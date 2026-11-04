@@ -378,6 +378,7 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         // Every object, interface and `Any` value, and a type parameter's: a reference the
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
+        TyKind::Intersection(..) if is_reference_intersection(ty) => REFERENCE,
         TyKind::DefinitelyNotNull(inner) if inner.is_ty_param() => REFERENCE,
         // A function value is an object (see `super::super::function_values`).
         TyKind::Fun(signature) if !signature.suspend => REFERENCE,
@@ -386,12 +387,24 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
             REFERENCE
         }
         TyKind::Nullable(inner)
-            if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..)) =>
+            if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..))
+                || is_reference_intersection(inner) =>
         {
             REFERENCE
         }
         _ => return Err(format!("the type `{}`", describe(ty))),
     }))
+}
+
+/// Whether `ty` is an intersection whose every component is carried as a reference: its value is
+/// each of those types at once, so it is carried as one too.
+fn is_reference_intersection(ty: Ty) -> bool {
+    match ty.kind() {
+        TyKind::Intersection(parts) => parts
+            .iter()
+            .all(|&part| matches!(carrier(part), Ok(Some(REFERENCE)))),
+        _ => false,
+    }
 }
 
 /// Carrier admitted to the ordinary signed numeric instruction table. Unsigned values are carried
@@ -455,8 +468,8 @@ fn expression_type(
         IrExpr::Block {
             value: Some(value), ..
         } if ir.checked_type(id).is_none() => return expression_type(ir, declared, *value),
-        IrExpr::GetValue(slot) => match ir.logical_types.get(&id) {
-            Some(ty) => *ty,
+        IrExpr::GetValue(slot) => match ir.logical_type(id) {
+            Some(ty) => ty,
             None => *declared
                 .get(slot)
                 .ok_or_else(|| format!("a read of value {slot} before its declaration"))?,
@@ -471,6 +484,8 @@ fn expression_type(
             ir.functions[function as usize].ret
         }
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        // A top-level property read has its storage's declared type.
+        IrExpr::GetStatic(index) if ir.checked_type(id).is_none() => ir.statics[*index as usize].ty,
         // A shared cell's element is read, and a write evaluates to what it stored, at the
         // element's declared type.
         IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. }
@@ -1816,19 +1831,18 @@ mod tests {
     ) -> Result<(), Unsupported> {
         let mut ir = IrFile::default();
         let seven = ir.add_expr(IrExpr::Const(IrConst::Int(7)));
-        ir.logical_types.insert(seven, Ty::Int);
+        ir.set_logical_type(seven, Ty::Int);
         let statement = if diverges {
             ir.add_expr(IrExpr::Return(Some(seven)))
         } else {
             ir.add_expr(IrExpr::UnitInstance)
         };
-        ir.logical_types
-            .insert(statement, if diverges { Ty::Nothing } else { Ty::Unit });
+        ir.set_logical_type(statement, if diverges { Ty::Nothing } else { Ty::Unit });
         let operand = ir.add_expr(IrExpr::Block {
             stmts: vec![statement],
             value: None,
         });
-        ir.logical_types.insert(operand, Ty::Unit);
+        ir.set_logical_type(operand, Ty::Unit);
         let returned = ir.add_expr(IrExpr::Return(Some(operand)));
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![returned],
@@ -1883,7 +1897,7 @@ mod tests {
             type_operand: Ty::String,
         });
         ir.call_declared_ret.insert(call, formal);
-        ir.logical_types.insert(coercion, Ty::String);
+        ir.set_logical_type(coercion, Ty::String);
         assert_eq!(ir.checked_type(call), None);
         assert_eq!(
             expression_type(&ir, &HashMap::default(), call),
@@ -1920,7 +1934,7 @@ mod tests {
             args: Vec::new(),
         });
         ir.call_declared_ret.insert(call, declared);
-        ir.logical_types.insert(call, Ty::String);
+        ir.set_logical_type(call, Ty::String);
         assert_eq!(
             expression_type(&ir, &HashMap::default(), call),
             Ok(Some(Ty::String))
@@ -1952,7 +1966,7 @@ mod tests {
             stmts: Vec::new(),
             value: Some(value),
         });
-        ir.logical_types.insert(block, Ty::Byte);
+        ir.set_logical_type(block, Ty::Byte);
         let declared = HashMap::from_iter([(7, Ty::Int)]);
 
         assert_eq!(expression_type(&ir, &declared, block), Ok(Some(Ty::Byte)));

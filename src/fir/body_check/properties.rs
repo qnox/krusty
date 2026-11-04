@@ -611,6 +611,24 @@ impl BodyFirChecker<'_> {
         span: Option<Span>,
         selected: &crate::resolve::ImplicitReceiverSelection,
     ) -> Result<Option<FirReceiver>, BodyCheckFailure> {
+        let mut projected = selected.clone();
+        for projection in selected
+            .construction_sites
+            .iter()
+            .rev()
+            .filter(|projection| {
+                self.construction_site_receiver_frames
+                    .contains(&projection.declaration)
+            })
+        {
+            let coordinate = projection
+                .project(projected.receiver_depth)
+                .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
+            projected.current = coordinate.current;
+            projected.receiver_depth = coordinate.depth;
+        }
+        projected.construction_sites.clear();
+        let selected = &projected;
         let origin = self
             .origins
             .synthetic(cause, SyntheticOriginKind::ImplicitReceiver);

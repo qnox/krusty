@@ -272,7 +272,7 @@ fn build(
         },
     };
     let call = ir.add_expr(call);
-    ir.logical_types.insert(call, result);
+    ir.set_logical_type(call, result);
     // A function body returns its result explicitly; a `Unit` one ends after the call.
     let last = match result {
         Ty::Unit => call,
@@ -340,7 +340,7 @@ pub(super) fn fills(
         let guarded = ir.add_expr(IrExpr::When {
             branches: vec![(Some(omitted), fill)],
         });
-        ir.logical_types.insert(guarded, Ty::Unit);
+        ir.set_logical_type(guarded, Ty::Unit);
         fills.push(guarded);
     }
     fills
@@ -348,6 +348,6 @@ pub(super) fn fills(
 
 pub(super) fn read(ir: &mut IrFile, slot: u32, ty: Ty) -> ExprId {
     let read = ir.add_expr(IrExpr::GetValue(slot));
-    ir.logical_types.insert(read, ty);
+    ir.set_logical_type(read, ty);
     read
 }

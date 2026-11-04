@@ -129,6 +129,7 @@ mod provider_constructor_selection;
 use constructor_arguments::ConstructionExpectations;
 mod script_receivers;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
+mod call_argument_position;
 mod contract_declarations;
 mod contract_effects;
 mod declaration_rendering;
@@ -141,6 +142,8 @@ mod destructuring;
 mod diagnostic_selection;
 mod eager_lambda_analysis;
 mod elvis_expression;
+mod type_test_narrowing;
+use type_test_narrowing::TypeTest;
 mod enum_entries;
 mod enum_entry_method_owner;
 mod explicit_backing_fields;
@@ -148,8 +151,10 @@ mod explicit_property_write;
 mod explicit_receiver_levels;
 mod expression_qualifier_tree;
 mod expression_qualifiers;
+mod misfit_callable_references;
+use misfit_callable_references::{MisfitReference, ReferenceCandidateLevels};
 mod nested_type_aliases;
-use explicit_receiver_levels::{FunctionValueLevel, FunctionValueRungs};
+use explicit_receiver_levels::{FunctionValueLevel, ScopeLevelSearch};
 mod expected_expression;
 mod expression_getter;
 mod extension_receiver_uses;
@@ -324,6 +329,8 @@ use signature_parameter_identity::{
 pub(in crate::resolve) use type_spellings::{spelling_of_ref, spelling_of_ref_with};
 mod singleton_receivers;
 pub use singleton_receivers::SingletonValue;
+mod anonymous_capture_remap;
+mod constructor_receiver_frames;
 mod primary_constructor_arguments;
 mod source_constructors;
 mod source_package;
@@ -12018,7 +12025,7 @@ impl<'a> Checker<'a> {
             receiver,
             receiver_ty,
             name,
-            FunctionValueRungs::AlreadyTried,
+            ScopeLevelSearch::already_tried(CallResultConstraint::direct(expected)),
         ) {
             return ClassifierValueCall::Checked(ret);
         }
@@ -14228,7 +14235,7 @@ impl<'a> Checker<'a> {
                 );
                 return Ty::Error;
             }
-            Some(CallableCandidateSelection::Ambiguous(_)) => {
+            Some(CallableCandidateSelection::Ambiguous(..)) => {
                 self.diags.error(
                     span,
                     "collection literal factory overload ambiguity".to_string(),
@@ -14280,7 +14287,7 @@ impl<'a> Checker<'a> {
                     );
                     return Ty::Error;
                 }
-                Some(CallableCandidateSelection::Ambiguous(_)) => {
+                Some(CallableCandidateSelection::Ambiguous(..)) => {
                     self.diags.error(
                         span,
                         "collection literal factory overload ambiguity".to_string(),
@@ -14608,24 +14615,38 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // kotlinc captures receivers in the order the body first uses them.
+                let forwarded_uses = receiver_uses::ReceiverUseSites::anonymous_forwards(
+                    self.file,
+                    declaration,
+                    self.discovered_anonymous_super_forwards
+                        .get(&declaration)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                    self.resolved_primary_ctor_delegations.get(&declaration),
+                );
                 let mut deferred_implicit_receivers = deferred_implicit_receivers;
                 deferred_implicit_receivers.sort_by_key(|(_, identity, _, extension)| {
-                    self.implicit_receiver_identity_uses.first_use_since(
-                        uses_before_body,
-                        *identity,
-                        extension.map(|(declaration, _)| declaration),
-                    )
+                    self.implicit_receiver_identity_uses
+                        .first_use_since_excluding(
+                            uses_before_body,
+                            *identity,
+                            extension.map(|(declaration, _)| declaration),
+                            &forwarded_uses,
+                        )
                 });
                 let mut selected_receiver_candidates = Vec::new();
-                for (candidate, receiver_identity, before, extension_use) in
+                for (candidate, receiver_identity, _before, extension_use) in
                     deferred_implicit_receivers
                 {
                     if self.keep_anonymous_receiver(
                         declaration,
                         &candidate,
                         receiver_identity,
-                        before,
-                        extension_use,
+                        anonymous_object_capture::ReceiverCaptureUses {
+                            mark: uses_before_body,
+                            extension: extension_use.map(|(declaration, _)| declaration),
+                            forwarded: &forwarded_uses,
+                        },
                         &finalized,
                     ) {
                         selected_receiver_candidates.push(candidate);
@@ -14646,6 +14667,11 @@ impl<'a> Checker<'a> {
                 if !provisional {
                     self.finalized_anonymous_captures.insert(declaration);
                 }
+                let original_captures = self
+                    .discovered_anonymous_captures
+                    .get(&declaration)
+                    .cloned()
+                    .unwrap_or_default();
                 let storage_field_remap = record_anonymous_construction_captures(
                     self.file,
                     call,
@@ -14659,6 +14685,7 @@ impl<'a> Checker<'a> {
                         constructor_arguments: capture_storage::ConstructorArgumentUses::Checked {
                             expressions: &self.expr_lowers,
                             types: &self.expr_types,
+                            delegations: &self.resolved_primary_ctor_delegations,
                         },
                     },
                     &mut self.discovered_anonymous_captures,
@@ -14669,10 +14696,14 @@ impl<'a> Checker<'a> {
                 // whole subtree here doubles the work at every nesting level (and is exponential
                 // for deeply nested anonymous objects); the structural owner edge identifies the
                 // only constructions whose storage owner is this declaration.
-                if !remap_direct_anonymous_class_storage_captures(
+                if !anonymous_capture_remap::remap_direct_anonymous_class_storage_captures(
                     declaration,
                     &self.anonymous_lexical_scope,
-                    &storage_field_remap,
+                    anonymous_capture_remap::CaptureFieldRemap {
+                        fields: &storage_field_remap,
+                        original: &original_captures,
+                        forwarded: &forwarded_uses,
+                    },
                     &mut self.discovered_anonymous_captures,
                 ) {
                     self.diags.error(
@@ -14889,7 +14920,7 @@ impl<'a> Checker<'a> {
                                     None,
                                 );
                             }
-                            Some(CallableCandidateSelection::Ambiguous(candidates)) => {
+                            Some(CallableCandidateSelection::Ambiguous(candidates, _)) => {
                                 self.report_callable_ambiguity(call, &name, &candidates);
                                 return Ty::Error;
                             }
@@ -16131,7 +16162,7 @@ impl<'a> Checker<'a> {
                     receiver,
                     rt,
                     &name,
-                    FunctionValueRungs::InTower,
+                    ScopeLevelSearch::in_tower(CallResultConstraint::direct(expected)),
                 ) {
                     return ret;
                 }
@@ -17172,17 +17203,8 @@ impl<'a> Checker<'a> {
                         args,
                         arg_tys,
                     );
-                    self.implicit_receiver_selections.insert(
-                        callee,
-                        ImplicitReceiverSelection {
-                            ty: implicit.ty,
-                            current: implicit.current,
-                            receiver_depth: implicit.receiver_depth,
-                            classifier: None,
-                            context_binding: None,
-                            singleton: self.implicit_singleton_value(implicit.ty, implicit.current),
-                        },
-                    );
+                    self.implicit_receiver_selections
+                        .insert(callee, self.implicit_receiver_selection(implicit));
                     self.mark_extension_receiver_used(call, implicit);
                     self.mark_context_extension_receiver_used(scope, call, &context_args);
                     let ret = signature.ret;
@@ -19440,13 +19462,10 @@ impl<'a> Checker<'a> {
                     // receiver-less declaration and are evaluated by the later shared rung.
                     if let Some(ret) = self.check_member_extension_function_call(
                         scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys: &arg_tys,
-                        },
+                        associated_site.call_args,
                         receiver,
                         &fname,
+                        CallResultConstraint::direct(expected),
                         Some(&postponed_solutions),
                     ) {
                         self.mark_implicit_receiver_selection(call, implicit_receiver);
@@ -19461,7 +19480,7 @@ impl<'a> Checker<'a> {
                                         &crate::types::type_name("kotlin/internal/HidesMembers"),
                                     )
                             }
-                            Some(CallableCandidateSelection::Ambiguous(candidates)) => candidates
+                            Some(CallableCandidateSelection::Ambiguous(tied, _)) => tied
                                 .iter()
                                 .all(|candidate| candidate.scope_rung.is_import()),
                             None => false,
@@ -19481,7 +19500,7 @@ impl<'a> Checker<'a> {
                         }
                         match &extension.selection {
                             Some(CallableCandidateSelection::Selected(_))
-                            | Some(CallableCandidateSelection::Ambiguous(_)) => {
+                            | Some(CallableCandidateSelection::Ambiguous(..)) => {
                                 let type_args = self.resolved_explicit_type_args(scope, call);
                                 if let Some(ret) = self.record_extension_selection(
                                     scope,
@@ -19675,7 +19694,7 @@ impl<'a> Checker<'a> {
                 let top_level_owns_the_name = matches!(
                     &top_level,
                     Some(CallableCandidateSelection::Selected(_))
-                        | Some(CallableCandidateSelection::Ambiguous(_))
+                        | Some(CallableCandidateSelection::Ambiguous(..))
                 );
                 for implicit_receiver in callee_receivers.iter().copied() {
                     if top_level_owns_the_name
@@ -19802,7 +19821,7 @@ impl<'a> Checker<'a> {
                 // ambiguity rule for source, sibling-module, and dependency declarations.
                 let error_argument = self.call_has_error_argument(args);
                 let ambiguous = top_level_sam_ambiguous.or_else(|| match &top_level {
-                    Some(CallableCandidateSelection::Ambiguous(candidates)) => {
+                    Some(CallableCandidateSelection::Ambiguous(candidates, _)) => {
                         Some(candidates.clone())
                     }
                     _ => None,
@@ -30981,6 +31000,9 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         expr_stack: Vec::new(),
         callable_reference_types: HashMap::default(),
         reflective_callable_references: crate::fx_hash::HashSet::default(),
+        misfit_callable_references: crate::fx_hash::HashSet::default(),
+        checked_calls: Vec::new(),
+        checked_call_argument: None,
         exhaustive_whens: crate::fx_hash::HashSet::default(),
         when_subject_plans: when_flow::WhenSubjectPlans::default(),
         resolved_type_tys: HashMap::default(),
@@ -31074,6 +31096,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         eager_eliminated_members: HashMap::default(),
         implicit_receiver_selections: HashMap::default(),
         implicit_receiver_identities: HashMap::default(),
+        constructor_receiver_frames: Vec::new(),
         read_flow_roots: HashMap::default(),
         local_properties: Default::default(),
         local_initialization: Default::default(),
@@ -31356,36 +31379,6 @@ fn enclosing_receiver_labels(
 /// its provisional receiver prefix. The lexical-owner graph is the authoritative relationship:
 /// deeper descendants read storage from their immediate classifier, whose own finalization remaps
 /// them independently.
-fn remap_direct_anonymous_class_storage_captures(
-    owner: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
-    storage_fields: &[Option<u32>],
-    captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
-) -> bool {
-    let direct_children = lexical_scope
-        .owners
-        .iter()
-        .filter_map(|(&declaration, &candidate_owner)| {
-            (candidate_owner == owner).then_some(declaration)
-        })
-        .collect::<Vec<_>>();
-    for declaration in direct_children {
-        let Some(child_captures) = captures.get_mut(&declaration) else {
-            continue;
-        };
-        for capture in child_captures {
-            let AnonymousObjectCaptureSource::ClassStorage { field } = &mut capture.source else {
-                continue;
-            };
-            let Some(Some(finalized_field)) = storage_fields.get(*field as usize) else {
-                return false;
-            };
-            *field = *finalized_field;
-        }
-    }
-    true
-}
-
 fn install_anonymous_object_captures(
     syms: &mut SymbolTable,
     file_index: u32,
@@ -33046,7 +33039,8 @@ impl std::ops::Deref for SelectedCallable {
 enum CallableCandidateSelection {
     Selected(Box<SelectedCallable>),
     MissingContext(Box<SelectedCallable>),
-    Ambiguous(Vec<crate::libraries::FunctionInfo>),
+    /// The tied candidates, and their positions in the family passed to the selection.
+    Ambiguous(Vec<crate::libraries::FunctionInfo>, Vec<usize>),
 }
 
 enum InvokeResolution {
@@ -33065,14 +33059,14 @@ impl CallableCandidateSelection {
     fn candidate(self) -> Option<SelectedCallable> {
         match self {
             Self::Selected(candidate) | Self::MissingContext(candidate) => Some(*candidate),
-            Self::Ambiguous(_) => None,
+            Self::Ambiguous(..) => None,
         }
     }
 
     fn available(self) -> Option<SelectedCallable> {
         match self {
             Self::Selected(candidate) => Some(*candidate),
-            Self::MissingContext(_) | Self::Ambiguous(_) => None,
+            Self::MissingContext(_) | Self::Ambiguous(..) => None,
         }
     }
 }
@@ -33130,6 +33124,7 @@ impl ImplicitReceiverSelection {
             classifier: None,
             context_binding: None,
             singleton: None,
+            construction_sites: Vec::new(),
         }
     }
 }
@@ -33156,6 +33151,8 @@ pub struct ImplicitReceiverSelection {
     /// Exact singleton declaration when the selected receiver is a lexical object rather than a
     /// scoped `this` value. `None` means lowering must materialize the selected scoped receiver.
     pub singleton: Option<SingletonValue>,
+    /// Role-authenticated frame changes, consumed only for construction-site forwards.
+    pub(crate) construction_sites: Vec<constructor_receiver_frames::ConstructorReceiverProjection>,
 }
 
 /// The lexical binding a named context receiver is also visible as.
@@ -33400,6 +33397,15 @@ struct Checker<'a> {
     expr_stack: Vec<ExprId>,
     callable_reference_types: HashMap<ExprId, Ty>,
     reflective_callable_references: crate::fx_hash::HashSet<ExprId>,
+    /// References no candidate of which fits their expected function shape, typed by their only
+    /// nearest candidate for the enclosing check (see `misfit_callable_references`). Selection
+    /// records one and the same visit consumes it, so a later fitting revisit is unaffected.
+    misfit_callable_references: crate::fx_hash::HashSet<ExprId>,
+    /// The calls whose value arguments are being checked and the argument
+    /// [`Self::check_argument_expected`] is committing to its parameter, so a misfit reference
+    /// knows whether it is postponed into a call.
+    checked_calls: Vec<ExprId>,
+    checked_call_argument: Option<ExprId>,
     exhaustive_whens: crate::fx_hash::HashSet<ExprId>,
     /// See [`TypeInfo::when_subject_plans`].
     when_subject_plans: when_flow::WhenSubjectPlans,
@@ -33655,6 +33661,7 @@ struct Checker<'a> {
     /// Receiver-tower coordinate of each implicit receiver selected above; checker-only, it keys
     /// the smart-cast paths of member reads through that receiver.
     implicit_receiver_identities: HashMap<ExprId, (usize, usize)>,
+    constructor_receiver_frames: Vec<constructor_receiver_frames::ConstructorReceiverFrame>,
     /// The flow root each checked lexical-value or `this` read resolved to.
     read_flow_roots: HashMap<ExprId, scope::PathRoot>,
     local_properties: local_properties::LocalProperties,
@@ -35179,11 +35186,7 @@ impl<'a> Checker<'a> {
                 ))
             }
             ExtensionRefSelection::Ambiguous(candidates) => {
-                let mut message = "overload resolution ambiguity between candidates:".to_string();
-                for candidate in candidates {
-                    message.push('\n');
-                    message.push_str(&Self::callable_candidate_display(name, &candidate));
-                }
+                let message = Self::ambiguous_candidates_message(name, &candidates);
                 self.diags
                     .error(self.member_name_span(expression, name), message);
                 Some(Ty::Error)
@@ -36364,6 +36367,7 @@ impl<'a> Checker<'a> {
             };
         let mut applicable = Vec::new();
         let mut sam_converted = crate::fx_hash::HashSet::default();
+        let mut misfits = crate::fx_hash::HashSet::default();
         for (index, mut candidate) in overloads.iter().cloned().enumerate() {
             if self.file.infix_calls.contains(&call.0) && !candidate.flags.infix {
                 continue;
@@ -36784,7 +36788,7 @@ impl<'a> Checker<'a> {
             let expected_result_bindings = expected.and_then(|expected| {
                 crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
                     &source,
-                    &result_signature,
+                    &nested_producer_bindings::solved_bound_signature(&result_signature, &bindings),
                     expected,
                     |actual, bound| self.receiver_is_assignable(actual, bound),
                 )
@@ -37577,6 +37581,9 @@ impl<'a> Checker<'a> {
                 intersection_bindings,
                 candidate_index: Some(index),
             };
+            if !score.lambda_result_fits {
+                misfits.insert(index);
+            }
             applicable.push((
                 score.rank,
                 generic,
@@ -37677,6 +37684,9 @@ impl<'a> Checker<'a> {
                     .contains(&low_priority_annotation)
             });
         }
+        call_applicability::retain_eager_fits(self.file, &mut applicable, |c| {
+            !misfits.contains(&c.2)
+        });
         let has_context = applicable
             .iter()
             .any(|(_, _, _, missing_context, _, _, _, _)| !missing_context);
@@ -37722,15 +37732,29 @@ impl<'a> Checker<'a> {
                     && candidate.receiver_rank == nearest_receiver
             })
             .collect::<Vec<_>>();
+        let declared_receiver = |candidate: &SelectedCallable| {
+            candidate
+                .is_extension()
+                .then(|| candidate.semantic_receiver())
+                .flatten()
+                .map(|receiver| crate::types::ty_subst(receiver, &HashMap::default()))
+        };
         if maximal.len() > 1 {
+            // Fewer omitted defaults wins only between equally specific declarations.
+            let source = self.fed_source();
             let dominated = maximal
                 .iter()
                 .enumerate()
-                .filter_map(|(index, (_, _, _, _, omitted, _, params, _))| {
+                .filter_map(|(index, (_, _, _, _, omitted, candidate, _, declared))| {
                     maximal
                         .iter()
-                        .any(|(_, _, _, _, other_omitted, _, other_params, _)| {
-                            other_params == params && other_omitted < omitted
+                        .any(|(_, _, _, _, other_omitted, other, _, other_declared)| {
+                            other_omitted < omitted
+                                && crate::symbol_resolver::declarations_equally_specific(
+                                    &source,
+                                    (declared_receiver(candidate), declared),
+                                    (declared_receiver(other), other_declared),
+                                )
                         })
                         .then_some(index)
                 })
@@ -37772,19 +37796,15 @@ impl<'a> Checker<'a> {
             extension_receiver,
             &mut maximal,
             |(_, generic, _, _, _, candidate, _, parameters)| {
-                let receiver = candidate
-                    .is_extension()
-                    .then(|| {
-                        candidate
-                            .semantic_receiver()
-                            .map(|receiver| crate::types::ty_subst(receiver, &HashMap::default()))
-                    })
-                    .flatten();
+                let receiver = declared_receiver(candidate);
                 let member_owner = (candidate.kind == crate::libraries::FnKind::Member)
                     .then_some(candidate.callable.owner);
                 (receiver, parameters, *generic, member_owner)
             },
         );
+        call_applicability::refine_lambda_tie(self.file, (args, arg_tys), &mut maximal, |t| {
+            (&t.5.info, &t.6, !misfits.contains(&t.2))
+        });
         // Distinct SAM target types do not make an overload family inherently ambiguous. The
         // ordinary most-specific relation below must still compare them: if one SAM interface
         // inherits the other, its overload wins (`MyRunnable : Runnable`; `foo(MyRunnable)` beats
@@ -37837,13 +37857,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .map(|(_, _, _, _, _, candidate, _, declaration_params)| {
                             selecting_extension
-                                .then(|| {
-                                    candidate
-                                        .semantic_receiver()
-                                        .map(|receiver| {
-                                            crate::types::ty_subst(receiver, &HashMap::default())
-                                        })
-                                })
+                                .then(|| declared_receiver(candidate))
                                 .flatten()
                                 .into_iter()
                                 .chain(declaration_params.iter().copied())
@@ -37881,6 +37895,7 @@ impl<'a> Checker<'a> {
                                 .iter()
                                 .map(|(_, _, _, _, _, candidate, _, _)| candidate.info.clone())
                                 .collect(),
+                            maximal.iter().filter_map(|t| t.5.candidate_index).collect(),
                         ));
                     }
                     crate::symbol_resolver::CandidateSelection::None => return None,
@@ -38555,12 +38570,7 @@ impl<'a> Checker<'a> {
             let selected = crate::symbol_resolver::inherited_nested_classifier_name(
                 name,
                 vec![owner],
-                |current| {
-                    crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(current))
-                        .into_iter()
-                        .filter_map(Ty::kotlin_class_internal)
-                        .collect()
-                },
+                |current| crate::symbol_resolver::nested_classifier_supertypes(&source, current),
                 |candidate| {
                     crate::symbol_resolver::inherited_classifier_shape(&source, candidate, owner)
                         .is_some_and(|classifier| {
@@ -38677,6 +38687,11 @@ impl<'a> Checker<'a> {
                 .flatten(),
             context_binding: None,
             singleton: self.implicit_singleton_value(receiver.ty, receiver.current),
+            construction_sites: self
+                .constructor_receiver_frames
+                .iter()
+                .filter_map(|frame| frame.selected(receiver))
+                .collect(),
         }
     }
 
@@ -38690,6 +38705,7 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         selected: &ImplicitReceiverSelection,
+        declaration: DeclId,
     ) {
         if selected.singleton.is_some() {
             return;
@@ -38701,8 +38717,10 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
-        self.implicit_receiver_identity_uses
-            .record(receiver.identity);
+        self.implicit_receiver_identity_uses.record(
+            receiver.identity,
+            receiver_uses::ReceiverUseSite::Declaration(declaration),
+        );
     }
 
     fn implicit_receiver_identity_use_count(&self, identity: (usize, usize)) -> usize {
@@ -42432,7 +42450,7 @@ impl<'a> Checker<'a> {
             }
         };
         if let Some(receiver) = &selected.outer_receiver {
-            self.mark_selected_implicit_receiver_used(scope, receiver);
+            self.mark_selected_implicit_receiver_used(scope, receiver, class);
         }
         if !selected.omitted.is_empty() && selected.default_masks.is_empty() {
             self.diags.error(
@@ -42566,25 +42584,19 @@ impl<'a> Checker<'a> {
         internal: TypeName,
     ) -> InheritedNestedClassifier {
         let source = self.fed_source();
-        let roots = <Self as crate::assignable::TypeOracle>::direct_supertypes(
-            self,
-            Ty::obj_name(internal),
-        )
-        .into_iter()
-        .filter_map(Ty::obj_internal)
-        .collect();
-        crate::symbol_resolver::inherited_nested_classifier_name(
-            name,
-            roots,
-            |owner| {
-                <Self as crate::assignable::TypeOracle>::direct_supertypes(
-                    self,
-                    Ty::obj_name(owner),
-                )
+        let inheriting_supertypes = |owner: TypeName| {
+            <Self as crate::assignable::TypeOracle>::direct_supertypes(self, Ty::obj_name(owner))
                 .into_iter()
                 .filter_map(Ty::obj_internal)
-                .collect()
-            },
+                .filter(|&supertype| {
+                    crate::symbol_resolver::inherits_nested_classifiers_through(&source, supertype)
+                })
+                .collect::<Vec<_>>()
+        };
+        crate::symbol_resolver::inherited_nested_classifier_name(
+            name,
+            inheriting_supertypes(internal),
+            inheriting_supertypes,
             |candidate| {
                 crate::symbol_resolver::inherited_classifier_shape(&source, candidate, internal)
                     .is_some()
@@ -43920,6 +43932,11 @@ impl<'a> Checker<'a> {
             while let Expr::SafeCall { receiver, .. } = self.file.expr(root) {
                 root = *receiver;
             }
+            // A non-null safe cast (`x as? T`, or a safe-call chain rooted at one) proves `x is T`.
+            if let Some(test) = self.safe_cast_type_test(root) {
+                self.type_test_narrowings(scope, test, out, declined);
+                return;
+            }
             if let Some(root_path) = self
                 .expr_access_path(root)
                 .filter(|path| path.segments.is_empty())
@@ -44084,58 +44101,17 @@ impl<'a> Checker<'a> {
         if negated != for_else {
             return out;
         }
-        let Some(path) = self.expr_access_path(operand) else {
-            crate::trace_compiler!(
-                "smartcast",
-                "condition expression={} rejected: operand has no stable access path",
-                cond.0,
-            );
-            return out;
-        };
-        // The target is computed before the stability gate so a DECLINED proof can still name it.
-        let site = self.span(cond);
-        let stable_ty = self.stable_path_ty(scope, &path, site);
-        let tt = self
-            .resolved_type_tys
-            .get(&(ty.span.lo, ty.span.hi))
-            .copied()
-            .unwrap_or_else(|| self.type_ref_ty_silent(scope, &ty));
-        let narrowed = self.type_test_target(stable_ty, tt, ty.nullable(), ty.targs.is_empty());
-        // Only stable values smart-cast soundly — a `var`/computed property could change.
-        if stable_ty.is_none() {
-            if let Some(narrowed) = narrowed {
-                if let Some((name, _)) = self.closure_mutated_decline(scope, &path, site) {
-                    declined.push((name, narrowed));
-                }
-            }
-            crate::trace_compiler!(
-                "smartcast",
-                "condition expression={} path={path:?} rejected: unstable",
-                cond.0,
-            );
-            return out;
-        }
-        if let Some(narrowed) = narrowed {
-            crate::trace_compiler!(
-                "smartcast",
-                "condition expression={} path={path:?} target={narrowed:?} else={for_else}",
-                cond.0,
-            );
-            out.push((path, narrowed));
-            // A non-null type test can succeed on a safe-call chain only when every guarded
-            // receiver was non-null. Publish those prefix facts as part of the same proof:
-            // `holder?.value is T` permits an ordinary `holder.value` read in the guarded branch.
-            // Nullable tests (`is T?`) deliberately do not imply this because `null is T?` holds.
-            if !ty.nullable() && matches!(self.file.expr(operand), Expr::SafeCall { .. }) {
-                self.null_check_narrowings(scope, operand, &mut out, declined);
-            }
-        } else {
-            crate::trace_compiler!(
-                "smartcast",
-                "condition expression={} path={path:?} rejected: target={tt:?}",
-                cond.0,
-            );
-        }
+        self.type_test_narrowings(
+            scope,
+            TypeTest {
+                operand,
+                ty: &ty,
+                nullable: ty.nullable(),
+                site: self.span(cond),
+            },
+            &mut out,
+            declined,
+        );
         out
     }
 
@@ -44282,14 +44258,11 @@ impl<'a> Checker<'a> {
             // declared non-null classifier (`String?` + a null proof is still `Nothing?`, never
             // `String & Nothing?`). Classifier type-test proofs continue through the intersection
             // path below.
-            let root_value = match (&path.root, path.segments.is_empty()) {
-                (scope::PathRoot::Value(identity), true) => {
-                    self.visible_flow_value(scope, *identity)
-                }
-                _ => None,
-            };
+            let declared = StablePathRead::new(self).declared_ty(scope, path);
             if ty.non_null() != Ty::Nothing {
-                if let Some(declared) = root_value.map(|(_, local)| local.declared_ty.non_null()) {
+                // A nullable test (`is B?`) still admits null, so the declaration keeps its `?`.
+                let keep_null = ty.is_nullable();
+                if let Some(declared) = declared.map(|d| if keep_null { d } else { d.non_null() }) {
                     let context = crate::assignable::TyCtx::new();
                     let comparable = crate::assignable::is_subtype(&context, self, declared, *ty)
                         || crate::assignable::is_subtype(&context, self, *ty, declared);
@@ -49229,10 +49202,12 @@ impl<'a> Checker<'a> {
             || (self.postponed_empty_reference_array_factory(scope, argument)
                 && expected.non_null().is_reference_array()
                 && expected.non_null().array_elem().is_some())
-            || (matches!(self.file.expr(argument), Expr::CallableRef { .. })
-                && expected.non_null().is_fun())
         {
             self.expr_expected(scope, argument, expected)
+        } else if matches!(self.file.expr(argument), Expr::CallableRef { .. })
+            && expected.non_null().is_fun()
+        {
+            self.check_argument_expected(scope, argument, expected, false, None)
         } else if self.lambda_needs_selected_shape(scope, argument, actual, expected) {
             self.check_argument_expected(
                 scope,
@@ -52053,15 +52028,19 @@ impl<'a> Checker<'a> {
             &member_extension,
             member_extension_selection::MemberExtensionLambdaShape::Absent
         );
-        let extension = match member_extension {
-            member_extension_selection::MemberExtensionLambdaShape::Selected(shape) => Some(shape),
-            member_extension_selection::MemberExtensionLambdaShape::Absent
-            | member_extension_selection::MemberExtensionLambdaShape::Ambiguous => None,
-        };
-        let extension = extension.or_else(|| {
-            (consider_extension && !member_extension_claimed)
-                .then(|| self.extension_lambda_shape(scope, receiver, name, untyped))
-                .flatten()
+        // An ambiguous extension rung claims the call just as an ambiguous member-extension rung
+        // does: no later source may shape its lambdas.
+        let mut extension_claimed = member_extension_claimed;
+        let extension = member_extension.selected().or_else(|| {
+            if !consider_extension || extension_claimed {
+                return None;
+            }
+            let shape = self.extension_lambda_shape(scope, call, receiver, name, untyped);
+            extension_claimed = matches!(
+                shape,
+                member_extension_selection::MemberExtensionLambdaShape::Ambiguous
+            );
+            shape.selected()
         });
         // A call selected by the lambda's RETURN type (`recv.sumOf { … }`) has no JVM method under
         // its source name, so every signature-driven source above misses it. It is the last source
@@ -52069,28 +52048,10 @@ impl<'a> Checker<'a> {
         // decision: the selector's `it` comes from the receiver's element type, at the lambda's own
         // argument position.
         let extension = extension.or_else(|| {
-            if !consider_extension || member_extension_claimed {
+            if !consider_extension || extension_claimed {
                 return None;
             }
-            let params = self.lambda_return_overload_param_types(receiver, name)?;
-            Some(crate::symbol_resolver::LambdaCallShape {
-                generic_formals: Vec::new(),
-                argument_parameters: Vec::new(),
-                param_types: Some(
-                    args.iter()
-                        .map(|&argument| match self.file.expr(argument) {
-                            Expr::Lambda { .. } => params.clone(),
-                            _ => Vec::new(),
-                        })
-                        .collect(),
-                ),
-                expected_types: None,
-                fixed_expected_types: None,
-                receivers: None,
-                context_counts: None,
-                boxes_captures: None,
-                inline: false,
-            })
+            self.lambda_return_overload_shape(receiver, name, args)
         });
         // The same fitness rule, applied to the other carrier. See
         // [`Self::shape_fits_written_lambdas`] for why the two count parameters differently.
@@ -52315,7 +52276,7 @@ impl<'a> Checker<'a> {
                                 Some(name),
                             )
                         } else {
-                            self.check_lambda_with_types(scope, x, pt)
+                            self.check_lambda_with_types_labeled(scope, x, pt, Some(name))
                         }
                     }
                     _ => {
@@ -52851,7 +52812,9 @@ impl<'a> Checker<'a> {
                     .is_some_and(|arguments| !arguments.is_empty());
                 self.record_flexible_call_inputs(e, Some(receiver), explicit);
                 self.record_flexible_nullable_result(e);
-                return self.expr_inner_safe_call(scope, e, expected, receiver, name, args);
+                return self.checking_call(e, |c| {
+                    c.expr_inner_safe_call(scope, e, expected, receiver, name, args)
+                });
             }
             Expr::Name(n) if n == "this" => {
                 // A smart-cast narrowing (`this != null` in a nullable-prim-receiver extension)
@@ -53089,7 +53052,9 @@ impl<'a> Checker<'a> {
                     .get(&e.0)
                     .is_some_and(|arguments| !arguments.is_empty());
                 self.record_flexible_call_inputs(e, receiver, explicit);
-                let called = self.check_call(scope, e, callee, &args, self.span(e), expected);
+                let span = self.span(e);
+                let called = self
+                    .checking_call(e, |c| c.check_call(scope, e, callee, &args, span, expected));
                 // The callee's own return may not be determined yet — its body is an expression the
                 // walk could not type. Ask for that declaration rather than taking the marker as
                 // the call's type, which would publish it into whatever this call initializes.
@@ -53313,15 +53278,13 @@ impl<'a> Checker<'a> {
                     && (candidate.kind != crate::libraries::FnKind::Member
                         || candidate.context_count == 0)
             });
-            self.drop_members_hidden_by_applicable_extensions(
-                at,
-                &mut functions.overloads,
-                access_control::OperatorCallShape::IndexedGet { args: &index_kinds },
-            );
+            // The member rung resolves only with a member this site can see. One it cannot see
+            // stays in the final selection below, ranked under every accessible candidate.
             let mut members = functions.clone();
-            members
-                .overloads
-                .retain(|candidate| candidate.kind == crate::libraries::FnKind::Member);
+            members.overloads.retain(|candidate| {
+                candidate.kind == crate::libraries::FnKind::Member
+                    && self.member_candidate_accessible(candidate, Some(at))
+            });
             let members = crate::libraries::Callables::Functions(members);
             let callables = crate::libraries::Callables::from_parts(functions, properties);
             let selected_get = match self
@@ -54419,6 +54382,7 @@ impl<'a> Checker<'a> {
         name: String,
         args: Option<Vec<ExprId>>,
     ) -> Ty {
+        let safe_search = ScopeLevelSearch::in_tower(CallResultConstraint::safe_lifted(expected));
         let t = {
             let rt = self.expr(scope, receiver);
             if rt == Ty::Error {
@@ -54536,7 +54500,7 @@ impl<'a> Checker<'a> {
                                         receiver,
                                         recv,
                                         &name,
-                                        FunctionValueRungs::InTower,
+                                        safe_search,
                                     )
                                     .or_else(|| {
                                         let call_args = CallArgs {
@@ -54613,7 +54577,7 @@ impl<'a> Checker<'a> {
                                         receiver,
                                         recv,
                                         &name,
-                                        FunctionValueRungs::InTower,
+                                        safe_search,
                                     )
                                     .or_else(|| {
                                         let call_args = CallArgs {
@@ -54689,7 +54653,7 @@ impl<'a> Checker<'a> {
                                 receiver,
                                 recv,
                                 &name,
-                                FunctionValueRungs::InTower,
+                                safe_search,
                             )
                             .or_else(|| {
                                 self.record_extension_call(
@@ -57104,6 +57068,7 @@ impl<'a> Checker<'a> {
         let previous_callable_reference = self.active_callable_reference.replace(e);
         let nominal = self.callable_ref_function_type(scope, e, selection_expected, receiver, name);
         self.active_callable_reference = previous_callable_reference;
+        let misfit = self.misfit_callable_references.remove(&e);
         if nominal.mentions_error() || nominal.mentions_pending() {
             self.selected_callable_reference_diagnostics.remove(&e);
         }
@@ -57122,7 +57087,7 @@ impl<'a> Checker<'a> {
         // A callable reference in a (possibly nullable) function-typed context is the adapted value
         // selected above. Its reflection classifier stays the natural standalone type, but must not
         // replace the contextual function type after overload/default/vararg adaptation succeeded.
-        if expected.is_some_and(|expected| expected.non_null().is_fun()) {
+        if expected.is_some_and(|expected| expected.non_null().is_fun()) && !misfit {
             return self.set(e, function_type.unwrap_or(nominal));
         }
         if let Some(reflect) = function_type
@@ -57740,7 +57705,20 @@ impl<'a> Checker<'a> {
                     return Some(Ty::Error);
                 }
             }
-            None
+            let levels = expected_function
+                .and_then(|_| ReferenceCandidateLevels::of(&extension_candidates))?;
+            match self.report_misfit_callable_reference(expression, name, &levels) {
+                MisfitReference::Reported => Some(Ty::Error),
+                MisfitReference::Natural => {
+                    match self.select_unbound_ref(scope, expression, None, receiver, name) {
+                        UnboundRefSelection::Selected(ty) => {
+                            self.misfit_callable_references.insert(expression);
+                            Some(ty)
+                        }
+                        UnboundRefSelection::Missing | UnboundRefSelection::NotClassifier => None,
+                    }
+                }
+            }
         })();
         selected
             .map(UnboundRefSelection::Selected)
@@ -58495,7 +58473,7 @@ impl<'a> Checker<'a> {
                 .select_receiver_function_with_params_tracking(
                     rt,
                     name,
-                    &argument_kinds,
+                    crate::symbol_resolver::FamilyArguments::Shared(&argument_kinds),
                     &[],
                     callables,
                     Some(ret),
@@ -58731,11 +58709,11 @@ impl<'a> Checker<'a> {
                     self.report_selected_callable_missing_context(scope, e, &selected);
                     return Some(Ty::Error);
                 }
-                CallableCandidateSelection::Ambiguous(_) => {
-                    self.diags.error(
-                        self.call_callee_name_span(e),
-                        "overload resolution ambiguity".to_string(),
-                    );
+                CallableCandidateSelection::Ambiguous(candidates, _) => {
+                    let message = Self::ambiguous_candidates_message(name, &candidates);
+                    self.diags.error(self.call_callee_name_span(e), message);
+                    // No candidate shapes the lambdas of an ambiguous call.
+                    self.report_unshaped_lambda_diagnostics(scope, args);
                     return Some(Ty::Error);
                 }
             },
@@ -59751,21 +59729,23 @@ impl<'a> Checker<'a> {
         let selected = {
             let resolver = self.resolver();
             let (mut functions, _) = callables.clone().into_parts();
-            self.drop_members_hidden_by_applicable_extensions(
-                recv,
-                &mut functions.overloads,
-                access_control::OperatorCallShape::Call { name, args: &[] },
-            );
+            // The member rung resolves only with a member this site can see. One it cannot see
+            // competes on the last rung, ranked under every accessible candidate there.
             functions.overloads.retain(|candidate| {
-                candidate.kind == kind
-                    && (kind == crate::libraries::FnKind::Member
-                        || self.source_callable_visible(candidate))
+                let member = candidate.kind == crate::libraries::FnKind::Member;
+                match kind {
+                    crate::libraries::FnKind::Member => {
+                        member && self.member_candidate_accessible(candidate, Some(recv))
+                    }
+                    _ if member => !self.member_candidate_accessible(candidate, Some(recv)),
+                    _ => candidate.kind == kind && self.source_callable_visible(candidate),
+                }
             });
             let callables = crate::libraries::Callables::Functions(functions);
             resolver.select_receiver_function_with_params_tracking(
                 recv,
                 name,
-                &[],
+                crate::symbol_resolver::FamilyArguments::Shared(&[]),
                 &[],
                 &callables,
                 None,
@@ -60246,7 +60226,8 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn check_argument_expected(
+    /// Check `expression` against `expected`, giving a lambda its contextual function shape.
+    pub(super) fn check_expected_operand(
         &mut self,
         scope: &CheckerScope<'_>,
         expression: ExprId,
