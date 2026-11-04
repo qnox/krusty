@@ -12,6 +12,7 @@ use super::member_names::{accessor_type_is_value_class, vc_mangle};
 use super::Under;
 use crate::ir::{
     BridgeAccessorRole, BridgeKind, Callee, ExprId, IrExpr, IrFile, IrLocalPropertyLayout,
+    JvmAccessorSide,
 };
 use crate::jvm::names::property_getter_name;
 use crate::names::property_setter_name;
@@ -34,6 +35,7 @@ struct DefaultAccessors {
 
 pub(super) fn stamp_synthesized(ir: &mut IrFile, under: &Under) {
     for class_index in 0..ir.classes.len() {
+        let class = ir.classes[class_index].fq_name;
         let properties: Vec<DefaultAccessors> = ir.classes[class_index]
             .properties
             .iter()
@@ -44,8 +46,12 @@ pub(super) fn stamp_synthesized(ir: &mut IrFile, under: &Under) {
                 name: property.name.clone(),
                 ty: property.ty,
                 // Module realization already gave a default accessor its written `@JvmName`.
-                written_getter: property.getter_jvm_name.clone(),
-                written_setter: property.setter_jvm_name.clone(),
+                written_getter: ir
+                    .jvm_property_accessor_name(class, index as u32, JvmAccessorSide::Getter)
+                    .map(str::to_owned),
+                written_setter: ir
+                    .jvm_property_accessor_name(class, index as u32, JvmAccessorSide::Setter)
+                    .map(str::to_owned),
             })
             .collect();
         for DefaultAccessors {
@@ -79,9 +85,10 @@ pub(super) fn stamp_synthesized(ir: &mut IrFile, under: &Under) {
             });
             rename_bound_calls(ir, class_index as u32, index as u32, &getter);
             retarget_property_bridges(ir, class_index, index as u32, &getter, &setter);
-            let property = &mut ir.classes[class_index].properties[index];
-            property.getter_jvm_name = Some(getter);
-            property.setter_jvm_name = Some(setter);
+            let class = ir.classes[class_index].fq_name;
+            let index = index as u32;
+            ir.set_jvm_property_accessor_name(class, index, JvmAccessorSide::Getter, getter);
+            ir.set_jvm_property_accessor_name(class, index, JvmAccessorSide::Setter, setter);
         }
     }
 }

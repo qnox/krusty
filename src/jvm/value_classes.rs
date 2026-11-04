@@ -3571,14 +3571,15 @@ pub(crate) fn lower_value_classes(
         // (The getter keeps its plain name: a value-class RESULT alone contributes no hash inside a
         // file class.)
         if property.is_var && property.is_facade_owned() && !property.accessors.any_declared() {
-            property.setter_jvm_name = Some(vc_mangle(
+            let setter = vc_mangle(
                 &crate::names::property_setter_name(&property.name),
                 std::slice::from_ref(&declared),
                 &Ty::Unit,
                 &under,
                 false,
                 false,
-            ));
+            );
+            ir.set_jvm_static_accessor_name(si as u32, crate::ir::JvmAccessorSide::Setter, setter);
         }
     }
 

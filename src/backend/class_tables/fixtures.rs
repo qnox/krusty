@@ -63,8 +63,6 @@ pub(crate) fn stored_property(name: &str, ty: Ty, field: u32) -> IrProperty {
         setter_visibility: crate::types::Visibility::Public,
         getter: None,
         setter: None,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         needs_access_bridge: false,
         accessor_annotations: Default::default(),
     }

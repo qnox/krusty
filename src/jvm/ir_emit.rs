@@ -744,14 +744,18 @@ fn value_class_is_readable(ir: &IrFile, fq_name: crate::types::TypeName) -> bool
 /// The convention itself is [`crate::names::property_getter_name`] — the same helper the accessor
 /// EMISSION uses, so a Kotlin `is`-prefixed property (`val isOpen`, whose accessor keeps the source
 /// name rather than becoming `getIsOpen`) is spelled one way everywhere.
-fn accessor_jvm_names(c: &crate::ir::IrClass, field_name: &str) -> (String, String) {
-    let declaration = c.properties.iter().find(|p| p.name == field_name);
+fn accessor_jvm_names(ir: &IrFile, c: &crate::ir::IrClass, field_name: &str) -> (String, String) {
+    let realized = (0u32..)
+        .zip(&c.properties)
+        .find(|(_, p)| p.name == field_name)
+        .map(|(index, _)| ir.jvm_property_accessor_names(c.fq_name, index))
+        .unwrap_or_default();
     (
-        declaration
-            .and_then(|p| p.getter_jvm_name.clone())
+        realized
+            .getter
             .unwrap_or_else(|| crate::names::property_getter_name(field_name)),
-        declaration
-            .and_then(|p| p.setter_jvm_name.clone())
+        realized
+            .setter
             .unwrap_or_else(|| crate::names::property_setter_name(field_name)),
     )
 }
@@ -842,7 +846,7 @@ fn attach_synth_nullability(
         let Some(a) = ann(hoisted.ty) else {
             continue;
         };
-        let (getter, setter) = accessor_jvm_names(c, &property.name);
+        let (getter, setter) = accessor_jvm_names(ir, c, &property.name);
         let pd = desc(hoisted.ty);
         if property
             .getter
@@ -882,16 +886,16 @@ fn attach_synth_nullability(
         let Some(a) = declared_property_annotation(c, index) else {
             continue;
         };
-        let (getter, setter) = accessor_jvm_names(c, &f.name);
+        let (getter, setter) = accessor_jvm_names(ir, c, &f.name);
         // The accessor's own descriptor: an explicit backing field (`val x: Any? field: String`)
         // stores a narrower type than the getter returns.
         let accessor_desc = c
             .properties
             .iter()
-            .find(|property| property.backing_field == Some(index as u32))
+            .position(|property| property.backing_field == Some(index as u32))
             .map_or_else(
                 || desc(f.ty),
-                |property| desc(declared_property_accessor_jvm(ir, property, f)),
+                |property| desc(declared_property_accessor_jvm(ir, c, property as u32, f)),
             );
         cw.set_method_nullability(&getter, &format!("(){accessor_desc}"), Some(a), &[]);
         if !f.is_final() {

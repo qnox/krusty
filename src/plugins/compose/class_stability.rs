@@ -348,8 +348,6 @@ fn mark(ir: &mut IrFile, index: usize, reads: Option<Vec<TypeName>>, parameters:
         is_lateinit: false,
         owner: Some(owner),
         visibility: Visibility::Public,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         erased_declared_ty: None,
         accessors: IrStaticAccessors::ABSENT,
         line: 0,
