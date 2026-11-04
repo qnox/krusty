@@ -4,8 +4,7 @@
 
 use super::common;
 
-const PROGRAM: &str =
-    include_str!("fixtures/apply_receiver_single_store/applyReceiverSingleStore.kt");
+const PROGRAM: &str = include_str!("box_regressions/applyReceiverSingleStore.kt");
 
 #[test]
 fn the_complete_apply_receiver_program_matches_kotlin() {
