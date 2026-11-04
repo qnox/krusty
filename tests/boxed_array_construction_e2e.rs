@@ -191,3 +191,41 @@ fun primitiveArray() {\n\
 fun box(): String { objectArray(); primitiveArray(); return \"OK\" }\n";
     assert_eq!(run(SRC).expect("inline array initializers"), "OK");
 }
+
+#[test]
+fn array_of_nulls_of_any_element_type() {
+    // `arrayOfNulls<T>` is defined for every runtime-available `T`: an unsigned value, a value
+    // class and `Unit` are as valid as `Int`. Each nullable element is stored and read as its box.
+    const SRC: &str = "@JvmInline value class Meter(val v: Int)\n\
+fun box(): String {\n\
+    val u = arrayOfNulls<UInt>(2)\n\
+    u[0] = 5u\n\
+    val l = arrayOfNulls<ULong>(1)\n\
+    l[0] = 2uL\n\
+    val m = arrayOfNulls<Meter>(2)\n\
+    m[1] = Meter(3)\n\
+    val n = arrayOfNulls<Unit>(1)\n\
+    n[0] = Unit\n\
+    val ok = u[0] == 5u && u[1] == null && l[0] == 2uL && m[1]?.v == 3 && n[0] == Unit\n\
+    return if (ok) \"OK\" else \"fail\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "ArrayOfNullsAnyElement");
+}
+
+#[test]
+fn nullable_unsigned_array_elements_stay_boxed() {
+    // `Array<UInt?>` holds `UInt` boxes or `null`; only a non-null `Array<UInt>` element crosses
+    // the primitive carrier boundary on a store or load.
+    const SRC: &str = "fun box(): String {\n\
+    val filled = Array(2) { 7u }\n\
+    filled[1] = 9u\n\
+    val empty: Array<UInt?> = Array(2) { null }\n\
+    empty[0] = 5u\n\
+    val literal = arrayOf<UInt?>(1u, null)\n\
+    var sum = 0u\n\
+    for (x in literal) sum += x ?: 0u\n\
+    val ok = filled[0] + filled[1] == 16u && empty[0] == 5u && empty[1] == null && sum == 1u\n\
+    return if (ok) \"OK\" else \"fail\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "NullableUnsignedArrayElements");
+}

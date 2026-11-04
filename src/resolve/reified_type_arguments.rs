@@ -76,12 +76,18 @@ impl Checker<'_> {
                 spelling: written.map(|reference| self.reified_argument_spelling(reference)),
                 provenance: written.map_or(reified.provenance, |_| Default::default()),
             };
+            // A written argument is the type argument itself. The one derived from the result
+            // cannot tell `arrayOfNulls<Nothing>` from `arrayOfNulls<Nothing?>`: both return
+            // `Array<Nothing?>`.
+            let argument = written
+                .and_then(|r| self.resolved_type_tys.get(&(r.span.lo, r.span.hi)).copied())
+                .unwrap_or(reified.argument);
             let mut problems = Vec::new();
             self.reified_problems(
                 scope,
                 site.spelling.as_ref(),
                 &site.provenance,
-                reified.argument,
+                argument,
                 reified.intersection.as_ref(),
                 false,
                 false,
