@@ -3,6 +3,7 @@
 //! A backend consumes checked frontend output and emits target artifacts.
 
 pub(crate) mod class_tables;
+mod constructor_selection;
 pub(crate) mod coroutines;
 pub(crate) mod counted_loops;
 pub(crate) mod default_arguments;
@@ -17,6 +18,7 @@ pub(crate) mod local_properties;
 mod module_facts;
 mod source_class_members;
 
+pub(crate) use constructor_selection::selected_constructor;
 pub(crate) use dependency_call_shape::{
     DeclaredOperandRoles, DependencyCallShape, DependencyExportCall,
 };

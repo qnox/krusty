@@ -205,6 +205,24 @@ impl From<&str> for TyParamName {
     }
 }
 
+impl From<&TyParamName> for TyParamName {
+    fn from(name: &TyParamName) -> Self {
+        *name
+    }
+}
+
+impl From<&String> for TyParamName {
+    fn from(name: &String) -> Self {
+        TyParamName::new(name)
+    }
+}
+
+impl From<String> for TyParamName {
+    fn from(name: String) -> Self {
+        TyParamName::new(&name)
+    }
+}
+
 impl Deref for TyParamName {
     type Target = str;
 

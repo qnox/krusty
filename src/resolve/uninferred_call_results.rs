@@ -19,12 +19,12 @@ impl Checker<'_> {
         call: ExprId,
         class: &ClassSig,
         bindings: &[Ty],
-        captured_bindings: &HashMap<String, Ty>,
+        captured_bindings: &crate::types::TyParamBindings,
     ) {
         let bound = class
             .type_params
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(bindings.iter().copied())
             .filter(|(_, binding)| *binding != Ty::Error)
             .collect::<crate::symbol_resolver::GSigBinds>();
@@ -53,15 +53,20 @@ impl Checker<'_> {
                 .map(|(index, formal)| {
                     // With no applied outer receiver, the captured declaration is the one the
                     // construction site sees lexically, so its argument is that type parameter.
-                    Some(captured_bindings.get(formal).copied().unwrap_or_else(|| {
-                        let bound = captured
-                            .type_param_bounds
-                            .get(index)
+                    Some(
+                        captured_bindings
+                            .get(formal.as_str())
                             .copied()
-                            .filter(|bound| *bound != Ty::Error)
-                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                        Ty::ty_param(formal, bound)
-                    }))
+                            .unwrap_or_else(|| {
+                                let bound = captured
+                                    .type_param_bounds
+                                    .get(index)
+                                    .copied()
+                                    .filter(|bound| *bound != Ty::Error)
+                                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                                Ty::ty_param(formal, bound)
+                            }),
+                    )
                 }),
         );
         self.replace_call_type_arguments(call, arguments);
