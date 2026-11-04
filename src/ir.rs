@@ -54,6 +54,7 @@ mod constants;
 mod constructors;
 mod default_arguments;
 pub(crate) use default_arguments::module_override_callable;
+mod endless_loops;
 mod enum_switch_whens;
 pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;

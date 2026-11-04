@@ -865,15 +865,7 @@ fn linearize_finally_returns(ir: &mut IrFile, expression: ExprId, return_ty: &Ty
         stmts: vec![body, leave],
         value: None,
     });
-    let always = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-    let protected_loop = ir.add_expr(IrExpr::While {
-        cond: always,
-        body: loop_body,
-        update: None,
-        post_test: false,
-        label: Some(label),
-        inline_return_frame: false,
-    });
+    let protected_loop = ir.add_endless_loop(loop_body, Some(label));
     let protected_body = ir.add_expr(IrExpr::Block {
         stmts: vec![protected_loop],
         value: None,
@@ -1842,18 +1834,7 @@ fn build_state_machine(
             value: None,
         },
     );
-    let cond_true = k(ir, IrExpr::Const(IrConst::Boolean(true)));
-    let while_loop = k(
-        ir,
-        IrExpr::While {
-            cond: cond_true,
-            body: loop_body,
-            update: None,
-            post_test: false,
-            label: None,
-            inline_return_frame: false,
-        },
-    );
+    let while_loop = ir.add_endless_loop(loop_body, None);
     let mut body_stmts = vec![var_cont, var_suspended];
     body_stmts.extend(prologue_decls);
     body_stmts.push(while_loop);
@@ -2872,7 +2853,7 @@ impl Flat<'_> {
                 update,
                 post_test,
                 label,
-                inline_return_frame: _,
+                ..
             } = &self.ir.exprs[stmt as usize]
             {
                 if expr_calls_suspend(self.ir, *cond, self.suspend)
