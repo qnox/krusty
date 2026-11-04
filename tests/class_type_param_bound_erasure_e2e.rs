@@ -374,20 +374,55 @@ class Outer<T : Cargo>(val t: T) {
     assert_eq!(krusty, kotlinc);
 }
 
+/// A class type parameter's bound is resolved before any rung of the class itself. Neither a
+/// same-named classifier nested in a supertype nor one nested in the class body hides the package
+/// `Limit` that kotlinc binds the bound to, so every member erases to `Lapp/Limit;`.
+#[test]
+fn class_type_param_bound_ignores_nested_classifiers_of_the_class_and_its_supertypes() {
+    for (stem, src, class) in [
+        (
+            "BscopeSuper",
+            "package app\n\nopen class Limit\nopen class Base { open class Limit }\n\
+             class Child<T : Limit>(val bound: T) : Base() { fun f(t: T) {} }\n",
+            "app/Child",
+        ),
+        (
+            "BscopeOwn",
+            "package app\n\nopen class Limit\n\
+             class Own<T : Limit>(val bound: T) { open class Limit\n fun f(t: T) {} }\n",
+            "app/Own",
+        ),
+    ] {
+        let Some((kotlinc, krusty)) = javap_both(stem, src, class) else {
+            eprintln!("skip ({stem}: reference toolchain unavailable)");
+            return;
+        };
+        assert_eq!(
+            descriptors(&krusty),
+            [
+                "Lapp/Limit;",
+                "(Lapp/Limit;)V",
+                "()Lapp/Limit;",
+                "(Lapp/Limit;)V"
+            ],
+            "{stem}"
+        );
+        assert_eq!(descriptors(&krusty), descriptors(&kotlinc), "{stem}");
+    }
+}
+
 const BOUND_SKIPS_SUPERTYPE_NESTED: &str =
     include_str!("box_regressions/classTypeParameterBoundSkipsSupertypeNested.kt");
 const BOUND_SKIPS_OWN_NESTED: &str =
     include_str!("box_regressions/classTypeParameterBoundSkipsOwnNested.kt");
 
-/// A class type parameter's bound is resolved before any rung of the class itself. Neither a
-/// same-named classifier nested in a supertype nor one nested in the class body hides the
-/// top-level `Limit` that kotlinc binds the bound to, so every member erases to `LLimit;`. The
-/// programs are the shared portable regressions; this leaf pins their JVM erasure.
+/// The shared portable programs for the same rule run `box()` through the bound's member, which
+/// only type-checks against the top-level `Limit`; this leaf also pins their JVM erasure.
 #[test]
-fn class_type_param_bound_ignores_nested_classifiers_of_the_class_and_its_supertypes() {
+fn shared_bound_scope_programs_run_and_erase_to_the_top_level_bound() {
     for (stem, src, class) in [
-        ("BscopeSuper", BOUND_SKIPS_SUPERTYPE_NESTED, "Child"),
-        ("BscopeOwn", BOUND_SKIPS_OWN_NESTED, "Own"),
+        ("BscopeSharedSuper", BOUND_SKIPS_SUPERTYPE_NESTED, "Child"),
+        ("BscopeSharedOwn", BOUND_SKIPS_OWN_NESTED, "Own"),
     ] {
         assert_eq!(
             common::expect_box_run_with_stdlib(src, stem),
