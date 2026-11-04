@@ -292,11 +292,7 @@ All existing platform/version manifests only shrink. The required `ci` job runs
 `scripts/check-outcome-lists.sh` before building and fails a pull request that adds an entry to any
 existing outcome manifest compared with its merge base, including one entry swapped for another:
 a regression is fixed, not recorded, and a fix does not pay for one. A manifest for a newly
-supported Kotlin version is exempt, and so is a box expected failure for a regression fixture the
-same change adds: `regressions/<path>` is not an addition when `tests/box_regressions/<path>` is
-absent at the merge base. A new portable fixture stays in the shared inventory for every backend,
-and a lane that cannot run it yet lists it beside it. A fixture that already existed is charged
-like any other case, and the not-applicable, CLI and KLIB lists have no such exemption. JVM and all target-KLIB inventories use the same script and
+supported Kotlin version is exempt. JVM and all target-KLIB inventories use the same script and
 repository layout, and it covers the CLI corpus's expected failures (`tests/cli_expected_failures`)
 too. The CLI
 not-applicable lists are not under this gate: they record what the reference kotlinc cannot run in
