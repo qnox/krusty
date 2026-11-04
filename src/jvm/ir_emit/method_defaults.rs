@@ -163,6 +163,7 @@ pub(super) fn emit_default_stub(
                 stub_parameter_count: stub_param_tys.len(),
                 mask_count,
                 signature_line,
+                receiver_value: true,
                 receiver: singleton.is_none().then_some(owner_ty),
             },
         );
@@ -647,6 +648,7 @@ pub(super) fn emit_facade_default_stub(
                 stub_parameter_count: stub_param_tys.len(),
                 mask_count,
                 signature_line,
+                receiver_value: false,
                 receiver: None,
             },
         );
@@ -759,7 +761,12 @@ struct CopiedInlineBody<'a> {
     stub_parameter_count: usize,
     mask_count: usize,
     signature_line: Option<u32>,
-    /// A member stub's leading receiver, value 0; a static stub has none.
+    /// Whether common IR numbers a receiver as value 0, so the parameters start at value 1. A
+    /// member's stub always does, a `@JvmStatic` singleton member's included, although that stub
+    /// takes no physical receiver.
+    receiver_value: bool,
+    /// The stub's leading physical receiver, in slot 0 and its LocalVariableTable; a static stub
+    /// has none.
     receiver: Option<Ty>,
 }
 
@@ -775,7 +782,7 @@ fn emit_copied_inline_body(
 ) {
     let ir = emitter.ir;
     let fid = copied.fid;
-    let receiver_value = copied.receiver.is_some();
+    let receiver_value = copied.receiver_value;
     // The mask and marker parameters sit in the slots the body reuses. The default prefix has
     // already recorded its stack map against the method's entry locals, so the frame cursor can
     // return to the first of those slots.
