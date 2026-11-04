@@ -166,9 +166,9 @@ impl BodyLowering<'_> {
             otherwise = if index == 0 {
                 conditional
             } else {
-                self.ir.logical_types.insert(conditional, ty);
+                self.ir.set_logical_type(conditional, ty);
                 let completed = complete_bottom_value(self.ir, conditional, ty);
-                self.ir.logical_types.insert(completed, ty);
+                self.ir.set_logical_type(completed, ty);
                 completed
             };
         }
@@ -198,7 +198,7 @@ impl BodyLowering<'_> {
             stmts: vec![lowered],
             value: Some(unit),
         });
-        self.ir.logical_types.insert(block, Ty::Unit);
+        self.ir.set_logical_type(block, Ty::Unit);
         Ok(block)
     }
 
