@@ -1,5 +1,5 @@
 // TARGET_BACKEND: JVM_IR
-// `Array.clone()` is a JVM member, from `Cloneable`; other platforms' `Array` has none.
+// PLATFORM-SPECIFIC: `Array.clone()` is a JVM member, from `Cloneable`; other platforms' `Array` has none.
 open class Reader(size: Int) {
     protected var names: Array<String?> = arrayOfNulls(size)
     protected var depths: Array<Int?> = arrayOfNulls(size)
