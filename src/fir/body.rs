@@ -7,7 +7,9 @@ use super::local_delegated_properties::{
 };
 use crate::fx_hash::{HashMap, HashSet};
 
+mod annotation_constructions;
 mod context_parameters;
+pub use annotation_constructions::{FirAnnotationConstruction, FirAnnotationDefaultValue};
 pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
@@ -37,11 +39,11 @@ pub use ranges::{
 };
 mod indexed_iteration;
 pub use indexed_iteration::{FirBuiltinIterableKind, FirCharSequenceIndexing};
-mod constant_sources;
 mod conversions;
+mod source_forms;
 mod with_index;
-pub use constant_sources::FirConstantSource;
 pub use conversions::{FirConversion, FirConversionKind};
+pub use source_forms::FirSourceForm;
 pub use with_index::{FirIndexedValueComponent, FirWithIndexLoop};
 mod callable_dispatch;
 pub use callable_dispatch::{
@@ -437,37 +439,6 @@ impl DelegateStorage {
 /// A constructor declaration identity after overload selection. Module constructors use their
 /// stable callable identity. Dependency constructors retain a backend-neutral classifier and
 /// semantic parameter signature; a backend maps that exact declaration to physical linkage.
-/// Compact declaration default retained only for an annotation-construction plan. Ordinary source
-/// defaults remain checked retained bodies; dependency metadata contributes only these closed values.
-#[derive(Clone, Debug, PartialEq)]
-pub enum FirAnnotationDefaultValue {
-    Constant(FirConstant),
-    Singleton(TypeName),
-    EnumEntry {
-        classifier: TypeName,
-        name: Box<str>,
-    },
-    KClass(Ty),
-    Array {
-        array_type: Ty,
-        elements: Vec<Self>,
-    },
-    Annotation {
-        classifier: TypeName,
-        members: Vec<(String, Ty)>,
-        values: Vec<Self>,
-    },
-}
-
-/// Complete checked declaration shape needed to realize an annotation value. This is Kotlin
-/// semantics rather than a platform implementation detail: a backend may allocate a concrete value,
-/// synthesize an implementation, or use a native annotation representation without new lookup.
-#[derive(Clone, Debug, PartialEq)]
-pub struct FirAnnotationConstruction {
-    pub members: Box<[(Box<str>, ResolvedTy)]>,
-    pub defaults: Box<[Option<FirAnnotationDefaultValue>]>,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum FirConstructorTarget {
     Module {
@@ -490,16 +461,9 @@ pub enum FirConstructorTarget {
 impl FirConstructorTarget {
     fn storage_payload_bytes(&self) -> usize {
         match self {
-            Self::Module { annotation, .. } => annotation.as_ref().map_or(0, |annotation| {
-                annotation.members.len() * std::mem::size_of::<(Box<str>, ResolvedTy)>()
-                    + annotation
-                        .members
-                        .iter()
-                        .map(|(name, _)| name.len())
-                        .sum::<usize>()
-                    + annotation.defaults.len()
-                        * std::mem::size_of::<Option<FirAnnotationDefaultValue>>()
-            }),
+            Self::Module { annotation, .. } => annotation
+                .as_ref()
+                .map_or(0, |annotation| annotation.storage_payload_bytes()),
             Self::External {
                 parameters,
                 declared_parameters,
@@ -507,16 +471,9 @@ impl FirConstructorTarget {
                 ..
             } => {
                 (parameters.len() + declared_parameters.len()) * std::mem::size_of::<ResolvedTy>()
-                    + annotation.as_ref().map_or(0, |annotation| {
-                        annotation.members.len() * std::mem::size_of::<(Box<str>, ResolvedTy)>()
-                            + annotation
-                                .members
-                                .iter()
-                                .map(|(name, _)| name.len())
-                                .sum::<usize>()
-                            + annotation.defaults.len()
-                                * std::mem::size_of::<Option<FirAnnotationDefaultValue>>()
-                    })
+                    + annotation
+                        .as_ref()
+                        .map_or(0, |annotation| annotation.storage_payload_bytes())
             }
         }
     }
@@ -1776,9 +1733,8 @@ pub struct FirBody {
     /// Naming provenance of each expression the reference compiler realizes as a class of its own
     /// (a callable reference). A naming fact, not a lowering decision.
     generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
-    /// Constants that are not a literal as source wrote it. Every one is `FirExprKind::Constant`;
-    /// metadata's constant-initializer rule tells them apart.
-    constant_sources: HashMap<FirExprId, FirConstantSource>,
+    /// Source forms checking normalized away, which metadata's constant-initializer rule reads.
+    source_forms: HashMap<FirExprId, FirSourceForm>,
     /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
     /// old value.
     postfix_updates: HashSet<FirExprId>,
@@ -1862,7 +1818,7 @@ impl FirBody {
             destructuring_loop_containers: HashSet::default(),
             debug_lines: Default::default(),
             generated_class_provenance: HashMap::default(),
-            constant_sources: HashMap::default(),
+            source_forms: HashMap::default(),
             postfix_updates: HashSet::default(),
             inlined_call_conversions: HashSet::default(),
             lifting_site: None,
