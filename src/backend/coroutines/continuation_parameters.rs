@@ -113,22 +113,26 @@ fn add_continuation_parameter(ir: &mut IrFile, function: u32) {
     // Common lowering numbered the body's locals from the index the continuation now takes.
     shift_value_indices(ir, body, completion, 1);
     let unit = result == Ty::Unit;
-    complete_in_place(ir, body, unit);
+    let completed = complete_in_place(ir, body, unit);
+    ir.functions[function as usize].body = Some(completed);
 }
 
 /// Make every completion of a body that does not suspend return its result as `Any?`: an explicit
-/// `return`, the body's value, and falling off its end.
-fn complete_in_place(ir: &mut IrFile, body: ExprId, unit: bool) {
+/// `return`, the body's value, and falling off its end. Returns the body to install, which is
+/// `body` itself when it is a block.
+///
+/// An expression body keeps its node: the new block returns it rather than taking its arena slot,
+/// so the facts recorded for the expression stay on it and the block cannot contain itself.
+fn complete_in_place(ir: &mut IrFile, body: ExprId, unit: bool) -> ExprId {
     let mut visited = HashSet::default();
     coerce_returns(ir, body, unit, &mut visited);
     let IrExpr::Block { mut stmts, value } = ir.exprs[body as usize].clone() else {
         let completed = completed_value(ir, Some(body), unit);
         let returned = ir.add_expr(IrExpr::Return(Some(completed)));
-        ir.exprs[body as usize] = IrExpr::Block {
+        return ir.add_expr(IrExpr::Block {
             stmts: vec![returned],
             value: None,
-        };
-        return;
+        });
     };
     match value {
         Some(value) => {
@@ -142,6 +146,7 @@ fn complete_in_place(ir: &mut IrFile, body: ExprId, unit: bool) {
         }
     }
     ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
+    body
 }
 
 /// The `Any?` a completion with `value` returns. A `Unit` function evaluates its value for effect

@@ -134,3 +134,101 @@ fn a_body_that_suspends_is_declined_before_any_signature_changes() {
         .all(|function| function.params.is_empty()));
     assert!(ir.suspend_declared_sigs.is_empty());
 }
+
+/// Whether the expression graph under `root` has no cycle.
+fn acyclic(ir: &IrFile, root: ExprId) -> bool {
+    fn visit(
+        ir: &IrFile,
+        node: ExprId,
+        open: &mut HashSet<ExprId>,
+        done: &mut HashSet<ExprId>,
+    ) -> bool {
+        if done.contains(&node) {
+            return true;
+        }
+        if !open.insert(node) {
+            return false;
+        }
+        let mut children = Vec::new();
+        for_each_child(&ir.exprs, node, &mut |child| children.push(child));
+        let ok = children
+            .into_iter()
+            .all(|child| visit(ir, child, open, done));
+        open.remove(&node);
+        done.insert(node);
+        ok
+    }
+    visit(ir, root, &mut HashSet::default(), &mut HashSet::default())
+}
+
+/// `suspend fun f(): Int = 7`: an expression body stays its own node, returned by a new block.
+#[test]
+fn an_expression_body_is_returned_by_a_new_block_that_keeps_it() {
+    let mut ir = IrFile::default();
+    let seven = ir.add_expr(IrExpr::Const(IrConst::Int(7)));
+    let f = ir.add_fun(function(Vec::new(), Ty::Int, Some(seven)));
+    ir.suspend_funs.push(f);
+
+    assert_eq!(add_continuation_parameters(&mut ir), Ok(()));
+
+    assert!(matches!(
+        ir.exprs[seven as usize],
+        IrExpr::Const(IrConst::Int(7))
+    ));
+    let body = ir.functions[f as usize].body.expect("a body");
+    assert_ne!(body, seven);
+    assert!(acyclic(&ir, body));
+    let IrExpr::Block { stmts, value: None } = &ir.exprs[body as usize] else {
+        panic!("the body completes by a return");
+    };
+    let [returned] = stmts.as_slice() else {
+        panic!("one return: {stmts:?}");
+    };
+    let IrExpr::Return(Some(completed)) = ir.exprs[*returned as usize] else {
+        panic!("a return");
+    };
+    assert!(matches!(
+        ir.exprs[completed as usize],
+        IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg, type_operand }
+            if arg == seven && type_operand == any()
+    ));
+}
+
+/// `suspend fun f(): Unit = g()`: the expression runs for effect, then the body completes with
+/// `Unit`.
+#[test]
+fn a_unit_expression_body_runs_and_completes_with_unit() {
+    let mut ir = IrFile::default();
+    let g = ir.add_fun(function(Vec::new(), Ty::Unit, None));
+    let call = ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::Local(g)),
+        dispatch_receiver: None,
+        args: Vec::new(),
+    });
+    let f = ir.add_fun(function(Vec::new(), Ty::Unit, Some(call)));
+    ir.suspend_funs.push(f);
+
+    assert_eq!(add_continuation_parameters(&mut ir), Ok(()));
+
+    let body = ir.functions[f as usize].body.expect("a body");
+    assert_ne!(body, call);
+    assert!(acyclic(&ir, body));
+    let IrExpr::Block { stmts, value: None } = &ir.exprs[body as usize] else {
+        panic!("the body completes by a return");
+    };
+    let [returned] = stmts.as_slice() else {
+        panic!("one return: {stmts:?}");
+    };
+    let IrExpr::Return(Some(completed)) = ir.exprs[*returned as usize] else {
+        panic!("a return");
+    };
+    let IrExpr::Block {
+        stmts: effects,
+        value: Some(unit),
+    } = &ir.exprs[completed as usize]
+    else {
+        panic!("the call, then `Unit`");
+    };
+    assert_eq!(effects.as_slice(), [call]);
+    assert!(matches!(ir.exprs[*unit as usize], IrExpr::UnitInstance));
+}
