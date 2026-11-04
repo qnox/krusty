@@ -661,8 +661,12 @@ pub trait SignatureSemantics:
     /// the enclosing declarations and are kept. Kotlin solves a nested call's open variables in
     /// the enclosing call's constraint system; the enclosing selection must therefore not read
     /// them as already-fixed argument types.
-    fn nested_result_variables(&self, _scope: SignatureScope, ty: ResolvedTy) -> ResolvedTy {
-        ty
+    fn nested_result_variables(
+        &self,
+        _scope: SignatureScope,
+        ty: ResolvedTy,
+    ) -> Result<ResolvedTy, DiagnosticId> {
+        Ok(ty)
     }
 
     fn select_call(

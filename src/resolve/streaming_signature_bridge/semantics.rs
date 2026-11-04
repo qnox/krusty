@@ -791,7 +791,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         ty: crate::fir::ResolvedTy,
-    ) -> crate::fir::ResolvedTy {
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         self.open_nested_result_variables(scope, ty)
     }
 

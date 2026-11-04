@@ -41,10 +41,10 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         ty: crate::fir::ResolvedTy,
-    ) -> crate::fir::ResolvedTy {
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let mut mentioned = crate::fx_hash::HashSet::default();
         collect_type_parameters(ty.get(), &mut mentioned);
-        let visible = self.lexically_visible_type_parameters(scope);
+        let visible = self.lexically_visible_type_parameters(scope)?;
         let active = self.active_postponed_type_variables(scope);
         let open = mentioned
             .into_iter()
@@ -56,9 +56,10 @@ impl ProductionSignatureSemantics<'_> {
             .map(|formal| (formal, crate::types::nested_result_type_variable(formal)))
             .collect::<crate::fx_hash::HashMap<&str, &'static str>>();
         if open.is_empty() {
-            return ty;
+            return Ok(ty);
         }
-        crate::fir::ResolvedTy::new(crate::types::ty_rename_params(ty.get(), &open)).unwrap_or(ty)
+        crate::fir::ResolvedTy::new(crate::types::ty_rename_params(ty.get(), &open))
+            .map_err(|_| Self::failure())
     }
 }
 

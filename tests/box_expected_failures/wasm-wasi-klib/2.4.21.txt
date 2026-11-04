@@ -5150,6 +5150,7 @@ regressions/dataClassInInlineFunctionWithTypeParameters.kt
 regressions/dataClassInRegularFunctionWithTypeParameters.kt
 regressions/directInvokeDestructuring.kt
 regressions/directInvokeNameBasedDestructuring.kt
+regressions/enumEntryMemberNestedResult.kt
 regressions/floatingRangeContainsMixedWidths.kt
 regressions/generic.kt
 regressions/hashCodeNPE.kt

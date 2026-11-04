@@ -220,14 +220,14 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             scope: SignatureScope,
             nested_call: bool,
             argument: ResolvedSigCallArgument<'a>,
-        ) -> ResolvedSigCallArgument<'a> {
+        ) -> Result<ResolvedSigCallArgument<'a>, DiagnosticId> {
             if !nested_call || argument.lambda || !argument.ty.get().mentions_ty_param() {
-                return argument;
+                return Ok(argument);
             }
-            ResolvedSigCallArgument {
-                ty: semantics.nested_result_variables(scope, argument.ty),
+            Ok(ResolvedSigCallArgument {
+                ty: semantics.nested_result_variables(scope, argument.ty)?,
                 ..argument
-            }
+            })
         }
 
         fn materialize_argument<'a, S: SignatureSemantics>(
@@ -909,7 +909,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                             memo,
                             computing,
                         )?,
-                    ),
+                    )?,
                 });
             }
             semantics.select_call(
@@ -1259,7 +1259,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                             memo,
                             computing,
                         )?,
-                    ),
+                    )?,
                 });
             }
             let selected = semantics.select_member_call(
