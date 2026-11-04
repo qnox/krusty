@@ -362,6 +362,22 @@ impl Body<'_> {
         Ok(InterfaceCall { member, params })
     }
 
+    /// The member a SAM conversion implements: the interface function `method`, with its declared
+    /// parameters (after the receiver) and result.
+    pub(super) fn sam_member(
+        &mut self,
+        method: CallableId,
+    ) -> Result<(MemberRef, Vec<Ty>, Ty), Unsupported> {
+        let call = self
+            .interface_function(method)?
+            .ok_or("a functional interface method with no interface member")?;
+        let (_, result) = self
+            .numbers
+            .function_carriers(PlanKey::Callable(method))
+            .ok_or("an interface member with no carriers")?;
+        Ok((call.member, call.params, result))
+    }
+
     /// The call through the interface function `callable`, when it is a member of this module's
     /// interfaces.
     fn interface_function(

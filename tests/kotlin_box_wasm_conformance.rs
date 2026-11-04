@@ -764,10 +764,10 @@ fn wasm_suspend_function_values_decline() {
     expect_wasm_decline(src, "suspendFunctionValue", "a suspend function value");
 }
 
-// PLATFORM-SPECIFIC: a lambda or callable reference converted to a `fun interface` is not a
-// function value; until SAM conversion lands, both forms must decline.
+// PLATFORM-SPECIFIC: a lambda or callable reference converted to a `fun interface` becomes an
+// object of that interface whose member forwards to the function value.
 #[test]
-fn wasm_sam_converted_function_values_decline() {
+fn wasm_sam_converted_function_values_implement_their_interface() {
     for (stem, argument) in [
         ("samConvertedLambda", "{ 1 }"),
         ("samConvertedReference", "(::one)"),
@@ -776,7 +776,7 @@ fn wasm_sam_converted_function_values_decline() {
             "fun interface Source {{ fun get(): Int }}\nfun one(): Int = 1\nfun read(source: Source): Int = source.get()\nfun box(): String = if (read {argument} == 1) \"OK\" else \"fail\""
         );
         expect_reference_box(&src, stem);
-        expect_wasm_decline(&src, stem, "a lambda converted to a `fun interface`");
+        expect_wasm_box(&src, stem);
     }
 }
 
