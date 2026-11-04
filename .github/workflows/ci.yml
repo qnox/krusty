@@ -42,6 +42,8 @@ jobs:
       - name: select supported Kotlin versions
         id: versions
         run: echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
+      - name: test the route request builder
+        run: python3 -m unittest scripts/tests/test_route_request.py
       - uses: ./.github/actions/route
         with:
           workflow: .github/workflows/ci.yml
