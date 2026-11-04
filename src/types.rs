@@ -23,7 +23,7 @@ pub use deprecation::{
     DeprecationLevel,
 };
 pub use overridden_declaration::OverriddenDeclaration;
-pub use semantic_call_role::SemanticCallRole;
+pub use semantic_call_role::{ConstNumericOperation, SemanticCallRole};
 pub use semantic_callable_owner::SemanticCallableOwner;
 mod annotation_targets;
 mod interning;
@@ -40,8 +40,8 @@ pub use equality_mode::EqualityMode;
 
 pub(crate) use substitute::{
     ty_canonicalize_params, ty_rename_params, ty_subst, ty_subst_alias_expansion, ty_subst_all,
-    ty_subst_applied_arguments, ty_subst_applied_lookup, ty_subst_formals, ty_subst_keep_unbound,
-    ty_with_param_bounds, ty_with_transitive_param_bounds,
+    ty_subst_applied_arguments, ty_subst_formals, ty_subst_keep_unbound,
+    ty_subst_supertype_template, ty_with_param_bounds, ty_with_transitive_param_bounds,
 };
 
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
@@ -282,6 +282,13 @@ impl TypeName {
     #[inline]
     pub fn nested_owner(self) -> Option<TypeName> {
         type_names().nested_owner(self.name_id()).map(TypeName)
+    }
+
+    /// Exact declaration nesting, without the backend spelling interpretation of `nested_owner`.
+    pub(crate) fn exact_nested_owner(self) -> Option<TypeName> {
+        type_names()
+            .exact_nested_owner(self.name_id())
+            .map(TypeName)
     }
 
     /// Backend-oriented candidates for textual JVM nesting, deepest first. Semantic resolution

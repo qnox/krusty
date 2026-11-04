@@ -27,6 +27,19 @@ pub(super) fn inaccessible_classifier_message(
 impl Checker<'_> {
     /// Render a callable directly from its semantic record. The receiver is an attribute of an
     /// extension, never positional parameter zero.
+    /// kotlinc's ambiguity diagnostic, listing the tied most specific `candidates`.
+    pub(super) fn ambiguous_candidates_message<'f>(
+        name: &str,
+        candidates: impl IntoIterator<Item = &'f crate::libraries::FunctionInfo>,
+    ) -> String {
+        let mut message = "overload resolution ambiguity between candidates:".to_string();
+        for candidate in candidates {
+            message.push('\n');
+            message.push_str(&Self::callable_candidate_display(name, candidate));
+        }
+        message
+    }
+
     pub(super) fn callable_candidate_display(
         name: &str,
         function: &crate::libraries::FunctionInfo,

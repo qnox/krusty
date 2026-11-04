@@ -12,8 +12,7 @@
 //! The state machine is kotlinc's transformer's, in its lambda mode, when the class is written.
 //! The lambdas taken so far are the shapes the transformer takes for a named function: every
 //! suspension point is a plain call and no inline body is spliced in. The others keep today's
-//! lowering, a lifted function with a continuation class of its own, until their steps land (see
-//! `docs/JVM_INLINE_BEFORE_CPS.md`).
+//! lowering, a lifted function with a continuation class of its own, until their steps land.
 
 use super::bytecode_machine::{eligible_points, owned_suspensions, Route, Routed, Subject};
 use super::cps::{
@@ -34,6 +33,7 @@ const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 struct Capture {
     name: String,
     ty: Ty,
+    crossinline: bool,
 }
 
 /// One of the lambda's own parameters.
@@ -166,7 +166,7 @@ pub(super) fn route(
     let units = ensure_tail_return(ir, body, unit_return);
     if let Some(&close) = ir.fn_close_lines.get(&fid) {
         for unit in units {
-            ir.expr_source_lines.insert(unit, close);
+            ir.set_source_line(unit, close);
         }
     }
     let Some((form, explicit_suspend)) = ir
@@ -201,7 +201,7 @@ pub(super) fn route(
             defaults: Box::new([]),
             default_prefix_count: 0,
         };
-        ir.logical_types.insert(node, Ty::obj_name(internal));
+        ir.set_logical_type(node, Ty::obj_name(internal));
     }
 
     let mut declared_spill_fields: Vec<(String, usize)> = Vec::new();
@@ -229,6 +229,7 @@ pub(super) fn route(
                 .map(|(index, capture)| SuspendLambdaCapture {
                     field: index as u32,
                     ty: capture.ty,
+                    crossinline: capture.crossinline,
                 })
                 .collect(),
             member_parameters,
@@ -384,7 +385,15 @@ fn layout(
             Some(element) => crate::jvm::shared_captures::holder_ty(element),
             None => function.params[parameter],
         };
-        captures.push(Capture { name, ty });
+        let crossinline = matches!(
+            identity.role,
+            IrParameterRole::CapturedValue { capture, .. } if capture.crossinline_parameter.is_some()
+        );
+        captures.push(Capture {
+            name,
+            ty,
+            crossinline,
+        });
     }
     let expressions = crate::ir::value_namespace_expressions(ir, body);
     let read = |value: usize| {
