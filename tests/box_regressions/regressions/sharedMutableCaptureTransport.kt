@@ -1,15 +1,19 @@
+private class CaptureMark(val value: Int)
+
 private fun sharedFactory(): () -> (() -> String) {
     var integer = 0
     var wide = 0L
     var single = 0.0f
     var double = 0.0
     var text: String? = null
+    var reference = CaptureMark(0)
     val advance: () -> Unit = {
         integer++
         wide += 2L
         single += 0.5f
         double += 0.25
         text = (text ?: "") + "x"
+        reference = CaptureMark(integer)
     }
     return {
         val step = advance
@@ -22,7 +26,7 @@ private fun sharedFactory(): () -> (() -> String) {
                 4 -> wide == 8L && single == 2.0f && double == 1.0 && text == "xxxx"
                 else -> false
             }
-            if (consistent) "OK" else "shared state"
+            if (consistent && reference.value == integer) "OK" else "shared state"
         }
         run
     }
