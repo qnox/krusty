@@ -5065,7 +5065,6 @@ regressions/multimodule/multimoduleDirectCollectionIterator.kt
 regressions/noCapturingForTypesWithTypeVariables.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
-regressions/optInOnAccessorsAndTrailingLambdaValue.kt
 regressions/recursiveDnnTypeInLambda.kt
 regressions/resolvedCallForGetOperator.kt
 reified/arraysReification/jaggedArray.kt
