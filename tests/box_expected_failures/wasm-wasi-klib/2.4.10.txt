@@ -699,7 +699,6 @@ classes/kt1578.kt
 classes/kt1721.kt
 classes/kt1918.kt
 classes/kt1980.kt
-classes/kt2224.kt
 classes/kt2384.kt
 classes/kt2391.kt
 classes/kt2417.kt
@@ -776,9 +775,6 @@ closures/closureOnTopLevel1.kt
 closures/closureOnTopLevel2.kt
 closures/closuresAsSingleton.kt
 closures/crossinlineLocalDeclaration.kt
-closures/kt11634.kt
-closures/kt11634_2.kt
-closures/kt11634_3.kt
 closures/kt11634_4.kt
 closures/kt19389.kt
 closures/kt19389_set.kt
@@ -788,7 +784,6 @@ closures/kt3523.kt
 closures/kt4106.kt
 closures/kt47840.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
-closures/localClassLambdaClosure.kt
 closures/localFunInInit.kt
 closures/localFunctionInInitBlock.kt
 closures/subclosuresWithinInitializers.kt
@@ -1854,20 +1849,15 @@ delegatedProperty/valByMapDelegatedProperty.kt
 delegatedProperty/valInInnerClass.kt
 delegatedProperty/varInInnerClass.kt
 delegation/delegatedAnonymousObject_noParametersOnDelegate.kt
-delegation/delegatedAnonymousObject_someParametersOnDelegate.kt
 delegation/delegationDifferentModule.kt
 delegation/delegationDifferentModule2.kt
-delegation/delegationToIntersectionType.kt
 delegation/delegationToIntersectionType3.kt
 delegation/delegationToVar.kt
-delegation/genericFunctionInGenericInterface.kt
 delegation/genericProperty.kt
-delegation/hiddenSuperOverrideIn1.0.kt
 delegation/ifWithCallableReferenceInLazy.kt
 delegation/inDataClass.kt
 delegation/kt30102_comparable.kt
 delegation/kt44199.kt
-delegation/smartCastedDelegation.kt
 delegation/withDefaultsMultipleFilesOrder.kt
 destructuringDeclInLambdaParam/generic.kt
 destructuringDeclInLambdaParam/inline.kt
@@ -3662,7 +3652,6 @@ localClasses/recaptureVarCapturedInLocalClass1.kt
 localClasses/recaptureVarCapturedInLocalClass2.kt
 localClasses/recaptureVarCapturedInLocalClass3.kt
 localClasses/subclassingExtensionReceiverClass.kt
-localClasses/withclosure.kt
 localEscapeAnalysis/arraysFieldWrite.kt
 lower/forLoopsLowering/arrays.kt
 lower/forLoopsLowering/lists.kt
@@ -3863,7 +3852,6 @@ nonLocalReturns/returnInsideTwoLambdas.kt
 nonLocalReturns/suspendConversion.kt
 nothingValue/nothingValueException.kt
 nothingValue/toStringOnNothing.kt
-nullCheckOptimization/kt22410.kt
 nullCheckOptimization/primitiveCheckWithSideEffect.kt
 nullCheckOptimization/trivialInstanceOf.kt
 object/constructor0.kt

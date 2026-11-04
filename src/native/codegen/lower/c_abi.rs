@@ -47,17 +47,18 @@ impl<'a> FileLowering<'a> {
         let Some(symbol) = &export.default_entry else {
             return Ok(());
         };
-        // The module default entry takes the declaration's operands and the omission masks, so
+        // The default-argument entry takes the declaration's operands and the omission masks, so
         // its export is the same trampoline over that entry.
-        let Some(&(_, entry)) = self
-            .module_default_entries
-            .iter()
-            .find(|(declared, _)| *declared == function)
+        let Some(entry) = crate::backend::default_arguments::published_entry(self.ir, function)
+            .and_then(|entry| self.functions[entry as usize])
         else {
-            return Err(declined!("`{symbol}` has no module default entry"));
+            return Err(declined!("`{symbol}` has no default-argument entry"));
         };
         let mut params = export.signature.parameters().to_vec();
-        params.extend(super::defaults::module_default_masks(params.len()));
+        params.extend(std::iter::repeat_n(
+            Ty::Int,
+            crate::backend::default_arguments::mask_words(params.len()),
+        ));
         self.define_trampoline(file_init, entry, function, symbol, params)
     }
 

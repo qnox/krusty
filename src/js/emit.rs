@@ -1294,6 +1294,7 @@ mod tests {
 
     fn blank_class(name: &str) -> IrClass {
         IrClass {
+            declaration_context: None,
             fq_name: name.into(),
             declaration_name: None,
             is_source_declared: true,
