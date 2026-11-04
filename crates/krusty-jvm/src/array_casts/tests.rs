@@ -55,6 +55,7 @@ fn parameter(name: &str, bounds: &[(Ty, bool)]) -> IrTypeParameter {
         bounds: bounds.to_vec(),
         variance: TypeVariance::Invariant,
         reified: false,
+        captured_from_enclosing: false,
     }
 }
 

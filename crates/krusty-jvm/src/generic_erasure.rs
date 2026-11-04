@@ -125,6 +125,7 @@ pub(super) fn erased_callable_parameters(
             bounds: parameter.bounds.to_vec(),
             variance: krusty::types::TypeVariance::Invariant,
             reified: false,
+            captured_from_enclosing: false,
         })
         .collect::<Vec<_>>();
     erased_parameters(parameters, &type_parameters)
@@ -220,6 +221,7 @@ mod tests {
             bounds: vec![(bound, false)],
             variance: TypeVariance::Invariant,
             reified: false,
+            captured_from_enclosing: false,
         }
     }
 

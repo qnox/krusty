@@ -20,7 +20,7 @@ use krusty_plugin_ir::{
 };
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ksp")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/krusty-plugin-host/tests/fixtures/ksp")
 }
 
 fn platform(paths: Vec<PathBuf>) -> PlatformProvider {

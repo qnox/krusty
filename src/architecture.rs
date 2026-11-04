@@ -953,12 +953,17 @@ mod tests {
                 "diagnostic_wording",
                 "features",
                 "frontend",
+                // Compiler plugins consume this public projection of the module's checked FIR.
+                "hosted_plugin_ir",
                 "ir",
                 "js",
                 "jvm",
                 "klib",
                 "klib_libraries",
                 "kotlin_version",
+                // A KSP driver reads resolved declaration headers through the public round
+                // projection, before asking the compiler to check source bodies.
+                "ksp_round",
                 "language_settings",
                 "language_version",
                 "lexer",

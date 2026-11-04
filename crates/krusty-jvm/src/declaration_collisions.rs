@@ -1764,6 +1764,7 @@ mod tests {
                     bounds: vec![(bound, false), (comparable, true)],
                     variance: krusty::types::TypeVariance::Invariant,
                     reified: false,
+                    captured_from_enclosing: false,
                 }],
                 params: vec![krusty::types::Ty::Int],
                 ret: Some(parameter),

@@ -823,6 +823,7 @@ dependencies = [
  "krusty-cli",
  "krusty-jvm",
  "krusty-native",
+ "krusty-plugin-host",
  "krusty-plugin-ir",
  "krusty-wasm",
  "libc",
@@ -902,8 +903,6 @@ dependencies = [
 name = "krusty-plugin-host"
 version = "0.0.1"
 dependencies = [
- "krusty",
- "krusty-jvm",
  "krusty-plugin-ir",
  "sha2",
  "zip",

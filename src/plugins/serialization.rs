@@ -2337,6 +2337,7 @@ mod tests {
                     bounds: Vec::new(),
                     variance: crate::types::TypeVariance::Invariant,
                     reified: false,
+                    captured_from_enclosing: false,
                 }],
                 params: Vec::new(),
                 ret: None,

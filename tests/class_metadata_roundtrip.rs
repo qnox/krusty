@@ -249,6 +249,7 @@ fn class_type_parameter_bound_and_variance_round_trip() {
         bounds: vec![(Ty::obj("kotlin/CharSequence"), true)],
         variance: TypeVariance::Out,
         reified: false,
+        captured_from_enclosing: false,
     };
     let names = vec!["T".to_string()];
     let (d1, d2) = build_class(
@@ -305,6 +306,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         bounds: vec![(Ty::obj("kotlin/Any"), false)],
         variance: TypeVariance::Invariant,
         reified: false,
+        captured_from_enclosing: false,
     };
     let methods = vec![FnMeta {
         has_source: true,
@@ -402,6 +404,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         bounds: vec![(bound, false)],
         variance: TypeVariance::Invariant,
         reified: false,
+        captured_from_enclosing: false,
     };
     let parameter = |name: &str| (name.to_string(), Ty::ty_param(name, bound));
     let methods = vec![FnMeta {

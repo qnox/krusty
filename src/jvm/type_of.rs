@@ -961,6 +961,7 @@ mod tests {
                     bounds: vec![(bound, false)],
                     variance: TypeVariance::Invariant,
                     reified: false,
+                    captured_from_enclosing: false,
                 }],
                 params: Vec::new(),
                 ret: Some(Ty::Unit),

@@ -52,7 +52,25 @@ pub(super) fn emit_enum_entry_subclass(
     if let Some(signature) = &ctor_signature {
         cw.reserve_descriptor(signature);
     }
+    // The constructor maps to its entry's line: the superclass call is a constructor call at the
+    // entry's offsets, so, as for any constructor call, its arguments mark their own lines and the
+    // entry's line goes back into effect for the default-argument operands and the call itself.
+    let entry_line = ir
+        .class_id_by_name(c.superclass)
+        .and_then(|enum_class| {
+            ir.classes[enum_class as usize]
+                .enum_entries
+                .iter()
+                .find(|entry| entry.subclass == Some(c.fq_name))
+        })
+        .map_or(0, |entry| entry.decl_line);
+    let mark_entry = |code: &mut CodeBuilder| {
+        if entry_line != 0 {
+            code.mark_line(entry_line);
+        }
+    };
     let mut ctor = CodeBuilder::new(1 + prefix_words);
+    mark_entry(&mut ctor);
     let ctor_max = {
         let mut e = Emitter::new(
             ir,
@@ -95,6 +113,7 @@ pub(super) fn emit_enum_entry_subclass(
             .unwrap_or_default();
         let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
         if !super_defaults.is_empty() {
+            mark_entry(&mut ctor);
             for mask in constructor_default_masks(super_defaults, c.super_ctor_params.len()) {
                 ctor.push_int(mask, e.cw);
                 super_params.push(Ty::Int);
@@ -115,6 +134,7 @@ pub(super) fn emit_enum_entry_subclass(
             &method_descriptor(&super_params, Ty::Unit),
         );
         let argw: i32 = super_params.iter().map(|t| slot_words(*t) as i32).sum();
+        mark_entry(&mut ctor);
         ctor.invokespecial(super_init, argw, 0);
         e.this_uninitialized = false;
         if let Some(init_body) = c.init_body {
@@ -124,6 +144,11 @@ pub(super) fn emit_enum_entry_subclass(
         }
         e.frame.max()
     };
+    let ctor_lines: Vec<(u16, u32)> = ctor
+        .line_marks()
+        .iter()
+        .map(|&(pc, line)| (pc, u32::from(line)))
+        .collect();
     ctor.ret_void();
     ctor.ensure_locals(ctor_max);
     ctor.link();
@@ -144,18 +169,8 @@ pub(super) fn emit_enum_entry_subclass(
         ),
         ("$enum$ordinal".to_string(), "I".to_string(), 2),
     ];
-    let line = ir
-        .class_id_by_name(c.superclass)
-        .and_then(|enum_class| {
-            ir.classes[enum_class as usize]
-                .enum_entries
-                .iter()
-                .find(|entry| entry.subclass == Some(c.fq_name))
-        })
-        .map(|entry| entry.decl_line)
-        .filter(|&line| line != 0)
-        .map(|line| (0, line));
-    cw.set_method_debug("<init>", &ctor_desc, line, &locals);
+    cw.set_method_debug("<init>", &ctor_desc, None, &locals);
+    cw.set_method_lines("<init>", &ctor_desc, &ctor_lines);
 
     // The overriding methods + synthesized property getters.
     emit_declared_property_accessors(

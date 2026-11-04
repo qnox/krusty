@@ -82,7 +82,7 @@ pub(crate) use local_signatures::{
     publish_checked_default_local_signatures, publish_checked_inline_local_signatures,
     publish_checked_local_signatures_in_pass_two_root,
 };
-use postponed_argument_mapping::MappedTopLevelSelection;
+use postponed_argument_mapping::{typed_argument_evidence, MappedTopLevelSelection};
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
 use type_resolution::SelectedTypeSite;
 
