@@ -509,6 +509,7 @@ fn sam_class_signature(
                 bounds: parameter.bounds.clone(),
                 variance: crate::types::TypeVariance::Invariant,
                 reified: false,
+                captured_from_enclosing: false,
             })
             .collect(),
         params: Vec::new(),
