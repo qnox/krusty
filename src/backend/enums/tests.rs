@@ -405,7 +405,7 @@ fn defaults_reading_a_constant_are_realized() {
          fun box(): String = if (pick() == Holder().shade) \"fail\" else \"OK\"\n",
     );
     let mut defaults = super::uses::function_defaults(&ir);
-    defaults.extend(crate::backend::default_arguments::constructor_defaults(&ir));
+    defaults.extend(super::uses::constructor_defaults(&ir));
     assert_eq!(defaults.len(), 3);
     let reads: Vec<bool> = defaults
         .iter()

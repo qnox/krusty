@@ -8,13 +8,13 @@ use super::initializer::{call, entries_type, read_slot};
 use super::Realized;
 
 /// Rewrite each use in an emitted body, the realization's own bodies included (a constant's
-/// arguments may read another constant), and in every default a target may evaluate: the default
-/// lowering copies a function's defaults into its entry after this pass, and a target evaluates a
-/// constructor's in the constructor's frame (`annotation class C(val e: E = E.A)`).
+/// arguments may read another constant), and in every default: the default-argument lowering
+/// copies a function's or constructor's defaults into its entry after this pass
+/// (`annotation class C(val e: E = E.A)`).
 pub(super) fn rewrite(ir: &mut IrFile, realized: &HashMap<TypeName, Realized>) {
     let mut roots = crate::ir::emitted_body_roots(ir);
     roots.extend(function_defaults(ir));
-    roots.extend(crate::backend::default_arguments::constructor_defaults(ir));
+    roots.extend(constructor_defaults(ir));
     let mut seen = HashSet::default();
     for root in roots {
         for expression in crate::ir::value_namespace_expressions(ir, root) {
@@ -34,6 +34,27 @@ pub(super) fn function_defaults(ir: &IrFile) -> Vec<ExprId> {
         .flatten()
         .flatten()
         .copied()
+        .collect()
+}
+
+/// The defaults of every constructor this file emits, which the default-argument lowering copies
+/// into the constructor's entry.
+pub(super) fn constructor_defaults(ir: &IrFile) -> Vec<ExprId> {
+    ir.classes
+        .iter()
+        .flat_map(|class| {
+            let primary = class
+                .has_primary_ctor
+                .then(|| ir.class_ctor_defaults_name(class.fq_name_id()))
+                .flatten()
+                .into_iter()
+                .flatten();
+            let secondaries = class
+                .secondary_ctors
+                .iter()
+                .flat_map(|constructor| &constructor.defaults);
+            primary.chain(secondaries).flatten().copied()
+        })
         .collect()
 }
 

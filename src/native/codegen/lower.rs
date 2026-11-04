@@ -22,7 +22,6 @@ mod classes_literal;
 mod classifier_shapes;
 mod compiler_intrinsics;
 mod declared_capabilities;
-mod defaults;
 mod dispatch;
 mod entry;
 mod enums;
@@ -325,7 +324,6 @@ pub fn lower_file(
         statics: Vec::new(),
         lambdas: HashMap::default(),
         local_delegate_helpers: HashMap::default(),
-        default_constructors: HashMap::default(),
         reference_identities: HashMap::default(),
         holders: HashMap::default(),
         references: HashMap::default(),
@@ -353,14 +351,12 @@ pub fn lower_file(
     lowering.declare_statics()?;
     lowering.declare_lambdas()?;
     lowering.declare_local_delegate_helpers()?;
-    lowering.declare_default_constructors()?;
     // Constructors are bodies too, so property-reference artifacts must exist before classes are
     // defined: a class initializer may itself contain `C::property`.
     lowering.declare_property_references()?;
     lowering.declare_local_property_references()?;
     lowering.define_local_delegate_helpers()?;
     lowering.define_classes()?;
-    lowering.define_default_constructors()?;
     let statics_init = lowering.define_statics_init()?;
     let file_init_linkage = match unit_kind {
         crate::backend::CheckedIrUnitKind::Source => Linkage::Hidden,
@@ -470,8 +466,6 @@ struct FileLowering<'a> {
     lambdas: HashMap<u32, functions::LambdaItems>,
     /// Native-local accessor helper per checked local-delegate plan and accessor side.
     local_delegate_helpers: HashMap<(u32, bool), FuncId>,
-    /// One wrapper per omission shape a construction in this file uses.
-    default_constructors: HashMap<defaults::CtorOmission, FuncId>,
     /// The holder type for a captured `var` of each carrier, by the carrier's spelling.
     holders: HashMap<String, DataId>,
     /// The emitted pieces of each property reference, by the expression that creates it.

@@ -115,6 +115,12 @@ fn initializer(ir: &mut IrFile, class: ClassId, slots: &[u32], flag: u32, entrie
         };
         let construction = ir.add_expr(construction);
         ir.set_logical_type(construction, constructed);
+        // The selected constructor travels with the construction, so the default-argument lowering
+        // can reach its entry when the constant leaves arguments out.
+        if entry.subclass.is_none() {
+            ir.construction_targets
+                .insert(construction, entry.constructor);
+        }
         let constant = ir.add_expr(IrExpr::EnumConstant {
             classifier,
             name: entry.name.as_str().into(),
