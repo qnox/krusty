@@ -16,7 +16,7 @@ use krusty_plugin_host::{
 const KSP_VERSION: &str = "2.3.12";
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ksp")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/krusty-plugin-host/tests/fixtures/ksp")
 }
 
 fn runtime() -> (KspRuntime, Environment) {
@@ -580,7 +580,7 @@ fn unsigned_annotation_values_are_what_ksp2_reports() {
         "Annotations",
         "annotations.AnnotationsProvider",
         &[Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/unsigned_annotation_values/UnsignedAnnotations.kt")],
+            .join("tests/fixtures/unsigned_annotation_values/UnsignedAnnotations.kt")],
         "ksp-outputs-unsigned-annotations",
         "unsigned-annotations.expected",
     );
