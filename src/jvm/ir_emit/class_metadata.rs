@@ -78,11 +78,11 @@ pub(super) fn build_class_metadata_with_facts(
         return Some(KotlinMetadata {
             k: 3,
             stamp: opts.metadata_stamp(),
-            xi: synthetic_class_xi(if is_continuation_class(c) {
-                SYNTHETIC_PROTECTED
+            xi: if is_continuation_class(c) {
+                continuation_class_xi(ir, c)
             } else {
-                SYNTHETIC_LOCAL
-            }),
+                synthetic_class_xi(SYNTHETIC_LOCAL)
+            },
             d1: vec![],
             d2: vec![],
         });
@@ -367,9 +367,9 @@ impl<'a> JvmClassRealization<'a> {
         let f = &self.ir.functions[fid as usize];
         // Recorded exactly when a reader cannot rebuild the physical descriptor from the
         // declared types (kotlinc's `requiresFunctionSignature`).
-        let physical = crate::jvm::names::method_descriptor(
+        let physical = crate::jvm::method_descriptors::ir_method_desc(
             &f.params,
-            self.override_results.physical_result(self.ir, fid),
+            &self.override_results.physical_result(self.ir, fid),
         );
         let desc = (super::super::metadata_method_signatures::requires_function_signature(
             record.receiver,

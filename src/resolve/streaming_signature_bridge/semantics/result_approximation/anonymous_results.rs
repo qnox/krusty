@@ -1,6 +1,6 @@
 //! Expose anonymous implementation types only when an inferred declaration publishes them.
 
-use crate::fir::{DeclarationFlags, DeclarationId, DiagnosticId};
+use crate::fir::{DeclarationFlags, DeclarationId, DeclarationKind, DiagnosticId};
 use crate::fx_hash::HashSet;
 use crate::symbol_resolver::{
     compose_type_position, GSigBinds, TypePosition, UnboundSpecialization,
@@ -19,9 +19,30 @@ pub(super) fn declaration_result(
         .headers
         .stub(declaration)
         .ok_or_else(ProductionSignatureSemantics::failure)?;
+    let container = semantics
+        .headers
+        .declarations
+        .anchor(declaration)
+        .ok_or_else(ProductionSignatureSemantics::failure)?
+        .owner
+        .map(|owner| {
+            semantics
+                .headers
+                .stub(owner)
+                .ok_or_else(ProductionSignatureSemantics::failure)
+        })
+        .transpose()?;
+    // A non-regular declaration container, including an enum entry's body, has local visibility
+    // for result approximation. This does not change its members' visibility or registration.
+    let local_container = container.is_some_and(|owner| {
+        owner.kind != DeclarationKind::Classifier
+            || owner.flags.has(DeclarationFlags::LOCAL_CLASS)
+            || owner.flags.has(DeclarationFlags::ANONYMOUS_OBJECT)
+    });
     // Local members retain their exact result even when written public. A private inline function
     // exposes its result because each call site materializes a distinct anonymous implementation.
-    let expose = !stub.flags.has(DeclarationFlags::LOCAL_CLASS)
+    let expose = !local_container
+        && !stub.flags.has(DeclarationFlags::LOCAL_CLASS)
         && (stub.visibility != crate::types::Visibility::Private
             || stub.flags.has(DeclarationFlags::INLINE));
     if !expose || !contains_anonymous(semantics.table, semantics.headers, ty) {
@@ -408,5 +429,153 @@ mod tests {
             ),
             Ok(definitely_non_null)
         );
+    }
+
+    #[test]
+    fn enum_entry_results_keep_anonymous_types_without_changing_published_member_roles() {
+        let source = r#"interface Parent
+            enum class Container {
+                Entry {
+                    val entryProperty = object : Parent {}
+                    public val explicitEntryProperty = object {}
+                    fun entryFunction() = object : Parent {}
+                    fun <T> entryGeneric(value: T) = object { val saved = value }
+                }
+            }
+            class Regular {
+                val ordinaryProperty = object : Parent {}
+                internal fun internalFunction() = object : Parent {}
+                protected fun protectedFunction() = object : Parent {}
+                private val privateProperty = object : Parent {}
+                private inline fun privateInlineFunction() = object : Parent {}
+            }
+            private class PrivateRegular {
+                val publicMemberOfPrivateClass = object : Parent {}
+            }
+            val topLevelProperty = object : Parent {}
+            private val privateTopLevelProperty = object : Parent {}
+        "#;
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let analysis = crate::frontend::analyze_source_set_with_features(
+            &[
+                crate::source::SourceInput::kotlin(source)
+                    .with_file_stem("ContainerResultExposure"),
+            ],
+            crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
+            &crate::features::LangFeatures::new(),
+            &mut diagnostics,
+        );
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        let index = analysis
+            .streamed
+            .as_ref()
+            .expect("finalized signatures")
+            .module
+            .index();
+        let declaration = |name: &str| {
+            let matches = (0..index.declaration_count())
+                .map(|raw| DeclarationId::from_raw(u32::try_from(raw).unwrap()))
+                .filter(|declaration| {
+                    index
+                        .declaration_header(*declaration)
+                        .is_some_and(|header| {
+                            !header.flags.has(DeclarationFlags::COMPILER_GENERATED)
+                        })
+                })
+                .filter(|declaration| index.declaration_name(*declaration) == Some(name))
+                .filter(|declaration| {
+                    index
+                        .declaration_anchor(*declaration)
+                        .is_some_and(|anchor| {
+                            matches!(
+                                anchor.kind,
+                                DeclarationKind::Property | DeclarationKind::Function
+                            )
+                        })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1, "{name}");
+            matches[0]
+        };
+        for name in [
+            "entryProperty",
+            "explicitEntryProperty",
+            "entryFunction",
+            "entryGeneric",
+        ] {
+            let id = declaration(name);
+            let header = index
+                .declaration_header(id)
+                .expect("published entry member");
+            assert!(!header.flags.has(DeclarationFlags::LOCAL_CLASS), "{name}");
+            assert_eq!(header.visibility, crate::types::Visibility::Public);
+            let owner = index.declaration_anchor(id).unwrap().owner.unwrap();
+            assert_eq!(
+                index.declaration_anchor(owner).unwrap().kind,
+                DeclarationKind::EnumEntry
+            );
+            let signature = index
+                .signature(id)
+                .expect("published entry-member signature");
+            let classifier = analysis
+                .symbols
+                .class_by_type_name(
+                    signature
+                        .result
+                        .get()
+                        .obj_internal()
+                        .expect("exact anonymous result"),
+                )
+                .expect("source anonymous classifier");
+            assert!(
+                analysis.files[classifier.source_file as usize].is_anonymous_object_class(
+                    classifier
+                        .source_decl
+                        .expect("source anonymous declaration"),
+                ),
+                "{name}"
+            );
+            if name == "entryGeneric" {
+                assert_eq!(
+                    signature.result.get().type_args(),
+                    signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.get())
+                        .collect::<Vec<_>>()
+                );
+            }
+            if header.kind == DeclarationKind::Property {
+                assert!(index.property_for_declaration(id).is_some());
+            } else {
+                assert!(index.callable_for_declaration(id).is_some());
+            }
+        }
+        for name in [
+            "ordinaryProperty",
+            "internalFunction",
+            "protectedFunction",
+            "privateInlineFunction",
+            "publicMemberOfPrivateClass",
+            "topLevelProperty",
+        ] {
+            assert_eq!(
+                index.signature(declaration(name)).unwrap().result.get(),
+                Ty::obj("Parent"),
+                "{name}"
+            );
+        }
+        for name in ["privateProperty", "privateTopLevelProperty"] {
+            let result = index.signature(declaration(name)).unwrap().result.get();
+            let classifier = analysis
+                .symbols
+                .class_by_type_name(result.obj_internal().unwrap())
+                .unwrap();
+            assert!(
+                analysis.files[classifier.source_file as usize]
+                    .is_anonymous_object_class(classifier.source_decl.unwrap()),
+                "{name}"
+            );
+        }
     }
 }
