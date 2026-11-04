@@ -27,6 +27,15 @@ class Builder {
 
     fun <S> inputConstrained(column: Column<S>, value: Expression<S>) = update(column, same(value))
 
+    // One producer under two different expected types in one inferred body.
+    fun <S, R> siblings(first: Column<S>, second: Column<R>) =
+        pick(first, wrap("p")).name + pick(second, wrap("q")).name
+
+    fun <T, S : T?> pick(column: Column<T>, value: Expression<S>): Column<T> {
+        update(column, value)
+        return column
+    }
+
     fun <T, S : T?> update(column: Column<T>, value: Expression<S>) {
         val query = QueryBuilder()
         value.toQueryBuilder(query)
@@ -41,5 +50,6 @@ fun box(): String {
     builder.explicitReceiver(Column<String>("b"))
     builder.inputConstrained(Column<Long?>("c"), wrap<Long>("z"))
     local(Column<Boolean>("d"))
-    return if (builder.log == "a=x;b=y;c=z;d=w;") "OK" else builder.log
+    if (builder.siblings(Column<Int>("e"), Column<String>("f")) != "ef") return "siblings"
+    return if (builder.log == "a=x;b=y;c=z;d=w;e=p;f=q;") "OK" else builder.log
 }

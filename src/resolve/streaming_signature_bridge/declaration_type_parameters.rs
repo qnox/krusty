@@ -76,14 +76,26 @@ impl ProductionSignatureSemantics<'_> {
             .and_then(|parameters| parameters.get(&declaration).cloned())
     }
 
-    /// Every type parameter a type reference at `scope` can name: those of the declaration that
-    /// owns the scope and of each lexically enclosing declaration, including the formals a local
-    /// or anonymous classifier captures.
+    /// Every type parameter fixed at `scope`: those of the declaration that owns the scope and of
+    /// each lexically enclosing declaration, including the formals a local or anonymous classifier
+    /// captures.
     pub(super) fn lexically_visible_type_parameters(
         &self,
         scope: crate::fir::SignatureScope,
     ) -> crate::fx_hash::HashSet<&'static str> {
-        let mut visible = crate::fx_hash::HashSet::default();
+        // Signature type resolution is the authority on what a type reference here can name,
+        // header-only declarations included. The declaration walk below adds the formals a nearer
+        // same-named one shadows: they cannot be named, but still reach this scope through members.
+        let mut visible = self
+            .with_signature_type_scope(scope, |lexical| {
+                lexical
+                    .visible_tparams()
+                    .erasure
+                    .values()
+                    .filter_map(|ty| ty.ty_param_name())
+                    .collect::<crate::fx_hash::HashSet<_>>()
+            })
+            .unwrap_or_default();
         let mut owner = Some(scope.owner);
         while let Some(declaration) = owner {
             if let Some(generic) = self
