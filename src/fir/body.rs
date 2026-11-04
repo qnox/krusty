@@ -103,6 +103,15 @@ pub struct FirSamConversion {
     pub kotlin_interface: bool,
     /// Provider-normalized semantic identities parallel to `declared_parameters`.
     pub parameter_identities: Box<[super::ResolvedParameterIdentity]>,
+    /// The interface's own type parameters in declaration order, which the declared shape names.
+    pub type_parameters: Box<[FirSamTypeParameter]>,
+}
+
+/// One type parameter a functional interface declares, with every declared upper bound.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirSamTypeParameter {
+    pub name: Box<str>,
+    pub bounds: Box<[super::ResolvedTypeParameterBound]>,
 }
 
 /// The abstract method a SAM conversion implements.
