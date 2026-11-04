@@ -69,15 +69,29 @@ jobs:
           tool: just
       - name: lint
         run: just lint
-      # The remaining host tests start real compiler-plugin hosts from their pinned toolchains
-      # on the runner's JDK. The toolchains and compiled adapters stay in krusty's cache.
+
+  # krusty-plugin-host is outside the default members and the coverage packages, so its own
+  # compiler-independent tests run here. Compiler-dependent plugin integrations run in `ci`.
+  plugin-host:
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      # The host tests start real compiler-plugin hosts from their pinned toolchains on the
+      # runner's JDK. The toolchains and compiled adapters stay in krusty's cache.
       - &plugin-host-runtime-cache
         name: cache plugin host runtime
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/krusty/plugin-host
           key: plugin-host-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
-      # Compiler-independent host tests stay outside the root compiler test target.
       - name: plugin host tests
         run: cargo test --profile gate -p krusty-plugin-host -- --include-ignored
 
@@ -730,7 +744,7 @@ jobs:
   # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, maven, build-tools, bazel]
+    needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, maven, build-tools, bazel]
     if: always()
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "helper-1c-1gb"]') }}
     steps:
@@ -738,6 +752,7 @@ jobs:
         env:
           CI_RESULT: ${{ needs.ci.result }}
           LINT_RESULT: ${{ needs.lint.result }}
+          PLUGIN_HOST_RESULT: ${{ needs.plugin-host.result }}
           CONFORMANCE_RESULT: ${{ needs.conformance.result }}
           KLIB_CONFORMANCE_RESULT: ${{ needs.conformance-klib.result }}
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
@@ -748,6 +763,7 @@ jobs:
         run: |
           echo "ci: $CI_RESULT"
           echo "lint: $LINT_RESULT"
+          echo "plugin-host: $PLUGIN_HOST_RESULT"
           echo "conformance: $CONFORMANCE_RESULT"
           echo "KLIB conformance: $KLIB_CONFORMANCE_RESULT"
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
@@ -757,6 +773,7 @@ jobs:
           echo "bazel: $BAZEL_RESULT"
           if [ "$CI_RESULT" != success ] \
             || [ "$LINT_RESULT" != success ] \
+            || [ "$PLUGIN_HOST_RESULT" != success ] \
             || [ "$CONFORMANCE_RESULT" != success ] \
             || [ "$KLIB_CONFORMANCE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
@@ -764,7 +781,7 @@ jobs:
             || [ "$MAVEN_RESULT" != success ] \
             || [ "$BUILD_TOOLS_RESULT" != success ] \
             || [ "$BAZEL_RESULT" != success ]; then
-            echo "lint, coverage, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed" >&2
+            echo "lint, plugin host tests, coverage, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed" >&2
             exit 1
           fi
 
@@ -1131,7 +1148,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
+    needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: [self-hosted, helper-1c-1gb]
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
