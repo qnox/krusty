@@ -76,7 +76,6 @@
 1	src/jvm/ir_emit/access_bridges.rs	usage of `contains_key` followed by `insert` on a `HashMap`
 1	src/jvm/ir_emit/block_scope.rs	this function has too many arguments (8/7)
 1	src/jvm/ir_emit/bytecode_inline_call/lambda_node.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/jvm/ir_emit/method_defaults.rs	items after a test module
 1	src/jvm/ir_emit/method_defaults.rs	this `match` can be collapsed into the outer `match`
 1	src/jvm/ir_emit/property_access.rs	this `map_or` can be simplified
 1	src/jvm/ir_emit/property_access.rs	this function has too many arguments (8/7)

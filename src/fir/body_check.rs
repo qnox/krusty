@@ -450,10 +450,19 @@ fn bind_parameters_and_check_defaults(
     defaults: &[CheckedBodyDefault],
     receiver_shape: CheckedBodyReceiverShape<'_>,
 ) -> Result<(), BodyCheckFailure> {
-    let context_parameter_count = u32::try_from(receiver_shape.context_receivers.len())
-        .map_err(|_| checker.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?;
+    // A default sees only the parameters before it, but its locals are values of the same body:
+    // allocating every parameter's value first keeps them distinct from a later parameter's.
+    let values = parameters
+        .iter()
+        .enumerate()
+        .map(|(ordinal, parameter)| {
+            let anonymous_context = ordinal < receiver_shape.context_receivers.len()
+                && parameter.context_kind != crate::types::ContextParameterKind::Named;
+            (!anonymous_context).then(|| checker.allocate_local())
+        })
+        .collect::<Vec<_>>();
     let mut defaults = defaults.iter().peekable();
-    for (ordinal, parameter) in parameters.iter().enumerate() {
+    for ((ordinal, parameter), value) in parameters.iter().enumerate().zip(values) {
         let ordinal = u32::try_from(ordinal).map_err(|_| {
             checker.failure(
                 Some(parameter.span),
@@ -474,23 +483,19 @@ fn bind_parameters_and_check_defaults(
                 value,
             });
         }
-        if ordinal < context_parameter_count
-            && parameter.context_kind != crate::types::ContextParameterKind::Named
-        {
+        let Some(value) = value else {
             continue;
-        }
-        let value = match parameter.name_binding {
-            CheckedBodyParameterNameBinding::PhysicalOnly => checker.allocate_local(),
-            CheckedBodyParameterNameBinding::ScriptReceiver(ordinal) => {
-                checker.bind_local(&script_receiver_binding(ordinal), parameter.ty)
-            }
-            CheckedBodyParameterNameBinding::Lexical if parameter.name == "_" => {
-                checker.allocate_local()
-            }
-            CheckedBodyParameterNameBinding::Lexical => {
-                checker.bind_local(parameter.name, parameter.ty)
-            }
         };
+        match parameter.name_binding {
+            CheckedBodyParameterNameBinding::PhysicalOnly => {}
+            CheckedBodyParameterNameBinding::ScriptReceiver(ordinal) => {
+                checker.bind_value(value, &script_receiver_binding(ordinal), parameter.ty);
+            }
+            CheckedBodyParameterNameBinding::Lexical if parameter.name == "_" => {}
+            CheckedBodyParameterNameBinding::Lexical => {
+                checker.bind_value(value, parameter.name, parameter.ty);
+            }
+        }
         let origin = checker.origins.source(checker.source, parameter.span);
         let parameter_record = match parameter.name_binding {
             CheckedBodyParameterNameBinding::ScriptReceiver(ordinal) => {
@@ -1050,15 +1055,10 @@ impl BodyFirChecker<'_> {
         &mut self,
         value: FirExprId,
         target: ResolvedTy,
-        cause: OriginId,
         conversion: Option<FirConversion>,
     ) -> FirExprId {
         conversion.map_or(value, |conversion| {
-            self.body.add_expr(FirExpr {
-                origin: cause,
-                ty: target,
-                kind: FirExprKind::ImplicitConversion { value, conversion },
-            })
+            self.body.add_implicit_conversion(value, target, conversion)
         })
     }
 
@@ -1074,6 +1074,23 @@ impl BodyFirChecker<'_> {
         lateinit: bool,
     ) -> LocalValueId {
         let local = self.allocate_local();
+        self.bind_allocated(local, name, ty, mutable, lateinit);
+        local
+    }
+
+    /// Bind `name` to an already allocated immutable value.
+    fn bind_value(&mut self, local: LocalValueId, name: &str, ty: ResolvedTy) {
+        self.bind_allocated(local, name, ty, false, false);
+    }
+
+    fn bind_allocated(
+        &mut self,
+        local: LocalValueId,
+        name: &str,
+        ty: ResolvedTy,
+        mutable: bool,
+        lateinit: bool,
+    ) {
         self.body.set_debug_value_name(local, name.to_owned());
         self.scopes
             .last_mut()
@@ -1087,7 +1104,6 @@ impl BodyFirChecker<'_> {
                     lateinit,
                 },
             );
-        local
     }
 
     fn with_lambda_binding<T>(
@@ -2657,14 +2673,7 @@ impl BodyFirChecker<'_> {
                         let conversion = self
                             .selected_type_conversion(call_ty, unit, origin)
                             .expect("an indexed assignment discards its selected set result");
-                        self.body.add_expr(FirExpr {
-                            origin,
-                            ty: unit,
-                            kind: FirExprKind::ImplicitConversion {
-                                value: call,
-                                conversion,
-                            },
-                        })
+                        self.body.add_implicit_conversion(call, unit, conversion)
                     }
                 } else {
                     if indices.len() != 1 || receiver_ty.array_elem().is_none() {
