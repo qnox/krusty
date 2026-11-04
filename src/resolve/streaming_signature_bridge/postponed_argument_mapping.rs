@@ -227,3 +227,25 @@ impl ProductionSignatureSemantics<'_> {
         })
     }
 }
+
+/// The evidence a mapped call's typed arguments give its type variables before its postponed
+/// arguments are shaped, as `(parameter, type, spread)`. A callable-reference argument constrains
+/// those variables too, so beside one an integer literal stays soft: in `choose(1, Receiver::pick)`
+/// the reference may fix `T = Byte`, which the literal `1` then adapts to.
+pub(super) fn typed_argument_evidence<'a>(
+    kinds: &'a [crate::symbol_resolver::CallArgKind],
+    generic: &'a crate::libraries::GenericSig,
+    beside_callable_reference: bool,
+) -> impl Iterator<Item = (usize, Ty, bool)> + 'a {
+    kinds
+        .iter()
+        .enumerate()
+        .filter_map(move |(parameter, argument)| {
+            let declared = generic.params.get(parameter).copied().unwrap_or(Ty::Error);
+            let soft_literal = beside_callable_reference
+                && argument.is_integer_literal()
+                && crate::types::ty_mentions_param(declared, &generic.formals);
+            (argument.ty() != Ty::Error && !argument.is_omitted_default() && !soft_literal)
+                .then_some((parameter, argument.type_for(declared), argument.is_spread()))
+        })
+}
