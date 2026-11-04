@@ -216,7 +216,9 @@ impl Backend for CraneliftBackend {
             }
         };
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
-        crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables);
+        crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables, |function| {
+            file.dependency_exports.callable(function).is_some()
+        });
         // A local or anonymous classifier arrives with an opaque identity; this target names it
         // from its provenance as Kotlin/Native does. There is no facade class here, so a
         // classifier local to a top-level function starts in the package: `box$MyLocalObject`,
