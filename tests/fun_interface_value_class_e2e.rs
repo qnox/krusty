@@ -107,7 +107,8 @@ fun box(): String {
     val h = H { it + 1 }
     val k = K<IC> { it }
     val boxed = bar<Boxed, String>(Boxed(\"b\")) { it.v as String }
-    return g.v + h.h(1) + k.k(IC(\"z\")).v + boxed
+    val result = g.v + h.h(1) + k.k(IC(\"z\")).v + boxed
+    return if (result == \"a2zb\") \"OK\" else result
 }
 ";
 
@@ -121,4 +122,9 @@ fn factory_conflicting_conversions_are_kotlincs_classes() {
     ] {
         common::assert_class_matches_kotlinc("FactoryConflicts", FACTORY_CONFLICTS, class);
     }
+}
+
+#[test]
+fn factory_conflicting_conversions_run_like_kotlinc() {
+    common::expect_box_same_as_kotlinc(FACTORY_CONFLICTS, "FactoryConflicts");
 }
