@@ -20074,6 +20074,14 @@ impl<'a> Checker<'a> {
                 let mut candidates = inapplicable_associated;
                 candidates.extend(self.resolver().top_level_candidates(&fname));
                 candidates.extend(inapplicable_classifier_invoke.iter().cloned());
+                if self.report_deferred_lexical_invoke_among(
+                    args,
+                    span,
+                    deferred_lexical_invoke.as_ref(),
+                    &candidates,
+                ) {
+                    return Ty::Error;
+                }
                 let had_rejected_callable = had_inapplicable_constructor
                     || !candidates.is_empty()
                     || !local_overloads.is_empty();
@@ -20260,7 +20268,7 @@ impl<'a> Checker<'a> {
                             args,
                             arg_tys: &[],
                         },
-                        LexicalInvokeSite {
+                        &LexicalInvokeSite {
                             callee,
                             name: &fname,
                             span,

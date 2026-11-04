@@ -28,6 +28,9 @@ fn argument_mapping_and_overload_errors_match_kotlinc_exactly() {
         "class C(val a: Int) { constructor(a: String, b: String, c: String) : this(0) }\nfun g(): C = C(1, 2)",
         "fun f(vararg x: Int): Int = x.size\nfun g(): Int = f(\"no\")",
         "fun f(x: Int = \"no\"): Int = x",
+        "fun f(n: Int, label: (String) -> Unit) { label(n) }",
+        "fun label(x: Boolean) {}\nfun f(n: Int, label: (String) -> Unit) { label(n) }",
+        "class R { fun label(x: Boolean) {} }\nfun f(n: Int, label: (String) -> Unit) { with(R()) { label(n) } }",
     ];
     assert_error_parity(&cases);
 }
