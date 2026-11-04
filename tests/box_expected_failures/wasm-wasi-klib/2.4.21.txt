@@ -3709,7 +3709,6 @@ localClass/signatureConflictHiddenByTypeParameter.kt
 localClass/tryCatch.kt
 localClass/virtualCallFromConstructor.kt
 localClasses/anonymousObjectInExtension.kt
-localClasses/capturingInDefaultConstructorParameter.kt
 localClasses/closureOfInnerLocalClass.kt
 localClasses/closureOfLambdaInLocalClass.kt
 localClasses/closureWithSelfInstantiation.kt
@@ -3724,7 +3723,6 @@ localClasses/kt10835.kt
 localClasses/kt10835a.kt
 localClasses/kt3210.kt
 localClasses/kt3389.kt
-localClasses/kt3584.kt
 localClasses/kt4174.kt
 localClasses/kt45383.kt
 localClasses/localClassCaptureExtensionReceiver.kt
