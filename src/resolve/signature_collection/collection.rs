@@ -12,6 +12,7 @@
 //! instead of reaching for those locals. Do not add another declaration shape to it in place.
 
 use super::*;
+use crate::resolve::local_class_scope::inner_class_enclosing_type_parameters;
 
 /// Stub positions grouped by source file. Signature collection used to scan every stub in the
 /// module once per classifier; a file only needs its own declarations.
@@ -972,35 +973,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         })
                         .unwrap_or_default();
                     if compact_headers.is_none() {
-                        let mut outer = c.inner_of.clone();
-                        let mut guard = 0;
-                        let mut outer_declarations = Vec::new();
-                        while let Some(on) = outer {
-                            guard += 1;
-                            if guard > 32 {
-                                break;
-                            }
-                            if let Some(oc) = file
-                                .decls
-                                .iter()
-                                .filter_map(|&d| match file.decl(d) {
-                                    Decl::Class(x) => Some(x),
-                                    _ => None,
-                                })
-                                .find(|x| x.name == on)
-                            {
-                                outer_declarations.push(EnclosingTypeParameterDeclaration {
-                                    declaration_start: oc.span.lo,
-                                    names: oc.type_params.clone(),
-                                    bounds: oc.type_param_bounds.clone(),
-                                });
-                                outer = oc.inner_of.clone();
-                            } else {
-                                break;
-                            }
-                        }
-                        outer_declarations.reverse();
-                        enclosing_tparam_declarations.splice(0..0, outer_declarations);
+                        enclosing_tparam_declarations
+                            .splice(0..0, inner_class_enclosing_type_parameters(file, c));
                     }
                     // A classifier header is resolved before declarations in that classifier's own
                     // body enter scope. Keep this declaration-owned header scope separate from the
@@ -1205,6 +1179,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .filter(|owner| *owner != internal)
                         .collect::<Vec<_>>();
                     extend_inherited_names(&mut header_class_names, &header_inheritors, false);
+                    // Type-parameter bounds see no rung of the classifier itself: neither its body
+                    // nor its inherited nested classifiers (`class C<T : Limit> : Base()` binds the
+                    // package `Limit` even when `Base` declares one).
+                    let bound_class_names = header_class_names.clone();
                     // The classifier's own inherited nested classifiers form a later header rung:
                     // package/import/lexical declarations win, but an otherwise unresolved bare
                     // type may still come from a supertype (`class Child(x: Category) : Parent()`).
@@ -1315,7 +1293,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .erased_extended_with(
                             &classifier_header.type_parameters,
                             &classifier_header.bounds,
-                            &|name| class_names.get(name),
+                            &|name| bound_class_names.get(name),
                         );
                     // An enum entry contributes a nearer lexical classifier rung than its enum.
                     // Bind entry-owned declarations first so the general class inventory cannot
@@ -1379,7 +1357,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .symbolic_extended_with(
                             &classifier_header.type_parameters,
                             &classifier_header.bounds,
-                            &|name| class_names.get(name),
+                            &|name| bound_class_names.get(name),
                         )
                         .alpha_renamed_declaration(
                             &classifier_header.type_parameters,
