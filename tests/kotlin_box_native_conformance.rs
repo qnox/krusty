@@ -311,6 +311,21 @@ fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
     )
 }
 
+// PLATFORM-SPECIFIC: This checks the Native oracle's generated module runner. The whole portable
+// program is also selected by every backend from the shared box inventory.
+#[test]
+fn native_reference_runner_calls_the_packaged_final_module_box() {
+    let source = include_str!("box_regressions/multimodule/packagedFinalModuleBox.kt");
+    let stem = "packagedFinalModuleBox";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole packaged module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "the Native oracle and product must both call the final module's declared box"
+    );
+}
+
 /// A required inline dependency function whose body cannot become a template rejects its caller:
 /// it is never compiled as a direct call of the dependency function.
 // PLATFORM-SPECIFIC: Native expands required KLIB inline bodies in common IR; JVM uses bytecode.

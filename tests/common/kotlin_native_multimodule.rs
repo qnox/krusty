@@ -353,6 +353,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_runner_calls_the_box_in_its_declaring_final_unit_file() {
+        let source = include_str!("../box_regressions/multimodule/packagedFinalModuleBox.kt");
+        let modules = krusty::conformance::split_modules(source).expect("valid packaged module graph");
+        let unit = krusty::conformance::module_units(&modules)
+            .pop()
+            .expect("the main module is built last");
+        let root = super::super::common::scratch_dir().expect("private runner test directory");
+        let (_, runner) = write_native_module_sources(&root, &unit.files, true);
+        let runner = runner.expect("the final unit gets a runner");
+        let frame = krusty::backend::BOX_RESULT_FRAME.replace('\0', "\\u0000");
+        assert_eq!(
+            std::fs::read_to_string(runner).expect("read generated runner"),
+            format!(
+                "fun main() {{ val answer = `packageentry`.`when`.box(); print(\"{frame}\"); print(answer) }}\n"
+            )
+        );
+    }
+
+    #[test]
     fn friend_library_precedence_follows_the_native_linker_version() {
         let friend = PathBuf::from("/work/friend.klib");
         let sibling = PathBuf::from("/work/sibling.klib");
