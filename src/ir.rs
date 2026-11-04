@@ -158,7 +158,9 @@ pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
 pub use lambda_classes::{IrInvokeBridge, IrLambdaCapture, IrLambdaClass, IrSamWrapperClass};
 pub(crate) use lifting_sequences::{IrLiftingEntry, IrLiftingRoot, IrLiftingSequence};
-pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
+pub(crate) use local_class_names::{
+    IrClassDeclarationContext, IrLocalClassNameProvenance, IrLocalClassOwner,
+};
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
     IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
@@ -182,7 +184,7 @@ pub use references::{
     FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable, PropRef,
     ReflectedCallable,
 };
-pub use sam_target::{IrSamMethod, IrSamTarget};
+pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
@@ -883,6 +885,8 @@ pub enum IrEnclosure {
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
 pub struct IrClass {
+    /// Original checked source context; absent for a class with no source declaration.
+    pub(crate) declaration_context: Option<IrClassDeclarationContext>,
     /// Non-local lexical declaration name retained independently from the class's physical name.
     pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub fq_name: TypeName,
