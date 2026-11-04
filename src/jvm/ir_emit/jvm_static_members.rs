@@ -205,13 +205,6 @@ fn emit_companion_bridge(
         .fn_param_annotations
         .get(&function)
         .map_or(&[], Vec::as_slice);
-    let annotation_types = function_annotations::header_annotation_types(
-        result_nullability,
-        parameter_annotations,
-        &parameter_nullability,
-        nullability_annotated,
-    );
-    let annotation_types: Vec<&str> = annotation_types.iter().map(String::as_str).collect();
     let method_parameters = if env.java_parameters {
         crate::jvm::method_parameters::function(ir, function, &parameters, None)
     } else {
@@ -222,9 +215,15 @@ fn emit_companion_bridge(
         name,
         &descriptor,
         signature.as_deref(),
-        &annotation_types,
+        &[],
         &annotations,
         &method_parameters,
+    );
+    cw.reserve_method_parameter_annotation_pool(
+        result_nullability,
+        parameter_annotations,
+        &parameter_nullability,
+        nullability_annotated,
     );
 
     let argument_words = parameters.iter().map(|ty| slot_words(*ty)).sum::<u16>();
@@ -287,7 +286,11 @@ fn emit_companion_bridge(
     let visibility = method_access::jvm_visibility(ir.method_visibility(function));
     // A static method of an interface cannot be final.
     let finality = if interface { 0 } else { 0x0010 };
-    let access = visibility | 0x0008 | finality | method_access::varargs_access(ir, function);
+    let access = visibility
+        | 0x0008
+        | finality
+        | method_access::varargs_access(ir, function)
+        | method_access::annotated_method_modifiers(ir.function_annotations.get(&function));
     cw.add_method_sig(access, name, &descriptor, &code, signature.as_deref());
     cw.set_method_parameters(name, &descriptor, &method_parameters);
     if nullability_annotated

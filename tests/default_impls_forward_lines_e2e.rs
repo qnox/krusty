@@ -63,6 +63,45 @@ fn default_impls_forwards_return_on_the_declaration_end_line() {
     }
 }
 
+const PARENTHESIZED_SOURCE: &str = "\
+package store\n\
+\n\
+interface Parenthesized {\n\
+    fun grouped(p: String): Boolean =\n\
+        (\n\
+            p == \"kotlin\" ||\n\
+                p.startsWith(\"kotlin.\")\n\
+        )\n\
+\n\
+    fun negated(p: String): Boolean =\n\
+        !(\n\
+            p == \"kotlin\"\n\
+        )\n\
+\n\
+    fun operand(p: String): Int =\n\
+        p.length +\n\
+            (\n\
+                p.length\n\
+            )\n\
+\n\
+    fun closedBelow(p: String): Boolean = !(p.isEmpty()\n\
+    )\n\
+}\n\
+";
+
+/// An expression body's closing `)` belongs to the body, so the forward returns on its line.
+#[test]
+fn default_impls_forward_returns_on_the_closing_parenthesis_line() {
+    common::byte_diff_against_kotlinc_cp(
+        "DefaultImplsForwardParenthesized",
+        PARENTHESIZED_SOURCE,
+        "store/Parenthesized$DefaultImpls",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("store/Parenthesized$DefaultImpls differs from kotlinc: {diff}"));
+}
+
 #[test]
 fn suspend_default_impls_forward_keeps_the_declaration_end_line() {
     let comparison = common::compare_with_kotlinc_plugin(

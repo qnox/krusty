@@ -16,11 +16,14 @@
 //! generated symbols resolve. Body and expression rewriting belongs at the IR level.
 
 pub mod allopen;
+pub mod assignment;
 pub mod class_metadata;
 pub mod cli;
+pub mod compose;
 pub mod deps;
 pub mod noarg;
 pub mod registry;
+pub mod runtime_declarations;
 pub mod sam_with_receiver;
 pub mod serialization;
 
@@ -783,6 +786,13 @@ pub trait IrPlugin {
         &[]
     }
 
+    /// Annotations whose classes an assignment to a `val` property calls `assign` on, as kotlinc's
+    /// assignment plugin does: `target.p = v` becomes `target.p.assign(v)` when the class of `p`'s
+    /// type, or one of its supertypes, carries one.
+    fn assignment_annotations(&self) -> &[TypeName] {
+        &[]
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
@@ -791,6 +801,19 @@ pub trait IrPlugin {
     /// record includes them. A generated function's body is a placeholder until
     /// [`Self::complete_declarations`]; nothing here may name a target representation.
     fn generate_declarations(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
+
+    /// Record what the plugin's later phases need from the file's source text, which no target
+    /// phase can read, select the runtime declarations its generated code calls, and reject every
+    /// construct the plugin does not implement. This runs at the frontend/backend handoff, once the
+    /// dependency declarations the file selected are frozen.
+    fn record_source_facts(
+        &self,
+        _ir: &mut IrFile,
+        _source: &PluginSourceView<'_>,
+        _runtime: &mut dyn runtime_declarations::PluginRuntime,
+        _rejections: &mut Vec<PluginRejection>,
+    ) {
+    }
 
     /// Realize the declared members for the target: their bodies, and the storage and helpers
     /// that have no Kotlin declaration of their own.
@@ -813,6 +836,65 @@ pub trait IrPlugin {
         _out: &mut class_metadata::ClassMetadataExtensions<'_>,
     ) {
     }
+}
+
+/// The source a file's common IR was lowered from, as the frontend/backend handoff still holds it.
+pub struct PluginSourceView<'a> {
+    /// The file's text as written; spans are UTF-8 byte offsets into it.
+    pub text: &'a str,
+    /// The file's simple name (`Main.kt`).
+    pub file_name: &'a str,
+    pub source: crate::ir::SourceFileId,
+    /// What the handoff answers about the file's checked nodes and selected declarations.
+    pub checked: &'a dyn CheckedSourceFacts,
+}
+
+impl PluginSourceView<'_> {
+    /// The span in this file that `expression` was lowered from, when it has one.
+    pub fn expression_span(
+        &self,
+        ir: &IrFile,
+        expression: crate::ir::ExprId,
+    ) -> Option<crate::diag::Span> {
+        self.checked.expression_span(ir, expression)
+    }
+}
+
+/// The checked facts behind a file's common IR that only the frontend/backend handoff holds.
+pub trait CheckedSourceFacts {
+    /// The span in this file that `expression` was lowered from, when it has one.
+    fn expression_span(
+        &self,
+        ir: &IrFile,
+        expression: crate::ir::ExprId,
+    ) -> Option<crate::diag::Span>;
+    /// The checked annotations of the dependency function a call selected by `callable`.
+    fn dependency_annotations(&self, callable: crate::ir::ExternalCallableId) -> &[TypeName];
+}
+
+/// A construct a native plugin does not implement, reported as an error at `span`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginRejection {
+    pub span: crate::diag::Span,
+    pub message: String,
+}
+
+/// Run each native plugin's [`IrPlugin::record_source_facts`] over a file at the handoff.
+pub fn record_enabled_source_facts(
+    ir: &mut IrFile,
+    plugins: &registry::NativePlugins,
+    module_name: &str,
+    source: &PluginSourceView<'_>,
+    runtime: &mut dyn runtime_declarations::PluginRuntime,
+) -> Vec<PluginRejection> {
+    let mut rejections = Vec::new();
+    if plugins.is_empty() {
+        return rejections;
+    }
+    plugins
+        .host(module_name)
+        .record_source_facts(ir, source, runtime, &mut rejections);
+    rejections
 }
 
 /// Declare what this compilation's native plugins generate, at the frontend/backend handoff.
@@ -887,6 +969,7 @@ fn triggered(ir: &IrFile, plugins: &registry::NativePlugins, ctx: &PluginContext
         )
     });
     uses_serialization
+        || ir.compose.is_some()
         || !ctx
             .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
             .is_empty()
@@ -1267,6 +1350,14 @@ impl PluginHost {
             .collect()
     }
 
+    /// Every registered plugin's [`IrPlugin::assignment_annotations`].
+    pub fn assignment_annotations(&self) -> Vec<TypeName> {
+        self.plugins
+            .iter()
+            .flat_map(|plugin| plugin.assignment_annotations().iter().copied())
+            .collect()
+    }
+
     /// Every registered plugin's [`IrPlugin::no_arg_constructor_annotations`].
     pub fn no_arg_constructor_annotations(&self) -> Vec<TypeName> {
         self.plugins
@@ -1349,6 +1440,18 @@ impl PluginHost {
             plugin.plan_frontend_expressions(ctx, &mut plans);
         }
         plans
+    }
+
+    pub fn record_source_facts(
+        &self,
+        ir: &mut IrFile,
+        source: &PluginSourceView<'_>,
+        runtime: &mut dyn runtime_declarations::PluginRuntime,
+        rejections: &mut Vec<PluginRejection>,
+    ) {
+        for plugin in &self.plugins {
+            plugin.record_source_facts(ir, source, runtime, rejections);
+        }
     }
 
     /// The handoff phase: all supertypes, then all declarations.
@@ -1468,6 +1571,7 @@ mod tests {
             crate::ir::DeclarationAnnotations::new(vec![crate::ir::RetainedAnnotation {
                 retention: crate::types::AnnotationRetention::Runtime,
                 annotation: crate::ir::AppliedAnnotation {
+                    written_order: None,
                     internal: stamp,
                     values: vec![],
                 },
@@ -1569,6 +1673,7 @@ mod tests {
         let retained = |name: &str, values| crate::ir::RetainedAnnotation {
             retention: crate::types::AnnotationRetention::Runtime,
             annotation: crate::ir::AppliedAnnotation {
+                written_order: None,
                 internal: crate::types::type_name(name),
                 values,
             },

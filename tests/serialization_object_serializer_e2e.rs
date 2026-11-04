@@ -149,6 +149,34 @@ fn an_object_init_block_keeps_its_closing_line_before_the_cached_serializer() {
     assert_class_shapes("ObjectInit", INIT_SOURCE, &["Counter", "Opened", "Single"]);
 }
 
+const DATA_OBJECT_SOURCE: &str = "import kotlinx.serialization.SerialName\n\
+import kotlinx.serialization.Serializable\n\
+\n\
+@Serializable\n\
+sealed interface Phase {\n\
+\x20   @Serializable\n\
+\x20   @SerialName(\"pending\")\n\
+\x20   data object Pending : Phase\n\
+\n\
+\x20   @Serializable\n\
+\x20   data object Done : Phase {\n\
+\x20       val code = 7\n\
+\x20       fun describe() = \"done $code\"\n\
+\x20   }\n\
+}\n";
+
+/// A `data object`'s `serializer()` precedes its generated `toString`, `hashCode` and `equals`:
+/// kotlinc declares the plugin member with the object's other declarations and appends the data
+/// members after them. Its `@Metadata` lists the plugin member and the data members by name.
+#[test]
+fn a_data_object_declares_its_serializer_before_its_data_members() {
+    assert_class_shapes(
+        "DataObjectSerializer",
+        DATA_OBJECT_SOURCE,
+        &["Phase$Pending", "Phase$Done"],
+    );
+}
+
 /// Compile `source` with both compilers and the serialization plugin, and require each class's
 /// shape (everything but the constant pool's numbering) to be kotlinc's.
 fn assert_class_shapes(stem: &str, source: &str, classes: &[&str]) {

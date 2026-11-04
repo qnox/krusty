@@ -167,6 +167,10 @@ pub(super) fn published_function(
         enclosing,
     );
     function.default_values = signed.defaults.clone();
+    // KLIB has no default-argument symbol: a declaration's defaults belong to its body, which the
+    // declaring module's compilation realizes.
+    function.callable.defaults_from_declaration =
+        function.call_sig.param_defaults.as_slice().contains(&true);
     // A KLIB declaration's implementation is its serialized IR body unless provider normalization
     // authenticated an exact shared builtin or target-stdlib intrinsic declaration.
     match placement {

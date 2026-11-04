@@ -224,6 +224,13 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     if sub == Ty::Nothing {
         return true;
     }
+    // `T & Any` is the intersection of the parameter and `Any`: a source fits it only when it fits
+    // the parameter itself and is non-null. A shared classifier bound is not that proof, since
+    // `<T : CharSequence, S : T?>` does not make `T` a subtype of `S & Any`.
+    if let TyKind::DefinitelyNotNull(original) = sup.kind() {
+        return assignable_inner(cx, oracle, sub, original)
+            && assignable_inner(cx, oracle, sub, Ty::obj("kotlin/Any"));
+    }
     // A target intersection requires the source to meet every component. Checked before the
     // source arm so `Int & String & Number` is still a subtype of `Int & String`. `Nothing` is
     // already a subtype of every intersection via the arm above.

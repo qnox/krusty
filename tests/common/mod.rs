@@ -625,7 +625,6 @@ pub fn compile_in_process_metadata_cp_module_target(
 /// Compile Kotlin `src` in-process and write the emitted `.class` files under `out_dir`, preserving
 /// package directories. This matches the classfile layout the CLI writes for tests that need to run a
 /// Java driver against krusty output, without paying a subprocess/compiler-cache cold start per case.
-#[allow(dead_code)]
 pub fn compile_to_dir(
     src: &str,
     stem: &str,
@@ -651,12 +650,12 @@ pub fn compile_to_dir(
     }
     // kotlinc writes the module file even for a class-only compilation — with an EMPTY parts list
     // (a facade that was never emitted must not be listed).
-    let packages: Vec<(String, Vec<String>)> = if facade_emitted {
+    let packages: Vec<(String, Vec<krusty::metadata::module::PackagePart>)> = if facade_emitted {
         let (pkg, short) = match facade.rsplit_once('/') {
             Some((p, s)) => (p.replace('/', "."), s.to_string()),
             None => (String::new(), facade),
         };
-        vec![(pkg, vec![short])]
+        vec![(pkg, vec![short.into()])]
     } else {
         Vec::new()
     };

@@ -1432,8 +1432,8 @@ pub struct ResolvedModuleIndex {
     serialization: serialization_records::SerializationRecords,
     /// The superclass constructor each class the no-arg plugin matched delegates to.
     no_arg_constructors: HashMap<DeclarationId, NoArgSuperConstructor>,
-    /// The annotations kotlinc's sam-with-receiver plugin is configured with.
-    sam_with_receiver_annotations: Box<[TypeName]>,
+    /// The annotation-configured conventions of the compilation's frontend plugins.
+    annotation_conventions: crate::symbol_source::AnnotationConventions,
     /// Stable declarations whose resolved `@Suppress` policy permits otherwise-invisible source
     /// references while checking their bodies. Annotation occurrences remain Pass-1 syntax; only
     /// this declaration-owned semantic fact crosses into Pass 2.
@@ -2508,7 +2508,7 @@ impl ResolvedModuleIndex {
             && self.generated_classifiers.is_empty()
             && self.serialization.is_empty()
             && self.no_arg_constructors.is_empty()
-            && self.sam_with_receiver_annotations.is_empty()
+            && self.annotation_conventions.is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()
@@ -2999,7 +2999,8 @@ impl ResolvedModuleIndex {
             + self.serialization.retained_bytes()
             + self.no_arg_constructors.len()
                 * std::mem::size_of::<(DeclarationId, NoArgSuperConstructor)>()
-            + std::mem::size_of_val(&*self.sam_with_receiver_annotations)
+            + std::mem::size_of_val(&*self.annotation_conventions.sam_with_receiver)
+            + std::mem::size_of_val(&*self.annotation_conventions.assignment)
             + (self.invisible_reference_suppressions.len()
                 + self.invisible_member_suppressions.len()
                 + self.optional_declaration_usage_suppressions.len())

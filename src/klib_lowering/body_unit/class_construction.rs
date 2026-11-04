@@ -90,8 +90,7 @@ impl<'u, 's> Linker<'u, 's> {
         ir.classes[class as usize].methods.push(function);
         ir.note_class_method(class, function);
         let receiver = ir.add_expr(IrExpr::GetValue(0));
-        ir.logical_types
-            .insert(receiver, plan.storage.declaration.self_type());
+        ir.set_logical_type(receiver, plan.storage.declaration.self_type());
         let args = header
             .params()
             .iter()
@@ -100,7 +99,7 @@ impl<'u, 's> Linker<'u, 's> {
                 let value = ir.add_expr(IrExpr::GetValue(
                     u32::try_from(index + 1).expect("a value index fits u32"),
                 ));
-                ir.logical_types.insert(value, *ty);
+                ir.set_logical_type(value, *ty);
                 Some(value)
             })
             .collect();
@@ -110,7 +109,7 @@ impl<'u, 's> Linker<'u, 's> {
             receiver,
             args,
         });
-        ir.logical_types.insert(initialize, Ty::Unit);
+        ir.set_logical_type(initialize, Ty::Unit);
         ir.classes[class as usize].init_body = Some(initialize);
         self.classes.insert(identity.clone(), class);
         self.pending.push_back(PendingBody {

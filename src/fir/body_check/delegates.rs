@@ -634,6 +634,7 @@ impl BodyFirChecker<'_> {
                     classifier: None,
                     context_binding: None,
                     singleton: None,
+                    construction_sites: Vec::new(),
                 }
             }
             FirDelegateDispatchReceiver::ContextBinding {
@@ -651,6 +652,7 @@ impl BodyFirChecker<'_> {
                     flow_identity: None,
                 }),
                 singleton: None,
+                construction_sites: Vec::new(),
             },
             FirDelegateDispatchReceiver::Singleton { ty, classifier } => {
                 crate::resolve::ImplicitReceiverSelection {
@@ -663,6 +665,7 @@ impl BodyFirChecker<'_> {
                         classifier: *classifier,
                         companion_owner: None,
                     }),
+                    construction_sites: Vec::new(),
                 }
             }
         };
@@ -890,6 +893,7 @@ fn selected_delegate_call(
         DelegateGetValueTarget::Extension {
             callable,
             stable_declaration,
+            ..
         } => {
             let parameters = callable
                 .params
@@ -1226,6 +1230,7 @@ mod tests {
         let target = DelegateGetValueTarget::Extension {
             callable: Box::new(callable),
             stable_declaration: None,
+            applied_receiver: Ty::Int,
         };
 
         let failure = selected_delegate_call(

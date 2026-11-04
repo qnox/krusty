@@ -26,7 +26,7 @@ fn a_receiver_after_a_value_capture_keeps_its_origin_through_nested_recapture() 
                 receiver.clone(),
                 ParameterValue {
                     index: 0,
-                    stable_read: false,
+                    stable_read: true,
                     erased: None,
                 },
             ),

@@ -250,6 +250,18 @@ fn a_var_realizes_its_getter_and_setter_signatures() {
 
     let getter = accessor_realization(&libraries, realization.getter);
     let setter = accessor_realization(&libraries, realization.setter.expect("setter identity"));
+    for (accessor, role) in [
+        (&getter, crate::libraries::KlibAccessorRole::Getter),
+        (&setter, crate::libraries::KlibAccessorRole::Setter),
+    ] {
+        let facet = accessor.klib_body_accessor.as_ref().unwrap();
+        assert_eq!(
+            Some(facet.property),
+            counter.getter.external_property_identity
+        );
+        assert_eq!(facet.role, role);
+        assert_eq!(&*facet.name, "counter");
+    }
     assert_eq!(setter.kind, ExternalCallableKind::TopLevel);
     assert_eq!(
         *setter.parameter_identities,

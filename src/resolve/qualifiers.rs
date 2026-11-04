@@ -223,6 +223,15 @@ pub(super) fn qualifier_path<S: SymbolSource + ?Sized>(
     walk_qualifier(source, prefix, &segments[1..])
 }
 
+impl super::SymbolTable {
+    /// The library classifier an absolute import path names, walked segment by segment as the
+    /// import directive itself is resolved. An import of a callable, or one that names nothing,
+    /// has none.
+    pub fn library_import_classifier(&self, path: &str) -> Option<TypeName> {
+        classifier_path(path, &*self.libraries, None).ok()
+    }
+}
+
 pub(super) fn classifier_path<S: SymbolSource + ?Sized>(
     path: &str,
     source: &S,

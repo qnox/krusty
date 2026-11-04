@@ -5,16 +5,19 @@
 
 use crate::libraries::{
     CompilerIntrinsic, LibraryMember, MemberRealization, PropKind, PropertyInfo,
+    RuntimeExceptionLayout,
 };
 use crate::types::{type_name, Ty, TypeName};
 
 pub(in super::super) fn realize_constructor(
     owner: TypeName,
     compiler_builtin_owner: bool,
+    layout: Option<RuntimeExceptionLayout>,
     member: &mut LibraryMember,
 ) {
+    let Some(layout) = layout else { return };
     if !compiler_builtin_owner
-        || owner != type_name("kotlin/Throwable")
+        || layout.kind.classifier() != owner
         || member.owner != Some(owner)
         || member.name != "<init>"
         || member.ret != Ty::Unit
@@ -33,8 +36,10 @@ pub(in super::super) fn realize_constructor(
         [parameter] if *parameter == Ty::nullable(Ty::String) => true,
         _ => return,
     };
-    member.realization =
-        MemberRealization::Intrinsic(CompilerIntrinsic::ThrowableConstructor { message });
+    member.realization = MemberRealization::Intrinsic(CompilerIntrinsic::ThrowableConstructor {
+        kind: layout.kind,
+        message,
+    });
 }
 
 pub(in super::super) fn realize_throwable_property(
@@ -70,6 +75,14 @@ pub(in super::super) fn realize_throwable_property(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::libraries::RuntimeExceptionKind;
+
+    fn throwable_layout() -> Option<RuntimeExceptionLayout> {
+        Some(RuntimeExceptionLayout {
+            kind: RuntimeExceptionKind::Throwable,
+            parent: None,
+        })
+    }
 
     fn constructor(params: Vec<Ty>) -> LibraryMember {
         let mut member = LibraryMember::new("<init>".into(), params, Ty::Unit, String::new());
@@ -185,13 +198,16 @@ mod tests {
         let owner = type_name("kotlin/Throwable");
         for (params, message) in [(Vec::new(), false), (vec![Ty::nullable(Ty::String)], true)] {
             let mut trusted = constructor(params.clone());
-            realize_constructor(owner, true, &mut trusted);
+            realize_constructor(owner, true, throwable_layout(), &mut trusted);
             assert_eq!(
                 trusted.realization,
-                MemberRealization::Intrinsic(CompilerIntrinsic::ThrowableConstructor { message })
+                MemberRealization::Intrinsic(CompilerIntrinsic::ThrowableConstructor {
+                    kind: RuntimeExceptionKind::Throwable,
+                    message
+                })
             );
             let mut identical_untrusted = constructor(params);
-            realize_constructor(owner, false, &mut identical_untrusted);
+            realize_constructor(owner, false, throwable_layout(), &mut identical_untrusted);
             assert_eq!(identical_untrusted.realization, MemberRealization::Dispatch);
         }
         for params in [
@@ -200,23 +216,89 @@ mod tests {
             vec![Ty::nullable(Ty::String), Ty::nullable(Ty::obj_name(owner))],
         ] {
             let mut member = constructor(params);
-            realize_constructor(owner, true, &mut member);
+            realize_constructor(owner, true, throwable_layout(), &mut member);
             assert_eq!(member.realization, MemberRealization::Dispatch);
         }
         let mut wrong_owner = constructor(Vec::new());
-        realize_constructor(type_name("user/Throwable"), true, &mut wrong_owner);
+        realize_constructor(
+            type_name("user/Throwable"),
+            true,
+            throwable_layout(),
+            &mut wrong_owner,
+        );
         assert_eq!(wrong_owner.realization, MemberRealization::Dispatch);
         let mut wrong_result = constructor(Vec::new());
         wrong_result.ret = Ty::Int;
-        realize_constructor(owner, true, &mut wrong_result);
+        realize_constructor(owner, true, throwable_layout(), &mut wrong_result);
         assert_eq!(wrong_result.realization, MemberRealization::Dispatch);
         let mut context = constructor(vec![Ty::nullable(Ty::String)]);
         context.context_count = 1;
-        realize_constructor(owner, true, &mut context);
+        realize_constructor(owner, true, throwable_layout(), &mut context);
         assert_eq!(context.realization, MemberRealization::Dispatch);
         let mut vararg = constructor(vec![Ty::nullable(Ty::String)]);
         vararg.call_sig.vararg_index = Some(0);
-        realize_constructor(owner, true, &mut vararg);
+        realize_constructor(owner, true, throwable_layout(), &mut vararg);
         assert_eq!(vararg.realization, MemberRealization::Dispatch);
+    }
+
+    #[test]
+    fn selected_exception_constructors_keep_their_declaring_class_authority() {
+        let owner = type_name("kotlin/IllegalStateException");
+        let layout = Some(RuntimeExceptionLayout {
+            kind: RuntimeExceptionKind::IllegalState,
+            parent: Some(RuntimeExceptionKind::RuntimeException.classifier()),
+        });
+        for (params, message) in [(Vec::new(), false), (vec![Ty::nullable(Ty::String)], true)] {
+            let mut trusted = constructor(params.clone());
+            trusted.owner = Some(owner);
+            realize_constructor(owner, true, layout, &mut trusted);
+            assert!(matches!(
+                trusted.realization,
+                MemberRealization::Intrinsic(CompilerIntrinsic::ThrowableConstructor {
+                    kind: RuntimeExceptionKind::IllegalState,
+                    message: actual,
+                }) if actual == message
+            ));
+            let mut untrusted = constructor(params);
+            untrusted.owner = Some(owner);
+            realize_constructor(owner, false, layout, &mut untrusted);
+            assert_eq!(untrusted.realization, MemberRealization::Dispatch);
+        }
+    }
+
+    #[test]
+    fn constructor_authority_requires_the_selected_storage_role_and_overload() {
+        let owner = RuntimeExceptionKind::IllegalState.classifier();
+        let valid = RuntimeExceptionLayout {
+            kind: RuntimeExceptionKind::IllegalState,
+            parent: Some(RuntimeExceptionKind::RuntimeException.classifier()),
+        };
+        for layout in [None, throwable_layout()] {
+            let mut member = constructor(vec![Ty::nullable(Ty::String)]);
+            member.owner = Some(owner);
+            realize_constructor(owner, true, layout, &mut member);
+            assert_eq!(member.realization, MemberRealization::Dispatch);
+        }
+        for params in [
+            vec![Ty::String],
+            vec![Ty::nullable(Ty::obj("kotlin/Throwable"))],
+            vec![
+                Ty::nullable(Ty::String),
+                Ty::nullable(Ty::obj("kotlin/Throwable")),
+            ],
+        ] {
+            let mut member = constructor(params);
+            member.owner = Some(owner);
+            realize_constructor(owner, true, Some(valid), &mut member);
+            assert_eq!(member.realization, MemberRealization::Dispatch);
+        }
+        let mut member = constructor(vec![Ty::nullable(Ty::String)]);
+        member.owner = Some(owner);
+        member.call_sig.param_defaults = crate::libraries::ParamFlags::repeat(true, 1);
+        realize_constructor(owner, true, Some(valid), &mut member);
+        assert_eq!(member.realization, MemberRealization::Dispatch);
+        let mut wrong_owner = constructor(vec![Ty::nullable(Ty::String)]);
+        realize_constructor(owner, true, Some(valid), &mut wrong_owner);
+        assert_eq!(wrong_owner.realization, MemberRealization::Dispatch);
     }
 }

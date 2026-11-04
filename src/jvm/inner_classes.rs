@@ -18,6 +18,8 @@ pub(super) struct InnerClasses {
     paths: DeclarationPaths,
     /// The class each class declared in executable code is declared in, by internal name.
     declaring: Rc<HashMap<String, String>>,
+    /// Source declaration visitation order, independent of emitted constructor evaluation.
+    source_orders: Rc<HashMap<String, u32>>,
     /// Specialized lambdas regenerated at a call site. kotlinc's inliner copies the
     /// `new` into the caller without giving that caller an `InnerClasses` row.
     call_sites: Rc<HashSet<String>>,
@@ -87,7 +89,7 @@ impl InnerClasses {
                 access: declared
                     .get(&companion)
                     .copied()
-                    .map_or(0x0019, |class| class_access(ir, class)),
+                    .map_or(0x0019, |class| companion_access(ir, owner, class)),
             });
         }
 
@@ -201,9 +203,14 @@ impl InnerClasses {
                 outer: (!coroutine && !local).then_some(outer),
                 name: (!coroutine).then_some(name),
                 access: if coroutine {
+                    let class_id =
+                        u32::try_from(class_id).expect("too many classes for a class id");
                     let public = u16::from(
                         (suspend_lambda && suspend_lambda_is_public(ir, class))
-                            || published_inline_lambda(ir, class),
+                            || published_inline_lambda(ir, class)
+                            || crate::jvm::suspend_inline_functions::constructed_by_method_copy(
+                                ir, class_id,
+                            ),
                     );
                     0x0008 | 0x0010 | public
                 } else {
@@ -233,10 +240,20 @@ impl InnerClasses {
                 Some((class.fq_name(), owner))
             })
             .collect();
+        let source_orders = ir
+            .classes
+            .iter()
+            .enumerate()
+            .filter_map(|(class_id, class)| {
+                let order = ir.class_source_order(class_id.try_into().expect("packed class id"))?;
+                Some((class.fq_name(), order))
+            })
+            .collect();
         Self {
             specs: specs.into_iter().map(Rc::new).collect(),
             paths: Rc::new(paths),
             declaring: Rc::new(declaring),
+            source_orders: Rc::new(source_orders),
             call_sites: Rc::new(call_site_regenerated_lambdas(ir)),
             copied_inline_holders: Rc::new(copied_inline_capture_holders(ir, facade, lambda_modes)),
             independent_capture_holders: Rc::new(independent_capture_holders(
@@ -253,6 +270,7 @@ impl InnerClasses {
         writer.add_inner_classes(&self.specs);
         writer.set_declaration_paths(self.paths.clone());
         writer.set_declaring_classes(self.declaring.clone());
+        writer.set_declaration_source_orders(self.source_orders.clone());
         writer.set_call_site_classes(self.call_sites.clone());
         writer.set_copied_inline_capture_holders(
             self.copied_inline_holders.clone(),
@@ -672,6 +690,18 @@ fn enclosure_reaches_inline(ir: &IrFile, start: Option<crate::ir::IrEnclosure>) 
     false
 }
 
+/// kotlinc's `specialCaseVisibility`: a private companion of an interface is public in bytecode,
+/// since an interface's members are. Its `Companion` field is public for the same reason.
+fn companion_access(ir: &IrFile, owner: &IrClass, companion: &IrClass) -> u16 {
+    const VISIBILITY: u16 = 0x0007;
+    let access = class_access(ir, companion);
+    if owner.is_interface {
+        access & !VISIBILITY | 0x0001
+    } else {
+        access
+    }
+}
+
 pub(super) fn class_access(ir: &IrFile, class: &IrClass) -> u16 {
     const PUBLIC: u16 = 0x0001;
     const STATIC: u16 = 0x0008;
@@ -715,6 +745,37 @@ mod tests {
     };
     use crate::jvm::ir_emit::{LambdaMode, LambdaModes};
     use crate::types::Ty;
+
+    #[test]
+    fn nested_anonymous_classes_publish_declaration_visitation_order() {
+        let ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
+            include_str!("../../tests/box_regressions/nestedAnonymousConstructionOrder.kt"),
+            "NestedAnonymousConstructionOrder",
+        );
+        let order = |base| {
+            let classes = ir
+                .classes
+                .iter()
+                .enumerate()
+                .filter(|(_, class)| {
+                    class.is_local_class
+                        && class
+                            .supertypes
+                            .iter()
+                            .any(|ty| ty.kotlin_class_internal() == Some(type_name(base)))
+                })
+                .collect::<Vec<_>>();
+            let [(class, _)] = classes.as_slice() else {
+                panic!("one anonymous subclass of {base}")
+            };
+            ir.class_source_order((*class).try_into().expect("packed class id"))
+                .expect("source declaration order")
+        };
+        assert!(
+            order("Container") < order("Leaf"),
+            "containing declaration is visited before its constructor operands"
+        );
+    }
 
     fn function(name: &str) -> IrFunction {
         IrFunction {
