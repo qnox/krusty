@@ -46,7 +46,7 @@ impl IrFile {
                 "{}?",
                 self.rendered_cast_target(inner, top_level_owner, qualify_root_classifier)
             ),
-            TyKind::PlatformNullable(inner) => {
+            TyKind::PlatformNullable(inner) | TyKind::MutabilityFlexible(inner) => {
                 self.rendered_cast_target(inner, top_level_owner, qualify_root_classifier)
             }
             TyKind::InProjection(inner) => format!(

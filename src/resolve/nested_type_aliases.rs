@@ -27,6 +27,12 @@ impl BodyLocalTypeAliases {
             (owner, name.into()),
             AliasExpansion {
                 identity: crate::types::type_name_child(owner, name),
+                declaration_name: Some(std::sync::Arc::new(
+                    crate::types::ClassifierDeclarationName::Nested {
+                        owner,
+                        name: name.into(),
+                    },
+                )),
                 target: alias.target,
                 formals: alias.formals.clone(),
                 expansion: alias.expansion,
@@ -47,6 +53,17 @@ impl BodyLocalTypeAliases {
 }
 
 impl SymbolSource for BodyLocalTypeAliases {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        let crate::libraries::ClassifierDeclarationKey::TypeAlias(identity) = declaration else {
+            return None;
+        };
+        self.binding(identity)
+            .map(|alias| alias.declaration_name.as_deref().cloned())
+    }
+
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
         let alias = match namespace {
             SymbolNamespace::Classifier(owner) => self.0.get(&(owner, name.into())),

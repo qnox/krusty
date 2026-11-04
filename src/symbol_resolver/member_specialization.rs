@@ -3,7 +3,7 @@
 use super::{
     infer_generic_call_bindings_from_symbols, merge_call_argument_bindings,
     merge_specialized_return, seed_undeclared_return_bindings, seeded_gsig_binds, ty_subst,
-    ty_subst_keep_unbound, unify_ty_from_symbols, CallArgKind, GSigBinds,
+    ty_subst_keep_unbound, unify_receiver_from_symbols, CallArgKind, GSigBinds,
 };
 use crate::libraries::{
     GenericSig, InlineBodyPlan, InlineCollectionAppend, InlineCollectionCapacity,
@@ -80,7 +80,7 @@ pub(super) fn bind_member_return_from_call_args_tracking(
         }
     }
     if let Some(declared_receiver) = gsig.receiver {
-        unify_ty_from_symbols(source, declared_receiver, receiver, &mut binds);
+        unify_receiver_from_symbols(source, declared_receiver, receiver, &mut binds);
         preserve_receiver_identity_bindings(declared_receiver, receiver, &mut binds);
     } else {
         seed_undeclared_return_bindings(gsig.ret, provider_ret, &gsig.formals, &mut binds);
@@ -215,7 +215,8 @@ fn specialize_member_type_with_unbound(
                 if bound.upper_bound_admits_null() {
                     binding
                 } else {
-                    binding.non_null()
+                    // `S & Any` takes the argument's own `& Any` (`T` becomes `T & Any`).
+                    binding.non_null().definitely_non_null()
                 }
             };
             match (position, binding.kind()) {
@@ -297,6 +298,16 @@ fn specialize_member_type_with_unbound(
             } else {
                 Ty::platform_nullable(specialized)
             }
+        }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(specialize_member_type_with_unbound(
+                source,
+                inner,
+                bindings,
+                position,
+                unbound,
+                input_projection,
+            ))
         }
         TyKind::InProjection(inner) => Ty::in_projection(specialize_member_type_with_unbound(
             source,
@@ -539,6 +550,7 @@ fn contains_flexible_variable(ty: Ty) -> bool {
         TyKind::DefinitelyNotNull(inner)
         | TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::StarProjection(inner) => contains_flexible_variable(inner),
@@ -714,7 +726,7 @@ fn specialize_fixed_extension(
         return None;
     }
     let mut bindings = GSigBinds::default();
-    super::unify_ty_from_symbols(source, declared_receiver, receiver, &mut bindings);
+    super::unify_receiver_from_symbols(source, declared_receiver, receiver, &mut bindings);
     for (&declared, &actual) in signature.params.iter().zip(arguments) {
         super::unify_ty_from_symbols(source, declared, actual, &mut bindings);
     }

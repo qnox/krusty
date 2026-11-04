@@ -1,0 +1,7 @@
+# What KSP2 2.3.12 (KSPJvmMain) logs with Annotations.kt over java-array-defaults/Use.kt, with
+# java-array-defaults/dependency/ on the classpath (built by javac): every array element a Java
+# annotation declares without a default has an empty array as its default.
+w: [ksp] ja.AllWritten @ArrayElements=javaarrays.ArrayElements target=null origin=KOTLIN (names=["a":String]:List KOTLIN, count=1:Integer KOTLIN, types=[type kotlin.String]:List KOTLIN, numbers=[2:Integer]:List KOTLIN, tags=["x":String]:List SYNTHETIC) defaults(names=[]:List, types=[]:List, tags=["x":String]:List, numbers=[]:List)
+w: [ksp] ja.Empty @ArrayElements=javaarrays.ArrayElements target=null origin=KOTLIN (count=3:Integer KOTLIN, types=[]:List KOTLIN, names=[]:List KOTLIN, numbers=[]:List KOTLIN, tags=["y":String]:List KOTLIN) defaults(names=[]:List, types=[]:List, tags=["x":String]:List, numbers=[]:List)
+w: [ksp] ja.Value @Valued=javaarrays.Valued target=null origin=KOTLIN (value=["v":String]:List KOTLIN, more=[]:List SYNTHETIC) defaults(value=[]:List, more=[]:List)
+w: [ksp] ja.Omitted @Valued=javaarrays.Valued target=null origin=KOTLIN (value=[]:List SYNTHETIC, more=[]:List SYNTHETIC) defaults(value=[]:List, more=[]:List)

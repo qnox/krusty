@@ -109,6 +109,68 @@ class Summary(unittest.TestCase):
                              ['left to kotlinc: compose', 1]]),
         ])
 
+    def test_build_cost_compares_both_builds_of_each_measured_project(self):
+        def cost(built, compile_, wall, cpu, daemon, krusty, total):
+            return dict(built_compile_seconds=built, compile_seconds=compile_, wall_seconds=wall,
+                        cpu_seconds=cpu, peak_rss_mb=dict(total=total, gradle=0, kotlin_daemon=daemon,
+                                                          krusty=krusty, other=0))
+        with tempfile.TemporaryDirectory() as work:
+            reports = []
+            measured = project('zeta', [row(':a:compileKotlin', True, 4, 4)])
+            measured['cost'] = dict(kotlinc=cost(30.0, 40.0, 120.0, 300.0, 1500, 0, 2500),
+                                    krusty=cost(10.0, 25.0, 90.0, 200.0, 0, 400, 1400))
+            # A result published before builds were measured has no cost and no row.
+            earlier = project('Alpha', [row(':compileKotlin', True, 1, 1)])
+            for p in (measured, earlier):
+                path = os.path.join(work, p['name'] + '.json')
+                with open(path, 'w') as f:
+                    json.dump(p, f)
+                reports.append(path)
+            text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'), *reports],
+                                  check=True, capture_output=True, text=True).stdout
+        section = text[text.index('## Build cost'):].splitlines()
+        self.assertEqual(section[-4:], [
+            '| Project | Compile time, compilations krusty built (kotlinc / krusty) | Compile time, all compilations |'
+            ' Compiler peak RSS | Build peak RSS | Build wall time | Build CPU time |',
+            '| --- | ---: | ---: | ---: | ---: | ---: | ---: |',
+            '| zeta | 30.0 s / 10.0 s (3.0×) | 40.0 s / 25.0 s | 1,500 MB / 400 MB | 2,500 MB / 1,400 MB | '
+            '120.0 s / 90.0 s | 300.0 s / 200.0 s |',
+            '| **Total** | **30.0 s / 10.0 s (3.0×)** | **40.0 s / 25.0 s** | | | **120.0 s / 90.0 s** | '
+            '**300.0 s / 200.0 s** |',
+        ])
+
+    def test_hotspots_rank_functions_across_the_sampled_projects(self):
+        with tempfile.TemporaryDirectory() as work:
+            reports = []
+            for name, functions, graph in (
+                ('zeta', [dict(function='zip::find', self=60, total=60),
+                          dict(function='krusty::resolve', self=20, total=70)], True),
+                ('Alpha', [dict(function='krusty::resolve', self=15, total=20)], False),
+            ):
+                p = project(name, [row(':a:compileKotlin', True, 1, 1)])
+                p['hotspots'] = dict(samples=100, functions=functions)
+                if graph:
+                    p['flame_graph'] = 'krusty-flamegraph.svg'
+                path = os.path.join(work, name + '.json')
+                with open(path, 'w') as f:
+                    json.dump(p, f)
+                reports.append(path)
+            text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'), *reports],
+                                  check=True, capture_output=True, text=True).stdout
+        self.assertEqual(text[text.index('## krusty hotspots'):].splitlines(), [
+            '## krusty hotspots',
+            '',
+            'Sampled call stacks of the krusty processes of every krusty build (200 samples at 99 Hz).',
+            '*Self* counts the samples in the function itself, *total* those with it anywhere on the stack.',
+            '',
+            'Flame graphs: [zeta](projects/zeta/krusty-flamegraph.svg).',
+            '',
+            '| Function | Self | Total | Projects |',
+            '| --- | ---: | ---: | --- |',
+            '| `zip::find` | 30.0% | 30.0% | zeta |',
+            '| `krusty::resolve` | 17.5% | 45.0% | Alpha, zeta |',
+        ])
+
 
 if __name__ == '__main__':
     unittest.main()

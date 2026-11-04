@@ -165,6 +165,12 @@ pub(super) fn sign_package_classes(
         shape.mapped_collection =
             super::collection_roles::normalize(identity, compiler_builtin_owner, &shape)
                 .map_err(|error| unsignable(package, &local, error))?;
+        shape.runtime_exception = super::runtime_exception_layouts::normalize(
+            identity,
+            compiler_builtin_owner,
+            &shape,
+            class.properties.iter().any(|property| !property.is_static),
+        );
         let enum_members = (class.kind == TypeKind::Enum)
             .then(|| enum_class_member_signatures(inside, class.has_enum_entries))
             .transpose()

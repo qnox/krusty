@@ -142,6 +142,7 @@ impl Closure<'_> {
             TyKind::DefinitelyNotNull(inner)
             | TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
             | TyKind::RawProjection(inner) => self.see(inner),
@@ -175,7 +176,10 @@ impl BodyLowering<'_> {
     ) {
         let mut type_params = captured
             .iter()
-            .map(|&ty| self.captured_type_parameter(ty))
+            .map(|&ty| IrTypeParameter {
+                captured_from_enclosing: true,
+                ..self.captured_type_parameter(ty)
+            })
             .collect::<Vec<_>>();
         type_params.extend(body.type_parameters().iter().map(|parameter| {
             IrTypeParameter {
@@ -188,6 +192,7 @@ impl BodyLowering<'_> {
                     .collect(),
                 variance: crate::types::TypeVariance::Invariant,
                 reified: parameter.reified,
+                captured_from_enclosing: false,
             }
         }));
         if type_params.is_empty() {

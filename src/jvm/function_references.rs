@@ -251,6 +251,12 @@ fn realize_adapter_reference(
             .collect()
     });
     let mut module_reflection = None;
+    let reflected_function = match reference.target {
+        crate::ir::IrCallableReferenceTarget::Module(target) => {
+            ir.checked_callable_functions.get(&target).copied()
+        }
+        _ => None,
+    };
     let reflected = match reference.target {
         crate::ir::IrCallableReferenceTarget::Module(_) => crate::ir::ReflectedCallable::Source,
         crate::ir::IrCallableReferenceTarget::Local { function, .. } => {
@@ -463,6 +469,7 @@ fn realize_adapter_reference(
         function_type: reference.function_type.non_null(),
         reflection_signature,
         reflected,
+        reflected_function,
         invoke_renamed: false,
     });
     let class = ir.add_class(class);
@@ -524,7 +531,7 @@ fn install_carrier(
 ) -> ExprId {
     ir.exprs[expression] = carrier;
     let carrier = ExprId::try_from(expression).expect("an expression id fits its index");
-    ir.logical_types.insert(carrier, Ty::obj_name(class));
+    ir.set_logical_type(carrier, Ty::obj_name(class));
     carrier
 }
 
@@ -674,7 +681,7 @@ fn realize_own_invoke(
     // operands begin: at each parameter or captured value read, or at a constructed object's
     // `new`. Every other node enters it only at its dispatch, so a bound receiver's read stays
     // ahead of the line.
-    if let Some(line) = ir.expr_source_lines.get(&(expression as u32)).copied() {
+    if let Some(line) = ir.source_line(expression as u32) {
         // The bridge maps its whole body to the same line.
         ir.fn_decl_lines.insert(adapter, line);
         let parameter_count = function_type.params.len() as u32;
@@ -686,9 +693,9 @@ fn realize_own_invoke(
                 _ => false,
             };
             if marks {
-                ir.expr_source_lines.insert(current, line);
+                ir.set_source_line(current, line);
             } else {
-                ir.expr_source_lines.remove(&current);
+                ir.take_source_line(current);
                 ir.mark_dispatch_line(current, line);
             }
         }
@@ -956,6 +963,7 @@ mod tests {
                 crate::ir::IrValueCapture {
                     declaration: crate::ir::IrCapturedDeclaration::Parameter,
                     capturer: crate::ir::IrCapturingCallable::LocalFunction,
+                    crossinline_parameter: None,
                 },
             )];
             identities.extend(

@@ -62,7 +62,7 @@ fn char_arithmetic_result_type_survives_nested_common_lowering() {
             .then_some(expression as u32)
         })
         .expect("lowered Char subtraction");
-    assert_eq!(ir.logical_types.get(&subtraction), Some(&Ty::Char));
+    assert_eq!(ir.logical_type(subtraction), Some(Ty::Char));
 }
 
 #[test]
@@ -564,7 +564,8 @@ fn checked_call_keeps_stable_target_and_final_argument_mapping() {
             IrCheckedArgument::Vararg {
                 parameter: 2,
                 array_type,
-                elements
+                elements,
+                ..
             }
         ] if *array_type == Ty::obj("kotlin/IntArray") && elements == &vec![(1, false)]
     ));
@@ -599,6 +600,7 @@ fn external_default_call_keeps_only_supplied_common_operands() {
                 inline_plan: None,
                 extension_receiver_parameter: None,
                 semantic_role: None,
+                intrinsic_const: false,
                 overridden_declarations: Box::new([]),
             },
             dispatch_receiver: None,
@@ -2004,7 +2006,7 @@ fn nested_generic_inline_expansion_specializes_its_result_storage() {
         .expect("consumer body");
 
     assert!(!expression_subtree_contains(&ir, body, &|expression, _| {
-        ir.inline_regions.contains(&expression) && ir.physical_types.contains_key(&expression)
+        ir.inline_regions.contains(&expression) && ir.physical_type(expression).is_some()
     }));
     assert!(!expression_subtree_contains(&ir, body, &|_, expression| {
         let IrExpr::Variable {

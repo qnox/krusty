@@ -14,19 +14,15 @@ use super::super::SourceOracle;
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind, TypeName, TypeVariance};
 
-pub(super) fn common_super_type(source: &dyn SymbolSource, left: Ty, right: Ty) -> Ty {
-    common_super_types(source, &[left, right])
-}
-
 pub(crate) fn common_super_types(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty {
     CommonSupertypeSolver::new(source).common(bounds)
 }
 
 struct CommonSupertypeSolver<'a> {
     source: &'a dyn SymbolSource,
-    active: Vec<(bool, bool, Vec<Ty>)>,
+    active: Vec<(bool, Vec<Ty>)>,
     active_classifiers: Vec<(TypeName, usize)>,
-    completed: Vec<(bool, bool, Vec<Ty>, Ty)>,
+    completed: Vec<(bool, Vec<Ty>, Ty)>,
     invalid_classifier_shape: bool,
 }
 
@@ -43,7 +39,7 @@ impl<'a> CommonSupertypeSolver<'a> {
 
     fn common(&mut self, bounds: &[Ty]) -> Ty {
         let result = self
-            .common_at(bounds, false)
+            .common_at(bounds)
             .unwrap_or_else(|| Ty::obj_name(crate::types::wk::any()));
         if self.invalid_classifier_shape {
             Ty::Error
@@ -56,11 +52,18 @@ impl<'a> CommonSupertypeSolver<'a> {
     /// the classifier candidate that led back to it is recursive and must not participate in this
     /// round. Other shared classifiers still compete, and `Any` remains the sound result when no
     /// acyclic candidate exists.
-    fn common_at(&mut self, bounds: &[Ty], permit_intersection: bool) -> Option<Ty> {
+    fn common_at(&mut self, bounds: &[Ty]) -> Option<Ty> {
         let nullable = bounds.iter().any(|bound| bound.is_nullable());
+        // A type parameter whose upper bound admits `null` may be instantiated with a nullable
+        // type, so a join that approximates past it to a shared supertype is nullable:
+        // `listOf(t, Sub())` for `T : Base?` is `List<Base?>`. A join whose result is such a
+        // parameter itself (`T` with `Nothing`, or `T` with `T`) keeps that bare parameter.
+        let past_nullable_parameter = bounds.iter().any(|bound| admits_null_through_bound(*bound));
         let preserve_nullability = |result: Ty| {
-            if nullable && result != Ty::Error {
-                Ty::nullable(result.non_null())
+            if result != Ty::Error
+                && (nullable || (past_nullable_parameter && !admits_null_through_bound(result)))
+            {
+                Ty::nullable(result)
             } else {
                 result
             }
@@ -81,36 +84,37 @@ impl<'a> CommonSupertypeSolver<'a> {
             return Some(preserve_nullability(Ty::Nothing));
         };
         if rest.iter().all(|bound| *bound == first) {
+            // One classifier joined with its own `(Mutable)` interval keeps the interval: the lower
+            // faces agree and the read-only upper face bounds both.
+            let flexible = Ty::mutability_flexible(first);
+            let first = if bounds
+                .iter()
+                .any(|bound| bound.non_null_keeping_mutability() == flexible)
+            {
+                flexible
+            } else {
+                first
+            };
             return Some(preserve_nullability(first));
         }
-        if let Some((_, _, _, result)) =
-            self.completed
-                .iter()
-                .find(|(permit, known_nullable, known, _)| {
-                    *permit == permit_intersection
-                        && *known_nullable == nullable
-                        && same_bound_set(known, &key)
-                })
-        {
+        if let Some((_, _, result)) = self.completed.iter().find(|(known_nullable, known, _)| {
+            *known_nullable == nullable && same_bound_set(known, &key)
+        }) {
             return Some(*result);
         }
-        if self.active.iter().any(|(permit, known_nullable, active)| {
-            *permit == permit_intersection
-                && *known_nullable == nullable
-                && same_bound_set(active, &key)
+        if self.active.iter().any(|(known_nullable, active)| {
+            *known_nullable == nullable && same_bound_set(active, &key)
         }) {
             return None;
         }
-        self.active
-            .push((permit_intersection, nullable, key.clone()));
-        let result = preserve_nullability(self.common_active(&key, permit_intersection));
+        self.active.push((nullable, key.clone()));
+        let result = preserve_nullability(self.common_active(&key));
         self.active.pop();
-        self.completed
-            .push((permit_intersection, nullable, key, result));
+        self.completed.push((nullable, key, result));
         Some(result)
     }
 
-    fn common_active(&mut self, bounds: &[Ty], permit_intersection: bool) -> Ty {
+    fn common_active(&mut self, bounds: &[Ty]) -> Ty {
         let Some((&first, rest)) = bounds.split_first() else {
             return Ty::obj_name(crate::types::wk::any());
         };
@@ -140,11 +144,8 @@ impl<'a> CommonSupertypeSolver<'a> {
             }
         }
 
-        // A top-level inference binding must be denotable. Multiple incomparable common views are
-        // retained separately by the call-selection intersection contract; putting their synthetic
-        // intersection into the binding changes ABI decisions such as a generic vararg's array
-        // component. Nested invariant arguments are different: `Inv<A>` plus `Inv<B>` is expressed
-        // as `Inv<out (X & Y)>`, so that argument join explicitly permits the intersection.
+        // Several incomparable most-specific classifiers join at their intersection, at the top
+        // level as in a nested argument (`Inv<A>` plus `Inv<B>` is `Inv<out (X & Y)>`).
         let dominated_owners = classifiers
             .iter()
             .flat_map(|(owner, _)| {
@@ -155,9 +156,6 @@ impl<'a> CommonSupertypeSolver<'a> {
             .filter_map(Ty::obj_internal)
             .collect::<HashSet<_>>();
         classifiers.retain(|(owner, _)| !dominated_owners.contains(owner));
-        if !permit_intersection && classifiers.len() > 1 {
-            return Ty::obj_name(crate::types::wk::any());
-        }
 
         let mut candidates = Vec::new();
         for (classifier, arity) in classifiers {
@@ -194,8 +192,7 @@ impl<'a> CommonSupertypeSolver<'a> {
         match most_specific.as_slice() {
             [] => Ty::obj("kotlin/Any"),
             [one] => *one,
-            many if permit_intersection => Ty::intersection(many),
-            _ => Ty::obj("kotlin/Any"),
+            many => Ty::intersection(many),
         }
     }
 
@@ -286,7 +283,7 @@ impl<'a> CommonSupertypeSolver<'a> {
                 .iter()
                 .map(|argument| argument.projection_read_ty())
                 .collect::<Vec<_>>();
-            let joined = self.common_at(&readable, true)?;
+            let joined = self.common_at(&readable)?;
             combined_arguments.push(if variance == TypeVariance::Out {
                 joined
             } else {
@@ -311,6 +308,7 @@ fn type_size(ty: Ty) -> usize {
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::StarProjection(inner)
@@ -406,6 +404,11 @@ fn single_reified_supertype(
     }
 }
 
+/// A bare type-parameter occurrence whose upper bound admits `null`.
+fn admits_null_through_bound(ty: Ty) -> bool {
+    matches!(ty.kind(), TyKind::TyParam(..)) && ty.upper_bound_admits_null()
+}
+
 fn supertype_closure(
     name: TypeName,
     direct_supertypes: &dyn Fn(TypeName) -> Option<Vec<TypeName>>,
@@ -440,6 +443,10 @@ fn closure(source: &dyn SymbolSource, root: Ty) -> Vec<Ty> {
             continue;
         }
         types.push(current);
+        // A type parameter's supertypes are its declared upper bounds.
+        if let TyKind::TyParam(_, bound) = current.kind() {
+            queue.push_back(bound.non_null());
+        }
         queue.extend(
             direct_supertypes(source, current)
                 .into_iter()
@@ -454,12 +461,17 @@ fn closure(source: &dyn SymbolSource, root: Ty) -> Vec<Ty> {
 
 #[cfg(test)]
 mod tests {
-    use super::{common_super_type, common_super_types, reified_runtime_type};
+    use super::{common_super_types, reified_runtime_type};
     use crate::libraries::{Callables, ClassifierDeclaration, LibraryType, ResolvedSymbols};
     use crate::symbol_source::{SymbolNamespace, SymbolSource};
     use crate::types::{type_name, Ty, TypeParameters, TypeVariance};
     use std::rc::Rc;
     use std::sync::Arc;
+
+    /// The two-bound join the solver answers for a pair of lower bounds.
+    fn common_super_type(source: &dyn SymbolSource, left: Ty, right: Ty) -> Ty {
+        common_super_types(source, &[left, right])
+    }
 
     struct EmptySource;
 
@@ -615,6 +627,55 @@ mod tests {
         );
     }
 
+    fn unbounded(name: &str) -> Ty {
+        Ty::ty_param(name, Ty::nullable(Ty::obj("kotlin/Any")))
+    }
+
+    #[test]
+    fn bottom_keeps_a_bare_type_parameter_in_both_operand_orders() {
+        let t = unbounded("T");
+        assert_eq!(common_super_type(&EmptySource, t, Ty::Nothing), t);
+        assert_eq!(common_super_type(&EmptySource, Ty::Nothing, t), t);
+    }
+
+    #[test]
+    fn a_repeated_type_parameter_joins_to_itself() {
+        let t = unbounded("T");
+        assert_eq!(common_super_types(&EmptySource, &[t, t]), t);
+    }
+
+    #[test]
+    fn bottom_keeps_a_bare_type_parameter_inside_a_covariant_argument() {
+        let source = GenericSource {
+            variance: TypeVariance::Out,
+        };
+        let covariant_t = Ty::obj_args("demo/Inv", &[unbounded("T")]);
+        let covariant_bottom = Ty::obj_args("demo/Inv", &[Ty::Nothing]);
+        assert_eq!(
+            common_super_type(&source, covariant_t, covariant_bottom),
+            covariant_t
+        );
+        assert_eq!(
+            common_super_type(&source, covariant_bottom, covariant_t),
+            covariant_t
+        );
+    }
+
+    #[test]
+    fn a_join_past_a_nullable_bound_parameter_is_nullable() {
+        let left = Ty::obj("demo/Left");
+        let t = Ty::ty_param("T", Ty::nullable(left));
+        assert_eq!(common_super_type(&EmptySource, t, left), Ty::nullable(left));
+        assert_eq!(common_super_type(&EmptySource, left, t), Ty::nullable(left));
+    }
+
+    #[test]
+    fn a_join_past_a_non_null_bound_parameter_reaches_its_bound() {
+        let left = Ty::obj("demo/Left");
+        let t = Ty::ty_param("T", left);
+        assert_eq!(common_super_type(&EmptySource, t, left), left);
+    }
+
     #[test]
     fn a_missing_generic_declaration_is_not_treated_as_invariant() {
         assert_eq!(
@@ -622,6 +683,24 @@ mod tests {
                 &EmptySource,
                 Ty::obj_args("demo/Inv", &[Ty::obj("demo/Left")]),
                 Ty::obj_args("demo/Inv", &[Ty::obj("demo/Right")]),
+            ),
+            Ty::Error
+        );
+    }
+
+    #[test]
+    fn a_missing_generic_declaration_stays_an_error_through_the_lower_bound_merge() {
+        let left = Ty::obj_args("demo/Inv", &[Ty::obj("demo/Left")]);
+        let right = Ty::obj_args("demo/Inv", &[Ty::obj("demo/Right")]);
+        assert_eq!(
+            super::super::merge_inferred_ty_from_symbols(Some(&EmptySource), left, right),
+            Ty::Error
+        );
+        assert_eq!(
+            super::super::merge_inferred_ty_from_symbols(
+                Some(&EmptySource),
+                Ty::nullable(left),
+                right
             ),
             Ty::Error
         );

@@ -8,17 +8,22 @@
 use std::ops::Range;
 
 use crate::ir::{
-    IrClass, IrFile, IrGeneratedFunctionMetadataScope, IrGeneratedMemberPublication, IrMemberKind,
+    IrClass, IrDataClassMemberRole, IrFile, IrGeneratedFunctionMetadataScope,
+    IrGeneratedMemberPublication, IrMemberKind,
 };
 use crate::metadata::builder::TypeAliasMeta;
 use crate::metadata::class_builder::{ClassMemberOrder, FnMeta, PropMeta};
+use crate::metadata::class_declarations::FunctionOrigin;
 use crate::types::{wk, Ty, TyKind, TypeName};
 use std::cmp::Ordering;
 
 /// Indices into a class's metadata function and property lists of members the compiler generates.
 pub(crate) struct MemberRanges {
-    /// A data or value class's generated functions, following the declared ones.
-    pub synthesized: Range<usize>,
+    /// A data or value class's generated functions, following the declared ones, in metadata
+    /// order (see [`generated_function_order`]).
+    pub synthesized: Vec<usize>,
+    /// Where the functions a compiler plugin generated and published start.
+    pub published_functions: usize,
     /// Forwarders to interface delegates, following the plugin-generated functions.
     pub delegation_functions: Range<usize>,
     /// Delegation properties' positions, already in their metadata order.
@@ -147,9 +152,54 @@ pub(crate) fn sort_delegation_properties(
     positions
 }
 
+/// The metadata order of a class's generated functions, `generated` being their indices in
+/// `methods` (whose origins `origins` gives). kotlinc sorts a data class's `equals`, `hashCode` and `toString` together with the
+/// functions a compiler plugin declares on the class, by name, after its components and `copy`:
+/// a serializable data object lists `equals`, `hashCode`, `serializer`, `toString`.
+pub(crate) fn generated_function_order(
+    ir: &IrFile,
+    declared_fids: &[u32],
+    methods: &[FnMeta],
+    origins: &[FunctionOrigin],
+    generated: Range<usize>,
+) -> Vec<usize> {
+    let structural = |index: &usize| {
+        matches!(
+            origins[*index],
+            FunctionOrigin::DataMember(
+                IrDataClassMemberRole::Equals
+                    | IrDataClassMemberRole::HashCode
+                    | IrDataClassMemberRole::ToString
+            )
+        )
+    };
+    let mut order: Vec<usize> = generated
+        .clone()
+        .filter(|index| !structural(index))
+        .collect();
+    let mut sorted: Vec<usize> = generated.filter(structural).collect();
+    if !sorted.is_empty() {
+        sorted.extend(
+            declared_fids
+                .iter()
+                .enumerate()
+                .filter(|(_, fid)| {
+                    ir.plugin_declaration_functions
+                        .values()
+                        .any(|functions| functions.contains(fid))
+                })
+                .map(|(index, _)| index),
+        );
+    }
+    sorted.sort_by(|left, right| methods[*left].name.cmp(&methods[*right].name));
+    order.extend(sorted);
+    order
+}
+
 /// `declared_fids` are the declared functions, which open the metadata function list; the
-/// `synthesized` indices of that list follow them (a data or value class's generated members), the
-/// plugin-generated functions follow those, and the delegation members close the list.
+/// `synthesized` indices follow them (a data or value class's generated members, with the functions
+/// a plugin declares on a data class), the plugin-generated functions follow those, and the
+/// delegation members close the list.
 pub(crate) fn member_order(
     ir: &IrFile,
     c: &IrClass,
@@ -173,12 +223,18 @@ pub(crate) fn member_order(
             .map(|(index, order)| (order, ClassMemberOrder::Property(index))),
     );
     if !exclusive {
-        ordered.extend(declared_fids.iter().enumerate().map(|(index, fid)| {
-            (
-                ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX),
-                ClassMemberOrder::Function(index),
-            )
-        }));
+        ordered.extend(
+            declared_fids
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !ranges.synthesized.contains(index))
+                .map(|(index, fid)| {
+                    (
+                        ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX),
+                        ClassMemberOrder::Function(index),
+                    )
+                }),
+        );
     }
     ordered.extend(type_aliases.iter().enumerate().map(|(index, alias)| {
         (
@@ -207,9 +263,10 @@ pub(crate) fn member_order(
         generated_order = generated_order.saturating_add(1);
         (order, member)
     };
-    let inferred_method_count = ranges.synthesized.end;
+    let inferred_method_count = ranges.published_functions;
     let synthesized: Vec<_> = ranges
         .synthesized
+        .into_iter()
         .map(|index| generated(ClassMemberOrder::Function(index)))
         .collect();
     ordered.extend(synthesized);
