@@ -3,6 +3,7 @@
 //! A backend consumes checked frontend output and emits target artifacts.
 
 pub mod class_tables;
+mod constructor_selection;
 pub mod coroutines;
 pub mod counted_loops;
 pub mod default_arguments;
@@ -17,6 +18,7 @@ pub mod local_properties;
 mod module_facts;
 mod source_class_members;
 
+pub use constructor_selection::selected_constructor;
 pub use dependency_call_shape::{DeclaredOperandRoles, DependencyCallShape, DependencyExportCall};
 #[cfg(any(test, feature = "test-support"))]
 pub use dependency_facts::referenced_dependencies;

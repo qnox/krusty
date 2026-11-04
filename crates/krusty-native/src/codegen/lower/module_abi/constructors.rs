@@ -119,20 +119,21 @@ impl FileLowering<'_> {
                         super::super::objects::constructor_parameters(self.ir, class),
                     )
                 }),
-                n => self.classes[class as usize]
-                    .secondaries
-                    .get(n as usize - 1)
-                    .copied()
-                    .zip(
-                        self.ir.classes[class as usize]
-                            .secondary_ctors
-                            .get(n as usize - 1)
-                            .map(|secondary| {
-                                let mut parameters = secondary.prefix_params.clone();
-                                parameters.extend(secondary.params.iter().copied());
-                                parameters
-                            }),
-                    ),
+                n => {
+                    let secondary = n as usize - 1;
+                    self.classes[class as usize]
+                        .secondaries
+                        .get(secondary)
+                        .copied()
+                        .zip(
+                            (secondary < self.ir.classes[class as usize].secondary_ctors.len())
+                                .then(|| {
+                                    super::super::objects::secondary_constructor_parameters(
+                                        self.ir, class, secondary,
+                                    )
+                                }),
+                        )
+                }
             };
             let Some((function, physical)) = local else {
                 return Err(format!(
