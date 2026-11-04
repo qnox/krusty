@@ -67,7 +67,8 @@ mod type_name_list;
 pub use type_name_list::TypeNameList;
 pub(crate) use type_parameter_identity::{
     call_site_type_variable, constructor_type_parameter, declaration_type_parameter,
-    generated_function_type_parameter, hidden_captured_type_parameter, metadata_type_parameter,
+    generated_function_type_parameter, hidden_captured_type_parameter,
+    is_nested_result_type_variable, metadata_type_parameter, nested_result_type_variable,
     postponed_call_type_variable, type_parameter_source_name,
 };
 

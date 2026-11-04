@@ -312,78 +312,6 @@ impl ProductionSignatureSemantics<'_> {
         })?
     }
 
-    /// Property type parameters in the order the whole-table scans used to prefer them: a top-level
-    /// source property, then a top-level extension, then a member extension. The first recorded
-    /// declaration wins, including a property with no formals, so a miss still means "not a
-    /// property" and falls through to the header-only parameters.
-    fn property_type_parameters(
-        &self,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<super::DeclarationTypeParameters> {
-        let missing = self
-            .property_type_parameters_by_declaration
-            .borrow()
-            .is_none();
-        if missing {
-            let mut parameters = crate::fx_hash::HashMap::default();
-            let record = |parameters: &mut crate::fx_hash::HashMap<
-                crate::fir::DeclarationId,
-                super::DeclarationTypeParameters,
-            >,
-                          declaration: crate::fir::DeclarationId,
-                          formals: &[String],
-                          formal_bounds: &[Ty]| {
-                parameters
-                    .entry(declaration)
-                    .or_insert_with(|| super::DeclarationTypeParameters {
-                        formals: formals.to_vec(),
-                        bounds: formal_bounds
-                            .iter()
-                            .copied()
-                            .map(|bound| vec![bound])
-                            .collect(),
-                    });
-            };
-            for property in self.table.source_props.values() {
-                if let Some(declaration) = property.stable_declaration {
-                    record(
-                        &mut parameters,
-                        declaration,
-                        &property.formals,
-                        &property.formal_bounds,
-                    );
-                }
-            }
-            for property in self.table.ext_props.values().flatten() {
-                if let Some(declaration) = property.stable_declaration {
-                    record(
-                        &mut parameters,
-                        declaration,
-                        &property.formals,
-                        &property.formal_bounds,
-                    );
-                }
-            }
-            for class in self.table.classes.values() {
-                for property in class.member_ext_props.values().flatten() {
-                    if let Some(declaration) = property.stable_declaration() {
-                        record(
-                            &mut parameters,
-                            declaration,
-                            property.type_params(),
-                            property.type_param_bounds(),
-                        );
-                    }
-                }
-            }
-            *self.property_type_parameters_by_declaration.borrow_mut() = Some(parameters);
-        }
-        self.property_type_parameters_by_declaration
-            .borrow()
-            .as_ref()
-            .and_then(|parameters| parameters.get(&declaration).cloned())
-    }
-
     pub(super) fn with_signature_type_scope<T>(
         &self,
         scope: crate::fir::SignatureScope,
@@ -859,6 +787,14 @@ impl ProductionSignatureSemantics<'_> {
 }
 
 impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
+    fn nested_result_variables(
+        &self,
+        scope: crate::fir::SignatureScope,
+        ty: crate::fir::ResolvedTy,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        self.open_nested_result_variables(scope, ty)
+    }
+
     fn enter_scoped_receiver(
         &self,
         declaration: crate::fir::DeclarationId,
