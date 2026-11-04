@@ -19,6 +19,8 @@ mod elvis_newline_continuation_e2e;
 mod enum_entry_argument_lines_e2e;
 #[path = "../infix_newline_operand_e2e.rs"]
 mod infix_newline_operand_e2e;
+#[path = "../inline_only_converted_lambda_line_e2e.rs"]
+mod inline_only_converted_lambda_line_e2e;
 #[path = "../inline_operand_binding_line_e2e.rs"]
 mod inline_operand_binding_line_e2e;
 #[path = "../multiline_receiver_access_line_e2e.rs"]
