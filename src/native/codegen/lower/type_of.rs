@@ -121,6 +121,9 @@ impl FileLowering<'_> {
                     .ok_or_else(|| declined!("`typeOf` of `{ty:?}`"))?,
                 Vec::new(),
             ),
+            // `Nothing` has no instances and no class to look up; the runtime names it with a
+            // descriptor of its own, which is what a `KType` naming it (`In<Nothing>`) points at.
+            TyKind::Nothing => (self.import_data("kt_type_nothing")?, Vec::new()),
             TyKind::TyParam(..) | TyKind::DefinitelyNotNull(_) => {
                 return Err(declined!(
                     "`typeOf` of the type parameter `{ty:?}`, whose classifier is a \

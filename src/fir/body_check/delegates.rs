@@ -1152,9 +1152,15 @@ fn delegate_substitutions(
             let value = ResolvedTy::new(value)
                 .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?;
             let runtime = if reified {
-                crate::symbol_resolver::reified_runtime_type(value.get(), &|name| {
-                    index.recorded_direct_supertypes(name)
-                })
+                crate::symbol_resolver::reified_runtime_type(
+                    value.get(),
+                    &crate::symbol_resolver::ReifiedDeclarations {
+                        direct_supertypes: &|name| index.recorded_direct_supertypes(name),
+                        variance_at: &|name, position| {
+                            index.recorded_type_argument_variance(name, position)
+                        },
+                    },
+                )
             } else {
                 value.get()
             };

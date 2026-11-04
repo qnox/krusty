@@ -119,6 +119,15 @@ fn a_reified_intersection_describes_its_common_supertype() {
 }
 
 #[test]
+fn a_reified_contravariant_intersection_argument_describes_nothing() {
+    // `In<A>` and `In<B>` join at `In<A & B>`, which kotlinc reifies as `In<Nothing>`.
+    both(
+        include_str!("box_regressions/typeOfContravariantIntersection.kt"),
+        "TypeOfContravariantIntersection",
+    );
+}
+
+#[test]
 fn files_naming_one_type_share_its_object_and_its_class() {
     // Portable: the files' types are equal, hash alike and name one classifier.
     let declarations = (
