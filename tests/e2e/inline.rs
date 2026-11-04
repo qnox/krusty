@@ -8,6 +8,8 @@ mod inline_arguments_in_place_e2e;
 mod inline_body_class_source_map_e2e;
 #[path = "../inline_call_condition_line_e2e.rs"]
 mod inline_call_condition_line_e2e;
+#[path = "../inline_call_in_default_argument_e2e.rs"]
+mod inline_call_in_default_argument_e2e;
 #[path = "../inline_call_operand_spill_e2e.rs"]
 mod inline_call_operand_spill_e2e;
 #[path = "../inline_capture_default_e2e.rs"]
