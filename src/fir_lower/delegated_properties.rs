@@ -113,6 +113,7 @@ pub(super) fn materialize_top_level_delegate(
         source_order,
     )?;
     let owner_ty = extension_receiver.unwrap_or(Ty::Null);
+    let getter_body = ir.exprs.len();
     let receiver = delegate_storage_read(
         ir,
         IrExpr::GetStatic(delegate_static),
@@ -135,7 +136,7 @@ pub(super) fn materialize_top_level_delegate(
             (property_reference, property_reference_ty),
         ],
     )?;
-    at_property_line(ir, read, property.decl_line);
+    at_property_line(ir, getter_body, read, property.decl_line);
     let getter = add_accessor_function(
         ir,
         AccessorFunctionInput::getter(
@@ -321,6 +322,7 @@ pub(super) fn materialize_member_delegate(
         store,
     ));
 
+    let getter_body = ir.exprs.len();
     let this_ref = ir.add_expr(IrExpr::GetValue(0));
     let receiver = delegate_storage_read(
         ir,
@@ -341,7 +343,7 @@ pub(super) fn materialize_member_delegate(
         receiver,
         vec![this_ref, (property_reference, property_reference_ty)],
     )?;
-    at_property_line(ir, read, property.decl_line);
+    at_property_line(ir, getter_body, read, property.decl_line);
     let getter = add_accessor_function(
         ir,
         AccessorFunctionInput::getter(
@@ -570,6 +572,7 @@ pub(super) fn materialize_member_extension_delegate(
         store,
     ));
 
+    let getter_body = ir.exprs.len();
     let dispatch = ir.add_expr(IrExpr::GetValue(0));
     let delegate = delegate_storage_read(
         ir,
@@ -593,7 +596,7 @@ pub(super) fn materialize_member_extension_delegate(
             (property_reference, property_reference_ty),
         ],
     )?;
-    at_property_line(ir, read, property.decl_line);
+    at_property_line(ir, getter_body, read, property.decl_line);
     let getter = add_accessor_function(
         ir,
         AccessorFunctionInput::getter(
@@ -798,9 +801,19 @@ fn push_delegate_static(
 /// to be attributed to an unrelated one.
 /// kotlinc states a delegated getter's convention call at the property's line, the call site an
 /// inlined operator's lines are mapped against.
-fn at_property_line(ir: &mut IrFile, call: ExprId, line: u32) {
+///
+/// fir2ir builds the whole generated accessor body at the property's offsets, so every node built
+/// for it from `first_generated` on takes that line.
+fn at_property_line(ir: &mut IrFile, first_generated: usize, call: ExprId, line: u32) {
     if line != 0 {
         ir.set_source_line(call, line);
+        let position = crate::ir::IrNodePosition {
+            start_line: Some(line),
+            source_line: Some(line),
+            end_line: Some(line),
+            ..crate::ir::IrNodePosition::default()
+        };
+        ir.settle_positions(first_generated..ir.exprs.len(), position);
     }
 }
 

@@ -210,7 +210,6 @@ impl Emitter<'_> {
         producer: crate::ir::ExprId,
         code: &mut CodeBuilder,
     ) {
-        super::debug_lines::begin_expression(self.ir, coercion, code);
         self.mark_value_expression_start(coercion, code);
         self.emit_value(producer, code);
         if !code.is_dead() {

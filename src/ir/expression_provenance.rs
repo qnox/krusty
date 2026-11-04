@@ -40,13 +40,3 @@ pub enum IrBuiltinCallKind {
     /// A member call the frontend selected as a compiler intrinsic; the node's callee names it.
     Intrinsic,
 }
-
-/// A read of a safe call's receiver temporary, by the role fir2ir gives it, with the source line
-/// it carries there.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IrSafeCallRead {
-    /// The `null` test, at the safe call's own line.
-    NullCheck { line: u32 },
-    /// The selector's receiver, at the line the receiver starts on.
-    Receiver { start_line: u32 },
-}

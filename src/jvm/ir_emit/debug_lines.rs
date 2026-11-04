@@ -4,15 +4,10 @@
 //! those locations into `LineNumberTable` marks without teaching expression emission how the maps
 //! are represented.
 
-use crate::fir::SyntheticOriginKind;
-use crate::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin, IrTypeOp};
+use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::jvm::classfile::CodeBuilder;
 
 use super::Emitter;
-
-mod intrinsic_calls;
-use intrinsic_calls::safe_call_read_line;
-pub(super) use intrinsic_calls::{inversion_mask_line, states_line_before_operands};
 
 fn first_block_expression(ir: &IrFile, block: ExprId) -> ExprId {
     let mut expression = block;
@@ -27,60 +22,11 @@ fn first_block_expression(ir: &IrFile, block: ExprId) -> ExprId {
     }
 }
 
-/// Whether `value` is `expression` itself, or only an implicit coercion or the bottom-typed
-/// completion of it, which writes no code ahead of it and marks no line of its own there.
-pub(super) fn evaluates_to(ir: &IrFile, value: ExprId, expression: ExprId) -> bool {
-    let mut value = value;
-    loop {
-        if value == expression {
-            return true;
-        }
-        match ir.expr(value) {
-            IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::ImplicitCoercion,
-                arg,
-                ..
-            } => value = *arg,
-            IrExpr::BottomValue { producer, .. } => value = *producer,
-            _ => return false,
-        }
-    }
-}
-
-/// Mark a source statement or block value at the first instruction it emits.
-pub(super) fn mark_statement(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
-    if let Some(&line) = ir.expr_lines.get(&expression) {
-        code.mark_line(line);
-    }
-}
-
-/// Mark a statement line and keep it when the next mark at this pc names that same line.
-///
-/// An unsigned assignment whose right operand is itself unsigned records the line twice at the
-/// receiver load: once for the assignment, once for the inlined operation.
-pub(super) fn mark_statement_retained(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
-    if let Some(&line) = ir.expr_lines.get(&expression) {
-        if line != 0 {
-            code.mark_line_retained(line);
-        }
-    }
-}
-
-/// An initializer store returns to its own source line after an inlined value reset the caller's
-/// line. This distinct consumer debug point also bounds the existing inline closing anchor.
+/// An initializer store marks its own line again before the store (`visitFieldAccess`), which
+/// writes an entry once its value moved the line or an inlined value made the mapper forget it.
 pub(super) fn restore_initializer_store_line(line: Option<u32>, code: &mut CodeBuilder) {
-    if code.line_forgotten() {
-        if let Some(line) = line.filter(|&line| line != 0) {
-            code.inlined_line(line.min(u32::from(u16::MAX)) as u16);
-        }
-    }
-}
-
-/// Withdraw a line marked where a positionless expression begins; see
-/// [`CodeBuilder::withdraw_line`].
-pub(super) fn begin_expression(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
-    if ir.is_positionless(expression) {
-        code.withdraw_line();
+    if let Some(line) = line.filter(|&line| line != 0) {
+        code.mark_line(line);
     }
 }
 
@@ -102,19 +48,14 @@ pub(super) fn mark_loop_control(loop_line: Option<u32>, code: &mut CodeBuilder) 
 impl Emitter<'_> {
     /// Mark the line a catch-all finalizer copy's block emission marks first.
     ///
-    /// A `finally` is emitted inline on the normal path and again at a handler entry. The exception
-    /// edge resets kotlinc's last-line state, so the handler keeps an entry even when the normal
-    /// copy ended on that same line. Mapping through the first expression's inline provenance also
-    /// gives a copied finalizer the caller line that its body uses, rather than the callee's raw line.
-    pub(super) fn mark_finalizer_handler_entry(
-        &mut self,
-        try_expression: ExprId,
-        block: ExprId,
-        code: &mut CodeBuilder,
-    ) {
+    /// A `finally` is emitted inline on the normal path and again at a handler entry, which marks
+    /// its first expression's line like any mark. Mapping through the first expression's inline
+    /// provenance gives a copied finalizer the caller line that its body uses, rather than the
+    /// callee's raw line.
+    pub(super) fn mark_finalizer_handler_entry(&mut self, block: ExprId, code: &mut CodeBuilder) {
         let mut expression = first_block_expression(self.ir, block);
         let entry = loop {
-            if let Some(&line) = self.ir.expr_lines.get(&expression) {
+            if let Some(line) = self.ir.statement_line(expression) {
                 break (line != 0).then_some((expression, line));
             }
             let crate::ir::IrExpr::Block { stmts, value } = self.ir.expr(expression) else {
@@ -128,15 +69,10 @@ impl Emitter<'_> {
         if let Some((expression, line)) = entry {
             self.note_inlined_expression(expression, code);
             let line = self.mapped_expression_line(expression, line);
-            // A handler reopens the finalizer's line after a preceding, different `try` line even
-            // when the normal-path finalizer left that same line in effect. An entirely one-line
-            // `try { ... } finally { ... }` has no line transition at all, and kotlinc keeps only
-            // the entry at pc 0 instead of repeating it at the catch-all handler.
-            if self.ir.source_line(try_expression) == self.ir.expr_lines.get(&expression).copied() {
-                code.mark_line(line);
-            } else {
-                code.mark_control_entry_line(line);
-            }
+            // kotlinc marks the first child of the `finally` before the handler's store; the
+            // normal-path copy left the block's closing line in effect (`mark_block_exit`), so a
+            // finalizer on another line writes an entry here.
+            code.mark_line(line);
         }
     }
 
@@ -152,7 +88,7 @@ impl Emitter<'_> {
             .ir
             .implicit_return_end_line(returned)
             .or_else(|| self.ir.source_line(returned))
-            .or_else(|| self.ir.expr_lines.get(&returned).copied())
+            .or_else(|| self.ir.statement_line(returned))
         {
             self.mark_expression_line(returned, line, code);
         }
@@ -167,7 +103,11 @@ impl Emitter<'_> {
         expression: ExprId,
         code: &mut CodeBuilder,
     ) {
-        if !states_line_before_operands(self.ir, expression) {
+        if !crate::jvm::line_numbers::states_line_before_operands(
+            self.ir,
+            self.default_call_operands,
+            expression,
+        ) {
             return;
         }
         if let Some(line) = self.ir.source_line(expression) {
@@ -175,10 +115,10 @@ impl Emitter<'_> {
         }
     }
 
-    /// Mark the lines a value expression owns on entry, before it emits anything: its source
-    /// start, then a suspend callee's call line (see [`Self::mark_suspend_call_line`]).
+    /// Mark the lines a value expression owns on entry, before it emits anything: its start when
+    /// its kind marks there, then a suspend callee's call line (see
+    /// [`Self::mark_suspend_call_line`]).
     pub(super) fn mark_value_entry_lines(&mut self, expression: ExprId, code: &mut CodeBuilder) {
-        begin_expression(self.ir, expression, code);
         self.mark_value_expression_start(expression, code);
         self.mark_suspend_call_line(expression, code);
     }
@@ -186,7 +126,9 @@ impl Emitter<'_> {
     /// Mark a suspend callee's call line before anything its call generates, receiver and
     /// arguments included. kotlinc's `visitCall` does so for every suspend callee, so the line is
     /// in effect before the coroutine transformer spills around the call (KT-66413); the
-    /// receiver's own line, when it starts another line, follows at the same offset.
+    /// receiver's own line, when it starts another line, follows at the same offset: the line
+    /// mapper keeps every entry it writes, so both stand. A call already marked at its start
+    /// writes nothing more here.
     ///
     /// `expression` may be a cast of the call's generic result: the cast starts where the call
     /// does and carries the call's line when the call node itself does not.
@@ -207,7 +149,7 @@ impl Emitter<'_> {
         if !code.is_dead() {
             self.note_inlined_expression(call, code);
             let line = self.mapped_expression_line(call, line);
-            code.mark_line_kept(line);
+            code.mark_line(line);
         }
     }
 
@@ -242,67 +184,55 @@ impl Emitter<'_> {
         function.is_some_and(|function| self.ir.suspend_funs.contains(&function))
     }
 
-    /// Mark one expression line, mapping a same-module inline copy through the class's SMAP. Common
-    /// IR supplies the semantic declaration owner, the callee's source file, and the call line;
-    /// this boundary chooses JVM source paths and output line numbers.
+    /// Mark `expression`'s own line, mapping a same-module inline copy through the class's SMAP.
+    /// Common IR supplies the semantic declaration owner, the callee's source file, and the call
+    /// line; this boundary chooses JVM source paths and output line numbers.
+    ///
+    /// Callers mark where kotlinc's visitor marks the node's kind: its start for a node
+    /// [`crate::jvm::line_numbers::marks_line_at_start`] names
+    /// ([`Self::mark_value_expression_start`]), the instruction that completes it otherwise.
     pub(super) fn mark_expression_start(&mut self, expression: ExprId, code: &mut CodeBuilder) {
-        self.mark_start_line(expression, false, code);
+        if let Some(line) = self.expression_start_line(expression, code) {
+            code.mark_line(line);
+        }
     }
 
-    /// kotlinc's `visitVariable` marks the initializer's line once its value is on the stack, then
-    /// the declaration's line. Both entries stay when they share an offset: a multi-line
-    /// `val x =\n    if (…) … else …` records the `if`'s line and then the `val`'s at the store.
-    pub(super) fn mark_initializer_end(&mut self, initializer: ExprId, code: &mut CodeBuilder) {
-        self.mark_start_line(initializer, true, code);
-    }
-
-    /// Mark `expression`'s start line; `kept` keeps the entry when the next mark at this offset
-    /// names another line.
-    fn mark_start_line(&mut self, expression: ExprId, kept: bool, code: &mut CodeBuilder) {
+    /// The output line [`Self::mark_expression_start`] marks for `expression`, mapped through the
+    /// class SMAP for an inline copy.
+    pub(super) fn expression_start_line(
+        &mut self,
+        expression: ExprId,
+        code: &mut CodeBuilder,
+    ) -> Option<u32> {
         if self.ir.callable_scopes.contains(&expression)
             || self.ir.dispatch_line(expression).is_some()
         {
-            return;
+            return None;
         }
-        if self.keeps_start_line(expression) {
-            self.mark_kept_start_line(expression, code);
-            return;
-        }
-        let Some(line) = self
-            .ir
-            .source_line(expression)
-            .or_else(|| safe_call_read_line(self.ir, expression))
-        else {
-            return;
+        // kotlinc's `visitCall` marks an inline call where its source starts
+        // (`markLineNumber(startOffset = true)`), so a call chained onto a receiver on an earlier
+        // line opens on the receiver's line; the inlined body's opening `nop` marks the call's own.
+        let line = if crate::jvm::line_numbers::realizes_inlined_call(self.ir, expression) {
+            self.ir.start_line(expression)
+        } else {
+            self.ir.source_line(expression)
         };
-        if !kept {
-            self.mark_expression_line(expression, line, code);
-        } else if line != 0 && !code.is_dead() {
-            self.note_inlined_expression(expression, code);
-            let line = self.mapped_expression_line(expression, line);
-            code.mark_line_kept(line);
-        }
-    }
-
-    /// Whether `expression`'s line keeps its entry where an operand marks another line at the same
-    /// offset: an intrinsic or safe call that states its line before its operands, or a node
-    /// common IR marks so.
-    pub(super) fn keeps_start_line(&self, expression: ExprId) -> bool {
-        self.ir.kept_start_lines.contains(&expression)
-            || states_line_before_operands(self.ir, expression)
+        let line = line.filter(|&line| line != 0)?;
+        self.note_inlined_expression(expression, code);
+        Some(self.mapped_expression_line(expression, line))
     }
 
     /// Mark `expression`'s line where kotlinc marks an intrinsic call before its operands (the
     /// `andand`/`oror` intrinsic's own mark). Operand code marking another line at this same offset
     /// keeps the entry, as kotlinc's line table does.
-    pub(super) fn mark_kept_start_line(&mut self, expression: ExprId, code: &mut CodeBuilder) {
+    pub(super) fn mark_line_before_operands(&mut self, expression: ExprId, code: &mut CodeBuilder) {
         let Some(line) = self.ir.source_line(expression) else {
             return;
         };
         if line != 0 && !code.is_dead() {
             self.note_inlined_expression(expression, code);
             let line = self.mapped_expression_line(expression, line);
-            code.mark_line_kept(line);
+            code.mark_line(line);
         }
     }
 
@@ -530,31 +460,6 @@ impl Emitter<'_> {
             && self.ir.source_line(expression).is_some()
     }
 
-    /// Common IR identifies an operation whose source line owns its generated leading operand.
-    /// Retain that line at the operand's start so the positionless operand does not withdraw it and
-    /// move it to the later `invoke*`. Ordinary calls keep operand-then-dispatch marking.
-    pub(super) fn mark_generated_operand_start(
-        &self,
-        call: ExprId,
-        first_operand: Option<ExprId>,
-        code: &mut CodeBuilder,
-    ) {
-        if !self.ir.starts_at_generated_operand(call)
-            || !first_operand.is_some_and(|operand| self.ir.is_positionless(operand))
-        {
-            return;
-        }
-        if let Some(line) = self
-            .ir
-            .dispatch_line(call)
-            .or_else(|| self.ir.source_line(call))
-        {
-            if line != 0 {
-                code.mark_line_retained(line);
-            }
-        }
-    }
-
     /// Run `emit` as the emission of a `when` branch condition (kotlinc's `isInsideCondition`).
     pub(super) fn in_condition<R>(&mut self, emit: impl FnOnce(&mut Self) -> R) -> R {
         let outer = std::mem::replace(&mut self.inside_condition, true);
@@ -622,19 +527,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// Whether `expression` realizes an inlined call in place (`SyntheticOriginKind::InlinedCall`)
-    /// or is an external-inline expansion lowered from its declaration plan.
-    pub(super) fn realizes_inlined_call(&self, expression: ExprId) -> bool {
-        self.ir.external_inline_expansions.contains(&expression)
-            || matches!(
-                self.ir.fir_origins.get(&expression),
-                Some(IrNodeOrigin::Synthetic {
-                    kind: SyntheticOriginKind::InlinedCall,
-                    ..
-                })
-            )
-    }
-
     /// kotlinc's `markLineNumberAfterInlineIfNeeded`, after a node that realizes an inlined call in
     /// place (`SyntheticOriginKind::InlinedCall`), and after an external-inline expansion lowered
     /// from its declaration plan.
@@ -643,7 +535,7 @@ impl Emitter<'_> {
     /// anywhere else it is forgotten, so the next mark of any line is written — kotlinc resets its
     /// last line number after an inlined body, which ran under the callee's lines.
     pub(super) fn mark_after_inlined_call(&self, expression: ExprId, code: &mut CodeBuilder) {
-        if !self.realizes_inlined_call(expression) {
+        if !crate::jvm::line_numbers::realizes_inlined_call(self.ir, expression) {
             return;
         }
         if self.ir.inline_result_adaptation_restores_caller(expression) {
@@ -652,10 +544,7 @@ impl Emitter<'_> {
             // would add a LineNumberTable entry kotlinc does not emit.
             return;
         }
-        match code.current_line() {
-            Some(line) if self.inside_condition => code.inlined_line(line),
-            _ => code.forget_line(),
-        }
+        code.line_after_inline(self.inside_condition);
     }
 
     /// Mark the site of an INLINE call, at the first instruction its expansion emits.
@@ -668,7 +557,7 @@ impl Emitter<'_> {
     pub(super) fn mark_inline_call_site_line(&self, expression: ExprId, code: &mut CodeBuilder) {
         if let Some(line) = self.ir.source_line(expression) {
             if line != 0 {
-                code.mark_line_retained(line);
+                code.mark_line(line);
             }
         }
     }

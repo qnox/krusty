@@ -62,7 +62,8 @@ pub(super) fn constructor_default_realization(
     if !matches!(
         constructor.realization,
         MemberRealization::Direct {
-            pass_receiver: false
+            pass_receiver: false,
+            ..
         }
     ) || !constructor
         .call_sig

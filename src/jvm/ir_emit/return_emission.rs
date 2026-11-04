@@ -140,8 +140,11 @@ impl Emitter<'_> {
                 self.mark_return(returned, code);
                 code.nop();
             }
-            if self.emit_return_finalizers(code) {
-                self.mark_return(returned, code);
+            // The return marks its line after the finalizers even when one of them leaves no way
+            // back: kotlinc generates the dead return, and its mark still moves the mapper.
+            let survives = self.emit_return_finalizers(code);
+            self.mark_return(returned, code);
+            if survives {
                 code.ret_void();
             }
             self.reopen_finally_segments(code);
@@ -149,7 +152,6 @@ impl Emitter<'_> {
         };
         let ret = self.ret;
         // `visitReturn` marks its line once the value is on the stack.
-        code.mark_value_boundary(value);
         if ret == crate::types::Ty::Unit {
             // A void function's `return <Unit expression>` evaluates that expression as a
             // statement: kotlinc leaves nothing of its value on the stack.
@@ -164,11 +166,9 @@ impl Emitter<'_> {
         if let Some(&result) = self.suspended_result_returns.get(&returned) {
             self.emit_suspended_result_return(result, code);
         }
-        if self.emit_finalizers_before_return(code) {
-            if self.completes_unsigned_bitwise_value(value) {
-                code.forget_line();
-            }
-            self.mark_return(returned, code);
+        let survives = self.emit_finalizers_before_return(code);
+        self.mark_return(returned, code);
+        if survives {
             emit_return(ret, code);
         }
         self.reopen_finally_segments(code);

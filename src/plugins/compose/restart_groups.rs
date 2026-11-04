@@ -46,7 +46,7 @@
 
 use crate::ir::{
     Callee, ExprId, FunId, IrBinOp, IrConst, IrEnclosure, IrExpr, IrFile, IrFunction,
-    IrParameterIdentity, IrTypeOp,
+    IrNodePosition, IrParameterIdentity, IrTypeOp,
 };
 use crate::types::{EqualityMode, Ty};
 
@@ -340,7 +340,7 @@ fn lambda_group(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLa
         value: None,
     };
     // kotlinc builds the group without offsets: the first line is its first statement's.
-    ir.expr_lines.remove(&body.block);
+    ir.take_statement_line(body.block);
     let root = ir.functions[lambda.implementation as usize]
         .body
         .expect("a lambda has a body");
@@ -786,6 +786,11 @@ fn restart_group(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableF
         branches: vec![(Some(execute), executed), (None, skipped)],
     });
     ir.whens.exhaustive.insert(branch, Ty::Unit);
+    // kotlinc's plugin builds the test and the code around the body without offsets: only the
+    // branch itself begins on the function's line, and the body keeps its own positions.
+    for built in [execute, executed] {
+        ir.settle_tree_positions(built, IrNodePosition::default());
+    }
     mark_line(ir, branch, function_line);
     statements.push(branch);
 
@@ -998,6 +1003,6 @@ fn next_value_slot(ir: &IrFile, function: FunId) -> u32 {
 
 fn mark_line(ir: &mut IrFile, expression: ExprId, line: u32) {
     if line != 0 {
-        ir.expr_lines.insert(expression, line);
+        ir.set_statement_line(expression, line);
     }
 }

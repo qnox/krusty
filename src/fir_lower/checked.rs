@@ -804,6 +804,7 @@ impl BodyLowering<'_> {
                             extension_receiver,
                             &call.arguments,
                             *result,
+                            source_line,
                         )
                         .ok_or(FirLoweringFailure::UnsupportedIntrinsicCall);
                 }

@@ -35,6 +35,35 @@ pub(super) fn realize_unsigned_bitwise_member(
     member.inline_body_plan = None;
 }
 
+/// The JVM descriptor of `element`'s carrier and the JDK class whose static methods implement its
+/// unsigned operations.
+const fn jdk_carrier(element: UnsignedElement) -> (&'static str, &'static str) {
+    match element {
+        UnsignedElement::UInt => ("I", "java/lang/Integer"),
+        UnsignedElement::ULong => ("J", "java/lang/Long"),
+    }
+}
+
+/// Whether `callable`, a member of `UInt` or `ULong`, is realized as the JDK's own unsigned
+/// operation on its carrier. kotlinc's `IntrinsicMethods` implements exactly those declarations
+/// with an intrinsic method of its own instead of a call of the declaration.
+pub(in crate::jvm) fn realizes_jdk_unsigned_operation(
+    callable: &crate::backend::BackendCallableFact,
+) -> bool {
+    let Some(crate::types::SemanticCallableOwner::Classifier(owner)) = callable.declaration_owner
+    else {
+        return false;
+    };
+    let element = if owner == crate::types::wk::uint() {
+        UnsignedElement::UInt
+    } else if owner == crate::types::wk::ulong() {
+        UnsignedElement::ULong
+    } else {
+        return false;
+    };
+    callable.physical_owner == type_name(jdk_carrier(element).1)
+}
+
 /// Realizes `member`, classified as `operation` on `element`, as the JDK static method that
 /// implements it on the carrier, with the receiver passed as its first argument.
 fn realize_jdk_unsigned_member(
@@ -42,10 +71,7 @@ fn realize_jdk_unsigned_member(
     operation: UnsignedMemberOperation,
     member: &mut LibraryMember,
 ) {
-    let (carrier, jdk_owner) = match element {
-        UnsignedElement::UInt => ("I", "java/lang/Integer"),
-        UnsignedElement::ULong => ("J", "java/lang/Long"),
-    };
+    let (carrier, jdk_owner) = jdk_carrier(element);
     let (jdk_name, descriptor) = match operation {
         UnsignedMemberOperation::CompareTo => ("compareUnsigned", format!("({carrier}{carrier})I")),
         UnsignedMemberOperation::Divide => {

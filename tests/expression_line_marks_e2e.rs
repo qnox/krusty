@@ -824,3 +824,102 @@ fn an_expression_bodied_setter_returns_at_its_last_line() {
         &["line 6: 0", "line 7: 1", "line 5: 2", "line 8: 5"],
     );
 }
+
+/// kotlinc decides each line entry from the kind of node it visits: a node that has no operands to
+/// evaluate first (`E.values()`), an intrinsic (`UInt.toString()` realized on the JDK), and an
+/// inlined lambda's invocation mark where their code starts; a `var` without an initializer marks
+/// its declaration before the default it stores; a discarded implicit `Unit` branch value is no
+/// code and marks nothing; and nothing puts the declaration's line ahead of the body's first mark.
+#[test]
+fn line_entries_follow_kotlincs_rule_by_node_kind() {
+    let source = KIND_LINE_RULE;
+    common::byte_diff_against_kotlinc_cp(
+        "KindLineRule",
+        source,
+        "KindLineRuleKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("the reference kotlinc is provisioned")
+    .unwrap_or_else(|why| panic!("{why}"));
+    // Every class the program writes, `Shade` included, is the reference compiler's class byte for
+    // byte, and both compilers write the same classes.
+    let classes = common::classes_against_kotlinc_module_without_script_runtime(&[(
+        "KindLineRule.kt",
+        source,
+    )]);
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        classes.krusty.keys().collect::<Vec<_>>(),
+        "both compilers write the same classes"
+    );
+    for (class, reference) in &classes.reference {
+        assert!(
+            classes.krusty[class] == *reference,
+            "{class} is not kotlinc's class:\n\n{}",
+            classes.differences().join("\n\n")
+        );
+    }
+}
+
+/// The program [`line_entries_follow_kotlincs_rule_by_node_kind`] compares runs as kotlinc's does:
+/// a `box()` added after it calls every function down each of its paths.
+#[test]
+fn the_node_kind_line_rule_program_runs_like_kotlincs() {
+    let source = format!(
+        "{KIND_LINE_RULE}
+fun box(): String {{
+    if (names() != 1) return \"names\"
+    if (text(4294967294u) != \"4294967295\") return \"text\"
+    if (late(true) != 1) return \"late true\"
+    if (late(false) != 2) return \"late false\"
+    branch(true)
+    branch(false)
+    if (runs() != 4) return \"runs\"
+    return \"OK\"
+}}
+"
+    );
+    common::expect_box_same_as_kotlinc(&source, "KindLineRuleBox");
+}
+
+const KIND_LINE_RULE: &str = "\
+enum class Shade { LIGHT, DARK }
+
+fun sink(v: Any?) {}
+
+fun names(): Int {
+    var n = 0
+    for (s in Shade.values()) {
+        n += s.ordinal
+    }
+    return n
+}
+
+fun text(x: UInt): String {
+    val s = (x + 1u).toString()
+    return s
+}
+
+fun late(flag: Boolean): Int {
+    var k: Int
+    if (flag) {
+        k = 1
+    } else {
+        k = 2
+    }
+    return k
+}
+
+fun branch(flag: Boolean) {
+    if (flag) sink(1)
+    sink(2)
+}
+
+fun runs(): Int {
+    val v = run {
+        sink(3)
+        4
+    }
+    return v
+}
+";

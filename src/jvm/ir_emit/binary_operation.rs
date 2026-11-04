@@ -4,73 +4,25 @@ use super::{emit_num_conv, ir_ty_to_jvm, CodeBuilder, Emitter, TempRole, Ty};
 use crate::ir::IrBinOp;
 
 impl Emitter<'_> {
-    fn unsigned_bitwise_operation(&self, mut expression: u32) -> Option<(IrBinOp, u32)> {
-        loop {
-            match self.ir.expr(expression) {
-                crate::ir::IrExpr::TypeOp { arg, .. } => expression = *arg,
-                crate::ir::IrExpr::Block {
-                    stmts,
-                    value: Some(value),
-                } if stmts.is_empty() => {
-                    expression = *value;
-                }
-                crate::ir::IrExpr::PrimitiveBinOp { op, rhs, .. }
-                    if matches!(
-                        op,
-                        IrBinOp::BitAnd
-                            | IrBinOp::BitOr
-                            | IrBinOp::BitXor
-                            | IrBinOp::Shl
-                            | IrBinOp::Shr
-                            | IrBinOp::Ushr
-                    ) && self.is_unsigned_bitwise_result(expression) =>
-                {
-                    return Some((*op, *rhs));
-                }
-                _ => return None,
-            }
-        }
-    }
-
     fn is_unsigned_bitwise_result(&self, expression: u32) -> bool {
         self.ir
             .logical_type(expression)
             .is_some_and(|ty| matches!(ty.canonical_semantic().non_null(), Ty::UInt | Ty::ULong))
     }
 
-    /// Kotlin's primitive unsigned binary members mark their source line after the receiver has
-    /// been loaded. `inv()` is unary despite using xor-with-all-bits-set in IR, so it keeps the
-    /// ordinary expression-entry mark. This is a JVM debug-layout decision over the checked
-    /// operation shape, not dispatch on a library member spelling.
-    fn defers_unsigned_bitwise_start_line(&self, expression: u32) -> bool {
-        let Some((op, rhs)) = self.unsigned_bitwise_operation(expression) else {
-            return false;
-        };
-        !(op == IrBinOp::BitXor && self.ir.is_positionless(rhs))
-    }
-
     pub(super) fn mark_value_expression_start(&mut self, expression: u32, code: &mut CodeBuilder) {
         // A plain local operand of an inline-only unsigned member is loaded with no line of its
-        // own (`genOrGetLocal`). The enclosing statement or call keeps the line on the first load.
+        // own (`genOrGetLocal`).
         if self.suppress_unsigned_local_line {
             return;
         }
-        if !self.defers_unsigned_bitwise_start_line(expression) {
+        if crate::jvm::line_numbers::marks_value_line_at_start(
+            self.ir,
+            self.default_call_operands,
+            expression,
+        ) {
             self.mark_expression_start(expression, code);
         }
-    }
-
-    pub(super) fn completes_unsigned_bitwise_value(&self, expression: u32) -> bool {
-        self.unsigned_bitwise_operation(expression).is_some()
-    }
-
-    /// The right operand of this unsigned operation is itself an unsigned operation.
-    ///
-    /// `r = r or (cur and mask)` and `r = r or (cur shl count)` are this shape. kotlinc marks the
-    /// assignment line and then the inlined `or` marks it again, both at the receiver load.
-    pub(super) fn unsigned_bitwise_rhs_is_unsigned(&self, expression: u32) -> bool {
-        self.unsigned_bitwise_operation(expression)
-            .is_some_and(|(_, rhs)| self.unsigned_bitwise_operation(rhs).is_some())
     }
 
     pub(super) fn emit_binop(
@@ -180,7 +132,7 @@ impl Emitter<'_> {
                 if unsigned && !self.spills_operand_prefix(rhs) {
                     self.emit_unsigned_bitwise_operands(expression, lhs, rhs, code);
                 } else if let Some(line) =
-                    super::debug_lines::inversion_mask_line(self.ir, expression)
+                    crate::jvm::line_numbers::inversion_mask_line(self.ir, expression)
                 {
                     // kotlinc's `inv` intrinsic restates its line where it pushes the mask.
                     self.emit_value(lhs, code);
@@ -256,13 +208,18 @@ impl Emitter<'_> {
             // These members are inline-only. kotlinc's `markLineNumberAfterInlineIfNeeded` runs
             // after the body: inside a condition the line is written again at once, on the jump;
             // otherwise it is forgotten so the next mark of that same line is kept.
-            match code.current_line() {
-                Some(line) if self.inside_condition => code.inlined_line(line),
-                _ => code.forget_line(),
-            }
+            code.line_after_inline(self.inside_condition);
         }
     }
 
+    /// The operands of an unsigned bitwise member, which the standard library declares
+    /// `@InlineOnly` over the signed carrier, and the member's own line.
+    ///
+    /// kotlinc inlines the member with its arguments in place (`IrInlineCodegen`): a plain local
+    /// argument is `genOrGetLocal`, loaded with no line, any other argument is generated with its
+    /// own lines, and the call marks its line once they are, ahead of their code (see
+    /// `CodeBuilder::mark_in_place_call_line`). The body itself has no lines, and the mapper
+    /// forgets the caller's line after it (`rebuild_unsigned_bitwise_result`).
     fn emit_unsigned_bitwise_operands(
         &mut self,
         expression: u32,
@@ -270,67 +227,32 @@ impl Emitter<'_> {
         rhs: u32,
         code: &mut CodeBuilder,
     ) {
-        let literal_argument = self.is_source_literal(rhs);
-        // A condition and an assignment already placed the line on the receiver load. A literal
-        // must not take it. The assignment flag stays set for the whole right-hand side, so an
-        // inner `and` shares that receiver line; its own literal does not start an entry. The
-        // inner `constructor-impl` still forgets, and the outer literal is the next mark. A
-        // declaration still lets the literal own the line, and a nested unsigned operation that
-        // is not under that flag forgets ahead of its own literal so that literal is kept.
-        // An enclosing `&&`/`||` that kept its own mark of this line there owns the receiver too.
-        let line = self.ir.source_line(expression);
-        let kept_line = line.is_some_and(|line| code.line_kept_here(line));
-        let keep_receiver_line =
-            self.inside_condition || self.unsigned_assignment_line || kept_line;
-        let move_line = literal_argument
-            && !keep_receiver_line
-            && self.unsigned_receiver_line_moves.unwrap_or(true);
-        if move_line {
-            if let Some(line) = line {
-                code.withdraw_operand_line(line);
-            }
+        let index = code.line_entry_count();
+        let pc = code.bytes.len().min(usize::from(u16::MAX)) as u16;
+        self.emit_unsigned_operand(lhs, code);
+        self.emit_unsigned_operand(rhs, code);
+        if let Some(line) = self.expression_start_line(expression, code) {
+            code.mark_in_place_call_line(index, pc, line);
         }
-        let receiver_is_unsigned = self.unsigned_bitwise_operation(lhs).is_some();
-        let outer_receiver = self.unsigned_receiver_line_moves.replace(move_line);
-        // The extension receiver is generated in full, so its load keeps a line. A literal that
-        // takes that line is the exception: the load then has none.
-        let marks_before = code.line_marks().len();
-        self.emit_unsigned_operand(lhs, code, move_line);
-        self.unsigned_receiver_line_moves = outer_receiver;
-        // A call receiver (`b.toUInt()`) marks its own line while it emits. Only a mark still
-        // sitting at the cursor — nothing has been written yet — belongs to the literal instead.
-        if move_line && !receiver_is_unsigned {
-            if let Some(line) = line {
-                code.withdraw_operand_line(line);
-            }
-        }
-        // A plain local lets the literal own the line, even when the load itself was marked
-        // (`(v and mask) shl c` records both). A property read or a captured local records its
-        // own line and keeps it; forgetting here would hand that same line to the literal. An
-        // inlined call (`toUInt()`) forgets after its body, so the literal still owns the line.
-        let receiver_left_a_live_line = !self.plain_local_operand(lhs)
-            && code.line_marks().len() > marks_before
-            && !code.line_forgotten();
-        if literal_argument && !keep_receiver_line && !receiver_left_a_live_line {
-            code.forget_line();
-        }
-        // The other parameter of an inline-only member is `genOrGetLocal` when it is a local, so
-        // it never records a line, on this line or the next.
-        self.emit_unsigned_operand(rhs, code, true);
     }
 
-    fn emit_unsigned_operand(
-        &mut self,
-        operand: u32,
-        code: &mut CodeBuilder,
-        suppress_local_line: bool,
-    ) {
-        let plain_local = suppress_local_line && self.plain_local_operand(operand);
+    /// One argument of an unsigned member. A plain local is `genOrGetLocal`, loaded with no line.
+    /// An operand lowering generated with no position (`inv()`'s all-bits mask) is code of the
+    /// member's own body, which has no lines either.
+    fn emit_unsigned_operand(&mut self, operand: u32, code: &mut CodeBuilder) {
+        let plain_local = self.plain_local_operand(operand);
+        let body_code = self.ir.is_positionless(operand);
         let saved = self.suppress_unsigned_local_line;
         if plain_local {
             self.suppress_unsigned_local_line = true;
         }
+        if body_code {
+            code.line_mapper().open_no_line_scope();
+        }
         self.emit_value(operand, code);
+        if body_code {
+            code.line_mapper().close_no_line_scope();
+        }
         self.suppress_unsigned_local_line = saved;
     }
 
@@ -343,16 +265,6 @@ impl Emitter<'_> {
                     value: Some(value),
                 } if stmts.is_empty() => expression = *value,
                 crate::ir::IrExpr::GetValue(_) => return true,
-                _ => return false,
-            }
-        }
-    }
-
-    fn is_source_literal(&self, mut expression: u32) -> bool {
-        loop {
-            match self.ir.expr(expression) {
-                crate::ir::IrExpr::TypeOp { arg, .. } => expression = *arg,
-                crate::ir::IrExpr::Const(_) => return self.ir.source_line(expression).is_some(),
                 _ => return false,
             }
         }

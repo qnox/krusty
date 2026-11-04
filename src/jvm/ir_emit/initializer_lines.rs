@@ -51,8 +51,9 @@ impl Emitter<'_> {
         self.render_initializer_boundaries && self.ir.initializer_blocks.contains(&block)
     }
 
-    /// kotlinc's `init { … }` lines: the block opens on its `init` line and closes on its `}`, each
-    /// an entry of its own even with no instruction there (see [`CodeBuilder::mark_line_occupied`]).
+    /// kotlinc's `init { … }` lines (`visitBlock` of a `SYNTHESIZED_INIT_BLOCK`): the block opens on
+    /// its `init` line and closes on its `}`, each marked over a `nop` that the redundant-nop pass
+    /// keeps only where the line owns no other instruction.
     pub(super) fn mark_initializer_line(&self, block: u32, closing: bool, code: &mut CodeBuilder) {
         if !self.renders_initializer_boundary(block) {
             return;
@@ -62,7 +63,8 @@ impl Emitter<'_> {
             false => self.ir.source_line(block),
         };
         if let Some(line) = line.filter(|&line| line != 0) {
-            code.mark_line_occupied(line);
+            code.mark_line(line);
+            code.nop();
         }
     }
 

@@ -253,9 +253,16 @@ impl Emitter<'_> {
         // line forgotten: kotlinc's `visitVariable` marks it before the cast. Anywhere else the
         // next line mark is the consumer's own.
         let initializer = self.transformed_suspensions.initializer == Some(e);
-        let marked = block || (initializer && code.line_forgotten());
         match self.ir.source_line(e) {
-            Some(line) if marked && !discarded && line != 0 => code.mark_line(line),
+            // After the block the call's line is the coroutine transformer's, written at the
+            // point the resumed path joins; kotlinc's codegen has forgotten its line there, so
+            // the next mark, a `return`'s included, writes its entry.
+            Some(line) if block && !discarded && line != 0 => {
+                code.inlined_line(line.min(u32::from(u16::MAX)) as u16)
+            }
+            Some(line) if initializer && code.line_forgotten() && !discarded && line != 0 => {
+                code.mark_line(line)
+            }
             _ => {}
         }
         let target = jvm_declared_ty(&result);

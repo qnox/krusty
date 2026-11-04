@@ -56,7 +56,7 @@ pub(super) fn memoize(
         ir.property_initializer_stores.insert(store);
         // The lambda is created on the line it starts.
         if lambda.opening_line != 0 {
-            ir.expr_lines.insert(store, lambda.opening_line);
+            ir.set_statement_line(store, lambda.opening_line);
         }
         stores.push(store);
         let declaration = &mut ir.classes[class_id as usize];
