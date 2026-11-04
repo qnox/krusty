@@ -384,3 +384,25 @@ mod tests {
         rename_bound_calls(&mut ir, 0, 0, "getResult-impl");
     }
 }
+
+/// A facade-owned value-class `var`'s default setter name. The SETTER's name is decided by its
+/// parameter, not by the storage: a value-class parameter always contributes to the hash, whether
+/// the field behind it holds the carrier or the box. `var nullableScalar: Crate?` keeps a boxed
+/// field AND takes `setNullableScalar-<hash>(Crate)`, which tying the two decisions together left
+/// unmangled. (The getter keeps its plain name: a value-class RESULT alone contributes no hash
+/// inside a file class.)
+pub(super) fn stamp_facade_setter(ir: &mut IrFile, storage: u32, declared: Ty, under: &Under) {
+    let property = &ir.statics[storage as usize];
+    if !property.is_var || !property.is_facade_owned() || property.accessors.any_declared() {
+        return;
+    }
+    let setter = vc_mangle(
+        &property_setter_name(&property.name),
+        std::slice::from_ref(&declared),
+        &Ty::Unit,
+        under,
+        false,
+        false,
+    );
+    ir.set_jvm_static_accessor_name(storage, JvmAccessorSide::Setter, setter);
+}
