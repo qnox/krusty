@@ -57771,13 +57771,13 @@ impl<'a> Checker<'a> {
                 }
                 let mut bound_represented = None;
                 if unbound.is_none() {
-                    // Bound: a reference receiver, or a boxable primitive (boxed then `getClass`).
+                    // Bound: a reference receiver, or a builtin signed or unsigned scalar value
+                    // (its runtime class is that classifier).
                     let rt = self.expr(scope, recv);
                     if rt == Ty::Error {
                         return self.set(e, Ty::Error);
                     }
-                    let boxable = rt.jvm_boxed_ref().is_some();
-                    if !rt.is_reference() && !boxable {
+                    if !rt.is_reference() && !rt.is_builtin_scalar() {
                         return unsupported(self);
                     }
                     // The runtime class of a VALUE may be a proper subtype of its static type.

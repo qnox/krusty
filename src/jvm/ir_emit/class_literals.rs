@@ -105,14 +105,14 @@ impl super::Emitter<'_> {
                     code.ldc_class(internal, self.cw);
                 }
             },
-            (None, Some(value)) => match primitive_wrapper(self.value_ty(value)) {
+            (None, Some(value)) => match primitive_wrapper(self.bound_class_literal_ty(value)) {
                 Some(wrapper) => {
                     self.emit_discarding(value, code);
                     self.primitive_class(wrapper, wrap_primitives, code);
                 }
                 None => {
                     self.emit_value(value, code);
-                    self.box_scalar_operand(self.value_ty(value), code);
+                    self.box_scalar_operand(self.bound_class_literal_ty(value), code);
                     let get_class =
                         self.cw
                             .methodref("java/lang/Object", "getClass", "()Ljava/lang/Class;");
@@ -142,6 +142,19 @@ impl super::Emitter<'_> {
 }
 
 /// The wrapper class of a JVM primitive type; `None` for a reference or an unsigned value class.
+impl super::Emitter<'_> {
+    /// The type whose runtime class a bound class literal names. A scalar value sits in its JVM
+    /// carrier (an unsigned value in the signed one), so the checked scalar type, not the slot,
+    /// decides the box: `u::class` for a `UInt` is `kotlin.UInt`, never `int`.
+    fn bound_class_literal_ty(&self, value: ExprId) -> Ty {
+        let physical = self.value_ty(value);
+        self.ir
+            .logical_type(value)
+            .filter(|checked| checked.scalar_value_repr() == Some(physical))
+            .unwrap_or(physical)
+    }
+}
+
 fn primitive_wrapper(ty: Ty) -> Option<&'static str> {
     (ty.scalar_value_repr() == Some(ty))
         .then(|| crate::jvm::jvm_class_map::wrapper_internal(ty))

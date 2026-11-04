@@ -1834,6 +1834,11 @@ impl Ty {
         matches!(self, Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong)
     }
 
+    /// True for a builtin scalar classifier: a signed number, `Char`, `Boolean`, or unsigned.
+    pub fn is_builtin_scalar(self) -> bool {
+        self.is_numeric_or_char() || self == Ty::Boolean || self.is_unsigned()
+    }
+
     /// Whether a property of this type may carry metadata `HAS_CONSTANT`.
     ///
     /// kotlinc's `canBeUsedForConstVal`: the platform lower bound is a primitive, `String`, or an

@@ -3453,7 +3453,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             }
             _ => receiver,
         };
-        if !unbound && !receiver.is_reference() && receiver.jvm_boxed_ref().is_none() {
+        if !unbound && !receiver.is_reference() && !receiver.is_builtin_scalar() {
             return Err(Self::failure());
         }
         let Some(base) = self.table.libraries.class_literal_type() else {

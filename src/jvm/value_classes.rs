@@ -2865,9 +2865,7 @@ pub(crate) fn lower_value_classes(
                     );
                 }
             }
-            value_boundaries::record_property_receiver_boundary(
-                &mut ops, &ir.exprs, &repr_ctx, id, &under,
-            );
+            value_boundaries::record_receiver_boundary(&mut ops, &ir.exprs, &repr_ctx, id, &under);
             // A member call (`toString`/`equals`/`hashCode`/user method) on an UNBOXED value class
             // dispatches on the boxed object — box the receiver. (Getter calls were already rewritten to
             // identity property access in step 4, so only real instance-method calls remain here.)
