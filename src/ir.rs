@@ -53,7 +53,6 @@ pub use compiled_inline_calls::{CompiledInlineOperands, SameModuleInlining};
 mod constants;
 mod constructors;
 mod default_arguments;
-pub(crate) use default_arguments::module_override_callable;
 mod enum_switch_whens;
 pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
@@ -159,7 +158,9 @@ pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
 pub use lambda_classes::{IrInvokeBridge, IrLambdaCapture, IrLambdaClass, IrSamWrapperClass};
 pub(crate) use lifting_sequences::{IrLiftingEntry, IrLiftingRoot, IrLiftingSequence};
-pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
+pub(crate) use local_class_names::{
+    IrClassDeclarationContext, IrLocalClassNameProvenance, IrLocalClassOwner,
+};
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
     IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
@@ -884,6 +885,8 @@ pub enum IrEnclosure {
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
 pub struct IrClass {
+    /// Original checked source context; absent for a class with no source declaration.
+    pub(crate) declaration_context: Option<IrClassDeclarationContext>,
     /// Non-local lexical declaration name retained independently from the class's physical name.
     pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub fq_name: TypeName,
