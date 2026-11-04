@@ -62,7 +62,7 @@ fn char_arithmetic_result_type_survives_nested_common_lowering() {
             .then_some(expression as u32)
         })
         .expect("lowered Char subtraction");
-    assert_eq!(ir.logical_types.get(&subtraction), Some(&Ty::Char));
+    assert_eq!(ir.logical_type(subtraction), Some(Ty::Char));
 }
 
 #[test]
@@ -2006,7 +2006,7 @@ fn nested_generic_inline_expansion_specializes_its_result_storage() {
         .expect("consumer body");
 
     assert!(!expression_subtree_contains(&ir, body, &|expression, _| {
-        ir.inline_regions.contains(&expression) && ir.physical_types.contains_key(&expression)
+        ir.inline_regions.contains(&expression) && ir.physical_type(expression).is_some()
     }));
     assert!(!expression_subtree_contains(&ir, body, &|_, expression| {
         let IrExpr::Variable {

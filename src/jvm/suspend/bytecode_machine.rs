@@ -173,7 +173,7 @@ pub(super) fn route(
         };
     // The arrays the transformer computes replace these when the continuation class is written.
     route.outputs.continuation_metadata.insert(
-        continuation_class.clone(),
+        crate::types::type_name(&continuation_class),
         ContinuationMetadata {
             m: method.clone(),
             c: owner.replace('/', "."),
