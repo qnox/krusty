@@ -2,14 +2,24 @@ use super::*;
 use crate::diag::DiagSink;
 use crate::features::LangFeatures;
 use crate::frontend::{PlatformProvider, SourceInput};
-use crate::libraries::{CompilerCoreDeclaration, EmptySymbolSource};
+use crate::libraries::EmptySymbolSource;
 
 #[test]
 fn any_equals_relation_is_published_for_every_classifier_placement() {
+    let core = super::super::override_plans::declared_functions(
+        &EmptySymbolSource,
+        Ty::obj_name(crate::types::wk::any()),
+        "equals",
+    );
+    let [core] = core.as_slice() else {
+        panic!("core provider must publish one Any.equals declaration");
+    };
+    let core_identity = core
+        .callable
+        .external_identity
+        .expect("the core provider identifies its Any.equals declaration");
     let expected = ResolvedOperatorEqualsOverride {
-        overridden: ResolvedOperatorEqualsTarget::CompilerCore(
-            CompilerCoreDeclaration::KotlinAnyEquals,
-        ),
+        overridden: ResolvedFunctionOverrideTarget::External(core_identity),
         overridden_owner: crate::types::wk::any(),
         overridden_semantic_role: Some(crate::types::SemanticCallRole::KotlinAnyEquals),
         overridden_result: crate::fir::ResolvedTy::new(Ty::Boolean).unwrap(),
@@ -55,17 +65,16 @@ fn any_equals_relation_is_published_for_every_classifier_placement() {
     )
     .expect("the exact checker-selected local relation must freeze with its stable signature");
 
-    let core = super::super::override_plans::declared_functions(
-        &EmptySymbolSource,
-        Ty::obj_name(crate::types::wk::any()),
-        "equals",
-    );
-    let [core] = core.as_slice() else {
-        panic!("core provider must publish one Any.equals declaration");
-    };
+    let realization =
+        crate::symbol_source::SymbolSource::external_callable(&EmptySymbolSource, core_identity)
+            .expect("the core provider answers for the identity it assigned");
     assert_eq!(
-        core.callable.compiler_core_declaration,
-        Some(CompilerCoreDeclaration::KotlinAnyEquals)
+        realization.callable.semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinAnyEquals)
+    );
+    assert_eq!(
+        realization.callable.declaration_owner, core.callable.declaration_owner,
+        "the selected and realized Any.equals name the same semantic owner"
     );
     assert_eq!(
         core.callable.declaration_owner,
@@ -138,8 +147,8 @@ fn checked_local_relation_rejects_an_unpublished_stable_callable() {
     let selected = crate::fx_hash::HashMap::from_iter([(
         declaration,
         ResolvedOperatorEqualsOverride {
-            overridden: ResolvedOperatorEqualsTarget::CompilerCore(
-                CompilerCoreDeclaration::KotlinAnyEquals,
+            overridden: ResolvedFunctionOverrideTarget::External(
+                crate::fir::ExternalCallableId::from_raw(0),
             ),
             overridden_owner: crate::types::wk::any(),
             overridden_semantic_role: Some(crate::types::SemanticCallRole::KotlinAnyEquals),

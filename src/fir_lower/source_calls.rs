@@ -488,7 +488,7 @@ impl BodyLowering<'_> {
         // dependency ABI. Ordinary source expressions publish the same fact at the outer lowering
         // boundary, but generated consumers (notably callable-reference adapters) invoke this
         // operation directly and therefore need the call node itself to carry it.
-        self.ir.logical_types.insert(call, result.get());
+        self.ir.set_logical_type(call, result.get());
         if let Some(singleton) = singleton_dispatch {
             self.ir
                 .external_singleton_dispatches
@@ -1391,6 +1391,7 @@ impl BodyLowering<'_> {
             crate::ir::IrAnnotationConstruction {
                 interface: classifier,
                 members,
+                arguments: annotation.arguments.clone(),
                 defaults,
                 scopes: vec![enclosing_class],
             },
@@ -1450,6 +1451,7 @@ impl BodyLowering<'_> {
                 classifier,
                 members,
                 values,
+                arguments,
             } => {
                 if members.len() != values.len() {
                     return None;
@@ -1473,6 +1475,7 @@ impl BodyLowering<'_> {
                     crate::ir::IrAnnotationConstruction {
                         interface: *classifier,
                         members: members.clone(),
+                        arguments: arguments.clone(),
                         defaults: vec![None; members.len()],
                         // Evaluated where the constructions omitting this element are.
                         scopes: Vec::new(),
@@ -1584,10 +1587,8 @@ impl BodyLowering<'_> {
             // was boxed by its reference-typed temporary.
             let operand = self
                 .ir
-                .physical_types
-                .get(&receiver)
-                .or_else(|| self.ir.logical_types.get(&receiver))
-                .copied();
+                .physical_type(receiver)
+                .or_else(|| self.ir.logical_type(receiver));
             let receiver = self.direct_call_operand(receiver, specialized);
             if operand.is_some_and(|operand| !operand.is_reference()) && specialized.is_reference()
             {
@@ -1677,12 +1678,7 @@ impl BodyLowering<'_> {
                 let classifier = self.index.enclosing_classifier(callable.declaration)?;
                 let semantic_receiver =
                     Ty::obj_name(dispatch_class.unwrap_or(classifier.classifier));
-                let storage_receiver = self
-                    .ir
-                    .physical_types
-                    .get(&receiver)
-                    .copied()
-                    .unwrap_or(semantic_receiver);
+                let storage_receiver = self.ir.physical_type(receiver).unwrap_or(semantic_receiver);
                 Some(self.spill_call_operand(receiver, storage_receiver, &mut statements))
             }
             None => None,
@@ -2261,7 +2257,7 @@ impl BodyLowering<'_> {
         // source FIR node of its own. Preserve the already-specialized semantic operand type anyway:
         // a backend may need to distinguish `UInt` from its `int` carrier when the selected
         // declaration stores the value in an erased reference slot.
-        self.ir.logical_types.insert(read, ty);
+        self.ir.set_logical_type(read, ty);
         read
     }
 
@@ -2288,8 +2284,8 @@ fn inline_argument_stays(ir: &crate::ir::IrFile, value: ExprId) -> bool {
     }
 }
 
-/// The inline template of a lambda, or of a non-suspend callable reference whose adapter is that
-/// template. The reference's target is not consulted: the adapter's captures, bound receiver, and
+/// The inline template of a lambda, or of a callable reference whose adapter is that template and
+/// whose selected declaration is not itself suspend. The reference's target is not consulted: the adapter's captures, bound receiver, and
 /// one returned value are the invocation. A stored reference never reaches this helper.
 pub(crate) fn inline_argument_template(
     ir: &crate::ir::IrFile,

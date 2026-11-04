@@ -265,3 +265,22 @@ fn a_callable_reference_keeps_an_unbound_callee_formal_postponed() {
     assert_eq!(common::compiler_errors(&result.krusty_stderr), []);
     common::expect_box_same_as_kotlinc(GENERIC_CALLEE_REFERENCE, "GenericCalleeReference");
 }
+
+#[test]
+fn overloaded_extension_reference_passed_to_stdlib_reduce_on_an_implicit_receiver() {
+    // `reduce` is an extension on the implicit `List` receiver. Its `(S, T) -> S` parameter selects
+    // `and(Expr<Boolean>)`; `and(() -> Op<Boolean>)` cannot take the list's `Op<Boolean>` element.
+    const SRC: &str = "open class Expr<T>(val label: String)\n\
+class Op<T>(label: String) : Expr<T>(label)\n\
+infix fun Expr<Boolean>.and(op: Expr<Boolean>): Op<Boolean> = Op(\"(\" + label + \" and \" + op.label + \")\")\n\
+inline fun Expr<Boolean>.and(op: () -> Op<Boolean>): Op<Boolean> = and(op())\n\
+fun List<Op<Boolean>>.compoundAnd(): Op<Boolean> = reduce(Op<Boolean>::and)\n\
+fun List<Op<Boolean>>.inferredAnd() = reduce(Op<Boolean>::and)\n\
+fun box(): String {\n\
+    val items = listOf(Op<Boolean>(\"a\"), Op<Boolean>(\"b\"), Op<Boolean>(\"c\"))\n\
+    if (items.compoundAnd().label != \"((a and b) and c)\") return items.compoundAnd().label\n\
+    if (items.inferredAnd().label != \"((a and b) and c)\") return items.inferredAnd().label\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("reduce(Op<Boolean>::and)"), "OK");
+}
