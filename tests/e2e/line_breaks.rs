@@ -5,6 +5,8 @@ use super::common;
 
 #[path = "../cast_line_break_e2e.rs"]
 mod cast_line_break_e2e;
+#[path = "../child_serializers_companion_line_e2e.rs"]
+mod child_serializers_companion_line_e2e;
 #[path = "../class_header_newline_e2e.rs"]
 mod class_header_newline_e2e;
 #[path = "../companion_static_initializer_line_e2e.rs"]
