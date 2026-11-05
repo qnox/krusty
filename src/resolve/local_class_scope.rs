@@ -133,6 +133,36 @@ fn type_parameters(
     }
 }
 
+/// The type-parameter declarations of the classes an `inner class` captures, outermost first. Their
+/// parameters are in scope for its members (`inner class N : Iterator<T>` with the outer's `T`).
+pub(super) fn inner_class_enclosing_type_parameters(
+    file: &File,
+    class: &ClassDecl,
+) -> Vec<EnclosingTypeParameterDeclaration> {
+    let mut declarations = Vec::new();
+    let mut outer = class.inner_of.as_deref();
+    while let Some(name) = outer.filter(|_| declarations.len() < 32) {
+        let Some(owner) = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Class(owner) if owner.name == name => Some(owner),
+                _ => None,
+            })
+        else {
+            break;
+        };
+        declarations.push(type_parameters(
+            owner.span.lo,
+            &owner.type_params,
+            &owner.type_param_bounds,
+        ));
+        outer = owner.inner_of.as_deref();
+    }
+    declarations.reverse();
+    declarations
+}
+
 /// Every statement and expression reachable from a body, including local-class member bodies.
 fn reachable_nodes(file: &File, root: ExprId) -> (Vec<StmtId>, Vec<ExprId>) {
     let mut exprs = vec![root];

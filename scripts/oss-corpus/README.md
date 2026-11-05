@@ -22,6 +22,22 @@ unsupported compiler plugin or option) counts as a miss, with the plugin's reaso
 fails counts as a miss with the first error it logged. Android modules take part only in a project
 that names a variant in `projects.tsv`, and then only that variant's compiles.
 
+After each measured build, an unmeasured test build runs the project's own JVM tests on the classes
+that build compiled. `outputs.py --keep` first snapshots the measured outputs and leaves them in
+place for it; `outputs.py --clear` then removes them and lists every file under them the test build
+wrote, rewrote or deleted (a compile task that ran again, say). The snapshot, and so the byte
+comparison, is always the measured build's; when a test build changed it, its tests did not run on
+the measured classes, and the project's test comparison is reported unavailable instead. `corpus.init.gradle` adds the
+`corpusTest` task, which depends on every JVM `Test` task of the projects whose compiles are
+compared (an Android project's unit tests of its variant only). In a test build no test task is up
+to date or taken from the build cache, a failing test does not fail its task, and the init script
+lists each test task with its JUnit XML report directory and the compile tasks it depends on,
+directly or through an upstream module's jar. Test builds run online, since the warm-up downloads
+only what compiling needs, and stop after `$CORPUS_TEST_TIMEOUT` seconds (3600 by default).
+`testruns.py` compares only the tests that passed on kotlinc's classes, and counts how many of them
+pass, fail, are skipped or do not run on krusty's; a test task whose compilations krusty built
+every one of runs krusty's classes only, and those tasks are totalled apart.
+
 Both builds are measured. `measure.py` runs each one as the child subreaper of everything it starts,
 so the Gradle, Kotlin and krusty processes and the daemons that outlive the build are all counted: it
 records wall time, CPU time, and the peak of their summed resident memory (sampled every 100 ms,
@@ -38,7 +54,8 @@ binary keeps frame pointers), `hotspots.py` folds the krusty processes' call sta
 and the report lists the top ones across the corpus with a link to each project's flame graph.
 
 `summarize.py` turns the per-project results into the run's report: stars, Kotlin and Java lines,
-compilations built, identical classes, the reason for every miss, what both builds cost, krusty's
+compilations built, identical classes, the reason for every miss, the projects' tests that pass on
+krusty's classes, what both builds cost, krusty's
 hotspots, and the Gradle and compiler plugins the corpus uses. The nightly run, and a manual run
 with `publish` set, records the results on the `corpus-results` branch with `publish.py`:
 `README.md` is the scoreboard, `projects/<name>/` holds each project's latest result (a project a
@@ -47,7 +64,7 @@ run could not measure keeps its previous one), and `history.tsv` gets one line p
 Setup fails fast: a failed fetch, a checkout that is not the pinned commit, a patch that does not
 apply, or a Kotlin version pin that does not match exactly one assignment (`pin.py`) stops the run
 before either build. `test_compare.py`, `test_setup.py`, `test_summarize.py`, `test_publish.py`,
-`test_measure.py` and `test_hotspots.py` cover the comparison, the output inventory, the pin
+`test_measure.py`, `test_hotspots.py` and `test_testruns.py` cover the comparison, the test runs, the output inventory, the pin
 rewrite, the setup failures, the report, the results branch, the build measurement and the stack
 folding.
 

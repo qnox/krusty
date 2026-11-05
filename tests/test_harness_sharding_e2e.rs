@@ -781,7 +781,7 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
         .expect("each version's JVM row runs every non-box conformance test");
     let release = workflow
         .find(
-            "needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]",
+            "needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]",
         )
         .expect(
             "release waits on combined conformance plus the exact tested Gradle and Maven artifacts and matrices",
@@ -1302,9 +1302,10 @@ fn phase_timing_coverage_run_prints_every_phase() {
     let summary = temp.join("summary.json");
     let compiler_json = temp.join("compiler.json");
     let lsp_json = temp.join("lsp.json");
+    let github_output = temp.join("github-output");
     fs::write(
         &e2e_bin,
-        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\n",
+        "#!/usr/bin/env bash\nif [ -n \"${GITHUB_OUTPUT:-}\" ]; then printf '%s\\n' 'compiler_e2e_binary=child-overwrite' >>\"$GITHUB_OUTPUT\"; fi\nprintf '%s\\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\n",
     )
     .expect("write e2e stub");
     fs::write(
@@ -1342,6 +1343,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
     }
 
     let run_coverage = |cpu_source: &str| {
+        fs::write(&github_output, "").expect("reset owned workflow output");
         Command::new("bash")
             .arg(root.join("scripts").join("coverage.sh"))
             .arg(&summary)
@@ -1353,6 +1355,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
             .env("KRUSTY_COVERAGE_LSP_JSON", &lsp_json)
             .env("KRUSTY_TEST_JOBS", "1")
             .env("KRUSTY_TEST_THREADS", "1")
+            .env("GITHUB_OUTPUT", &github_output)
             .env("RUSTFLAGS", "-Z threads=4")
             .env("E2E_BIN", &e2e_bin)
             .env("UNIT_BIN", &unit_bin)
@@ -1367,6 +1370,12 @@ fn phase_timing_coverage_run_prints_every_phase() {
         output.status.success(),
         "coverage stub run failed: {stderr}"
     );
+    assert_eq!(
+        fs::read_to_string(&github_output).expect("read workflow output"),
+        format!("compiler_e2e_binary={}\n", e2e_bin.display()),
+        "coverage alone publishes its selected binary after its children finish"
+    );
+    assert!(e2e_bin.is_file(), "published executable remains available");
     assert!(
         stderr.contains("cargo: visible stderr"),
         "compiler test build hid cargo stderr: {stderr}"
@@ -1392,6 +1401,10 @@ fn phase_timing_coverage_run_prints_every_phase() {
     assert!(
         fallback_output.status.success(),
         "coverage sysctl fallback run failed: {fallback_stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(&github_output).expect("read fallback workflow output"),
+        format!("compiler_e2e_binary={}\n", e2e_bin.display())
     );
     assert_eq!(
         fallback_stderr
@@ -1451,6 +1464,10 @@ fn phase_timing_coverage_run_prints_every_phase() {
     .expect("write failing unit stub");
     let failed_unit = run_coverage("nproc");
     assert_eq!(failed_unit.status.code(), Some(1));
+    assert!(
+        fs::read_to_string(&github_output).unwrap().is_empty(),
+        "failed coverage must not publish an executable"
+    );
     let failed_unit_stderr =
         String::from_utf8(failed_unit.stderr).expect("coverage stderr is UTF-8");
     assert!(
@@ -1470,6 +1487,10 @@ fn phase_timing_coverage_run_prints_every_phase() {
     .expect("write failing e2e stub");
     let failed_e2e = run_coverage("nproc");
     assert_eq!(failed_e2e.status.code(), Some(1));
+    assert!(
+        fs::read_to_string(&github_output).unwrap().is_empty(),
+        "failed e2e coverage must not publish an executable"
+    );
     let failed_e2e_stderr = String::from_utf8(failed_e2e.stderr).expect("coverage stderr is UTF-8");
     assert!(
         failed_e2e_stderr.contains("coverage: e2e exited with status 9"),

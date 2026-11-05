@@ -13,7 +13,7 @@ use super::{Checker, ClassSig, ResolvedConstructor};
 /// inspecting a constructor realization or querying a symbol provider again.
 #[derive(Clone, Debug)]
 pub(super) struct ConstructorDeclarationShape {
-    pub(super) formals: Vec<String>,
+    pub(super) formals: Vec<crate::types::TyParamName>,
     pub(super) bounds: Vec<Ty>,
     pub(super) parameters: Vec<Ty>,
 }
@@ -21,7 +21,7 @@ pub(super) struct ConstructorDeclarationShape {
 impl ConstructorDeclarationShape {
     pub(super) fn source(class: &ClassSig, parameters: Vec<Ty>) -> Self {
         Self {
-            formals: class.type_params().clone(),
+            formals: crate::types::TyParamName::all(class.type_params()),
             bounds: class.type_param_bounds().clone(),
             parameters,
         }
@@ -30,7 +30,7 @@ impl ConstructorDeclarationShape {
     pub(super) fn provider(classifier: &LibraryType, member: &LibraryMember) -> Self {
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
         Self {
-            formals: classifier.type_params().clone(),
+            formals: crate::types::TyParamName::all(classifier.type_params()),
             bounds: classifier
                 .type_param_bounds()
                 .iter()
@@ -55,8 +55,13 @@ pub(super) fn initial_provider_bindings(
 ) -> GSigBinds {
     let mut bindings = inferred.clone();
     for formal in upper_only {
-        let binding = tightest_upper.get(formal).copied().unwrap_or(Ty::Nothing);
-        bindings.entry(formal.clone()).or_insert(binding);
+        let binding = tightest_upper
+            .get(formal.as_str())
+            .copied()
+            .unwrap_or(Ty::Nothing);
+        bindings
+            .entry(crate::types::TyParamName::new(formal))
+            .or_insert(binding);
     }
     crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
         source,
@@ -112,22 +117,22 @@ impl Checker<'_> {
             let Some(index) = signature
                 .formals
                 .iter()
-                .position(|candidate| candidate == &formal)
+                .position(|candidate| *candidate == formal)
             else {
                 continue;
             };
-            if !nullable_flexible_roots.contains(&formal)
+            if !nullable_flexible_roots.contains(formal.as_str())
                 || explicit_type_arguments
                     .get(index)
                     .is_some_and(|argument| *argument != Ty::Error)
             {
                 continue;
             }
-            let Some(&fixed) = expected_bindings.get(&formal) else {
+            let Some(&fixed) = expected_bindings.get(formal.as_str()) else {
                 continue;
             };
             let mut trial = bindings.clone();
-            trial.insert(formal, fixed);
+            trial.insert(crate::types::TyParamName::new(&formal), fixed);
             if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
                 signature,
                 &trial,

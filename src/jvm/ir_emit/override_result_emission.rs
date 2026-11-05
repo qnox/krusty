@@ -12,27 +12,41 @@ use super::scalar_coercion::{box_prim_free, unbox_prim_from};
 use super::signature_formatter::{JvmSignatureFormatter, MethodSignatureParts};
 use super::{
     discard, ir_method_desc, ir_ty_to_jvm, jvm_declared_ty, jvm_is_erased_top, method_descriptor,
-    method_signature, type_descriptor, CodeBuilder, Emitter,
+    method_signature, type_descriptor, CodeBuilder, EmitEnv, Emitter,
 };
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
+use crate::jvm::collection_override_signatures::OverrideSignature;
+use crate::jvm::mapped_builtin_declarations::CollectionSignaturePolicy;
 use crate::jvm::override_results::OverrideResults;
+use crate::jvm::read_only_collection_stubs::star_projected;
 use crate::types::Ty;
 
 const NOT_NULL: &str = "Lorg/jetbrains/annotations/NotNull;";
+const NULLABLE: &str = "Lorg/jetbrains/annotations/Nullable;";
 
 /// The declaration annotation for a result after the boxed-override representation is selected.
 ///
 /// Common IR keeps the non-null primitive Kotlin result, which ordinarily has no JVM nullability
 /// annotation. When [`OverrideResults`] gives that declaration a wrapper result, the wrapper is a
 /// non-null reference at the class-file boundary and kotlinc publishes `@NotNull` on it.
+///
+/// A parameter that a collection method-entry guard covers accepts `null` at the class-file
+/// boundary (the guard answers it with the neutral result), so kotlinc publishes `@Nullable` on it.
 pub(super) fn declared_nullability(
     ir: &IrFile,
-    override_results: &OverrideResults,
+    env: &EmitEnv<'_>,
     function: u32,
 ) -> super::declared_nullability::DeclaredNullability {
     let mut declared = super::declared_nullability::declared_nullability(ir, function);
-    if override_results.boxes(function) {
+    if env.override_results.boxes(function) {
         declared.result = Some(NOT_NULL);
+    }
+    if let Some(plan) = env.collection_method_entry_barriers.plan(function) {
+        for checked in &plan.parameters {
+            if let Some(annotation) = declared.parameters.get_mut(checked.parameter) {
+                *annotation = Some(NULLABLE);
+            }
+        }
     }
     declared
 }
@@ -183,6 +197,15 @@ pub(super) fn declared_method_signature(
     function: u32,
 ) -> Option<String> {
     let declaration = &ir.functions[function as usize];
+    // A value class's static replacement (`addAll-impl`) overrides nothing: kotlinc signs it as
+    // any member, its moved receiver first, and the policy shapes only the override it backs.
+    let policy = override_results
+        .collection_signatures
+        .policy(function)
+        .filter(|_| !ir.jvm_value_class_receiver_impls.contains(&function));
+    if let Some(policy) = policy {
+        return collection_override_signature(formatter, ir, function, policy);
+    }
     // The unboxed shape decides whether a signature is needed at all; boxing a primitive result
     // never adds generic structure.
     method_signature(formatter, ir, function, declaration)?;
@@ -210,4 +233,86 @@ pub(super) fn declared_method_signature_parts(
         parts.result = type_descriptor(jvm_declared_ty(&Ty::nullable(declaration.ret)));
     }
     Some(parts)
+}
+
+/// kotlinc's signature for an override of a collection declaration with a signature policy: the
+/// declaration's collection parameter star-projected, every declaration-site variance of the
+/// parameters written, or a type-safe declaration's checked parameters as `Object`. `None` when
+/// that spells the descriptor back.
+fn collection_override_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
+    function: u32,
+    policy: OverrideSignature,
+) -> Option<String> {
+    let declaration = &ir.functions[function as usize];
+    let (parameters, result) = semantic_signature(ir, function);
+    let signature = policy_signature(formatter, parameters, result, policy)?;
+    (signature != ir_method_desc(&declaration.params, &declaration.ret)).then_some(signature)
+}
+
+/// The signature policy's shape for the interface entry a value class writes on its box for the
+/// static replacement `member`, when `member` backs an override with a policy. The entry is that
+/// override: its parameters are the replacement's less its leading carrier. The outer `None` is a
+/// member without a policy; the inner one a policy that writes no signature beyond `descriptor`.
+pub(super) fn value_class_entry_collection_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
+    override_results: &OverrideResults,
+    member: u32,
+    descriptor: &str,
+) -> Option<Option<String>> {
+    let policy = override_results.collection_signatures.policy(member)?;
+    // The member's semantic signature is the override's own; its lowered parameters lead with the
+    // carrier.
+    let (parameters, result) = ir
+        .member_semantic_sigs
+        .get(&member)
+        .cloned()
+        .unwrap_or_else(|| {
+            let declaration = &ir.functions[member as usize];
+            assert!(
+                !declaration.params.is_empty(),
+                "a lowered value-class member takes its carrier ahead of the entry's parameters"
+            );
+            (declaration.params[1..].to_vec(), declaration.ret)
+        });
+    Some(
+        policy_signature(formatter, parameters, result, policy)
+            .filter(|signature| signature != descriptor),
+    )
+}
+
+/// `function`'s semantic parameters and result.
+fn semantic_signature(ir: &IrFile, function: u32) -> (Vec<Ty>, Ty) {
+    let declaration = &ir.functions[function as usize];
+    ir.member_semantic_sigs
+        .get(&function)
+        .cloned()
+        .unwrap_or_else(|| (declaration.params.clone(), declaration.ret))
+}
+
+/// `policy` applied to an override's `parameters` and `result`.
+fn policy_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    mut parameters: Vec<Ty>,
+    result: Ty,
+    policy: OverrideSignature,
+) -> Option<String> {
+    match policy {
+        OverrideSignature::Policy(CollectionSignaturePolicy::ErasedCollectionParameter(index)) => {
+            let parameter = &mut parameters[usize::from(index)];
+            *parameter = star_projected(*parameter);
+            formatter.method_positions(&parameters, &result)
+        }
+        OverrideSignature::Policy(CollectionSignaturePolicy::DeclarationSiteWildcards) => {
+            formatter.method_positions_with_declaration_site_wildcards(&parameters, &result)
+        }
+        OverrideSignature::ErasedCheckedParameters(checked) => {
+            for &index in checked {
+                parameters[usize::from(index)] = Ty::nullable(Ty::obj("kotlin/Any"));
+            }
+            formatter.method_positions(&parameters, &result)
+        }
+    }
 }

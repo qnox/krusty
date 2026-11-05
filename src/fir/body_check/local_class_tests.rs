@@ -1,3 +1,5 @@
+mod anonymous_capture_demand;
+
 use super::test_support::{checked_function_body, root_expression};
 use super::*;
 use crate::types::TyKind;
@@ -385,7 +387,7 @@ fn forwarded_nested_anonymous_super_argument_reads_the_live_dispatch_receiver() 
                 object.captures.iter().find(|capture| {
                     matches!(
                         capture.receiver.as_ref(),
-                        Some(crate::fir::FirCapturedReceiver::Enclosing { classifier })
+                        Some(crate::fir::FirCapturedReceiver::Enclosing { classifier, .. })
                             if *classifier == crate::types::type_name("B")
                     )
                 })
@@ -411,6 +413,45 @@ fn forwarded_nested_anonymous_super_argument_reads_the_live_dispatch_receiver() 
         ),
         "the nested anonymous object must retain B's live dispatch receiver instead of reinterpreting B's field 0: {receiver_captures:?}"
     );
+}
+
+#[test]
+fn whole_receiver_lifetime_control_keeps_exact_declaring_instance_owners() {
+    let (index, bodies) = checked_streamed_bodies(include_str!(
+        "../../../tests/box_regressions/ReceiverLifetimeContrast.kt"
+    ));
+    let classifier = crate::types::type_name("Owner");
+    let declaration = index
+        .classifier_declaration(classifier)
+        .expect("source Owner");
+    let expected = crate::fir::EnclosingInstanceOwner {
+        declaration,
+        kind: crate::fir::EnclosingInstanceKind::Classifier,
+    };
+    let mut selected = Vec::new();
+    for body in &bodies {
+        for raw in 0..body.expression_count() {
+            if let Some(FirExpr {
+                kind: FirExprKind::AnonymousObject(object),
+                ..
+            }) = body.expr(FirExprId::from_raw(raw as u32))
+            {
+                for capture in &object.captures {
+                    if let Some(crate::fir::FirCapturedReceiver::Enclosing {
+                        classifier: source,
+                        owner,
+                    }) = &capture.receiver
+                    {
+                        assert_eq!(*source, classifier);
+                        assert_eq!(*owner, Some(expected));
+                        assert_eq!(capture.ty.get(), Ty::obj_name(classifier));
+                        selected.push(*owner);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(selected, vec![Some(expected); 5]);
 }
 
 #[test]

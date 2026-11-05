@@ -94,6 +94,11 @@ pub struct KlibArchive {
     /// generation's bytes or fails. A caller that consults a few packages of a large library then
     /// inflates only those entries.
     semantic_entries: BTreeMap<String, OnceLock<Vec<u8>>>,
+    /// The digest of `semantic_entries`, kept once it has been computed in full. The selected
+    /// entries and their bytes are fixed for this instance, so a second request for the same
+    /// digest would only hash them again; a failed digest is not kept. Another instance of the
+    /// same path, such as a reopen that checks the path is current, computes its own.
+    fingerprint: OnceLock<[u8; 32]>,
     /// Native input assembly widens the selected snapshot with its target import facts. Other
     /// KLIB consumers do not let a Native-only entry perturb their semantic/body generation.
     native_imports_frozen: bool,
@@ -326,6 +331,7 @@ impl KlibArchive {
                 source: Source::Directory { canonical_root },
                 entries,
                 semantic_entries: BTreeMap::new(),
+                fingerprint: OnceLock::new(),
                 native_imports_frozen,
             };
             archive.select_semantic_entries();
@@ -408,6 +414,7 @@ impl KlibArchive {
             source: Source::Zip(Mutex::new(archive)),
             entries,
             semantic_entries: BTreeMap::new(),
+            fingerprint: OnceLock::new(),
             native_imports_frozen,
         };
         archive.select_semantic_entries();
@@ -433,6 +440,14 @@ impl KlibArchive {
     /// cannot change declaration/body/link selection and can be substantially larger than the
     /// channels this compiler consumes.
     pub(crate) fn content_fingerprint(&self) -> Result<[u8; 32], KlibError> {
+        if let Some(fingerprint) = self.fingerprint.get() {
+            return Ok(*fingerprint);
+        }
+        let fingerprint = self.digest_semantic_entries()?;
+        Ok(*self.fingerprint.get_or_init(|| fingerprint))
+    }
+
+    fn digest_semantic_entries(&self) -> Result<[u8; 32], KlibError> {
         use sha2::{Digest as _, Sha256};
 
         let mut digest = Sha256::new();
@@ -1613,6 +1628,50 @@ mod tests {
         }
 
         std::fs::remove_dir_all(root).expect("remove zip generation fixtures");
+    }
+
+    #[test]
+    fn an_opened_klib_digests_its_selected_entries_once() {
+        let root = temp_dir("klib-digest-once");
+        let path = write_stored_zip(
+            &root,
+            "digest.klib",
+            &[
+                ("default/manifest", b"unique_name=fixture\n"),
+                ("default/linkdata/module", b"first"),
+            ],
+        );
+
+        // A successful digest is kept by the instance that computed it and answers again
+        // unchanged; an independently opened instance computes its own.
+        let opened = KlibArchive::open(&path).expect("open the KLIB");
+        assert_eq!(opened.fingerprint.get(), None);
+        let digest = opened.content_fingerprint().expect("digest the KLIB");
+        assert_eq!(opened.fingerprint.get(), Some(&digest));
+        assert_eq!(opened.content_fingerprint().expect("digest again"), digest);
+        let reopened = opened.reopen_selected(&path).expect("reopen the KLIB");
+        assert_eq!(reopened.fingerprint.get(), None);
+        assert_eq!(
+            reopened.content_fingerprint().expect("digest the reopen"),
+            digest
+        );
+
+        // A failed digest is not kept: each request reads the selected entries again and
+        // reports the same corruption.
+        let corrupt = write_raw_zip(&root, "corrupt.klib", CORRUPT_CRC_ZIP);
+        let opened = KlibArchive::open(&corrupt).expect("the central directory is intact");
+        for attempt in ["first", "second"] {
+            match opened.content_fingerprint() {
+                Err(KlibError::Io { source, .. }) => {
+                    assert_eq!(source.to_string(), "Invalid checksum", "{attempt}");
+                }
+                Err(error) => panic!("unexpected {attempt} digest error: {error}"),
+                Ok(_) => panic!("{attempt} digest accepted a corrupt selected entry"),
+            }
+            assert_eq!(opened.fingerprint.get(), None, "{attempt}");
+        }
+
+        std::fs::remove_dir_all(root).expect("remove digest fixtures");
     }
 
     #[test]
