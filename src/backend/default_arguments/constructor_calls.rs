@@ -15,8 +15,8 @@
 use crate::ir::{ClassId, ExprId, IrConstructorTarget, IrExpr, IrFile};
 use crate::types::Ty;
 
-use super::call_sites::{arguments, frame, Frame};
-use super::constructor_entries::{declared, DeclaredConstructor};
+use super::call_sites::{Frame, arguments, frame};
+use super::constructor_entries::{DeclaredConstructor, declared};
 use super::entries::Entries;
 
 /// Rewrite `site` when it is a construction of a class of this file that leaves arguments out.
@@ -28,6 +28,7 @@ pub(super) fn rewrite(ir: &mut IrFile, entries: &mut Entries, site: ExprId) {
         external_target: None,
         defaults,
         default_prefix_count,
+        declared_params,
         ..
     } = ir.expr(site)
     else {
@@ -36,6 +37,7 @@ pub(super) fn rewrite(ir: &mut IrFile, entries: &mut Entries, site: ExprId) {
     if defaults.is_empty() {
         return;
     }
+    let has_declared_params = declared_params.is_some();
     let (internal, default_prefix_count) = (*internal, *default_prefix_count);
     let Some(class) = ir.class_id_by_name(internal) else {
         return;
@@ -60,24 +62,25 @@ pub(super) fn rewrite(ir: &mut IrFile, entries: &mut Entries, site: ExprId) {
     };
     args.extend(operands);
     let parameters = entry_parameters(ir, class, entry);
+    let declared_params = has_declared_params.then(|| {
+        constructor
+            .prefix
+            .iter()
+            .copied()
+            .chain(parameters.iter().copied())
+            .collect()
+    });
     ir.exprs[site as usize] = IrExpr::New {
         internal,
         args,
-        ctor_params: Some(parameters.clone()),
+        ctor_params: Some(parameters),
+        declared_params,
         ctor_desc: None,
         external_target: None,
         defaults: Box::new([]),
         default_prefix_count,
     };
     ir.construction_targets.insert(site, entry);
-    if let Some(declared) = ir.construction_declared_params.get_mut(&site) {
-        *declared = constructor
-            .prefix
-            .iter()
-            .copied()
-            .chain(parameters)
-            .collect();
-    }
 }
 
 /// Rewrite every delegation and enum constant of this file's classes that leaves arguments out.

@@ -7,7 +7,7 @@ use crate::fx_hash::HashMap;
 
 use super::expression_copy::copy_expression_facts;
 use super::{ExprId, FunId, IrCheckedArgument, IrCheckedOperation, IrExpr, IrFile, IrFunction};
-use crate::types::{ty_subst_keep_unbound, Ty};
+use crate::types::{Ty, ty_subst_keep_unbound};
 
 /// Clone `root` and every reachable expression, preserving sparse semantic/source facts. Returns
 /// the new root and the complete old-to-new identity map.
@@ -844,6 +844,58 @@ mod tests {
         assert_eq!(ir.reified_call_subst.len(), 2);
         assert_eq!(ir.reified_call_subst.get(&source), Some(&reified));
         assert_eq!(ir.reified_call_subst.get(&target), Some(&reified));
+    }
+
+    #[test]
+    fn expression_clone_keeps_constructor_declaration_types_separate_from_representation() {
+        let mut ir = IrFile::default();
+        let value = ir.add_expr(super::super::IrExpr::Const(super::super::IrConst::Int(7)));
+        let declared = Ty::obj("sample/Money");
+        let source = ir.add_expr(super::super::IrExpr::New {
+            internal: crate::types::type_name("sample/Holder"),
+            args: vec![value],
+            ctor_params: Some(vec![Ty::Int]),
+            declared_params: Some(vec![declared].into_boxed_slice()),
+            ctor_desc: Some("(I)V".into()),
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        });
+
+        let (target, copies) = clone_expression_dag(&mut ir, source);
+
+        let super::super::IrExpr::New {
+            args,
+            ctor_params,
+            ctor_desc,
+            ..
+        } = ir.expr(target)
+        else {
+            panic!("a construction copy");
+        };
+        assert_ne!(source, target);
+        assert_eq!(args, &[copies[&value]]);
+        assert_eq!(ctor_params.as_deref(), Some([Ty::Int].as_slice()));
+        assert_eq!(ctor_desc.as_deref(), Some("(I)V"));
+        assert_eq!(
+            ir.construction_declared_params(target),
+            Some([declared].as_slice())
+        );
+        let super::super::IrExpr::New {
+            declared_params, ..
+        } = &mut ir.exprs[target as usize]
+        else {
+            panic!("a construction copy");
+        };
+        declared_params.as_mut().expect("the selected declaration")[0] = Ty::String;
+        assert_eq!(
+            ir.construction_declared_params(source),
+            Some([declared].as_slice())
+        );
+        assert_eq!(
+            ir.construction_declared_params(target),
+            Some([Ty::String].as_slice())
+        );
     }
 
     #[test]

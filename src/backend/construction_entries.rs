@@ -68,17 +68,26 @@ fn build(ir: &mut IrFile, constructor: super::ExportedConstructor) -> Option<Fun
     let class = &ir.classes[constructor.class as usize];
     let internal = class.fq_name;
     let result = ir.declared_class_self_type(internal)?;
-    let (parameters, selected) = match constructor.secondary {
+    let (parameters, selected, declared) = match constructor.secondary {
         None => (
             class.ctor_args.iter().map(|argument| argument.ty).collect(),
             None,
+            class
+                .ctor_args
+                .iter()
+                .map(|argument| argument.declared_ty.unwrap_or(argument.ty))
+                .collect::<Vec<_>>(),
         ),
         Some(ordinal) => {
             let secondary = class.secondary_ctors.get(ordinal)?;
             if !secondary.prefix_params.is_empty() {
                 return None;
             }
-            (secondary.params.clone(), Some(secondary.params.clone()))
+            (
+                secondary.params.clone(),
+                Some(secondary.params.clone()),
+                secondary.params.clone(),
+            )
         }
     };
     let arguments = parameters
@@ -90,6 +99,7 @@ fn build(ir: &mut IrFile, constructor: super::ExportedConstructor) -> Option<Fun
         internal,
         args: arguments,
         ctor_params: selected,
+        declared_params: Some(declared.into_boxed_slice()),
         ctor_desc: None,
         external_target: None,
         defaults: Box::default(),
