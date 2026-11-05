@@ -1640,7 +1640,6 @@ dataClasses/hashCode/short.kt
 dataClasses/kt49715.kt
 dataClasses/multiDeclaration.kt
 dataClasses/multiDeclarationFor.kt
-dataClasses/nonTrivialMemberInSuperClass.kt
 dataClasses/propertyOfDnnType.kt
 dataClasses/toString/arrayParams.kt
 dataClasses/toString/genericParam.kt
