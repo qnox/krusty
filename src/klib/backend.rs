@@ -821,7 +821,7 @@ fn record_class_property_exports(
                             ..
                         },
                     ) if *owner == name && *at as usize == *index => {
-                        Some((*property, *getter, *setter, backing_field.is_some()))
+                        Some((Some(*property), *getter, *setter, backing_field.is_some()))
                     }
                     (
                         PropertyOrigin::MemberExtension(index),
@@ -836,30 +836,66 @@ fn record_class_property_exports(
                             .and_then(|extensions| extensions.get(*index))
                             .is_some_and(|extension| extension.getter == *getter) =>
                     {
-                        Some((*property, Some(*getter), *setter, false))
+                        Some((Some(*property), Some(*getter), *setter, false))
                     }
                     _ => None,
                 });
-        let Some((property, getter, setter, storage)) = selected.next() else {
-            if matches!(
-                origin,
-                PropertyOrigin::Declared(_) | PropertyOrigin::MemberExtension(_)
-            ) {
-                return Err(format!(
-                    "{}.{} has no checked property declaration identity",
-                    source.fq_name(),
-                    declaration.name
-                ));
-            }
-            continue;
-        };
+        let first = selected.next();
         if selected.next().is_some() {
             return Err(format!(
                 "{}.{} has ambiguous checked property declaration identities",
                 source.fq_name(),
-                declaration.name
+                declaration.name,
             ));
         }
+        let (property, getter, setter, storage) = if let Some(first) = first {
+            first
+        } else {
+            // Generated forwarders and metadata-only declarations need not have a FIR property.
+            // The metadata origin still owns the exact IR declaration and its accessor body IDs.
+            let (getter, setter, source_order) = match origin {
+                PropertyOrigin::Declared(index) => {
+                    let property = source.properties.get(*index).ok_or_else(|| {
+                        format!(
+                            "{}.{} has no recorded IR property declaration",
+                            source.fq_name(),
+                            declaration.name
+                        )
+                    })?;
+                    (property.getter, property.setter, property.source_order)
+                }
+                PropertyOrigin::MemberExtension(index) => {
+                    let property = extensions
+                        .and_then(|properties| properties.get(*index))
+                        .ok_or_else(|| {
+                            format!(
+                                "{}.{} has no recorded IR extension declaration",
+                                source.fq_name(),
+                                declaration.name
+                            )
+                        })?;
+                    (
+                        Some(property.getter),
+                        property.setter,
+                        property.source_order,
+                    )
+                }
+                PropertyOrigin::Constant(_) | PropertyOrigin::CompanionBlock(_) => continue,
+            };
+            let owner = ir
+                .class_id_by_name(name)
+                .ok_or_else(|| format!("class {} has no IR identity", source.fq_name()))?;
+            if ir.checked_properties.values().any(|property| {
+                property.class == Some(owner) && property.source_order == source_order
+            }) {
+                return Err(format!(
+                    "{}.{} lost its checked property layout",
+                    source.fq_name(),
+                    declaration.name
+                ));
+            }
+            (None, getter, setter, false)
+        };
         let accessor = |accessor| {
             package_property_accessor_signature(container, declaration, accessor)
                 .map(|signature| crate::libraries::KlibDependencyCallable {
@@ -868,7 +904,7 @@ fn record_class_property_exports(
                 })
                 .map_err(|error| format!("{}.{}: {error}", source.fq_name(), declaration.name))
         };
-        if source.is_interface {
+        if let (true, Some(property)) = (source.is_interface, property) {
             exports.record_interface_property(property, accessor(MetadataAccessor::Getter)?);
         }
         for (function, role, modifiers, present) in [
@@ -920,6 +956,9 @@ fn record_class_property_exports(
                 && !declaration.is_external
                 && !declaration.is_expect
             {
+                // Without a checked storage operation this is an honest metadata-only export;
+                // do not invent a property ID or infer a field access from an accessor spelling.
+                let Some(property) = property else { continue };
                 if !storage || !ir.checked_properties.contains_key(&property) {
                     return Err(format!(
                         "{}.{} has no checked storage for its default accessor",
@@ -936,7 +975,8 @@ fn record_class_property_exports(
                     }
                 };
                 exports.record_property_accessor(operation, accessor(role)?);
-            } else if !source.is_interface
+            } else if property.is_some()
+                && !source.is_interface
                 && !modifiers.modality.is_abstract()
                 && !modifiers.is_external
                 && !declaration.is_external
