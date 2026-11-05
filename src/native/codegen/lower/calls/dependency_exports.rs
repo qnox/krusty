@@ -319,4 +319,45 @@ impl BodyLowering<'_, '_, '_> {
             None => Ok(None),
         }
     }
+
+    /// Another module's class, constructed through the entry its module exports under the
+    /// selected constructor's identity; `None` when that module published none.
+    pub(in super::super) fn dependency_construction(
+        &mut self,
+        target: crate::fir::ExternalCallableId,
+        internal: crate::types::TypeName,
+        args: &[u32],
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        if self.file.ir.class_id_by_name(internal).is_some() {
+            return None;
+        }
+        let identity = self
+            .file
+            .callables
+            .callable(target)?
+            .dependency_callable
+            .as_ref()?;
+        let export = self.file.dependency_symbols.get(identity)?;
+        Some((|| {
+            let parameters = export.signature.parameters().to_vec();
+            let result = export.signature.result();
+            if parameters.len() != args.len() {
+                return Err(
+                    "a dependency construction whose operands disagree with its constructor"
+                        .into(),
+                );
+            }
+            let arguments = self.arguments(args, &parameters)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            let id = self.file.import(&export.symbol, &parameters, result)?;
+            let func_ref = self.func_ref(id);
+            let call = self.emit_call(func_ref, &arguments)?;
+            match self.builder.inst_results(call).first().copied() {
+                Some(value) => self.convert(value, Some(result), Ty::obj_name(internal)),
+                None => Err("a dependency constructor answering nothing".into()),
+            }
+        })())
+    }
 }

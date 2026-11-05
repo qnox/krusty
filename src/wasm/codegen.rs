@@ -150,6 +150,7 @@ impl Backend for WasmBackend {
         }
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
         crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables);
+        crate::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
         let Ok(properties) = crate::backend::local_properties::realize(&mut file.ir) else {
             decline(state, "a local delegated property".to_string());
             return Vec::new();

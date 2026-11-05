@@ -337,4 +337,36 @@ impl Body<'_> {
         }
         Ok(())
     }
+
+    /// Another module's class, constructed through the entry its module exports under the
+    /// selected constructor's identity; `None` when that module published none.
+    pub(super) fn dependency_construction(
+        &mut self,
+        target: crate::fir::ExternalCallableId,
+        internal: crate::types::TypeName,
+        args: &[u32],
+    ) -> Option<Result<(), Unsupported>> {
+        if self.ir.class_id_by_name(internal).is_some() {
+            return None;
+        }
+        let function = self.calls.external(target)?;
+        Some((|| {
+            let signature = self
+                .calls
+                .signature(target)
+                .ok_or("a dependency constructor without its declared signature")?
+                .clone();
+            if signature.parameters().len() != args.len() {
+                return Err(
+                    "a dependency construction whose operands disagree with its constructor"
+                        .to_string(),
+                );
+            }
+            for (argument, parameter) in args.iter().zip(signature.parameters()) {
+                self.value(*argument, *parameter)?;
+            }
+            self.code.call(function);
+            self.coerce_emitted_value(signature.result(), Ty::obj_name(internal))
+        })())
+    }
 }

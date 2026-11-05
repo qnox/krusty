@@ -4,6 +4,7 @@
 
 pub(crate) mod class_tables;
 pub(crate) mod coroutines;
+pub(crate) mod construction_entries;
 pub(crate) mod counted_loops;
 pub(crate) mod default_arguments;
 mod dependency_accessor;
@@ -26,7 +27,7 @@ pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
     CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
-pub(crate) use dependency_metadata::KlibDependencyCallable;
+pub(crate) use dependency_metadata::{ExportedConstructor, KlibDependencyCallable};
 pub(crate) use dependency_metadata::{
     authenticated_singleton_receiver, has_standalone_dependency_code,
     inert_staged_singleton_bindings,

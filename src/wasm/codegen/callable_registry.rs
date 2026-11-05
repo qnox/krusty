@@ -44,6 +44,8 @@ pub(super) struct CallableRegistry {
     singleton_member_receivers: HashMap<KlibDependencyCallable, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
         HashMap<KlibDependencyCallable, SingletonExtensionUnreadReceiver>,
+    /// The entry answering each published object declaration's instance, by its classifier.
+    dependency_singletons: HashMap<crate::types::TypeName, u32>,
 }
 
 pub(super) struct FileCallTargets {
@@ -58,6 +60,8 @@ pub(super) struct FileCallTargets {
     singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
         HashMap<ExternalCallableId, SingletonExtensionUnreadReceiver>,
+    /// The instance entry of each other module's object this file reads as a value.
+    singletons: HashMap<crate::types::TypeName, u32>,
 }
 
 impl CallableRegistry {
@@ -164,6 +168,7 @@ impl CallableRegistry {
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
+            singletons: HashMap::default(),
         };
         for expression in crate::ir::emitted_body_roots(ir)
             .into_iter()
@@ -176,6 +181,37 @@ impl CallableRegistry {
                     dispatch_receiver,
                     ..
                 } => (&**callee, *dispatch_receiver),
+                // Another module's class is constructed through the entry its module exports
+                // under the constructor's identity (see `backend::construction_entries`).
+                IrExpr::New {
+                    external_target: Some(target),
+                    defaults,
+                    ..
+                } if defaults.is_empty() => {
+                    let Some(identity) = callables
+                        .callable(*target)
+                        .and_then(|callable| callable.dependency_callable.as_ref())
+                    else {
+                        continue;
+                    };
+                    let Some(&index) = self.dependencies.get(identity) else {
+                        continue;
+                    };
+                    targets.external.insert(*target, index);
+                    let signature = self.signatures.get(identity).ok_or_else(|| {
+                        "an emitted dependency constructor without its declared signature"
+                            .to_owned()
+                    })?;
+                    targets.signatures.insert(*target, signature.clone());
+                    continue;
+                }
+                // Another module's object is read through the entry its module publishes.
+                IrExpr::SingletonValue { classifier } if ir.class_id_by_name(*classifier).is_none() => {
+                    if let Some(&entry) = self.dependency_singletons.get(classifier) {
+                        targets.singletons.insert(*classifier, entry);
+                    }
+                    continue;
+                }
                 IrExpr::Checked(operation) => {
                     let Some(access) = callables.dependency_accessor(operation) else {
                         continue;
@@ -343,6 +379,14 @@ impl CallableRegistry {
         exports: &DependencyExportSignatures,
         functions: &[Option<u32>],
     ) -> Result<(), Unsupported> {
+        for &(classifier, entry) in exports.singleton_entries() {
+            let entry = functions
+                .get(entry as usize)
+                .copied()
+                .flatten()
+                .ok_or_else(|| "an object instance entry without its function".to_string())?;
+            self.dependency_singletons.insert(classifier, entry);
+        }
         for (function, identity) in exports.callables() {
             let emitted = functions
                 .get(function as usize)
@@ -440,6 +484,11 @@ impl CallableRegistry {
 impl FileCallTargets {
     pub(super) fn module(&self, target: CallableId) -> Option<u32> {
         self.module.get(&target).copied()
+    }
+
+    /// The entry answering the instance of another module's object `classifier`.
+    pub(super) fn dependency_singleton(&self, classifier: crate::types::TypeName) -> Option<u32> {
+        self.singletons.get(&classifier).copied()
     }
 
     pub(super) fn external(&self, target: ExternalCallableId) -> Option<u32> {
