@@ -472,11 +472,10 @@ fn constructor_calls_this_lowering_cannot_realize_keep_their_checked_form() {
     for site in [elsewhere, unselected, omitting] {
         assert_eq!(construction_shape(&ir, site).2, vec![0]);
     }
-    assert!(
-        ir.classes
-            .iter()
-            .all(|class| class.secondary_ctors.is_empty())
-    );
+    assert!(ir
+        .classes
+        .iter()
+        .all(|class| class.secondary_ctors.is_empty()));
     assert_eq!(ir.classes[bare as usize].secondary_ctors.len(), 0);
     assert_eq!(
         ir.super_constructor_default_arguments[&type_name("demo/Child")],

@@ -15,8 +15,8 @@
 use crate::ir::{ClassId, ExprId, IrConstructorTarget, IrExpr, IrFile};
 use crate::types::Ty;
 
-use super::call_sites::{Frame, arguments, frame};
-use super::constructor_entries::{DeclaredConstructor, declared};
+use super::call_sites::{arguments, frame, Frame};
+use super::constructor_entries::{declared, DeclaredConstructor};
 use super::entries::Entries;
 
 /// Rewrite `site` when it is a construction of a class of this file that leaves arguments out.

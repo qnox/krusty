@@ -7,7 +7,7 @@ use crate::fx_hash::HashMap;
 
 use super::expression_copy::copy_expression_facts;
 use super::{ExprId, FunId, IrCheckedArgument, IrCheckedOperation, IrExpr, IrFile, IrFunction};
-use crate::types::{Ty, ty_subst_keep_unbound};
+use crate::types::{ty_subst_keep_unbound, Ty};
 
 /// Clone `root` and every reachable expression, preserving sparse semantic/source facts. Returns
 /// the new root and the complete old-to-new identity map.
