@@ -73,6 +73,9 @@ pub(super) struct LinkedCallee {
     /// receiver (the class applied to them), parameters and result name and a call binds from its
     /// dispatch receiver's type, in declaration order.
     pub(super) class_type_parameters: Vec<String>,
+    /// Whether each of [`Self::params`] declares a default a call may leave it to, for a function
+    /// this unit lowers; empty for every other callee, which no call may omit an argument of.
+    pub(super) parameter_defaults: Vec<bool>,
 }
 
 pub(super) struct LinkedCallableReference {
