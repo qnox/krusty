@@ -987,9 +987,10 @@ fn lower_captured_receiver(
     receiver: &crate::fir::FirCapturedReceiver,
 ) -> crate::ir::IrCapturedReceiver {
     match receiver {
-        crate::fir::FirCapturedReceiver::Enclosing { classifier } => {
+        crate::fir::FirCapturedReceiver::Enclosing { classifier, owner } => {
             crate::ir::IrCapturedReceiver::Enclosing {
                 classifier: *classifier,
+                owner: *owner,
             }
         }
         crate::fir::FirCapturedReceiver::Callable { label, owner } => {
