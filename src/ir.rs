@@ -116,7 +116,9 @@ mod when_facts;
 pub use crate::enclosing_declarations::EnclosingDeclaration;
 /// A declared type's checked source spelling, which the IR carries per declaration
 /// ([`IrFile::prop_declared_spellings`]) as part of its contract with backends and plugins.
-pub use crate::fir::{CallableId, ExternalCallableId, SourceFileId};
+pub use crate::fir::{
+    CallableId, ExternalCallableId, ExternalPropertyId, PropertyId, SourceFileId,
+};
 pub use crate::spelling::{Spelled, TypeUseAnnotation};
 pub use crate::types::EqualityMode;
 pub(crate) use annotations::PackagePropertyAnnotations;

@@ -881,7 +881,7 @@ pub trait CheckedSourceFacts {
     /// `property`.
     fn dependency_property(
         &self,
-        property: crate::fir::ExternalPropertyId,
+        property: crate::ir::ExternalPropertyId,
     ) -> Option<DependencyDeclaration<'_>>;
 }
 

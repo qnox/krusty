@@ -178,7 +178,7 @@ struct Recorder<'a, 'b> {
     rejections: &'a mut Vec<PluginRejection>,
     updaters: Vec<FieldUpdater>,
     /// Each lowered atomic by its checked identity.
-    by_property: HashMap<crate::fir::PropertyId, usize>,
+    by_property: HashMap<crate::ir::PropertyId, usize>,
     /// Each updater function selected so far.
     bound: HashMap<(TypeName, &'static str), BoundRuntimeFunction>,
 }
@@ -237,6 +237,11 @@ impl Recorder<'_, '_> {
             else {
                 continue;
             };
+            // kotlinc's checker refuses a `var` atomic: only the value inside it may change.
+            if declaring.properties[index].is_var {
+                self.reject(span, "a mutable atomic property");
+                continue;
+            }
             let Some(field) = declaring.properties[index].backing_field else {
                 self.reject(span, "an atomic property without a backing field");
                 continue;

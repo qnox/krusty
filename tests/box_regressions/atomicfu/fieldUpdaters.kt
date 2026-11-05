@@ -1,8 +1,7 @@
-// TARGET_BACKEND: JVM
 // WITH_STDLIB
 // WITH_ATOMICFU
-// A class's Int and Long atomics become volatile fields updated through static
-// java.util.concurrent field updaters; every operation becomes a call of its updater.
+// A class's Int and Long atomics and every operation on them. kotlinc's atomicfu plugin lowers
+// them to each platform's atomic primitive (on the JVM, volatile fields and static field updaters).
 // FILE: fieldUpdaters.kt
 package counters
 

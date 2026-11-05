@@ -734,6 +734,12 @@ fn the_atomicfu_pass_rejects_what_it_does_not_cover() {
          as a value yet",
     );
     assert_atomicfu_rejects(
+        "atomicfu-var",
+        "class Counter {\nprivate var hits = atomic(0)\nfun reset() { hits = atomic(1) }\n}\n",
+        "4:9: error: krusty's atomicfu compiler plugin does not support a mutable atomic property \
+         yet",
+    );
+    assert_atomicfu_rejects(
         "atomicfu-inner",
         "class Counter {\nprivate val hits = atomic(0)\ninner class Probe { fun next() = hits.incrementAndGet() }\n}\n",
         "5:34: error: krusty's atomicfu compiler plugin does not support an atomic operation \
