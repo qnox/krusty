@@ -1233,6 +1233,7 @@ pub(super) fn record_anonymous_construction_captures(
 /// member's dispatch receiver is that class's instance type.
 pub(super) fn enclosing_instance(ty: Ty) -> FirCapturedReceiver {
     FirCapturedReceiver::Enclosing {
+        owner: None,
         classifier: ty
             .non_null()
             .kotlin_class_internal()
