@@ -29,9 +29,10 @@
 
 use crate::plugins::allopen::AllOpenPlugin;
 use crate::plugins::assignment::AssignmentPlugin;
+use crate::plugins::atomicfu::AtomicfuPlugin;
 use crate::plugins::cli::{
-    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, ASSIGNMENT_PLUGIN_ID, COMPOSE_PLUGIN_ID,
-    KAPT_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID, SAM_WITH_RECEIVER_PLUGIN_ID,
+    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, ASSIGNMENT_PLUGIN_ID, ATOMICFU_PLUGIN_ID,
+    COMPOSE_PLUGIN_ID, KAPT_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID, SAM_WITH_RECEIVER_PLUGIN_ID,
     SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
 };
 use crate::plugins::compose::{ComposeOptions, ComposePlugin};
@@ -401,6 +402,16 @@ fn build_sam_with_receiver(
     Box::new(SamWithReceiverPlugin::from_options(options))
 }
 
+/// Build the native atomicfu plugin. Its registrar declares no command-line processor, so it has
+/// no options.
+fn build_atomicfu(
+    _act: &Activation,
+    _release: Option<&str>,
+    _options: &[PluginOption],
+) -> Box<dyn IrPlugin> {
+    Box::new(AtomicfuPlugin)
+}
+
 /// Build the native assignment plugin from the compilation's options for it.
 fn build_assignment(
     _act: &Activation,
@@ -466,6 +477,14 @@ impl PluginRegistry {
             kind: ExtensionKind::PartialNative(build_compose),
             option_keys: Some(ComposeOptions::KEYS),
             unimplemented_options: ComposeOptions::UNIMPLEMENTED,
+        });
+        r.register(RegisteredExtension {
+            plugin_id: ATOMICFU_PLUGIN_ID,
+            registrar:
+                "org.jetbrains.kotlinx.atomicfu.compiler.extensions.AtomicfuComponentRegistrar",
+            kind: ExtensionKind::PartialNative(build_atomicfu),
+            option_keys: Some(&[]),
+            unimplemented_options: &[],
         });
         r.register(RegisteredExtension {
             plugin_id: KSP_PLUGIN_ID,
@@ -758,7 +777,26 @@ mod tests {
         assert!(r.is_registered(NOARG_PLUGIN_ID));
         assert!(r.is_registered(SAM_WITH_RECEIVER_PLUGIN_ID));
         assert!(r.is_registered(COMPOSE_PLUGIN_ID));
+        assert!(r.is_registered(ATOMICFU_PLUGIN_ID));
         assert!(r.is_registered(KSP_PLUGIN_ID));
+    }
+
+    #[test]
+    fn atomicfu_runs_natively_but_a_build_is_refused_it_until_coverage_is_complete() {
+        let jar = plugin_jar(
+            "kotlin-atomicfu-compiler-plugin-embeddable.jar",
+            &[registrar_of(ATOMICFU_PLUGIN_ID)],
+        );
+        let c = cfg(&[&format!("-Xplugin={jar}")]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert_eq!(resolved.native.host("app").plugin_names(), vec!["atomicfu"]);
+        assert!(!resolved.has_errors());
+        assert_eq!(resolved.diagnostics.len(), 1);
+        assert!(matches!(
+            &resolved.diagnostics[0],
+            PluginDiagnostic::PartialSubstitution { plugin_id } if plugin_id == ATOMICFU_PLUGIN_ID
+        ));
+        assert!(resolved.diagnostics[0].is_refusal());
     }
 
     #[test]

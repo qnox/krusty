@@ -1244,7 +1244,10 @@ fn jvm_property_signature(st: &mut StringTable<'_>, p: &mut Pb, m: &PropMeta) {
     if let Some(delegate_method) = &delegate_method {
         jvm.field_message(5, delegate_method); // JvmPropertySignature.delegateMethod = 5
     }
-    p.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
+    // kotlinc records no signature for a property with neither storage nor accessors.
+    if !jvm.is_empty() {
+        p.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
+    }
 }
 
 /// The top-level declarations of one file, as package metadata records them.

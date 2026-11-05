@@ -527,6 +527,9 @@ pub struct ExtraLibs {
     /// `// WITH_COMPOSE`: the Compose runtime, which the case compiles with the Compose compiler
     /// plugin (see [`compiler_arguments::case_kotlinc_arguments`]).
     pub compose: bool,
+    /// `// WITH_ATOMICFU`: the atomicfu runtime, which the case compiles with the atomicfu compiler
+    /// plugin.
+    pub atomicfu: bool,
 }
 
 pub fn extra_libs(src: &str) -> ExtraLibs {
@@ -535,6 +538,7 @@ pub fn extra_libs(src: &str) -> ExtraLibs {
         stdlib_jdk8: directive(src, "STDLIB_JDK8"),
         coroutines: directive(src, "WITH_COROUTINES"),
         compose: directive(src, "WITH_COMPOSE"),
+        atomicfu: directive(src, "WITH_ATOMICFU"),
     }
 }
 

@@ -1362,6 +1362,11 @@ fun box(): String = Registry.value()\n";
     );
 }
 
+#[test]
+fn atomicfu_field_updaters_are_byte_identical_to_kotlinc() {
+    assert_atomicfu_fixture_matches_kotlinc("fieldUpdaters");
+}
+
 /// Each Compose fixture, JVM-only and so outside the portable box regressions, compiles to exactly
 /// the classes the reference compiler and its Compose plugin emit, byte for byte, and both builds
 /// pass its `box()`, which composes and recomposes the transformed functions through a recording
@@ -1432,10 +1437,21 @@ fn compose_generic_field_stability_is_byte_identical_to_kotlinc() {
 }
 
 fn assert_compose_fixture_matches_kotlinc(stem: &str) {
+    assert_plugin_fixture_matches_kotlinc("compose", stem);
+}
+
+/// The atomicfu fixture `stem`, JVM-only like the Compose ones, compiles to exactly the classes the
+/// reference compiler and its atomicfu plugin emit, byte for byte, and both builds pass its `box()`.
+fn assert_atomicfu_fixture_matches_kotlinc(stem: &str) {
+    assert_plugin_fixture_matches_kotlinc("atomicfu", stem);
+}
+
+fn assert_plugin_fixture_matches_kotlinc(plugin: &str, stem: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/compose")
+        .join("tests/fixtures")
+        .join(plugin)
         .join(format!("{stem}.kt"));
-    let source = fs::read_to_string(&path).expect("read the Compose fixture");
+    let source = fs::read_to_string(&path).expect("read the plugin fixture");
     let source =
         krusty::conformance::prepare_test_source(&source, krusty::conformance::TestTarget::Jvm);
     let reference = box_reference_classes::checked_prepared_box(&source, stem)

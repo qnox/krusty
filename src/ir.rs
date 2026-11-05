@@ -1692,6 +1692,9 @@ pub struct IrFile {
     /// What the Compose plugin recorded from this file's source at the handoff, for its body
     /// transform. `None` unless the plugin is active and the file declares a composable function.
     pub compose: Option<Box<crate::plugins::compose::ComposeFileFacts>>,
+    /// What the atomicfu plugin recorded from this file's source at the handoff, for its body
+    /// transform. `None` unless the plugin is active and the file declares an atomic it lowers.
+    pub atomicfu: Option<Box<crate::plugins::atomicfu::AtomicfuFileFacts>>,
     /// Package functions a compiler plugin gave physical parameters their declaration does not
     /// have (Compose's `$composer` and `$changed`). Metadata records their realized signature.
     pub(crate) plugin_extended_signatures: crate::fx_hash::HashSet<FunId>,
