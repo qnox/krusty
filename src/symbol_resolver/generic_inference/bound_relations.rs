@@ -130,11 +130,13 @@ pub(crate) fn complete_return_only_captured_receiver_bindings(
             }
         }
         let captured_upper = match bound.non_null().kind() {
-            TyKind::TyParam(receiver_formal, _) => receiver_bindings
-                .get(receiver_formal.as_str())
-                .copied()
-                .filter(|captured| captured.projection_inner().is_some())
-                .map(Ty::projection_read_ty),
+            TyKind::TyParam(receiver_formal, _) | TyKind::Var(receiver_formal, _) => {
+                receiver_bindings
+                    .get(receiver_formal.as_str())
+                    .copied()
+                    .filter(|captured| captured.projection_inner().is_some())
+                    .map(Ty::projection_read_ty)
+            }
             TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_) => {
                 Some(bound.non_null().projection_read_ty())
             }
@@ -176,7 +178,9 @@ pub(super) fn complete_dependent_bound_bindings(
                 continue;
             };
             for bound in bounds {
-                let TyKind::TyParam(bound_formal, _) = bound.non_null().kind() else {
+                let (TyKind::TyParam(bound_formal, _) | TyKind::Var(bound_formal, _)) =
+                    bound.non_null().kind()
+                else {
                     continue;
                 };
                 let Some(bound_index) = generic_sig
@@ -377,7 +381,7 @@ pub(crate) fn resolve_bound_violating_bindings(
             continue;
         };
         for bound in bounds {
-            let TyKind::TyParam(open, _) = bound.non_null().kind() else {
+            let (TyKind::TyParam(open, _) | TyKind::Var(open, _)) = bound.non_null().kind() else {
                 continue;
             };
             let Some(open_index) = generic_sig
@@ -395,7 +399,7 @@ pub(crate) fn resolve_bound_violating_bindings(
             };
             for open_bound in open_bounds {
                 let Some(position) = open_bound.type_args().iter().position(
-                    |argument| matches!(argument.non_null().kind(), TyKind::TyParam(name, _) if name == open),
+                    |argument| matches!(argument.non_null().kind(), TyKind::TyParam(name, _) | TyKind::Var(name, _) if name == open),
                 ) else {
                     continue;
                 };
@@ -436,7 +440,7 @@ pub(crate) fn resolve_bound_violating_bindings(
             // Only a bound that mentions the formal ITSELF can be re-solved this way: it is what
             // ties the variable to a position in its own hierarchy.
             let Some(position) = bound.type_args().iter().position(
-                |argument| matches!(argument.non_null().kind(), TyKind::TyParam(name, _) if name == formal),
+                |argument| matches!(argument.non_null().kind(), TyKind::TyParam(name, _) | TyKind::Var(name, _) if name == formal),
             ) else {
                 continue;
             };

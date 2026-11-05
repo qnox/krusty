@@ -856,6 +856,12 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 crate::ir::IrIntrinsic::EnumName => {
                     format!("{}.name", emit_expr(ir, dispatch_receiver.unwrap(), inst))
                 }
+                crate::ir::IrIntrinsic::EnumOrdinal => {
+                    format!(
+                        "{}.ordinal",
+                        emit_expr(ir, dispatch_receiver.unwrap(), inst)
+                    )
+                }
                 crate::ir::IrIntrinsic::StringGet | crate::ir::IrIntrinsic::ArrayGet => format!(
                     "{}[{}]",
                     emit_expr(ir, dispatch_receiver.unwrap(), inst),

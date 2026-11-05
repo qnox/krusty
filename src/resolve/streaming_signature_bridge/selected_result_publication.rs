@@ -91,7 +91,7 @@ impl ProductionSignatureSemantics<'_> {
             origin,
             CompactSelectedResultPublication::constructor(
                 owner,
-                declaration.type_parameters.type_params.clone(),
+                crate::types::TyParamName::all(&declaration.type_parameters.type_params),
                 bounds,
                 parameters,
                 selected,
