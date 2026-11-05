@@ -727,19 +727,18 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         let semantic = self.ir.logical_type(expression).unwrap_or(source);
-        let destination_semantic = self
-            .ir
-            .construction_declared_params
-            .get(&construction)
-            .and_then(|parameters| {
-                super::capture_order::physical_for(
-                    self.ir,
-                    self.constructed_class(construction),
-                    parameters.to_vec(),
-                )
-                .get(parameter_index)
-                .copied()
-            });
+        let destination_semantic =
+            self.ir
+                .construction_declared_params(construction)
+                .and_then(|parameters| {
+                    super::capture_order::physical_for(
+                        self.ir,
+                        self.constructed_class(construction),
+                        parameters.to_vec(),
+                    )
+                    .get(parameter_index)
+                    .copied()
+                });
         self.adapt_physical_operand(source, semantic, destination_semantic, physical, code);
     }
 
@@ -751,8 +750,7 @@ impl Emitter<'_> {
         let owner = self.constructed_class(construction);
         let checked = self
             .ir
-            .construction_declared_params
-            .get(&construction)
+            .construction_declared_params(construction)
             .map(|params| super::capture_order::physical_for(self.ir, owner, params.to_vec()));
         crate::jvm::physical_type::constructor_operand_tys(descriptor, checked.as_deref())
             .expect("constructor descriptor must be valid")

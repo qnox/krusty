@@ -959,8 +959,8 @@ fn superclass_chain(
                         method.descriptor
                     ))
                 };
-                let declaration = info
-                    .meta
+                let declaration = classpath
+                    .class_members(&info)
                     .class_functions
                     .iter()
                     .find(|declaration| {
@@ -1012,17 +1012,19 @@ fn superclass_chain(
                 // does not tell. A generated member has no declaration and only its descriptor.
                 // A suspend declaration's continuation is a real parameter its metadata signature
                 // omits, so it keeps its physical key and implements no non-suspend member.
-                let declaration = (is_kotlin
-                    && candidates.iter().any(|stub| stub.name == method.name))
-                .then(|| {
-                    info.meta.class_functions.iter().find(|declaration| {
-                        declaration.jvm_name == method.name
-                            && declaration.jvm_desc == Some(method.descriptor.as_str())
-                    })
-                })
-                .flatten()
-                .filter(|declaration| !declaration.is_suspend())
-                .and_then(|declaration| declaration.generic_sig.as_ref());
+                let declaration =
+                    (is_kotlin && candidates.iter().any(|stub| stub.name == method.name))
+                        .then(|| {
+                            classpath.class_members(&info).class_functions.iter().find(
+                                |declaration| {
+                                    declaration.jvm_name == method.name
+                                        && declaration.jvm_desc == Some(method.descriptor.as_str())
+                                },
+                            )
+                        })
+                        .flatten()
+                        .filter(|declaration| !declaration.is_suspend())
+                        .and_then(|declaration| declaration.generic_sig.as_ref());
                 let (key, result) = match declaration {
                     Some(signature) => {
                         let bindings = superclass_bindings(

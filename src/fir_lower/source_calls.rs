@@ -739,6 +739,7 @@ impl BodyLowering<'_> {
             internal: factory_classifier,
             args: factory_arguments,
             ctor_params: Some(factory_parameters.iter().map(|ty| ty.get()).collect()),
+            declared_params: None,
             ctor_desc: None,
             external_target: Some(factory),
             defaults: Box::new([]),
@@ -1351,14 +1352,12 @@ impl BodyLowering<'_> {
             internal: classifier,
             args,
             ctor_params: Some(physical_parameter_types),
+            declared_params: Some(declared_parameter_types.into_boxed_slice()),
             ctor_desc: None,
             external_target: Some(declaration),
             defaults: defaults.into_boxed_slice(),
             default_prefix_count,
         });
-        self.ir
-            .construction_declared_params
-            .insert(construction, declared_parameter_types.into_boxed_slice());
         self.record_annotation_construction(construction, classifier, annotation)?;
         Some(self.wrap_call_statements(statements, construction))
     }
@@ -1472,6 +1471,7 @@ impl BodyLowering<'_> {
                     internal: *classifier,
                     args,
                     ctor_params: Some(ctor_params),
+                    declared_params: None,
                     ctor_desc: None,
                     external_target: None,
                     defaults: Box::new([]),
@@ -1560,14 +1560,12 @@ impl BodyLowering<'_> {
             internal: classifier,
             args,
             ctor_params: (!primary_in_current_file).then_some(declaration_parameter_types),
+            declared_params: Some(declared_parameters),
             ctor_desc: None,
             external_target: None,
             defaults: defaults.into_boxed_slice(),
             default_prefix_count,
         });
-        self.ir
-            .construction_declared_params
-            .insert(construction, declared_parameters);
         self.ir.construction_targets.insert(construction, target);
         self.ir
             .module_constructions
