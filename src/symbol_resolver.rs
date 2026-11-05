@@ -141,8 +141,8 @@ pub use resolved_symbol::{
 };
 pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
 use scope_level_callables::{
-    callables_from_symbols, fn_in_scope, level_functions,
-    level_properties, symbol_levels_in_function_scope, symbols_in_function_scope,
+    callables_from_symbols, fn_in_scope, level_functions, level_properties,
+    symbol_levels_in_function_scope, symbols_in_function_scope,
     tagged_symbol_levels_in_function_scope, FunctionScopeRef,
 };
 pub(crate) use scope_level_callables::{CallableImport, FunctionImportScope};
