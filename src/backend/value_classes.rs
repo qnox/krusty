@@ -1,16 +1,18 @@
-//! Which classifiers a native program carries as value classes, and how it carries them.
+//! Which classifiers a KLIB-backend program carries as value classes, and how it carries them.
 //!
 //! What a value class IS comes from the checked declarations the frontend hands a backend — the
 //! classifier facts of the module being compiled and of its dependencies — never from a class's
 //! shape or from how its name is spelled. So there is one inventory per file: every classifier the
 //! IR references, every one their declared underlying types reach in turn, and the underlying type
 //! each declares. The traversal over that inventory is the one every backend shares
-//! (`crate::value_classes`); what belongs to this target is the REPRESENTATION POLICY, which says
-//! when an occurrence travels as its underlying value and when as a box.
+//! (`crate::value_classes`); what this module adds is the REPRESENTATION POLICY the KLIB backends
+//! (Native and Wasm) share, which says when an occurrence travels as its underlying value and when
+//! as a box. The policy names no machine fact: it asks only whether the underlying value has a
+//! `null` to spare.
 //!
 //! A single-field `V` always travels as its underlying value when non-null — that is what the
 //! shared traversal means by projecting it. A multi-field value class has no singular underlying
-//! value, so this target carries it as its complete ordinary object layout instead. A `V?` does
+//! value, so it is carried as its complete ordinary object layout instead. A `V?` does
 //! too when the underlying value is a reference that cannot
 //! itself be `null`: the reference's own `null` is then free to mean the outer one. Otherwise —
 //! an underlying scalar, which has no `null` to spare, or an underlying that is already nullable —
@@ -28,17 +30,17 @@ use crate::value_classes::{
 
 /// Every value class one file reaches, each with the underlying type its declaration states.
 #[derive(Debug, Default)]
-pub(super) struct NativeValueClasses {
+pub(crate) struct ValueClassInventory {
     declarations: UnderlyingTypes,
     /// The value classes this module's sources declare, in this file or another.
     module_declared: HashSet<TypeName>,
 }
 
-/// This target's answer to the one question the shared traversal leaves to a backend: whether a
-/// NULLABLE occurrence of a value class can travel as its underlying value.
-struct NativeRepresentation;
+/// The KLIB backends' answer to the one question the shared traversal leaves to a backend:
+/// whether a NULLABLE occurrence of a value class can travel as its underlying value.
+struct KlibRepresentation;
 
-impl RepresentationPolicy for NativeRepresentation {
+impl RepresentationPolicy for KlibRepresentation {
     fn project_nullable(
         &self,
         _classifier: TypeName,
@@ -55,16 +57,16 @@ impl RepresentationPolicy for NativeRepresentation {
     }
 }
 
-impl NativeValueClasses {
+impl ValueClassInventory {
     /// The inventory of `ir`, read from the checked declarations in `facts`.
     ///
     /// Two publications of one declaration that disagree, a class the IR marks as a value class
     /// with no checked declaration behind it, and a declaration graph that reaches itself are each
     /// refused rather than resolved by picking one answer.
-    pub(super) fn inventory(ir: &IrFile, facts: &dyn ClassifierFactSource) -> Result<Self, String> {
+    pub(crate) fn inventory(ir: &IrFile, facts: &dyn ClassifierFactSource) -> Result<Self, String> {
         let mut pending = crate::ir::referenced_classifiers::referenced_classifier_names(ir);
         // A dependency member is named by its checked signature, and the IR walk above covers
-        // the call shapes a JVM needs; a native program also realizes the dependency members its
+        // the call shapes a JVM needs; a KLIB program also realizes the dependency members its
         // runtime answers, so their signatures are part of what it references.
         for expression in &ir.exprs {
             if let crate::ir::IrExpr::Call { callee, .. } = expression {
@@ -124,7 +126,7 @@ impl NativeValueClasses {
     /// The value classes among `classes` and every classifier the types in `carried` name, read
     /// from the checked declarations alone: given the module's named classes and what their members
     /// carry, one answer every file shares, which a dispatch numbering that spans files needs.
-    pub(super) fn of_module_classes(
+    pub(crate) fn of_module_classes(
         classes: impl IntoIterator<Item = TypeName>,
         carried: impl IntoIterator<Item = Ty>,
         facts: &dyn ClassifierFactSource,
@@ -188,32 +190,32 @@ impl NativeValueClasses {
         Ok(inventory)
     }
 
-    /// `ty` as this target carries it: a value class projected to its underlying value wherever
+    /// `ty` as a KLIB backend carries it: a value class projected to its underlying value wherever
     /// the policy says so, anything else unchanged. Still a SEMANTIC type — the carrier is read
     /// from it as from any other.
-    pub(super) fn project(&self, ty: Ty) -> Ty {
+    pub(crate) fn project(&self, ty: Ty) -> Ty {
         if self.declarations.is_empty() {
             return ty;
         }
-        project_underlying(ty, &self.declarations, &NativeRepresentation)
+        project_underlying(ty, &self.declarations, &KlibRepresentation)
     }
 
     /// The value class `ty` is an UNBOXED occurrence of, or `None` when `ty` travels as itself —
     /// which a boxed `V?` does, being an object like any other.
-    pub(super) fn unboxed(&self, ty: Ty) -> Option<TypeName> {
+    pub(crate) fn unboxed(&self, ty: Ty) -> Option<TypeName> {
         let classifier = ty.non_null().obj_internal()?;
         (self.declarations.contains_key(&classifier) && self.project(ty) != ty)
             .then_some(classifier)
     }
 
     /// Whether `classifier` is a value class.
-    pub(super) fn is_value_class(&self, classifier: TypeName) -> bool {
+    pub(crate) fn is_value_class(&self, classifier: TypeName) -> bool {
         self.declarations.contains_key(&classifier)
     }
 
     /// This inventory, knowing which of its value classes the module's own sources declare: the
     /// ones another file of the module boxes through entry points the declaring file defines.
-    pub(super) fn declared_in_module(
+    pub(crate) fn declared_in_module(
         mut self,
         classifiers: impl IntoIterator<Item = TypeName>,
     ) -> Self {
@@ -225,12 +227,12 @@ impl NativeValueClasses {
     }
 
     /// Whether `classifier` is a value class the module's own sources declare.
-    pub(super) fn is_module_declared(&self, classifier: TypeName) -> bool {
+    pub(crate) fn is_module_declared(&self, classifier: TypeName) -> bool {
         self.module_declared.contains(&classifier)
     }
 
     /// The underlying type `classifier` declares, when it is a value class.
-    pub(super) fn underlying(&self, classifier: TypeName) -> Option<Ty> {
+    pub(crate) fn underlying(&self, classifier: TypeName) -> Option<Ty> {
         self.declarations.get(&classifier).copied()
     }
 }
@@ -282,7 +284,7 @@ mod tests {
     fn the_inventory_is_what_the_checked_declarations_say() {
         let facts = Facts(vec![("app/Name", Ty::String)]);
         let ir = referencing(&[Ty::obj("app/Name"), Ty::obj("app/Other")]);
-        let inventory = NativeValueClasses::inventory(&ir, &facts).expect("an inventory");
+        let inventory = ValueClassInventory::inventory(&ir, &facts).expect("an inventory");
         assert_eq!(inventory.project(Ty::obj("app/Name")), Ty::String);
         assert!(!inventory.is_value_class(type_name("app/Other")));
     }
@@ -296,7 +298,7 @@ mod tests {
         class.ctor_param_count = 2;
         ir.classes.push(class);
 
-        let inventory = NativeValueClasses::inventory(&ir, &Facts(Vec::new()))
+        let inventory = ValueClassInventory::inventory(&ir, &Facts(Vec::new()))
             .expect("multi-field value classes have no singular carrier to inventory");
 
         assert!(!inventory.is_value_class(classifier));
@@ -313,7 +315,7 @@ mod tests {
             ("app/Inner", Ty::Int),
         ]);
         let ir = referencing(&[Ty::obj("app/Outer")]);
-        let inventory = NativeValueClasses::inventory(&ir, &facts).expect("an inventory");
+        let inventory = ValueClassInventory::inventory(&ir, &facts).expect("an inventory");
         assert!(inventory.is_value_class(type_name("app/Inner")));
         assert_eq!(inventory.project(Ty::obj("app/Outer")), Ty::Int);
     }
@@ -322,7 +324,7 @@ mod tests {
     fn the_unsigned_integers_stay_built_in_scalars() {
         let facts = Facts(vec![("kotlin/UInt", Ty::Int)]);
         let ir = referencing(&[Ty::obj("kotlin/UInt")]);
-        let inventory = NativeValueClasses::inventory(&ir, &facts).expect("an inventory");
+        let inventory = ValueClassInventory::inventory(&ir, &facts).expect("an inventory");
         assert!(!inventory.is_value_class(type_name("kotlin/UInt")));
     }
 
@@ -330,7 +332,7 @@ mod tests {
     fn the_unsigned_arrays_stay_built_in_arrays() {
         let facts = Facts(vec![("kotlin/UIntArray", Ty::obj("kotlin/IntArray"))]);
         let ir = referencing(&[Ty::obj("kotlin/UIntArray")]);
-        let inventory = NativeValueClasses::inventory(&ir, &facts).expect("an inventory");
+        let inventory = ValueClassInventory::inventory(&ir, &facts).expect("an inventory");
         assert!(!inventory.is_value_class(type_name("kotlin/UIntArray")));
     }
 
@@ -341,7 +343,7 @@ mod tests {
             ("app/Second", Ty::obj("app/First")),
         ]);
         let ir = referencing(&[Ty::obj("app/First")]);
-        assert!(NativeValueClasses::inventory(&ir, &facts).is_err());
+        assert!(ValueClassInventory::inventory(&ir, &facts).is_err());
     }
 
     #[test]
@@ -356,7 +358,7 @@ mod tests {
             Ty::obj("app/Count"),
             Ty::obj("app/Maybe"),
         ]);
-        let inventory = NativeValueClasses::inventory(&ir, &facts).expect("an inventory");
+        let inventory = ValueClassInventory::inventory(&ir, &facts).expect("an inventory");
         let nullable = |name: &str| Ty::nullable(Ty::obj(name));
         // A reference that cannot be `null` lends its `null` to the outer one.
         assert_eq!(

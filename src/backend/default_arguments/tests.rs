@@ -164,6 +164,44 @@ fn masks_take_one_word_per_32_parameters() {
     assert_eq!(omission_masks(34, []), vec![0, 0]);
 }
 
+/// A dependency declaration lowered into a support unit has no checked identity of its own: the
+/// later module reaches it by its export, so an exported declaration with defaults publishes its
+/// entry with no caller in the unit, and an unexported one builds none.
+#[test]
+fn an_exported_dependency_declaration_publishes_its_entry_without_a_caller() {
+    let mut ir = IrFile::default();
+    let mut declarations = Vec::new();
+    for name in ["exported", "unexported"] {
+        let read = ir.add_expr(IrExpr::GetValue(0));
+        let function = declare(&mut ir, name, vec![Ty::Int], Ty::Int, Some(read), None);
+        let seven = int(&mut ir, 7);
+        with_defaults(&mut ir, function, vec![Some(seven)]);
+        declarations.push(function);
+    }
+    let [exported_function, unexported_function] = declarations[..] else {
+        unreachable!("two declarations");
+    };
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |function| function == exported_function,
+    );
+
+    let entry = ir.default_entries[&exported_function];
+    assert_eq!(ir.default_entries.len(), 1);
+    assert_eq!(published_entry(&ir, exported_function), Some(entry));
+    assert_eq!(published_entry(&ir, unexported_function), None);
+    assert_eq!(ir.functions[entry as usize].name, "exported$default");
+    assert_eq!(ir.functions[entry as usize].params, vec![Ty::Int; 2]);
+    assert_eq!(
+        body(&ir, entry),
+        format!(
+            "{{ {}; return fun{exported_function}($0) }}",
+            fill(1, 1, 0, "7")
+        )
+    );
+}
+
 #[test]
 fn a_published_entry_takes_the_frame_and_one_mask_word_per_32_parameters() {
     let mut ir = IrFile::default();
@@ -188,7 +226,7 @@ fn a_published_entry_takes_the_frame_and_one_mask_word_per_32_parameters() {
     ir.checked_callable_functions
         .insert(CallableId::from_raw(4), function);
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     let entry = ir.default_entries[&function];
     assert_eq!(ir.default_entries.len(), 1);
@@ -254,7 +292,7 @@ fn a_default_reads_an_earlier_parameter_and_its_own_locals_move_past_the_masks()
     });
     let caller = declare(&mut ir, "caller", Vec::new(), Ty::Int, Some(call), None);
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     let entry = ir.default_entries[&function];
     assert_eq!(
@@ -270,39 +308,6 @@ fn a_default_reads_an_earlier_parameter_and_its_own_locals_move_past_the_masks()
         "the declaration's own default is left as it was"
     );
     assert_eq!(body(&ir, caller), format!("fun{entry}(5, absent Int, 2)"));
-}
-
-#[test]
-fn a_constructor_default_calling_with_an_omission_calls_the_entry() {
-    let mut ir = IrFile::default();
-    let seven = int(&mut ir, 7);
-    let body = ir.add_expr(IrExpr::GetValue(0));
-    let function = declare(&mut ir, "f", vec![Ty::Int], Ty::Int, Some(body), None);
-    with_defaults(&mut ir, function, vec![Some(seven)]);
-    let call = || IrExpr::Call {
-        callee: Box::new(Callee::LocalWithDefaults {
-            function,
-            defaults: Box::new([0]),
-        }),
-        dispatch_receiver: None,
-        args: Vec::new(),
-    };
-    let primary_default = ir.add_expr(call());
-    let secondary_default = ir.add_expr(call());
-    let mut class = crate::ir::test_support::blank_class("demo/C");
-    let mut secondary = crate::ir::test_support::blank_secondary_ctor();
-    secondary.params = vec![Ty::Int];
-    secondary.defaults = vec![Some(secondary_default)];
-    class.secondary_ctors.push(secondary);
-    ir.add_class(class);
-    ir.insert_class_ctor_defaults("demo/C", vec![Some(primary_default)]);
-
-    realize(&mut ir, &mut CheckedBackendCallables::default());
-
-    let entry = ir.default_entries[&function];
-    for default in [primary_default, secondary_default] {
-        assert_eq!(render(&ir, default), format!("fun{entry}(absent Int, 1)"));
-    }
 }
 
 #[test]
@@ -336,7 +341,7 @@ fn a_call_site_passes_every_parameter_and_constant_mask_words() {
     });
     let caller = declare(&mut ir, "caller", Vec::new(), Ty::Unit, Some(call), None);
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     let entry = ir.default_entries[&function];
     let mut expected = vec!["0".to_owned(), "absent Int".to_owned()];
@@ -392,7 +397,7 @@ fn a_member_entry_takes_the_receiver_and_dispatches_through_the_method() {
         None,
     );
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     let entry = ir.default_entries[&function];
     let declaration = &ir.functions[entry as usize];
@@ -448,7 +453,7 @@ fn a_value_class_member_entry_calls_the_member_directly() {
         None,
     );
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     let entry = ir.default_entries[&function];
     assert_eq!(
@@ -513,7 +518,7 @@ fn an_inherited_default_calls_the_entry_of_its_provider_in_this_file() {
         None,
     );
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     assert_eq!(ir.default_entries.len(), 1);
     let entry = ir.default_entries[&provider];
@@ -575,7 +580,7 @@ fn an_override_narrowing_its_providers_result_coerces_the_entry_value() {
         None,
     );
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     let entry = ir.default_entries[&provider];
     assert_eq!(ir.functions[entry as usize].ret, formal);
@@ -621,7 +626,7 @@ fn an_actual_entry_is_keyed_by_its_expect_and_calls_the_actual() {
     });
     let caller = declare(&mut ir, "caller", Vec::new(), Ty::String, Some(call), None);
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     let entry = ir.default_entries[&function];
     assert_eq!(published_identities(&ir, function), [expect]);
@@ -745,7 +750,7 @@ fn shapes_this_lowering_cannot_realize_keep_their_checked_form() {
     let before = format!("{:?}", ir.exprs);
     let functions = ir.functions.len();
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     assert_eq!(format!("{:?}", ir.exprs), before);
     assert_eq!(ir.functions.len(), functions);
@@ -817,7 +822,7 @@ fn an_entry_keeps_the_checked_facts_frozen_for_its_defaults() {
     let mut facts = CheckedBackendCallables::freeze(&ir, &SingletonMember(target))
         .expect("the selected dependency member has a frozen fact");
 
-    realize(&mut ir, &mut facts);
+    realize(&mut ir, &mut facts, |_| false);
 
     let entry = ir.default_entries[&function];
     assert_eq!(ir.default_entries.len(), 1);
@@ -854,3 +859,5 @@ fn an_entry_keeps_the_checked_facts_frozen_for_its_defaults() {
     assert_eq!(facts.singleton_dispatch(call), dispatch);
     assert_eq!(facts.singleton_dispatch(next), dispatch);
 }
+
+mod constructors;

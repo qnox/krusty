@@ -1780,7 +1780,7 @@ impl ProductionSignatureSemantics<'_> {
         let mut bindings = class.type_parameter_bindings(applied);
         if let Some(signature) = generic_signature {
             for formal in &signature.formals {
-                bindings.remove(formal);
+                bindings.remove(formal.as_str());
             }
         }
         let specialized = crate::symbol_resolver::ty_subst_keep_unbound(result, &bindings);
@@ -1841,7 +1841,7 @@ impl ProductionSignatureSemantics<'_> {
                 generic
                     .formals
                     .iter()
-                    .cloned()
+                    .map(crate::types::TyParamName::from)
                     .zip(explicit_type_arguments.iter().copied()),
             );
         }
