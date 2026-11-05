@@ -9,7 +9,7 @@ use crate::types::{EqualityMode, Ty, TypeName, Visibility};
 use super::Realized;
 
 /// Build the slots, initializer, `values()` and `valueOf` of the enum `class`.
-pub(super) fn build(ir: &mut IrFile, class: ClassId) -> Realized {
+pub(super) fn build(ir: &mut IrFile, class: ClassId, reads_entries: bool) -> Realized {
     let declaration = &ir.classes[class as usize];
     let classifier = declaration.fq_name_id();
     let owner = declaration.fq_name();
@@ -25,7 +25,8 @@ pub(super) fn build(ir: &mut IrFile, class: ClassId) -> Realized {
         .collect();
     let flag = static_slot(ir, format!("{owner}$initialized"), Ty::Boolean);
     let entries_ty = entries_type(classifier);
-    let entries = static_slot(ir, format!("{owner}$entries"), Ty::nullable(entries_ty));
+    let entries = reads_entries
+        .then(|| static_slot(ir, format!("{owner}$entries"), Ty::nullable(entries_ty)));
 
     let initializer = initializer(ir, class, &slots, flag, entries);
     let values = values(ir, classifier, &owner, &names, &slots, initializer);
@@ -75,7 +76,13 @@ fn static_slot(ir: &mut IrFile, name: String, ty: Ty) -> u32 {
 /// instances and then runs `initInstance` per entry): a constructor that reaches back into its
 /// enum finds every constant already allocated, the ones not constructed yet with their
 /// `kotlin.Enum` storage unset.
-fn initializer(ir: &mut IrFile, class: ClassId, slots: &[u32], flag: u32, entries: u32) -> FunId {
+fn initializer(
+    ir: &mut IrFile,
+    class: ClassId,
+    slots: &[u32],
+    flag: u32,
+    entries: Option<u32>,
+) -> FunId {
     let declaration = &ir.classes[class as usize];
     let classifier = declaration.fq_name_id();
     let name = format!("{}$initEntries", declaration.fq_name());
@@ -148,15 +155,17 @@ fn initializer(ir: &mut IrFile, class: ClassId, slots: &[u32], flag: u32, entrie
         ir.set_logical_type(constant, Ty::obj_name(classifier));
         build.push(constant);
     }
-    let array = values_array(ir, classifier, slots);
-    let list = ir.add_expr(IrExpr::EnumEntriesList {
-        classifier,
-        values: array,
-    });
-    build.push(ir.add_expr(IrExpr::SetStatic {
-        index: entries,
-        value: list,
-    }));
+    if let Some(entries) = entries {
+        let array = values_array(ir, classifier, slots);
+        let list = ir.add_expr(IrExpr::EnumEntriesList {
+            classifier,
+            values: array,
+        });
+        build.push(ir.add_expr(IrExpr::SetStatic {
+            index: entries,
+            value: list,
+        }));
+    }
     if let Some(companion) = companion {
         let instance = ir.add_expr(IrExpr::SingletonValue {
             classifier: companion,
@@ -169,7 +178,7 @@ fn initializer(ir: &mut IrFile, class: ClassId, slots: &[u32], flag: u32, entrie
     // builds it again and throws again, rather than handing out the constants that did get made.
     let caught = next_free_value(ir, build);
     let mut reset = vec![write(ir, flag, IrConst::Boolean(false))];
-    for &slot in slots.iter().chain([&entries]) {
+    for &slot in slots.iter().chain(entries.as_ref()) {
         reset.push(write(ir, slot, IrConst::Null));
     }
     let exception = ir.add_expr(IrExpr::GetValue(caught));

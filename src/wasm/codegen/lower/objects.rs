@@ -163,6 +163,7 @@ impl Body<'_> {
             chain.push(parent);
         }
         self.code.global_get(table);
+        self.enum_base_fields(class)?;
         for &owner in chain.iter().rev() {
             for field in &self.ir.classes[owner as usize].fields {
                 let value = carrier(field.ty)?.ok_or("a `Unit`-typed field")?;

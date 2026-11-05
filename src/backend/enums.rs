@@ -6,7 +6,9 @@
 //! [`IrExpr::EnumEntries`]. None of it is target-specific, so this pass builds it once:
 //!
 //! - **Storage.** Each constant gets a static slot of this file, and the enum gets an
-//!   `initialized` flag and a slot for its one `entries` list.
+//!   `initialized` flag and, when this file reads it, a slot for its one `entries` list. The
+//!   slots are private to the file, and an enum another file declares is not realized here, so
+//!   a list no use of this file reads is never observed and is not built.
 //! - **The initializer.** Kotlin initializes an enum class as a whole: its constants, then the
 //!   `entries` list, then the companion object. One function per enum does that when its flag is
 //!   clear, in Kotlin/Native's order (its `EnumClassLowering`): every constant is first allocated
@@ -51,8 +53,8 @@ use crate::types::TypeName;
 struct Realized {
     /// The static slot of each constant, in declaration order.
     slots: Vec<u32>,
-    /// The static slot of the enum's `entries` list.
-    entries: u32,
+    /// The static slot of the enum's `entries` list, when this file reads it.
+    entries: Option<u32>,
     /// Builds every constant, then `entries`, then the companion, when the enum is not built yet.
     initializer: FunId,
     /// `values()`: a fresh array of the constants.
@@ -67,14 +69,42 @@ pub(crate) fn realize(ir: &mut IrFile) {
         .map(|class| ClassId::try_from(class).expect("too many classes"))
         .filter(|&class| is_enum(&ir.classes[class as usize]))
         .collect();
+    let entries_read = uses::entries_read(ir);
     let mut realized: HashMap<TypeName, Realized> = HashMap::default();
     for class in enums {
-        let enum_class = initializer::build(ir, class);
+        let reads_entries = entries_read.contains(&ir.classes[class as usize].fq_name_id());
+        let enum_class = initializer::build(ir, class, reads_entries);
         ir.enum_initializers.insert(class, enum_class.initializer);
         realized.insert(ir.classes[class as usize].fq_name_id(), enum_class);
     }
     if !realized.is_empty() {
         uses::rewrite(ir, &realized);
+    }
+}
+
+/// One of `kotlin.Enum`'s two properties, which a target answers from the storage its enum base
+/// contributes to every constant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BaseMember {
+    Name,
+    Ordinal,
+}
+
+/// The `kotlin.Enum` property an external property read names: the getter frozen at the
+/// frontend/backend boundary is declared by `kotlin.Enum`, under the name its provider decoded.
+pub(crate) fn base_member(
+    callables: &crate::backend::CheckedBackendCallables,
+    target: crate::fir::ExternalPropertyId,
+) -> Option<BaseMember> {
+    let property = callables.property(target)?;
+    let getter = callables.callable(property.getter)?;
+    if getter.physical_owner != crate::types::wk::kotlin_enum() {
+        return None;
+    }
+    match &*property.name {
+        "name" => Some(BaseMember::Name),
+        "ordinal" => Some(BaseMember::Ordinal),
+        _ => None,
     }
 }
 

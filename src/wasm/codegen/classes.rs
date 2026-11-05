@@ -38,7 +38,7 @@ use super::super::encode::{
 };
 use super::super::interface_dispatch::ClassRef;
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
-use super::lower::{carrier, Unsupported};
+use super::lower::{carrier, Unsupported, STRING};
 
 mod constructor_prefix;
 
@@ -63,8 +63,10 @@ impl Representation for WasmRepresentation {
         matches!(carrier(ty), Ok(Some(ValType::Ref { .. })))
     }
 
-    fn owns_base(&self, _: TypeName) -> bool {
-        false
+    /// `kotlin.Enum` is a base no file declares: its `name` and `ordinal` are the `$Enum` struct's
+    /// ([`ObjectRoot::enum_base`]).
+    fn owns_base(&self, superclass: TypeName) -> bool {
+        superclass == crate::types::wk::kotlin_enum()
     }
 }
 
@@ -118,6 +120,9 @@ pub(super) struct FileClasses {
     pub(super) accessors: Vec<(Accessor, u32, u32)>,
     /// The checked property each realized member read or write (by expression) selected.
     properties: HashMap<u32, PropertyId>,
+    /// Whether each class extends `kotlin.Enum`, itself or through a superclass of this file, so
+    /// its struct leads with `$Enum`'s two fields.
+    enum_rooted: Vec<bool>,
 }
 
 impl FileClasses {
@@ -131,7 +136,17 @@ impl FileClasses {
 
     /// The struct field holding field `index` of `class`.
     pub(super) fn field(&self, class: ClassId, index: u32) -> u32 {
-        1 + self.tables.table(class).first_field + index
+        1 + self.base_fields(class) + self.tables.table(class).first_field + index
+    }
+
+    /// How many fields of `class`'s struct, after the dispatch table, a base no file declares
+    /// contributes: `kotlin.Enum`'s `name` and `ordinal`.
+    pub(super) fn base_fields(&self, class: ClassId) -> u32 {
+        if self.enum_rooted[class as usize] {
+            ENUM_BASE_FIELDS
+        } else {
+            0
+        }
     }
 
     /// The checked property the realized member access `operation` reads or writes.
@@ -146,6 +161,9 @@ impl FileClasses {
             .expect("only an interface has no struct, and nothing reads an interface's field")
     }
 }
+
+/// `kotlin.Enum`'s `name` and `ordinal`: fields 1 and 2 of `$Enum`.
+pub(super) const ENUM_BASE_FIELDS: u32 = 2;
 
 /// The wasm signature of a method of the file: the receiver, then its parameters.
 pub(super) fn method_type(
@@ -183,8 +201,6 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
         "a callable reference"
     } else if class.lambda.is_some() || class.sam_wrapper.is_some() {
         "a function value's class"
-    } else if class.is_enum || class.is_enum_entry {
-        "an enum class"
     } else if class.is_value {
         "a value class"
     // An inner class's enclosing instance is already an ordinary constructor-prefix argument and
@@ -234,6 +250,15 @@ pub(super) fn declare(
     let tables = class_tables::build_numbered(&WasmRepresentation, ir, plan)?;
     let slot_types = slot_types(ir, module, objects, &tables)?;
 
+    let enum_rooted: Vec<bool> = (0..ir.classes.len())
+        .map(|class| {
+            let mut root = class as ClassId;
+            while let Some(parent) = tables.table(root).superclass {
+                root = parent;
+            }
+            ir.classes[root as usize].superclass == crate::types::wk::kotlin_enum()
+        })
+        .collect();
     let mut forms: Vec<ClassForm> = ir.classes.iter().map(|_| ClassForm::default()).collect();
     for &id in &tables.order {
         let class = &ir.classes[id as usize];
@@ -243,13 +268,21 @@ pub(super) fn declare(
         let table = tables.table(id);
         let parent = table.superclass.map(|parent| &forms[parent as usize]);
         let mut fields = vec![immutable(ValType::reference(objects.any_table))];
+        if enum_rooted[id as usize] {
+            fields.extend([immutable(STRING), immutable(ValType::I32)]);
+        }
         if let Some(parent) = table.superclass {
             fields.extend(inherited_fields(ir, &tables, parent)?);
         }
         fields.extend(own_fields(class)?);
+        let root = if enum_rooted[id as usize] {
+            objects.enum_base
+        } else {
+            objects.object
+        };
         let structure = module.subtype(SubType {
             composite: CompositeType::Struct(fields),
-            supertype: Some(parent.map_or(objects.object, |parent| {
+            supertype: Some(parent.map_or(root, |parent| {
                 parent.structure.expect("a superclass has a struct")
             })),
             open: true,
@@ -358,6 +391,7 @@ pub(super) fn declare(
             .filter(|access| access.direct_member)
             .map(|access| (access.operation, access.target))
             .collect(),
+        enum_rooted,
     })
 }
 

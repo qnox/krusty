@@ -148,7 +148,7 @@ impl BodyLowering<'_, '_, '_> {
                 if !args.is_empty() {
                     return Err("a malformed `Enum.name` read".into());
                 }
-                self.enum_member("name", receiver)
+                self.enum_member(crate::backend::enums::BaseMember::Name, receiver)
             }
             IrIntrinsic::EnumOrdinal => {
                 let (Some(receiver), []) = (receiver, args) else {

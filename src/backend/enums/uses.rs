@@ -12,17 +12,31 @@ use super::Realized;
 /// copies a function's or constructor's defaults into its entry after this pass
 /// (`annotation class C(val e: E = E.A)`).
 pub(super) fn rewrite(ir: &mut IrFile, realized: &HashMap<TypeName, Realized>) {
-    let mut roots = crate::ir::emitted_body_roots(ir);
-    roots.extend(function_defaults(ir));
-    roots.extend(constructor_defaults(ir));
     let mut seen = HashSet::default();
-    for root in roots {
+    for root in roots(ir) {
         for expression in crate::ir::value_namespace_expressions(ir, root) {
             if seen.insert(expression) {
                 rewrite_one(ir, realized, expression);
             }
         }
     }
+}
+
+/// Every root a use can sit under: each emitted body and each default.
+fn roots(ir: &IrFile) -> Vec<ExprId> {
+    let mut roots = crate::ir::emitted_body_roots(ir);
+    roots.extend(function_defaults(ir));
+    roots.extend(constructor_defaults(ir));
+    roots
+}
+
+/// The enums whose `entries` some use of this file reads.
+pub(super) fn entries_read(ir: &IrFile) -> HashSet<TypeName> {
+    roots(ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+        .filter_map(|expression| entries_of(ir.expr(expression)))
+        .collect()
 }
 
 /// The defaults of every function this file emits.
@@ -105,7 +119,10 @@ fn rewrite_one(ir: &mut IrFile, realized: &HashMap<TypeName, Realized>, expressi
                 return;
             };
             let build = call(ir, enum_class.initializer, Vec::new(), Ty::Unit);
-            let read = read_slot(ir, enum_class.entries, entries_type(classifier));
+            let entries = enum_class
+                .entries
+                .expect("an enum whose `entries` this file reads keeps them");
+            let read = read_slot(ir, entries, entries_type(classifier));
             IrExpr::Block {
                 stmts: vec![build],
                 value: Some(read),

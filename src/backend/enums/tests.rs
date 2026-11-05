@@ -590,3 +590,28 @@ fn defaults_reading_a_constant_are_realized() {
         );
     }
 }
+
+/// No use of this file reads `Shade.entries`, and no other file can read this file's slots, so
+/// the list is never built.
+#[test]
+fn entries_no_use_reads_are_not_built() {
+    let ir = lowered(COLORS);
+    let lists = |initializer: &str| {
+        let (build, reset, _) = initializer_parts(&ir, function(&ir, initializer));
+        let built = build
+            .iter()
+            .filter(|&&statement| {
+                matches!(
+                    ir.expr(statement),
+                    IrExpr::SetStatic { value, .. }
+                        if matches!(ir.expr(*value), IrExpr::EnumEntriesList { .. })
+                )
+            })
+            .count();
+        (built, reset.len())
+    };
+    // Color: flag, three constants and entries cleared, then the rethrow.
+    assert_eq!(lists("Color$initEntries"), (1, 6));
+    // Shade: flag and two constants cleared, then the rethrow.
+    assert_eq!(lists("Shade$initEntries"), (0, 4));
+}

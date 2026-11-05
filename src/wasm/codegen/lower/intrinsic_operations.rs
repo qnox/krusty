@@ -56,6 +56,14 @@ impl Body<'_> {
                 self.code.array_get_u(self.runtime.chars);
                 Ok(())
             }
+            // The frontend publishes the exact `kotlin.Enum.name` declaration as an intrinsic
+            // after ordinary property selection; it reads the same `$Enum` field.
+            IrIntrinsic::EnumName => {
+                let (Some(receiver), []) = (receiver, args) else {
+                    return Err("a malformed `Enum.name` read".to_string());
+                };
+                self.enum_member(crate::backend::enums::BaseMember::Name, receiver)
+            }
             other => Err(format!("a call to the intrinsic {other:?}")),
         }
     }
