@@ -557,8 +557,10 @@ impl CallInferenceConstraints {
                         && crate::types::ty_mentions_param(*bound, &signature.formals)
                         && !crate::types::ty_mentions_param(*bound, std::slice::from_ref(formal))
                     {
-                        for &(actual, origin) in
-                            lower.get(formal).map(Vec::as_slice).unwrap_or_default()
+                        for &(actual, origin) in lower
+                            .get(formal.as_str())
+                            .map(Vec::as_slice)
+                            .unwrap_or_default()
                         {
                             let mut incorporated = CallInferenceConstraints::default();
                             collect_call_inference_constraints(
