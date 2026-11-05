@@ -2,104 +2,47 @@
 
 use std::collections::BTreeMap;
 
-use krusty::features::FeatureTable;
+use krusty::diag::names::{self, DiagnosticSeverity};
+use krusty::diag::DiagnosticName;
 use krusty::kotlin_version::KotlinVersion;
 
-/// Stable diagnostic names exposed through kotlinc's `-Xwarning-level` contract. A name enters
-/// this registry only when krusty can emit that diagnostic; accepting any other spelling would
-/// promise a policy the compiler cannot apply.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum WarningName {
-    Compiler(krusty::diag::CompilerWarningName),
-    CliArgDisablesStableFeature,
-    DeprecatedCliArg,
-    DeprecatedLanguageVersion,
-    ExperimentalLanguageVersion,
-    RedundantCliArg,
-    RemovedCliArg,
-}
+/// The warnings krusty reports under their kotlinc names, the ones `-Xwarning-level` may
+/// configure. A name enters this list only when krusty can emit that diagnostic; accepting any
+/// other spelling would promise a policy the compiler cannot apply. Whether the selected release
+/// declares the name at all is that release's own diagnostic table.
+const REPORTED_WARNINGS: &[DiagnosticName] = &[
+    names::CLASS_LITERAL_LHS_NOT_A_CLASS_WARNING,
+    names::CLI_ARG_DISABLES_STABLE_FEATURE,
+    names::DATA_CLASS_COPY_VISIBILITY_WILL_BE_CHANGED_WARNING,
+    names::DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING,
+    names::DEPRECATED_CLI_ARG,
+    names::DEPRECATED_LANGUAGE_VERSION,
+    names::DEPRECATION,
+    names::DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING,
+    names::EXPERIMENTAL_LANGUAGE_VERSION,
+    names::EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING,
+    names::INAPPLICABLE_OPERATOR_MODIFIER_WARNING,
+    names::PARENTHESIZED_PACKAGE_QUALIFIER_WARNING,
+    names::REDUNDANT_CLI_ARG,
+    names::REMOVED_CLI_ARG,
+    names::TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING,
+    names::TYPE_ARGUMENTS_NOT_ALLOWED_WARNING,
+    names::TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING,
+    names::TYPE_INTERSECTION_AS_REIFIED_WARNING,
+    names::TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING,
+    names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING,
+    names::WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING,
+];
 
-impl WarningName {
-    fn parse(name: &str, release: KotlinVersion) -> Option<Self> {
-        if let Some(name) = krusty::diag::CompilerWarningName::parse(name) {
-            let available = match name {
-                krusty::diag::CompilerWarningName::DataClassCopyVisibilityWillBeChanged
-                | krusty::diag::CompilerWarningName::DataClassInvisibleCopyUsage => {
-                    FeatureTable::for_version(release).is_some_and(|table| {
-                        table
-                            .get("ErrorAboutDataClassCopyVisibilityChange")
-                            .is_some()
-                    })
-                }
-                krusty::diag::CompilerWarningName::ClassLiteralLhsNotAClass => {
-                    FeatureTable::for_version(release)
-                        .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
-                }
-                krusty::diag::CompilerWarningName::Deprecation => true,
-                krusty::diag::CompilerWarningName::DeprecationErrorMigrationPeriodWarning => {
-                    FeatureTable::for_version(release).is_some_and(|table| {
-                        [
-                            "ReportDeprecatedCompanionInDelegation",
-                            "ReportDeprecationsOfClassifiersInImplicitInvokes",
-                            "ReportDeprecationsOfOuterImportedClasses",
-                        ]
-                        .iter()
-                        .any(|feature| table.get(feature).is_some())
-                    })
-                }
-                krusty::diag::CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess => {
-                    FeatureTable::for_version(release)
-                        .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
-                }
-                krusty::diag::CompilerWarningName::InapplicableOperatorModifier => {
-                    FeatureTable::for_version(release).is_some_and(|table| {
-                        table
-                            .get("ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects")
-                            .is_some()
-                    })
-                }
-                krusty::diag::CompilerWarningName::ParenthesizedPackageQualifier
-                | krusty::diag::CompilerWarningName::TypeArgumentsNotAllowedInPackageQualifier => {
-                    FeatureTable::for_version(release).is_some_and(|table| {
-                        table
-                            .get("ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier")
-                            .is_some()
-                    })
-                }
-                krusty::diag::CompilerWarningName::TypeIntersectionAsReified
-                | krusty::diag::CompilerWarningName::TypeIntersectionAsReifiedDeprecation
-                | krusty::diag::CompilerWarningName::TypeParameterAsReifiedDeprecation => true,
-                krusty::diag::CompilerWarningName::TypeArgumentsNotAllowed => {
-                    FeatureTable::for_version(release)
-                        .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
-                }
-                krusty::diag::CompilerWarningName::WrongNumberOfTypeArgumentsInGetClass => {
-                    FeatureTable::for_version(release)
-                        .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
-                }
-                krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters => {
-                    FeatureTable::for_version(release).is_some_and(|table| {
-                        table
-                            .get("ForbidValueClassRecursionViaTypeParameters")
-                            .is_some()
-                    })
-                }
-            };
-            if !available {
-                return None;
-            }
-            return Some(Self::Compiler(name));
-        }
-        Some(match name {
-            "CLI_ARG_DISABLES_STABLE_FEATURE" => Self::CliArgDisablesStableFeature,
-            "DEPRECATED_CLI_ARG" => Self::DeprecatedCliArg,
-            "DEPRECATED_LANGUAGE_VERSION" => Self::DeprecatedLanguageVersion,
-            "EXPERIMENTAL_LANGUAGE_VERSION" => Self::ExperimentalLanguageVersion,
-            "REDUNDANT_CLI_ARG" => Self::RedundantCliArg,
-            "REMOVED_CLI_ARG" => Self::RemovedCliArg,
-            _ => return None,
-        })
-    }
+/// The warning `name` selects in `release`: one the release declares as a warning and krusty
+/// reports.
+fn warning_name(name: &str, release: KotlinVersion) -> Option<DiagnosticName> {
+    let name = DiagnosticName::parse(name)?;
+    let declared = matches!(
+        name.severity(release),
+        Some(DiagnosticSeverity::Warning | DiagnosticSeverity::StrongWarning)
+    );
+    (declared && REPORTED_WARNINGS.contains(&name)).then_some(name)
 }
 
 /// The three severities accepted by kotlinc's warning-level option.
@@ -133,7 +76,7 @@ pub enum WarningDisposition {
 #[derive(Clone, Debug)]
 pub struct WarningPolicy {
     compiler_default: WarningLevel,
-    configured: BTreeMap<WarningName, WarningLevel>,
+    configured: BTreeMap<DiagnosticName, WarningLevel>,
 }
 
 impl Default for WarningPolicy {
@@ -152,7 +95,7 @@ impl WarningPolicy {
                 "invalid value '{value}' for -Xwarning-level: expected <NAME>:<error|warning|disabled>"
             ));
         };
-        let Some(name) = WarningName::parse(name, release) else {
+        let Some(name) = warning_name(name, release) else {
             let name = value.split_once(':').map_or(value, |(name, _)| name);
             return Err(format!("warning with name \"{name}\" does not exist"));
         };
@@ -186,14 +129,14 @@ impl WarningPolicy {
     }
 
     /// The configured level for a diagnostic, before global policy is considered.
-    pub(super) fn configured_level(&self, name: WarningName) -> Option<WarningLevel> {
+    pub(super) fn configured_level(&self, name: DiagnosticName) -> Option<WarningLevel> {
         self.configured.get(&name).copied()
     }
 
     /// Command-line configuration warnings are not hidden by plain `-nowarn`. An explicit named
     /// level still wins, while global `-Werror` retains warning severity and fails afterward. A
     /// warning without a configurable identity follows only the global policy.
-    pub fn command_line_disposition(&self, name: Option<WarningName>) -> WarningDisposition {
+    pub fn command_line_disposition(&self, name: Option<DiagnosticName>) -> WarningDisposition {
         match name.and_then(|name| self.configured_level(name)) {
             Some(WarningLevel::Disabled) => WarningDisposition::Disabled,
             Some(WarningLevel::Warning) => WarningDisposition::Warning,
@@ -208,14 +151,8 @@ impl WarningPolicy {
     /// Policy for a compiler warning. A named level wins over the global default exactly as it
     /// does for command-line warnings; `None` is reserved for genuinely unnamed diagnostics and
     /// module warnings.
-    pub fn compiler_disposition(
-        &self,
-        name: Option<krusty::diag::CompilerWarningName>,
-    ) -> WarningDisposition {
-        if let Some(level) = name
-            .map(WarningName::Compiler)
-            .and_then(|name| self.configured_level(name))
-        {
+    pub fn compiler_disposition(&self, name: Option<DiagnosticName>) -> WarningDisposition {
+        if let Some(level) = name.and_then(|name| self.configured_level(name)) {
             return match level {
                 WarningLevel::Disabled => WarningDisposition::Disabled,
                 WarningLevel::Warning => WarningDisposition::Warning,
@@ -233,7 +170,6 @@ impl WarningPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krusty::diag::CompilerWarningName;
 
     #[test]
     fn a_named_compiler_warning_overrides_global_policy() {
@@ -248,7 +184,7 @@ mod tests {
                 .configure(&format!("DEPRECATION:{level}"), KotlinVersion::V2_4_20)
                 .unwrap();
             assert_eq!(
-                policy.compiler_disposition(Some(CompilerWarningName::Deprecation)),
+                policy.compiler_disposition(Some(names::DEPRECATION)),
                 expected
             );
             assert_eq!(
@@ -258,24 +194,37 @@ mod tests {
         }
     }
 
+    /// Measured with kotlinc 2.4.0: of the reified warnings it declares only
+    /// `TYPE_INTERSECTION_AS_REIFIED_WARNING`; the two deprecation warnings are new in 2.4.20.
     #[test]
-    fn reified_warning_names_are_available_in_each_supported_release() {
+    fn reified_warning_names_follow_the_selected_release_catalog() {
         for release in KotlinVersion::supported() {
-            for (name, diagnostic) in [
+            for (name, diagnostic, since) in [
                 (
                     "TYPE_INTERSECTION_AS_REIFIED_WARNING",
-                    CompilerWarningName::TypeIntersectionAsReified,
+                    names::TYPE_INTERSECTION_AS_REIFIED_WARNING,
+                    KotlinVersion::V2_4_0,
                 ),
                 (
                     "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING",
-                    CompilerWarningName::TypeIntersectionAsReifiedDeprecation,
+                    names::TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING,
+                    KotlinVersion::V2_4_20,
                 ),
                 (
                     "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING",
-                    CompilerWarningName::TypeParameterAsReifiedDeprecation,
+                    names::TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING,
+                    KotlinVersion::V2_4_20,
                 ),
             ] {
                 let mut policy = WarningPolicy::default();
+                if release < since {
+                    assert_eq!(
+                        policy.configure(&format!("{name}:error"), release),
+                        Err(format!("warning with name \"{name}\" does not exist")),
+                        "{release}: {name}"
+                    );
+                    continue;
+                }
                 assert_eq!(
                     policy.configure(&format!("{name}:error"), release),
                     Ok(()),
@@ -288,6 +237,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every warning krusty reports is one the newest release declares as a warning.
+    #[test]
+    fn every_reported_warning_is_declared_by_the_newest_release() {
+        for &name in REPORTED_WARNINGS {
+            assert_eq!(
+                warning_name(name.as_str(), KotlinVersion::newest()),
+                Some(name),
+                "{name}"
+            );
+        }
+        assert!(REPORTED_WARNINGS.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    /// kotlinc declares `UNRESOLVED_REFERENCE`, but as an error, which has no warning level.
+    #[test]
+    fn an_error_is_not_a_configurable_warning() {
+        assert_eq!(
+            warning_name("UNRESOLVED_REFERENCE", KotlinVersion::V2_4_20),
+            None
+        );
     }
 
     #[test]
@@ -326,15 +297,15 @@ mod tests {
                 Ok(())
             );
             assert_eq!(
-                current.configured_level(WarningName::Compiler(
-                    CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
-                )),
+                current.configured_level(
+                    names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING
+                ),
                 Some(expected_level),
                 "{level}"
             );
             assert_eq!(
                 current.compiler_disposition(Some(
-                    CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
+                    names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING,
                 )),
                 expected_disposition,
                 "{level}"
@@ -347,11 +318,11 @@ mod tests {
         for (name, identity) in [
             (
                 "DATA_CLASS_COPY_VISIBILITY_WILL_BE_CHANGED_WARNING",
-                CompilerWarningName::DataClassCopyVisibilityWillBeChanged,
+                names::DATA_CLASS_COPY_VISIBILITY_WILL_BE_CHANGED_WARNING,
             ),
             (
                 "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING",
-                CompilerWarningName::DataClassInvisibleCopyUsage,
+                names::DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING,
             ),
         ] {
             for release in KotlinVersion::supported() {
@@ -362,7 +333,7 @@ mod tests {
                     "{release}: {name}"
                 );
                 assert_eq!(
-                    policy.configured_level(WarningName::Compiler(identity)),
+                    policy.configured_level(identity),
                     Some(WarningLevel::Disabled),
                     "{release}: {name}"
                 );
@@ -373,10 +344,11 @@ mod tests {
     #[test]
     fn operator_modifier_warning_name_follows_the_selected_release_catalog() {
         const NAME: &str = "INAPPLICABLE_OPERATOR_MODIFIER_WARNING";
+        // Measured: kotlinc 2.4.0 and 2.4.10 already declare it, so both accept the level.
         for release in [KotlinVersion::V2_4_0, KotlinVersion::V2_4_10] {
             assert_eq!(
                 WarningPolicy::default().configure(&format!("{NAME}:warning"), release),
-                Err(format!("warning with name \"{NAME}\" does not exist")),
+                Ok(()),
                 "{release}"
             );
         }
@@ -399,15 +371,12 @@ mod tests {
                 Ok(())
             );
             assert_eq!(
-                current.configured_level(WarningName::Compiler(
-                    CompilerWarningName::InapplicableOperatorModifier,
-                )),
+                current.configured_level(names::INAPPLICABLE_OPERATOR_MODIFIER_WARNING),
                 Some(expected_level),
                 "{level}"
             );
             assert_eq!(
-                current
-                    .compiler_disposition(Some(CompilerWarningName::InapplicableOperatorModifier,)),
+                current.compiler_disposition(Some(names::INAPPLICABLE_OPERATOR_MODIFIER_WARNING,)),
                 expected_disposition,
                 "{level}"
             );

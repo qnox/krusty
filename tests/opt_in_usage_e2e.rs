@@ -112,6 +112,78 @@ fun statements() {
 }
 
 #[test]
+fn an_accessor_opt_in_covers_only_that_accessor() {
+    let src = source(
+        "@A fun a() = \"a\"
+fun <T> call(f: () -> T): T = f()
+
+class Accessors {
+    val own: String
+        @OptIn(A::class)
+        get() = a()
+
+    @get:OptIn(A::class)
+    val getSite: String
+        get() = a()
+
+    @get:OptIn(A::class)
+    val getSiteInitializer: String = a()
+
+    @get:OptIn(A::class)
+    var getSiteSetter: String
+        get() = a()
+        set(value) { a() }
+
+    @set:OptIn(A::class)
+    var setSite: String
+        get() = a()
+        set(value) { a() }
+
+    var ownSetter: String = \"\"
+        @OptIn(A::class)
+        set(value) { field = a() + value }
+
+    val lambdaInGetter: String
+        @OptIn(A::class)
+        get() = call { a() }
+}
+
+val topLevel: String
+    @OptIn(A::class)
+    get() { return a() }
+",
+    );
+    common::assert_errors_match_kotlinc(&[("main.kt", &src)], &[]);
+}
+
+#[test]
+fn an_opt_in_on_a_lambdas_trailing_value_covers_that_value() {
+    let src = source(
+        "@A fun a() = 1
+fun <T> call(f: () -> T): T = f()
+
+fun trailing() = call {
+    @OptIn(A::class)
+    a()
+}
+
+fun afterStatements() = call {
+    val first = 1
+    @OptIn(A::class)
+    first + a()
+}
+
+fun onlyTheAnnotatedStatement() = call {
+    a()
+    @OptIn(A::class)
+    a()
+}
+",
+    );
+    common::assert_errors_match_kotlinc(&[("main.kt", &src)], &[]);
+}
+
+#[test]
 fn enclosing_opt_in_reaches_members_of_an_anonymous_object() {
     let src = source(
         "@A fun experimental(): Int = 1
