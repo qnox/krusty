@@ -189,8 +189,8 @@ fn recursion_warning_keeps_its_typed_policy_identity() {
     assert_eq!(diagnostic.editor_span, None);
     assert_eq!(diagnostic.severity, krusty::diag::Severity::Warning);
     assert_eq!(
-        diagnostic.warning_name,
-        Some(krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,)
+        diagnostic.name,
+        Some(krusty::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING,)
     );
     assert_eq!(diagnostic.kind, krusty::diag::DiagnosticKind::Compiler);
     assert_eq!(
@@ -269,6 +269,46 @@ fn recursion_warning_is_suppressed_on_the_parameter_and_the_class() {
     assert_eq!(kotlinc, expected);
     let krusty = common::front_end_diagnostics_located(
         SUPPRESSED,
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    );
+    assert_eq!(krusty, expected);
+}
+
+const SUPPRESSED_PARAMETER_SITE: &str = "\
+@JvmInline value class T1<T : T1<T>>(@param:Suppress(\"VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING\") val x: T)
+@JvmInline value class T3<T : T3<T>>(val x: T)
+";
+
+/// A `@param:` use-site application belongs to the parameter declaration, so its suppression
+/// covers the warning inside that parameter too.
+#[test]
+fn recursion_warning_is_suppressed_by_the_parameter_use_site() {
+    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+        return;
+    }
+    let expected = [
+        "2:45: warning: value class cannot be recursive. This will become an error \
+                     in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-85848.",
+    ];
+    let result = common::compiler_diagnostics_with_shared_args(
+        &[("ValueClasses.kt", SUPPRESSED_PARAMETER_SITE)],
+        &[common::stdlib_jar()],
+        &[],
+    );
+    assert!(common::compiler_errors(&result.reference_stderr).is_empty());
+    let kotlinc = common::compiler_warnings(&result.reference_stderr)
+        .into_iter()
+        .map(|warning| {
+            format!(
+                "{}:{}: warning: {}",
+                warning.line, warning.column, warning.message
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(kotlinc, expected);
+    let krusty = common::front_end_diagnostics_located(
+        SUPPRESSED_PARAMETER_SITE,
         &[common::stdlib_jar()],
         Some(common::jdk_modules().as_path()),
     );
