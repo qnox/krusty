@@ -74,7 +74,7 @@ fn suspend_unary_minus_cross_file_executes() {
     expect_ok("r = (-b).v + 3", "suspend_unary_minus_cross_file");
 }
 
-/// `compareTo` (via `a < b`) and `contains` (via `x in b`) were recorded in `docs/SPEC.md` as
+/// `compareTo` (via `a < b`) and `contains` (via `x in b`) were once recorded as
 /// cross-file RESOLUTION gaps, refused by the front end "with or WITHOUT `suspend`". They are not:
 /// both resolve and run across the file boundary. The suspending spellings are checked here; the
 /// comparison additionally has a cross-file `suspend` guard in `cross_file_inline_call_e2e`.

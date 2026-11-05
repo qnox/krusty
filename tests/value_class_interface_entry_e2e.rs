@@ -157,3 +157,53 @@ fn delegated_value_class_interface_members_run() {
     .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");
 }
+
+/// The lines of a value class's interface entries, against kotlinc.
+///
+/// An interface member of a value class is realized as a static replacement over the carrier, and
+/// the box gets an instance entry calling it. kotlinc generates that entry as a forwarder of the
+/// declaration: it enters on the member's signature line, even when an expression body starts on a
+/// later line, and returns on the line the declaration ends on (a block's `}` or an expression
+/// body's last line). krusty entered on the body's line and mapped no return.
+const ENTRY_LINES: &str = r#"interface Described {
+    fun describe(): String
+    fun count(): Int
+}
+
+@JvmInline
+value class Text(val v: String) : Described, Comparable<Text> {
+    override fun describe(): String {
+        val q = "'"
+        return q + v + q
+    }
+
+    override fun count(): Int =
+        v.length +
+            0
+
+    override fun compareTo(other: Text): Int {
+        val a = v.length
+        return a - other.v.length
+    }
+}
+
+fun box(): String {
+    val text = Text("ab")
+    val got = text.describe() + text.count() + text.compareTo(Text("a"))
+    return if (got == "'ab'21") "OK" else got
+}
+"#;
+
+#[test]
+fn interface_entries_enter_on_the_signature_and_return_on_the_end_line() {
+    common::assert_classes_identical_to_kotlinc(
+        "ValueClassInterfaceEntryLines",
+        ENTRY_LINES,
+        &["Text"],
+    );
+}
+
+#[test]
+fn interface_entries_run() {
+    common::expect_box_ok_with_stdlib(ENTRY_LINES, "ValueClassInterfaceEntryLines");
+}

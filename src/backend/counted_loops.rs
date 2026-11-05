@@ -237,13 +237,13 @@ fn finish_membership(
 ) {
     if negated {
         let contains = ir.add_expr(contains);
-        ir.logical_types.insert(contains, Ty::Boolean);
+        ir.set_logical_type(contains, Ty::Boolean);
         ir.replace_with_negation(expression, contains);
     } else {
         ir.exprs[expression as usize] = contains;
     }
     record_generated_origins(ir, expression, first_generated, inlined_calls);
-    if let Some(line) = ir.expr_source_lines.get(&expression).copied() {
+    if let Some(line) = ir.source_line(expression) {
         record_generated_line(ir, line, first_generated);
     }
     keep_written_offsets(ir, derived_constants);
@@ -314,7 +314,7 @@ impl Realizer<'_> {
     /// A value node whose checked type this realizer decides, recorded as lowering records one.
     fn add_checked(&mut self, expression: IrExpr, ty: Ty) -> ExprId {
         let id = self.add(expression);
-        self.ir.logical_types.insert(id, ty);
+        self.ir.set_logical_type(id, ty);
         id
     }
 
@@ -330,7 +330,7 @@ impl Realizer<'_> {
         let copy = self.ir.expr(expression).clone();
         let copy = self.add(copy);
         if let Some(ty) = self.ir.checked_type(expression) {
-            self.ir.logical_types.insert(copy, ty);
+            self.ir.set_logical_type(copy, ty);
         }
         self.keep_representation(expression, copy);
         copy
@@ -407,7 +407,7 @@ impl Realizer<'_> {
     fn bound_operand(&mut self, bound: ExprId, ty: Ty) -> Operand {
         let stable = constant_bound(self.ir, bound).is_some()
             || (self.ir.binding_read_stability.get(&bound) == Some(&IrBindingStability::Stable)
-                && self.ir.logical_types.get(&bound) == Some(&ty)
+                && self.ir.logical_type(bound) == Some(ty)
                 && matches!(self.ir.expr(bound), IrExpr::GetValue(_)));
         Operand {
             value: self.range_bound(bound, ty),
@@ -621,7 +621,7 @@ fn record_generated_lines(ir: &mut IrFile, source: ExprId, first_generated: usiz
 /// offsets, so the comparison after an inlined `compareTo` marks that line at its jump.
 fn record_generated_line(ir: &mut IrFile, line: u32, first_generated: usize) {
     for raw in first_generated..ir.exprs.len() {
-        ir.expr_source_lines.insert(raw as ExprId, line);
+        ir.set_source_line(raw as ExprId, line);
     }
 }
 
@@ -629,13 +629,17 @@ fn record_generated_line(ir: &mut IrFile, line: u32, first_generated: usize) {
 /// nodes took the construct's line.
 fn keep_written_offsets(ir: &mut IrFile, derived_constants: &[DerivedConstant]) {
     for &DerivedConstant { written, built } in derived_constants {
-        match ir.expr_source_lines.get(&written).copied() {
-            Some(line) => ir.expr_source_lines.insert(built, line),
-            None => ir.expr_source_lines.remove(&built),
-        };
-        match ir.expr_end_lines.get(&written).copied() {
-            Some(line) => ir.expr_end_lines.insert(built, line),
-            None => ir.expr_end_lines.remove(&built),
-        };
+        match ir.source_line(written) {
+            Some(line) => ir.set_source_line(built, line),
+            None => {
+                ir.take_source_line(built);
+            }
+        }
+        match ir.end_line(written) {
+            Some(line) => ir.set_end_line(built, line),
+            None => {
+                ir.take_end_line(built);
+            }
+        }
     }
 }

@@ -68,6 +68,99 @@ impl SelectedGenericCallShape {
 }
 
 impl Checker<'_> {
+    /// Whether a selected call can infer its result from `expected` after expression-owned result
+    /// transformations have been preserved. The declaration supplies the generic result shape, but
+    /// a safe call adds nullability outside that shape and contextual inference cannot erase it.
+    pub(super) fn call_result_can_bind_expected(&self, expression: ExprId, expected: Ty) -> bool {
+        // `Any`/`Any?` cannot bind anything: every result is already a subtype, so the
+        // expectation carries no constraint for a result variable. A literal declared
+        // `Map<String, Any?>` hands `Any?` to every nested value and used to re-enter each level
+        // once more for it (see `selected_argument_type` for the equal-type case).
+        if expected
+            .non_null()
+            .obj_internal()
+            .is_some_and(|owner| owner == crate::types::wk::any())
+        {
+            return false;
+        }
+        if let Expr::Elvis { lhs, rhs } = self.file.expr(expression) {
+            // An Elvis carries the selected generic-result decision of either branch. Treating only
+            // a syntactic CALL as contextual made `null ?: emptyList()` opaque to an enclosing
+            // `Collection<Int>` parameter even though the RHS had already selected `emptyList<T>`.
+            return self.call_result_can_bind_expected(*lhs, Ty::nullable(expected))
+                || self.call_result_can_bind_expected(*rhs, expected);
+        }
+        if let Expr::SafeCall { receiver, .. } = self.file.expr(expression) {
+            let receiver = self.expr_types[receiver.0 as usize];
+            if receiver.is_reference() && !expected.admits_null() {
+                return false;
+            }
+        }
+        if self
+            .file
+            .call_type_args
+            .get(&expression.0)
+            .is_some_and(|arguments| !arguments.is_empty())
+        {
+            return false;
+        }
+        if matches!(
+            self.expr_lowers.get(&expression),
+            Some(ExprLowering::CompilerSynthetic(
+                crate::synthetics::SyntheticKind::EmptyReference
+                    | crate::synthetics::SyntheticKind::ReferenceVararg
+            ))
+        ) {
+            let expected = expected.non_null();
+            let actual = self.expr_types[expression.0 as usize].non_null();
+            return expected.is_reference_array()
+                && expected.array_elem().is_some()
+                && actual.is_reference_array();
+        }
+        if matches!(self.file.expr(expression), Expr::Call { .. }) {
+            let actual = self.expr_types[expression.0 as usize];
+            let expected_owner = expected.kotlin_class_internal();
+            let actual_owner = actual.kotlin_class_internal();
+            // A nullable result keeps its nullability under every binding of its arguments.
+            if expected_owner.is_some()
+                && (!actual.is_nullable() || expected.admits_null())
+                && expected_owner == actual_owner
+                && expected_owner
+                    .and_then(|owner| self.resolver().classifier(owner))
+                    .is_some_and(|class| !class.type_params.is_empty())
+            {
+                return true;
+            }
+        }
+        let resolved = self.resolved_calls.get(&expression);
+        let generic = self.expected_type_callable_signature(expression);
+        crate::trace_compiler!(
+            "expected_call",
+            "argument expression={expression:?} expected={expected:?} selected={} generic_ret={:?}",
+            resolved.is_some(),
+            generic.as_ref().map(|signature| signature.ret),
+        );
+        let Some(generic) = generic else {
+            return false;
+        };
+        let source = self.fed_source();
+        let provisional = self.expr_types[expression.0 as usize];
+        crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
+            &source,
+            &generic,
+            expected,
+            |actual, bound| self.receiver_is_assignable(actual, bound),
+        )
+        .is_some_and(|bindings| {
+            crate::symbol_resolver::expected_result_keeps_call_evidence(
+                provisional,
+                &generic,
+                expected,
+                &bindings,
+            )
+        })
+    }
+
     /// Whether this nested call has no input-fixed result shape and therefore receives an ordinary
     /// successful-argument score until the enclosing declarations' parameter shapes are compared.
     pub(super) fn argument_uses_context_only_result(
@@ -241,10 +334,10 @@ impl Checker<'_> {
             })
             .collect::<Vec<_>>();
         Some(std::borrow::Cow::Owned(GenericSig {
-            formals: classifier.type_params().clone(),
+            formals: crate::types::TyParamName::all(classifier.type_params()),
             formal_bounds: classifier.type_param_bounds().clone(),
             receiver: None,
-            params: Vec::new(),
+            params: constructor_parameter_shapes(constructor).to_vec(),
             ret: Ty::obj_args_name(owner, &arguments),
             return_policy: GenericReturnPolicy::Exact,
         }))
@@ -376,7 +469,7 @@ impl Checker<'_> {
             .resolved_constructors
             .get(&expression)
             .and_then(|constructor| self.resolved_type_name(constructor.owner()))
-            .map(|classifier| classifier.type_params().clone())
+            .map(|classifier| crate::types::TyParamName::all(classifier.type_params()))
             .unwrap_or_default();
         let shape_mentions_result_formal = |shape: Ty| {
             signature
@@ -431,10 +524,14 @@ impl Checker<'_> {
                         .any(shape_mentions_result_formal)
                 }),
         };
-        fn is_declaration_fallback(symbolic: Ty, actual: Ty, formals: &[String]) -> bool {
+        fn is_declaration_fallback(
+            symbolic: Ty,
+            actual: Ty,
+            formals: &[crate::types::TyParamName],
+        ) -> bool {
             match (symbolic.kind(), actual.kind()) {
-                (TyKind::TyParam(formal, bound), _)
-                    if formals.iter().any(|declared| declared == formal) =>
+                (TyKind::TyParam(formal, bound) | TyKind::Var(formal, bound), _)
+                    if formals.contains(&formal) =>
                 {
                     // An alias formal (`E` of `typealias HashSet<E> = java.util.HashSet<E>`) is
                     // bounded by `Any?`; the Java target completes the same position from its own
@@ -462,6 +559,7 @@ impl Checker<'_> {
                 }
                 (TyKind::Nullable(symbolic), TyKind::Nullable(actual))
                 | (TyKind::PlatformNullable(symbolic), TyKind::PlatformNullable(actual))
+                | (TyKind::MutabilityFlexible(symbolic), TyKind::MutabilityFlexible(actual))
                 | (TyKind::InProjection(symbolic), TyKind::InProjection(actual))
                 | (TyKind::OutProjection(symbolic), TyKind::OutProjection(actual))
                 | (TyKind::StarProjection(symbolic), TyKind::StarProjection(actual)) => {
@@ -484,6 +582,22 @@ impl Checker<'_> {
     }
 }
 
+/// The selected constructor's parameter shapes before classifier type-argument substitution. They
+/// tell which classifier formals the call's own value arguments determine, so a constructor's
+/// result template is input-constrained exactly when a function's would be.
+fn constructor_parameter_shapes(constructor: &ResolvedConstructor) -> &[Ty] {
+    match constructor {
+        ResolvedConstructor::Source {
+            declaration_params, ..
+        } => declaration_params,
+        ResolvedConstructor::Plain { member, .. }
+        | ResolvedConstructor::PlainSlots { member, .. } => member.constructor_declaration_params(),
+        ResolvedConstructor::Synthetic { ctor, .. } => {
+            ctor.declaration.constructor_declaration_params()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,7 +606,7 @@ mod tests {
         SelectedGenericCallShape::source_for_test(
             declaration,
             GenericSig {
-                formals: vec!["T".to_string()],
+                formals: vec![crate::types::TyParamName::new("T")],
                 formal_bounds: vec![Vec::new()],
                 receiver: None,
                 params: Vec::new(),

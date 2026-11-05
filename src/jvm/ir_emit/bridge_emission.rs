@@ -44,7 +44,9 @@ fn finish_bridge(
     } = header;
     let name = bridge.name.as_str();
     if let Some(entry) = entry {
-        finish_code_sig::<0x0001>(cw, name, desc, code, locals, entry.signature.as_deref());
+        code.ensure_locals(locals);
+        code.link();
+        cw.add_method_sig(entry.access, name, desc, code, entry.signature.as_deref());
         cw.set_method_parameters(name, desc, &entry.reflected);
     } else if packs_arguments || erased_copy {
         finish_code::<{ 0x0001 | 0x0010 | 0x0040 | 0x1000 }>(cw, name, desc, code, locals);
@@ -132,15 +134,24 @@ pub(super) fn emit_barrier_outcome(
     }
 }
 
-/// An interface entry reads as its member does: the member's declaration line once its parameter
-/// checks are done, and `this` with the member's own parameter names (its carrier is `this` here).
+/// Where a bridge's code starts once its parameter checks are done, and where it returns when it
+/// does (a `Nothing` member's bridge throws instead).
+#[derive(Clone, Copy)]
+struct BridgeCodeOffsets {
+    body: u16,
+    ret: Option<u16>,
+}
+
+/// An interface entry is kotlinc's generated forwarder of its member: it enters on the member's
+/// signature line once its parameter checks are done and returns on the line the declaration ends
+/// on, and it names `this` with the member's own parameter names (its carrier is `this` here).
 fn attach_interface_entry_debug_tables(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
     bridge: &crate::ir::Bridge,
     descriptor: &str,
-    body_pc: u16,
+    offsets: BridgeCodeOffsets,
 ) {
     let Some(member) = bridge.target_function else {
         return;
@@ -163,8 +174,17 @@ fn attach_interface_entry_debug_tables(
         }
         slot += slot_words(*parameter);
     }
-    let line = ir.fn_decl_lines.get(&member).map(|&line| (body_pc, line));
+    let entry = super::method_defaults::signature_line(ir, member);
+    let line = entry.map(|line| (offsets.body, line));
     cw.set_method_debug(&bridge.name, descriptor, line, &locals);
+    // The return's line is an entry of its own only below the entry line; on that same line the
+    // method's one entry at its start already covers it.
+    let end = ir.fn_end_lines.get(&member).copied();
+    if let (Some(line), Some(pc), Some(end)) =
+        (line, offsets.ret, end.filter(|&end| Some(end) != entry))
+    {
+        cw.set_method_lines(&bridge.name, descriptor, &[line, (pc, end)]);
+    }
 }
 
 fn is_extension_receiver(bridge: &crate::ir::Bridge, index: usize) -> bool {
@@ -236,6 +256,18 @@ fn bridge_position(ir: &IrFile, c: &crate::ir::IrClass, b: &crate::ir::Bridge) -
         .unwrap_or(u32::MAX)
 }
 
+/// A value class's read-only collection stubs, which kotlinc adds before its value-class lowering
+/// generates the representation members (`<init>`, `constructor-impl`, `box-impl`, ...), so they
+/// precede those. [`emit_bridges`] then finds them written.
+pub(super) fn emit_value_class_stubs(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    cw: &mut ClassWriter,
+    env: &EmitEnv<'_>,
+) {
+    read_only_stubs::emit_stubs(ir, c, cw, env);
+}
+
 /// Emit `ACC_BRIDGE|ACC_SYNTHETIC` methods: each has the supertype's erased descriptor, adapts its
 /// arguments (type barrier / checkcast / unbox / numeric convert), delegates to the concrete override,
 /// and adapts the return value back (box / numeric convert). A class's read-only collection stubs
@@ -248,7 +280,7 @@ pub(super) fn emit_bridges(
 ) {
     read_only_stubs::emit_stubs(ir, c, cw, env);
     let class = ClassBridges::new(ir, c, env);
-    let mut stub_bridges = read_only_stubs::StubBridges::of(c, env);
+    let mut stub_bridges = read_only_stubs::StubBridges::of(ir, c, env);
     for (bridge_index, b) in c.bridges.iter().enumerate() {
         // An interface entry stands beside its static member, which emits it.
         if b.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
@@ -310,6 +342,10 @@ enum BridgeRealization {
     /// (`Object get(Object)` beside `Integer get(Object)`): the same body, final and synthetic,
     /// with no generic signature.
     ErasedCopy,
+    /// The special bridge beside an [`Self::ErasedCopy`] whose value-class result that copy boxes:
+    /// it returns the target's own physical result (`String get(Object)` over `get-gaYaXmE`)
+    /// with no result adaptation.
+    TargetResult,
 }
 
 /// Emit one planned bridge in kotlinc's form. A special bridge whose implementation result
@@ -324,7 +360,6 @@ fn emit_planned_bridge(
     bridge_index: usize,
     b: &crate::ir::Bridge,
 ) {
-    // A value-class result keeps its single adapted bridge.
     let adapted = class
         .adaptations
         .get(
@@ -332,6 +367,29 @@ fn emit_planned_bridge(
             u32::try_from(bridge_index).expect("bridge ordinals fit u32"),
         )
         .is_some();
+    // kotlinc substitutes a type-safe special bridge's result with its target's, so a value-class
+    // adapted bridge whose target returns a narrower reference than the erased result is two
+    // methods as well: the erased copy, which adapts the result, then the special bridge at the
+    // target's physical result (`Object get(Object)`, then `String get(Object)` over
+    // `get-gaYaXmE`).
+    if adapted
+        && b.special
+        && !class.class.is_interface
+        && b.kind == crate::ir::BridgeKind::Function
+        && b.barrier_plan.is_some()
+    {
+        let target = bridge_target_result(class.ir, class.class, class.override_results, b);
+        let erased = ir_ty_to_jvm(&b.erased_ret);
+        if target.is_reference() && erased.is_reference() && target != erased {
+            for realization in [
+                BridgeRealization::ErasedCopy,
+                BridgeRealization::TargetResult,
+            ] {
+                emit_bridge(class, cw, bridge_index, b, None, realization);
+            }
+            return;
+        }
+    }
     let narrower_result = b.special
         && !adapted
         && !class.class.is_interface
@@ -389,6 +447,33 @@ fn emit_planned_bridge(
     }
 }
 
+/// The class's own static value-class member a bridge calls, when it calls one.
+fn static_bridge_target<'a>(
+    ir: &'a IrFile,
+    c: &crate::ir::IrClass,
+    b: &crate::ir::Bridge,
+) -> Option<(u32, &'a crate::ir::IrFunction)> {
+    b.target_function.and_then(|function| {
+        let target = ir.functions.get(function as usize)?;
+        (target.is_static && target.dispatch_receiver == Some(c.fq_name))
+            .then_some((function, target))
+    })
+}
+
+/// The JVM result of the member a bridge calls. The target is a declaration, so its result is
+/// spelled as declared (`Nothing?` is `Void`).
+fn bridge_target_result(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    override_results: &crate::jvm::override_results::OverrideResults,
+    b: &crate::ir::Bridge,
+) -> Ty {
+    static_bridge_target(ir, c, b).map_or_else(
+        || jvm_declared_ty(&b.target_ret.unwrap_or(b.concrete_ret)),
+        |(function, _)| jvm_declared_ty(&override_results.physical_result(ir, function)),
+    )
+}
+
 /// Emit one bridge: see [`emit_bridges`].
 fn emit_bridge(
     class: &ClassBridges<'_>,
@@ -412,33 +497,30 @@ fn emit_bridge(
         c.fq_name_id(),
         u32::try_from(bridge_index).expect("bridge ordinals fit u32"),
     );
-    let result_adapter = adapter.and_then(|adapter| adapter.result);
+    let result_adapter = adapter
+        .and_then(|adapter| adapter.result)
+        .filter(|_| realization != BridgeRealization::TargetResult);
     let return_unboxing = match result_adapter {
         Some(crate::jvm::bridge_adaptations::BridgeResultAdapter::Unbox(plan)) => Some(plan),
         _ => None,
     };
     let ep = jvm_tys(&b.erased_params);
-    let static_target = b.target_function.and_then(|function| {
-        let target = ir.functions.get(function as usize)?;
-        (target.is_static && target.dispatch_receiver == Some(c.fq_name))
-            .then_some((function, target))
-    });
+    let static_target = static_bridge_target(ir, c, b);
     let target_parameters = static_target.map(|(function, _)| jvm_function_params(ir, function));
     let cp = target_parameters
         .as_deref()
         .and_then(|parameters| parameters.get(1..))
         .map_or_else(|| jvm_tys(&b.concrete_params), <[Ty]>::to_vec);
-    let er = ir_ty_to_jvm(&b.erased_ret);
-    let cr = ir_ty_to_jvm(&b.concrete_ret);
-    // The target is a declaration, so its result is spelled as declared (`Nothing?` is `Void`).
-    let tr = static_target.map_or_else(
-        || jvm_declared_ty(&b.target_ret.unwrap_or(b.concrete_ret)),
-        |(function, _)| jvm_declared_ty(&override_results.physical_result(ir, function)),
-    );
+    let tr = bridge_target_result(ir, c, override_results, b);
+    let (er, cr) = if realization == BridgeRealization::TargetResult {
+        (tr, tr)
+    } else {
+        (ir_ty_to_jvm(&b.erased_ret), ir_ty_to_jvm(&b.concrete_ret))
+    };
     let erased_desc = method_descriptor(&ep, er);
     // A special bridge carries its result's generic signature: a type-safe member's, or a renamed
     // property getter's (`keySet()Ljava/util/Set<Ljava/lang/String;>;`).
-    let signature = (realization == BridgeRealization::Planned
+    let signature = (realization != BridgeRealization::ErasedCopy
         && b.special
         && (b.collection_barrier.is_some() || b.kind == crate::ir::BridgeKind::PropertyGetter))
         .then(|| {
@@ -448,7 +530,12 @@ fn emit_bridge(
             {
                 formatter.method_positions(&b.erased_params, &b.concrete_ret)
             } else {
-                super::method_parameterized_sig(&formatter, &b.erased_params, &b.concrete_ret)
+                super::method_signatures::method_parameterized_sig(
+                    &formatter,
+                    &b.erased_params,
+                    &b.concrete_ret,
+                    None,
+                )
             }
         })
         .flatten()
@@ -481,6 +568,10 @@ fn emit_bridge(
         emit_interface_entry_checks(ir, b, &ep, cw, &mut code);
     }
     let body_pc = u16::try_from(code.bytes.len()).expect("parameter checks fit a method");
+    let diverging = BridgeCodeOffsets {
+        body: body_pc,
+        ret: None,
+    };
     if let Some(barrier) = &b.barrier_plan {
         for checked in &barrier.parameters {
             let parameter = checked.parameter;
@@ -627,7 +718,7 @@ fn emit_bridge(
                 owner_is_interface: c.is_interface,
             },
         );
-        attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
+        attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, diverging);
         return;
     }
     if b.concrete_ret == Ty::Nothing && !unboxes_result {
@@ -654,7 +745,7 @@ fn emit_bridge(
                 owner_is_interface: c.is_interface,
             },
         );
-        attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
+        attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, diverging);
         return;
     }
     if let Some(crate::jvm::bridge_adaptations::BridgeResultAdapter::Box(plan)) = result_adapter {
@@ -740,6 +831,10 @@ fn emit_bridge(
             code.checkcast(ci);
         }
     }
+    let offsets = BridgeCodeOffsets {
+        body: body_pc,
+        ret: Some(u16::try_from(code.bytes.len()).expect("a bridge fits a method")),
+    };
     emit_return(er, &mut code);
     finish_bridge(
         cw,
@@ -755,7 +850,7 @@ fn emit_bridge(
             owner_is_interface: c.is_interface,
         },
     );
-    attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
+    attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, offsets);
 }
 
 /// kotlinc gives every bridge a `LineNumberTable` rooted at the CLASS declaration and a
@@ -776,10 +871,10 @@ fn attach_bridge_debug_tables(
     bridge: &crate::ir::Bridge,
     packs_arguments: bool,
     erased_desc: &str,
-    body_pc: u16,
+    offsets: BridgeCodeOffsets,
 ) {
     if bridge.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
-        attach_interface_entry_debug_tables(ir, c, cw, bridge, erased_desc, body_pc);
+        attach_interface_entry_debug_tables(ir, c, cw, bridge, erased_desc, offsets);
         return;
     }
     if packs_arguments {
@@ -841,6 +936,8 @@ fn attach_bridge_debug_tables(
 /// nullability annotations and, under `-java-parameters`, `MethodParameters`, less the carrier the
 /// member receives first.
 struct EntryHeader {
+    /// `ACC_PUBLIC`, with the member's `ACC_VARARGS`: the entry keeps its trailing vararg.
+    access: u16,
     signature: Option<String>,
     result: Option<&'static str>,
     parameters: Vec<Option<&'static str>>,
@@ -854,31 +951,29 @@ impl EntryHeader {
         member: u32,
         entry: &crate::ir::Bridge,
         descriptor: &str,
-        java_parameters: bool,
+        env: &EmitEnv<'_>,
     ) -> Self {
-        let function = &ir.functions[member as usize];
-        let signature = ir.signatures.get(&member).and_then(|generic| {
-            let mut generic =
-                super::value_class_signatures::physical_generic_signature(ir, member, generic)
-                    .into_owned();
+        // The entry stands for the lowered member less its leading carrier: its signature is the
+        // member's declared whole-frame shape (a vararg at its position in that frame, a boxed
+        // override result as its wrapper) without the carrier's element.
+        let signature = super::override_result_emission::declared_method_signature_parts(
+            formatter,
+            ir,
+            env.override_results,
+            member,
+        )
+        .map(|mut parts| {
             assert_eq!(
-                generic.params.len(),
-                function.params.len(),
-                "a lowered value-class member signs its carrier"
+                parts.parameters.len(),
+                entry.erased_params.len() + 1,
+                "a lowered value-class member signs its carrier ahead of the entry's parameters"
             );
-            generic.params.remove(0);
-            // The carrier occupied signed slot 0, so a later vararg keeps declaration-site
-            // variance at its shifted index.
-            let vararg_index = ir
-                .fn_varargs
-                .get(&member)
-                .and_then(|vararg| vararg.index.checked_sub(1));
-            formatter
-                .method_signature(&generic, function, vararg_index)
-                .filter(|signature| signature != descriptor)
-        });
-        let nullability = super::declared_nullability::declared_nullability(ir, member);
-        let reflected = if java_parameters {
+            parts.parameters.remove(0);
+            parts.render()
+        })
+        .filter(|signature| signature != descriptor);
+        let nullability = super::override_result_emission::declared_nullability(ir, env, member);
+        let reflected = if env.java_parameters {
             crate::jvm::method_parameters::value_class_interface_entry(
                 ir,
                 member,
@@ -890,6 +985,8 @@ impl EntryHeader {
             Vec::new()
         };
         Self {
+            access: crate::jvm::classfile::ACC_PUBLIC
+                | super::method_access::varargs_access(ir, member),
             signature,
             result: nullability.result,
             parameters: nullability.parameters.get(1..).unwrap_or_default().to_vec(),
@@ -923,7 +1020,7 @@ pub(super) fn emit_value_class_interface_entries(
             continue;
         }
         let descriptor = method_descriptor(&jvm_tys(&b.erased_params), ir_ty_to_jvm(&b.erased_ret));
-        let header = EntryHeader::of(ir, formatter, member, b, &descriptor, env.java_parameters);
+        let header = EntryHeader::of(ir, formatter, member, b, &descriptor, env);
         let class = ClassBridges::new(ir, c, env);
         emit_bridge(
             &class,

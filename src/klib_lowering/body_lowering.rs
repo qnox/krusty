@@ -15,6 +15,7 @@ use crate::fx_hash::{HashMap, HashSet};
 
 mod arrays;
 mod blocks;
+mod callable_references;
 mod calls;
 mod class_initializers;
 mod class_literals;
@@ -22,10 +23,15 @@ mod closures;
 mod compiler_blocks;
 mod conditionals;
 mod constructions;
+mod elvis_blocks;
 mod loops;
+mod range_membership;
+mod safe_calls;
 mod string_templates;
 mod try_catch;
 mod type_operators;
+
+pub(super) use blocks::publish_parameter_defaults;
 
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::FunctionHeader;
@@ -58,11 +64,31 @@ pub(super) struct LinkedCallee {
     pub(super) singleton_dispatch: Option<TypeName>,
     /// The semantic identities of the callee's own type parameters, which the receiver,
     /// parameters and result name and a call's type arguments bind, in declaration order.
-    pub(super) type_parameters: Vec<String>,
+    pub(super) type_parameters: Vec<crate::types::TyParamName>,
+    /// The complete declared upper bounds of each of [`Self::type_parameters`], as the selected
+    /// declaration authenticates them (an empty slot is the implicit `Any?`). `None` when the
+    /// selection carries no generic signature to read them from.
+    pub(super) type_parameter_bounds: Option<Vec<Vec<Ty>>>,
     /// The semantic identities of the type parameters of a member's generic class, which the
     /// receiver (the class applied to them), parameters and result name and a call binds from its
     /// dispatch receiver's type, in declaration order.
     pub(super) class_type_parameters: Vec<String>,
+    /// Whether each of [`Self::params`] declares a default a call may leave it to, for a function
+    /// this unit lowers; empty for every other callee, which no call may omit an argument of.
+    pub(super) parameter_defaults: Vec<bool>,
+}
+
+pub(super) struct LinkedCallableReference {
+    pub(super) declaration: crate::fir::ExternalCallableId,
+    pub(super) kind: crate::libraries::ExternalCallableKind,
+    pub(super) call: LinkedCallee,
+}
+
+/// The declared shape of a member a range literal's membership calls.
+pub(super) struct RangeMembershipHeader {
+    pub(super) receiver: Option<Ty>,
+    pub(super) params: Vec<Ty>,
+    pub(super) ret: Ty,
 }
 
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
@@ -81,8 +107,28 @@ pub(super) trait CallLinker {
     /// may be folded into a common-IR operation.
     fn requires_declaration(&self, callee: &KlibPublicIdSignature) -> Lowered<bool>;
 
+    /// The serialized header of the member `callee` an `in` over a range literal calls, read
+    /// only to prove it is the range's own membership operator: its dispatch receiver, value
+    /// parameters and result. `None` keeps the membership an ordinary checked call, as template
+    /// linkers do; a linker whose dependency preparation omits the membership's declaration
+    /// edge declines a header it cannot read instead.
+    fn range_membership_header(
+        &self,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<Option<RangeMembershipHeader>> {
+        Ok(None)
+    }
+
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
+
+    fn link_reference(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<LinkedCallableReference> {
+        unsupported("a callable reference without an exact provider declaration")
+    }
 
     /// The dependency constructor a constructor call of the public declaration `callee` invokes.
     fn link_constructor(
@@ -103,7 +149,11 @@ pub(super) trait CallLinker {
 
     /// Whether `sub` is a subtype of `sup` in the calling compilation's semantic model, which a
     /// producer-checked body uses a value of the one where the other is expected for.
-    fn is_subtype(&self, sub: Ty, sup: Ty) -> bool;
+    fn is_subtype(&self, parameters: &KlibTypeParameters, sub: Ty, sup: Ty) -> bool;
+
+    /// Whether `left` and `right` are one type in the calling compilation's class model, apart
+    /// from projections that restate their parameter's declaration-site variance.
+    fn same_type(&self, left: Ty, right: Ty) -> bool;
 
     /// Constructor generic bounds consume explicit hierarchy/full-formal evidence without
     /// changing the independent operand-coercion capability.
@@ -152,6 +202,8 @@ pub(super) struct BodyLowering<'a> {
     /// Compiler temporaries that name another immutable value, by the initializer each read of
     /// them lowers as.
     compiler_aliases: HashMap<KlibIrSymbol, KlibIrExprId>,
+    /// Safe-call receiver temporaries, inside the selector their `null` test guards.
+    null_proven: HashSet<KlibIrSymbol>,
     /// All enclosing return-target declarations, including tail-only blocks without a frame.
     returnable_targets: Vec<KlibIrSymbol>,
     /// Enclosing serialized returnable blocks, whose exact symbols own their local exits.
@@ -185,6 +237,7 @@ impl<'a> BodyLowering<'a> {
             linker,
             locals: LocalValues::after(header.parameter_count()),
             compiler_aliases: HashMap::default(),
+            null_proven: HashSet::default(),
             returnable_targets: Vec::new(),
             returnable_frames: Vec::new(),
             loops: Vec::new(),
@@ -247,7 +300,15 @@ impl<'a> BodyLowering<'a> {
                 if super_qualifier.is_some() {
                     return unsupported("a `super` call");
                 }
-                (self.call(access, ty)?, ty)
+                let lowered =
+                    match super::range_membership::range_literal_membership(arena, expression) {
+                        Some(membership) => self.range_literal_membership(membership, ty, false)?,
+                        None => None,
+                    };
+                match lowered {
+                    Some(lowered) => (lowered, ty),
+                    None => (self.call(access, ty)?, ty),
+                }
             }
             KlibIrExprKind::Return { target, value } => {
                 let ty = self.ty(expression, "`return`")?;
@@ -288,6 +349,13 @@ impl<'a> BodyLowering<'a> {
                 origin,
                 ..
             } => {
+                if let Some(reference) =
+                    super::callable_references::unbound_reference(self.arena, expression)
+                {
+                    let ty = self.ty(expression, "callable reference")?;
+                    let lowered = self.callable_reference(reference, ty)?;
+                    return Ok(self.typed(lowered, ty));
+                }
                 if !super::closure_forms::unbound_rich_reference(&expression.kind) {
                     return unsupported("a bound or reflective rich function reference");
                 }
@@ -329,9 +397,17 @@ impl<'a> BodyLowering<'a> {
             KlibIrExprKind::Block {
                 statements,
                 origin: Some(origin),
+            } if origin == "ELVIS" => {
+                let ty = self.ty(expression, "Elvis block")?;
+                return self.elvis_block(statements, ty);
+            }
+            KlibIrExprKind::Block {
+                statements,
+                origin: Some(origin),
             } if matches!(
                 origin.as_str(),
                 "INLINE_ARGS_CONTAINER"
+                    | "WHEN"
                     | "POSTFIX_INCR"
                     | "POSTFIX_DECR"
                     | "PREFIX_INCR"
@@ -340,6 +416,13 @@ impl<'a> BodyLowering<'a> {
             {
                 let ty = self.ty(expression, "compiler expression block")?;
                 return self.temporary_expression_block(statements, ty);
+            }
+            KlibIrExprKind::Block {
+                statements,
+                origin: Some(origin),
+            } if origin == "SAFE_CALL" => {
+                let ty = self.ty(expression, "safe call")?;
+                return self.safe_call_block(statements, ty);
             }
             KlibIrExprKind::Block {
                 statements,
@@ -472,9 +555,9 @@ impl<'a> BodyLowering<'a> {
     /// records the type of every expression it lowers, around the bottom-value completion it
     /// attaches to a `Nothing` producer.
     fn typed(&mut self, lowered: ExprId, ty: Ty) -> ExprId {
-        self.ir.logical_types.insert(lowered, ty);
+        self.ir.set_logical_type(lowered, ty);
         let completed = complete_bottom_value(self.ir, lowered, ty);
-        self.ir.logical_types.insert(completed, ty);
+        self.ir.set_logical_type(completed, ty);
         completed
     }
 
@@ -506,17 +589,25 @@ impl<'a> BodyLowering<'a> {
     }
 
     /// `value`, of the type `actual`, as a value of its supertype `expected`: the value itself, or
-    /// the coercion checked FIR lowering places when only `expected` is nullable. `None` when
-    /// `expected` is not a supertype of `actual`.
+    /// the coercion checked FIR lowering places when nullability or value/reference shape changes.
+    /// `None` when `expected` is not a supertype of `actual`.
     fn upcast(&mut self, value: ExprId, actual: Ty, expected: Ty) -> Option<ExprId> {
-        if !self.linker.is_subtype(actual, expected) {
+        if !self
+            .linker
+            .is_subtype(self.header.type_parameters(), actual, expected)
+        {
             return None;
         }
-        Some(if actual.is_nullable() == expected.is_nullable() {
-            value
-        } else {
-            self.coercion(value, expected)
-        })
+        Some(
+            if actual.is_nullable() == expected.is_nullable()
+                && actual.is_reference() == expected.is_reference()
+            {
+                value
+            } else {
+                let coerced = self.coercion(value, expected);
+                self.typed(coerced, expected)
+            },
+        )
     }
 
     /// The type recorded for an expression this lowering produced.
@@ -575,7 +666,7 @@ impl<'a> BodyLowering<'a> {
             Some(erased) => {
                 // The read itself is of the declared type; its use is of the erasure.
                 let declared = self.header.slot_type(index);
-                self.ir.logical_types.insert(read, declared);
+                self.ir.set_logical_type(read, declared);
                 let coercion = self.coercion(read, erased);
                 self.erasure_coercions.insert(coercion);
                 coercion
@@ -631,7 +722,7 @@ impl<'a> BodyLowering<'a> {
                     .map(|(condition, result)| (condition, self.declared_value(result, target)))
                     .collect();
                 self.ir.exprs[value as usize] = IrExpr::When { branches };
-                self.ir.logical_types.insert(value, target);
+                self.ir.set_logical_type(value, target);
                 if self.ir.whens.exhaustive.contains_key(&value) {
                     self.ir.whens.exhaustive.insert(value, target);
                 }
@@ -662,7 +753,11 @@ impl<'a> BodyLowering<'a> {
         }
         // A prepared copy also erases the type parameters of the inline functions it already
         // expanded, so the value may be typed with the erasure's bound: a supertype of `declared`.
-        if actual != self.header.erased(declared) && !self.linker.is_subtype(declared, actual) {
+        if actual != self.header.erased(declared)
+            && !self
+                .linker
+                .is_subtype(self.header.type_parameters(), declared, actual)
+        {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         }
         Ok(self.declared_value(lowered, declared))

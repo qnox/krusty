@@ -189,6 +189,21 @@ pub(super) struct FunctionScopeLevel {
     pub(super) symbols: Vec<Rc<ResolvedSymbols>>,
 }
 
+impl FunctionScopeLevel {
+    /// Whether the file brings this level into scope itself: its own package, an explicit import
+    /// or an explicit star import, rather than a default import.
+    pub(super) fn is_written_scope(&self) -> bool {
+        match self.kind {
+            FunctionScopeLevelKind::Explicit | FunctionScopeLevelKind::CurrentPackage => true,
+            FunctionScopeLevelKind::Import => self.rank == EXPLICIT_STAR_IMPORT_RANK,
+            FunctionScopeLevelKind::Flat => false,
+        }
+    }
+}
+
+/// The rank of the explicit star imports in [`FunctionImportScope`]'s callable levels.
+const EXPLICIT_STAR_IMPORT_RANK: u32 = 1;
+
 pub(super) fn tagged_symbol_levels_in_function_scope(
     src: &dyn SymbolSource,
     name: &str,
@@ -310,7 +325,7 @@ pub(super) fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<FunctionScopeRef<'_
 }
 
 /// Materialize one scope level's functions when the consumer needs ownership of the full set.
-pub(super) fn function_set_from_symbols(symbols: &[Rc<ResolvedSymbols>]) -> FunctionSet {
+fn function_set_from_symbols(symbols: &[Rc<ResolvedSymbols>]) -> FunctionSet {
     let capacity = symbols
         .iter()
         .map(|record| record.callables.functions().len())
@@ -374,6 +389,35 @@ impl SymbolResolver<'_> {
             })
             .find(|properties| !properties.is_empty())
             .unwrap_or_default()
+    }
+
+    /// The receiver-less function family of the nearest scope level that declares an accessible
+    /// function named `name`. An inaccessible declaration is never a successful candidate, so, as
+    /// in kotlinc's tower, a level offering only inaccessible functions does not own the name and
+    /// resolution continues outward: a file-private or dependency-internal `minOf` under an
+    /// explicit star import leaves the default-imported `kotlin.comparisons.minOf` selectable.
+    /// When no level declares an accessible function, the nearest level declaring any keeps the
+    /// name so the call reports the inaccessible declarations instead of an unresolved reference.
+    pub(super) fn nearest_top_level_functions(
+        &self,
+        levels: &[Vec<Rc<ResolvedSymbols>>],
+    ) -> FunctionSet {
+        let mut nearest_inaccessible = None;
+        for symbols in levels {
+            let functions = function_set_from_symbols(symbols);
+            if functions.overloads.is_empty() {
+                continue;
+            }
+            if functions
+                .overloads
+                .iter()
+                .any(|function| self.non_member_callable_accessible(function))
+            {
+                return functions;
+            }
+            nearest_inaccessible.get_or_insert(functions);
+        }
+        nearest_inaccessible.unwrap_or_default()
     }
 
     pub(super) fn nearest_top_level_properties(

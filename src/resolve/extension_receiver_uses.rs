@@ -11,8 +11,10 @@ impl Checker<'_> {
         receiver: ImplicitReceiver,
     ) {
         if !self.suppress_receiver_capture_accounting {
-            self.implicit_receiver_identity_uses
-                .record(receiver.identity);
+            self.implicit_receiver_identity_uses.record(
+                receiver.identity,
+                receiver_uses::ReceiverUseSite::Expression(expression),
+            );
         }
         if let Some(span) = receiver.extension_receiver {
             self.mark_extension_receiver_span_used(expression, span);
@@ -24,8 +26,10 @@ impl Checker<'_> {
         statement: StmtId,
         receiver: ImplicitReceiver,
     ) {
-        self.implicit_receiver_identity_uses
-            .record(receiver.identity);
+        self.implicit_receiver_identity_uses.record(
+            receiver.identity,
+            receiver_uses::ReceiverUseSite::Statement(statement),
+        );
         if let Some(span) = receiver.extension_receiver {
             self.mark_extension_receiver_stmt_span_used(statement, span);
         }
@@ -36,7 +40,8 @@ impl Checker<'_> {
         if !uses.contains(&span) {
             uses.push(span);
         }
-        self.implicit_receiver_identity_uses.record_extension(span);
+        self.implicit_receiver_identity_uses
+            .record_extension(span, receiver_uses::ReceiverUseSite::Expression(expression));
     }
 
     pub(super) fn mark_extension_receiver_stmt_span_used(&mut self, statement: StmtId, span: Span) {
@@ -44,7 +49,8 @@ impl Checker<'_> {
         if !uses.contains(&span) {
             uses.push(span);
         }
-        self.implicit_receiver_identity_uses.record_extension(span);
+        self.implicit_receiver_identity_uses
+            .record_extension(span, receiver_uses::ReceiverUseSite::Statement(statement));
     }
 
     pub(super) fn extension_receiver_use_count(&self, declaration: Span) -> usize {

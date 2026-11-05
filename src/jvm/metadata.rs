@@ -944,7 +944,7 @@ fn build_generic_sig(
     // `Class<E>` into a fictitious `fun <E>` and allow call inference to overwrite the owner's `E`.
     let inherited = class_tparams.len();
     Some(GenericSig {
-        formals: context.formals[inherited..].to_vec(),
+        formals: crate::types::TyParamName::all(&context.formals[inherited..]),
         formal_bounds: context.formal_bounds[inherited..].to_vec(),
         receiver,
         params,
@@ -1051,7 +1051,7 @@ fn build_property_generic_sig(
             .collect::<Option<Vec<_>>>()?
     };
     Some(GenericSig {
-        formals: context.formals[property.inherited.len()..].to_vec(),
+        formals: crate::types::TyParamName::all(&context.formals[property.inherited.len()..]),
         formal_bounds: context.formal_bounds[property.inherited.len()..].to_vec(),
         receiver,
         params,
@@ -1432,7 +1432,13 @@ pub fn decode_metadata_within(
         package_properties: realizations
             .stamp_properties(decode_properties(&ctx, 4, &[], &[])?)
             .into(),
-        type_aliases: decode_type_aliases(&ctx, package.as_deref(), this_class, k == Some(1))?,
+        type_aliases: decode_type_aliases(
+            &ctx,
+            package.as_deref(),
+            this_class,
+            k == Some(1),
+            st_body,
+        )?,
         constructors: constructors.into(),
         is_inner: class_flags.is_some_and(enclosing_type_parameters::is_inner),
         type_parameter_scope: scope,

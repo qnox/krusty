@@ -438,16 +438,13 @@ impl KlibDeclarationBodies {
     pub(crate) fn emitted_body_callables(
         &self,
         identity: &KlibDependencyCallable,
-        closure: fn(
-            &KlibIrArena,
-            &crate::metadata::klib_ir::tree::KlibIrExpr,
-        ) -> Option<crate::metadata::klib_ir::tree::KlibIrFunctionId>,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibDependencyCallable> {
         let Some((arena, function)) = self.function(identity) else {
             return Vec::new();
         };
         arena
-            .emitted_callable_symbols(function, closure)
+            .emitted_callable_symbols(function, forms)
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(

@@ -24,20 +24,36 @@ pub const DECLINE_PREFIX: &str = "krusty: the wasm backend does not support ";
 
 pub struct WasmBackend {
     target: WasmTarget,
-    entry: Entry,
+    entry: crate::backend::ProgramEntry,
+    array_range_checks: bool,
 }
 
 impl WasmBackend {
     pub fn new(target: WasmTarget) -> Self {
         Self {
             target,
-            entry: Entry::Main,
+            entry: crate::backend::ProgramEntry::new(Entry::Main),
+            array_range_checks: super::array_access::default_range_checks(),
         }
     }
 
     /// Start the program in `entry` instead of `main`.
     pub fn with_entry(mut self, entry: Entry) -> Self {
-        self.entry = entry;
+        self.entry.kind = entry;
+        self
+    }
+
+    /// Emit the synthetic program entry only for this exact declared source module. Ordinary
+    /// library functions, dependency exports and initialization are still emitted.
+    pub fn with_entry_module(mut self, module: impl Into<String>) -> Self {
+        self.entry = self.entry.in_module(module.into());
+        self
+    }
+
+    /// Explicit `-Xwasm-enable-array-range-checks` semantics. This is a code-generation option;
+    /// it does not change frontend array types, overload selection or dependency identities.
+    pub fn with_array_range_checks(mut self, enabled: bool) -> Self {
+        self.array_range_checks = enabled;
         self
     }
 }
@@ -106,6 +122,13 @@ impl Backend for WasmBackend {
         true
     }
 
+    fn realizes_dependency_intrinsic(
+        &self,
+        operation: crate::backend::BackendCompilerIntrinsic,
+    ) -> bool {
+        lower::is_direct_operation(operation)
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -123,7 +146,10 @@ impl Backend for WasmBackend {
             );
         };
         let selected = match file.kind {
-            crate::backend::CheckedIrUnitKind::Source => self.entry.selected(&file.ir),
+            crate::backend::CheckedIrUnitKind::Source => self
+                .entry
+                .for_module(file.module_name)
+                .and_then(|entry| entry.selected(&file.ir)),
             crate::backend::CheckedIrUnitKind::DependencySupport => None,
         };
         if selected.is_some_and(|(_, parameters)| {
@@ -133,6 +159,10 @@ impl Backend for WasmBackend {
             return Vec::new();
         }
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
+        crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables, |function| {
+            file.dependency_exports.callable(function).is_some()
+        });
+        crate::backend::dispatch_entries::realize(&mut file.ir, &file.dependency_exports);
         let Ok(properties) = crate::backend::local_properties::realize(&mut file.ir) else {
             decline(state, "a local delegated property".to_string());
             return Vec::new();
@@ -161,6 +191,8 @@ impl Backend for WasmBackend {
                 ir: &file.ir,
                 properties: &properties,
                 callables: &file.callables,
+                classifiers: &file.classifiers,
+                array_range_checks: self.array_range_checks,
                 dependency_exports: &file.dependency_exports,
                 module_name: file.module_name,
                 plan,
@@ -197,7 +229,7 @@ impl Backend for WasmBackend {
                     crate::diag::Span::new(0, 0),
                     format!(
                         "krusty: the program declares {} in both {first} and {stem}",
-                        self.entry.declaration()
+                        self.entry.kind.declaration()
                     ),
                 ),
                 None => state.entry = Some((entry, stem)),
@@ -212,7 +244,7 @@ impl Backend for WasmBackend {
                 crate::diag::Span::new(0, 0),
                 format!(
                     "krusty: the program declares no {} to start in",
-                    self.entry.declaration()
+                    self.entry.kind.declaration()
                 ),
             );
         }
@@ -234,7 +266,7 @@ impl Backend for WasmBackend {
         for initializer in &state.initializers {
             code.call(*initializer);
         }
-        match self.entry {
+        match self.entry.kind {
             Entry::Main => {
                 code.call(entry);
             }
@@ -293,6 +325,15 @@ mod tests {
         entry: Entry,
         sources: &[&str],
     ) -> (Vec<Artifact>, Vec<String>) {
+        compile_program_with_provider(target, entry, sources, Box::new(EmptySymbolSource))
+    }
+
+    fn compile_program_with_provider(
+        target: WasmTarget,
+        entry: Entry,
+        sources: &[&str],
+        provider: Box<dyn crate::libraries::SemanticPlatform>,
+    ) -> (Vec<Artifact>, Vec<String>) {
         let stems = (0..sources.len())
             .map(|ordinal| match ordinal {
                 0 => "Main".to_string(),
@@ -309,7 +350,7 @@ mod tests {
             &inputs,
             crate::frontend::PlatformProvider::new(
                 crate::compiler::Backend::compilation_target(&WasmBackend::new(target)),
-                Box::new(EmptySymbolSource),
+                provider,
             ),
             &crate::features::LangFeatures::new(),
             &mut diags,
@@ -519,16 +560,29 @@ mod tests {
 
     #[test]
     fn nothing_member_property_getter_has_no_wasm_result() {
+        use crate::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+
         for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile(
+            let path = crate::toolchain::kotlin_stdlib_klib(
+                crate::backend::Backend::compilation_target(&WasmBackend::new(target)),
+            )
+            .expect("the exact target stdlib must be provisioned");
+            let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+                path,
+                KlibStdlibSemantics::Wasm,
+            )])
+            .unwrap();
+            let (outputs, diagnostics) = compile_program_with_provider(
                 target,
-                "var flag = true\n\
+                Entry::Box,
+                &["var flag = true\n\
                  object Test { val magic: Nothing get() = null!! }\n\
                  fun box(): String {\n\
                  \x20   val answer: String\n\
                  \x20   if (flag) answer = \"OK\" else Test.magic\n\
                  \x20   return answer\n\
-                 }",
+                 }"],
+                Box::new(libraries),
             );
             assert_eq!(diagnostics, Vec::<String>::new());
             assert_eq!(outputs.len(), 2);
@@ -654,5 +708,107 @@ mod tests {
             compile_program(WasmTarget::Wasi, Entry::Main, &["fun main() {}"]);
         assert_eq!(diagnostics, Vec::<String>::new());
         assert_eq!(outputs.len(), 2);
+    }
+    // PLATFORM-SPECIFIC: These controls inspect Wasm session artifacts and entry diagnostics.
+    /// Real separately analyzed modules retain one target state; only the selected source module
+    /// contributes a synthetic entry. Metadata still describes every ordinary source module.
+    fn compile_scoped_modules(
+        target: WasmTarget,
+        modules: &[(&str, &[&str])],
+    ) -> (Vec<Artifact>, Vec<String>) {
+        let backend = WasmBackend::new(target)
+            .with_entry(Entry::Box)
+            .with_entry_module("application");
+        let platform = match target {
+            WasmTarget::Js => crate::klib::write::KlibPlatform::WasmJs,
+            WasmTarget::Wasi => crate::klib::write::KlibPlatform::WasmWasi,
+        };
+        let metadata = crate::klib::backend::KlibBackend::new(
+            platform,
+            crate::klib::write::KlibStamp::new(
+                crate::kotlin_version::target(),
+                crate::features::LangFeatures::new().language_version(),
+            ),
+        );
+        let mut session = crate::compiler::EmissionSession::new(&backend);
+        let mut diags = DiagSink::new();
+        for (name, sources) in modules {
+            let stems = (0..sources.len())
+                .map(|i| format!("File{i}"))
+                .collect::<Vec<_>>();
+            let inputs = sources
+                .iter()
+                .zip(&stems)
+                .map(|(source, stem)| SourceInput::kotlin(source).with_file_stem(stem))
+                .collect::<Vec<_>>();
+            let analysis = crate::frontend::analyze_source_set_streaming_with_features(
+                &inputs,
+                crate::frontend::PlatformProvider::new(
+                    crate::compiler::Backend::compilation_target(&backend),
+                    Box::new(EmptySymbolSource),
+                ),
+                &crate::features::LangFeatures::new(),
+                &mut diags,
+            );
+            let Some(module) = session.emit_module(analysis, &stems, &metadata, name, &mut diags)
+            else {
+                break;
+            };
+            assert!(
+                !module.artifacts().is_empty(),
+                "ordinary source metadata is retained"
+            );
+        }
+        let artifacts = session.finish("program", &mut diags);
+        (
+            artifacts,
+            diags.diags.iter().map(|diag| diag.msg.clone()).collect(),
+        )
+    }
+
+    #[test]
+    fn a_library_box_does_not_claim_the_selected_source_modules_program_entry() {
+        for target in WasmTarget::ALL {
+            let (artifacts, diagnostics) = compile_scoped_modules(
+                target,
+                &[
+                    ("library", &["fun box(): String  = \"library\""]),
+                    ("application", &["fun box(): String  = \"OK\""]),
+                ],
+            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(artifacts.len(), 2);
+        }
+    }
+
+    #[test]
+    fn scoped_source_modules_still_reject_duplicate_and_missing_program_entries() {
+        for target in WasmTarget::ALL {
+            for sources in [
+                &[
+                    "package one\nfun box(): String  = \"OK\"",
+                    "package two\nfun box(): String  = \"OK\"",
+                ][..],
+                &["fun answer(): String  = \"OK\""][..],
+            ] {
+                let (artifacts, diagnostics) = compile_scoped_modules(
+                    target,
+                    &[
+                        ("library", &["fun box(): String  = \"library\""]),
+                        ("application", sources),
+                    ],
+                );
+                assert_eq!(artifacts, Vec::<Artifact>::new());
+                assert_eq!(diagnostics.len(), 1);
+                assert_eq!(
+                    diagnostics[0],
+                    if sources.len() == 2 {
+                        "krusty: the program declares `fun box(): String` in both File0 and File1"
+                    } else {
+                        "krusty: the program declares no `fun box(): String` to start in"
+                    }
+                );
+            }
+        }
     }
 }

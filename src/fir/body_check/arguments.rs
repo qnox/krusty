@@ -770,7 +770,6 @@ impl BodyFirChecker<'_> {
         Ok(self.convert_fir_value(
             value,
             target,
-            origin,
             Some(FirConversion {
                 origin,
                 kind: conversion.kind,
@@ -986,22 +985,14 @@ impl BodyFirChecker<'_> {
                 }
                 let cause = self.expression_origin(source)?;
                 let conversion = self.platform_narrowing_conversion(None, cause, target);
-                Ok(self.body.add_expr(crate::fir::FirExpr {
-                    origin: cause,
-                    ty: target,
-                    kind: FirExprKind::ImplicitConversion { value, conversion },
-                }))
+                Ok(self.body.add_implicit_conversion(value, target, conversion))
             }
             Expr::Block { .. } => Ok(value),
             _ if !self.info.produces_unchecked_java_value(source) => Ok(value),
             _ => {
                 let cause = self.expression_origin(source)?;
                 let conversion = self.platform_producer_conversion(source, value, cause, target);
-                Ok(self.body.add_expr(crate::fir::FirExpr {
-                    origin: cause,
-                    ty: target,
-                    kind: FirExprKind::ImplicitConversion { value, conversion },
-                }))
+                Ok(self.body.add_implicit_conversion(value, target, conversion))
             }
         }
     }
@@ -1026,6 +1017,32 @@ impl BodyFirChecker<'_> {
                 Some(self.platform_producer_conversion(receiver, checked.value, cause, target));
         }
         Ok(checked)
+    }
+
+    /// An operator convention's explicit `receiver` (`map[k] = v`, `list += x`, `map + pair`) is the
+    /// argument of the selected extension's receiver parameter. A Java value the checker committed
+    /// to that non-null parameter is guarded like a written extension call's receiver.
+    pub(super) fn guard_operator_extension_receiver(
+        &mut self,
+        receiver: ExprId,
+        call: &mut FirCall,
+    ) -> Result<(), BodyCheckFailure> {
+        let Some(checked) = call.extension_receiver.as_mut() else {
+            return Ok(());
+        };
+        if checked.conversion.is_some() || !self.info.platform_narrowings.contains_key(&receiver) {
+            return Ok(());
+        }
+        let span = self
+            .file
+            .expr_span(receiver)
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        let received = self.info.semantic_ty(receiver).platform_lower_bound();
+        let target = self.resolved_type(span, received)?;
+        let cause = self.expression_origin(receiver)?;
+        checked.conversion =
+            Some(self.platform_producer_conversion(receiver, checked.value, cause, target));
+        Ok(())
     }
 
     /// An extension call's explicit `receiver`, converted as the argument of the receiver
@@ -1204,11 +1221,7 @@ impl BodyFirChecker<'_> {
         let Some(conversion) = conversion else {
             return Ok(value);
         };
-        Ok(self.body.add_expr(crate::fir::FirExpr {
-            origin,
-            ty: target,
-            kind: crate::fir::FirExprKind::ImplicitConversion { value, conversion },
-        }))
+        Ok(self.body.add_implicit_conversion(value, target, conversion))
     }
 
     /// The value a block yields, including a fun-interface conversion recorded on a trailing lambda.
@@ -1272,11 +1285,7 @@ impl BodyFirChecker<'_> {
         let Some(conversion) = conversion else {
             return Err(self.failure(span, BodyCheckFailureKind::UnpublishedRecordedSamConversion));
         };
-        Ok(self.body.add_expr(crate::fir::FirExpr {
-            origin,
-            ty: target,
-            kind: crate::fir::FirExprKind::ImplicitConversion { value, conversion },
-        }))
+        Ok(self.body.add_implicit_conversion(value, target, conversion))
     }
 
     fn value_has_sam_conversion(&self, value: crate::fir::FirExprId) -> bool {
@@ -1704,6 +1713,25 @@ impl BodyFirChecker<'_> {
             nullable,
             kotlin_interface: sam.kotlin_interface,
             parameter_identities: sam.parameter_identities.clone(),
+            type_parameters: sam
+                .type_parameters
+                .iter()
+                .map(|parameter| {
+                    Ok(crate::fir::FirSamTypeParameter {
+                        name: parameter.name.as_str().into(),
+                        bounds: parameter
+                            .bounds
+                            .iter()
+                            .map(|&(ty, is_interface)| {
+                                Ok(crate::fir::ResolvedTypeParameterBound {
+                                    ty: resolved(ty)?,
+                                    is_interface,
+                                })
+                            })
+                            .collect::<Result<Box<[_]>, _>>()?,
+                    })
+                })
+                .collect::<Result<Box<[_]>, _>>()?,
         })
     }
 }

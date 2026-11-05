@@ -34,8 +34,8 @@ pub(super) mod vararg_parameters;
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ParameterValue {
     pub(super) index: u32,
-    /// Whether a read publishes the binding as stable. Checked FIR lowering publishes it for a
-    /// read of a value or context parameter, and not for a receiver, which is read as `this`.
+    /// Whether a read publishes the binding as stable. Authenticated receiver, value and context
+    /// parameters are immutable bindings, as are their by-value closure captures.
     pub(super) stable_read: bool,
     /// The type the body reads the parameter at when that is the erasure of its declared type,
     /// as in a prepared-inline copy; `None` when the body reads the declared type itself.
@@ -169,6 +169,9 @@ pub(super) fn function_header(
 /// and the result must be either its selected type or that type's erasure, which the body then
 /// reads at. A function-typed parameter is read at its selected type, and its invocations convert
 /// the erased operands instead.
+///
+/// A member of a generic class is copied out of its class, so the copy erases the class's type
+/// parameters as well: its dispatch receiver is the class applied to their erasures.
 pub(super) fn prepared_inline_header(
     selected: KlibBodyCallable<'_>,
     formals: &[Ty],
@@ -235,6 +238,22 @@ pub(super) fn prepared_inline_header(
     }
     let mut type_parameters = KlibTypeParameters::default();
     let mut erasures = HashMap::default();
+    let class_formals = selected
+        .class_contract()
+        .map_or(&[][..], |class| &*class.parameters.formals);
+    for formal in class_formals {
+        let TyKind::TyParam(name, bound) = formal.kind() else {
+            return Err(mismatch(format!(
+                "a class type parameter is selected as {formal:?}"
+            )));
+        };
+        let erasure = crate::types::ty_subst_keep_unbound(bound, &erasures);
+        if erasures.insert(name.as_str().to_owned(), erasure).is_some() {
+            return Err(mismatch(
+                "a class repeats a type parameter identity".to_owned(),
+            ));
+        }
+    }
     for (parameter, formal) in function.type_parameters.iter().zip(formals) {
         let TyKind::TyParam(name, bound) = formal.kind() else {
             return Err(mismatch(format!(
@@ -252,7 +271,12 @@ pub(super) fn prepared_inline_header(
         }
         // A bound names only earlier formals here; a later one stays and fails the comparison.
         let erasure = crate::types::ty_subst_keep_unbound(bound, &erasures);
-        erasures.insert(name.as_str().to_owned(), erasure);
+        if erasures.insert(name.as_str().to_owned(), erasure).is_some() {
+            return Err(mismatch(format!(
+                "the type parameter `{}` repeats a class type parameter's identity",
+                parameter.name
+            )));
+        }
     }
     // The extension receiver is serialized either in its own slot or as the leading value
     // parameter; both orders follow the selected declaration's.
@@ -310,20 +334,24 @@ pub(super) fn prepared_inline_header(
     };
     let mut values = HashMap::default();
     // A member's body reads its dispatch receiver in the slot ahead of the parameters. Its type
-    // names the selected classifier, without type arguments of its own.
+    // names the selected classifier, applied to the erasures of its class's type parameters.
     let receiver_slot = match dispatch_receiver {
         Some(receiver) => {
             let TyKind::Obj(classifier, arguments) =
                 semantic_type(arena, &type_parameters, receiver.ty)?.kind()
             else {
                 return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                    "a dispatch receiver of a generic or non-class type",
+                    "a dispatch receiver of a non-class type",
                 ));
             };
-            if !arguments.is_empty() {
-                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                    "a dispatch receiver of a generic or non-class type",
-                ));
+            let erased_formals = class_formals
+                .iter()
+                .map(|formal| crate::types::ty_subst(*formal, &erasures))
+                .collect::<Vec<_>>();
+            if arguments[..] != erased_formals[..] {
+                return Err(mismatch(format!(
+                    "the dispatch receiver applies {arguments:?} to its class, whose type parameters erase to {erased_formals:?}"
+                )));
             }
             // Metadata is authoritative for the member's owner: the copy must be its member.
             if selected.declaration_owner()
@@ -338,7 +366,7 @@ pub(super) fn prepared_inline_header(
                 receiver.base.symbol.clone(),
                 ParameterValue {
                     index: 0,
-                    stable_read: false,
+                    stable_read: true,
                     erased: None,
                 },
             );
@@ -374,15 +402,10 @@ pub(super) fn prepared_inline_header(
         }
         extension_receiver |= receiver;
         let erased = read_type(parameter.ty, ty)?.filter(|_| !ty.is_fun());
-        let stable_read = !matches!(
-            identity,
-            ResolvedParameterIdentity::ExtensionReceiver
-                | ResolvedParameterIdentity::LegacyContextReceiver { .. }
-        );
         let index = u32::try_from(index).expect("a parameter list fits u32") + first_slot;
         let value = ParameterValue {
             index,
-            stable_read,
+            stable_read: true,
             erased,
         };
         if values
@@ -649,11 +672,6 @@ fn header(
                 semantic_type(arena, types, element)?,
             )?;
         }
-        if parameter.default_value.is_some() {
-            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                "a parameter default",
-            ));
-        }
         params.push(packed);
         identities.push(serialized_identity(*role, parameter));
     }
@@ -712,7 +730,10 @@ fn header(
         receiver_slot: None,
         singleton_extension_unread_receiver,
         values,
-        defaults: vec![None; serialized.len()],
+        defaults: serialized
+            .iter()
+            .map(|(_, parameter)| parameter.default_value)
+            .collect(),
         type_parameters,
         erasures: HashMap::default(),
         erased_result: None,
@@ -879,18 +900,14 @@ fn companion_extension_classifier(
 /// stable binding read.
 fn parameter_role(role: SerializedRole, identity: &ResolvedParameterIdentity) -> Option<bool> {
     match (role, identity) {
-        (SerializedRole::Context, ResolvedParameterIdentity::LegacyContextReceiver { .. }) => {
-            Some(false)
-        }
         (
             SerializedRole::Context,
-            ResolvedParameterIdentity::ContextValue { .. }
+            ResolvedParameterIdentity::LegacyContextReceiver { .. }
+            | ResolvedParameterIdentity::ContextValue { .. }
             | ResolvedParameterIdentity::AnonymousContextParameter { .. },
-        ) => Some(true),
-        (SerializedRole::ExtensionReceiver, ResolvedParameterIdentity::ExtensionReceiver) => {
-            Some(false)
-        }
-        (
+        )
+        | (SerializedRole::ExtensionReceiver, ResolvedParameterIdentity::ExtensionReceiver)
+        | (
             SerializedRole::Value,
             ResolvedParameterIdentity::Source(_) | ResolvedParameterIdentity::Unnamed { .. },
         ) => Some(true),

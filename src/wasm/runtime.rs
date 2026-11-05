@@ -16,12 +16,16 @@
 //! `String` is on every target. A string constant is copied out of the module's passive data
 //! segment with `array.new_data`.
 
+mod string_hash;
+
 use crate::fx_hash::HashMap;
 
+use super::boxes::Boxes;
 use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
 };
 use super::exception_transport::ExceptionTransport;
+use super::function_values::FunctionShapes;
 use super::host::Host;
 use super::objects::ObjectRoot;
 
@@ -37,7 +41,10 @@ pub(super) struct Runtime {
     pub(super) chars: u32,
     /// `(struct (field (ref $chars)))`.
     pub(super) string: u32,
+    /// Reference-element array storage shared by every applied Kotlin `Array<T>`.
+    pub(super) references: u32,
     pub(super) string_equals: u32,
+    pub(super) string_hash: u32,
     pub(super) string_concat: u32,
     pub(super) string_of_i32: u32,
     pub(super) string_of_i64: u32,
@@ -50,6 +57,10 @@ pub(super) struct Runtime {
     /// The object model's root types and `kotlin.Any`'s members.
     pub(super) objects: ObjectRoot,
     pub(super) exceptions: ExceptionTransport,
+    /// The box types of the primitives this module carries as references.
+    pub(super) boxes: Boxes,
+    /// The table types of the function values this module creates.
+    pub(super) functions: FunctionShapes,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
 }
@@ -89,10 +100,16 @@ impl Runtime {
         let mut objects = ObjectRoot::declare(module, ValType::nullable(string));
         let exceptions =
             ExceptionTransport::declare(module, &mut objects, ValType::nullable(string));
+        let references = module.ty(CompositeType::Array(FieldType {
+            storage: StorageType::Val(super::objects::REFERENCE),
+            mutable: true,
+        }));
         let mut runtime = Self {
             chars,
             string,
+            references,
             string_equals: module.declare(),
+            string_hash: module.declare(),
             string_concat: module.declare(),
             string_of_i32: module.declare(),
             string_of_i64: module.declare(),
@@ -104,9 +121,12 @@ impl Runtime {
             i64_div: module.declare(),
             objects,
             exceptions,
+            boxes: Boxes::default(),
+            functions: FunctionShapes::default(),
             constants: HashMap::default(),
         };
         runtime.define_string_equals(module);
+        runtime.define_string_hash(module);
         runtime.define_string_concat(module);
         runtime.define_string_of_i64(module);
         runtime.define_string_of_i32(module);

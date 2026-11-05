@@ -82,10 +82,10 @@ impl Hash for SemanticBoundSet {
     }
 }
 
-fn neutral_formal_bounds(formals: &[String]) -> crate::fx_hash::HashMap<String, Ty> {
+fn neutral_formal_bounds(formals: &[crate::types::TyParamName]) -> crate::types::TyParamBindings {
     formals
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .map(|formal| (formal, Ty::nullable(Ty::obj("kotlin/Any"))))
         .collect()
 }
@@ -165,7 +165,7 @@ fn delegated_function_key(
     let formals = function
         .type_parameters
         .iter()
-        .map(|parameter| parameter.semantic_name.to_string())
+        .map(|parameter| crate::types::TyParamName::new(&parameter.semantic_name))
         .collect::<Vec<_>>();
     let neutral_bounds = neutral_formal_bounds(&formals);
     let normalize = |ty| {
@@ -273,7 +273,7 @@ fn normalized_property_result_type(property: &PropertyInfo) -> Ty {
                 [bound] => *bound,
                 bounds => Ty::intersection(bounds),
             };
-            (formal.clone(), bound)
+            (*formal, bound)
         })
         .collect::<crate::fx_hash::HashMap<_, _>>();
     crate::types::ty_canonicalize_params(
@@ -286,7 +286,7 @@ fn delegated_property_key(property: &crate::fir::ResolvedDelegatedProperty) -> P
     let formals = property
         .type_parameters
         .iter()
-        .map(|parameter| parameter.semantic_name.to_string())
+        .map(|parameter| crate::types::TyParamName::new(&parameter.semantic_name))
         .collect::<Vec<_>>();
     let neutral_bounds = neutral_formal_bounds(&formals);
     let normalize = |ty| {
@@ -450,10 +450,56 @@ impl Checker<'_> {
             }
         }
 
+        // A body-local class's methods are an overlay its walk publishes, not part of the stable
+        // providers: union its own methods as implementations. A method whose result its body
+        // infers implements an obligation with the result its checked body recorded; the walk
+        // checks every method before it asks.
+        let local_implementations = if self.checked_local_methods.contains_key(&owner) {
+            families
+                .iter()
+                .map(|(name, _)| {
+                    let (candidates, _) = self.body_local_declared_member_candidates_at(root, name);
+                    let candidates = candidates
+                        .into_iter()
+                        .filter_map(|mut candidate| {
+                            let generic_pending = candidate
+                                .generic_sig
+                                .as_ref()
+                                .is_some_and(|generic| generic.ret == Ty::Pending);
+                            if candidate.callable.ret == Ty::Pending || generic_pending {
+                                let result = self.checked_source_member_result(
+                                    candidate.source_member,
+                                    candidate.stable_declaration,
+                                )?;
+                                if candidate.callable.ret == Ty::Pending {
+                                    candidate.callable.ret = result;
+                                }
+                                if let Some(generic) = candidate
+                                    .generic_sig
+                                    .as_mut()
+                                    .filter(|generic| generic.ret == Ty::Pending)
+                                {
+                                    generic.ret = result;
+                                }
+                            }
+                            Some(candidate)
+                        })
+                        .collect::<Vec<_>>();
+                    (name.clone(), candidates)
+                })
+                .collect::<crate::fx_hash::HashMap<_, _>>()
+        } else {
+            crate::fx_hash::HashMap::default()
+        };
+
         let mut unresolved = Vec::<UnimplementedMember>::new();
         let mut unresolved_functions = Vec::<(&FunctionInfo, FunctionKey)>::new();
-        for (_, callables) in &families {
+        for (name, callables) in &families {
             let functions = callables.functions();
+            let local = local_implementations
+                .get(name)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             for function in functions.iter().filter(|function| {
                 function.flags.is_abstract
                     && function
@@ -461,7 +507,7 @@ impl Checker<'_> {
                         .external_identity
                         .is_none_or(|identity| !property_accessor_targets.contains(&identity))
             }) {
-                if functions.iter().any(|implementation| {
+                if functions.iter().chain(local).any(|implementation| {
                     !implementation.flags.is_abstract
                         && implements_abstract_function(
                             &source,

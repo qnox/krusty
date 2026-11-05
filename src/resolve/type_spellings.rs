@@ -335,7 +335,7 @@ pub(super) fn expansion_arg_spellings(
     };
     let bindings = formals
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .zip(use_site.iter().map(|(ty, _)| *ty))
         .collect::<crate::symbol_resolver::GSigBinds>();
     let applied = crate::symbol_resolver::ty_subst_keep_unbound(expansion, &bindings);
@@ -415,7 +415,7 @@ fn substitute_expansion_spelling(
     bindings: &crate::symbol_resolver::GSigBinds,
 ) -> Spelled {
     let template_inner = template.projection_inner().unwrap_or(template);
-    if let TyKind::TyParam(name, _) = template_inner.kind() {
+    if let TyKind::TyParam(name, _) | TyKind::Var(name, _) = template_inner.kind() {
         if let Some(index) = formals.iter().position(|formal| formal == name) {
             let argument = use_site
                 .get(index)
@@ -473,6 +473,7 @@ fn substitute_expansion_spelling(
         unsafe_variance: spelling.unsafe_variance,
         parameter_name: spelling.parameter_name.clone(),
         flexible_upper_bound: spelling.flexible_upper_bound,
+        mutability_upper_bound: spelling.mutability_upper_bound,
         enhanced_nullability: spelling.enhanced_nullability,
         actualized_expect: spelling.actualized_expect,
     }

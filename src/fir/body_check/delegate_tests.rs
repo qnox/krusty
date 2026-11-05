@@ -308,6 +308,12 @@ fn member_extension_delegate_keeps_its_independent_dispatch_receiver() {
             crate::fir::FirLocalDelegateDispatchParameter::ImplicitReceiver(
                 crate::fir::FirCapturedReceiver::Enclosing {
                     classifier: crate::types::type_name("Scope"),
+                    owner: Some(crate::fir::EnclosingInstanceOwner {
+                        declaration: index
+                            .classifier_declaration(crate::types::type_name("Scope"))
+                            .expect("the selected dispatch owner's declaration"),
+                        kind: crate::fir::EnclosingInstanceKind::Classifier,
+                    }),
                 },
             )
         ),

@@ -3,7 +3,7 @@
 
 use super::capture_storage::{
     anonymous_body_expressions, anonymous_descendant_uses_name, anonymous_descendant_writes_name,
-    anonymous_descendants, enclosing_value_visible_beside_member,
+    anonymous_descendants, enclosing_value_visible_beside_member, ConstructorArgumentUses,
 };
 use super::scope::ContextReceiverKind;
 use super::{
@@ -15,6 +15,17 @@ use crate::diag::Span;
 use crate::fir::{CapturedCallableOwner, FirCapturedReceiver};
 use crate::fx_hash::HashMap;
 use crate::types::{CapturedContextKind, Ty};
+
+/// What a visit knows about a captured value's type, least first.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum CaptureTypeKnowledge {
+    /// It waits on inference that has not run yet.
+    Pending,
+    /// It holds an inference variable of a call that is still being solved; that call's solution
+    /// completes it.
+    AwaitingCall,
+    Determined,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnonymousObjectCapture {
@@ -66,6 +77,27 @@ pub struct AnonymousObjectCapture {
 impl AnonymousObjectCapture {
     pub fn stored_ty(&self) -> Ty {
         self.storage_ty.unwrap_or(self.ty)
+    }
+
+    /// Whether the captured value's type is not known yet: it still waits on pending inference, or
+    /// it holds an inference variable of a call that is still being solved (a builder lambda's
+    /// receiver before the builder call completes). Such a capture is provisional; the visit after
+    /// the owning call is solved records its determined type.
+    pub(super) fn has_undetermined_type(&self) -> bool {
+        self.type_knowledge() != CaptureTypeKnowledge::Determined
+    }
+
+    /// How much is known about the captured value's type, for preferring the better-informed of
+    /// two visits.
+    pub(super) fn type_knowledge(&self) -> CaptureTypeKnowledge {
+        let types = || [Some(self.ty), self.storage_ty].into_iter().flatten();
+        if types().any(Ty::mentions_pending) {
+            CaptureTypeKnowledge::Pending
+        } else if types().any(Ty::mentions_type_variable) {
+            CaptureTypeKnowledge::AwaitingCall
+        } else {
+            CaptureTypeKnowledge::Determined
+        }
     }
 }
 
@@ -181,6 +213,12 @@ pub(super) struct AnonymousCaptureCandidate {
     pub(super) receiver_role: Option<super::ReceiverDeclarationRole>,
 }
 
+pub(super) struct ReceiverCaptureUses<'a> {
+    pub(super) mark: usize,
+    pub(super) extension: Option<Span>,
+    pub(super) forwarded: &'a super::receiver_uses::ReceiverUseSites,
+}
+
 fn receiver_capture_source(
     class_receiver: bool,
     current: bool,
@@ -243,15 +281,18 @@ impl Checker<'_> {
         declaration: DeclId,
         candidate: &AnonymousCaptureCandidate,
         receiver_identity: (usize, usize),
-        uses_before: usize,
-        extension_use: Option<(Span, usize)>,
+        uses: ReceiverCaptureUses<'_>,
         finalized: &[AnonymousObjectCapture],
     ) -> bool {
-        let semantically_used = self.implicit_receiver_identity_use_count(receiver_identity)
-            > uses_before
-            || extension_use.is_some_and(|(declaration, before)| {
-                self.extension_receiver_use_count(declaration) > before
-            });
+        let semantically_used = self
+            .implicit_receiver_identity_uses
+            .first_use_since_excluding(
+                uses.mark,
+                receiver_identity,
+                uses.extension,
+                uses.forwarded,
+            )
+            != usize::MAX;
         semantically_used
             || self.selected_anonymous_super_outer_candidate(declaration, candidate)
             || finalized
@@ -542,12 +583,9 @@ impl Checker<'_> {
         );
         // Provisional visits publish only proven selections, but cannot mark their types final.
         let provisional = self.postponed_argument_depth != 0
-            || captures.iter().any(|capture| {
-                capture.ty.mentions_pending()
-                    || capture
-                        .storage_ty
-                        .is_some_and(|storage| storage.mentions_pending())
-            });
+            || captures
+                .iter()
+                .any(AnonymousObjectCapture::has_undetermined_type);
         // Established fields are proven reads, not the temporary candidate overlay. A completed
         // local method never selects its receiver again during a memoized revisit.
         let mut proven_uses = established
@@ -1037,6 +1075,7 @@ pub(super) struct SelectedLocalCallableCaptures<'a> {
     pub(super) calls: &'a HashMap<ExprId, ResolvedCall>,
     pub(super) expressions: &'a HashMap<ExprId, ExprLowering>,
     pub(super) statements: &'a HashMap<StmtId, StmtLowering>,
+    pub(super) constructor_arguments: ConstructorArgumentUses<'a>,
 }
 
 fn expression_uses_selected_local_callable_capture(
@@ -1101,7 +1140,7 @@ fn anonymous_descendant_uses_selected_local_callable_capture(
     selected: SelectedLocalCallableCaptures<'_>,
 ) -> bool {
     anonymous_descendants(declaration, lexical_scope).any(|candidate| {
-        anonymous_body_expressions(file, candidate)
+        anonymous_body_expressions(file, candidate, selected.constructor_arguments)
             .into_iter()
             .any(|expression| {
                 expression_uses_selected_local_callable_capture(file, expression, name, selected)
@@ -1167,6 +1206,7 @@ pub(super) fn record_anonymous_construction_captures(
                         &candidate.name,
                         candidate.ty,
                         candidate.function_local,
+                        selected_local_callables.constructor_arguments,
                     )
                     || anonymous_descendant_uses_selected_local_callable_capture(
                         file,
@@ -1181,6 +1221,7 @@ pub(super) fn record_anonymous_construction_captures(
                         lexical_scope,
                         &candidate.name,
                         candidate.function_local,
+                        selected_local_callables.constructor_arguments,
                     ))
             }
         })
@@ -1221,6 +1262,7 @@ pub(super) fn record_anonymous_construction_captures(
 /// member's dispatch receiver is that class's instance type.
 pub(super) fn enclosing_instance(ty: Ty) -> FirCapturedReceiver {
     FirCapturedReceiver::Enclosing {
+        owner: None,
         classifier: ty
             .non_null()
             .kotlin_class_internal()

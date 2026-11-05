@@ -24,6 +24,10 @@ class DumpProcessor(private val env: SymbolProcessorEnvironment) : SymbolProcess
             env.codeGenerator.createNewFile(Dependencies.ALL_FILES, "gen", "Generated").use {
                 it.write("package gen\n\n@sample.Marker\nclass Generated {\n    class Nested\n}\n".toByteArray())
             }
+            // A package that is a resource directory rather than a Kotlin package, as a service descriptor uses.
+            env.codeGenerator.createNewFile(Dependencies.ALL_FILES, "META-INF.services", "dump.Service", "").use {
+                it.write("dump.Implementation\n".toByteArray())
+            }
         }
         return emptyList()
     }

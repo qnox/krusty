@@ -87,7 +87,6 @@ pub(super) fn specialize(ctx: &ReprCtx<'_>, left: ExprId, right: ExprId) -> Opti
             ty: ctx
                 .types
                 .get(&right)
-                .copied()
                 .filter(|ty| ty.is_nullable() || !ty.is_jvm_scalar())?,
         },
         _ => return None,

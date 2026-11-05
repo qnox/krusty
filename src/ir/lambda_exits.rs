@@ -7,6 +7,7 @@
 
 use crate::fx_hash::HashMap;
 
+use super::expression_copy::InheritedFacts;
 use super::{ExprId, IrCheckedOperation, IrExpr, IrFile};
 
 #[derive(Default)]
@@ -105,12 +106,12 @@ impl IrFile {
         self.lambda_exits.leaves.get(&body)?;
         Some(lambda_exit(self, body, &mut Vec::new()))
     }
+}
 
-    /// Give the copy `target` of expression `source` the exit recorded for `source`.
-    pub(super) fn copy_lambda_exit(&mut self, source: ExprId, target: ExprId) {
-        if let Some(&leaves) = self.lambda_exits.leaves.get(&source) {
-            self.lambda_exits.leaves.insert(target, leaves);
-        }
+impl InheritedFacts for LambdaExits {
+    fn inherit(&mut self, source: ExprId, target: ExprId) {
+        let Self { leaves } = self;
+        leaves.inherit(source, target);
     }
 }
 
