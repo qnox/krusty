@@ -117,18 +117,32 @@ impl Checker<'_> {
     ) {
         let origins = self.safe_call_origin_paths(scope, path);
         for path in std::iter::once(path.clone()).chain(origins) {
-            match self.stable_path_ty(scope, &path, site).map(Ty::kind) {
-                Some(TyKind::Nullable(inner)) => out.push((path, inner)),
-                _ => {
+            match self
+                .stable_path_ty(scope, &path, site)
+                .and_then(proven_non_null)
+            {
+                Some(proven) => out.push((path, proven)),
+                None => {
                     if let Some((name, mutated)) = self.closure_mutated_decline(scope, &path, site)
                     {
-                        if let TyKind::Nullable(inner) = mutated.kind() {
-                            declined.push((name, inner));
+                        if let Some(proven) = proven_non_null(mutated) {
+                            declined.push((name, proven));
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/// The type a value of type `ty` is proven to have once it is known not to be null: `T?` is `T`,
+/// and a type parameter whose upper bound admits null (`V : S?`) is its definitely-non-null
+/// `V & Any`. A type that already excludes null proves nothing new.
+fn proven_non_null(ty: Ty) -> Option<Ty> {
+    match ty.kind() {
+        TyKind::Nullable(inner) => Some(inner),
+        TyKind::TyParam(..) if ty.upper_bound_admits_null() => Some(ty.definitely_non_null()),
+        _ => None,
     }
 }
 

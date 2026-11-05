@@ -97,7 +97,7 @@ pub struct ResolvedDelegatedFunctionDeclaration {
     pub target: ResolvedFunctionOverrideTarget,
     pub owner: TypeName,
     pub semantic_role: Option<crate::types::SemanticCallRole>,
-    pub collection_barrier: Option<crate::libraries::CollectionBarrierOutcome>,
+    pub collection_barrier: Option<crate::libraries::CollectionBarrier>,
     pub parameter_identities: Box<[ResolvedParameterIdentity]>,
     /// Number of leading semantic parameters owned by the declaration's context clause.
     /// This boundary is part of the callable's source shape even when its flattened parameter

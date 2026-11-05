@@ -13,8 +13,9 @@ use crate::libraries::{
     LibraryMember, Origin, PropKind, PropertyInfo, PropertySet, SemanticPlatform,
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{Ty, TyKind, TypeName, Visibility};
+use crate::types::{Ty, TyKind, TyParamName, TypeName, Visibility};
 mod access_site;
+pub(crate) use access_site::MemberAccessSite;
 mod argument_compatibility;
 mod call_argument;
 mod callable_shapes;
@@ -33,11 +34,13 @@ mod extension_specialization;
 mod generic_inference;
 pub(crate) use generic_inference::reified_runtime_type;
 mod hierarchy_projection;
+mod indexed_convention_selection;
 mod lambda_call_shape;
 mod member_hierarchy;
 mod member_property_selection;
 mod member_specialization;
 mod overload_selection;
+mod postponed_lambda_selection;
 mod property_candidates;
 mod qualified_classifiers;
 mod raw_member_view;
@@ -49,12 +52,14 @@ mod resolved_symbol;
 mod sam;
 mod scope_level_callables;
 mod selected_call_instantiation;
+mod separately_mapped_selection;
 pub(crate) use selected_call_instantiation::{
     declaration_default_callable, selected_default_callable,
 };
 pub(crate) mod selected_constructor;
 pub(crate) use selected_constructor::SelectedConstructorDeclaration;
-pub(crate) use top_level_selection::{CandidateCall, TopLevelArguments, TopLevelSelection};
+pub(crate) use separately_mapped_selection::{CandidateCall, FamilyArguments};
+pub(crate) use top_level_selection::TopLevelSelection;
 mod source_view;
 mod statically_known_subtype;
 mod top_level_selection;
@@ -64,7 +69,7 @@ use argument_compatibility::{arg_fits_platform, arg_fits_source, untyped_lambda_
 pub(crate) use argument_compatibility::{
     function_input_types, resolution_subtype, sam_arg_matches, sam_return_matches,
 };
-pub(crate) use call_argument::CallArgKind;
+pub(crate) use call_argument::{expected_result_keeps_call_evidence, CallArgKind};
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
 };
@@ -123,7 +128,8 @@ use overload_selection::{
     integer_literal_overload_with_ties, logical_call_params, logical_value_params, select_overload,
     select_overload_tracking_with_functions, select_receiver_overload_from_functions_tracking,
     semantic_arg_assignable, unique_most_specific, unique_most_specific_with_conflicts,
-    unique_most_specific_with_conflicts_and_ties, ExtCtx, IndexedConvention, SelectionMode,
+    unique_most_specific_with_conflicts_and_ties, ExtCtx, IndexedConvention, OverloadCall,
+    SelectionMode,
 };
 use property_candidates::{
     generic_property_more_specific, source_property_visible, specialize_property,
@@ -135,14 +141,14 @@ pub use resolved_symbol::{
 };
 pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
 use scope_level_callables::{
-    callables_from_symbols, fn_in_scope, function_set_from_symbols, level_functions,
-    level_properties, symbol_levels_in_function_scope, symbols_in_function_scope,
+    callables_from_symbols, fn_in_scope, level_functions, level_properties,
+    symbol_levels_in_function_scope, symbols_in_function_scope,
     tagged_symbol_levels_in_function_scope, FunctionScopeRef,
 };
 pub(crate) use scope_level_callables::{CallableImport, FunctionImportScope};
 pub(crate) use statically_known_subtype::{nominal_type, statically_known_subtype};
 
-pub(crate) type GSigBinds = crate::fx_hash::HashMap<String, Ty>;
+pub(crate) type GSigBinds = crate::types::TyParamBindings;
 
 /// [`crate::assignable::TypeOracle`] over a federated [`SymbolSource`] (module ∪ classpath): the class
 /// hierarchy walk the one assignability relation needs. Kotlin-name supertypes, no JVM canonicalization —
@@ -272,13 +278,13 @@ fn specialized_constructor_params(
     // formals; occurrences of the owning CLASS's parameters remain in its value-parameter types.
     // Make those finalized classifier declarations explicit to the shared solver. Otherwise it
     // correctly treats `T` as an enclosing, non-inferable variable and leaves `Box(1)` at `T`.
-    let mut formals = classifier.type_parameters.type_params.clone();
+    let mut formals = TyParamName::all(&classifier.type_parameters.type_params);
     let mut formal_bounds = classifier.type_parameters.type_param_bounds.clone();
     for (ordinal, formal) in signature.formals.iter().enumerate() {
         if formals.contains(formal) {
             continue;
         }
-        formals.push(formal.clone());
+        formals.push(*formal);
         formal_bounds.push(
             signature
                 .formal_bounds
@@ -345,18 +351,6 @@ fn specialized_constructor_params(
         // still-unbound formal in the contextual function shape; erasing it to the upper bound here
         // coerces the lambda result to `Any` before the checked call can contribute its constraint.
         .map(|parameter| ty_subst_keep_unbound(*parameter, &bindings))
-        .collect()
-}
-
-/// Seed a declaration's formals from explicit call-site type arguments. All inference channels use
-/// this operation before receiver/argument unification so written arguments remain authoritative and
-/// member, extension, static, and lambda-shape probes cannot drift into different binding rules.
-pub(crate) fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
-    gsig.formals
-        .iter()
-        .cloned()
-        .zip(type_args.iter().copied())
-        .filter(|(_, argument)| *argument != Ty::Error)
         .collect()
 }
 
@@ -698,7 +692,7 @@ pub(crate) fn ranked_extension_overloads_by_recv<'a>(
 fn ranked_extension_candidates<'a>(
     src: &dyn SymbolSource,
     receiver: Ty,
-    type_variables: &[String],
+    type_variables: &[TyParamName],
     overloads: impl Iterator<Item = &'a FunctionInfo>,
 ) -> Vec<(u32, Ty, &'a FunctionInfo)> {
     let candidates = overloads
@@ -799,9 +793,11 @@ pub struct SymbolResolver<'a> {
     /// applicability, and classifier access diagnostics read one decision.
     visibility_suppressed: bool,
     /// Type variables of the enclosing postponed calls; extension receivers match over them.
-    type_variables: &'a [String],
+    type_variables: &'a [TyParamName],
     /// `+EagerLambdaAnalysis` in the calling file: a lambda's checked result decides applicability.
     eager_lambda_results: bool,
+    /// The access site's member visibility ([`MemberAccessSite`]), when the caller has a site.
+    member_access: Option<&'a dyn MemberAccessSite>,
 }
 
 /// Which accessor a property selection will execute. Provider-normalized candidate availability
@@ -882,7 +878,7 @@ impl<'a> SymbolResolver<'a> {
                 .type_parameters
                 .type_params
                 .iter()
-                .cloned()
+                .map(TyParamName::from)
                 .zip(type_args.iter().copied())
                 .collect::<GSigBinds>();
             if let Some(signature) = declaration.generic_sig.as_ref() {
@@ -912,9 +908,11 @@ impl<'a> SymbolResolver<'a> {
                     );
                 }
                 for formal in &classifier.type_parameters.type_params {
-                    if !bindings.contains_key(formal) {
-                        if let Some(argument) = completed_argument_bindings.get(formal).copied() {
-                            bindings.insert(formal.clone(), argument);
+                    if !bindings.contains_key(formal.as_str()) {
+                        if let Some(argument) =
+                            completed_argument_bindings.get(formal.as_str()).copied()
+                        {
+                            bindings.insert(TyParamName::new(formal), argument);
                         }
                     }
                 }
@@ -925,7 +923,7 @@ impl<'a> SymbolResolver<'a> {
                 .iter()
                 .enumerate()
                 .map(|(index, formal)| {
-                    bindings.get(formal).copied().unwrap_or_else(|| {
+                    bindings.get(formal.as_str()).copied().unwrap_or_else(|| {
                         classifier
                             .type_parameters
                             .type_param_bounds
@@ -991,9 +989,19 @@ impl<'a> SymbolResolver<'a> {
         }
     }
 
-    pub(crate) fn with_type_variables(mut self, type_variables: &'a [String]) -> Self {
+    pub(crate) fn with_type_variables(mut self, type_variables: &'a [TyParamName]) -> Self {
         self.type_variables = type_variables;
         self
+    }
+
+    fn ext_ctx(&self) -> ExtCtx<'_> {
+        ExtCtx {
+            fn_scope: self.fn_scope,
+            source: &self.src,
+            type_variables: self.type_variables,
+            eager_lambda_results: self.eager_lambda_results,
+            member_access: self.member_access,
+        }
     }
 
     fn receiver_mro(&self, receiver: Ty) -> ReceiverMro {
@@ -1107,180 +1115,6 @@ impl<'a> SymbolResolver<'a> {
         ErrorReceiverSelection::Absent
     }
 
-    pub(crate) fn select_receiver_indexed_get_function_with_params(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        callables: &Callables,
-    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty, GSigBinds)> {
-        let selected = match select_receiver_overload_from_functions_tracking(
-            self.lib,
-            receiver,
-            name,
-            args,
-            type_args,
-            ExtCtx {
-                fn_scope: self.fn_scope,
-                source: &self.src,
-                type_variables: self.type_variables,
-                eager_lambda_results: self.eager_lambda_results,
-            },
-            callables.functions(),
-            IndexedConvention::Get,
-        ) {
-            CandidateSelectionWithTies::Selected(selected) => selected,
-            CandidateSelectionWithTies::Ambiguous(_) => return CandidateSelection::Ambiguous,
-            CandidateSelectionWithTies::None => return CandidateSelection::None,
-        };
-        let binding_receiver = selected
-            .semantic_receiver()
-            .and_then(|declared| {
-                self.receiver_mro(receiver)
-                    .binding_receiver(&self.src, declared)
-            })
-            .unwrap_or(receiver);
-        if selected.call_sig.vararg_index.is_none() {
-            let params =
-                logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
-            // The bindings are published with the call; the receiver binds `V` of `Map.get`.
-            let (resolved, bindings) = if selected.generic_sig.is_some() && selected.is_extension()
-            {
-                let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
-                let semantic = selected.semantic_signature();
-                let (ret, bindings) = bind_ext_ret_tracking(
-                    &self.src,
-                    &semantic,
-                    binding_receiver,
-                    &arg_tys,
-                    type_args,
-                );
-                (
-                    specialized_extension_return(self.lib, &selected, ret),
-                    bindings,
-                )
-            } else if selected.is_extension() {
-                (
-                    selected.ret.apply(selected.callable.ret),
-                    GSigBinds::default(),
-                )
-            } else {
-                let (member, bindings) = resolved_member_from_info_tracking(
-                    self.lib,
-                    &self.src,
-                    receiver,
-                    args,
-                    type_args,
-                    selected.clone(),
-                );
-                (member.ret, bindings)
-            };
-            return CandidateSelection::Selected((selected, params, resolved, bindings));
-        }
-        let Some((params, ret, bindings)) = indexed_call_shape(
-            self.lib,
-            &self.src,
-            &selected,
-            binding_receiver,
-            args,
-            type_args,
-            false,
-        ) else {
-            return CandidateSelection::None;
-        };
-        CandidateSelection::Selected((selected, params, ret, bindings))
-    }
-
-    /// Select the `set` convention used by indexed assignment. The assignment RHS binds the final
-    /// value parameter even when the preceding index parameter is a vararg; ordinary positional
-    /// calls deliberately do not permit that mapping.
-    pub(crate) fn select_receiver_indexed_set_function(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        callables: &Callables,
-    ) -> CandidateSelection<FunctionInfo> {
-        select_receiver_overload_from_functions_tracking(
-            self.lib,
-            receiver,
-            name,
-            args,
-            type_args,
-            ExtCtx {
-                fn_scope: self.fn_scope,
-                source: &self.src,
-                type_variables: self.type_variables,
-                eager_lambda_results: self.eager_lambda_results,
-            },
-            callables.functions(),
-            IndexedConvention::Set,
-        )
-        .collapse()
-    }
-
-    pub(crate) fn select_receiver_indexed_set_function_with_params(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        callables: &Callables,
-    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty)> {
-        let selected = match self
-            .select_receiver_indexed_set_function(receiver, name, args, type_args, callables)
-        {
-            CandidateSelection::Selected(selected) => selected,
-            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-            CandidateSelection::None => return CandidateSelection::None,
-        };
-        let binding_receiver = selected
-            .semantic_receiver()
-            .and_then(|declared| {
-                self.receiver_mro(receiver)
-                    .binding_receiver(&self.src, declared)
-            })
-            .unwrap_or(receiver);
-        if selected.call_sig.vararg_index.is_none() {
-            let params =
-                logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
-            let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
-            let inferred_ret = selected
-                .generic_sig
-                .as_ref()
-                .map_or(selected.callable.ret, |sig| {
-                    if selected.is_extension() {
-                        bind_ext_ret(&self.src, sig, binding_receiver, &arg_tys, type_args)
-                    } else {
-                        bind_member_return(
-                            &self.src,
-                            sig,
-                            binding_receiver,
-                            &arg_tys,
-                            type_args,
-                            selected.callable.ret,
-                        )
-                    }
-                });
-            let ret = selected.ret.apply(inferred_ret);
-            return CandidateSelection::Selected((selected, params, ret));
-        }
-        let Some((params, ret, _)) = indexed_call_shape(
-            self.lib,
-            &self.src,
-            &selected,
-            binding_receiver,
-            args,
-            type_args,
-            true,
-        ) else {
-            return CandidateSelection::None;
-        };
-        CandidateSelection::Selected((selected, params, ret))
-    }
-
     /// Select one receiver callable and return the value parameters specialized by the receiver and
     /// the already-known arguments. Syntax owners use this before checking postponed lambdas; overload
     /// selection remains here, while the checker remains responsible for typing expression bodies.
@@ -1293,7 +1127,12 @@ impl<'a> SymbolResolver<'a> {
         callables: &Callables,
     ) -> Option<(FunctionInfo, Vec<Ty>)> {
         match self.select_receiver_function_with_params_tracking(
-            receiver, name, args, type_args, callables, None,
+            receiver,
+            name,
+            FamilyArguments::Shared(args),
+            type_args,
+            callables,
+            None,
         ) {
             CandidateSelection::Selected((selected, params, _)) => Some((selected, params)),
             CandidateSelection::None | CandidateSelection::Ambiguous => None,
@@ -1327,34 +1166,6 @@ impl<'a> SymbolResolver<'a> {
                 (parameters.len() == args.len()).then_some(parameters)
             })
             .collect()
-    }
-
-    /// Tracking form used by synthesized language conventions. It preserves ambiguity and the exact
-    /// specialized return beside the selected declaration so the checker can commit one target and
-    /// lowering never has to repeat receiver or overload resolution.
-    pub(crate) fn select_receiver_function_with_params_tracking(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        callables: &Callables,
-        expected_result: Option<Ty>,
-    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty)> {
-        match self.select_receiver_function_with_applied_receiver_tracking(
-            receiver,
-            name,
-            args,
-            type_args,
-            callables,
-            expected_result,
-        ) {
-            ReceiverFunctionSelection::Selected(selected) => {
-                CandidateSelection::Selected((*selected.function, selected.params, selected.ret))
-            }
-            ReceiverFunctionSelection::None => CandidateSelection::None,
-            ReceiverFunctionSelection::Ambiguous(_) => CandidateSelection::Ambiguous,
-        }
     }
 
     /// Apply a convention constraint expressed on a selected supertype back to a raw concrete
@@ -1397,7 +1208,7 @@ impl<'a> SymbolResolver<'a> {
         let applied = classifier
             .type_params
             .iter()
-            .map(|formal| bindings.get(formal).copied())
+            .map(|formal| bindings.get(formal.as_str()).copied())
             .collect::<Option<Vec<_>>>()?;
         Some(Ty::obj_args_name(owner, &applied))
     }
@@ -1436,16 +1247,7 @@ impl<'a> SymbolResolver<'a> {
         ret: Ty,
     ) -> ResolvedMember {
         let member = selected.member_with_return(ret);
-        ResolvedMember {
-            receiver,
-            ret,
-            member,
-            physical_params: selected.callable.physical_params.clone(),
-            context_args: Vec::new(),
-            projected_return_hazard: selected.projected_return_hazard,
-            suspend: selected.flags.suspend,
-            origin: selected.callable.origin.clone(),
-        }
+        ResolvedMember::from_function(receiver, &selected, member, ret)
     }
 
     /// Select the nearest in-scope extension property, rejecting equal-rank candidates.
@@ -1714,7 +1516,12 @@ impl<'a> SymbolResolver<'a> {
         );
         let CandidateSelection::Selected((selected, _, result)) = self
             .select_receiver_function_with_params_tracking(
-                receiver, name, args, type_args, &callables, None,
+                receiver,
+                name,
+                FamilyArguments::Shared(args),
+                type_args,
+                &callables,
+                None,
             )
         else {
             return None;
@@ -1723,12 +1530,7 @@ impl<'a> SymbolResolver<'a> {
     }
 
     pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
-        let functions = self
-            .symbol_levels_in_scope(name)
-            .into_iter()
-            .map(|symbols| function_set_from_symbols(&symbols))
-            .find(|functions| !functions.overloads.is_empty())
-            .unwrap_or_default();
+        let functions = self.nearest_top_level_functions(&self.symbol_levels_in_scope(name));
         crate::trace_compiler!(
             "resolve",
             "top-level candidate inventory {name}: {:?}",
@@ -1822,7 +1624,7 @@ impl<'a> SymbolResolver<'a> {
         match self.select_top_level_candidates(
             name,
             candidates,
-            TopLevelArguments::Shared(args),
+            FamilyArguments::Shared(args),
             type_args,
             expected,
             include_invisible,
@@ -1866,21 +1668,18 @@ impl<'a> SymbolResolver<'a> {
                 let mut call_ambiguous = false;
                 let selected_call = select_overload_tracking_with_functions(
                     self.lib,
-                    ty,
-                    name,
-                    args,
-                    type_args,
-                    SelectionMode::Receiver,
-                    ExtCtx {
-                        fn_scope: self.fn_scope,
-                        source: &self.src,
-                        type_variables: self.type_variables,
-                        eager_lambda_results: self.eager_lambda_results,
+                    OverloadCall {
+                        recv: ty,
+                        name,
+                        args,
+                        type_args,
+                        indexed: IndexedConvention::Ordinary,
                     },
+                    SelectionMode::Receiver,
+                    self.ext_ctx(),
                     Some(callables.functions()),
                     &mut call_ambiguous,
                     None,
-                    IndexedConvention::Ordinary,
                 );
                 let call = selected_call
                     .as_ref()
@@ -2026,11 +1825,7 @@ impl<'a> SymbolResolver<'a> {
                 // reads `overloads` to inspect the family, or `top_level_call` for the arg/type-arg selected
                 // callable (default/vararg-aware) ready to emit.
                 let levels = self.symbol_levels_in_scope(name);
-                let fs = levels
-                    .iter()
-                    .map(|symbols| function_set_from_symbols(symbols))
-                    .find(|functions| !functions.overloads.is_empty())
-                    .unwrap_or_default();
+                let fs = self.nearest_top_level_functions(&levels);
                 crate::trace_compiler!(
                     "signature_inference",
                     "top-level candidates={name} {:?}",
@@ -2130,7 +1925,7 @@ impl<'a> SymbolResolver<'a> {
         match self.pick_top_level_with_visibility(
             name,
             fs,
-            TopLevelArguments::Shared(args),
+            FamilyArguments::Shared(args),
             type_args,
             expected,
             false,
@@ -2954,7 +2749,7 @@ pub(crate) fn select_constructor_declaration_from_type_with_type_arguments(
         .type_parameters
         .type_params
         .iter()
-        .cloned()
+        .map(TyParamName::from)
         .zip(type_args.iter().copied())
         .collect::<GSigBinds>();
     let candidates = classifier
@@ -3050,7 +2845,7 @@ fn select_instance_member_ty(
 fn receiver_allows_member_dispatch(receiver: Ty) -> bool {
     match receiver.kind() {
         TyKind::Nullable(_) | TyKind::Null => false,
-        TyKind::TyParam(_, bound) => receiver_allows_member_dispatch(bound),
+        TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => receiver_allows_member_dispatch(bound),
         // Kotlin permits direct member calls on Java platform types despite uncertain nullability.
         TyKind::PlatformNullable(_) => true,
         _ => true,
@@ -3255,16 +3050,7 @@ fn resolved_member_from_info_tracking(
     );
     let member = o.member_with_return(o.callable.ret);
     (
-        ResolvedMember {
-            receiver: recv,
-            ret,
-            member,
-            physical_params: o.callable.physical_params.clone(),
-            context_args: Vec::new(),
-            projected_return_hazard: o.projected_return_hazard,
-            suspend: o.flags.suspend,
-            origin: o.callable.origin.clone(),
-        },
+        ResolvedMember::from_function(recv, &o, member, ret),
         bindings,
     )
 }
@@ -3335,6 +3121,7 @@ fn select_instance_info(
             source,
             type_variables: &[],
             eager_lambda_results: false,
+            member_access: None,
         },
     )
 }
@@ -3368,7 +3155,7 @@ mod tests {
                 LibraryCallable::library("demo/TestKt", "choose", vec![parameter], any, any, ""),
             );
             info.generic_sig = Some(GenericSig {
-                formals: vec![formal.to_string()],
+                formals: vec![TyParamName::new(formal)],
                 formal_bounds: vec![vec![any]],
                 receiver: None,
                 params: vec![parameter],
@@ -3462,7 +3249,7 @@ mod tests {
             vec![Ty::obj_args("fixtures/Box", &[owner]), method],
             Ty::obj_args("fixtures/Result", &[method]),
         ));
-        let bindings = GSigBinds::from_iter([("Owner".to_string(), Ty::String)]);
+        let bindings = GSigBinds::from_iter([("Owner".into(), Ty::String)]);
 
         assert_eq!(
             ty_subst_keep_unbound(signature, &bindings),
@@ -3497,7 +3284,7 @@ mod tests {
             specialize_final_signature_output_type(
                 &EMPTY_SOURCE,
                 output,
-                &GSigBinds::from_iter([("R".to_string(), Ty::out_projection(Ty::String),)]),
+                &GSigBinds::from_iter([("R".into(), Ty::out_projection(Ty::String),)]),
             ),
             Ty::String
         );
@@ -3516,7 +3303,7 @@ mod tests {
             specialize_signature_output_type(
                 &VarianceSource,
                 output,
-                &GSigBinds::from_iter([("R".to_string(), Ty::star_projection(nullable_any),)]),
+                &GSigBinds::from_iter([("R".into(), Ty::star_projection(nullable_any),)]),
             ),
             Ty::obj_args("fixtures/Producer", &[nullable_any])
         );
@@ -3531,7 +3318,7 @@ mod tests {
         unify_inferred_ty(parameter, Ty::Int, &mut inferred);
         assert_eq!(inferred.get("T"), Some(&Ty::nullable(Ty::Int)));
 
-        let mut explicit = GSigBinds::from_iter([("T".to_string(), Ty::Int)]);
+        let mut explicit = GSigBinds::from_iter([("T".into(), Ty::Int)]);
         unify_ty(parameter, Ty::Null, &mut explicit);
         assert_eq!(explicit.get("T"), Some(&Ty::Int));
     }
@@ -3542,7 +3329,7 @@ mod tests {
         let r = Ty::ty_param("R", any);
         let q = Ty::ty_param("Q", any);
         GenericSig {
-            formals: vec!["C".to_string(), "R".to_string(), "Q".to_string()],
+            formals: TyParamName::all(&["C", "R", "Q"]),
             formal_bounds: vec![vec![r], vec![q], vec![any]],
             receiver: Some(c),
             params: Vec::new(),
@@ -3555,9 +3342,9 @@ mod tests {
     fn bottom_bindings_complete_transitively_in_the_real_binding_map() {
         let signature = subtype_chain_signature();
         let mut bindings = GSigBinds::from_iter([
-            ("C".to_string(), Ty::String),
-            ("R".to_string(), Ty::Nothing),
-            ("Q".to_string(), Ty::Null),
+            ("C".into(), Ty::String),
+            ("R".into(), Ty::Nothing),
+            ("Q".into(), Ty::Null),
         ]);
 
         complete_bottom_constraint_bindings(&signature, &mut bindings, 0);
@@ -3570,9 +3357,9 @@ mod tests {
     fn explicitly_written_bottom_binding_is_not_completed() {
         let signature = subtype_chain_signature();
         let mut bindings = GSigBinds::from_iter([
-            ("C".to_string(), Ty::String),
-            ("R".to_string(), Ty::Nothing),
-            ("Q".to_string(), Ty::Null),
+            ("C".into(), Ty::String),
+            ("R".into(), Ty::Nothing),
+            ("Q".into(), Ty::Null),
         ]);
 
         complete_bottom_constraint_bindings(&signature, &mut bindings, 3);
@@ -3660,7 +3447,7 @@ mod tests {
         let expected = Ty::obj_args("kotlin/collections/List", &[formal]);
 
         assert_eq!(
-            infer_generic_symbolic_return_constraints(declared, expected, &["T".to_string()])
+            infer_generic_symbolic_return_constraints(declared, expected, &[TyParamName::new("T")])
                 .bindings
                 .get("T"),
             Some(&formal)
@@ -3668,7 +3455,7 @@ mod tests {
         assert!(infer_generic_symbolic_return_constraints(
             Ty::obj_args("kotlin/collections/Set", &[formal]),
             expected,
-            &["T".to_string()],
+            &[TyParamName::new("T")],
         )
         .bindings
         .is_empty());
@@ -3681,7 +3468,7 @@ mod tests {
         let expected = Ty::obj_args("kotlin/collections/List", &[Ty::nullable(formal)]);
 
         assert_eq!(
-            infer_generic_symbolic_return_constraints(declared, expected, &["T".to_string()])
+            infer_generic_symbolic_return_constraints(declared, expected, &[TyParamName::new("T")])
                 .bindings
                 .get("T"),
             Some(&Ty::nullable(formal))
@@ -3696,7 +3483,7 @@ mod tests {
         let expected = Ty::obj_args("fixtures/Duo", &[caller, Ty::nullable(caller), caller]);
 
         let constraints =
-            infer_generic_symbolic_return_constraints(declared, expected, &["T".to_string()]);
+            infer_generic_symbolic_return_constraints(declared, expected, &[TyParamName::new("T")]);
         assert!(constraints.bindings.is_empty());
         assert!(constraints.constrained_formals.contains("T"));
         assert!(constraints.conflicting_formals.contains("T"));
@@ -3725,7 +3512,7 @@ mod tests {
         );
 
         let constraints =
-            infer_generic_symbolic_return_constraints(declared, expected, &["T".to_string()]);
+            infer_generic_symbolic_return_constraints(declared, expected, &[TyParamName::new("T")]);
 
         assert!(constraints.conflicting_formals.is_empty());
         assert!(constraints.bindings.is_empty());
@@ -3739,7 +3526,7 @@ mod tests {
         let constraints = infer_generic_symbolic_return_constraints(
             Ty::obj_args("fixtures/Duo", &[callee, callee]),
             Ty::obj_args("fixtures/Duo", &[caller, Ty::String]),
-            &["T".to_string()],
+            &[TyParamName::new("T")],
         );
 
         assert!(constraints.bindings.is_empty());
@@ -3751,7 +3538,7 @@ mod tests {
         let any = Ty::obj("kotlin/Any");
         let parameter = Ty::ty_param("T", any);
         let signature = GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![vec![any]],
             receiver: None,
             params: vec![Ty::nullable(parameter), parameter],
@@ -3805,7 +3592,7 @@ mod tests {
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
         let parameter = Ty::ty_param("T", any);
         let signature = GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![vec![any]],
             receiver: None,
             params: vec![Ty::array(parameter)],
@@ -3863,7 +3650,7 @@ mod tests {
         let optional_of = |ty| Ty::obj_args("java/util/Optional", &[ty]);
 
         let method_generic = GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![Vec::new()],
             receiver: None,
             params: vec![class_of(parameter)],
@@ -3942,7 +3729,7 @@ mod tests {
         let formal = Ty::ty_param("A", annotation);
         let class_of = |ty| Ty::obj_args("java/lang/Class", &[ty]);
         let signature = GenericSig {
-            formals: vec!["A".to_string()],
+            formals: vec![TyParamName::new("A")],
             formal_bounds: vec![vec![annotation]],
             receiver: None,
             params: vec![Ty::platform_nullable(class_of(formal))],
@@ -4081,7 +3868,7 @@ mod tests {
         let foo = Ty::obj("fixtures/Foo");
         let parameter = Ty::ty_param("T", any);
         let signature = GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![vec![any]],
             receiver: None,
             params: vec![Ty::obj_args(
@@ -4150,7 +3937,7 @@ mod tests {
         let any = Ty::obj("kotlin/Any");
         let parameter = Ty::ty_param("T", any);
         GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![vec![any]],
             receiver: None,
             params: vec![parameter],
@@ -4167,9 +3954,9 @@ mod tests {
     ) -> Option<Ty> {
         let signature = expected_result_signature(owner);
         let mut bindings = GSigBinds::default();
-        bindings.insert("T".to_string(), inferred);
+        bindings.insert("T".into(), inferred);
         let mut expected_bindings = GSigBinds::default();
-        expected_bindings.insert("T".to_string(), expected_argument);
+        expected_bindings.insert("T".into(), expected_argument);
         widen_invariant_expected_bindings(
             &VarianceSource,
             &signature,
@@ -4514,7 +4301,7 @@ mod tests {
             Some(0),
         );
         overload.generic_sig = Some(GenericSig {
-            formals: vec!["R".to_string()],
+            formals: vec![TyParamName::new("R")],
             formal_bounds: vec![vec![any]],
             receiver: Some(receiver),
             params: vec![values],
@@ -4658,7 +4445,7 @@ mod tests {
         let owner = type_name("demo/Box");
         let formal = "T".to_string();
         let outer = Ty::ty_param("OuterT", Ty::nullable(Ty::obj("kotlin/Any")));
-        let mut bindings = GSigBinds::from_iter([(formal.clone(), Ty::Int)]);
+        let mut bindings = GSigBinds::from_iter([(TyParamName::from(&formal), Ty::Int)]);
 
         constrain_constructor_result(
             owner,
@@ -4667,7 +4454,7 @@ mod tests {
             &mut bindings,
         );
 
-        assert_eq!(bindings.get(&formal), Some(&Ty::Int));
+        assert_eq!(bindings.get(formal.as_str()), Some(&Ty::Int));
     }
 
     #[test]
@@ -4682,7 +4469,7 @@ mod tests {
         constructor.call_sig =
             CallSig::metadata_member(1, vec!["values".to_string()], vec![false], Some(0));
         constructor.generic_sig = Some(GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
             receiver: None,
             params: vec![Ty::array(parameter)],
@@ -4790,7 +4577,7 @@ mod tests {
             "(Lfixture/Duo;Lfixture/Sink;)V".to_string(),
         );
         member.generic_sig = Some(GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![Vec::new()],
             receiver: None,
             params: vec![generic_values, generic_sink],
@@ -5390,7 +5177,7 @@ mod tests {
         base.callable.default_call = false;
         attach_default_target(&mut base, &bridge);
         base.generic_sig = Some(GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![vec![nullable_any]],
             receiver: None,
             params: vec![parameter, parameter, Ty::nullable(Ty::String)],

@@ -167,9 +167,13 @@ impl Emitter<'_> {
                 _ => break,
             };
         }
+        // A point whose resumption delivers a value class's box leaves that class's carrier on both
+        // paths. kotlinc materializes the call at the value class's JVM type, the carrier, for every
+        // consumer: `return foo()` and `bar().s` alike cast it after the paths merge.
         if self
             .transformed_result(e)
             .is_none_or(|result| result == Ty::Unit)
+            || self.transformed_suspensions.resumed_boxes.contains_key(&e)
         {
             return false;
         }
@@ -250,8 +254,8 @@ impl Emitter<'_> {
         // next line mark is the consumer's own.
         let initializer = self.transformed_suspensions.initializer == Some(e);
         let marked = block || (initializer && code.line_forgotten());
-        match self.ir.expr_source_lines.get(&e) {
-            Some(&line) if marked && !discarded && line != 0 => code.mark_line(line),
+        match self.ir.source_line(e) {
+            Some(line) if marked && !discarded && line != 0 => code.mark_line(line),
             _ => {}
         }
         let target = jvm_declared_ty(&result);

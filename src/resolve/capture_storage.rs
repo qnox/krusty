@@ -219,6 +219,25 @@ pub(super) enum ConstructorArgumentUses<'a> {
 }
 
 impl ConstructorArgumentUses<'_> {
+    /// Candidate discovery cannot decide whether an omitted lambda parameter list binds `it`.
+    /// Only the selected lambda expression and its checked function shape can hide that outer name.
+    pub(super) fn binds_implicit_lambda_parameter(self, file: &File, expression: ExprId) -> bool {
+        let Self::Checked {
+            expressions, types, ..
+        } = self
+        else {
+            return false;
+        };
+        if !matches!(expressions.get(&expression), Some(ExprLowering::Lambda(_))) {
+            return false;
+        }
+        let signature = match types.get(expression.0 as usize).map(|ty| ty.kind()) {
+            Some(TyKind::Fun(signature)) => Some(signature),
+            _ => None,
+        };
+        super::context_capture::lambda_binds_implicit_it(file, expression, signature)
+    }
+
     fn retains_closure(self, file: &File, declaration: DeclId, expression: ExprId) -> bool {
         match self {
             Self::Candidates => matches!(file.expr(expression), Expr::Lambda { .. }),
@@ -343,47 +362,6 @@ pub(super) fn anonymous_descendants(
     ))
 }
 
-fn expression_has_member_call_named(file: &File, expression: ExprId, name: &str) -> bool {
-    // A nested lambda is another runtime closure, but a value from outside the anonymous class
-    // still has to cross the class boundary before that closure can capture it.
-    let matches = match file.expr(expression) {
-        Expr::SafeCall { name: member, .. } => member == name,
-        Expr::Call { callee, .. } => {
-            matches!(file.expr(*callee), Expr::Member { name: member, .. } if member == name)
-        }
-        _ => false,
-    };
-    if matches {
-        return true;
-    }
-    let mut expressions = Vec::new();
-    let mut statements = Vec::new();
-    file.any_child_expr(
-        expression,
-        &mut |child| {
-            expressions.push(child);
-            false
-        },
-        &mut |statement| {
-            statements.push(statement);
-            false
-        },
-    );
-    expressions
-        .into_iter()
-        .any(|child| expression_has_member_call_named(file, child, name))
-        || statements.into_iter().any(|statement| {
-            let mut children = Vec::new();
-            file.any_child_stmt(statement, &mut |child| {
-                children.push(child);
-                false
-            });
-            children
-                .into_iter()
-                .any(|child| expression_has_member_call_named(file, child, name))
-        })
-}
-
 fn anonymous_body_uses_name(
     file: &File,
     declaration: DeclId,
@@ -391,26 +369,36 @@ fn anonymous_body_uses_name(
     ty: Ty,
     constructor_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
-    let expressions = anonymous_body_expressions(file, declaration, constructor_uses);
-    expressions
+    let Decl::Class(class) = file.decl(declaration) else {
+        return false;
+    };
+    let base_arguments = class
+        .base_args
         .iter()
-        .any(|expression| file.expr_uses_name_deep(*expression, name))
-        || matches!(ty.kind(), TyKind::Fun(signature) if signature.has_receiver)
-            && expressions
-                .into_iter()
-                .any(|expression| expression_has_member_call_named(file, expression, name))
+        .filter_map(|argument| {
+            anonymous_super_argument_constructor_use(file, declaration, *argument, constructor_uses)
+        })
+        .collect::<Vec<_>>();
+    capture_analysis::anonymous_class_uses_name(
+        file,
+        class,
+        &base_arguments,
+        name,
+        matches!(ty.kind(), TyKind::Fun(signature) if signature.has_receiver),
+        constructor_uses,
+    )
 }
 
 pub(super) fn anonymous_descendant_uses_name(
     file: &File,
     declaration: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
+    mut descendants: impl Iterator<Item = DeclId>,
     name: &str,
     ty: Ty,
     function_local: bool,
     constructor_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
-    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
+    descendants.any(|candidate| {
         enclosing_value_visible_beside_member(file, candidate, name, function_local)
             && (anonymous_body_uses_name(file, candidate, name, ty, constructor_uses)
                 || candidate != declaration
@@ -441,12 +429,12 @@ pub(super) fn enclosing_value_visible_beside_member(
 pub(super) fn anonymous_descendant_writes_name(
     file: &File,
     declaration: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
+    mut descendants: impl Iterator<Item = DeclId>,
     name: &str,
     function_local: bool,
     constructor_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
-    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
+    descendants.any(|candidate| {
         enclosing_value_visible_beside_member(file, candidate, name, function_local)
             && (anonymous_body_writes_name(file, candidate, name, constructor_uses)
                 || candidate != declaration

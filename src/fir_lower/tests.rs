@@ -18,6 +18,7 @@ mod catch_clauses;
 mod checked_hierarchy;
 mod checked_operand_types;
 mod checked_substitutions;
+mod enum_realization;
 mod external_constructions;
 mod external_references;
 mod inline_only;
@@ -62,7 +63,7 @@ fn char_arithmetic_result_type_survives_nested_common_lowering() {
             .then_some(expression as u32)
         })
         .expect("lowered Char subtraction");
-    assert_eq!(ir.logical_types.get(&subtraction), Some(&Ty::Char));
+    assert_eq!(ir.logical_type(subtraction), Some(Ty::Char));
 }
 
 #[test]
@@ -591,6 +592,7 @@ fn external_default_call_keeps_only_supplied_common_operands() {
                 default_provider: None,
                 receiver: None,
                 declared_receiver: None,
+                declaring_receiver: None,
                 parameters: Box::new([resolved(Ty::Int), resolved(Ty::String)]),
                 result: resolved(Ty::String),
                 declared_result: None,
@@ -2006,7 +2008,7 @@ fn nested_generic_inline_expansion_specializes_its_result_storage() {
         .expect("consumer body");
 
     assert!(!expression_subtree_contains(&ir, body, &|expression, _| {
-        ir.inline_regions.contains(&expression) && ir.physical_types.contains_key(&expression)
+        ir.inline_regions.contains(&expression) && ir.physical_type(expression).is_some()
     }));
     assert!(!expression_subtree_contains(&ir, body, &|_, expression| {
         let IrExpr::Variable {

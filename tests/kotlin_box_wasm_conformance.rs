@@ -182,7 +182,12 @@ impl Lane for WasmLane {
         modules: &[krusty::conformance::ModuleUnit],
         directive_source: &str,
     ) -> Outcome {
-        let backend = WasmBackend::new(self.target).with_entry(Entry::Box);
+        let Some(entry_module) = modules.last() else {
+            return Outcome::Harness("a module graph has no final source module".to_string());
+        };
+        let backend = WasmBackend::new(self.target)
+            .with_entry(Entry::Box)
+            .with_entry_module(entry_module.name.clone());
         let features = krusty::features::LangFeatures::from_source(directive_source);
         let platform = match self.target {
             WasmTarget::Js => krusty::klib::write::KlibPlatform::WasmJs,
@@ -651,9 +656,58 @@ fun box(): String {
 }
 "#;
 
+// PLATFORM-SPECIFIC: an out-of-range store whose value has side effects reaches the bounds check
+// only after the receiver, the index and the value ran. With range checks, that check throws
+// `IndexOutOfBoundsException`; without them (the 2.4.0 and 2.4.10 default) the store is a host trap.
+// A throwing value at an out-of-range index, and the in-range order, are portable and stay in
+// `tests/box_regressions/referenceArrayStoreEvaluatesValueBeforeBoundsCheck.kt`.
+const REFERENCE_ARRAY_STORE_BOUNDS: &str = r#"class Tag(val text: String)
+
+var trace = ""
+
+fun slots(): Array<Tag> {
+    trace += "a"
+    return arrayOf(Tag("0"))
+}
+
+fun at(index: Int): Int {
+    trace += "i"
+    return index
+}
+
+fun stored(text: String): Tag {
+    trace += "v"
+    return Tag(text)
+}
+
+fun box(): String {
+    try {
+        slots()[at(1)] = stored("y")
+        return "out of range stored"
+    } catch (expected: Throwable) {
+        if (expected !is IndexOutOfBoundsException) return "out of range threw another exception"
+        if (trace != "aiv") return "out of range: $trace"
+    }
+    return "OK"
+}
+"#;
+
 // PLATFORM-SPECIFIC: both the Kotlin exception and the unchecked host trap are observable here.
 #[test]
 fn wasm_reference_array_bounds_preserve_reference_defaults_and_explicit_options() {
+    expect_reference_array_bounds(REFERENCE_ARRAY_BOUNDS, "referenceArrayBounds");
+}
+
+// PLATFORM-SPECIFIC: see `REFERENCE_ARRAY_STORE_BOUNDS`.
+#[test]
+fn wasm_reference_array_store_bounds_follow_the_value_under_every_bounds_policy() {
+    expect_reference_box(REFERENCE_ARRAY_STORE_BOUNDS, "referenceArrayStoreBounds");
+    expect_reference_array_bounds(REFERENCE_ARRAY_STORE_BOUNDS, "referenceArrayStoreBounds");
+}
+
+/// Run `source` under the release's default bounds policy and both explicit ones: a checked access
+/// must run `box()` to `OK`, and an unchecked one must stop at the exact host trap.
+fn expect_reference_array_bounds(source: &str, name: &str) {
     use krusty::kotlin_version::{KotlinVersion, ReleaseRecords};
     const DEFAULTS: ReleaseRecords<bool> = ReleaseRecords::new(&[
         (KotlinVersion::V2_4_0, false),
@@ -663,10 +717,9 @@ fn wasm_reference_array_bounds_preserve_reference_defaults_and_explicit_options(
     let default = *DEFAULTS
         .get(krusty::kotlin_version::target())
         .expect("supported release");
-    let source = REFERENCE_ARRAY_BOUNDS;
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
-        if !focused_wasm_lane_available(&lane, "referenceArrayBounds") {
+        if !focused_wasm_lane_available(&lane, name) {
             return;
         }
         for requested in [None, Some(false), Some(true)] {
@@ -675,7 +728,7 @@ fn wasm_reference_array_bounds_preserve_reference_defaults_and_explicit_options(
             if let Some(requested) = requested {
                 backend = backend.with_array_range_checks(requested);
             }
-            let stem = format!("referenceArrayBounds{requested:?}");
+            let stem = format!("{name}{requested:?}");
             let mut program = box_lane::compile(
                 &[("Bounds.kt".to_owned(), source.to_owned())],
                 source,
@@ -942,3 +995,6 @@ fn wasm_declines_an_enum_class_by_name() {
         "an enum class (`Color`)",
     );
 }
+
+#[path = "wasm_value_hash.rs"]
+mod value_hash;

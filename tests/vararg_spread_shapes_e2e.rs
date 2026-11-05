@@ -50,6 +50,19 @@ fn declared_projected_varargs_box_nullable_value_classes_and_heterogeneous_value
     );
 }
 
+/// `arrayOf`'s parameter is `vararg elements: T`, so a spread or named whole array is checked
+/// against `Array<out T>`: an out-projected array spreads into it, and an explicit or expected
+/// element type still fixes `T`.
+#[test]
+fn out_projected_array_spreads_into_array_of() {
+    const SOURCE: &str = include_str!("box_regressions/spreadOutProjectedArrayIntoArrayOf.kt");
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SOURCE, "out_projected_array_of_spread"),
+        "OK"
+    );
+}
+
 /// Multi-file fixtures in this module exercise the backend boundary, so a front-end-clean `None`
 /// is a failure, not an acceptable skip. Keeping that strict contract in one helper prevents a new
 /// source-origin case from accidentally weakening runtime coverage while still reporting useful

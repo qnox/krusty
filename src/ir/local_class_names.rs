@@ -35,6 +35,16 @@ pub(crate) enum IrLocalClassOwner {
     External(TypeName),
 }
 
+/// A source classifier's original declaration context, retained when an inline copy changes its
+/// current executable enclosure. Targets decide how these source roles affect representation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IrClassDeclarationContext {
+    TopLevel,
+    Member,
+    Executable,
+    ClassInitializer { owner: TypeName },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct IrLocalClassNameProvenance {
     /// Source file whose facade roots the name when there is no lexical owner. An inline payload
@@ -107,7 +117,7 @@ fn name(name: &mut TypeName, names: &IdentityRemap<'_>) {
 /// A captured enclosing instance names its class by identity, which follows the class's rename.
 fn captured_receiver(receiver: &mut super::IrCapturedReceiver, names: &IdentityRemap<'_>) {
     match receiver {
-        super::IrCapturedReceiver::Enclosing { classifier } => name(classifier, names),
+        super::IrCapturedReceiver::Enclosing { classifier, .. } => name(classifier, names),
         super::IrCapturedReceiver::Context { types, .. } => tys(types, names),
         super::IrCapturedReceiver::Callable { .. } | super::IrCapturedReceiver::Lambda(_) => {}
     }
@@ -155,7 +165,12 @@ fn ty(value: Ty, names: &IdentityRemap<'_>) -> Ty {
                 .map(|part| ty(*part, names))
                 .collect::<Vec<_>>(),
         ),
-        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => value,
+        TyKind::Unit
+        | TyKind::Null
+        | TyKind::Nothing
+        | TyKind::Error
+        | TyKind::Pending
+        | TyKind::Var(..) => value,
     }
 }
 
@@ -464,6 +479,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
                 | super::IrIntrinsic::StringGet
                 | super::IrIntrinsic::StringLength
                 | super::IrIntrinsic::EnumName
+                | super::IrIntrinsic::EnumOrdinal
                 | super::IrIntrinsic::NullableAnyToString
                 | super::IrIntrinsic::CoroutineContext => {}
             }
@@ -516,18 +532,35 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             }
         }
         Callee::Super {
+            qualifier,
             owner,
             dispatch_owner,
             params,
             ret,
             ..
         } => {
+            name(qualifier, names);
             name(owner, names);
             name(dispatch_owner, names);
             tys(params, names);
             *ret = ty(*ret, names);
         }
         Callee::Local(_) | Callee::LocalDefault(_) | Callee::LocalWithDefaults { .. } => {}
+    }
+}
+
+/// The exact classifier remap, applied to a SAM conversion's checked target.
+fn sam_target(sam: &mut crate::ir::IrSamTarget, names: &IdentityRemap<'_>) {
+    name(&mut sam.classifier, names);
+    tys(&mut sam.parameters, names);
+    sam.result = ty(sam.result, names);
+    tys(&mut sam.declared_parameters, names);
+    sam.declared_result = ty(sam.declared_result, names);
+    tys(&mut sam.overridden_results, names);
+    for parameter in &mut sam.type_parameters {
+        for (bound, _) in &mut parameter.bounds {
+            *bound = ty(*bound, names);
+        }
     }
 }
 
@@ -571,7 +604,17 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
         | IrExpr::EnumValues { classifier }
         | IrExpr::EnumValueOf { classifier, .. }
         | IrExpr::EnumEntries { classifier }
+        | IrExpr::EnumConstant { classifier, .. }
+        | IrExpr::EnumEntriesList { classifier, .. }
+        | IrExpr::NoSuchEnumConstant { classifier, .. }
         | IrExpr::EnumSwitchKey { classifier, .. } => name(classifier, names),
+        IrExpr::EnumAllocation {
+            classifier,
+            instance,
+        } => {
+            name(classifier, names);
+            name(instance, names);
+        }
         IrExpr::EnumSwitchOrdinal {
             classifier,
             registrations,
@@ -639,10 +682,14 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
         IrExpr::New {
             internal,
             ctor_params,
+            declared_params,
             ..
         } => {
             name(internal, names);
             if let Some(parameters) = ctor_params {
+                tys(parameters, names);
+            }
+            if let Some(parameters) = declared_params {
                 tys(parameters, names);
             }
         }
@@ -657,14 +704,7 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
             tys(params, names);
             *ret = ty(*ret, names);
         }
-        IrExpr::Lambda { sam: Some(sam), .. } => {
-            name(&mut sam.classifier, names);
-            tys(&mut sam.parameters, names);
-            sam.result = ty(sam.result, names);
-            tys(&mut sam.declared_parameters, names);
-            sam.declared_result = ty(sam.declared_result, names);
-            tys(&mut sam.overridden_results, names);
-        }
+        IrExpr::Lambda { sam: Some(sam), .. } => sam_target(sam, names),
         IrExpr::Try {
             catches, result, ..
         } => {
@@ -928,6 +968,11 @@ fn declaration_argument_boundaries(
 
 fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
     name(&mut class.fq_name, names);
+    if let Some(IrClassDeclarationContext::ClassInitializer { owner }) =
+        &mut class.declaration_context
+    {
+        name(owner, names);
+    }
     for (_, bound) in &mut class.type_param_bounds {
         *bound = ty(*bound, names);
     }
@@ -961,6 +1006,11 @@ fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
     for argument in &mut class.ctor_args {
         argument.ty = ty(argument.ty, names);
         argument.declared_ty = argument.declared_ty.map(|value| ty(value, names));
+        if let super::IrCtorParameterProvenance::InterfaceDelegate { interface, .. } =
+            &mut argument.provenance
+        {
+            *interface = ty(*interface, names);
+        }
         if let Some(receiver) = argument
             .capture
             .as_mut()
@@ -1082,6 +1132,9 @@ fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
             .iter_mut()
             .for_each(|(_, holder)| name(holder, names));
         lambda.function_type = ty(lambda.function_type, names);
+        if let Some(sam) = &mut lambda.sam {
+            sam_target(sam, names);
+        }
         tys(&mut lambda.bridge.param_tys, names);
         lambda.bridge.ret_ty = ty(lambda.bridge.ret_ty, names);
         lambda
@@ -1487,16 +1540,11 @@ impl super::IrFile {
         for parameters in self.physical_call_parameters.values_mut() {
             tys(parameters, names);
         }
-        self.logical_types
-            .values_mut()
-            .for_each(|value| *value = ty(*value, names));
+        self.rewrite_types(|value| ty(value, names));
         self.deferred_local_types
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
         self.inline_declared_types_mut()
-            .for_each(|value| *value = ty(*value, names));
-        self.physical_types
-            .values_mut()
             .for_each(|value| *value = ty(*value, names));
         self.whens
             .exhaustive
@@ -1522,9 +1570,6 @@ impl super::IrFile {
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
         for values in self.call_declared_params.values_mut() {
-            tys(values, names);
-        }
-        for values in self.construction_declared_params.values_mut() {
             tys(values, names);
         }
         for (_, value) in self.property_selected_accessors.values_mut() {
@@ -1628,22 +1673,19 @@ impl super::IrFile {
 }
 
 fn remap_expression_facts(ir: &mut super::IrFile, expression: ExprId, names: &IdentityRemap<'_>) {
-    if let Some(value) = ir.logical_types.get_mut(&expression) {
+    if let Some(value) = ir.logical_type_mut(expression) {
         *value = ty(*value, names);
     }
     if let Some(value) = ir.deferred_local_types.get_mut(&expression) {
         *value = ty(*value, names);
     }
-    if let Some(value) = ir.physical_types.get_mut(&expression) {
+    if let Some(value) = ir.physical_type_mut(expression) {
         *value = ty(*value, names);
     }
     if let Some(value) = ir.call_declared_ret.get_mut(&expression) {
         *value = ty(*value, names);
     }
     if let Some(parameters) = ir.call_declared_params.get_mut(&expression) {
-        tys(parameters, names);
-    }
-    if let Some(parameters) = ir.construction_declared_params.get_mut(&expression) {
         tys(parameters, names);
     }
     if let Some(parameters) = ir.physical_call_parameters.get_mut(&expression) {
@@ -1844,6 +1886,44 @@ mod tests {
     }
 
     #[test]
+    fn class_copy_retains_original_context_when_its_current_enclosure_changes() {
+        let mut ir = crate::ir::IrFile::default();
+        let source_owner = crate::types::type_name("sample/SourceOwner");
+        let target_owner = crate::types::type_name("sample/TargetOwner");
+        let owner = ir.add_class(crate::ir::IrClass::synthetic(source_owner));
+        let mut original = crate::ir::IrClass::synthetic(source_owner.nested_child("Original"));
+        original.declaration_context = Some(IrClassDeclarationContext::ClassInitializer {
+            owner: source_owner,
+        });
+        original.enclosure = Some(crate::ir::IrEnclosure::ClassInitializer(owner));
+        let mut copy = original.clone();
+        copy.enclosure = Some(crate::ir::IrEnclosure::File);
+        copy.fq_name = source_owner.nested_child("Copy");
+        let original = ir.add_class(original);
+        let copy = ir.add_class(copy);
+
+        ir.remap_classifier_identities(&HashMap::from_iter([(source_owner, target_owner)]));
+
+        for class in [original, copy] {
+            assert_eq!(
+                ir.classes[class as usize].declaration_context,
+                Some(IrClassDeclarationContext::ClassInitializer {
+                    owner: target_owner
+                })
+            );
+        }
+        assert_eq!(
+            ir.classes[original as usize].enclosure,
+            Some(crate::ir::IrEnclosure::ClassInitializer(owner))
+        );
+        assert_eq!(
+            ir.classes[copy as usize].enclosure,
+            Some(crate::ir::IrEnclosure::File)
+        );
+        assert_eq!(ir.classes[owner as usize].fq_name, target_owner);
+    }
+
+    #[test]
     fn remaps_every_type_carrier_inside_expressions() {
         let source = crate::types::type_name("sample/Source");
         let target = crate::types::type_name("sample/Target");
@@ -1903,6 +1983,7 @@ mod tests {
                 nullable: false,
                 kotlin_interface: true,
                 parameter_identities: Vec::new(),
+                type_parameters: Vec::new(),
             })),
             inline_body: None,
         };

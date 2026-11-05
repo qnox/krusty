@@ -166,7 +166,7 @@ pub(super) fn route(
     let units = ensure_tail_return(ir, body, unit_return);
     if let Some(&close) = ir.fn_close_lines.get(&fid) {
         for unit in units {
-            ir.expr_source_lines.insert(unit, close);
+            ir.set_source_line(unit, close);
         }
     }
     let Some((form, explicit_suspend)) = ir
@@ -196,12 +196,13 @@ pub(super) fn route(
             internal,
             args: arguments,
             ctor_params: None,
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),
             default_prefix_count: 0,
         };
-        ir.logical_types.insert(node, Ty::obj_name(internal));
+        ir.set_logical_type(node, Ty::obj_name(internal));
     }
 
     let mut declared_spill_fields: Vec<(String, usize)> = Vec::new();

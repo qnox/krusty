@@ -89,6 +89,10 @@ impl IrFile {
     /// Callable-reference lowering published the returned expression directly; this projection
     /// combines it with the reference's ordered captures/bound receiver and adapter signature
     /// without inspecting the adapter body or its reflective target kind.
+    ///
+    /// The arity is a literal lambda's: the function type's parameters, and for a suspend function
+    /// type the `Continuation` its adapter takes after them once a backend gives the adapter its
+    /// CPS signature, as a suspend literal's arity counts its implementation's continuation.
     pub(crate) fn callable_reference_inline_template(
         &self,
         expression: ExprId,
@@ -99,7 +103,9 @@ impl IrFile {
         let TyKind::Fun(signature) = reference.function_type.non_null().kind() else {
             return None;
         };
-        if signature.suspend || reference.declaration_suspend {
+        // The selected declaration's call is then a suspension point of the template, which the
+        // coroutine pass places only in a literal's own inline body.
+        if reference.declaration_suspend {
             return None;
         }
         let function = self.functions.get(reference.adapter as usize)?;
@@ -107,8 +113,17 @@ impl IrFile {
         let returned = *self.callable_reference_adapter_results.get(&body)?;
         let mut captures = reference.captures.clone();
         captures.extend(reference.bound_receiver);
-        let arity = function.params.len().checked_sub(captures.len())?;
-        (signature.params.len() == arity).then_some((reference.adapter, captures, returned, arity))
+        let declared = self
+            .suspend_declared_sigs
+            .get(&reference.adapter)
+            .map_or(&function.params, |(params, _)| params);
+        let arity = signature.params.len() + usize::from(signature.suspend);
+        (declared.len().checked_sub(captures.len())? == signature.params.len()).then_some((
+            reference.adapter,
+            captures,
+            returned,
+            arity,
+        ))
     }
 }
 

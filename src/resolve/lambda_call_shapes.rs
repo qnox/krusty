@@ -161,7 +161,7 @@ impl Checker<'_> {
                 semantic
                     .formals
                     .iter()
-                    .filter(|formal| !bindings.contains_key(*formal))
+                    .filter(|formal| !bindings.contains_key((*formal).as_str()))
                     .cloned()
                     .collect::<Vec<_>>()
             })
@@ -406,7 +406,9 @@ impl Checker<'_> {
             // formal by its broad declared bound still admits the actual receiver, that binding can
             // widen and is not an expected lambda-return type yet.
             for (index, formal) in semantic.formals.iter().enumerate() {
-                if fixed_expectation_formals.contains(formal) || !binds.contains_key(formal) {
+                if fixed_expectation_formals.contains(formal)
+                    || !binds.contains_key(formal.as_str())
+                {
                     continue;
                 }
                 let broad = semantic
@@ -416,7 +418,7 @@ impl Checker<'_> {
                     .copied()
                     .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
                 let mut trial = binds.clone();
-                trial.insert(formal.clone(), broad);
+                trial.insert(crate::types::TyParamName::new(formal), broad);
                 let widened_receiver =
                     crate::symbol_resolver::ty_subst_keep_unbound(receiver_sig, &trial);
                 let widened_receiver = self.declared_function_semantic_type(widened_receiver);
@@ -424,10 +426,10 @@ impl Checker<'_> {
                 crate::trace_compiler!(
                     "expected_call",
                     "receiver lambda constraint formal={formal:?} binding={:?} broad={broad:?} receiver={receiver:?} declared={receiver_sig:?} widened={widened_receiver:?} widens={widens}",
-                    binds.get(formal),
+                    binds.get(formal.as_str()),
                 );
                 if !widens {
-                    fixed_expectation_formals.insert(formal.clone());
+                    fixed_expectation_formals.insert(*formal);
                 }
             }
         }
@@ -448,14 +450,14 @@ impl Checker<'_> {
                 continue;
             };
             for formal in &semantic.formals {
-                if binds.contains_key(formal)
+                if binds.contains_key(formal.as_str())
                     && function
                         .params
                         .iter()
                         .copied()
                         .any(|input| ty_mentions_param(input, std::slice::from_ref(formal)))
                 {
-                    fixed_expectation_formals.insert(formal.clone());
+                    fixed_expectation_formals.insert(*formal);
                 }
             }
         }
@@ -470,8 +472,8 @@ impl Checker<'_> {
                 .ok()?
             {
                 if !fixed_expectation_formals.contains(&formal) {
-                    binds.insert(formal.clone(), actual);
-                    expectation_binds.insert(formal.clone(), actual);
+                    binds.insert(formal, actual);
+                    expectation_binds.insert(formal, actual);
                     fixed_expectation_formals.insert(formal);
                 }
             }
@@ -492,8 +494,8 @@ impl Checker<'_> {
         // the integer literal to `Long`; joining the provisional `Int` with fixed `A = Long` into
         // `Any` would type the lambda's `acc` as `Any` before final overload selection.
         for formal in &fixed_expectation_formals {
-            if let Some(&fixed) = fixed_before_argument_merge.get(formal) {
-                binds.insert(formal.clone(), fixed);
+            if let Some(&fixed) = fixed_before_argument_merge.get(formal.as_str()) {
+                binds.insert(crate::types::TyParamName::new(formal), fixed);
             }
         }
         for (&parameter, actual) in argument_map.iter().zip(arg_tys) {
@@ -502,23 +504,23 @@ impl Checker<'_> {
                     continue;
                 };
                 for formal in &semantic.formals {
-                    if binds.contains_key(formal)
+                    if binds.contains_key(formal.as_str())
                         && crate::symbol_resolver::formal_variance_in_type(
                             &self.fed_source(),
                             *parameter,
                             formal,
                         ) == Some(crate::types::TypeVariance::Invariant)
                     {
-                        fixed_expectation_formals.insert(formal.clone());
+                        fixed_expectation_formals.insert(*formal);
                     }
                 }
             }
         }
-        expectation_binds.extend(
-            fixed_expectation_formals
-                .iter()
-                .filter_map(|formal| binds.get(formal).map(|binding| (formal.clone(), *binding))),
-        );
+        expectation_binds.extend(fixed_expectation_formals.iter().filter_map(|formal| {
+            binds
+                .get(formal.as_str())
+                .map(|binding| (crate::types::TyParamName::from(formal), *binding))
+        }));
         let param_types = argument_parameters
             .iter()
             .zip(argument_map)
@@ -626,7 +628,7 @@ impl Checker<'_> {
                         .iter()
                         .filter(|formal| {
                             declared_return.is_some_and(|declared_return| {
-                                ty_mentions_param(declared_return, std::slice::from_ref(formal))
+                                ty_mentions_param(declared_return, std::slice::from_ref(*formal))
                             })
                         })
                         .collect::<Vec<_>>();
@@ -838,10 +840,10 @@ impl Checker<'_> {
                     .iter()
                     .flatten()
                     .any(|(inputs, result)| {
-                        ty_mentions_param(*result, std::slice::from_ref(&formal))
-                            || inputs.iter().any(|input| {
-                                ty_mentions_param(*input, std::slice::from_ref(&formal))
-                            })
+                        ty_mentions_param(*result, &[formal.to_string()])
+                            || inputs
+                                .iter()
+                                .any(|input| ty_mentions_param(*input, &[formal.to_string()]))
                     });
             if shapes_lambda_expectation {
                 bindings.entry(formal).or_insert(actual);
@@ -853,7 +855,7 @@ impl Checker<'_> {
             |actual, bound| self.generic_bound_admits(actual, bound),
         ) {
             for (formal, actual) in inferred {
-                if !symbolic.constrained_formals.contains(&formal) {
+                if !symbolic.constrained_formals.contains(formal.as_str()) {
                     bindings.entry(formal).or_insert(actual);
                 }
             }
