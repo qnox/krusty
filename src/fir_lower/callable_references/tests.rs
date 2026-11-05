@@ -65,6 +65,12 @@ fn unadapted_local_function_reference_keeps_structural_identity_and_capture() {
         panic!("one semantic local function reference")
     };
     assert_eq!(reference.captures.len(), 1);
+    let body = ir.functions[reference.adapter as usize]
+        .body
+        .expect("local callable-reference adapter body");
+    let call = ir.callable_reference_adapter_results[&body];
+    assert!(matches!(ir.expr(call), IrExpr::Call { .. }));
+    assert_eq!(ir.call_declared_ret.get(&call), Some(&Ty::Int));
     assert!(matches!(
         &reference.target,
         crate::ir::IrCallableReferenceTarget::Local { name, .. } if name.as_ref() == "add"
