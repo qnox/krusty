@@ -303,7 +303,7 @@ fn realize_expressions(
             };
             *args = realized_arguments;
             args.extend(realization_operands);
-            *ctor_desc = Some(if let Some(default) = default {
+            *ctor_desc = Some(Box::from(if let Some(default) = default {
                 default.descriptor.clone()
             } else if let Some(constructor) = constructor {
                 constructor.descriptor.clone()
@@ -314,7 +314,7 @@ fn realize_expressions(
                 )
             } else {
                 callable.descriptor
-            });
+            }));
             *external_target = None;
             *defaults = Box::new([]);
             *default_prefix_count = 0;
@@ -849,8 +849,10 @@ fn realize_expressions(
                 true,
                 inline_modifiers,
             )?;
-            let physical_call =
-                bridge_external_result(ir, index, callable.physical_ret, semantic_ret);
+            // The invoked operation is the provider's `$default` bridge, so its descriptor result is
+            // the physical value on the stack. An inherited provider can erase a generic result
+            // (`Base<T>.f$default(...): Object`) that the selected override returns as `int`.
+            let physical_call = bridge_external_result(ir, index, default.ret, semantic_ret);
             default_call_operands.record(physical_call, operand_plan);
             default_call_operands.record_declaration(
                 physical_call,
@@ -1651,7 +1653,7 @@ fn publish_inline_substitutions(
             }
             signature.formals.get(ordinal as usize).map(|name| {
                 (
-                    name.clone(),
+                    name.to_string(),
                     substitution.value,
                     substitution.reified_runtime,
                     substitution.reified,

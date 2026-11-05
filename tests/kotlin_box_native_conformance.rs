@@ -238,9 +238,13 @@ impl Lane for NativeLane {
         modules: &[krusty::conformance::ModuleUnit],
         directive_source: &str,
     ) -> Outcome {
+        let Some(entry_module) = modules.last() else {
+            return Outcome::Harness("a module graph has no final source module".to_string());
+        };
         let target = self.target.expect("checked by `unavailable`");
         let backend = CraneliftBackend::new(target)
             .with_entry(Entry::Box)
+            .with_entry_module(entry_module.name.clone())
             .verified();
         let features = krusty::features::LangFeatures::from_source(directive_source);
         let metadata = match krusty::klib::backend::KlibBackend::new(
@@ -309,6 +313,21 @@ fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
         &units,
         source,
     )
+}
+
+// PLATFORM-SPECIFIC: This checks the Native oracle's generated module runner. The whole portable
+// program is also selected by every backend from the shared box inventory.
+#[test]
+fn native_reference_runner_calls_the_packaged_final_module_box() {
+    let source = include_str!("box_regressions/multimodule/packagedFinalModuleBox.kt");
+    let stem = "packagedFinalModuleBox";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole packaged module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "the Native oracle and product must both call the final module's declared box"
+    );
 }
 
 /// A required inline dependency function whose body cannot become a template rejects its caller:

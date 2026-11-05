@@ -139,6 +139,7 @@ impl BodyFirChecker<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(FirExprKind::Call(FirCall {
             target: FirCallTarget::Super {
+                qualifier: target.qualifier,
                 owner: target.owner,
                 dispatch_owner,
                 enclosing_dispatch: !target.receiver.current,

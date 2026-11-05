@@ -48,6 +48,7 @@ mod class_lambda_reflection;
 mod class_literals;
 mod class_mode_lambda_members;
 mod class_pool_seed;
+mod collection_to_array;
 mod companion_blocks;
 mod comparison_branches;
 mod condition_emission;
@@ -80,6 +81,7 @@ mod emission_readiness;
 mod emit_options;
 pub(crate) use emission_readiness::jvm_can_emit;
 pub(super) mod enclosure;
+mod enum_entry_construction;
 mod enum_entry_subclass;
 mod enum_reflection_call;
 mod enum_synthetic_fields;
@@ -182,6 +184,8 @@ use primary_constructor_parameters::{
     primary_ctor_parameter_fields, primary_ctor_source_parameters,
 };
 use try_emission::ProtectedRegion;
+#[cfg(test)]
+mod arithmetic_result_tests;
 mod class_metadata;
 #[cfg(test)]
 mod metadata_name_tests;
@@ -190,6 +194,7 @@ use class_metadata::build_class_metadata;
 use class_metadata::build_class_metadata_with_facts;
 mod constructor_delegation_arguments;
 pub(super) mod jvm_static_members;
+mod method_copies;
 mod method_placement;
 use method_placement::MethodPlacement;
 mod entries_mappings;
@@ -627,25 +632,6 @@ impl JvmDefaultMode {
             Self::Enable => Some(3),
             Self::NoCompatibility => Some(1),
             Self::Disable => None,
-        }
-    }
-}
-
-/// Drop every implicit not-null guard on a narrowed platform value.
-///
-/// `-Xno-call-assertions` removes the null checks kotlinc emits where a Java call's `T!` result is
-/// committed to a declared non-null type. The guard is an expression wrapper, so it is removed by
-/// rewriting the node into its operand's value: `x!!` is a SOURCE assertion the flag leaves alone.
-pub(crate) fn strip_call_assertions(ir: &mut IrFile) {
-    for expr in &mut ir.exprs {
-        let IrExpr::NotNullAssert { operand, check } = expr else {
-            continue;
-        };
-        if check.is_implicit() {
-            *expr = IrExpr::Block {
-                stmts: Vec::new(),
-                value: Some(*operand),
-            };
         }
     }
 }
@@ -1539,16 +1525,9 @@ fn emit_pass(
     for (class_id, c) in ir.classes.iter().enumerate() {
         let class_id = class_id as ClassId;
         let fq_name = c.fq_name();
-        // A function whose suspension points all turned out to be tail calls has no machine, and
-        // its continuation is written only when a method's `$$forInline` copy constructs it.
-        if let Some(crate::jvm::classfile::CoroutineOutcome::TailCalls) =
-            env.run.transformed_coroutine(&fq_name)
+        if method_copies::continuation_is_unwritten(ir, env, class_id, &fq_name)
+            || unwritten_continuations.contains(&c.fq_name)
         {
-            if !crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, class_id) {
-                continue;
-            }
-        }
-        if unwritten_continuations.contains(&c.fq_name) {
             continue;
         }
         // With an interface's `$DefaultImpls` holder (its `name$default` synthetics), if any.
@@ -2143,13 +2122,13 @@ fn emit_class(
     let transformed = env.run.transformed_coroutine(&fq_name);
     let transformed_metadata = env
         .continuation_metadata
-        .get(&fq_name)
+        .get(&c.fq_name)
         .and_then(|metadata| {
             transformed_suspensions::continuation_metadata(metadata, transformed.as_ref()?)
         });
     let continuation_metadata = transformed_metadata
         .as_ref()
-        .or(env.continuation_metadata.get(&fq_name));
+        .or(env.continuation_metadata.get(&c.fq_name));
     if let Some(metadata) = continuation_metadata {
         cw.set_enclosing_method(
             &metadata.enclosing_class,
@@ -2225,11 +2204,8 @@ fn emit_class(
     let has_abstract = c.methods.iter().any(|&fid| {
         !standalone_method_is_elided(ir, fid, env) && ir.functions[fid as usize].body.is_none()
     });
-    // A synthesized continuation class is package-private in kotlinc, unless a method's
-    // `$$forInline` copy constructs it.
     let mut access = if is_continuation {
-        let public = crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, class_id);
-        u16::from(public) | 0x0020 // [PUBLIC |] SUPER
+        method_copies::continuation_access(ir, class_id)
     } else {
         class_public_bit(ir, c) | 0x0020 // [PUBLIC |] SUPER
     };
@@ -2376,13 +2352,8 @@ fn emit_class(
     // declared (`L$0`, `I$0`, …), and kotlinc's pool carries each of those strings once, first visited
     // with the FIELD. Building the annotation earlier interned the subset the array happens to mention
     // ahead of the table and left the rest to the fields, reordering the whole pool.
-    // A machine-less continuation (its function's suspension points all tail calls, written for
-    // a method's `$$forInline` copy) has no states to describe.
-    let tail_calls = matches!(
-        transformed,
-        Some(crate::jvm::classfile::CoroutineOutcome::TailCalls)
-    );
-    if let Some(metadata) = continuation_metadata.filter(|_| !tail_calls) {
+    let describes_states = method_copies::describes_states(transformed.as_ref());
+    if let Some(metadata) = continuation_metadata.filter(|_| describes_states) {
         cw.set_debug_metadata(&crate::jvm::bytecode_passes::coroutines::DebugMetadata {
             source_file: opts.source_file.clone().unwrap_or_default(),
             line_numbers: metadata.l.clone(),
@@ -2439,8 +2410,7 @@ fn emit_class(
         markers: &markers,
         byte_parity,
     };
-    // A value class's declared members and `Any` overrides precede its private primary `<init>`,
-    // which its generated representation members follow; every other class starts with `<init>`.
+    // A value class's members precede its `<init>`, which the representation members follow.
     let (before_primary, after_primary) = split_around_primary_constructor(
         ir,
         c,
@@ -2450,6 +2420,7 @@ fn emit_class(
         emit_scheduled_member(&member_emission, member, &mut cw);
     }
     if c.is_value {
+        bridge_emission::emit_value_class_stubs(ir, c, &mut cw, env);
         inherited_default_forwarders::emit_value_class_inherited_defaults(ir, c, &mut cw, env);
     }
     seed_value_ctor_after_members(byte_parity, pool_seed(), &mut cw);
@@ -2823,6 +2794,7 @@ fn emit_class(
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
     accessor_emission_order::emit(ir, c, &fq_name, facade, env, &mut cw);
+    collection_to_array::emit(c, &mut cw, env);
     if !static_storage(ir, c) {
         static_fields::emit_class_static_initializer(
             ir,
@@ -3008,18 +2980,6 @@ fn finish_code_sig<const ACCESS: u16>(
     code.ensure_locals(locals);
     code.link();
     cw.add_method_sig(ACCESS, name, desc, code, signature);
-}
-
-/// `Arrays.equals`/`Arrays.hashCode`/`Arrays.toString` parameter descriptor for an array member: a
-/// primitive specialized array has its own overload (`[I`), a reference `Array<T>` uses
-/// `[Ljava/lang/Object;` (array covariance lets a `String[]`/`Enum[]` flow in). Keyed off the array
-/// KIND (its class), not the element — `Array<Int>` is a reference `Integer[]`, not `[I`.
-fn arrays_param_desc(array: Ty) -> String {
-    if array.is_reference_array() {
-        "[Ljava/lang/Object;".to_string()
-    } else {
-        type_descriptor(array)
-    }
 }
 
 /// Emit an `interface`: `ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT`, extends `java/lang/Object`. A method
@@ -3850,6 +3810,7 @@ fn emit_enum_class(
         static_accessors::class_declaration_line(c),
         &mut cw,
     );
+    collection_to_array::emit(c, &mut cw, env);
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
     // their names, descriptors and body constants between the entry constants and `<clinit>`, so
     // building the initializer earlier claimed those pool slots first.
@@ -3883,96 +3844,7 @@ fn emit_enum_class(
         if delegated_property_array::exists(env, c.fq_name) {
             e.cw.omit_method_lines("<clinit>", "()V");
         }
-        // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
-        // Consecutive enum entries on one source line share one LNT entry.
-        for (i, entry) in c.enum_entries.iter().enumerate() {
-            if entry.decl_line != 0 && clinit_lines.last().map(|&(_, l)| l) != Some(entry.decl_line)
-            {
-                clinit_lines.push((clinit.bytes.len() as u16, entry.decl_line));
-            }
-            for &statement in &entry.argument_prelude {
-                e.emit(statement, &mut clinit);
-            }
-            let args = &entry.args;
-            // An entry arg that cannot carry the operand stack (`X(try { 1 } finally {})`) runs on a
-            // clean stack: spill all args to temps first, then construct (as the `New` node does).
-            let spill = args.iter().any(|&a| e.spills_operand_prefix(a));
-            let temps = if spill {
-                e.spill_to_temps(args, &mut clinit)
-            } else {
-                Vec::new()
-            };
-            // A bodied entry is an instance of its synthesized subclass (`new Enum$ENTRY(...)`); the
-            // subclass constructor shares the enum's `(String,int,<user>)V` descriptor.
-            let new_class = entry
-                .subclass
-                .map(TypeName::render)
-                .unwrap_or_else(|| fq.clone());
-            let cls = e.cw.class_ref(&new_class);
-            clinit.new_obj(cls);
-            clinit.dup();
-            clinit.push_string(&entry.name, e.cw);
-            clinit.push_int(i as i32, e.cw);
-            let entry_parameter_types = &entry.constructor_parameter_types;
-            if spill {
-                let mut supplied = temps.iter();
-                for (parameter, ty) in entry_parameter_types.iter().copied().enumerate() {
-                    if entry.default_parameters.contains(&(parameter as u32)) {
-                        push_zero(ty, &mut clinit, e.cw);
-                    } else {
-                        let (slot, ty, _) = supplied
-                            .next()
-                            .expect("checked enum constructor supplied-argument count");
-                        load(*ty, *slot, &mut clinit);
-                    }
-                }
-                e.release_operand_spills(&temps);
-            } else {
-                let mut supplied = args.iter().copied();
-                for (parameter, ty) in entry_parameter_types.iter().copied().enumerate() {
-                    if entry.default_parameters.contains(&(parameter as u32)) {
-                        push_zero(ty, &mut clinit, e.cw);
-                    } else {
-                        e.emit_value(
-                            supplied
-                                .next()
-                                .expect("checked enum constructor supplied-argument count"),
-                            &mut clinit,
-                        );
-                    }
-                }
-            }
-            let mut entry_ctor_params = vec![Ty::String, Ty::Int];
-            entry_ctor_params.extend(entry_parameter_types.iter().copied());
-            let (entry_ctor_desc, entry_ctor_argw) = if entry.default_parameters.is_empty() {
-                let words = entry_ctor_params
-                    .iter()
-                    .map(|ty| slot_words(*ty) as i32)
-                    .sum();
-                (method_descriptor(&entry_ctor_params, Ty::Unit), words)
-            } else {
-                emit_constructor_default_arguments(
-                    &entry.default_parameters,
-                    entry_parameter_types.len(),
-                    &mut clinit,
-                    e.cw,
-                );
-                entry_ctor_params.extend(std::iter::repeat_n(
-                    Ty::Int,
-                    default_mask_count(entry_parameter_types.len()),
-                ));
-                entry_ctor_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-                let words = entry_ctor_params
-                    .iter()
-                    .map(|ty| slot_words(*ty) as i32)
-                    .sum();
-                (method_descriptor(&entry_ctor_params, Ty::Unit), words)
-            };
-            let ctor_ref = e.cw.methodref(&new_class, "<init>", &entry_ctor_desc);
-            clinit.invokespecial(ctor_ref, entry_ctor_argw, 0);
-            let fref = e.cw.fieldref(&fq, &entry.name, &self_desc);
-            clinit.putstatic(fref, 1);
-        }
+        e.emit_enum_entry_constructions(c, &fq, &self_desc, &mut clinit, &mut clinit_lines);
         // `$VALUES = $values()` — kotlinc factors the array build into a private `$values()` helper.
         let vfn = e.cw.methodref(&fq, "$values", &format!("(){arr_desc}"));
         clinit.invokestatic(vfn, 0, 1);
@@ -4151,15 +4023,7 @@ fn emit_method_inner(
         },
     };
     emit_placed_method(ir, fid, placement, owner, facade, cw, env);
-    let for_inline = crate::jvm::suspend_inline_functions::for_inline_copy(ir, fid)
-        .filter(|_| env.emit_time_machines.transformed(fid).is_some());
-    if let Some(kind) = for_inline {
-        let copy = MethodPlacement::ForInlineCopy {
-            static_owner,
-            instance: instance && singleton.is_none(),
-            singleton,
-            kind,
-        };
+    if let Some(copy) = method_copies::for_inline_placement(ir, fid, placement, env) {
         emit_placed_method(ir, fid, copy, owner, facade, cw, env);
     }
 }
@@ -4358,7 +4222,7 @@ fn emit_placed_method(
     let declared_nullability::DeclaredNullability {
         result: ret_ann,
         parameters: param_anns,
-    } = override_result_emission::declared_nullability(ir, e.override_results, fid);
+    } = override_result_emission::declared_nullability(ir, env, fid);
     let emitted_param_anns = holder_receiver.map_or_else(
         || param_anns.clone(),
         |_| {
@@ -4433,19 +4297,7 @@ fn emit_placed_method(
         });
     if placement.constructs_fake_continuation() {
         let completion = param_tys.len().saturating_sub(1) as u32 + u32::from(receiver_value);
-        let completion = e
-            .slots
-            .get(&completion)
-            .map(|&(slot, _)| slot)
-            .expect("a suspend method's copy has a completion parameter");
-        // The class the machine re-enters, under its final name: a copy's continuation is renamed
-        // with the copy, after coroutine lowering named it.
-        let continuation = env
-            .emit_time_machines
-            .transformed(fid)
-            .map(|machine| machine.continuation_class.clone())
-            .expect("a method's `$$forInline` copy is written beside its transformed machine");
-        e.emit_fake_continuation_construction(&continuation, completion, &mut code);
+        e.construct_copy_continuation(fid, completion, &mut code);
     }
     // The marker and the parameter guards carry no line. The method's first entry is the first
     // statement, or the expression body — kotlinc does not also record the signature line there.
@@ -5507,8 +5359,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_value_expression(&mut self, e: u32, code: &mut CodeBuilder) {
-        debug_lines::begin_expression(self.ir, e, code);
-        self.mark_value_expression_start(e, code);
+        self.mark_value_entry_lines(e, code);
         // Mark a machine-owned suspension at its post-splice location.
         let suspension = self.machine_before(e, code);
         self.open_transformed_suspension(e, code);
@@ -6303,7 +6154,7 @@ impl<'a> Emitter<'a> {
                 }
             }
             IrExpr::Equality { .. } => Ty::Boolean,
-            IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
+            IrExpr::PrimitiveBinOp { op, .. } => match op {
                 IrBinOp::Lt
                 | IrBinOp::Le
                 | IrBinOp::Gt
@@ -6314,20 +6165,19 @@ impl<'a> Emitter<'a> {
                 | IrBinOp::RefNe
                 | IrBinOp::And
                 | IrBinOp::Or => Ty::Boolean,
-                // Arithmetic leaves an unboxed primitive on the stack. Use the lhs carrier even when its
-                // value is boxed (`it + 100` from `Map.get`); otherwise safe-call/elvis boxing may skip
-                // `valueOf` and produce an `int`/`Integer` stackmap mismatch after spill removal.
-                _ => {
-                    let t = self.value_ty(*lhs);
-                    let physical = match boxed_prim_of(t).unwrap_or(t) {
-                        Ty::Byte | Ty::Short | Ty::Char => Ty::Int,
-                        other => other,
-                    };
-                    self.ir
-                        .logical_type(e)
-                        .map(|semantic| ir_ty_to_jvm(&semantic.non_null()))
-                        .unwrap_or(physical)
-                }
+                // Arithmetic leaves the unboxed primitive of the operator the checker selected,
+                // which its producer recorded. It is never re-derived from the operands.
+                _ => match self.ir.logical_type(e) {
+                    Some(result) => ir_ty_to_jvm(&result.non_null()),
+                    None => {
+                        self.run.set_emit_error(
+                            "an arithmetic operator has no recorded result type".to_string(),
+                        );
+                        // The class is refused already; a reference only keeps the rest of this
+                        // method's emission well-formed until the refusal discards it.
+                        Ty::obj_name(crate::types::wk::java_object())
+                    }
+                },
             },
             IrExpr::PrimitiveNeg { ty, .. } => ir_ty_to_jvm(ty),
             IrExpr::When { branches } => self.value_ty_of_when(branches),

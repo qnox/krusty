@@ -164,7 +164,8 @@ fn structural_cmp(left: Ty, right: Ty) -> Ordering {
             | (TyKind::DefinitelyNotNull(left), TyKind::DefinitelyNotNull(right)) => {
                 structural_cmp(left, right)
             }
-            (TyKind::TyParam(left_name, left_bound), TyKind::TyParam(right_name, right_bound)) => {
+            (TyKind::TyParam(left_name, left_bound), TyKind::TyParam(right_name, right_bound))
+            | (TyKind::Var(left_name, left_bound), TyKind::Var(right_name, right_bound)) => {
                 left_name
                     .cmp(&right_name)
                     .then_with(|| structural_cmp(left_bound, right_bound))
@@ -195,6 +196,7 @@ fn structural_rank(ty: Ty) -> u8 {
         TyKind::Intersection(_) => 14,
         TyKind::RawProjection(_) => 15,
         TyKind::MutabilityFlexible(_) => 16,
+        TyKind::Var(_, _) => 17,
     }
 }
 

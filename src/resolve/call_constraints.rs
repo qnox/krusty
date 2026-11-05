@@ -76,7 +76,7 @@ mod tests {
         let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
         let receiver = Ty::obj("example/Bucket");
         let signature = crate::libraries::GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
             receiver: Some(receiver),
             params: vec![parameter],

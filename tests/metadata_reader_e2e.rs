@@ -7,9 +7,7 @@ use super::common;
 
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
-use krusty::jvm::metadata::{
-    class_companion_name, class_functions, class_inline, package_functions,
-};
+use krusty::jvm::metadata::{class_companion_name, class_inline};
 use krusty::symbol_resolver::{SymRecv, Symbol, SymbolResolver};
 use krusty::types::{type_name, Ty};
 use std::rc::Rc;
@@ -38,7 +36,10 @@ fn result_companion_success_is_public_inline_in_metadata() {
     let comp_ci = cp
         .find("kotlin/Result$Companion")
         .expect("kotlin/Result$Companion on classpath");
-    let fns = class_functions(&comp_ci);
+    let fns = &comp_ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions;
     let success = fns
         .iter()
         .find(|f| f.kotlin_name == "success")
@@ -62,7 +63,10 @@ fn resultkt_get_or_throw_is_public_inline_extension_in_metadata() {
     let kt = cp
         .find("kotlin/ResultKt")
         .expect("kotlin/ResultKt on classpath");
-    let fns = package_functions(&kt);
+    let fns = &kt
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .package_functions;
     let g = fns
         .iter()
         .find(|f| f.kotlin_name == "getOrThrow")
@@ -183,7 +187,10 @@ fn metadata_decodes_value_parameter_names() {
     // named-argument resolution of a classpath call needs. `kotlin.Pair.copy(first, second)` is a stable
     // public, non-inline target.
     let pair = cp.find("kotlin/Pair").expect("kotlin/Pair on classpath");
-    let fns = class_functions(&pair);
+    let fns = &pair
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions;
     let copy = fns
         .iter()
         .find(|f| f.kotlin_name == "copy")

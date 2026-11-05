@@ -19,6 +19,12 @@ impl Body<'_> {
                 };
                 self.reference_array_get(receiver, *index)
             }
+            IrIntrinsic::ArraySet => {
+                let (Some(receiver), [index, value]) = (receiver, args) else {
+                    return Err("an array store with malformed operands".into());
+                };
+                self.reference_array_set(receiver, *index, *value)
+            }
             IrIntrinsic::PrimitiveCompare { operand, .. } => {
                 let (lhs, rhs) = match (receiver, args) {
                     (None, [lhs, rhs]) => (*lhs, *rhs),
@@ -49,6 +55,15 @@ impl Body<'_> {
                 self.value(*index, Ty::Int)?;
                 self.code.array_get_u(self.runtime.chars);
                 Ok(())
+            }
+            // `Any?.toString()` is the string a template makes of its operand.
+            IrIntrinsic::NullableAnyToString => {
+                let value = match (receiver, args) {
+                    (None, [value]) => *value,
+                    (Some(value), []) => value,
+                    _ => return Err("a malformed `toString` call".to_string()),
+                };
+                self.string_of(value)
             }
             other => Err(format!("a call to the intrinsic {other:?}")),
         }

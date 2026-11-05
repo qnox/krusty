@@ -103,6 +103,9 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) default_provider: Option<ExternalCallableId>,
     pub(super) receiver_ty: Option<ResolvedTy>,
     pub(super) declared_receiver: Option<ResolvedTy>,
+    /// The checked dispatch receiver applied as the member's generic declaring class, when the
+    /// receiver names a subclass of it.
+    pub(super) declaring_receiver: Option<ResolvedTy>,
     pub(super) parameters: &'a [ResolvedTy],
     pub(super) result: ResolvedTy,
     pub(super) declared_result: Option<ResolvedTy>,
@@ -364,6 +367,7 @@ impl BodyLowering<'_> {
             default_provider,
             receiver_ty,
             declared_receiver,
+            declaring_receiver,
             parameters,
             result,
             declared_result,
@@ -425,6 +429,9 @@ impl BodyLowering<'_> {
                         template,
                         parameter_types: &parameter_types,
                         dispatch_receiver,
+                        dispatch_type: declaring_receiver
+                            .or(receiver_ty)
+                            .map(|receiver| receiver.get()),
                         extension_receiver,
                         extension_receiver_parameter,
                         arguments,
@@ -732,6 +739,7 @@ impl BodyLowering<'_> {
             internal: factory_classifier,
             args: factory_arguments,
             ctor_params: Some(factory_parameters.iter().map(|ty| ty.get()).collect()),
+            declared_params: None,
             ctor_desc: None,
             external_target: Some(factory),
             defaults: Box::new([]),
@@ -1344,14 +1352,12 @@ impl BodyLowering<'_> {
             internal: classifier,
             args,
             ctor_params: Some(physical_parameter_types),
+            declared_params: Some(declared_parameter_types.into_boxed_slice()),
             ctor_desc: None,
             external_target: Some(declaration),
             defaults: defaults.into_boxed_slice(),
             default_prefix_count,
         });
-        self.ir
-            .construction_declared_params
-            .insert(construction, declared_parameter_types.into_boxed_slice());
         self.record_annotation_construction(construction, classifier, annotation)?;
         Some(self.wrap_call_statements(statements, construction))
     }
@@ -1391,6 +1397,7 @@ impl BodyLowering<'_> {
             crate::ir::IrAnnotationConstruction {
                 interface: classifier,
                 members,
+                arguments: annotation.arguments.clone(),
                 defaults,
                 scopes: vec![enclosing_class],
             },
@@ -1450,6 +1457,7 @@ impl BodyLowering<'_> {
                 classifier,
                 members,
                 values,
+                arguments,
             } => {
                 if members.len() != values.len() {
                     return None;
@@ -1463,6 +1471,7 @@ impl BodyLowering<'_> {
                     internal: *classifier,
                     args,
                     ctor_params: Some(ctor_params),
+                    declared_params: None,
                     ctor_desc: None,
                     external_target: None,
                     defaults: Box::new([]),
@@ -1473,6 +1482,7 @@ impl BodyLowering<'_> {
                     crate::ir::IrAnnotationConstruction {
                         interface: *classifier,
                         members: members.clone(),
+                        arguments: arguments.clone(),
                         defaults: vec![None; members.len()],
                         // Evaluated where the constructions omitting this element are.
                         scopes: Vec::new(),
@@ -1550,14 +1560,12 @@ impl BodyLowering<'_> {
             internal: classifier,
             args,
             ctor_params: (!primary_in_current_file).then_some(declaration_parameter_types),
+            declared_params: Some(declared_parameters),
             ctor_desc: None,
             external_target: None,
             defaults: defaults.into_boxed_slice(),
             default_prefix_count,
         });
-        self.ir
-            .construction_declared_params
-            .insert(construction, declared_parameters);
         self.ir.construction_targets.insert(construction, target);
         self.ir
             .module_constructions
@@ -2281,8 +2289,8 @@ fn inline_argument_stays(ir: &crate::ir::IrFile, value: ExprId) -> bool {
     }
 }
 
-/// The inline template of a lambda, or of a non-suspend callable reference whose adapter is that
-/// template. The reference's target is not consulted: the adapter's captures, bound receiver, and
+/// The inline template of a lambda, or of a callable reference whose adapter is that template and
+/// whose selected declaration is not itself suspend. The reference's target is not consulted: the adapter's captures, bound receiver, and
 /// one returned value are the invocation. A stored reference never reaches this helper.
 pub(crate) fn inline_argument_template(
     ir: &crate::ir::IrFile,

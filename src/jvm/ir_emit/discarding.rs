@@ -31,6 +31,7 @@ impl Emitter<'_> {
         node: &IrExpr,
         code: &mut CodeBuilder,
     ) {
+        self.mark_suspend_call_line(expression, code);
         if self.emit_discarded_safe_call(expression, node, code) {
             return;
         }
@@ -187,7 +188,7 @@ impl Emitter<'_> {
                 // duplicate to discard (`aload; invokestatic checkNotNull`).
                 IrExpr::NotNullAssert {
                     operand,
-                    check: crate::ir::NullCheck::Unnamed,
+                    check: crate::ir::NullCheck::Unnamed { .. },
                 } => {
                     self.emit_value(*operand, code);
                     let check = self.cw.methodref(

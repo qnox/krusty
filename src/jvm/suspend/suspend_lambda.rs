@@ -196,6 +196,7 @@ pub(super) fn route(
             internal,
             args: arguments,
             ctor_params: None,
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),

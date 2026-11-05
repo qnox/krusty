@@ -4,6 +4,9 @@
 
 pub(crate) mod anonymous_origin;
 pub use inline_class::InlineClass;
+pub use lazy_members::{KotlinMembers, LazyMembers};
+use member_names::function_jvm_name;
+pub use member_names::{FunctionName, PackageMemberNames};
 pub(super) mod builtin_bridge;
 mod builtin_records;
 mod class_identity;
@@ -11,6 +14,8 @@ mod contract;
 mod enclosing_type_parameters;
 mod function;
 mod inline_class;
+mod lazy_members;
+mod member_names;
 mod property_declarations;
 mod property_identity;
 mod realization_facts;
@@ -944,7 +949,7 @@ fn build_generic_sig(
     // `Class<E>` into a fictitious `fun <E>` and allow call inference to overwrite the owner's `E`.
     let inherited = class_tparams.len();
     Some(GenericSig {
-        formals: context.formals[inherited..].to_vec(),
+        formals: crate::types::TyParamName::all(&context.formals[inherited..]),
         formal_bounds: context.formal_bounds[inherited..].to_vec(),
         receiver,
         params,
@@ -1051,7 +1056,7 @@ fn build_property_generic_sig(
             .collect::<Option<Vec<_>>>()?
     };
     Some(GenericSig {
-        formals: context.formals[property.inherited.len()..].to_vec(),
+        formals: crate::types::TyParamName::all(&context.formals[property.inherited.len()..]),
         formal_bounds: context.formal_bounds[property.inherited.len()..].to_vec(),
         receiver,
         params,
@@ -1130,12 +1135,11 @@ impl MetaProp {
     }
 }
 
-/// The FULLY-decoded `@kotlin.Metadata` of one classfile — every projection the compiler consumes,
-/// materialized in ONE decode at class-parse time. The packed `d1`/`d2` strings are dropped after this
-/// decode: nothing downstream re-reads the protobuf, and the raw metadata never lives in a cache. A
-/// plain-Java class (no `@Metadata`) is the `Default` (all projections empty) — consumers need not
-/// distinguish the sources.
-#[derive(Clone, Debug)]
+/// The decoded `@kotlin.Metadata` of one classfile. Every header projection is decoded at
+/// class-parse time; the member declarations stay packed in [`Self::members`] until a lookup asks
+/// for them. A plain-Java class (no `@Metadata`) is the `Default` (all projections empty) —
+/// consumers need not distinguish the sources.
+#[derive(Clone, Debug, Default)]
 pub struct KotlinMeta {
     /// `Class.flags` visibility for a Kotlin class (`None` for plain Java classes and package facades).
     /// JVM access flags cannot represent Kotlin `internal`, so classifier access must prefer this fact.
@@ -1161,20 +1165,12 @@ pub struct KotlinMeta {
     pub class_supertypes: Vec<Ty>,
     /// The typealias each of [`Self::class_supertypes`] was written as, parallel to it.
     pub class_supertype_aliases: Vec<Option<TypeName>>,
-    /// `Class.function` (field 9) — member/extension functions of a class kind. `Arc` slices so a
-    /// consumer cache shares the decode instead of copying it.
-    pub class_functions: std::sync::Arc<[MetaFn]>,
-    /// `Package.function` (field 3) — top-level/extension functions of a file-facade/part kind.
-    pub package_functions: std::sync::Arc<[MetaFn]>,
-    /// `Class.property` (field 10).
-    pub class_properties: std::sync::Arc<[MetaProp]>,
-    /// `Package.property` (field 4).
-    pub package_properties: std::sync::Arc<[MetaProp]>,
+    /// Functions, properties, and constructors, decoded on first use. Read them through the
+    /// classpath, which reports a member message that does not decode.
+    pub members: LazyMembers,
     /// `Package.typeAlias` (field 5) or `Class.typeAlias` (field 11), normalized to the alias's
     /// fully qualified source identity.
     pub type_aliases: Vec<MetaTypeAlias>,
-    /// `Class.constructor` (field 8): named-parameter lists in declaration order.
-    pub constructors: std::sync::Arc<[MetaConstructor]>,
     /// `Class.flags.IS_INNER`: the class's metadata addresses its outer classes' type parameters
     /// by id, so it decodes completely only within [`Self::type_parameter_scope`] of its outer.
     pub is_inner: bool,
@@ -1210,51 +1206,14 @@ pub struct KotlinMeta {
     pub package: Option<String>,
 }
 
-impl Default for KotlinMeta {
-    fn default() -> Self {
-        KotlinMeta {
-            class_visibility: None,
-            class_modality: None,
-            class_kind: None,
-            is_fun_interface: false,
-            is_companion_object: false,
-            is_data: false,
-            class_type_parameters: crate::types::TypeParameters::default(),
-            class_supertypes: Vec::new(),
-            class_supertype_aliases: Vec::new(),
-            class_functions: std::sync::Arc::from([]),
-            package_functions: std::sync::Arc::from([]),
-            class_properties: std::sync::Arc::from([]),
-            package_properties: std::sync::Arc::from([]),
-            type_aliases: Vec::new(),
-            constructors: std::sync::Arc::from([]),
-            is_inner: false,
-            type_parameter_scope: Vec::new(),
-            class_qualified_name: None,
-            class_declaration_name: None,
-            companion_name: None,
-            nested_class_names: Box::default(),
-            sealed_subclasses: Vec::new(),
-            serial_element_names: Box::default(),
-            inline: None,
-            multifile_parts: Vec::new(),
-            package: None,
-        }
-    }
-}
-
 impl KotlinMeta {
     /// Whether this classfile carried any Kotlin metadata at all.
     pub fn is_present(&self) -> bool {
         !(self.class_visibility.is_none()
             && self.class_kind.is_none()
             && !self.is_fun_interface
-            && self.class_functions.is_empty()
-            && self.package_functions.is_empty()
-            && self.class_properties.is_empty()
-            && self.package_properties.is_empty()
+            && !self.members.declares_any()
             && self.type_aliases.is_empty()
-            && self.constructors.is_empty()
             && self.companion_name.is_none()
             && self.sealed_subclasses.is_empty()
             && self.inline.is_none()
@@ -1282,7 +1241,6 @@ pub fn decode_metadata(
     k: Option<i32>,
     this_class: &str,
     package_name: Option<&str>,
-    methods: &[super::classreader::MethodSig],
 ) -> MetadataResult<KotlinMeta> {
     decode_metadata_within(
         &RawMetadata {
@@ -1292,7 +1250,6 @@ pub fn decode_metadata(
             package_name: package_name.map(str::to_owned),
         },
         this_class,
-        methods,
         &[],
     )
 }
@@ -1302,7 +1259,6 @@ pub fn decode_metadata(
 pub fn decode_metadata_within(
     raw: &RawMetadata,
     this_class: &str,
-    methods: &[super::classreader::MethodSig],
     enclosing: &[ScopedTypeParameter],
 ) -> MetadataResult<KotlinMeta> {
     let (d1, d2, k, package_name) = (
@@ -1382,32 +1338,16 @@ pub fn decode_metadata_within(
     let class_flags = (k == Some(1)).then(|| class_identity::class_flags(&ctx));
     let scope =
         enclosing_type_parameters::class_scope(enclosing, &class_tparams, &class_type_param_bounds);
-    let (scope_tparams, scope_bounds) = enclosing_type_parameters::split(&scope);
-    let realizations = realization_facts::Realizations::new(methods);
     let data_equality_bound = class_flags
         .is_some_and(|flags| flags & (1u64 << 10) != 0)
         .then(|| Ty::obj(this_class));
-    let class_functions = realizations
-        .stamp_functions(decode_functions(
-            &ctx,
-            9,
-            &scope_tparams,
-            &scope_bounds,
-            data_equality_bound,
-        )?)
-        .into();
-    // A package's field 5 is `Package.type_alias`, while a class's field 5 is
-    // `Class.type_parameter`. Constructor decoding owns only the Class schema; running it over a
-    // package would feed each complete TypeAlias message to the strict type-parameter decoder.
-    let mut constructors = if k == Some(1) {
-        ctor_params(&ctx)?
-    } else {
-        Vec::new()
-    };
-    realizations.stamp_constructors(&mut constructors);
-    let class_properties = realizations
-        .stamp_properties(decode_properties(&ctx, 10, &scope_tparams, &scope_bounds)?)
-        .into();
+    let members = LazyMembers::new(
+        bytes.clone(),
+        d2.to_vec(),
+        k == Some(1),
+        enclosing,
+        data_equality_bound,
+    );
     Ok(KotlinMeta {
         class_visibility: class_flags
             .map(flags_visibility)
@@ -1424,14 +1364,7 @@ pub fn decode_metadata_within(
         ),
         class_supertypes,
         class_supertype_aliases,
-        class_functions,
-        package_functions: realizations
-            .stamp_functions(decode_functions(&ctx, 3, &[], &[], None)?)
-            .into(),
-        class_properties,
-        package_properties: realizations
-            .stamp_properties(decode_properties(&ctx, 4, &[], &[])?)
-            .into(),
+        members,
         type_aliases: decode_type_aliases(
             &ctx,
             package.as_deref(),
@@ -1439,7 +1372,6 @@ pub fn decode_metadata_within(
             k == Some(1),
             st_body,
         )?,
-        constructors: constructors.into(),
         is_inner: class_flags.is_some_and(enclosing_type_parameters::is_inner),
         type_parameter_scope: scope,
         class_qualified_name: if k == Some(1) {
@@ -1799,28 +1731,7 @@ fn decode_functions(
                     let Some(kotlin_name) = d2.get(pf.name_id as usize).cloned() else {
                         continue;
                     };
-                    // The `JvmMethodSignature` name/desc are plain string-table entries — resolve them as
-                    // kotlinc's `getString` does (predefined/d2 + substring/replace), NOT as class names.
-                    let (mut jvm_name, jvm_desc) = match pf.jvm_sig {
-                        Some(signature) => (
-                            signature
-                                .name_id
-                                .and_then(|id| resolve_string(records, d2, id as usize))
-                                .unwrap_or_else(|| kotlin_name.clone()),
-                            signature
-                                .desc_id
-                                .and_then(|id| resolve_string(records, d2, id as usize)),
-                        ),
-                        None => (kotlin_name.clone(), None),
-                    };
-                    // A `@kotlin.jvm.JvmName("...")` annotation is the AUTHORITATIVE bytecode name (kotlinc
-                    // uses it for the emitted method) — e.g. each `@OverloadResolutionByLambdaReturnType`
-                    // `sumOf` overload carries `@JvmName("sumOfInt")`/`@JvmName("sumOfLong")`. The
-                    // `method_signature` extension may omit it, so read it from the annotation directly.
-                    // Absent → the Kotlin name stands.
-                    if let Some(n) = annotation_jvm_name(&pf.annotation_bodies, records, d2) {
-                        jvm_name = n;
-                    }
+                    let (jvm_name, jvm_desc) = function_jvm_name(&pf, &kotlin_name, records, d2);
                     // Kotlin may place parameter types in the function-local table or in the
                     // containing package/class table. The nearer function table shadows the outer
                     // one, matching every other type-table lookup in this decoder.
@@ -2140,23 +2051,9 @@ fn decode_functions(
     Ok(out)
 }
 
-/// Functions declared in a `Class`'s `@Metadata` (member + companion functions live in their own class).
-pub fn class_functions(ci: &ClassInfo) -> &[MetaFn] {
-    &ci.meta.class_functions
-}
-
-/// Top-level / extension functions declared in a file facade's `Package` `@Metadata`.
-pub fn package_functions(ci: &ClassInfo) -> &[MetaFn] {
-    &ci.meta.package_functions
-}
-
 /// Public type aliases declared in a file facade's `Package` `@Metadata`.
 pub fn metadata_type_aliases(ci: &ClassInfo) -> &[MetaTypeAlias] {
     &ci.meta.type_aliases
-}
-
-pub fn class_constructors(ci: &ClassInfo) -> &[MetaConstructor] {
-    &ci.meta.constructors
 }
 
 /// The class's companion object name (`Companion`, or a custom one), from its `@Metadata`.
@@ -2167,15 +2064,6 @@ pub fn class_companion_name(ci: &ClassInfo) -> Option<String> {
 /// The direct subclasses of a `sealed` class, from its `@Metadata`, as JVM internal names.
 pub fn class_sealed_subclasses(ci: &ClassInfo) -> Vec<String> {
     ci.meta.sealed_subclasses.clone()
-}
-
-pub fn class_properties(ci: &ClassInfo) -> &[MetaProp] {
-    &ci.meta.class_properties
-}
-
-/// Top-level / extension properties declared in a file facade's `Package` `@Metadata`.
-pub fn package_properties(ci: &ClassInfo) -> &[MetaProp] {
-    &ci.meta.package_properties
 }
 
 pub fn class_inline(ci: &ClassInfo) -> Option<&InlineClass> {
@@ -2622,13 +2510,11 @@ mod module_reader_tests {
             Some(3),
             "sample/SyntheticLambda",
             Some("sample.redirected"),
-            &[],
         )
         .expect("synthetic lambda metadata uses its own protobuf schema");
 
         assert_eq!(metadata.package.as_deref(), Some("sample/redirected"));
-        assert!(metadata.class_functions.is_empty());
-        assert!(metadata.package_functions.is_empty());
+        assert!(!metadata.members.declares_any());
         assert!(metadata.type_aliases.is_empty());
     }
 

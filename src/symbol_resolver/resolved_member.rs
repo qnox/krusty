@@ -8,6 +8,10 @@ pub struct ResolvedMember {
     /// Semantic dispatch receiver selected with this overload. It is part of the call target rather
     /// than a lowering-side reconstruction, and is identical for module and dependency providers.
     pub receiver: Ty,
+    /// `receiver` applied as the member's generic declaring class when the receiver's classifier
+    /// is a proper subclass of it: `Base<String>` for a `Derived : Base<String>` receiver. The
+    /// checker publishes it once the selection is final; `None` otherwise.
+    pub declaring_receiver: Option<Ty>,
     pub member: LibraryMember,
     /// Declaration/ABI parameter types before call-site generic substitution. Checking uses
     /// `member.params`; module linking and argument realization use this parallel physical shape.
@@ -35,6 +39,7 @@ impl ResolvedMember {
         let suspend = member.suspend();
         Self {
             receiver,
+            declaring_receiver: None,
             member,
             physical_params,
             context_args: Vec::new(),
@@ -88,6 +93,7 @@ impl ResolvedMember {
         member.plugin_expression = callable.plugin_expression;
         member.deprecation = callable.deprecation;
         Self {
+            declaring_receiver: None,
             receiver,
             ret: member.ret,
             member,
@@ -96,6 +102,27 @@ impl ResolvedMember {
             projected_return_hazard,
             suspend,
             origin,
+        }
+    }
+
+    /// The selection of `function` as the member `member` at `receiver`, with its checked result
+    /// `ret` and no context arguments.
+    pub(crate) fn from_function(
+        receiver: Ty,
+        function: &crate::libraries::FunctionInfo,
+        member: LibraryMember,
+        ret: Ty,
+    ) -> Self {
+        Self {
+            receiver,
+            declaring_receiver: None,
+            member,
+            physical_params: function.callable.physical_params.clone(),
+            context_args: Vec::new(),
+            ret,
+            projected_return_hazard: function.projected_return_hazard,
+            suspend: function.flags.suspend,
+            origin: function.callable.origin.clone(),
         }
     }
 }
