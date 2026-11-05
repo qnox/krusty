@@ -1025,6 +1025,14 @@ fn wasm_generated_members_preserve_closure_identity() {
 }
 
 #[test]
+fn wasm_generated_members_keep_erased_array_hashes_stable_through_mutation() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassErasedArrayIdentityHash.kt"),
+        "wasmDataClassErasedArrayIdentityHash",
+    );
+}
+
+#[test]
 fn wasm_a_generated_hash_of_an_erased_property_dispatches_when_every_class_has_a_body() {
     expect_wasm_box(
         include_str!("box_regressions/dataClassErasedPropertyHash.kt"),

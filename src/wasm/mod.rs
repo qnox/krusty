@@ -22,6 +22,7 @@ mod identity;
 mod host;
 mod interface_dispatch;
 mod objects;
+mod reference_arrays;
 mod runtime;
 mod target;
 

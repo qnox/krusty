@@ -28,6 +28,7 @@ use super::hashing::Hashing;
 use super::host::Host;
 use super::identity::IdentityObjects;
 use super::objects::ObjectRoot;
+use super::reference_arrays::ReferenceArrays;
 
 /// Where a host write's bytes are staged in linear memory. The first 16 bytes are left for the
 /// host's own use (a WASI iovec).
@@ -43,6 +44,7 @@ pub(super) struct Runtime {
     pub(super) string: u32,
     /// Reference-element array storage shared by every applied Kotlin `Array<T>`.
     pub(super) references: u32,
+    pub(super) arrays: ReferenceArrays,
     pub(super) string_equals: u32,
     pub(super) string_concat: u32,
     pub(super) string_of_i32: u32,
@@ -107,10 +109,12 @@ impl Runtime {
             mutable: true,
         }));
         let identity = IdentityObjects::declare(module, &objects);
+        let arrays = ReferenceArrays::declare(module, &mut objects, &identity, references);
         let mut runtime = Self {
             chars,
             string,
             references,
+            arrays,
             string_equals: module.declare(),
             string_concat: module.declare(),
             string_of_i32: module.declare(),

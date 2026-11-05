@@ -67,7 +67,7 @@ impl Body<'_> {
                 self.value(right, ty)?;
                 self.code.call(self.runtime.string_equals);
             }
-            // An array is compared by identity, which is what `equals` on a non-object is.
+            // Array wrappers keep identity equality; classes use their selected `equals` slot.
             Some(ValType::Ref { .. }) => self.object_equality(left, right)?,
             Some(ValType::F32 | ValType::F64) => {
                 for operand in [left, right] {
