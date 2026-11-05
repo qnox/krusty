@@ -78,9 +78,9 @@ impl Checker<'_> {
             .as_ref()
             .is_some_and(|selected| selected.kind == SelectedValueClassKind::Full);
         let value_prefix = if self.file.full_value_classes {
-            "final value"
+            "Final value"
         } else {
-            "value"
+            "Value"
         };
         let class_final = cl.modality == Modality::Final;
         for (ordinal, parameter) in cl.props.iter().enumerate() {
@@ -89,8 +89,9 @@ impl Checker<'_> {
                 || parameter.is_var
                 || parameter.has_open_modifier;
             if class_final && not_final_read_only {
-                self.diags.error(
+                self.diags.error_named(
                     parameter.declaration_span,
+                    crate::diag::names::VALUE_CLASS_CONSTRUCTOR_NOT_FINAL_READ_ONLY_PARAMETER,
                     format!(
                         "{value_prefix} class primary constructor must only have final read-only \
                          ('val') property parameters."
@@ -100,15 +101,17 @@ impl Checker<'_> {
             }
             if full {
                 if parameter.is_property && cl.modality == Modality::Abstract {
-                    self.diags.error(
+                    self.diags.error_named(
                         parameter.declaration_span,
-                        "abstract value class primary constructor cannot have property parameters.",
+                        crate::diag::names::ABSTRACT_VALUE_CLASS_CONSTRUCTOR_PROPERTY_PARAMETER,
+                        "Abstract value class primary constructor cannot have property parameters.",
                     );
                     continue;
                 } else if parameter.is_property && cl.modality == Modality::Sealed {
-                    self.diags.error(
+                    self.diags.error_named(
                         parameter.declaration_span,
-                        "sealed value class primary constructor cannot have property parameters.",
+                        crate::diag::names::SEALED_VALUE_CLASS_CONSTRUCTOR_PROPERTY_PARAMETER,
+                        "Sealed value class primary constructor cannot have property parameters.",
                     );
                     continue;
                 }
@@ -126,10 +129,11 @@ impl Checker<'_> {
                     let prefix = if self.file.full_value_classes {
                         "@JvmInline value"
                     } else {
-                        "value"
+                        "Value"
                     };
-                    self.diags.error(
+                    self.diags.error_named(
                         parameter.ty.span,
+                        crate::diag::names::VALUE_CLASS_HAS_INAPPLICABLE_PARAMETER_TYPE,
                         format!("{prefix} class cannot have value parameter of type '{rendered}'."),
                     );
                     continue;
@@ -137,8 +141,11 @@ impl Checker<'_> {
             }
             match self.value_class_recursion(&record, underlying, &mut HashSet::new()) {
                 Some(Recursion::Plain) => {
-                    self.diags
-                        .error(parameter.ty.span, "Value class cannot be recursive.");
+                    self.diags.error_named(
+                        parameter.ty.span,
+                        crate::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE,
+                        "Value class cannot be recursive.",
+                    );
                 }
                 Some(Recursion::ViaTypeParameters) => {
                     // The warning is inside the parameter declaration, so the parameter's own
@@ -154,7 +161,10 @@ impl Checker<'_> {
                         self.file
                             .value_class_recursion_via_type_parameters_warning
                             .as_deref(),
-                        crate::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING,
+                        DeprecationNames {
+                            error: crate::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_ERROR,
+                            warning: crate::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING,
+                        },
                         "Value class cannot be recursive.",
                     );
                     self.active_lexical_policies.truncate(depth);
