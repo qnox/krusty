@@ -54,13 +54,14 @@ fn a_body_without_defaults_publishes_none() {
     assert_eq!(unit.ir().param_defaults(function), None);
 }
 
-/// kotlinc's `fun a(a: Int): Int = b(a)` beside `fun b(a: Int, b: Int = a): Int = b`: a body
-/// call that leaves `b`'s second parameter to its default calls `b` with that omission, as checked
-/// FIR lowering lowers the source call, and the shared default-argument lowering reaches `b`'s
-/// entry from it.
-#[test]
-fn a_body_call_that_leaves_a_parameter_to_its_default_carries_the_omission() {
-    let fixture = demo(
+/// kotlinc's `fun a(a: Int): Int = b(a)` beside `fun b(a: Int, b: Int = a): Int = b`.
+const DEFAULTED_AND_CALLER_SOURCE: &str = "fun b(a: Int, b: Int = a): Int {\n return b\n}\n\
+     fun a(a: Int): Int {\n return b(a)\n}\n";
+
+/// [`DEFAULTED_AND_CALLER_SOURCE`] as serialized trees: `b`'s second parameter defaults to its
+/// first, and `a` calls `b` leaving it out.
+fn defaulted_and_caller() -> super::demo_package::Demo {
+    demo(
         &[("b", &[T::Int, T::Int], T::Int), ("a", &[T::Int], T::Int)],
         |name, body| {
             let value = if name == "a" {
@@ -73,17 +74,23 @@ fn a_body_call_that_leaves_a_parameter_to_its_default_carries_the_omission() {
             };
             Some(vec![body.ret(value)])
         },
-    );
+    )
+}
+
+/// A body call that leaves `b`'s second parameter to its default calls `b` with that omission,
+/// as checked FIR lowering lowers the source call, and the shared default-argument lowering
+/// reaches `b`'s entry from it.
+#[test]
+fn a_body_call_that_leaves_a_parameter_to_its_default_carries_the_omission() {
+    let fixture = defaulted_and_caller();
     let mut unit = DependencyBodyUnit::default();
     let caller = fixture
         .lower(&mut unit, "a", &["a", "b"])
         .unwrap_or_else(|decline| panic!("{decline}"));
     validated(unit.ir());
-    let source = "fun b(a: Int, b: Int = a): Int {\n return b\n}\n\
-         fun a(a: Int): Int {\n return b(a)\n}\n";
     assert_eq!(
         lowered_body(&unit, caller),
-        source_body_with_stdlib(source, "a", 1)
+        source_body_with_stdlib(DEFAULTED_AND_CALLER_SOURCE, "a", 1)
     );
     let calls = unit
         .ir()
@@ -101,4 +108,41 @@ fn a_body_call_that_leaves_a_parameter_to_its_default_carries_the_omission() {
         })
         .collect::<Vec<_>>();
     assert_eq!(calls, [("b".to_owned(), vec![1])]);
+}
+
+/// The callee of that graph lowers its body and publishes its whole default vector exactly as
+/// checked FIR lowering does for the same source.
+#[test]
+fn the_defaulted_callee_publishes_its_defaults_as_checked_fir_lowering_does() {
+    let fixture = defaulted_and_caller();
+    let mut unit = DependencyBodyUnit::default();
+    let callee = fixture
+        .lower(&mut unit, "b", &["b"])
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    assert_eq!(
+        lowered_body(&unit, callee),
+        source_body_with_stdlib(DEFAULTED_AND_CALLER_SOURCE, "b", 2)
+    );
+    let defaults = unit
+        .ir()
+        .param_defaults(callee)
+        .expect("the declaration publishes its defaults")
+        .iter()
+        .map(|default| default.map(|default| render(unit.ir(), default)))
+        .collect::<Vec<_>>();
+    let expected = source_defaults_with_stdlib(DEFAULTED_AND_CALLER_SOURCE, "b", 2);
+    assert!(matches!(expected.as_slice(), [None, Some(_)]));
+    assert_eq!(defaults, expected);
+}
+
+/// The caller of that graph declares no default and publishes none, as its source does.
+#[test]
+fn the_caller_without_defaults_publishes_none() {
+    let fixture = defaulted_and_caller();
+    let mut unit = DependencyBodyUnit::default();
+    let caller = fixture
+        .lower(&mut unit, "a", &["a", "b"])
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    assert_eq!(unit.ir().param_defaults(caller), None);
 }
