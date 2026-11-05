@@ -14112,15 +14112,15 @@ impl<'a> Checker<'a> {
                 // whole subtree here doubles the work at every nesting level (and is exponential
                 // for deeply nested anonymous objects); the structural owner edge identifies the
                 // only constructions whose storage owner is this declaration.
-                if !anonymous_capture_remap::remap_direct_anonymous_class_storage_captures(
+                if !self.finish_anonymous_capture_layout(
+                    scope,
                     declaration,
-                    &self.anonymous_lexical_scope,
+                    &candidates,
                     anonymous_capture_remap::CaptureFieldRemap {
                         fields: &storage_field_remap,
                         original: &original_captures,
                         forwarded: &forwarded_uses,
                     },
-                    &mut self.discovered_anonymous_captures,
                 ) {
                     self.diags.error(
                         span,
@@ -14128,13 +14128,6 @@ impl<'a> Checker<'a> {
                     );
                     return Ty::Error;
                 }
-                if let Some(mut captures) = self.discovered_anonymous_captures.remove(&declaration)
-                {
-                    self.extend_anonymous_superclass_captures(scope, declaration, &mut captures);
-                    self.discovered_anonymous_captures
-                        .insert(declaration, captures);
-                }
-                self.refresh_anonymous_receiver_capture_fields(declaration, &candidates);
                 if self.discover_anonymous_captures {
                     return self.anonymous_object_type(scope, declaration);
                 }
@@ -14204,6 +14197,9 @@ impl<'a> Checker<'a> {
                     self.set_anonymous_lexical_class_context(declaration);
                     self.check_class(scope, &class, declaration);
                     self.restore_body_state(saved);
+                    if !self.discovers_captures_at_construction {
+                        self.publish_anonymous_class_capture_layout(scope, declaration, None);
+                    }
                 }
                 return self.anonymous_object_type(scope, declaration);
             }
