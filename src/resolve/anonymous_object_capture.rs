@@ -16,6 +16,17 @@ use crate::fir::{CapturedCallableOwner, FirCapturedReceiver};
 use crate::fx_hash::HashMap;
 use crate::types::{CapturedContextKind, Ty};
 
+/// What a visit knows about a captured value's type, least first.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum CaptureTypeKnowledge {
+    /// It waits on inference that has not run yet.
+    Pending,
+    /// It holds an inference variable of a call that is still being solved; that call's solution
+    /// completes it.
+    AwaitingCall,
+    Determined,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnonymousObjectCapture {
     pub name: String,
@@ -66,6 +77,27 @@ pub struct AnonymousObjectCapture {
 impl AnonymousObjectCapture {
     pub fn stored_ty(&self) -> Ty {
         self.storage_ty.unwrap_or(self.ty)
+    }
+
+    /// Whether the captured value's type is not known yet: it still waits on pending inference, or
+    /// it holds an inference variable of a call that is still being solved (a builder lambda's
+    /// receiver before the builder call completes). Such a capture is provisional; the visit after
+    /// the owning call is solved records its determined type.
+    pub(super) fn has_undetermined_type(&self) -> bool {
+        self.type_knowledge() != CaptureTypeKnowledge::Determined
+    }
+
+    /// How much is known about the captured value's type, for preferring the better-informed of
+    /// two visits.
+    pub(super) fn type_knowledge(&self) -> CaptureTypeKnowledge {
+        let types = || [Some(self.ty), self.storage_ty].into_iter().flatten();
+        if types().any(Ty::mentions_pending) {
+            CaptureTypeKnowledge::Pending
+        } else if types().any(Ty::mentions_type_variable) {
+            CaptureTypeKnowledge::AwaitingCall
+        } else {
+            CaptureTypeKnowledge::Determined
+        }
     }
 }
 
@@ -551,12 +583,9 @@ impl Checker<'_> {
         );
         // Provisional visits publish only proven selections, but cannot mark their types final.
         let provisional = self.postponed_argument_depth != 0
-            || captures.iter().any(|capture| {
-                capture.ty.mentions_pending()
-                    || capture
-                        .storage_ty
-                        .is_some_and(|storage| storage.mentions_pending())
-            });
+            || captures
+                .iter()
+                .any(AnonymousObjectCapture::has_undetermined_type);
         // Established fields are proven reads, not the temporary candidate overlay. A completed
         // local method never selects its receiver again during a memoized revisit.
         let mut proven_uses = established
@@ -1233,6 +1262,7 @@ pub(super) fn record_anonymous_construction_captures(
 /// member's dispatch receiver is that class's instance type.
 pub(super) fn enclosing_instance(ty: Ty) -> FirCapturedReceiver {
     FirCapturedReceiver::Enclosing {
+        owner: None,
         classifier: ty
             .non_null()
             .kotlin_class_internal()

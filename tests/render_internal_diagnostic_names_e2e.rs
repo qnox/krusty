@@ -11,10 +11,18 @@ const SOURCE: &str = "fun f() = 1\n";
 /// Remove only kotlinc's source excerpts, which krusty's plain renderer does not print. What remains
 /// is the complete ordered diagnostic ledger.
 fn diagnostic_ledger(stderr: &[u8]) -> Vec<String> {
+    source_ledger(stderr, SOURCE)
+}
+
+/// [`diagnostic_ledger`] for a compilation of `source`.
+fn source_ledger(stderr: &[u8], source: &str) -> Vec<String> {
     std::str::from_utf8(stderr)
         .expect("compiler diagnostics are UTF-8")
         .lines()
-        .filter(|line| *line != "fun f() = 1" && !line.chars().all(|c| c == ' ' || c == '^'))
+        .filter(|line| {
+            !source.lines().any(|source_line| source_line == *line)
+                && !line.chars().all(|c| c == ' ' || c == '^')
+        })
         .map(str::to_string)
         .collect()
 }
@@ -222,6 +230,147 @@ fn named_diagnostics_render_their_names_like_kotlinc() {
             "{}",
             case.tag
         );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Errors keep kotlinc's names: the deprecation-cycle errors once their language feature forbids
+/// the construct, and the reified, class-literal, qualifier and value-class errors.
+#[test]
+fn named_errors_render_their_names_like_kotlinc() {
+    struct Case {
+        file: &'static str,
+        source: &'static str,
+        arguments: &'static [&'static str],
+        diagnostics: &'static [&'static str],
+        /// krusty's error count.
+        errors: usize,
+    }
+
+    let cases = [
+        Case {
+            file: "Errors.kt",
+            source: "\
+typealias L<T> = List<T>
+fun l() = L<Int>::class
+@JvmInline value class V1(var x: Int)
+@JvmInline value class V2(val x: Nothing)
+@JvmInline value class V3(val x: V3)
+object O
+fun o() = O<Int>
+inline fun <reified T> r(): String = T::class.java.name
+fun <T> f1() = r<T>()
+fun <T> f2() = r<Array<T>>()
+fun f3() = r<Nothing>()
+fun <T> f4() = r<T & Any>()
+interface I1
+interface I2
+class C12 : I1, I2
+class D12 : I1, I2
+inline fun <reified T> ra(x: T): T = x
+fun f5(b: Boolean) = ra(if (b) C12() else D12())
+",
+            arguments: &[],
+            diagnostics: &[
+                "Errors.kt:2:11: error: [CLASS_LITERAL_LHS_NOT_A_CLASS] Only classes are allowed on the left-hand side of a class literal.",
+                "Errors.kt:3:27: error: [VALUE_CLASS_CONSTRUCTOR_NOT_FINAL_READ_ONLY_PARAMETER] Value class primary constructor must only have final read-only ('val') property parameters.",
+                "Errors.kt:4:34: error: [VALUE_CLASS_HAS_INAPPLICABLE_PARAMETER_TYPE] Value class cannot have value parameter of type 'kotlin/Nothing'.",
+                "Errors.kt:5:34: error: [VALUE_CLASS_CANNOT_BE_RECURSIVE] Value class cannot be recursive.",
+                "Errors.kt:7:12: error: [EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS] Object access cannot have explicit type arguments.",
+                "Errors.kt:9:18: error: [TYPE_PARAMETER_AS_REIFIED] Cannot use 'T' as reified type parameter. Use a class instead.",
+                "Errors.kt:10:18: error: [TYPE_PARAMETER_AS_REIFIED_ARRAY_ERROR] Cannot use 'T' as reified type parameter, since the array type parameter is not reified.",
+                "Errors.kt:11:14: error: [REIFIED_TYPE_FORBIDDEN_SUBSTITUTION] Cannot use 'Nothing' as reified type parameter.",
+                "Errors.kt:12:18: error: [DEFINITELY_NON_NULLABLE_AS_REIFIED] Cannot use definitely-non-nullable type as a reified type argument.",
+                "Errors.kt:18:22: error: [TYPE_INTERSECTION_AS_REIFIED_ERROR] Type argument for reified type parameter 'T' was inferred to the intersection of ['I1' & 'I2']. Reification of an intersection type results in the common supertype being used. This may lead to subtle issues and an explicit type argument is encouraged.",
+            ],
+            errors: 10,
+        },
+        Case {
+            file: "Forbidden.kt",
+            source: "\
+typealias Yes<T> = String
+typealias Two<T> = String
+fun c1() = Yes<Int>::class
+fun c2() = Two<Int, Int>::class
+inline fun <reified T> c3() = T<Int>::class
+fun s() = java.lang.Integer<Int>.MAX_VALUE
+fun p() = (kotlin).collections.listOf(1)
+",
+            arguments: &["-language-version", "2.5"],
+            diagnostics: &[
+                "warning: [EXPERIMENTAL_LANGUAGE_VERSION] Language version 2.5 is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.",
+                "Forbidden.kt:3:12: error: [CLASS_LITERAL_LHS_NOT_A_CLASS] Only classes are allowed on the left-hand side of a class literal.",
+                "Forbidden.kt:4:15: error: [WRONG_NUMBER_OF_TYPE_ARGUMENTS] One type argument expected for 'typealias Two<T> = String'.",
+                "Forbidden.kt:5:32: error: [TYPE_ARGUMENTS_NOT_ALLOWED] Type arguments are not allowed for type parameters.",
+                "Forbidden.kt:6:28: error: [TYPE_ARGUMENTS_NOT_ALLOWED] Type arguments are not allowed when static member is accessed.",
+                "Forbidden.kt:7:11: error: [PARENTHESIZED_PACKAGE_QUALIFIER_ERROR] Wrapping package qualifiers in parentheses is not allowed.",
+            ],
+            errors: 5,
+        },
+    ];
+
+    let krusty = common::krusty_binary();
+    let dir =
+        std::env::temp_dir().join(format!("krusty_render_error_names_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    for case in cases {
+        // Recorded kotlinc diagnostics retain the source path, so keep it stable across processes.
+        let directory =
+            std::path::Path::new("target/test-sources/render-internal-diagnostic-names");
+        fs::create_dir_all(directory).unwrap();
+        let source = directory.join(case.file);
+        fs::write(&source, case.source).expect("write source");
+        let location = source.display().to_string();
+        let expected = case
+            .diagnostics
+            .iter()
+            .map(|line| line.replacen(case.file, &location, 1))
+            .collect::<Vec<_>>();
+
+        let reference_out = dir.join(format!("{}-reference", case.file));
+        let mut reference_args = case
+            .arguments
+            .iter()
+            .map(|argument| (*argument).to_string())
+            .collect::<Vec<_>>();
+        reference_args.extend([
+            "-Xrender-internal-diagnostic-names".to_string(),
+            "-no-reflect".to_string(),
+            "-d".to_string(),
+            reference_out.display().to_string(),
+            location.clone(),
+        ]);
+        let (reference_code, reference_stderr) =
+            common::byte_dump::with_recorded_diagnostics(|| {
+                common::kotlinc_compile(&reference_args).expect("reference compiler unavailable")
+            });
+        assert_eq!(reference_code, 1, "{}", case.file);
+        assert_eq!(
+            source_ledger(reference_stderr.as_bytes(), case.source),
+            expected,
+            "{}: reference diagnostics",
+            case.file
+        );
+
+        let krusty_out = dir.join(format!("{}-krusty", case.file));
+        let result = Command::new(&krusty)
+            .args(case.arguments)
+            .args(["-Xrender-internal-diagnostic-names", "-no-reflect", "-d"])
+            .arg(&krusty_out)
+            .arg(&source)
+            .output()
+            .expect("run krusty");
+        assert_eq!(result.status.code(), Some(1), "{}", case.file);
+        let mut krusty_expected = expected.clone();
+        krusty_expected.push(format!("krusty: {} error(s)", case.errors));
+        assert_eq!(
+            source_ledger(&result.stderr, case.source),
+            krusty_expected,
+            "{}: krusty diagnostics",
+            case.file
+        );
+        assert_eq!(result.stdout, b"", "{}", case.file);
     }
     let _ = fs::remove_dir_all(&dir);
 }

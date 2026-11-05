@@ -298,7 +298,8 @@ impl Checker<'_> {
                         }
                         let mut actual = kind.ty();
                         let mut bounded = declared.non_null();
-                        while let TyKind::TyParam(_, bound) = bounded.kind() {
+                        while let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = bounded.kind()
+                        {
                             let value_bound = self.integer_literal_semantic_type(bound);
                             if kind.adapts_integer_literal_to(value_bound) {
                                 actual = value_bound;

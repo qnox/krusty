@@ -85,7 +85,7 @@ pub(crate) fn sam_return_matches(
         return true;
     }
     let expected = match expected.kind() {
-        TyKind::TyParam(_, bound) => bound,
+        TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => bound,
         _ => expected,
     };
     semantic_arg_assignable(source, &expected, &actual)
@@ -147,7 +147,7 @@ impl super::SymbolResolver<'_> {
     /// type, a SAM interface, a type variable whose bound admits one, or a supertype of every
     /// function type such as `Any`.
     pub(crate) fn admits_function_value(&self, parameter: Ty) -> bool {
-        if let TyKind::TyParam(_, bound) = parameter.non_null().kind() {
+        if let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = parameter.non_null().kind() {
             return self.admits_function_value(bound);
         }
         self.functional_expectation(parameter).is_some()

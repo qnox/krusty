@@ -129,7 +129,7 @@ pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{
     Bridge, BridgeAccessorRole, BridgeKind, BridgeParameter, BridgePropertyImplementation,
-    CollectionBarrierPlan,
+    CollectionBarrierCheck, CollectionBarrierParameter, CollectionBarrierPlan,
 };
 pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget};
 pub use catches::IrCatch;
@@ -167,7 +167,7 @@ pub use module_records::{
     IrModuleClassifier, IrModuleConstructions, IrModuleConstructor, IrModuleMemberAccess,
     IrModuleSource, IrOverriddenFunction,
 };
-pub use null_checks::NullCheck;
+pub use null_checks::{NullCheck, NullCheckSite};
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use package_declarations::{
@@ -618,6 +618,41 @@ pub enum IrExpr {
     },
     EnumEntries {
         classifier: TypeName,
+    },
+    /// One constant of `classifier` being built by [`crate::backend::enums`]: `construction`, a
+    /// `New` of the enum or of the constant's body subclass, with `kotlin.Enum`'s `name` and
+    /// `ordinal` storage holding these values before any constructor runs. A target owns that
+    /// storage; the shared lowering owns when and in which order constants are built.
+    ///
+    /// `published` is the static slot that already holds the constant's [`IrExpr::EnumAllocation`]
+    /// when the target publishes constants before constructing them: the construction then
+    /// initializes that object instead of allocating its own. `None` when it allocates.
+    EnumConstant {
+        classifier: TypeName,
+        name: Box<str>,
+        ordinal: u32,
+        construction: ExprId,
+        published: Option<u32>,
+    },
+    /// A constant of `classifier` allocated and nothing more: an instance of `instance` (the enum,
+    /// or the constant's body subclass) whose fields hold their zero values, whose `kotlin.Enum`
+    /// storage is unset, and whose constructor has not run. Its [`IrExpr::EnumConstant`] later
+    /// constructs it in place.
+    EnumAllocation {
+        classifier: TypeName,
+        instance: TypeName,
+    },
+    /// The one `EnumEntries` list of `classifier` over `values`, a fresh array of its constants in
+    /// declaration order. Built once by the enum's initializer ([`crate::backend::enums`]).
+    EnumEntriesList {
+        classifier: TypeName,
+        values: ExprId,
+    },
+    /// `classifier.valueOf(name)` found no constant of that name: Kotlin throws
+    /// `IllegalArgumentException`. Value type `Nothing`.
+    NoSuchEnumConstant {
+        classifier: TypeName,
+        name: ExprId,
     },
     /// JVM `MappedEnumWhenLowering`: the switch key of `subject`'s entry, read from the emitting
     /// class's `$WhenMappings` table for `classifier` at `subject`'s runtime ordinal. Value type:
@@ -1834,6 +1869,14 @@ pub struct IrFile {
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each exported overridable member's dispatching entry, by the member's `FunId`: the function
+    /// another module's call reaches it through, which dispatches on the receiver.
+    pub(crate) dispatch_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each enum class's initializer, which builds its constants and then its companion, once a
+    /// target's shared enum lowering ([`crate::backend::enums`]) has realized it as an ordinary
+    /// function of this file. A target whose companion getter runs first calls it before building
+    /// the companion, so touching the companion builds the constants first.
+    pub(crate) enum_initializers: crate::fx_hash::HashMap<ClassId, FunId>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: crate::fx_hash::HashMap<u32, FnParamInfo>,
     /// Per declared method/function, whether each SOURCE parameter was declared nullable (`a: String?`).

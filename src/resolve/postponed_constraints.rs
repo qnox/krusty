@@ -4,7 +4,15 @@
 use super::*;
 use crate::types::TyKind;
 
-pub(super) type PostponedLambdaTypes = (Vec<Ty>, Option<Ty>, Option<Ty>, Option<Ty>, bool);
+/// The declared types of a function literal passed to a postponed call: its parameters, the
+/// expected function type, the fixed expected type the selected candidate gives its parameter, and
+/// its receiver. Entering the call instantiates each with the call's variables.
+pub(super) struct PostponedLambdaTypes {
+    pub(super) parameters: Vec<Ty>,
+    pub(super) expected: Option<Ty>,
+    pub(super) fixed: Option<Ty>,
+    pub(super) receiver: Option<Ty>,
+}
 
 pub(super) struct PostponedRefinementSite<'a, 'scope> {
     pub(super) scope: &'a CheckerScope<'scope>,
@@ -14,6 +22,17 @@ pub(super) struct PostponedRefinementSite<'a, 'scope> {
     pub(super) selected_shape: Option<&'a crate::symbol_resolver::LambdaCallShape>,
     pub(super) known_signature: Option<&'a Signature>,
     pub(super) parameter_by_argument: Option<&'a [usize]>,
+}
+
+/// One function argument of a postponed call, entered for analysis before the call is solved: the
+/// call's expression in the checked file, and the argument's source span, which identifies the same
+/// function literal to Pass-1 signature inference.
+#[derive(Clone, Copy)]
+pub(super) struct PostponedCallSite {
+    pub(super) compilation: u64,
+    pub(super) file: u32,
+    pub(super) call: ExprId,
+    pub(super) argument: Span,
 }
 
 #[derive(Clone, Default)]
@@ -36,17 +55,13 @@ pub(super) struct PostponedCallConstraints {
 }
 
 impl PostponedCallConstraints {
-    pub(super) fn for_call(
-        compilation: u64,
-        file: u32,
-        call: ExprId,
-        formals: &[crate::types::TyParamName],
-    ) -> Self {
+    pub(super) fn for_call(site: PostponedCallSite, formals: &[crate::types::TyParamName]) -> Self {
         let variables = crate::symbol_resolver::CallSiteVariableMap::for_postponed_call(
             formals,
-            compilation,
-            file,
-            call.0,
+            site.compilation,
+            site.file,
+            site.call.0,
+            site.argument,
         );
         Self {
             formals: formals
@@ -84,14 +99,12 @@ impl PostponedCallConstraints {
     }
 
     pub(super) fn enter_for_type(
+        site: PostponedCallSite,
         frames: &mut Vec<Self>,
-        compilation: u64,
-        file: u32,
-        call: ExprId,
         formals: &[crate::types::TyParamName],
         ty: Ty,
     ) -> (Ty, bool) {
-        let constraints = Self::for_call(compilation, file, call, formals);
+        let constraints = Self::for_call(site, formals);
         let ty = constraints.instantiate_type(ty);
         let entered = ty.non_null().is_fun() && constraints.mentions_formal(ty);
         if entered {
@@ -112,21 +125,13 @@ impl PostponedCallConstraints {
     }
 
     pub(super) fn enter_for_function(
+        site: PostponedCallSite,
         frames: &mut Vec<Self>,
-        compilation: u64,
-        file: u32,
-        call: ExprId,
         formals: &[crate::types::TyParamName],
         function: &'static crate::types::FnSig,
     ) -> (&'static crate::types::FnSig, bool) {
-        let (entered_type, entered) = Self::enter_for_type(
-            frames,
-            compilation,
-            file,
-            call,
-            formals,
-            Ty::from(TyKind::Fun(function)),
-        );
+        let (entered_type, entered) =
+            Self::enter_for_type(site, frames, formals, Ty::from(TyKind::Fun(function)));
         let TyKind::Fun(function) = entered_type.kind() else {
             unreachable!("a function type remains a function type")
         };
@@ -134,32 +139,25 @@ impl PostponedCallConstraints {
     }
 
     pub(super) fn enter_lambda(
+        site: PostponedCallSite,
         frames: &mut Vec<Self>,
-        compilation: u64,
-        file: u32,
-        call: ExprId,
         formals: &[crate::types::TyParamName],
-        parameters: Vec<Ty>,
-        expected: Option<Ty>,
-        fixed: Option<&[Option<Ty>]>,
-        parameter: usize,
-        receiver: Option<Ty>,
-    ) -> PostponedLambdaTypes {
-        let constraints = Self::for_call(compilation, file, call, formals);
-        let parameters = constraints.instantiate_types(parameters);
-        let expected = constraints.instantiate_optional(expected);
-        let fixed = constraints.instantiate_optional(
-            fixed
-                .and_then(|types| types.get(parameter))
-                .copied()
-                .flatten(),
-        );
-        let receiver = constraints.instantiate_optional(receiver);
-        let entered = expected.is_some_and(|expected| constraints.mentions_formal(expected));
-        if entered {
+        declared: PostponedLambdaTypes,
+    ) -> (PostponedLambdaTypes, bool) {
+        let constraints = Self::for_call(site, formals);
+        let entered = PostponedLambdaTypes {
+            parameters: constraints.instantiate_types(declared.parameters),
+            expected: constraints.instantiate_optional(declared.expected),
+            fixed: constraints.instantiate_optional(declared.fixed),
+            receiver: constraints.instantiate_optional(declared.receiver),
+        };
+        let collects = entered
+            .expected
+            .is_some_and(|expected| constraints.mentions_formal(expected));
+        if collects {
             frames.push(constraints);
         }
-        (parameters, expected, fixed, receiver, entered)
+        (entered, collects)
     }
 
     /// Whether `bound` is `formal`'s own variable in a position that always holds: `V` or `V & Any`
@@ -173,7 +171,7 @@ impl PostponedCallConstraints {
             (TyKind::DefinitelyNotNull(inner), true) | (TyKind::Nullable(inner), false) => inner,
             (_, _) => bound,
         };
-        matches!(variable.kind(), TyKind::TyParam(name, _) if name == formal)
+        matches!(variable.kind(), TyKind::TyParam(name, _) | TyKind::Var(name, _) if name == formal)
     }
 
     pub(super) fn mentions_formal(&self, ty: Ty) -> bool {
@@ -483,6 +481,14 @@ pub(super) struct UnresolvedLambdaFormals {
 }
 
 impl Checker<'_> {
+    pub(super) fn postponed_call_site(&self, call: ExprId, argument: ExprId) -> PostponedCallSite {
+        PostponedCallSite {
+            compilation: self.compilation_id,
+            file: self.file_index,
+            call,
+            argument: self.span(argument),
+        }
+    }
     /// The callee formals whose postponed lambda result is still only a dependency on a nested
     /// call's open result. A symbolic type is not sufficient evidence: captured classifier
     /// parameters and enclosing declaration parameters are stable solutions even though they are
@@ -584,7 +590,8 @@ impl Checker<'_> {
             .rev()
             .find(|frame| frame.mentions_formal(expected))
             .map_or(expected, |frame| frame.declared_type(expected));
-        let TyKind::TyParam(formal, _) = expected.non_null().kind() else {
+        let (TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) = expected.non_null().kind()
+        else {
             return true;
         };
         // A generic referenced declaration can specialize its input to the still-open formal. Its

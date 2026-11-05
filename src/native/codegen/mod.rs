@@ -45,6 +45,9 @@ struct DependencyExport {
     /// The entry filling this declaration's omitted defaults, when it declares any: every operand
     /// of [`Self::signature`], then one `Int` mask per 32 of them with a bit per omitted operand.
     default_entry: Option<String>,
+    /// The entry an ordinary call to an overridable member goes through, which dispatches on
+    /// the receiver; [`Self::symbol`] stays the member's own body.
+    dispatch_entry: Option<String>,
 }
 
 /// One source function this target must publish for dependent source modules.
@@ -54,6 +57,7 @@ struct DependencyExportDefinition {
     signature: crate::backend::DependencyFunctionSignature,
     member_receiver: Option<crate::backend::DependencyMemberReceiver>,
     default_entry: Option<String>,
+    dispatch_entry: Option<String>,
 }
 
 /// The symbol every program object must define for the runtime's `_start` to call.
@@ -63,7 +67,7 @@ pub use crate::backend::{Entry, BOX_RESULT_FRAME};
 
 pub struct CraneliftBackend {
     target: NativeTarget,
-    entry: Entry,
+    entry: crate::backend::ProgramEntry,
     verify: bool,
 }
 
@@ -71,7 +75,7 @@ impl CraneliftBackend {
     pub fn new(target: NativeTarget) -> Self {
         Self {
             target,
-            entry: Entry::Main,
+            entry: crate::backend::ProgramEntry::new(Entry::Main),
             verify: false,
         }
     }
@@ -86,7 +90,14 @@ impl CraneliftBackend {
 
     /// Start the program in `entry` instead of `main`.
     pub fn with_entry(mut self, entry: Entry) -> Self {
-        self.entry = entry;
+        self.entry.kind = entry;
+        self
+    }
+
+    /// Emit the synthetic program entry only for this exact declared source module. Ordinary
+    /// library functions, dependency exports and initialization are still emitted.
+    pub fn with_entry_module(mut self, module: impl Into<String>) -> Self {
+        self.entry = self.entry.in_module(module.into());
         self
     }
 }
@@ -216,9 +227,13 @@ impl Backend for CraneliftBackend {
             }
         };
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
+        // Before default arguments: a constant leaving constructor arguments out is then an
+        // ordinary construction for that lowering.
+        crate::backend::enums::realize(&mut file.ir);
         crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables, |function| {
             file.dependency_exports.callable(function).is_some()
         });
+        crate::backend::dispatch_entries::realize(&mut file.ir, &file.dependency_exports);
         // A local or anonymous classifier arrives with an opaque identity; this target names it
         // from its provenance as Kotlin/Native does. There is no facade class here, so a
         // classifier local to a top-level function starts in the package: `box$MyLocalObject`,
@@ -321,6 +336,12 @@ impl Backend for CraneliftBackend {
             let default_entry =
                 crate::backend::default_arguments::published_entry(&file.ir, callable)
                     .map(|_| format!("{symbol}__defaults"));
+            // A later module's ordinary call to an overridable member dispatches on its receiver.
+            let dispatch_entry = file
+                .ir
+                .dispatch_entries
+                .contains_key(&callable)
+                .then(|| format!("{symbol}__dispatch"));
             let reference_declaration = match file.kind {
                 crate::backend::CheckedIrUnitKind::Source => {
                     match ReferenceDeclaration::source_export(&file.ir, file.module_name, callable)
@@ -348,6 +369,7 @@ impl Backend for CraneliftBackend {
                     .dependency_exports
                     .singleton_extension_unread_receiver(callable),
                 default_entry: default_entry.clone(),
+                dispatch_entry: dispatch_entry.clone(),
             };
             if state
                 .dependency_symbols
@@ -367,6 +389,7 @@ impl Backend for CraneliftBackend {
                     signature,
                     member_receiver: file.dependency_exports.member_receiver(callable),
                     default_entry,
+                    dispatch_entry,
                 },
             );
         }
@@ -391,7 +414,7 @@ impl Backend for CraneliftBackend {
             },
             self.target,
             &object_stem,
-            self.entry,
+            self.entry.for_module(file.module_name),
             self.verify,
         ) {
             Ok(lowered) => lowered,
