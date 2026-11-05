@@ -63,3 +63,26 @@ const SIZE_REFERENCE: &str = "fun length(values: IntArray): Int {\n\
 fn an_array_size_reference_reads_the_array_length() {
     common::expect_box_same_as_kotlinc(SIZE_REFERENCE, "ArraySizeReference");
 }
+
+/// JVM `Array<T>.clone()` returns the receiver's own array type, nullable element included:
+/// `Array<String?>.clone()` is an `Array<String?>`, never `Array<String>`.
+const NULLABLE_CLONE: &str = "class Reader(val names: Array<String?>) {\n\
+    \x20   constructor(copyFrom: Reader) : this(arrayOfNulls(1)) {\n\
+    \x20       var copied: Array<String?> = arrayOfNulls(0)\n\
+    \x20       copied = copyFrom.names.clone()\n\
+    \x20       copied[0] = null\n\
+    \x20       names[0] = copyFrom.names[0]\n\
+    \x20   }\n\
+    }\n\
+    fun copy(values: Array<String?>): Array<String?> = values.clone()\n\
+    fun box(): String {\n\
+    \x20   val source = Reader(arrayOf(\"OK\", null))\n\
+    \x20   val cloned = copy(source.names)\n\
+    \x20   if (cloned === source.names || cloned[1] != null) return \"Fail clone\"\n\
+    \x20   return Reader(source).names[0] ?: \"Fail copy\"\n\
+    }\n";
+
+#[test]
+fn a_nullable_element_array_clone_keeps_its_element_type() {
+    common::expect_box_same_as_kotlinc(NULLABLE_CLONE, "ArrayNullableCloneRun");
+}

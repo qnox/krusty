@@ -54,7 +54,11 @@ pub(super) fn classifier_constructor_generic_sig(
         })
         .collect::<Vec<_>>();
     Some(GenericSig {
-        formals: parameters.type_params.clone(),
+        formals: parameters
+            .type_params
+            .iter()
+            .map(crate::types::TyParamName::from)
+            .collect(),
         formal_bounds: parameters.type_param_bounds.clone(),
         receiver: None,
         params: value_parameters.to_vec(),
@@ -98,7 +102,7 @@ pub(super) fn align_mapped_owner_type_parameters(
         let mut bindings = owner_bindings.clone();
         for formal in &signature.formals {
             // A method formal shadows an identically named owner formal.
-            bindings.remove(formal);
+            bindings.remove(formal.as_str());
         }
         signature.receiver = signature
             .receiver
@@ -230,6 +234,7 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
         None => Vec::new(),
     };
     let meta = &class.meta;
+    let members = libraries.cp.class_members(&class);
     let listed = &meta.serial_element_names;
     let inherited = wire.len();
     if listed.len() < inherited
@@ -243,7 +248,7 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
     // kotlinc reads a library class's own elements as its listed, declared properties, so a
     // class that redeclares an inherited element (an override) names it twice and kotlinc
     // rejects every subclass with a duplicate serial name.
-    if meta.class_properties.iter().any(|property| {
+    if members.class_properties.iter().any(|property| {
         wire.iter()
             .any(|(name, _)| property.name.as_str() == &**name)
     }) {
@@ -259,10 +264,10 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
         })
     };
     // Without the list a class with stored properties gives no element order to follow.
-    if listed.len() == inherited && meta.class_properties.iter().any(stored) {
+    if listed.len() == inherited && members.class_properties.iter().any(stored) {
         return None;
     }
-    let primary = meta
+    let primary = members
         .constructors
         .iter()
         .find(|constructor| constructor.primary);
@@ -270,7 +275,7 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
         .iter()
         .map(|element| {
             let name = &element.name;
-            let property = meta
+            let property = members
                 .class_properties
                 .iter()
                 .find(|property| property.name.as_str() == &**name)

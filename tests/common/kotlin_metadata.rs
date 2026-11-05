@@ -43,7 +43,7 @@ pub(crate) fn kotlin_metadata_ints(bytes: &[u8]) -> Option<Vec<(String, Vec<i32>
     )
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum MetadataElement {
     Strings(Vec<String>),
     Ints(Vec<i32>),

@@ -217,6 +217,7 @@ impl ExistingLibrary {
                 retention: None,
                 annotation_targets: None,
                 mapped_collection: None,
+                mapped_builtin: false,
                 annotation_element_defaults: Vec::new(),
                 deprecation: None,
             })
@@ -1950,7 +1951,7 @@ fn preexisting_warning_does_not_mark_a_source_as_unparseable() {
         span: Span::new(0, 0),
         editor_span: None,
         severity: Severity::Warning,
-        warning_name: None,
+        name: None,
         kind: crate::diag::DiagnosticKind::Compiler,
         msg: "existing warning".to_string(),
         identity: None,

@@ -67,7 +67,10 @@ fn repository_emission_binds_each_data_member_to_one_exact_jvm_realization() {
         .find_map(|(name, bytes)| (name == "FixtureRecord").then_some(bytes))
         .expect("FixtureRecord.class is emitted");
     let class = krusty::jvm::classreader::parse_class(bytes).expect("FixtureRecord.class parses");
-    let functions = &class.meta.class_functions;
+    let functions = &class
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions;
     assert_eq!(
         functions
             .iter()

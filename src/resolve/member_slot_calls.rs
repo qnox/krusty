@@ -130,6 +130,7 @@ impl Checker<'_> {
             .cloned()
             .collect::<Vec<_>>();
         let rejected_candidates = overloads.clone();
+        let extension_offset = inner_constructors.len() + member_overloads.len();
 
         let selection = self.select_callable_candidate(
             scope,
@@ -170,6 +171,7 @@ impl Checker<'_> {
                         },
                         member_mapping_failure: None,
                         rejected_candidates,
+                        inaccessible_member: None,
                     };
                 }
                 if let Some((internal, alias_target)) =
@@ -194,6 +196,7 @@ impl Checker<'_> {
                     },
                     member_mapping_failure: None,
                     rejected_candidates,
+                    inaccessible_member: None,
                 };
             }
             Some(CallableCandidateSelection::MissingContext(_)) if tower_rung.is_implicit() => {
@@ -209,21 +212,31 @@ impl Checker<'_> {
                     },
                     member_mapping_failure: None,
                     rejected_candidates,
+                    inaccessible_member: None,
                 };
             }
             Some(CallableCandidateSelection::MissingContext(selected)) => {
                 self.report_selected_callable_missing_context(scope, call, &selected);
                 return MemberSlotCall::Rejected;
             }
-            Some(CallableCandidateSelection::Ambiguous(candidates)) => {
+            Some(CallableCandidateSelection::Ambiguous(candidates, positions)) => {
                 if candidates.iter().all(|candidate| candidate.is_extension()) {
                     return MemberSlotCall::ExtensionRung {
                         extension: ExtensionRungSelection {
-                            selection: Some(CallableCandidateSelection::Ambiguous(candidates)),
+                            // The positions move from the whole member level to its
+                            // extension rung.
+                            selection: Some(CallableCandidateSelection::Ambiguous(
+                                candidates,
+                                positions
+                                    .into_iter()
+                                    .map(|position| position - extension_offset)
+                                    .collect(),
+                            )),
                             overloads: extension_overloads,
                         },
                         member_mapping_failure: None,
                         rejected_candidates,
+                        inaccessible_member: None,
                     };
                 }
                 self.report_callable_ambiguity(call, name, &candidates);
@@ -248,6 +261,7 @@ impl Checker<'_> {
                     },
                     member_mapping_failure: mapping_failure,
                     rejected_candidates,
+                    inaccessible_member: None,
                 };
             }
         };
@@ -267,6 +281,22 @@ impl Checker<'_> {
         // access permits an inherited call through the subclass receiver and rejects the same call
         // through an arbitrary base-typed value.
         member.receiver = selected_receiver;
+        if tower_rung.explicit_receiver.is_some()
+            && member.member.owner.is_some_and(|owner| {
+                !self.selected_member_accessible(&member, owner)
+                    && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+            })
+        {
+            return MemberSlotCall::ExtensionRung {
+                extension: ExtensionRungSelection {
+                    selection: None,
+                    overloads: extension_overloads,
+                },
+                member_mapping_failure: None,
+                rejected_candidates,
+                inaccessible_member: Some(Box::new(member)),
+            };
+        }
         match self.record_selected_member_call(scope, call, args, member) {
             Some(Ty::Error) => MemberSlotCall::Rejected,
             Some(ret) => MemberSlotCall::Resolved(ret),
@@ -278,5 +308,18 @@ impl Checker<'_> {
                 MemberSlotCall::Rejected
             }
         }
+    }
+
+    /// Commit an explicit receiver's inaccessible member once no later rung resolved the call,
+    /// reporting its access error.
+    pub(super) fn commit_inaccessible_member_call(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        args: &[ExprId],
+        member: crate::symbol_resolver::ResolvedMember,
+    ) -> Ty {
+        self.record_selected_member_call(scope, call, args, member)
+            .unwrap_or(Ty::Error)
     }
 }

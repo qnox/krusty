@@ -15,8 +15,9 @@ pub(crate) struct EmittedCallForms {
 
 impl KlibIrArena {
     /// Closure selection belongs to common lowering; this arena supplies only the structural walk.
-    /// Defaults and unreferenced local declarations are never roots. The direct-only inventories
-    /// remain separate, particularly the one that authenticates intrinsic support.
+    /// The function's own parameter defaults are roots, since its default-argument entry runs
+    /// them; unreferenced local declarations never are. The direct-only inventories remain
+    /// separate, particularly the one that authenticates intrinsic support.
     pub(crate) fn emitted_callable_symbols<'a>(
         &'a self,
         function: &'a KlibIrFunction,
@@ -28,6 +29,14 @@ impl KlibIrArena {
         if let Some(KlibIrBody::Block(statements)) = &function.body {
             push_statement_expressions(self, statements, &mut roots);
         }
+        roots.extend(
+            function
+                .context_parameters
+                .iter()
+                .chain(&function.extension_receiver)
+                .chain(&function.regular_parameters)
+                .filter_map(|parameter| parameter.default_value),
+        );
         self.emitted_calls_from(roots, forms, functions)
     }
 

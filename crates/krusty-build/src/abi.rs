@@ -317,6 +317,11 @@ fn abi_annotation_value(value: &krusty::types::AnnotationValue) -> AbiAnnotation
         AnnotationValue::Byte(value) => AbiAnnotationValue::Byte(*value),
         AnnotationValue::Short(value) => AbiAnnotationValue::Short(*value),
         AnnotationValue::Long(value) => AbiAnnotationValue::Long(*value),
+        // This fingerprint models physical class-file annotation tags and carrier bits.
+        AnnotationValue::UByte(value) => AbiAnnotationValue::Byte(*value as i8),
+        AnnotationValue::UShort(value) => AbiAnnotationValue::Short(*value as i16),
+        AnnotationValue::UInt(value) => AbiAnnotationValue::Int(*value as i32),
+        AnnotationValue::ULong(value) => AbiAnnotationValue::Long(*value as i64),
         AnnotationValue::Float(value) => AbiAnnotationValue::FloatBits(value.to_bits()),
         AnnotationValue::Double(value) => AbiAnnotationValue::DoubleBits(value.to_bits()),
         AnnotationValue::Boolean(value) => AbiAnnotationValue::Boolean(*value),

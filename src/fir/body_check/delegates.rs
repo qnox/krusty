@@ -634,6 +634,7 @@ impl BodyFirChecker<'_> {
                     classifier: None,
                     context_binding: None,
                     singleton: None,
+                    construction_sites: Vec::new(),
                 }
             }
             FirDelegateDispatchReceiver::ContextBinding {
@@ -651,6 +652,7 @@ impl BodyFirChecker<'_> {
                     flow_identity: None,
                 }),
                 singleton: None,
+                construction_sites: Vec::new(),
             },
             FirDelegateDispatchReceiver::Singleton { ty, classifier } => {
                 crate::resolve::ImplicitReceiverSelection {
@@ -663,6 +665,7 @@ impl BodyFirChecker<'_> {
                         classifier: *classifier,
                         companion_owner: None,
                     }),
+                    construction_sites: Vec::new(),
                 }
             }
         };
@@ -865,6 +868,7 @@ fn selected_delegate_call(
                     default_provider: *external_default_provider,
                     receiver: Some(receiver),
                     declared_receiver: None,
+                    declaring_receiver: None,
                     parameters: parameters.clone(),
                     result: resolved(*ret)?,
                     declared_result: None,
@@ -890,6 +894,7 @@ fn selected_delegate_call(
         DelegateGetValueTarget::Extension {
             callable,
             stable_declaration,
+            ..
         } => {
             let parameters = callable
                 .params
@@ -969,6 +974,7 @@ fn selected_delegate_call(
                     default_provider: callable.external_default_provider,
                     receiver: Some(receiver),
                     declared_receiver: callable.source_receiver.map(resolved).transpose()?,
+                    declaring_receiver: None,
                     parameters: parameters.clone(),
                     result: resolved(callable.ret)?,
                     declared_result: callable.declared_ret.map(resolved).transpose()?,
@@ -1078,6 +1084,7 @@ fn selected_delegate_call(
                         default_provider: *external_default_provider,
                         receiver: Some(resolved(dispatch_receiver.ty)?),
                         declared_receiver: None,
+                        declaring_receiver: None,
                         parameters: parameters
                             .into_iter()
                             .map(resolved)
@@ -1226,6 +1233,7 @@ mod tests {
         let target = DelegateGetValueTarget::Extension {
             callable: Box::new(callable),
             stable_declaration: None,
+            applied_receiver: Ty::Int,
         };
 
         let failure = selected_delegate_call(

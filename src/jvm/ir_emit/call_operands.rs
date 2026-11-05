@@ -246,7 +246,16 @@ impl Emitter<'_> {
                         .is_continuation(call, argument_index)
                 });
             if !is_continuation {
-                this.coerce_reference_on_stack(source, target, code);
+                let declared = parameter_index
+                    .checked_sub(leading_non_argument_operands)
+                    .and_then(|argument_index| {
+                        this.ir
+                            .call_declared_params
+                            .get(&call)?
+                            .get(argument_index)
+                            .copied()
+                    });
+                this.coerce_declared_reference(source, declared, target, code);
             }
         });
         Ok(())
@@ -434,11 +443,14 @@ impl Emitter<'_> {
                 // (`T : Throwable` read as `Throwable`) is not the receiver's own class yet:
                 // kotlinc coerces it to the substituted type the call names.
                 let property_reference = this.property_ref_class_and_captures(operand).is_some();
+                let annotation_implementation =
+                    this.annotation_implementation_interface(source).is_some();
                 let erased_bound = matches!(
                     this.erased_reference_result(operand),
                     Some(super::operand_representation::ErasedResult::Coerced { .. })
                 );
                 let target = if !property_reference
+                    && !annotation_implementation
                     && !erased_bound
                     && source.is_reference()
                     && !super::jvm_is_erased_top(super::ir_ty_to_jvm(&source))
@@ -448,6 +460,7 @@ impl Emitter<'_> {
                     target
                 };
                 this.adapt_physical_operand_for(operand, source, target, code);
+                this.coerce_array_dispatch_receiver(source, code);
             } else {
                 this.adapt_physical_call_operand_for(
                     call_expression,

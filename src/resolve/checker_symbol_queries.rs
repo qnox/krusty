@@ -16,6 +16,8 @@ impl Checker<'_> {
             self.file_index,
             self.access_context_class_names(),
         )
+        .with_eager_lambda_results(self.file.eager_lambda_analysis)
+        .with_member_access(self)
     }
 
     pub(super) fn resolver_in_scope<'s>(
@@ -34,6 +36,7 @@ impl Checker<'_> {
             self.file_index,
             self.lexical_source_class_names(),
         )
+        .with_member_access(self)
     }
 
     /// A resolver over this checker's own federation (the module over the platform) shares the
@@ -120,12 +123,12 @@ impl Checker<'_> {
     /// Every variable currently owned by a postponed body-call frame. Nested member selection may
     /// observe these variables in an applied receiver or parameter, but their constraints must be
     /// committed by the owning frame after the nested candidate is selected.
-    pub(super) fn active_postponed_type_variables(&self) -> Vec<String> {
+    pub(super) fn active_postponed_type_variables(&self) -> Vec<crate::types::TyParamName> {
         let mut variables = Vec::new();
         for frame in &self.postponed_call_constraints {
             for formal in &frame.formals {
                 if !variables.contains(formal) {
-                    variables.push(formal.clone());
+                    variables.push(*formal);
                 }
             }
         }
@@ -133,14 +136,14 @@ impl Checker<'_> {
     }
 
     /// The type variables of active postponed calls that `ty` mentions.
-    pub(super) fn postponed_type_variables_in(&self, ty: Ty) -> Vec<String> {
+    pub(super) fn postponed_type_variables_in(&self, ty: Ty) -> Vec<crate::types::TyParamName> {
         let mut variables = Vec::new();
         for frame in &self.postponed_call_constraints {
             for formal in &frame.formals {
                 if !variables.contains(formal)
                     && ty_mentions_param(ty, std::slice::from_ref(formal))
                 {
-                    variables.push(formal.clone());
+                    variables.push(*formal);
                 }
             }
         }

@@ -15,7 +15,7 @@ use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_fram
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 15;
+pub(crate) const PROTOCOL: u32 = 16;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -391,7 +391,8 @@ fn put_argument(payload: &mut Vec<u8>, argument: &KspArgument) {
 }
 
 /// A value: a tag byte (0 boolean, 1 byte, 2 short, 3 int, 4 long, 5 char, 6 float bits,
-/// 7 double bits, 8 string, 9 enum entry, 10 type, 11 annotation, 12 array), then the value.
+/// 7 double bits, 8 string, 9 enum entry, 10 type, 11 annotation, 12 array,
+/// 13 unsigned byte, 14 unsigned short, 15 unsigned int, 16 unsigned long), then the value.
 fn put_value(payload: &mut Vec<u8>, value: &KspValue) {
     match value {
         KspValue::Boolean(value) => {
@@ -412,6 +413,22 @@ fn put_value(payload: &mut Vec<u8>, value: &KspValue) {
         }
         KspValue::Long(value) => {
             payload.push(4);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::UByte(value) => {
+            payload.push(13);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::UShort(value) => {
+            payload.push(14);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::UInt(value) => {
+            payload.push(15);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::ULong(value) => {
+            payload.push(16);
             payload.extend_from_slice(&value.to_be_bytes());
         }
         KspValue::Char(value) => {

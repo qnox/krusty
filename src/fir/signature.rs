@@ -26,7 +26,7 @@ mod selected_result_publication;
 mod selections;
 mod signature_state;
 pub use arena_ranges::{CallArgumentRange, OperandRange, SubstitutionRange};
-pub use call_arguments::{ResolvedSigCallArgument, SigCallArgument, SigCallArgumentProbe};
+pub use call_arguments::*;
 pub use call_result_constraints::SignatureCallResultConstraint;
 pub use classifier_headers::ResolvedClassifierHeader;
 pub(crate) use classifier_headers::{superclass_slot, DeclaredSuperclass};
@@ -922,7 +922,7 @@ pub trait SignatureSemantics:
 
     fn make_contextual_function_type(
         &self,
-        _declaration: DeclarationId,
+        _function: ContextualFunctionSite,
         parameters: &[ResolvedTy],
         result: ResolvedTy,
         context_count: u32,

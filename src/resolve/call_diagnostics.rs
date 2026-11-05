@@ -406,7 +406,7 @@ impl Checker<'_> {
                 if !inferred_from_callable_reference {
                     continue;
                 }
-                let satisfies_bounds = bindings.get(formal).is_some_and(|&actual| {
+                let satisfies_bounds = bindings.get(formal.as_str()).is_some_and(|&actual| {
                     signature
                         .formal_bounds
                         .get(formal_index)
@@ -432,7 +432,15 @@ impl Checker<'_> {
             .map(|alias| self.publish_constructor_alias_rigid_formals(alias))
             .unwrap_or_default();
         let signature = candidate.semantic_signature();
-        let receiver_bindings = constraints.receiver_bindings(&self.fed_source(), &signature);
+        let mut receiver_bindings = constraints.receiver_bindings(&self.fed_source(), &signature);
+        if let Some(declaration) = candidate.source_inputs.as_deref() {
+            receiver_bindings.extend(
+                declaration
+                    .receiver_bindings
+                    .iter()
+                    .map(|(formal, &actual)| (*formal, actual)),
+            );
+        }
         let whole_arrays = named_whole_array_varargs(parameters, argument_names, &shape.call_sig);
         for (source, &parameter) in parameters.iter().enumerate() {
             let Some((&declared, &actual)) = shape.params.get(parameter).zip(arg_tys.get(source))
@@ -448,7 +456,15 @@ impl Checker<'_> {
                 declared
             };
             let declaration_parameter = shape.parameter_indices[parameter];
-            let raw_input = signature.params[declaration_parameter];
+            let raw_input = candidate
+                .source_inputs
+                .as_deref()
+                .map(|declaration| {
+                    declaration
+                        .declared_input(declaration_parameter)
+                        .expect("retained declaration inputs preserve the mapped parameter layout")
+                })
+                .unwrap_or(signature.params[declaration_parameter]);
             let raw_input = if shape.call_sig.vararg_index == Some(parameter)
                 && !self.file.is_spread_arg(args[source])
                 && !whole_arrays[source]
@@ -469,9 +485,22 @@ impl Checker<'_> {
             {
                 let receiver =
                     self.diagnostic_type_name(constraints.receiver, &[constraints.receiver]);
-                let display = self
-                    .source_callable_display(candidate)
-                    .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
+                let display = self.source_callable_display(candidate).unwrap_or_else(|| {
+                    candidate.source_inputs.as_deref().map_or_else(
+                        || Self::callable_candidate_display(name, candidate),
+                        |declaration| {
+                            Self::semantic_callable_display(
+                                name,
+                                &declaration.signature,
+                                &candidate.call_sig,
+                                candidate.context_count,
+                                candidate.callable.suspend,
+                                candidate.flags.reified,
+                                declaration.signature.receiver,
+                            )
+                        },
+                    )
+                });
                 let projection = match projection {
                     crate::symbol_resolver::InputProjection::Out => "out",
                     crate::symbol_resolver::InputProjection::Star => "star",
@@ -629,7 +658,7 @@ impl Checker<'_> {
             let Some(formal) = signature.formals.get(formal_index) else {
                 continue;
             };
-            let Some(&actual) = bindings.get(formal) else {
+            let Some(&actual) = bindings.get(formal.as_str()) else {
                 continue;
             };
             for &bound in signature
@@ -1146,7 +1175,7 @@ impl Checker<'_> {
                             || ty_mentions_param(receiver, std::slice::from_ref(*formal))
                     })
                     .any(|(index, formal)| {
-                        let Some(&actual) = bindings.get(formal) else {
+                        let Some(&actual) = bindings.get(formal.as_str()) else {
                             return false;
                         };
                         signature
@@ -1178,7 +1207,7 @@ impl Checker<'_> {
             }
             .bindings(&self.fed_source(), &signature);
             for formal in &signature.formals {
-                if !receiver_bindings.contains_key(formal) {
+                if !receiver_bindings.contains_key(formal.as_str()) {
                     self.diags.error(
                         self.call_callee_name_span(call),
                         format!(

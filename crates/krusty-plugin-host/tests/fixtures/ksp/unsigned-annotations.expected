@@ -1,0 +1,12 @@
+# Complete output of KSP2 2.3.12 with Annotations.kt over the shared UnsignedAnnotations.kt fixture.
+w: [ksp] unsignedannotations.UB_MAX accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] unsignedannotations.US_MAX accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] unsignedannotations.UI_MAX accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] unsignedannotations.UL_MAX accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] unsignedannotations.Bits @Target=kotlin.annotation.Target target=null origin=KOTLIN (allowedTargets=[entry ENUM_ENTRY kotlin.annotation.AnnotationTarget.CLASS, entry ENUM_ENTRY kotlin.annotation.AnnotationTarget.TYPE]:List KOTLIN) defaults(allowedTargets=[]:List)
+w: [ksp] unsignedannotations.Bits.b accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] unsignedannotations.Bits.s accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] unsignedannotations.Bits.i accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] unsignedannotations.Bits.l accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] unsignedannotations.Bits.signed accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] unsignedannotations.Subject @Bits=unsignedannotations.Bits target=null origin=KOTLIN (b=[0:UByte, 128:UByte, 255:UByte]:List KOTLIN, s=[0:UShort, 32768:UShort, 65535:UShort]:List KOTLIN, i=[0:UInt, 2147483648:UInt, 4294967295:UInt]:List KOTLIN, l=[0:ULong, 9223372036854775808:ULong, 18446744073709551615:ULong]:List KOTLIN, signed=[-1:Byte]:List KOTLIN) defaults()

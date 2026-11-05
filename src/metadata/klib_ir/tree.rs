@@ -123,7 +123,7 @@ impl KlibIrArena {
         if let Some(KlibIrBody::Block(statements)) = &function.body {
             push_statement_expressions(self, statements, &mut pending);
         }
-        self.callable_symbols_from(pending)
+        self.callable_symbols_from(pending, false)
     }
 
     /// Calls and constructions in a prepared body's executable graph, including defaults.
@@ -144,12 +144,13 @@ impl KlibIrArena {
                 .chain(&function.regular_parameters)
                 .filter_map(|parameter| parameter.default_value),
         );
-        self.callable_symbols_from(pending)
+        self.callable_symbols_from(pending, true)
     }
 
     fn callable_symbols_from(
         &self,
         mut pending: Vec<KlibIrExprId>,
+        include_references: bool,
     ) -> impl Iterator<Item = &KlibIrSymbol> {
         let mut calls = Vec::new();
         while let Some(id) = pending.pop() {
@@ -160,6 +161,13 @@ impl KlibIrArena {
                 | KlibIrExprKind::ConstructorCall { access, .. }
                 | KlibIrExprKind::DelegatingConstructorCall(access)
                 | KlibIrExprKind::EnumConstructorCall(access) => calls.push(&access.symbol),
+                KlibIrExprKind::FunctionReference { access, .. } if include_references => {
+                    calls.push(&access.symbol);
+                }
+                KlibIrExprKind::RichFunctionReference {
+                    reflection_target: Some(target),
+                    ..
+                } if include_references => calls.push(target),
                 _ => {}
             }
         }
@@ -997,8 +1005,10 @@ mod tests {
         let executed = local(KlibIrSymbolKind::Constructor, 1);
         let helper = local(KlibIrSymbolKind::Function, 2);
         let excluded = local(KlibIrSymbolKind::Constructor, 3);
+        let defaulted = local(KlibIrSymbolKind::Constructor, 4);
         let call = arena.push_expr(Some(ty), constructor(executed.clone()));
         let excluded_call = arena.push_expr(Some(ty), constructor(excluded));
+        let default_call = arena.push_expr(Some(ty), constructor(defaulted.clone()));
         let helper_call = arena.push_expr(
             Some(ty),
             KlibIrExprKind::Call {
@@ -1065,10 +1075,10 @@ mod tests {
                 flags: 0,
                 annotations: vec![],
             },
-            name: "unused".into(),
+            name: "defaulted".into(),
             ty,
             vararg_element_type: None,
-            default_value: Some(excluded_call),
+            default_value: Some(default_call),
         });
         let root = arena.push_function(root);
         let selected = arena.function(root);
@@ -1087,17 +1097,22 @@ mod tests {
                 .into_iter()
                 .cloned()
                 .collect::<Vec<_>>(),
-            [helper, executed]
+            [defaulted.clone(), helper, executed]
         );
-        assert!(arena
-            .emitted_callable_symbols(
-                selected,
-                EmittedCallForms {
-                    closure: |_, _| None,
-                    folded_call: |_, _| false,
-                }
-            )
-            .is_empty());
+        assert_eq!(
+            arena
+                .emitted_callable_symbols(
+                    selected,
+                    EmittedCallForms {
+                        closure: |_, _| None,
+                        folded_call: |_, _| false,
+                    }
+                )
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            [defaulted]
+        );
         assert_eq!(arena.callable_symbols_in_body(selected).count(), 0);
         assert_eq!(arena.call_symbols_in_body(selected).count(), 0);
     }

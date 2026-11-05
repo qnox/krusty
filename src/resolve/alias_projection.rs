@@ -48,7 +48,7 @@ pub(super) fn star_projected_alias_type(
     let star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
     let bindings = formals
         .iter()
-        .map(|formal| (formal.clone(), star))
+        .map(|formal| (crate::types::TyParamName::from(formal), star))
         .collect::<crate::symbol_resolver::GSigBinds>();
     let applied = crate::types::ty_subst_alias_expansion(expansion, &bindings);
     alias_target_star_bounds(applied, classifier)
@@ -141,7 +141,7 @@ fn alias_target_star_bounds(
         // Alias formals have already been substituted. Any remaining variable belongs to an
         // enclosing declaration and keeps its declaration-owned bound; following an F-bound here
         // would revisit the same variable.
-        TyKind::TyParam(_, _) => ty,
+        TyKind::TyParam(_, _) | TyKind::Var(_, _) => ty,
         _ => ty,
     }
 }
@@ -400,7 +400,7 @@ impl Checker<'_> {
             .collect::<Vec<_>>();
         let bindings = formals
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(args.iter().copied())
             .collect::<crate::symbol_resolver::GSigBinds>();
         let resolved = crate::types::ty_subst_alias_expansion(expansion, &bindings);
@@ -500,7 +500,7 @@ impl Checker<'_> {
             .collect::<Vec<_>>();
         let bindings = formals
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(arguments)
             .collect::<crate::symbol_resolver::GSigBinds>();
         crate::types::ty_subst_alias_expansion(expansion, &bindings)
@@ -515,7 +515,7 @@ pub(super) fn conflicting_use_site_spans(
     formals: &[String],
     arguments: &[TypeRef],
     expansion: Ty,
-    bindings: &HashMap<String, Ty>,
+    bindings: &crate::types::TyParamBindings,
     projection_spans: &HashMap<Span, Span>,
 ) -> Vec<Span> {
     let mut conflicting = HashSet::default();
@@ -534,7 +534,7 @@ pub(super) fn conflicting_use_site_spans(
 
 fn note_template_conflicts(
     template: Ty,
-    bindings: &HashMap<String, Ty>,
+    bindings: &crate::types::TyParamBindings,
     conflicting: &mut HashSet<String>,
 ) {
     match template.kind() {
@@ -544,7 +544,7 @@ fn note_template_conflicts(
                 TyKind::InProjection(_)
             ) {
                 if let Some(formal) = projected_formal(inner) {
-                    if bindings.contains_key(&formal) {
+                    if bindings.contains_key(formal.as_str()) {
                         conflicting.insert(formal);
                     }
                 }
@@ -557,7 +557,7 @@ fn note_template_conflicts(
                 TyKind::OutProjection(_)
             ) {
                 if let Some(formal) = projected_formal(inner) {
-                    if bindings.contains_key(&formal) {
+                    if bindings.contains_key(formal.as_str()) {
                         conflicting.insert(formal);
                     }
                 }
@@ -586,14 +586,16 @@ fn note_template_conflicts(
                 note_template_conflicts(*part, bindings, conflicting);
             }
         }
-        TyKind::TyParam(_, bound) => note_template_conflicts(bound, bindings, conflicting),
+        TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
+            note_template_conflicts(bound, bindings, conflicting)
+        }
         TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => {}
     }
 }
 
 fn projected_formal(inner: Ty) -> Option<String> {
     match inner.kind() {
-        TyKind::TyParam(name, _) => Some(name.to_string()),
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => Some(name.to_string()),
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
         | TyKind::MutabilityFlexible(inner)

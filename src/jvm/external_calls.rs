@@ -263,6 +263,31 @@ fn realize_expressions(
             } else {
                 supplied
             };
+            if default.is_some() {
+                // The placeholders, masks and marker belong to the construction, as a defaulted
+                // call's do: emission puts the construction's line back at each run of them.
+                let operand_plan = realized_arguments
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(position, argument)| {
+                        let parameter = (position as u32).checked_sub(default_prefix_count);
+                        match parameter.filter(|parameter| defaults.contains(parameter)) {
+                            Some(parameter) => {
+                                DefaultCallOperand::synthesized_default(argument, parameter)
+                            }
+                            None => DefaultCallOperand::supplied(argument),
+                        }
+                    })
+                    .chain(
+                        realization_operands
+                            .iter()
+                            .copied()
+                            .map(DefaultCallOperand::synthesized_abi),
+                    )
+                    .collect();
+                default_call_operands.record(expression, operand_plan);
+            }
             let IrExpr::New {
                 args,
                 ctor_desc,
@@ -434,7 +459,7 @@ fn realize_expressions(
         let kind = callable.kind;
         publish_inline_substitutions(ir, expression, target, &callable, &substitutions);
         let declared_params = callable.declared_params.clone();
-        let inline_modifiers = callable.inline_modifiers.clone();
+        let mut inline_modifiers = callable.inline_modifiers.clone();
         let member_realization = callable.member_realization;
         let semantic_role = callable.semantic_role;
         let descriptor = if callable.descriptor.is_empty() {
@@ -518,7 +543,7 @@ fn realize_expressions(
                 ir.ext_call_source_receiver.remove(&expression);
                 operation.commit(ir, expression);
                 if matches!(result.canonical_semantic().non_null(), Ty::UInt | Ty::ULong) {
-                    ir.logical_types.insert(expression, result);
+                    ir.set_logical_type(expression, result);
                 }
                 continue;
             }
@@ -822,8 +847,10 @@ fn realize_expressions(
                 true,
                 inline_modifiers,
             )?;
-            let physical_call =
-                bridge_external_result(ir, index, callable.physical_ret, semantic_ret);
+            // The invoked operation is the provider's `$default` bridge, so its descriptor result is
+            // the physical value on the stack. An inherited provider can erase a generic result
+            // (`Base<T>.f$default(...): Object`) that the selected override returns as `int`.
+            let physical_call = bridge_external_result(ir, index, default.ret, semantic_ret);
             default_call_operands.record(physical_call, operand_plan);
             default_call_operands.record_declaration(
                 physical_call,
@@ -859,7 +886,44 @@ fn realize_expressions(
                 detail,
             })?;
         let source_arity = source_parameters.len();
-        let omitted = if supplied == source_arity {
+        // A plugin's transform appended parameters to a runtime declaration it compiled (Compose's
+        // `$composer` and `$changed`); its generated calls pass them after the declared ones, and
+        // the compiled method takes them last.
+        let appended = callables.plugin_runtime_appended(target);
+        if !appended.is_empty() {
+            let physical = appended_physical_parameters(&source_parameters, appended, &descriptor)
+                .map_err(|detail| ExternalRealizationError::Arguments {
+                    target: target.into(),
+                    detail: format!(
+                        "call {expression} ({kind:?} {}.{}) {detail}",
+                        callable.physical_owner.render(),
+                        physical_name
+                    ),
+                })?;
+            // The appended operands are ordinary values: no `crossinline` or `noinline` role.
+            if !inline_modifiers.is_empty() {
+                inline_modifiers = inline_modifiers
+                    .iter()
+                    .copied()
+                    .chain(appended.iter().map(|_| InlineParameterModifier::None))
+                    .collect();
+            }
+            let plan =
+                crate::libraries::physical_parameter_plan::source_parameter_plan(physical.len());
+            super::physical_call_arguments::publish_dependency_parameters(
+                ir,
+                expression,
+                physical,
+                Some(&plan),
+                supplied,
+                &[],
+            )
+            .map_err(|detail| ExternalRealizationError::Arguments {
+                target: target.into(),
+                detail,
+            })?;
+        }
+        let omitted = if !appended.is_empty() || supplied == source_arity {
             Vec::new()
         } else if kind == ExternalCallableKind::Extension {
             let receiver = u32::try_from(callable.context_count).map_err(|_| {
@@ -884,19 +948,28 @@ fn realize_expressions(
                 ),
             });
         };
-        super::physical_call_arguments::publish_dependency_parameters(
-            ir,
-            expression,
-            callable.physical_params.clone(),
-            callable.physical_parameter_plan.as_deref(),
-            supplied,
-            &omitted,
-        )
-        .map_err(|detail| ExternalRealizationError::Arguments {
-            target: target.into(),
-            detail,
-        })?;
+        if appended.is_empty() {
+            super::physical_call_arguments::publish_dependency_parameters(
+                ir,
+                expression,
+                callable.physical_params.clone(),
+                callable.physical_parameter_plan.as_deref(),
+                supplied,
+                &omitted,
+            )
+            .map_err(|detail| ExternalRealizationError::Arguments {
+                target: target.into(),
+                detail,
+            })?;
+        }
         let mut extension_receiver_at = None;
+        let annotation_receiver = match &ir.exprs[index] {
+            IrExpr::Call {
+                dispatch_receiver: Some(receiver),
+                ..
+            } => super::annotation_constructions::construction_interface(ir, *receiver),
+            _ => None,
+        };
         let IrExpr::Call {
             callee,
             dispatch_receiver,
@@ -1143,8 +1216,13 @@ fn realize_expressions(
                             &dispatch_classifiers,
                             callable.physical_owner,
                             callable.owner_is_interface,
-                            ir.dispatch_classes.get(&expression).copied(),
-                            ir.ext_call_source_receiver.get(&expression).copied(),
+                            crate::jvm::member_dispatch::VirtualReceiver {
+                                dispatch: ir.dispatch_classes.get(&expression).copied(),
+                                value_type: ir.ext_call_source_receiver.get(&expression).copied(),
+                                annotation_construction: annotation_receiver,
+                                semantic_role,
+                                declaration_owner: callable.declaration_owner,
+                            },
                         )
                         .map_err(|missing| {
                             ExternalDependencyTarget::DispatchClassifier {
@@ -1234,8 +1312,16 @@ fn realize_expressions(
                                 &dispatch_classifiers,
                                 callable.physical_owner,
                                 callable.owner_is_interface,
-                                ir.dispatch_classes.get(&expression).copied(),
-                                ir.ext_call_source_receiver.get(&expression).copied(),
+                                crate::jvm::member_dispatch::VirtualReceiver {
+                                    dispatch: ir.dispatch_classes.get(&expression).copied(),
+                                    value_type: ir
+                                        .ext_call_source_receiver
+                                        .get(&expression)
+                                        .copied(),
+                                    annotation_construction: annotation_receiver,
+                                    semantic_role,
+                                    declaration_owner: callable.declaration_owner,
+                                },
                             )
                             .map_err(|missing| ExternalDependencyTarget::DispatchClassifier {
                                 target,
@@ -1272,8 +1358,16 @@ fn realize_expressions(
                                 &dispatch_classifiers,
                                 callable.physical_owner,
                                 callable.owner_is_interface,
-                                ir.dispatch_classes.get(&expression).copied(),
-                                ir.ext_call_source_receiver.get(&expression).copied(),
+                                crate::jvm::member_dispatch::VirtualReceiver {
+                                    dispatch: ir.dispatch_classes.get(&expression).copied(),
+                                    value_type: ir
+                                        .ext_call_source_receiver
+                                        .get(&expression)
+                                        .copied(),
+                                    annotation_construction: annotation_receiver,
+                                    semantic_role,
+                                    declaration_owner: callable.declaration_owner,
+                                },
                             )
                             .map_err(|missing| ExternalDependencyTarget::DispatchClassifier {
                                 target,
@@ -1385,6 +1479,39 @@ fn realize_expressions(
 /// The wrapper's static `hashCode` and its descriptor that hash a non-null scalar receiver
 /// (`Integer.hashCode(I)I`), as kotlinc's `HashCode` intrinsic calls it for a JVM 1.8+ target.
 /// A receiver without a primitive representation keeps the ordinary virtual `hashCode()`.
+/// The physical parameters of a call that passes `appended` after a runtime declaration's
+/// `source` parameters, once the compiled method's `descriptor` is shown to take exactly those
+/// last.
+fn appended_physical_parameters(
+    source: &[crate::types::Ty],
+    appended: &[crate::types::Ty],
+    descriptor: &str,
+) -> Result<Vec<crate::types::Ty>, String> {
+    let (compiled, _) = crate::jvm::names::parse_method_descriptor(descriptor)
+        .ok_or_else(|| format!("has a malformed descriptor {descriptor}"))?;
+    let tail = compiled
+        .len()
+        .checked_sub(appended.len())
+        .filter(|&start| start == source.len())
+        .map(|start| &compiled[start..])
+        .ok_or_else(|| {
+            format!(
+                "compiles to {descriptor}, not its {} declared and {} appended parameters",
+                source.len(),
+                appended.len()
+            )
+        })?;
+    for (&ty, &spelled) in appended.iter().zip(tail) {
+        let expected = crate::jvm::names::type_descriptor(ty);
+        if expected != spelled {
+            return Err(format!(
+                "compiles an appended parameter as {spelled}, not {expected}"
+            ));
+        }
+    }
+    Ok(source.iter().chain(appended).copied().collect())
+}
+
 fn primitive_hash_code(receiver: crate::types::Ty) -> Option<(crate::types::TypeName, String)> {
     let scalar = receiver.scalar_value_repr()?;
     if receiver.is_nullable() || scalar != receiver || receiver.is_unsigned() {
@@ -1505,7 +1632,7 @@ fn publish_inline_substitutions(
             }
             signature.formals.get(ordinal as usize).map(|name| {
                 (
-                    name.clone(),
+                    name.to_string(),
                     substitution.value,
                     substitution.reified_runtime,
                     substitution.reified,
@@ -1589,8 +1716,8 @@ pub(super) fn bridge_external_result(
     // value-class lowering needs both facts on the cloned operation to distinguish an erased generic
     // read (`Iterator<X>.next(): Object`, which returns a boxed `X`) from a declaration whose value-
     // class result is already returned as its unboxed carrier.
-    ir.logical_types.insert(call, semantic);
-    ir.physical_types.insert(call, physical);
+    ir.set_logical_type(call, semantic);
+    ir.set_physical_type(call, physical);
     ir.exprs[index] = IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::ImplicitCoercion,
         arg: call,

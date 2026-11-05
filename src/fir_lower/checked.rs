@@ -650,6 +650,7 @@ impl BodyLowering<'_> {
                 default_provider,
                 receiver,
                 declared_receiver,
+                declaring_receiver,
                 parameters,
                 result,
                 declared_result,
@@ -669,6 +670,7 @@ impl BodyLowering<'_> {
                     default_provider: *default_provider,
                     receiver_ty: *receiver,
                     declared_receiver: *declared_receiver,
+                    declaring_receiver: *declaring_receiver,
                     parameters,
                     result: *result,
                     declared_result: *declared_result,
@@ -689,6 +691,7 @@ impl BodyLowering<'_> {
                 .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration))
             }
             FirCallTarget::Super {
+                qualifier,
                 owner,
                 dispatch_owner,
                 enclosing_dispatch,
@@ -731,6 +734,7 @@ impl BodyLowering<'_> {
                 // The semantic super target stays explicit through common lowering. A provider may
                 // already have fixed its physical descriptor; source declarations leave it empty.
                 let callee = crate::ir::Callee::Super {
+                    qualifier: *qualifier,
                     owner: *owner,
                     dispatch_owner: *dispatch_owner,
                     enclosing_dispatch: *enclosing_dispatch,
@@ -765,6 +769,13 @@ impl BodyLowering<'_> {
                 // continuation and must not infer suspendness from the realized descriptor.
                 if *suspend {
                     self.ir.suspend_calls.insert(call, result.get());
+                }
+                // A generic super declaration leaves its physical result on the call; the logical
+                // result is the coercion the caller wraps around it, as at any selected call.
+                if physical_result.get() != result.get() {
+                    self.ir
+                        .call_declared_ret
+                        .insert(call, physical_result.get());
                 }
                 Ok(self.wrap_call_statements(statements, call))
             }

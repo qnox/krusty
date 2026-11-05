@@ -165,7 +165,10 @@ fn copy_type(source: &KlibIrArena, target: &mut KlibIrArena, ty: KlibIrTypeId) -
     target.push_type(copied)
 }
 
-fn target_tree(source: &KlibIrArena, function: &KlibIrFunction) -> KlibIrDeclarationTree {
+pub(super) fn target_tree(
+    source: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> KlibIrDeclarationTree {
     let mut arena = KlibIrArena::default();
     let mut function = function.clone();
     for formal in &mut function.type_parameters {
@@ -520,7 +523,7 @@ fn klib_target_storage_external_leaves_keep_generic_calls_without_emitting_facto
             assert_eq!(substitutions.len(), 1);
             assert_eq!(substitutions[0].value, element.semantic());
             let generic = selected.generic_signature().unwrap();
-            let bindings = [(generic.formals[0].clone(), element.semantic())]
+            let bindings = [(generic.formals[0], element.semantic())]
                 .into_iter()
                 .collect();
             assert_eq!(*ret, generic.ret.substitute_erased(&bindings));

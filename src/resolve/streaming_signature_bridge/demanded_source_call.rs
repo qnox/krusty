@@ -26,7 +26,7 @@ pub(super) fn demanded_source_result(
             generic
                 .formals
                 .iter()
-                .cloned()
+                .map(crate::types::TyParamName::from)
                 .zip(explicit_type_arguments.iter().copied()),
         );
     }
