@@ -57,7 +57,14 @@ impl CallableReferences {
         });
         let equals = module.declare();
         let mut code = Code::default();
-        code.local_get(1)
+        code.local_get(0)
+            .local_get(1)
+            .ref_eq()
+            .if_(BlockType::Empty)
+            .i32_const(1)
+            .return_()
+            .end()
+            .local_get(1)
             .ref_test(false, HeapType::Concrete(object))
             .op(super::runtime::EQZ32)
             .if_(BlockType::Empty)

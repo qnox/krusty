@@ -1044,6 +1044,10 @@ fn wasm_generated_members_compare_callable_declarations_and_receivers() {
             "wasmDataClassCallableReferenceEquality",
         ),
         (
+            include_str!("box_regressions/dataClassCallableReferenceSelfEquality.kt"),
+            "wasmDataClassCallableReferenceSelfEquality",
+        ),
+        (
             include_str!("box_regressions/dataClassOverloadedConstructorReferences.kt"),
             "wasmDataClassOverloadedConstructorReferences",
         ),
