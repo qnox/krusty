@@ -115,7 +115,14 @@ pub(crate) fn base_member(
 ) -> Option<BaseMember> {
     let property = callables.property(target)?;
     let getter = callables.callable(property.getter)?;
-    if getter.physical_owner != crate::types::wk::kotlin_enum() {
+    // The semantic owner, not the physical one: on a JVM classpath the getter is realized on the
+    // mapped platform class.
+    let owner = match getter.declaration_owner {
+        Some(crate::types::SemanticCallableOwner::Classifier(owner)) => owner,
+        Some(crate::types::SemanticCallableOwner::Package(_)) => return None,
+        None => getter.physical_owner,
+    };
+    if owner != crate::types::wk::kotlin_enum() {
         return None;
     }
     match &*property.name {

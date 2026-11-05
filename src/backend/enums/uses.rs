@@ -30,12 +30,24 @@ fn roots(ir: &IrFile) -> Vec<ExprId> {
     roots
 }
 
-/// The enums whose `entries` some use of this file reads.
+/// The enums whose `entries` some use of this file reads. Before realization a constant's
+/// arguments are no emitted body yet, so they are scanned too (`A(F.entries.size)`).
 pub(super) fn entries_read(ir: &IrFile) -> HashSet<TypeName> {
     roots(ir)
         .into_iter()
+        .chain(entry_arguments(ir))
         .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
         .filter_map(|expression| entries_of(ir.expr(expression)))
+        .collect()
+}
+
+/// Every enum constant's argument prelude and arguments.
+fn entry_arguments(ir: &IrFile) -> Vec<ExprId> {
+    ir.classes
+        .iter()
+        .flat_map(|class| &class.enum_entries)
+        .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args))
+        .copied()
         .collect()
 }
 

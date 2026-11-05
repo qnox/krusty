@@ -497,12 +497,12 @@ mod tests {
     fn an_unsupported_construct_declines_the_whole_compilation_by_name() {
         let (outputs, diagnostics) = compile(
             WasmTarget::Js,
-            "enum class Color { RED }\nfun box(): String = \"OK\"",
+            "fun other(): String = try { \"O\" } finally { val unused = 0 }\nfun box(): String = \"OK\"",
         );
         assert_eq!(outputs, Vec::<Artifact>::new());
         assert_eq!(
             diagnostics,
-            ["krusty: the wasm backend does not support an enum class (`Color`) yet"]
+            ["krusty: the wasm backend does not support a `try` with `finally` yet"]
         );
     }
 

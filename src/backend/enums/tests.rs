@@ -620,6 +620,34 @@ fn entries_no_use_reads_are_not_built() {
     assert_eq!(lists("Shade$initEntries"), (0, 4));
 }
 
+/// A constant's argument is the only read of another enum's `entries`
+/// (`enum class Kind(val n: Int) { A(Shade.entries.size) }`): the list is still kept and built,
+/// under either contract.
+#[test]
+fn entries_read_only_by_a_constant_argument_are_built() {
+    for contract in [super::Contract::KotlinNative, super::Contract::KotlinWasm] {
+        let mut ir = IrFile::default();
+        shade(&mut ir);
+        let entries = ir.add_expr(IrExpr::EnumEntries {
+            classifier: type_name("Shade"),
+        });
+        enum_class(&mut ir, "Kind", vec![entry("A", vec![entries], Vec::new())]);
+        let ir = lowered_for(ir, contract);
+
+        let IrExpr::Block {
+            value: Some(value), ..
+        } = ir.expr(entries)
+        else {
+            panic!("the argument is realized in place: {:?}", ir.expr(entries));
+        };
+        assert!(
+            matches!(ir.expr(*value), IrExpr::GetStatic(_)),
+            "{contract:?}: {:?}",
+            ir.expr(*value)
+        );
+    }
+}
+
 /// kotlinc-js/wasm publish each constant once it is constructed, a constant with a body from its
 /// subclass's constructor right after the super call, and build `entries` on its first read.
 #[test]
