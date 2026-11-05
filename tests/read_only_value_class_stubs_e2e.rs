@@ -17,7 +17,7 @@
 //!
 //! A value class over `Collection<Z>` writes its interface entries by the overridden collection
 //! declaration's signature policy (`containsAll(Collection<?>)`) and bridges `size()` as an
-//! ordinary synthetic override; its `removeIf` default is the JDK's later realization. A class
+//! ordinary synthetic override, which its box test reads back through reflection. A class
 //! extending a Kotlin `AbstractList`/`AbstractSet` gets the special bridges of the fake overrides
 //! it inherits, and a value-class box passed to a declared parameter that names a type parameter
 //! without being one (`Iterable<T>`, `Tagged<out T>`) is cast to it, as kotlinc's implicit cast is.
@@ -179,18 +179,7 @@ const LATER_REALIZATIONS: &[&str] = &[
 ];
 
 fn assert_map_matches_kotlinc(class: &str, members: &[&str]) {
-    assert_members_match_kotlinc(("Maps.kt", MAPS), class, LATER_REALIZATIONS, members);
-}
-
-/// `class`'s declarations, except the `later` realizations, and the code of each of `members`
-/// match kotlinc's. A `later` entry ending in `-` names every mangled spelling it begins.
-fn assert_members_match_kotlinc(
-    (file, source): (&str, &str),
-    class: &str,
-    later: &[&str],
-    members: &[&str],
-) {
-    let classes = common::classes_against_kotlinc_module(&[(file, &packaged(source))]);
+    let classes = common::classes_against_kotlinc_module(&[("Maps.kt", &packaged(MAPS))]);
     let (reference, krusty) = classes
         .method_declarations(class)
         .unwrap_or_else(|| panic!("both compilers write {class}"));
@@ -198,7 +187,7 @@ fn assert_members_match_kotlinc(
         declarations
             .into_iter()
             .filter(|declaration| {
-                !later.iter().any(|later| {
+                !LATER_REALIZATIONS.iter().any(|later| {
                     declaration.as_str() == *later
                         || later.ends_with('-') && declaration.starts_with(later)
                 })
@@ -300,6 +289,13 @@ object Java {
         val method = Class.forName(face).methods.single { it.name == name && it.parameterCount == arguments.size }
         return \"$name=${method.invoke(receiver, *arguments)}\"
     }
+
+    /// The methods named `name` that `receiver`'s class declares, as reflection spells them.
+    fun declared(receiver: Any, name: String): String {
+        val type = receiver.javaClass
+        return type.declaredMethods.filter { it.name == name }
+            .joinToString { it.toGenericString().replace(type.name + \".\", \"\") }
+    }
 }
 
 fun box(): String {
@@ -316,12 +312,17 @@ fun box(): String {
         Java.through(collection, zs, \"contains\", 2),
         Java.through(collection, zs, \"containsAll\", listOf(Z(1))),
         Java.through(collection, zs, \"size\"),
+        Java.declared(zs, \"contains\"),
+        Java.declared(zs, \"containsAll\"),
+        Java.declared(zs, \"size\"),
         \"held=${held(zs, Z(1))}\",
         \"position=${position(zs, Z(2))}\",
         tags(Z(3)),
     ).joinToString(\"; \")
     val expected = \"contains=true; contains=false; indexOf=1; lastIndexOf=-1; \" +
-        \"contains=false; contains=true; contains=false; containsAll=true; size=2; held=true; position=1; Z(x=3)Z(x=3)\"
+        \"contains=false; contains=true; contains=false; containsAll=true; size=2; \" +
+        \"public final boolean contains(java.lang.Object); \" +
+        \"public boolean containsAll(java.util.Collection<?>); public int size(); held=true; position=1; Z(x=3)Z(x=3)\"
     return if (outcomes == expected) \"OK\" else outcomes
 }
 ";
@@ -338,24 +339,6 @@ fn a_value_class_box_passed_to_a_generic_parameter_shape_is_cast_like_kotlinc() 
         "ValueCollections",
         &packaged(COLLECTIONS),
         "stubs/ValueCollectionsKt",
-    );
-}
-
-/// The members of `java.util.Collection` a later realization writes, as `javap -p` spells them.
-const COLLECTION_LATER_REALIZATIONS: &[&str] =
-    &["public boolean removeIf(java.util.function.Predicate<? super stubs.Z>);"];
-
-#[test]
-fn a_value_class_collection_maps_its_special_members_like_kotlinc() {
-    assert_members_match_kotlinc(
-        ("ValueCollections.kt", COLLECTIONS),
-        "stubs/Zs",
-        COLLECTION_LATER_REALIZATIONS,
-        &[
-            "public final boolean contains(java.lang.Object);",
-            "public boolean containsAll(java.util.Collection<?>);",
-            "public int size();",
-        ],
     );
 }
 
