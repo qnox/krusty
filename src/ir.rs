@@ -1869,6 +1869,9 @@ pub struct IrFile {
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each exported overridable member's dispatching entry, by the member's `FunId`: the function
+    /// another module's call reaches it through, which dispatches on the receiver.
+    pub(crate) dispatch_entries: crate::fx_hash::HashMap<FunId, FunId>,
     /// Each enum class's initializer, which builds its constants and then its companion, once a
     /// target's shared enum lowering ([`crate::backend::enums`]) has realized it as an ordinary
     /// function of this file. A target whose companion getter runs first calls it before building
