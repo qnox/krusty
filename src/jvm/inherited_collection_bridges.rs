@@ -185,7 +185,7 @@ fn synthesize(
                 specification: specification.clone(),
                 method: method.clone(),
                 class_bindings: node.bindings.clone(),
-                declared_parameter_names: declared_parameter_names(&node.info, method),
+                declared_parameter_names: declared_parameter_names(classpath, &node.info, method),
             });
         }
     }
@@ -225,8 +225,13 @@ struct FoundMember {
 }
 
 /// The value parameter names `info`'s Kotlin metadata declares for `method`.
-fn declared_parameter_names(info: &ClassInfo, method: &MethodSig) -> Option<Vec<String>> {
-    info.meta
+fn declared_parameter_names(
+    classpath: &Classpath,
+    info: &ClassInfo,
+    method: &MethodSig,
+) -> Option<Vec<String>> {
+    classpath
+        .class_members(info)
         .class_functions
         .iter()
         .find(|function| {
