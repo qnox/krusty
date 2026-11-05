@@ -2,6 +2,7 @@
 
 use crate::fx_hash::HashSet;
 
+use super::capture_storage::ConstructorArgumentUses;
 use super::{Checker, ExprLowering, LambdaCapture};
 use crate::ast::{
     ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, File, FunBody, Stmt, StmtId,
@@ -300,7 +301,13 @@ pub(super) fn local_fun_body_uses_any(
     expression: ExprId,
     outer: &HashSet<String>,
 ) -> bool {
-    lexical_uses_any(file, CaptureUseRoot::Expression(expression), outer, false)
+    lexical_uses_any(
+        file,
+        CaptureUseRoot::Expression(expression),
+        outer,
+        false,
+        None,
+    )
 }
 
 /// Read an anonymous body's lexical roots without losing callable parameter scopes. The caller
@@ -311,6 +318,7 @@ pub(super) fn anonymous_class_uses_name(
     base_arguments: &[ExprId],
     name: &str,
     extension_calls: bool,
+    lambda_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
     let outer = std::iter::once(name.to_owned()).collect();
     lexical_uses_any(
@@ -321,6 +329,7 @@ pub(super) fn anonymous_class_uses_name(
         },
         &outer,
         extension_calls,
+        Some(lambda_uses),
     )
 }
 
@@ -333,9 +342,10 @@ enum CaptureUseRoot<'a> {
 }
 
 #[derive(Clone)]
-struct ActiveCaptureUses {
+struct ActiveCaptureUses<'a> {
     names: HashSet<String>,
     extension_calls: bool,
+    lambda_uses: Option<ConstructorArgumentUses<'a>>,
 }
 
 fn lexical_uses_any(
@@ -343,11 +353,12 @@ fn lexical_uses_any(
     root: CaptureUseRoot<'_>,
     outer: &HashSet<String>,
     extension_calls: bool,
+    lambda_uses: Option<ConstructorArgumentUses<'_>>,
 ) -> bool {
     fn class_uses(
         file: &File,
         class: &ClassDecl,
-        active: &ActiveCaptureUses,
+        active: &ActiveCaptureUses<'_>,
         base_arguments: &[ExprId],
     ) -> bool {
         // A name this class introduces hides an enclosing value only when the enclosing scope
@@ -468,7 +479,7 @@ fn lexical_uses_any(
         false
     }
 
-    fn expression_uses(file: &File, expression: ExprId, active: &ActiveCaptureUses) -> bool {
+    fn expression_uses(file: &File, expression: ExprId, active: &ActiveCaptureUses<'_>) -> bool {
         match file.expr(expression) {
             Expr::Name(name) => active.names.contains(name),
             Expr::SafeCall { name, .. }
@@ -496,7 +507,11 @@ fn lexical_uses_any(
                 for parameter in params {
                     active.names.remove(parameter);
                 }
-                if params.is_empty() {
+                if params.is_empty()
+                    && active
+                        .lambda_uses
+                        .is_none_or(|uses| uses.binds_implicit_lambda_parameter(file, expression))
+                {
                     active.names.remove("it");
                 }
                 expression_uses(file, *body, &active)
@@ -529,7 +544,7 @@ fn lexical_uses_any(
         }
     }
 
-    fn statement_uses(file: &File, statement: StmtId, active: &mut ActiveCaptureUses) -> bool {
+    fn statement_uses(file: &File, statement: StmtId, active: &mut ActiveCaptureUses<'_>) -> bool {
         match file.stmt(statement) {
             Stmt::IncDec { name, .. } => active.names.contains(name),
             // Assignment targets are statement spellings rather than `Expr::Name` children.
@@ -611,6 +626,7 @@ fn lexical_uses_any(
     let active = ActiveCaptureUses {
         names: outer.clone(),
         extension_calls,
+        lambda_uses,
     };
     match root {
         CaptureUseRoot::Expression(expression) => expression_uses(file, expression, &active),

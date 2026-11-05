@@ -219,6 +219,25 @@ pub(super) enum ConstructorArgumentUses<'a> {
 }
 
 impl ConstructorArgumentUses<'_> {
+    /// Candidate discovery cannot decide whether an omitted lambda parameter list binds `it`.
+    /// Only the selected lambda expression and its checked function shape can hide that outer name.
+    pub(super) fn binds_implicit_lambda_parameter(self, file: &File, expression: ExprId) -> bool {
+        let Self::Checked {
+            expressions, types, ..
+        } = self
+        else {
+            return false;
+        };
+        if !matches!(expressions.get(&expression), Some(ExprLowering::Lambda(_))) {
+            return false;
+        }
+        let signature = match types.get(expression.0 as usize).map(|ty| ty.kind()) {
+            Some(TyKind::Fun(signature)) => Some(signature),
+            _ => None,
+        };
+        super::context_capture::lambda_binds_implicit_it(file, expression, signature)
+    }
+
     fn retains_closure(self, file: &File, declaration: DeclId, expression: ExprId) -> bool {
         match self {
             Self::Candidates => matches!(file.expr(expression), Expr::Lambda { .. }),
@@ -366,6 +385,7 @@ fn anonymous_body_uses_name(
         &base_arguments,
         name,
         matches!(ty.kind(), TyKind::Fun(signature) if signature.has_receiver),
+        constructor_uses,
     )
 }
 
