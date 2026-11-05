@@ -678,16 +678,14 @@ fn record_class_function_exports(
             }
         }
         record_constructor_exports(ir, module_name, source, (record, class), container, exports)?;
-        if source.is_interface {
-            record_interface_property_exports(
-                ir,
-                module_name,
-                source,
-                (record, class),
-                container,
-                exports,
-            )?;
-        }
+        record_class_property_exports(
+            ir,
+            module_name,
+            source,
+            (record, class),
+            container,
+            exports,
+        )?;
     }
     Ok(())
 }
@@ -776,10 +774,9 @@ fn record_constructor_exports(
     Ok(())
 }
 
-/// Record the getter identity of every property the interface `source` declares, the identity
-/// another module's class implementing the property names it by, and export the accessor bodies
-/// an implementing class inherits as defaults.
-fn record_interface_property_exports(
+/// Join each published property accessor to its checked declaration. Source-written bodies retain
+/// their exact function identities; concrete default accessors get target-neutral entry plans.
+fn record_class_property_exports(
     ir: &IrFile,
     module_name: &str,
     source: &IrClass,
@@ -792,11 +789,16 @@ fn record_interface_property_exports(
 ) -> Result<(), String> {
     let name = source.fq_name_id();
     if class.properties.len() != record.prop_origins.len() {
+        let kind = if source.is_interface {
+            "interface"
+        } else {
+            "class"
+        };
         return Err(format!(
-            "interface {} changed property declaration order ({} decoded, {} recorded)",
+            "{kind} {} changed property declaration order ({} decoded, {} recorded)",
             source.fq_name(),
             class.properties.len(),
-            record.prop_origins.len()
+            record.prop_origins.len(),
         ));
     }
     let extensions = ir.member_ext_props.get(&name);
@@ -804,10 +806,10 @@ fn record_interface_property_exports(
         if declaration.visibility == crate::types::Visibility::Private {
             continue;
         }
-        let Some((property, getter, setter)) =
+        let mut selected =
             ir.local_property_layouts
                 .iter()
-                .find_map(|(property, layout)| match (origin, layout) {
+                .filter_map(|(property, layout)| match (origin, layout) {
                     (
                         PropertyOrigin::Declared(index),
                         crate::ir::IrLocalPropertyLayout::Member {
@@ -815,10 +817,11 @@ fn record_interface_property_exports(
                             property: at,
                             getter,
                             setter,
+                            backing_field,
                             ..
                         },
                     ) if *owner == name && *at as usize == *index => {
-                        Some((*property, *getter, *setter))
+                        Some((*property, *getter, *setter, backing_field.is_some()))
                     }
                     (
                         PropertyOrigin::MemberExtension(index),
@@ -833,13 +836,30 @@ fn record_interface_property_exports(
                             .and_then(|extensions| extensions.get(*index))
                             .is_some_and(|extension| extension.getter == *getter) =>
                     {
-                        Some((*property, Some(*getter), *setter))
+                        Some((*property, Some(*getter), *setter, false))
                     }
                     _ => None,
-                })
-        else {
+                });
+        let Some((property, getter, setter, storage)) = selected.next() else {
+            if matches!(
+                origin,
+                PropertyOrigin::Declared(_) | PropertyOrigin::MemberExtension(_)
+            ) {
+                return Err(format!(
+                    "{}.{} has no checked property declaration identity",
+                    source.fq_name(),
+                    declaration.name
+                ));
+            }
             continue;
         };
+        if selected.next().is_some() {
+            return Err(format!(
+                "{}.{} has ambiguous checked property declaration identities",
+                source.fq_name(),
+                declaration.name
+            ));
+        }
         let accessor = |accessor| {
             package_property_accessor_signature(container, declaration, accessor)
                 .map(|signature| crate::libraries::KlibDependencyCallable {
@@ -848,18 +868,72 @@ fn record_interface_property_exports(
                 })
                 .map_err(|error| format!("{}.{}: {error}", source.fq_name(), declaration.name))
         };
-        exports.record_interface_property(property, accessor(MetadataAccessor::Getter)?);
-        for (function, role) in [
-            (getter, MetadataAccessor::Getter),
-            (setter, MetadataAccessor::Setter),
+        if source.is_interface {
+            exports.record_interface_property(property, accessor(MetadataAccessor::Getter)?);
+        }
+        for (function, role, modifiers, present) in [
+            (
+                getter,
+                MetadataAccessor::Getter,
+                &declaration.getter_modifiers,
+                true,
+            ),
+            (
+                setter,
+                MetadataAccessor::Setter,
+                &declaration.setter_modifiers,
+                declaration.is_var,
+            ),
         ] {
-            let Some(function) = function
-                .filter(|function| crate::backend::has_standalone_dependency_code(ir, *function))
-            else {
+            if !present || modifiers.visibility == crate::types::Visibility::Private {
                 continue;
-            };
-            exports.record_callable(function, accessor(role)?);
-            exports.record_member_receiver(function, crate::types::Ty::obj_name(name));
+            }
+            if let Some(function) = function {
+                if crate::backend::has_standalone_dependency_code(ir, function) {
+                    let receiver = ir.declared_class_self_type(name).ok_or_else(|| {
+                        format!(
+                            "class {} has no declared accessor receiver application",
+                            source.fq_name()
+                        )
+                    })?;
+                    exports.record_callable(function, accessor(role)?);
+                    exports.record_member_receiver(function, receiver);
+                }
+            } else if !source.is_interface
+                && modifiers.is_default
+                && !modifiers.modality.is_abstract()
+                && !modifiers.is_external
+                && !declaration.is_external
+                && !declaration.is_expect
+            {
+                if !storage || !ir.checked_properties.contains_key(&property) {
+                    return Err(format!(
+                        "{}.{} has no checked storage for its default accessor",
+                        source.fq_name(),
+                        declaration.name
+                    ));
+                }
+                let operation = match role {
+                    MetadataAccessor::Getter => {
+                        crate::backend::ExportedPropertyAccessor::Getter(property)
+                    }
+                    MetadataAccessor::Setter => {
+                        crate::backend::ExportedPropertyAccessor::Setter(property)
+                    }
+                };
+                exports.record_property_accessor(operation, accessor(role)?);
+            } else if !source.is_interface
+                && !modifiers.modality.is_abstract()
+                && !modifiers.is_external
+                && !declaration.is_external
+                && !declaration.is_expect
+            {
+                return Err(format!(
+                    "{}.{} has no checked body for its declared accessor",
+                    source.fq_name(),
+                    declaration.name,
+                ));
+            }
         }
     }
     Ok(())

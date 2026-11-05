@@ -237,6 +237,12 @@ impl Backend for CraneliftBackend {
             file.dependency_exports.callable(function).is_some()
         });
         crate::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
+        if let Err(error) =
+            crate::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)
+        {
+            report_decline(&lower::Unsupported::from(error), &file, diags);
+            return Vec::new();
+        }
         crate::backend::dispatch_entries::realize(&mut file.ir, &file.dependency_exports);
         // A local or anonymous classifier arrives with an opaque identity; this target names it
         // from its provenance as Kotlin/Native does. There is no facade class here, so a
