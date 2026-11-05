@@ -18,8 +18,7 @@ use crate::metadata::class_declarations::{ClassTailOptions, FunctionOrigin, Prop
 use crate::metadata::declaration_records;
 use crate::metadata::id_signature::{
     constructor_signature, package_function_signature, package_property_accessor_signature,
-    MetadataAccessor,
-    MetadataClass, MetadataContainer,
+    MetadataAccessor, MetadataClass, MetadataContainer,
 };
 use crate::metadata::klib_fragment::{
     package_fragment_with_inner_classifiers, KlibClass, KlibFileMembers,
@@ -721,7 +720,9 @@ fn record_constructor_exports(
             class.constructors.len(),
         ));
     }
-    if (source.is_object || source.is_companion) && class.visibility != crate::types::Visibility::Private {
+    if (source.is_object || source.is_companion)
+        && class.visibility != crate::types::Visibility::Private
+    {
         let id = ir
             .class_id_by_name(source.fq_name_id())
             .ok_or_else(|| format!("object {} has no IR identity", source.fq_name()))?;
@@ -745,7 +746,10 @@ fn record_constructor_exports(
         .emit_primary_ctor
         .then_some(None)
         .filter(|_| source.has_primary_ctor);
-    let secondaries = record.secondary_ordinals.iter().map(|&ordinal| Some(ordinal));
+    let secondaries = record
+        .secondary_ordinals
+        .iter()
+        .map(|&ordinal| Some(ordinal));
     let skipped = usize::from(record.emit_primary_ctor && !source.has_primary_ctor);
     for (declaration, secondary) in class
         .constructors

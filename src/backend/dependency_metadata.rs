@@ -298,7 +298,11 @@ impl DependencyExportSignatures {
     }
 
     /// Record the target-realized entry answering the instance of the object `classifier`.
-    pub(crate) fn record_singleton_entry(&mut self, classifier: crate::types::TypeName, entry: FunId) {
+    pub(crate) fn record_singleton_entry(
+        &mut self,
+        classifier: crate::types::TypeName,
+        entry: FunId,
+    ) {
         self.singleton_entries.push((classifier, entry));
     }
 

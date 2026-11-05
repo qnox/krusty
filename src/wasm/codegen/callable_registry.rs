@@ -206,7 +206,9 @@ impl CallableRegistry {
                     continue;
                 }
                 // Another module's object is read through the entry its module publishes.
-                IrExpr::SingletonValue { classifier } if ir.class_id_by_name(*classifier).is_none() => {
+                IrExpr::SingletonValue { classifier }
+                    if ir.class_id_by_name(*classifier).is_none() =>
+                {
                     if let Some(&entry) = self.dependency_singletons.get(classifier) {
                         targets.singletons.insert(*classifier, entry);
                     }
@@ -510,7 +512,10 @@ impl FileCallTargets {
     }
 
     /// The entry answering the instance of another module's object `classifier`.
-    pub(super) fn dependency_singleton(&self, classifier: crate::backend::DependencyClassifier) -> Option<u32> {
+    pub(super) fn dependency_singleton(
+        &self,
+        classifier: crate::backend::DependencyClassifier,
+    ) -> Option<u32> {
         self.singletons.get(&classifier).copied()
     }
 

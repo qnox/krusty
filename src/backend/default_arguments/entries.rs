@@ -150,9 +150,7 @@ fn is_publishable(ir: &IrFile, function: FunId) -> bool {
             .class_id_by_name(owner)
             .is_some_and(|class| !ir.local_class_name_provenance.contains_key(&class)),
     };
-    reachable
-        && !ir.inline_only_fns.contains(&function)
-        && declares_defaults(ir, function)
+    reachable && !ir.inline_only_fns.contains(&function) && declares_defaults(ir, function)
 }
 
 fn is_checked_callable(ir: &IrFile, function: FunId) -> bool {

@@ -343,8 +343,7 @@ impl BodyLowering<'_, '_, '_> {
             let result = export.signature.result();
             if parameters.len() != args.len() {
                 return Err(
-                    "a dependency construction whose operands disagree with its constructor"
-                        .into(),
+                    "a dependency construction whose operands disagree with its constructor".into(),
                 );
             }
             let arguments = self.arguments(args, &parameters)?;
