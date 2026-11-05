@@ -161,7 +161,7 @@ pub(crate) fn solved_constructor_type_arguments(
 pub(crate) fn nested_result_from_concrete_parameter(
     nested: &GenericSig,
     parameter: Ty,
-    outer_formals: &[String],
+    outer_formals: &[crate::types::TyParamName],
     mut admits: impl FnMut(Ty, Ty) -> bool,
 ) -> Result<Option<Ty>, ()> {
     let mut binds = GSigBinds::default();
@@ -196,7 +196,7 @@ fn bind_concrete_parameter(
     nested: &GenericSig,
     shape: Ty,
     actual: Ty,
-    outer_formals: &[String],
+    outer_formals: &[crate::types::TyParamName],
     binds: &mut GSigBinds,
 ) -> bool {
     // `T?` matched against `S?` says only `T = S & Any`: `S` itself may admit null.
@@ -212,7 +212,7 @@ fn bind_concrete_parameter(
             outer_formals,
             binds,
         ),
-        TyKind::TyParam(name, _) if nested.formals.iter().any(|formal| formal == name) => {
+        TyKind::TyParam(name, _) if nested.formals.contains(&name) => {
             let constraint = actual.projection_inner().unwrap_or(actual);
             let constraint = if through_nullable {
                 constraint.contributed_through_nullable_formal()
@@ -250,7 +250,11 @@ fn bind_concrete_parameter(
     }
 }
 
-fn is_concrete_constraint(ty: Ty, nested_formals: &[String], outer_formals: &[String]) -> bool {
+fn is_concrete_constraint(
+    ty: Ty,
+    nested_formals: &[crate::types::TyParamName],
+    outer_formals: &[crate::types::TyParamName],
+) -> bool {
     !matches!(ty.kind(), TyKind::StarProjection(_) | TyKind::Error)
         && !crate::types::ty_mentions_param(ty, nested_formals)
         && !crate::types::ty_mentions_param(ty, outer_formals)
@@ -278,7 +282,11 @@ mod tests {
 
     fn signature(formals: &[&str], bounds: Vec<Vec<Ty>>, ret: Ty) -> GenericSig {
         GenericSig {
-            formals: formals.iter().map(|formal| (*formal).to_string()).collect(),
+            formals: formals
+                .iter()
+                .copied()
+                .map(crate::types::TyParamName::new)
+                .collect(),
             formal_bounds: bounds,
             receiver: None,
             params: Vec::new(),
@@ -381,9 +389,9 @@ mod tests {
                 &generic,
                 parameter,
                 &[
-                    "gather:T".to_string(),
-                    "gather:A".to_string(),
-                    "gather:R".to_string()
+                    crate::types::TyParamName::new("gather:T"),
+                    crate::types::TyParamName::new("gather:A"),
+                    crate::types::TyParamName::new("gather:R")
                 ],
                 |actual, bound| actual == bound || bound == any,
             ),
@@ -410,7 +418,7 @@ mod tests {
             nested_result_from_concrete_parameter(
                 &generic,
                 parameter,
-                &["take:T".to_string()],
+                &[crate::types::TyParamName::new("take:T")],
                 |actual, bound| actual == bound,
             ),
             Ok(None)

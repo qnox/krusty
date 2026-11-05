@@ -672,11 +672,6 @@ fn header(
                 semantic_type(arena, types, element)?,
             )?;
         }
-        if parameter.default_value.is_some() {
-            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                "a parameter default",
-            ));
-        }
         params.push(packed);
         identities.push(serialized_identity(*role, parameter));
     }
@@ -735,7 +730,10 @@ fn header(
         receiver_slot: None,
         singleton_extension_unread_receiver,
         values,
-        defaults: vec![None; serialized.len()],
+        defaults: serialized
+            .iter()
+            .map(|(_, parameter)| parameter.default_value)
+            .collect(),
         type_parameters,
         erasures: HashMap::default(),
         erased_result: None,
