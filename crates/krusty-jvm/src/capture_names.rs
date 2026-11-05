@@ -240,7 +240,7 @@ fn realized_instance(
     receiver: &IrCapturedReceiver,
     container: Option<FunId>,
 ) -> Option<String> {
-    let IrCapturedReceiver::Enclosing { classifier } = receiver else {
+    let IrCapturedReceiver::Enclosing { classifier, .. } = receiver else {
         return None;
     };
     let member = super::lifted_names::classifier_member(ir, container?, *classifier)?;

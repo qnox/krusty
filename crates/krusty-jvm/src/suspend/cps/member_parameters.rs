@@ -203,6 +203,7 @@ mod tests {
             vec![IrParameterIdentity::captured_receiver(0)],
             0,
             vec![IrCapturedReceiver::Enclosing {
+                owner: None,
                 classifier: krusty::types::type_name("Outer"),
             }],
             None,

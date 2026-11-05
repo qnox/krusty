@@ -15,6 +15,7 @@ pub(crate) struct ClassCaptureBinding {
     /// captured receiver. `None` for ordinary captured values/delegates.
     pub(crate) semantic_receiver_depth: Option<u32>,
     pub(crate) receiver_source: Option<ClassReceiverCaptureSource>,
+    pub(crate) enclosing_instance_owner: Option<crate::fir::EnclosingInstanceOwner>,
     /// Original classifier field whose closure value this field forwards. A directly captured
     /// value has its own `(owner, field)` identity; a transitive recapture preserves the upstream
     /// identity so independently streamed members never join closure operands by source spelling.

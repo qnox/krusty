@@ -24,7 +24,7 @@ pub const DECLINE_PREFIX: &str = "krusty: the wasm backend does not support ";
 
 pub struct WasmBackend {
     target: WasmTarget,
-    entry: Entry,
+    entry: krusty::backend::ProgramEntry,
     array_range_checks: bool,
 }
 
@@ -32,14 +32,21 @@ impl WasmBackend {
     pub fn new(target: WasmTarget) -> Self {
         Self {
             target,
-            entry: Entry::Main,
+            entry: krusty::backend::ProgramEntry::new(Entry::Main),
             array_range_checks: super::array_access::default_range_checks(),
         }
     }
 
     /// Start the program in `entry` instead of `main`.
     pub fn with_entry(mut self, entry: Entry) -> Self {
-        self.entry = entry;
+        self.entry.kind = entry;
+        self
+    }
+
+    /// Emit the synthetic program entry only for this exact declared source module. Ordinary
+    /// library functions, dependency exports and initialization are still emitted.
+    pub fn with_entry_module(mut self, module: impl Into<String>) -> Self {
+        self.entry = self.entry.in_module(module.into());
         self
     }
 
@@ -139,7 +146,10 @@ impl Backend for WasmBackend {
             );
         };
         let selected = match file.kind {
-            krusty::backend::CheckedIrUnitKind::Source => self.entry.selected(&file.ir),
+            krusty::backend::CheckedIrUnitKind::Source => self
+                .entry
+                .for_module(file.module_name)
+                .and_then(|entry| entry.selected(&file.ir)),
             krusty::backend::CheckedIrUnitKind::DependencySupport => None,
         };
         if selected.is_some_and(|(_, parameters)| {
@@ -220,7 +230,7 @@ impl Backend for WasmBackend {
                     krusty::diag::Span::new(0, 0),
                     format!(
                         "krusty: the program declares {} in both {first} and {stem}",
-                        self.entry.declaration()
+                        self.entry.kind.declaration()
                     ),
                 ),
                 None => state.entry = Some((entry, stem)),
@@ -235,7 +245,7 @@ impl Backend for WasmBackend {
                 krusty::diag::Span::new(0, 0),
                 format!(
                     "krusty: the program declares no {} to start in",
-                    self.entry.declaration()
+                    self.entry.kind.declaration()
                 ),
             );
         }
@@ -257,7 +267,7 @@ impl Backend for WasmBackend {
         for initializer in &state.initializers {
             code.call(*initializer);
         }
-        match self.entry {
+        match self.entry.kind {
             Entry::Main => {
                 code.call(entry);
             }
@@ -699,5 +709,107 @@ mod tests {
             compile_program(WasmTarget::Wasi, Entry::Main, &["fun main() {}"]);
         assert_eq!(diagnostics, Vec::<String>::new());
         assert_eq!(outputs.len(), 2);
+    }
+    // PLATFORM-SPECIFIC: These controls inspect Wasm session artifacts and entry diagnostics.
+    /// Real separately analyzed modules retain one target state; only the selected source module
+    /// contributes a synthetic entry. Metadata still describes every ordinary source module.
+    fn compile_scoped_modules(
+        target: WasmTarget,
+        modules: &[(&str, &[&str])],
+    ) -> (Vec<Artifact>, Vec<String>) {
+        let backend = WasmBackend::new(target)
+            .with_entry(Entry::Box)
+            .with_entry_module("application");
+        let platform = match target {
+            WasmTarget::Js => krusty::klib::write::KlibPlatform::WasmJs,
+            WasmTarget::Wasi => krusty::klib::write::KlibPlatform::WasmWasi,
+        };
+        let metadata = krusty::klib::backend::KlibBackend::new(
+            platform,
+            krusty::klib::write::KlibStamp::new(
+                krusty::kotlin_version::target(),
+                krusty::features::LangFeatures::new().language_version(),
+            ),
+        );
+        let mut session = krusty::compiler::EmissionSession::new(&backend);
+        let mut diags = DiagSink::new();
+        for (name, sources) in modules {
+            let stems = (0..sources.len())
+                .map(|i| format!("File{i}"))
+                .collect::<Vec<_>>();
+            let inputs = sources
+                .iter()
+                .zip(&stems)
+                .map(|(source, stem)| SourceInput::kotlin(source).with_file_stem(stem))
+                .collect::<Vec<_>>();
+            let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+                &inputs,
+                krusty::frontend::PlatformProvider::new(
+                    krusty::compiler::Backend::compilation_target(&backend),
+                    Box::new(EmptySymbolSource),
+                ),
+                &krusty::features::LangFeatures::new(),
+                &mut diags,
+            );
+            let Some(module) = session.emit_module(analysis, &stems, &metadata, name, &mut diags)
+            else {
+                break;
+            };
+            assert!(
+                !module.artifacts().is_empty(),
+                "ordinary source metadata is retained"
+            );
+        }
+        let artifacts = session.finish("program", &mut diags);
+        (
+            artifacts,
+            diags.diags.iter().map(|diag| diag.msg.clone()).collect(),
+        )
+    }
+
+    #[test]
+    fn a_library_box_does_not_claim_the_selected_source_modules_program_entry() {
+        for target in WasmTarget::ALL {
+            let (artifacts, diagnostics) = compile_scoped_modules(
+                target,
+                &[
+                    ("library", &["fun box(): String  = \"library\""]),
+                    ("application", &["fun box(): String  = \"OK\""]),
+                ],
+            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(artifacts.len(), 2);
+        }
+    }
+
+    #[test]
+    fn scoped_source_modules_still_reject_duplicate_and_missing_program_entries() {
+        for target in WasmTarget::ALL {
+            for sources in [
+                &[
+                    "package one\nfun box(): String  = \"OK\"",
+                    "package two\nfun box(): String  = \"OK\"",
+                ][..],
+                &["fun answer(): String  = \"OK\""][..],
+            ] {
+                let (artifacts, diagnostics) = compile_scoped_modules(
+                    target,
+                    &[
+                        ("library", &["fun box(): String  = \"library\""]),
+                        ("application", sources),
+                    ],
+                );
+                assert_eq!(artifacts, Vec::<Artifact>::new());
+                assert_eq!(diagnostics.len(), 1);
+                assert_eq!(
+                    diagnostics[0],
+                    if sources.len() == 2 {
+                        "krusty: the program declares `fun box(): String` in both File0 and File1"
+                    } else {
+                        "krusty: the program declares no `fun box(): String` to start in"
+                    }
+                );
+            }
+        }
     }
 }

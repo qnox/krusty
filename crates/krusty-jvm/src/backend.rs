@@ -244,6 +244,7 @@ fn run_backend_passes_after_plugins(
     let facades = file_classes.map(|classes| &classes.containers[..]);
     // Every later pass reads a type parameter's JVM carrier off its occurrences. Select it once,
     // from the declarations' complete bounds, before any of them runs.
+    crate::enclosing_capture_storage::realize(ir).map_err(SkipReason::CallArguments)?;
     crate::type_parameter_carriers::realize(ir);
     let module_value_classes = classifiers.module().source_value_classes();
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();

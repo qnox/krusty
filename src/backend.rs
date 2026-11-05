@@ -38,6 +38,7 @@ pub use dependency_signature::{instantiate_dependency_signature, DependencyFunct
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.
 pub use crate::ir::MainEntryParameters;
+pub use entry::ProgramEntry;
 pub use entry::{Entry, BOX_RESULT_FRAME};
 
 pub use module_facts::{

@@ -231,7 +231,10 @@ pub struct IrConstructorCapture {
 pub enum IrCapturedReceiver {
     /// The instance of the enclosing class `classifier`: the class whose member the capture is
     /// written in, or one further out when the capture is in a local class's member.
-    Enclosing { classifier: TypeName },
+    Enclosing {
+        classifier: TypeName,
+        owner: Option<crate::fir::EnclosingInstanceOwner>,
+    },
     /// The extension receiver of the named callable with this source name, and whether that
     /// callable is a local function or the declaration the capture is written in.
     Callable {

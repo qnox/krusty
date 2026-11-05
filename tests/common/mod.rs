@@ -321,7 +321,7 @@ fn parse_source_set(
 
 /// [`parse_source_set`] with source labels retained by the caller's fixture table.
 /// Local classifier identities remain backend-neutral in this frontend-only helper.
-fn parse_source_set_named(
+pub(super) fn parse_source_set_named(
     sources: &[(&str, &str)],
     diags: &mut krusty::diag::DiagSink,
 ) -> Option<Vec<krusty::ast::File>> {
