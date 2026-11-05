@@ -16,6 +16,47 @@ use crate::fir::{CapturedCallableOwner, FirCapturedReceiver};
 use crate::fx_hash::HashMap;
 use crate::types::{CapturedContextKind, Ty};
 
+#[cfg(test)]
+mod tests;
+
+/// Project completed Pass-1 selections into the current retained file before checking its bodies.
+/// A selected empty vector is authoritative; an absent record remains absent. Finalized checking
+/// uses stable classifier identity to reach the original Pass-1 arena, never a coincident parser ID.
+pub(super) fn published_captures(
+    file: &File,
+    file_index: u32,
+    pass_one: &super::SymbolTable,
+    active: Option<&crate::fir::ActiveSourceDeclarations>,
+    index: Option<&crate::fir::ResolvedModuleIndex>,
+) -> HashMap<DeclId, Vec<AnonymousObjectCapture>> {
+    file.anonymous_object_classes
+        .values()
+        .copied()
+        .filter_map(|declaration| {
+            let original = match active {
+                Some(active) => {
+                    let stable = active.canonical_classifier_declaration(
+                        declaration,
+                        index.expect("active declarations require their finalized index"),
+                    )?;
+                    let class = pass_one.class_by_stable_declaration(stable)?;
+                    if class.source_file != file_index {
+                        return None;
+                    }
+                    class.source_decl?
+                }
+                // Annotation-only legacy fragments still hold the same Pass-1 parser arena.
+                None => declaration,
+            };
+            pass_one
+                .anonymous_object_captures
+                .get(&(file_index, original))
+                .cloned()
+                .map(|captures| (declaration, captures))
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnonymousObjectCapture {
     pub name: String,

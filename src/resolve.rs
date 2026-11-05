@@ -14128,9 +14128,15 @@ impl<'a> Checker<'a> {
                     return self.anonymous_object_type(scope, declaration);
                 }
             }
-            let captures = self.body_class_storage_captures(declaration);
-            self.discovered_anonymous_captures
-                .insert(declaration, captures.clone());
+            let Some(captures) = self
+                .discovered_anonymous_captures
+                .get(&declaration)
+                .cloned()
+            else {
+                self.diags
+                    .error(span, "anonymous object capture selection was not published");
+                return Ty::Error;
+            };
             {
                 for capture in &captures {
                     let actual = match capture.source {
@@ -31580,9 +31586,19 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.selected_body_declarations = selected_body_declarations.cloned();
     c.selected_stable_body_declarations = selected_stable_bodies.cloned();
     match captures {
+        CaptureDiscovery::Published => {
+            c.discovered_anonymous_captures = anonymous_object_capture::published_captures(
+                file,
+                file_index,
+                syms.pass_one_symbols()
+                    .expect("published captures require live Pass-1 bindings"),
+                active_declarations,
+                resolved_index,
+            );
+        }
         CaptureDiscovery::Seeded(seeded) => c.discovered_anonymous_captures = seeded.clone(),
         CaptureDiscovery::AtConstruction => c.discovers_captures_at_construction = true,
-        CaptureDiscovery::Published | CaptureDiscovery::Scratch => {}
+        CaptureDiscovery::Scratch => {}
     }
     c.fragment = fragment;
     if fragment.publishes_annotation_metadata() {
@@ -32167,28 +32183,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         .flatten()
         .map(|span| (span.lo, span.hi))
         .collect();
-    let anonymous_object_captures_by_class = if let CaptureDiscovery::Published = captures {
-        let pass_one = syms
-            .pass_one_symbols()
-            .expect("legacy checking requires Pass-1 anonymous-object bindings");
-        file.anonymous_object_classes
-            .values()
-            .copied()
-            .filter_map(|declaration| {
-                discovered_anonymous_captures
-                    .get(&declaration)
-                    .or_else(|| {
-                        pass_one
-                            .anonymous_object_captures
-                            .get(&(file_index, declaration))
-                    })
-                    .cloned()
-                    .map(|captures| (declaration, captures))
-            })
-            .collect::<HashMap<_, _>>()
-    } else {
-        discovered_anonymous_captures
-    };
+    let anonymous_object_captures_by_class = discovered_anonymous_captures;
     let anonymous_object_captures_by_construction = file
         .anonymous_object_classes
         .iter()
