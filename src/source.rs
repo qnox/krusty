@@ -385,7 +385,13 @@ fn scan_file_imports(text: &str, tokens: &[crate::token::Token]) -> ScannedFileH
                     package = Some(name);
                 }
             }
-            TokenKind::KwImport if depth == 0 => {
+            // `import` is a soft keyword: a directive only where it starts a line (or follows `;`,
+            // which lexes as a line break), as an import list entry does.
+            TokenKind::Ident
+                if depth == 0
+                    && tokens[index].text(text) == "import"
+                    && (index == 0 || tokens[index - 1].kind == TokenKind::Newline) =>
+            {
                 index += 1;
                 let (segments, next) = scan_dotted_path(text, tokens, index);
                 index = next;
@@ -666,6 +672,9 @@ val text = \"import q.Quoted\"
             "package p\nval text = \"import q.Hidden\"\nimport q.Shown\nfun use(x: Widget) = x",
             "fun render() = 1\nimport q.Later\nval value: Shown = value\n",
             "package p\nclass Outer {\n    import q.Inner\n}\nimport q.After\nfun use(x: Shown) = x\n",
+            // `import` is a soft keyword: only a line-initial `import` is a directive.
+            "package p\nimport q.Shown\nval import = Shown()\nfun use(import: Widget) = import\n",
+            "package p; import q.Semi\nfun use(x: Semi) = x\n",
             "",
         ];
         for source in sources {

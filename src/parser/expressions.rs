@@ -1917,7 +1917,6 @@ impl Parser<'_> {
                     | TokenKind::KwWhen
                     | TokenKind::KwClass
                     | TokenKind::KwFun
-                    | TokenKind::KwImport
                     | TokenKind::KwPackage
                     | TokenKind::Eq,
                 ) if depth == 0 => return false,
