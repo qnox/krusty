@@ -4,13 +4,13 @@
 
 use crate::backend::{BackendClassifierSource, CheckedBackendCallables};
 use crate::diag::Span;
-use crate::fir::{ExternalCallableId, OriginStore, SourceFileId};
+use crate::fir::{ExternalCallableId, ExternalPropertyId, OriginStore, SourceFileId};
 use crate::ir::{ExprId, IrFile};
 use crate::libraries::FnKind;
 use crate::plugins::runtime_declarations::{
     BoundRuntimeFunction, PluginClassifier, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
 };
-use crate::plugins::CheckedSourceFacts;
+use crate::plugins::{CheckedSourceFacts, DependencyDeclaration};
 use crate::symbol_resolver::declared_member_callables;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName};
@@ -33,6 +33,28 @@ impl CheckedSourceFacts for HandoffSourceFacts<'_> {
         self.callables
             .callable(callable)
             .map_or(&[], |fact| &fact.annotations)
+    }
+
+    fn dependency_callable(
+        &self,
+        callable: ExternalCallableId,
+    ) -> Option<DependencyDeclaration<'_>> {
+        let fact = self.callables.callable(callable)?;
+        Some(DependencyDeclaration {
+            owner: fact.declaration_owner?.name(),
+            name: &fact.name,
+        })
+    }
+
+    fn dependency_property(
+        &self,
+        property: ExternalPropertyId,
+    ) -> Option<DependencyDeclaration<'_>> {
+        let fact = self.callables.property(property)?;
+        Some(DependencyDeclaration {
+            owner: fact.owner,
+            name: &fact.name,
+        })
     }
 }
 
@@ -78,6 +100,14 @@ impl PluginRuntime for HandoffRuntime<'_> {
             RuntimeDeclaration::Member(owner) => (
                 declared_member_callables(self.source, Ty::obj_name(owner), function.name),
                 FnKind::Member,
+            ),
+            // A classifier's static functions take no receiver: they live in its own namespace.
+            RuntimeDeclaration::Static(owner) => (
+                self.source
+                    .symbols(SymbolNamespace::Classifier(owner), function.name)
+                    .callables
+                    .clone(),
+                FnKind::TopLevel,
             ),
         };
         let mut selected = declared.functions().iter().filter(|candidate| {

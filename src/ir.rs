@@ -116,7 +116,9 @@ mod when_facts;
 pub use crate::enclosing_declarations::EnclosingDeclaration;
 /// A declared type's checked source spelling, which the IR carries per declaration
 /// ([`IrFile::prop_declared_spellings`]) as part of its contract with backends and plugins.
-pub use crate::fir::{CallableId, ExternalCallableId, SourceFileId};
+pub use crate::fir::{
+    CallableId, ExternalCallableId, ExternalPropertyId, PropertyId, SourceFileId,
+};
 pub use crate::spelling::{Spelled, TypeUseAnnotation};
 pub use crate::types::EqualityMode;
 pub(crate) use annotations::PackagePropertyAnnotations;
@@ -1692,6 +1694,9 @@ pub struct IrFile {
     /// What the Compose plugin recorded from this file's source at the handoff, for its body
     /// transform. `None` unless the plugin is active and the file declares a composable function.
     pub compose: Option<Box<crate::plugins::compose::ComposeFileFacts>>,
+    /// What the atomicfu plugin recorded from this file's source at the handoff, for its body
+    /// transform. `None` unless the plugin is active and the file declares an atomic it lowers.
+    pub atomicfu: Option<Box<crate::plugins::atomicfu::AtomicfuFileFacts>>,
     /// Package functions a compiler plugin gave physical parameters their declaration does not
     /// have (Compose's `$composer` and `$changed`). Metadata records their realized signature.
     pub(crate) plugin_extended_signatures: crate::fx_hash::HashSet<FunId>,

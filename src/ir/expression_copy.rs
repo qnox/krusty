@@ -237,6 +237,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         function_annotations: _,
         function_source_annotations: _,
         compose: _,
+        atomicfu: _,
         plugin_extended_signatures: _,
         property_annotation_markers: _,
         jvm_package_property_annotation_markers: _,

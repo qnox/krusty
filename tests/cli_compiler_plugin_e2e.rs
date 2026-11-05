@@ -706,6 +706,72 @@ fn compose_report_destinations_fail_the_compile() {
 
 /// Compile `declarations` (after a package line and the `Composable` import) and the `others`
 /// files with the Compose plugin, and assert the one error `Probe.kt:<error>` krusty reports.
+/// Compiled directly, an atomicfu module compiles through krusty's partial pass, which rejects each
+/// atomic it does not lower rather than leave the library's wrapper in its place.
+#[test]
+fn the_atomicfu_pass_rejects_what_it_does_not_cover() {
+    assert_atomicfu_rejects(
+        "atomicfu-boolean",
+        "class Flag { private val set = atomic(false) }\n",
+        "3:22: error: krusty's atomicfu compiler plugin does not support an AtomicBoolean yet",
+    );
+    assert_atomicfu_rejects(
+        "atomicfu-top-level",
+        "private val top = atomic(0)\nfun next() = top.incrementAndGet()\n",
+        "3:9: error: krusty's atomicfu compiler plugin does not support a top-level atomic \
+         property yet",
+    );
+    assert_atomicfu_rejects(
+        "atomicfu-update",
+        "class Counter {\nprivate val hits = atomic(0)\nfun next() = hits.updateAndGet { it + 1 }\n}\n",
+        "5:14: error: krusty's atomicfu compiler plugin does not support the atomic operation \
+         `updateAndGet` yet",
+    );
+    assert_atomicfu_rejects(
+        "atomicfu-value",
+        "class Counter {\nprivate val hits = atomic(0)\nfun wrapper(): Any = hits\n}\n",
+        "5:22: error: krusty's atomicfu compiler plugin does not support an atomic property used \
+         as a value yet",
+    );
+    assert_atomicfu_rejects(
+        "atomicfu-var",
+        "class Counter {\nprivate var hits = atomic(0)\nfun reset() { hits = atomic(1) }\n}\n",
+        "4:9: error: krusty's atomicfu compiler plugin does not support a mutable atomic property \
+         yet",
+    );
+    assert_atomicfu_rejects(
+        "atomicfu-inner",
+        "class Counter {\nprivate val hits = atomic(0)\ninner class Probe { fun next() = hits.incrementAndGet() }\n}\n",
+        "5:34: error: krusty's atomicfu compiler plugin does not support an atomic operation \
+         outside a member function of the atomic's class yet",
+    );
+}
+
+fn assert_atomicfu_rejects(name: &str, declarations: &str, error: &str) {
+    let plugin = krusty::toolchain::atomicfu_compiler_plugin_jar()
+        .expect("the atomicfu compiler plugin is provisioned");
+    let source = format!("package probe\nimport kotlinx.atomicfu.*\n{declarations}");
+    let probe = Probe::new(name, &source);
+    let classpath = vec![
+        krusty::toolchain::atomicfu_runtime_jar().expect("the atomicfu runtime is provisioned"),
+        common::stdlib_jar(),
+    ];
+    let compiled = probe.krusty(&classpath, &[format!("-Xplugin={}", plugin.display())]);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::ATOMICFU_PLUGIN_ID.to_string(),
+    }
+    .message();
+    assert_eq!(
+        compiled.stderr,
+        format!(
+            "info: {partial}\n{}:{error}; compile this module with kotlinc\nkrusty: 1 error(s)\n",
+            probe.source.display()
+        )
+    );
+    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.classes, Vec::<String>::new());
+}
+
 fn assert_compose_rejects(name: &str, declarations: &str, others: &[(&str, &str)], error: &str) {
     let compose = reference_plugin_jar("compose-compiler-plugin.jar");
     let source =

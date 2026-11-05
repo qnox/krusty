@@ -1362,6 +1362,16 @@ fun box(): String = Registry.value()\n";
     );
 }
 
+/// The shared atomicfu regression's JVM classes are kotlinc's and its atomicfu plugin's, byte for
+/// byte.
+#[test]
+fn atomicfu_field_updaters_are_byte_identical_to_kotlinc() {
+    assert_plugin_case_matches_kotlinc(
+        include_str!("box_regressions/atomicfu/fieldUpdaters.kt"),
+        "fieldUpdaters",
+    );
+}
+
 /// Each Compose fixture, JVM-only and so outside the portable box regressions, compiles to exactly
 /// the classes the reference compiler and its Compose plugin emit, byte for byte, and both builds
 /// pass its `box()`, which composes and recomposes the transformed functions through a recording
@@ -1436,8 +1446,14 @@ fn assert_compose_fixture_matches_kotlinc(stem: &str) {
         .join("tests/fixtures/compose")
         .join(format!("{stem}.kt"));
     let source = fs::read_to_string(&path).expect("read the Compose fixture");
+    assert_plugin_case_matches_kotlinc(&source, stem);
+}
+
+/// A compiler plugin's case compiles to exactly the classes the reference compiler and that plugin
+/// emit, byte for byte, and both builds pass its `box()`.
+fn assert_plugin_case_matches_kotlinc(source: &str, stem: &str) {
     let source =
-        krusty::conformance::prepare_test_source(&source, krusty::conformance::TestTarget::Jvm);
+        krusty::conformance::prepare_test_source(source, krusty::conformance::TestTarget::Jvm);
     let reference = box_reference_classes::checked_prepared_box(&source, stem)
         .expect("the reference compiler compiles the fixture and its box() returns OK");
     let reference = reference

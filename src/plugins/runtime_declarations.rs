@@ -31,6 +31,8 @@ pub enum RuntimeDeclaration {
     Package(TypeName),
     /// A member function this classifier declares.
     Member(TypeName),
+    /// A static function this classifier declares (a Java `static` method).
+    Static(TypeName),
 }
 
 /// One [`RuntimeFunction`] the compilation selected.
@@ -80,7 +82,7 @@ impl RuntimeFunction {
     pub fn described(&self) -> String {
         let owner = match self.declaration {
             RuntimeDeclaration::Package(package) => package,
-            RuntimeDeclaration::Member(owner) => owner,
+            RuntimeDeclaration::Member(owner) | RuntimeDeclaration::Static(owner) => owner,
         };
         let params = self
             .params
