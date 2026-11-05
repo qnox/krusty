@@ -1707,6 +1707,10 @@ pub(super) fn specialize_typed_expression(
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumValueOf { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumConstant { .. }
+        | IrExpr::EnumAllocation { .. }
+        | IrExpr::EnumEntriesList { .. }
+        | IrExpr::NoSuchEnumConstant { .. }
         | IrExpr::EnumSwitchOrdinal { .. }
         | IrExpr::EnumSwitchKey { .. }
         | IrExpr::ReifiedClassMarker { .. }
@@ -1853,6 +1857,7 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::StringGet
         | IrIntrinsic::StringLength
         | IrIntrinsic::EnumName
+        | IrIntrinsic::EnumOrdinal
         | IrIntrinsic::NullableAnyToString
         | IrIntrinsic::CoroutineContext => {}
     }
