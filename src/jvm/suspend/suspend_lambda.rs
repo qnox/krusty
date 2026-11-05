@@ -196,12 +196,13 @@ pub(super) fn route(
             internal,
             args: arguments,
             ctor_params: None,
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),
             default_prefix_count: 0,
         };
-        ir.logical_types.insert(node, Ty::obj_name(internal));
+        ir.set_logical_type(node, Ty::obj_name(internal));
     }
 
     let mut declared_spill_fields: Vec<(String, usize)> = Vec::new();

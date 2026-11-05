@@ -274,6 +274,30 @@ fn suspend_converted_source_reference_becomes_suspend_wrapper() {
         .all(|expression| !matches!(expression, IrExpr::Checked(_))));
 }
 
+/// A suspend-converted reference's inline template has a suspend literal's arity: the function
+/// type's parameters and the continuation its adapter takes after them. A reference whose selected
+/// declaration suspends has no inline template.
+#[test]
+fn a_suspend_function_type_reference_template_counts_the_continuation() {
+    let ir = lower_single_source(
+        r#"
+            fun increment(value: Int): Int = value + 1
+            suspend fun fetch(value: Int): Int = value
+            fun converted(): suspend (Int) -> Int = ::increment
+            fun declared(): suspend (Int) -> Int = ::fetch
+        "#,
+        "SuspendReferenceTemplates",
+    );
+    let templates = (0..ir.exprs.len() as u32)
+        .filter(|&expression| matches!(ir.expr(expression), IrExpr::CallableReference(_)))
+        .map(|expression| {
+            ir.callable_reference_inline_template(expression)
+                .map(|(_, captures, _, arity)| (captures.len(), arity))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(templates, [Some((0, 2)), None]);
+}
+
 #[test]
 fn direct_suspend_source_reference_becomes_suspend_wrapper() {
     let ir = lower_source_from_set(
@@ -1231,7 +1255,8 @@ fn ordinary_inner_constructor_keeps_source_property_after_physical_outer_prefix(
     assert_eq!(ir.checked_type(*outer), Some(Ty::obj("Outer")));
     assert_eq!(ir.checked_type(*value), Some(Ty::String));
     assert_eq!(
-        ir.construction_declared_params[&construction.0].as_ref(),
+        ir.construction_declared_params(construction.0)
+            .expect("declared parameters"),
         [Ty::obj("Outer"), Ty::String]
     );
 }
@@ -1383,6 +1408,7 @@ fn external_inner_constructor_prepends_the_checked_outer_receiver() {
             internal,
             args,
             ctor_params: Some(parameters),
+            declared_params: _,
             ctor_desc: None,
             external_target: Some(target),
             defaults,
@@ -1417,6 +1443,12 @@ fn external_annotation_construction_reaches_common_ir_without_provider_lookup() 
                 parameters: Box::new([resolved(Ty::String)]),
                 declared_parameters: Box::new([resolved(Ty::String)]),
                 annotation: Some(Box::new(FirAnnotationConstruction {
+                    arguments: crate::libraries::AnnotationArgumentProvenance::from_selected(
+                        1,
+                        &[0],
+                        &[],
+                    )
+                    .unwrap(),
                     members: Box::new([("name".into(), resolved(Ty::String))]),
                     defaults: Box::new([None]),
                 })),

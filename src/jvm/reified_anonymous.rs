@@ -49,11 +49,12 @@ pub(crate) fn rename(
     ir.remap_classifier_identities(&names);
     for (function, from, to, host) in renamed_continuations {
         continuations.machines.rename_continuation(function, to);
-        if let Some(mut metadata) = continuations.metadata.remove(&from.render()) {
+        if let Some(mut metadata) = continuations.metadata.remove(&from) {
+            // The classfile and `@DebugMetadata` spell the host; the map keeps its identity.
             let host = host.render();
             metadata.c = host.replace('/', ".");
             metadata.enclosing_class = host;
-            continuations.metadata.insert(to.render(), metadata);
+            continuations.metadata.insert(to, metadata);
         }
     }
 }

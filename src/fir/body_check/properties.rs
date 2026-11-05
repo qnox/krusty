@@ -503,9 +503,7 @@ impl BodyFirChecker<'_> {
                     depth: source.depth,
                     path: Box::new([]),
                     ty,
-                    receiver: FirCapturedReceiver::Enclosing {
-                        classifier: classifier.classifier,
-                    },
+                    receiver: self.enclosing_instance(owner),
                 });
             let value = self.body.add_expr(FirExpr {
                 origin,
@@ -1591,7 +1589,10 @@ impl BodyFirChecker<'_> {
             .iter()
             .enumerate()
             .filter_map(|(ordinal, formal)| {
-                bindings.get(formal).copied().map(|value| (ordinal, value))
+                bindings
+                    .get(formal.as_str())
+                    .copied()
+                    .map(|value| (ordinal, value))
             })
             .map(|(ordinal, value)| {
                 let ordinal = u32::try_from(ordinal).map_err(|_| {
