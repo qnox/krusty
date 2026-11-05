@@ -39,7 +39,6 @@ pub enum TokenKind {
     KwFalse,
     KwNull,
     KwPackage,
-    KwImport,
     // punctuation / operators
     LParen,
     RParen,
@@ -192,7 +191,6 @@ pub fn keyword(text: &str) -> Option<TokenKind> {
         "false" => TokenKind::KwFalse,
         "null" => TokenKind::KwNull,
         "package" => TokenKind::KwPackage,
-        "import" => TokenKind::KwImport,
         _ => return None,
     })
 }

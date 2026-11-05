@@ -3285,9 +3285,7 @@ fn formatting_kind(
     use CoreKind::*;
     Some(match kind {
         Ident | KwFun | KwClass | KwVal | KwVar | KwReturn | KwIf | KwElse | KwWhen | KwWhile
-        | KwDo | KwFor | KwIn | KwTrue | KwFalse | KwNull | KwPackage | KwImport | Unknown => {
-            Kind::Word
-        }
+        | KwDo | KwFor | KwIn | KwTrue | KwFalse | KwNull | KwPackage | Unknown => Kind::Word,
         IntLit | LongLit | UIntLit | ULongLit | DoubleLit | FloatLit | StringLit | CharLit
         | TemplateStart | RawTemplateStart | TemplateEnd | StrChunk | Dollar => Kind::Literal,
         LParen => Kind::LParen,
