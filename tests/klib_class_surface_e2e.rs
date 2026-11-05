@@ -314,24 +314,24 @@ fn krusty_consumes_a_kotlinc_native_reified_inline_body() {
 /// each call expands from the prepared copy instead of failing the file.
 #[test]
 fn inherited_generic_class_inline_members_expand_through_subclass_receivers() {
+    let modules = krusty::conformance::split_modules(include_str!(
+        "box_regressions/multimodule/multimoduleInheritedGenericInlineMembers.kt"
+    ))
+    .expect("the shared regression is a two-module graph");
+    let [producer, consumer] = modules.as_slice() else {
+        panic!("the shared regression has exactly a library and a consumer module");
+    };
+    assert_eq!(consumer.deps, std::slice::from_ref(&producer.name));
+    let [(_, producer_source)] = producer.files.as_slice() else {
+        panic!("the library module is one Kotlin file");
+    };
+    let [(_, consumer_source)] = consumer.files.as_slice() else {
+        panic!("the consumer module is one Kotlin file");
+    };
     let Some((diagnostics, expanded)) = official_inline_expansions(
         "official-inherited-generic-inline-member",
-        "package fixture\n\
-         open class Base<T>(val value: T) {\n\
-         \x20   inline fun marker(): Int = 1\n\
-         \x20   inline fun read(): T = value\n\
-         \x20   inline fun <R> mapped(transform: (T) -> R): R = transform(value)\n\
-         }\n\
-         open class Middle<U>(value: U) : Base<U>(value)\n\
-         class Derived : Middle<String>(\"O\")\n",
-        "import fixture.*\n\
-         fun box(): String {\n\
-         \x20   val derived = Derived()\n\
-         \x20   val middle: Middle<String> = derived\n\
-         \x20   if (derived.marker() + middle.marker() != 2) return \"marker\"\n\
-         \x20   val read: String = derived.read()\n\
-         \x20   return middle.mapped { it + \"K\" } + read\n\
-         }\n",
+        producer_source,
+        consumer_source,
     ) else {
         return;
     };
