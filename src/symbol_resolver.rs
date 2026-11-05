@@ -13,7 +13,7 @@ use crate::libraries::{
     LibraryMember, Origin, PropKind, PropertyInfo, PropertySet, SemanticPlatform,
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{Ty, TyKind, TypeName, Visibility};
+use crate::types::{Ty, TyKind, TyParamName, TypeName, Visibility};
 mod access_site;
 pub(crate) use access_site::MemberAccessSite;
 mod argument_compatibility;
@@ -141,8 +141,8 @@ pub use resolved_symbol::{
 };
 pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
 use scope_level_callables::{
-    callables_from_symbols, fn_in_scope, function_set_from_symbols, level_functions,
-    level_properties, symbol_levels_in_function_scope, symbols_in_function_scope,
+    callables_from_symbols, fn_in_scope, level_functions, level_properties,
+    symbol_levels_in_function_scope, symbols_in_function_scope,
     tagged_symbol_levels_in_function_scope, FunctionScopeRef,
 };
 pub(crate) use scope_level_callables::{CallableImport, FunctionImportScope};
@@ -278,13 +278,13 @@ fn specialized_constructor_params(
     // formals; occurrences of the owning CLASS's parameters remain in its value-parameter types.
     // Make those finalized classifier declarations explicit to the shared solver. Otherwise it
     // correctly treats `T` as an enclosing, non-inferable variable and leaves `Box(1)` at `T`.
-    let mut formals = classifier.type_parameters.type_params.clone();
+    let mut formals = TyParamName::all(&classifier.type_parameters.type_params);
     let mut formal_bounds = classifier.type_parameters.type_param_bounds.clone();
     for (ordinal, formal) in signature.formals.iter().enumerate() {
         if formals.contains(formal) {
             continue;
         }
-        formals.push(formal.clone());
+        formals.push(*formal);
         formal_bounds.push(
             signature
                 .formal_bounds
@@ -692,7 +692,7 @@ pub(crate) fn ranked_extension_overloads_by_recv<'a>(
 fn ranked_extension_candidates<'a>(
     src: &dyn SymbolSource,
     receiver: Ty,
-    type_variables: &[String],
+    type_variables: &[TyParamName],
     overloads: impl Iterator<Item = &'a FunctionInfo>,
 ) -> Vec<(u32, Ty, &'a FunctionInfo)> {
     let candidates = overloads
@@ -793,7 +793,7 @@ pub struct SymbolResolver<'a> {
     /// applicability, and classifier access diagnostics read one decision.
     visibility_suppressed: bool,
     /// Type variables of the enclosing postponed calls; extension receivers match over them.
-    type_variables: &'a [String],
+    type_variables: &'a [TyParamName],
     /// `+EagerLambdaAnalysis` in the calling file: a lambda's checked result decides applicability.
     eager_lambda_results: bool,
     /// The access site's member visibility ([`MemberAccessSite`]), when the caller has a site.
@@ -878,7 +878,7 @@ impl<'a> SymbolResolver<'a> {
                 .type_parameters
                 .type_params
                 .iter()
-                .map(crate::types::TyParamName::from)
+                .map(TyParamName::from)
                 .zip(type_args.iter().copied())
                 .collect::<GSigBinds>();
             if let Some(signature) = declaration.generic_sig.as_ref() {
@@ -912,7 +912,7 @@ impl<'a> SymbolResolver<'a> {
                         if let Some(argument) =
                             completed_argument_bindings.get(formal.as_str()).copied()
                         {
-                            bindings.insert(crate::types::TyParamName::new(formal), argument);
+                            bindings.insert(TyParamName::new(formal), argument);
                         }
                     }
                 }
@@ -989,7 +989,7 @@ impl<'a> SymbolResolver<'a> {
         }
     }
 
-    pub(crate) fn with_type_variables(mut self, type_variables: &'a [String]) -> Self {
+    pub(crate) fn with_type_variables(mut self, type_variables: &'a [TyParamName]) -> Self {
         self.type_variables = type_variables;
         self
     }
@@ -1247,16 +1247,7 @@ impl<'a> SymbolResolver<'a> {
         ret: Ty,
     ) -> ResolvedMember {
         let member = selected.member_with_return(ret);
-        ResolvedMember {
-            receiver,
-            ret,
-            member,
-            physical_params: selected.callable.physical_params.clone(),
-            context_args: Vec::new(),
-            projected_return_hazard: selected.projected_return_hazard,
-            suspend: selected.flags.suspend,
-            origin: selected.callable.origin.clone(),
-        }
+        ResolvedMember::from_function(receiver, &selected, member, ret)
     }
 
     /// Select the nearest in-scope extension property, rejecting equal-rank candidates.
@@ -1539,12 +1530,7 @@ impl<'a> SymbolResolver<'a> {
     }
 
     pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
-        let functions = self
-            .symbol_levels_in_scope(name)
-            .into_iter()
-            .map(|symbols| function_set_from_symbols(&symbols))
-            .find(|functions| !functions.overloads.is_empty())
-            .unwrap_or_default();
+        let functions = self.nearest_top_level_functions(&self.symbol_levels_in_scope(name));
         crate::trace_compiler!(
             "resolve",
             "top-level candidate inventory {name}: {:?}",
@@ -1839,11 +1825,7 @@ impl<'a> SymbolResolver<'a> {
                 // reads `overloads` to inspect the family, or `top_level_call` for the arg/type-arg selected
                 // callable (default/vararg-aware) ready to emit.
                 let levels = self.symbol_levels_in_scope(name);
-                let fs = levels
-                    .iter()
-                    .map(|symbols| function_set_from_symbols(symbols))
-                    .find(|functions| !functions.overloads.is_empty())
-                    .unwrap_or_default();
+                let fs = self.nearest_top_level_functions(&levels);
                 crate::trace_compiler!(
                     "signature_inference",
                     "top-level candidates={name} {:?}",
@@ -2767,7 +2749,7 @@ pub(crate) fn select_constructor_declaration_from_type_with_type_arguments(
         .type_parameters
         .type_params
         .iter()
-        .map(crate::types::TyParamName::from)
+        .map(TyParamName::from)
         .zip(type_args.iter().copied())
         .collect::<GSigBinds>();
     let candidates = classifier
@@ -2863,7 +2845,7 @@ fn select_instance_member_ty(
 fn receiver_allows_member_dispatch(receiver: Ty) -> bool {
     match receiver.kind() {
         TyKind::Nullable(_) | TyKind::Null => false,
-        TyKind::TyParam(_, bound) => receiver_allows_member_dispatch(bound),
+        TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => receiver_allows_member_dispatch(bound),
         // Kotlin permits direct member calls on Java platform types despite uncertain nullability.
         TyKind::PlatformNullable(_) => true,
         _ => true,
@@ -3068,16 +3050,7 @@ fn resolved_member_from_info_tracking(
     );
     let member = o.member_with_return(o.callable.ret);
     (
-        ResolvedMember {
-            receiver: recv,
-            ret,
-            member,
-            physical_params: o.callable.physical_params.clone(),
-            context_args: Vec::new(),
-            projected_return_hazard: o.projected_return_hazard,
-            suspend: o.flags.suspend,
-            origin: o.callable.origin.clone(),
-        },
+        ResolvedMember::from_function(recv, &o, member, ret),
         bindings,
     )
 }
@@ -3182,7 +3155,7 @@ mod tests {
                 LibraryCallable::library("demo/TestKt", "choose", vec![parameter], any, any, ""),
             );
             info.generic_sig = Some(GenericSig {
-                formals: vec![formal.to_string()],
+                formals: vec![TyParamName::new(formal)],
                 formal_bounds: vec![vec![any]],
                 receiver: None,
                 params: vec![parameter],
@@ -3356,7 +3329,7 @@ mod tests {
         let r = Ty::ty_param("R", any);
         let q = Ty::ty_param("Q", any);
         GenericSig {
-            formals: vec!["C".to_string(), "R".to_string(), "Q".to_string()],
+            formals: TyParamName::all(&["C", "R", "Q"]),
             formal_bounds: vec![vec![r], vec![q], vec![any]],
             receiver: Some(c),
             params: Vec::new(),
@@ -3474,7 +3447,7 @@ mod tests {
         let expected = Ty::obj_args("kotlin/collections/List", &[formal]);
 
         assert_eq!(
-            infer_generic_symbolic_return_constraints(declared, expected, &["T".to_string()])
+            infer_generic_symbolic_return_constraints(declared, expected, &[TyParamName::new("T")])
                 .bindings
                 .get("T"),
             Some(&formal)
@@ -3482,7 +3455,7 @@ mod tests {
         assert!(infer_generic_symbolic_return_constraints(
             Ty::obj_args("kotlin/collections/Set", &[formal]),
             expected,
-            &["T".to_string()],
+            &[TyParamName::new("T")],
         )
         .bindings
         .is_empty());
@@ -3495,7 +3468,7 @@ mod tests {
         let expected = Ty::obj_args("kotlin/collections/List", &[Ty::nullable(formal)]);
 
         assert_eq!(
-            infer_generic_symbolic_return_constraints(declared, expected, &["T".to_string()])
+            infer_generic_symbolic_return_constraints(declared, expected, &[TyParamName::new("T")])
                 .bindings
                 .get("T"),
             Some(&Ty::nullable(formal))
@@ -3510,7 +3483,7 @@ mod tests {
         let expected = Ty::obj_args("fixtures/Duo", &[caller, Ty::nullable(caller), caller]);
 
         let constraints =
-            infer_generic_symbolic_return_constraints(declared, expected, &["T".to_string()]);
+            infer_generic_symbolic_return_constraints(declared, expected, &[TyParamName::new("T")]);
         assert!(constraints.bindings.is_empty());
         assert!(constraints.constrained_formals.contains("T"));
         assert!(constraints.conflicting_formals.contains("T"));
@@ -3539,7 +3512,7 @@ mod tests {
         );
 
         let constraints =
-            infer_generic_symbolic_return_constraints(declared, expected, &["T".to_string()]);
+            infer_generic_symbolic_return_constraints(declared, expected, &[TyParamName::new("T")]);
 
         assert!(constraints.conflicting_formals.is_empty());
         assert!(constraints.bindings.is_empty());
@@ -3553,7 +3526,7 @@ mod tests {
         let constraints = infer_generic_symbolic_return_constraints(
             Ty::obj_args("fixtures/Duo", &[callee, callee]),
             Ty::obj_args("fixtures/Duo", &[caller, Ty::String]),
-            &["T".to_string()],
+            &[TyParamName::new("T")],
         );
 
         assert!(constraints.bindings.is_empty());
@@ -3565,7 +3538,7 @@ mod tests {
         let any = Ty::obj("kotlin/Any");
         let parameter = Ty::ty_param("T", any);
         let signature = GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![vec![any]],
             receiver: None,
             params: vec![Ty::nullable(parameter), parameter],
@@ -3619,7 +3592,7 @@ mod tests {
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
         let parameter = Ty::ty_param("T", any);
         let signature = GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![vec![any]],
             receiver: None,
             params: vec![Ty::array(parameter)],
@@ -3677,7 +3650,7 @@ mod tests {
         let optional_of = |ty| Ty::obj_args("java/util/Optional", &[ty]);
 
         let method_generic = GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![Vec::new()],
             receiver: None,
             params: vec![class_of(parameter)],
@@ -3756,7 +3729,7 @@ mod tests {
         let formal = Ty::ty_param("A", annotation);
         let class_of = |ty| Ty::obj_args("java/lang/Class", &[ty]);
         let signature = GenericSig {
-            formals: vec!["A".to_string()],
+            formals: vec![TyParamName::new("A")],
             formal_bounds: vec![vec![annotation]],
             receiver: None,
             params: vec![Ty::platform_nullable(class_of(formal))],
@@ -3895,7 +3868,7 @@ mod tests {
         let foo = Ty::obj("fixtures/Foo");
         let parameter = Ty::ty_param("T", any);
         let signature = GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![vec![any]],
             receiver: None,
             params: vec![Ty::obj_args(
@@ -3964,7 +3937,7 @@ mod tests {
         let any = Ty::obj("kotlin/Any");
         let parameter = Ty::ty_param("T", any);
         GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![vec![any]],
             receiver: None,
             params: vec![parameter],
@@ -4328,7 +4301,7 @@ mod tests {
             Some(0),
         );
         overload.generic_sig = Some(GenericSig {
-            formals: vec!["R".to_string()],
+            formals: vec![TyParamName::new("R")],
             formal_bounds: vec![vec![any]],
             receiver: Some(receiver),
             params: vec![values],
@@ -4472,8 +4445,7 @@ mod tests {
         let owner = type_name("demo/Box");
         let formal = "T".to_string();
         let outer = Ty::ty_param("OuterT", Ty::nullable(Ty::obj("kotlin/Any")));
-        let mut bindings =
-            GSigBinds::from_iter([(crate::types::TyParamName::from(&formal), Ty::Int)]);
+        let mut bindings = GSigBinds::from_iter([(TyParamName::from(&formal), Ty::Int)]);
 
         constrain_constructor_result(
             owner,
@@ -4497,7 +4469,7 @@ mod tests {
         constructor.call_sig =
             CallSig::metadata_member(1, vec!["values".to_string()], vec![false], Some(0));
         constructor.generic_sig = Some(GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
             receiver: None,
             params: vec![Ty::array(parameter)],
@@ -4605,7 +4577,7 @@ mod tests {
             "(Lfixture/Duo;Lfixture/Sink;)V".to_string(),
         );
         member.generic_sig = Some(GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![Vec::new()],
             receiver: None,
             params: vec![generic_values, generic_sink],
@@ -5205,7 +5177,7 @@ mod tests {
         base.callable.default_call = false;
         attach_default_target(&mut base, &bridge);
         base.generic_sig = Some(GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![TyParamName::new("T")],
             formal_bounds: vec![vec![nullable_any]],
             receiver: None,
             params: vec![parameter, parameter, Ty::nullable(Ty::String)],

@@ -1031,6 +1031,7 @@ impl BodyLowering<'_> {
             default_provider: None,
             receiver_ty: Some(call.receiver),
             declared_receiver: None,
+            declaring_receiver: None,
             parameters: &call.parameters,
             result,
             declared_result: None,

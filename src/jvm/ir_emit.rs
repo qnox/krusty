@@ -636,25 +636,6 @@ impl JvmDefaultMode {
     }
 }
 
-/// Drop every implicit not-null guard on a narrowed platform value.
-///
-/// `-Xno-call-assertions` removes the null checks kotlinc emits where a Java call's `T!` result is
-/// committed to a declared non-null type. The guard is an expression wrapper, so it is removed by
-/// rewriting the node into its operand's value: `x!!` is a SOURCE assertion the flag leaves alone.
-pub(crate) fn strip_call_assertions(ir: &mut IrFile) {
-    for expr in &mut ir.exprs {
-        let IrExpr::NotNullAssert { operand, check } = expr else {
-            continue;
-        };
-        if check.is_implicit() {
-            *expr = IrExpr::Block {
-                stmts: Vec::new(),
-                value: Some(*operand),
-            };
-        }
-    }
-}
-
 /// The primary constructor's JVM descriptor: every constructor argument, property-backed or plain.
 fn primary_ctor_descriptor(ir: &IrFile, c: &IrClass) -> String {
     format!("({})V", primary_ctor_parameter_descs(ir, c))
@@ -4241,7 +4222,7 @@ fn emit_placed_method(
     let declared_nullability::DeclaredNullability {
         result: ret_ann,
         parameters: param_anns,
-    } = override_result_emission::declared_nullability(ir, e.override_results, fid);
+    } = override_result_emission::declared_nullability(ir, env, fid);
     let emitted_param_anns = holder_receiver.map_or_else(
         || param_anns.clone(),
         |_| {

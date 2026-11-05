@@ -415,7 +415,7 @@ fn substitute_expansion_spelling(
     bindings: &crate::symbol_resolver::GSigBinds,
 ) -> Spelled {
     let template_inner = template.projection_inner().unwrap_or(template);
-    if let TyKind::TyParam(name, _) = template_inner.kind() {
+    if let TyKind::TyParam(name, _) | TyKind::Var(name, _) = template_inner.kind() {
         if let Some(index) = formals.iter().position(|formal| formal == name) {
             let argument = use_site
                 .get(index)

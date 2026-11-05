@@ -23,6 +23,7 @@ mod returnable_blocks;
 mod safe_calls;
 mod target_calls;
 mod target_members;
+mod value_class_members;
 mod varargs;
 
 use super::*;
@@ -299,7 +300,8 @@ pub(super) fn type_name_of(ty: Ty) -> String {
 /// logical type, a return's depth (`@0`), a stable (`!`) or mutable (`~`) binding read, a `when`'s
 /// exhaustiveness (`exhaustive:`), a callable scope (`scope`) and a recorded negation
 /// (`negation`), a short circuit (`and`, `or`) and a written cast (`written`). A call names its
-/// callee by source name, so two units' bodies compare whatever order their functions were
+/// callee by source name, and a call leaving arguments to their defaults the parameters it omits
+/// (`omitting`), so two units' bodies compare whatever order their functions were
 /// declared in, and a loop label by its order of appearance (`@L0`), so two lowerings that name
 /// their loops differently compare.
 pub(super) fn render(ir: &IrFile, expression: ExprId) -> String {
@@ -419,15 +421,33 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
         }
         IrExpr::Call {
             callee: call_callee,
-            dispatch_receiver: None,
+            dispatch_receiver,
             args,
         } if let Callee::Local(function) = &**call_callee => {
+            let receiver = dispatch_receiver.map_or(String::new(), |receiver| {
+                format!("{}.", render(ir, receiver))
+            });
             let args = args
                 .iter()
                 .map(|argument| render(ir, *argument))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("call {}({args})", ir.fn_source_names[function])
+            format!("call {receiver}{}({args})", ir.fn_source_names[function])
+        }
+        IrExpr::Call {
+            callee: call_callee,
+            dispatch_receiver: None,
+            args,
+        } if let Callee::LocalWithDefaults { function, defaults } = &**call_callee => {
+            let args = args
+                .iter()
+                .map(|argument| render(ir, *argument))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "call {}({args}) omitting {defaults:?}",
+                ir.fn_source_names[function]
+            )
         }
         IrExpr::InvokeFunction { func, args, .. } => {
             let operands = std::iter::once(func)
@@ -570,6 +590,15 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             ),
             other => panic!("a lowered body holds no {other:?}"),
         },
+        IrExpr::GetField {
+            receiver,
+            class,
+            index,
+        } => format!(
+            "{}.{}",
+            render(ir, *receiver),
+            ir.classes[*class as usize].fields[*index as usize].name
+        ),
         other => panic!("a lowered body holds no {other:?}"),
     };
     match ir.logical_type(expression) {

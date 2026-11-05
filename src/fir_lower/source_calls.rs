@@ -103,6 +103,9 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) default_provider: Option<ExternalCallableId>,
     pub(super) receiver_ty: Option<ResolvedTy>,
     pub(super) declared_receiver: Option<ResolvedTy>,
+    /// The checked dispatch receiver applied as the member's generic declaring class, when the
+    /// receiver names a subclass of it.
+    pub(super) declaring_receiver: Option<ResolvedTy>,
     pub(super) parameters: &'a [ResolvedTy],
     pub(super) result: ResolvedTy,
     pub(super) declared_result: Option<ResolvedTy>,
@@ -364,6 +367,7 @@ impl BodyLowering<'_> {
             default_provider,
             receiver_ty,
             declared_receiver,
+            declaring_receiver,
             parameters,
             result,
             declared_result,
@@ -425,6 +429,9 @@ impl BodyLowering<'_> {
                         template,
                         parameter_types: &parameter_types,
                         dispatch_receiver,
+                        dispatch_type: declaring_receiver
+                            .or(receiver_ty)
+                            .map(|receiver| receiver.get()),
                         extension_receiver,
                         extension_receiver_parameter,
                         arguments,
