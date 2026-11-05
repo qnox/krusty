@@ -255,7 +255,7 @@ pub(super) fn emit_bridges(
     stub_bridges.emit_rest(c, cw);
     let inherited = &env.collection_members.inherited_bridges;
     for bridge in inherited.for_class(c.fq_name_id()) {
-        emit_inherited_collection_bridge(ir, c, cw, bridge);
+        emit_inherited_collection_bridge(ir, c, cw, env, bridge);
     }
 }
 
@@ -1015,6 +1015,7 @@ fn emit_inherited_collection_bridge(
     ir: &IrFile,
     class: &crate::ir::IrClass,
     cw: &mut ClassWriter,
+    env: &EmitEnv<'_>,
     bridge: &crate::jvm::inherited_collection_bridges::InheritedCollectionBridge,
 ) {
     let params = jvm_tys(&bridge.parameters);
@@ -1031,9 +1032,13 @@ fn emit_inherited_collection_bridge(
         | crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Checked {
             signature,
             ..
-        } => signature.as_deref(),
+        } => signature.as_ref(),
     }
+    .and_then(|signature| {
+        JvmSignatureFormatter::new(ir, env).method_positions(&signature.parameters, &signature.result)
+    })
     .filter(|signature| *signature != descriptor);
+    let signature = signature.as_deref();
     // ASM visits the method header before its body. Reserve it here so body references do not
     // precede the name, descriptor, and generic Signature in the constant pool.
     cw.reserve_method_pool(&bridge.name, &descriptor, signature, &[]);

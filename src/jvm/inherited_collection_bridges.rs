@@ -54,7 +54,7 @@ pub(super) enum InheritedCollectionBridgeBody {
         name: String,
         descriptor: String,
         delegate_result: Ty,
-        signature: Option<String>,
+        signature: Option<InheritedBridgeSignature>,
     },
     /// A bridge that delegates to another entry on the generated class.
     Checked {
@@ -65,8 +65,16 @@ pub(super) enum InheritedCollectionBridgeBody {
         delegate_descriptor: String,
         delegate_result: Ty,
         cast_arguments: Vec<InheritedCollectionCheck>,
-        signature: Option<String>,
+        signature: Option<InheritedBridgeSignature>,
     },
+}
+
+/// The semantic parameter and result types a bridge's generic `Signature` is written from. The
+/// backend's signature formatter spells them, projections and declaration-site wildcards included.
+#[derive(Clone, Debug)]
+pub(super) struct InheritedBridgeSignature {
+    pub(super) parameters: Vec<Ty>,
+    pub(super) result: Ty,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -566,17 +574,17 @@ fn member_bridges(
         return BridgeSelection::default();
     }
 
-    let specialized_property_signature = (specification.kind == MappedBuiltinMemberKind::Property)
-        .then(|| property_signature(specialized_result));
     let physical_signature = if specification.kind == MappedBuiltinMemberKind::Property {
-        Some(property_signature(specification.result).1)
+        Some(InheritedBridgeSignature {
+            parameters: Vec::new(),
+            result: specification.result,
+        })
     } else {
-        inherited_special_method_signature(
+        Some(inherited_special_method_signature(
+            specification,
             &substituted_parameters,
             substituted_result,
-            &specification.generic_parameters,
-            specification.generic_result,
-        )
+        ))
     };
     let mut bridges = vec![InheritedCollectionBridge {
         name: specialized_name.clone(),
@@ -592,19 +600,17 @@ fn member_bridges(
             name: specification.physical_name.clone(),
             descriptor: member.method.descriptor.clone(),
             delegate_result: super_result,
-            // A function's entry is the fake override itself, signed at its specialized types
-            // (`contains(Ljava/util/Map$Entry<LZ;LZ;>;)Z`).
-            signature: Some(specialized_property_signature.map_or_else(
-                || {
-                    let parameters = specification
-                        .parameters
-                        .iter()
-                        .map(|parameter| signature_type(*parameter, true))
-                        .collect::<String>();
-                    format!("({parameters}){}", signature_type(specialized_result, true))
-                },
-                |pair| pair.0,
-            )),
+            // The entry is the fake override itself, signed at its specialized types with each
+            // class type parameter erased (`contains(Ljava/util/Map$Entry<LZ;LZ;>;)Z`;
+            // `getValues()Ljava/util/Collection<Ljava/lang/Object;>;` on `C<T> : HashMap<T, T>`).
+            signature: Some(InheritedBridgeSignature {
+                parameters: specification
+                    .parameters
+                    .iter()
+                    .map(|parameter| erase_type_parameters(*parameter))
+                    .collect(),
+                result: erase_type_parameters(specialized_result),
+            }),
         },
     }];
 
@@ -689,7 +695,7 @@ struct CheckedBridgeInput<'a> {
     delegate_descriptor: &'a str,
     delegate_result: Ty,
     access: InheritedCollectionBridgeAccess,
-    signature: Option<String>,
+    signature: Option<InheritedBridgeSignature>,
 }
 
 fn checked_bridge(input: CheckedBridgeInput<'_>) -> InheritedCollectionBridge {
@@ -827,90 +833,94 @@ fn inherits_final(classpath: &Classpath, mut next: TypeName, name: &str, descrip
     false
 }
 
-fn property_signature(result: Ty) -> (String, String) {
-    (
-        format!("(){}", signature_type(result, false)),
-        format!("(){}", signature_type(result, true)),
-    )
-}
-
-/// The final checked entry of a generic special member keeps the class-owned result variable and
-/// every parameter occurrence tied to it, while a type-checked input remains the erased JVM slot.
-/// `Map.getOrDefault` on `Map<String, V>` is therefore `(Object, V): V`: the foreign key stays
-/// `Object`, but the default and result retain `V`. A method whose result names no variable (the
-/// two-argument `remove`, for example) carries no generic signature in kotlinc.
+/// The final checked entry of a special member keeps each specialized position its JVM slot
+/// already erases to, while a type-checked input remains the erased JVM slot. `Map.getOrDefault` on
+/// `Map<String, V>` is therefore `(Object, V): V`: the checked key stays `Object`, but the default
+/// and result retain `V`, as `Map<String, Box<out CharSequence>>` retains `Box<out CharSequence>`.
+/// A member whose every position is its erased slot (the two-argument `remove`, whose key and
+/// value are both checked) signs nothing beyond its descriptor and carries no generic signature.
 fn inherited_special_method_signature(
+    specification: &BridgeMember,
     physical_parameters: &[Ty],
     physical_result: Ty,
-    semantic_parameters: &[Ty],
-    semantic_result: Ty,
-) -> Option<String> {
-    if !semantic_result.mentions_ty_param() {
-        return None;
-    }
-    let parameters = physical_parameters
-        .iter()
-        .zip(semantic_parameters)
-        .map(|(&physical, &semantic)| {
-            if semantic.mentions_ty_param() && descriptor_of(semantic) == descriptor_of(physical) {
-                semantic
-            } else {
-                physical
-            }
-        })
-        .map(|parameter| signature_type(parameter, true))
-        .collect::<String>();
-    let result = if descriptor_of(semantic_result) == descriptor_of(physical_result) {
-        semantic_result
-    } else {
-        physical_result
+) -> InheritedBridgeSignature {
+    let specialized = |physical: Ty, semantic: Ty| {
+        if descriptor_of(semantic) == descriptor_of(physical) {
+            semantic
+        } else {
+            physical
+        }
     };
-    Some(format!("({parameters}){}", signature_type(result, true)))
-}
-
-fn signature_type(ty: Ty, keep_parameters: bool) -> String {
-    if ty.nullable_primitive().is_some() {
-        return descriptor_of(ty);
-    }
-    {
-        let other = ty.non_null();
-        match other.kind() {
-            TyKind::TyParam(name, bound) => {
-                if keep_parameters {
-                    format!(
-                        "T{};",
-                        crate::types::type_parameter_source_name(name.as_str())
-                    )
+    let checked = |index: usize| {
+        specification.policy.as_ref().is_some_and(|policy| {
+            policy
+                .checked_parameters
+                .iter()
+                .any(|&parameter| usize::from(parameter) == index)
+        })
+    };
+    InheritedBridgeSignature {
+        parameters: physical_parameters
+            .iter()
+            .zip(&specification.generic_parameters)
+            .enumerate()
+            .map(|(index, (&physical, &semantic))| {
+                if checked(index) {
+                    physical
                 } else {
-                    signature_type(bound, false)
+                    specialized(physical, semantic)
                 }
-            }
-            TyKind::DefinitelyNotNull(inner) => signature_type(inner, keep_parameters),
-            TyKind::StarProjection(_) | TyKind::OutProjection(_) | TyKind::InProjection(_) => {
-                "Ljava/lang/Object;".to_string()
-            }
-            TyKind::Obj(name, arguments) if !arguments.is_empty() => {
-                let arguments = arguments
-                    .iter()
-                    .map(|argument| signature_argument(*argument, keep_parameters))
-                    .collect::<String>();
-                format!("L{}<{}>;", owned_classfile_internal_name(name), arguments)
-            }
-            _ => descriptor_of(other),
-        }
+            })
+            .collect(),
+        result: specialized(physical_result, specification.generic_result),
     }
 }
 
-fn signature_argument(ty: Ty, keep_parameters: bool) -> String {
-    match ty.non_null().kind() {
-        TyKind::TyParam(..) if keep_parameters => signature_type(ty, true),
-        TyKind::StarProjection(_) | TyKind::OutProjection(_) | TyKind::InProjection(_) => {
-            signature_type(ty, keep_parameters)
+/// kotlinc's `eraseTypeParameters`: every type-parameter occurrence becomes its erased upper bound,
+/// the classifier its bound chain ends at, applied to star projections (`T : Comparable<T>` is
+/// `Comparable<*>`). A class application keeps its arguments and their projections, erased in turn.
+fn erase_type_parameters(ty: Ty) -> Ty {
+    match ty.kind() {
+        TyKind::TyParam(..) => {
+            let erased = erased_upper_bound(ty);
+            if ty.is_nullable() {
+                Ty::nullable(erased)
+            } else {
+                erased
+            }
         }
-        _ if ty.nullable_primitive().is_some() || ty.non_null().is_jvm_scalar() => {
-            signature_type(reference_of(ty), keep_parameters)
+        TyKind::Nullable(inner) => Ty::nullable(erase_type_parameters(inner)),
+        TyKind::DefinitelyNotNull(inner) => erase_type_parameters(inner).non_null(),
+        TyKind::OutProjection(inner) => Ty::out_projection(erase_type_parameters(inner)),
+        TyKind::InProjection(inner) => Ty::in_projection(erase_type_parameters(inner)),
+        TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+            name,
+            &arguments
+                .iter()
+                .map(|argument| erase_type_parameters(*argument))
+                .collect::<Vec<_>>(),
+        ),
+        _ => ty,
+    }
+}
+
+/// kotlinc's `erasedUpperBound` of a type-parameter occurrence, star-projected. Each occurrence
+/// already carries its declaration's primary bound, so the chain is followed through the carried
+/// bounds; a chain that returns to a parameter it visited erases to `Any`.
+fn erased_upper_bound(ty: Ty) -> Ty {
+    let mut current = ty.non_null();
+    let mut visited = HashSet::default();
+    loop {
+        match current.kind() {
+            TyKind::TyParam(name, bound) if visited.insert(name) => current = bound.non_null(),
+            TyKind::DefinitelyNotNull(inner) => current = inner.non_null(),
+            TyKind::Obj(name, arguments) => {
+                let stars =
+                    vec![Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))); arguments.len()];
+                return Ty::obj_args_name(name, &stars);
+            }
+            _ => return Ty::obj("kotlin/Any"),
         }
-        _ => signature_type(ty, keep_parameters),
     }
 }
 
