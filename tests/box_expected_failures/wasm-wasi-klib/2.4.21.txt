@@ -962,7 +962,6 @@ controlStructures/breakContinueInExpressions/tryFinally1.kt
 controlStructures/breakContinueInExpressions/tryFinally2.kt
 controlStructures/breakInFinally.kt
 controlStructures/breakInWhen.kt
-controlStructures/compareBoxedIntegerToZero.kt
 controlStructures/continueInExpr.kt
 controlStructures/continueInFor.kt
 controlStructures/continueInForCondition.kt
@@ -2369,11 +2368,9 @@ increment/nullable.kt
 increment/postfixIncrementOnClass.kt
 increment/postfixIncrementOnClassSmartCast.kt
 increment/postfixNullableClassIncrement.kt
-increment/postfixNullableIncrement.kt
 increment/prefixIncrementOnClass.kt
 increment/prefixIncrementOnClassSmartCast.kt
 increment/prefixNullableClassIncrement.kt
-increment/prefixNullableIncrement.kt
 inference/builderInferenceLeakingVariable.kt
 inference/capturedSelfInsideIntersection.kt
 inference/capturedSelfInsideIntersection2.kt
