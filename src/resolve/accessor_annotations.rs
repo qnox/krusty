@@ -16,8 +16,11 @@ impl Checker<'_> {
         property: &PropDecl,
     ) {
         // The property's declaration policies cover its accessors.
-        let policy_depth =
-            self.push_declaration_policies(scope, &property.annotations, &property.annotation_args);
+        let policy_depth = self.push_property_declaration_policies(
+            scope,
+            &property.annotations,
+            &property.annotation_args,
+        );
         self.check_accessor_annotation_site(
             scope,
             &property.getter_annotations,
