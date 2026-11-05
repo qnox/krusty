@@ -25,8 +25,7 @@ impl Parser<'_> {
         let params = self.parse_param_list();
         let mut delegation = CtorDelegation::None;
         let mut delegation_offset = 0;
-        if self.eat(TokenKind::Colon) {
-            self.skip_newlines();
+        if self.eat_declaration_colon() {
             let target = if self.at(TokenKind::Ident) {
                 let target = self.text().to_string();
                 delegation_offset = self.tok().span.lo;

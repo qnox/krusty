@@ -1609,27 +1609,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse a property declaration. Whether an absent initializer is legal belongs to semantic
-    /// checking, because the answer depends on declaration ownership and modifiers.
-    /// Consume an initializer's `=` when the next non-newline token is one.
-    ///
-    /// Kotlin's property grammar is `… (NL* '=' NL* expression)?`, so a declaration may put its
-    /// initializer on the following line:
-    ///
-    /// ```kotlin
-    /// val a: Map<String, Int>
-    ///     = mapOf("x" to 1)
-    /// ```
-    ///
-    /// Stopping the declaration at the newline instead leaves the `=` to be read as the start of the
-    /// next declaration or statement, which is not a recoverable position — nothing else in the
-    /// grammar begins with `=`, so looking past the newlines cannot swallow anything but this
-    /// property's own initializer.
-    fn eat_initializer_eq(&mut self) -> Option<Span> {
-        self.skip_plain_newlines_before(TokenKind::Eq);
-        self.eat_span(TokenKind::Eq)
-    }
-
     /// Return the first token after an annotation without mutating parser state.
     fn annotation_end_at(&self, mut i: usize) -> Option<usize> {
         if !self
@@ -2326,11 +2305,7 @@ impl<'a> Parser<'a> {
             merged.append(&mut params);
             params = merged;
         }
-        let ret = if self.eat(TokenKind::Colon) {
-            Some(self.parse_type())
-        } else {
-            None
-        };
+        let ret = self.eat_declaration_colon().then(|| self.parse_type());
         // A `where` bound is the same constraint as the inline `<T : Bound>` form; join them so every
         // consumer sees one list.
         let mut type_param_bounds = type_param_bounds;

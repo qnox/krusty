@@ -87,6 +87,38 @@ impl Parser<'_> {
         }
     }
 
+    /// Consume an initializer's `=` when the next non-newline token is one.
+    ///
+    /// Kotlin's property grammar is `… (NL* '=' NL* expression)?`, so a declaration may put its
+    /// initializer on the following line:
+    ///
+    /// ```kotlin
+    /// val a: Map<String, Int>
+    ///     = mapOf("x" to 1)
+    /// ```
+    ///
+    /// Stopping the declaration at the newline instead leaves the `=` to be read as the start of the
+    /// next declaration or statement, which is not a recoverable position — nothing else in the
+    /// grammar begins with `=`, so looking past the newlines cannot swallow anything but this
+    /// property's own initializer.
+    pub(super) fn eat_initializer_eq(&mut self) -> Option<Span> {
+        self.skip_plain_newlines_before(TokenKind::Eq);
+        self.eat_span(TokenKind::Eq)
+    }
+
+    /// Consume the colon that introduces a function or getter return type, or a secondary
+    /// constructor's delegation call, with the line breaks Kotlin allows around it: `NL* ':' NL*`.
+    /// As with an initializer's `=`, no declaration or statement begins with `:`, so looking past
+    /// the line breaks cannot take anything but this declaration's own colon.
+    pub(super) fn eat_declaration_colon(&mut self) -> bool {
+        self.skip_plain_newlines_before(TokenKind::Colon);
+        let colon = self.eat(TokenKind::Colon);
+        if colon {
+            self.skip_plain_newlines();
+        }
+        colon
+    }
+
     /// Consume the `.` that ends a declaration's receiver type (or one of its qualifier segments),
     /// with the line breaks Kotlin allows on either side of it: `receiverType NL* '.' NL*`.
     pub(super) fn eat_receiver_dot(&mut self) -> bool {

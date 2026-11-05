@@ -228,7 +228,7 @@ impl Parser<'_> {
                     accessor_keyword.lo,
                     self.t[self.i.saturating_sub(1)].span.hi,
                 ));
-                getter_ty = self.eat(TokenKind::Colon).then(|| self.parse_type());
+                getter_ty = self.eat_declaration_colon().then(|| self.parse_type());
                 if self.at(TokenKind::Eq) || self.at(TokenKind::LBrace) {
                     getter = Some(self.parse_accessor_body());
                 } else if had_parens {

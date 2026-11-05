@@ -68,11 +68,7 @@ impl Parser<'_> {
         // An explicit return type (`: T`) drives the desugared lambda's function type — recorded below
         // once the lambda ExprId exists. A block body ending in `return` has body type `Nothing`, so the
         // checker relies on this annotation rather than the (diverging) body value.
-        let ret_ty = if self.eat(TokenKind::Colon) {
-            Some(self.parse_type())
-        } else {
-            None
-        };
+        let ret_ty = self.eat_declaration_colon().then(|| self.parse_type());
         let body = if self.eat(TokenKind::Eq) {
             let e = self.parse_expr();
             let sp = self.file.expr_spans[e.0 as usize];
