@@ -326,6 +326,12 @@ fun box(): String {
 }
 ";
 
+#[test]
+fn a_kotlin_collection_superclass_leaves_its_fake_overrides_kotlincs_special_bridges() {
+    common::assert_class_matches_kotlinc("ValueCollections", &packaged(COLLECTIONS), "stubs/Words");
+    common::assert_class_matches_kotlinc("ValueCollections", &packaged(COLLECTIONS), "stubs/Pairs");
+}
+
 /// The members of `java.util.Collection` a later realization writes, as `javap -p` spells them.
 const COLLECTION_LATER_REALIZATIONS: &[&str] =
     &["public boolean removeIf(java.util.function.Predicate<? super stubs.Z>);"];

@@ -1,4 +1,4 @@
-//! JVM bridge plans for collection members inherited from a Java superclass.
+//! JVM bridge plans for collection members inherited from a library superclass, Java or Kotlin.
 //!
 //! Declaration shape comes from `.kotlin_builtins`, Java substitution comes from classfile generic
 //! signatures, and the small non-derivable type-safe-barrier policy is keyed by the complete builtin
@@ -133,12 +133,15 @@ fn synthesize(
     if class.is_interface || class.is_annotation {
         return BridgeSelection::default();
     }
-    let Some(super_info) = classpath.find_name(class.superclass) else {
+    if classpath.find_name(class.superclass).is_none() {
         return BridgeSelection::default();
-    };
-    // A Kotlin superclass already publishes its final special bridges. Only the first Kotlin class
-    // whose immediate superclass is Java materializes inherited fake overrides.
-    if super_info.meta.class_kind.is_some() || class.superclass == crate::types::wk::java_object() {
+    }
+    // kotlinc's `BridgeLowering` gives a fake override of a special builtin member its pair of
+    // bridges whatever language the superclass is written in: a Kotlin superclass's member is only
+    // skipped where that class already publishes a final bridge under the special signature
+    // (`kotlin.collections.AbstractSet<E>.contains(Object)` is an ordinary method, so a subclass
+    // over `String` still gets `contains(String)` and the final `contains(Object)`).
+    if class.superclass == crate::types::wk::java_object() {
         return BridgeSelection::default();
     }
 
@@ -174,6 +177,7 @@ fn synthesize(
                 specification: specification.clone(),
                 method: method.clone(),
                 class_bindings: node.bindings.clone(),
+                declared_parameter_names: declared_parameter_names(&node.info, method),
             });
         }
     }
@@ -207,6 +211,27 @@ struct FoundMember {
     specification: BridgeMember,
     method: MethodSig,
     class_bindings: HashMap<String, Ty>,
+    /// The parameter names a Kotlin superclass's metadata gives the inherited method. A Java
+    /// method has none, and its fake override's parameters are kotlinc's generated `p0`, `p1`.
+    declared_parameter_names: Option<Vec<String>>,
+}
+
+/// The value parameter names `info`'s Kotlin metadata declares for `method`.
+fn declared_parameter_names(info: &ClassInfo, method: &MethodSig) -> Option<Vec<String>> {
+    info.meta
+        .class_functions
+        .iter()
+        .find(|function| {
+            function.jvm_name == method.name
+                && function.jvm_desc == Some(method.descriptor.as_str())
+        })
+        .map(|function| {
+            function
+                .value_params
+                .iter()
+                .map(|parameter| parameter.name.clone())
+                .collect()
+        })
 }
 
 #[derive(Clone)]
@@ -223,29 +248,69 @@ fn direct_supertype(class: &IrClass) -> Option<Ty> {
         .find(|ty| ty.non_null().obj_internal() == Some(class.superclass))
 }
 
-/// The first mapped collection interface reached through the actual Java generic hierarchy. The
-/// central JVM↔Kotlin class map identifies the mutable semantic face; no collection spelling is
-/// reconstructed here.
+/// The first mapped collection interface reached through the superclass's semantic hierarchy. A
+/// Kotlin class's supertypes come from its metadata, so a Kotlin face keeps its own mutability
+/// (`kotlin.collections.AbstractSet<E>` is a read-only `Set<E>` with no `remove`). A Java class is
+/// walked through its generic signature, and the central JVM↔Kotlin class map identifies the
+/// mutable semantic face of the Java collection it reaches, however the signature reader spells
+/// it; no collection spelling is reconstructed here.
 fn applied_collection_face(classpath: &Classpath, start: Ty) -> Option<Ty> {
-    let mut pending = VecDeque::from([start]);
+    let mut pending = VecDeque::from([(start, Declarer::Java)]);
     let mut seen = HashSet::default();
-    while let Some(applied) = pending.pop_front() {
+    while let Some((applied, declarer)) = pending.pop_front() {
         let owner = applied.non_null().obj_internal()?;
         let jvm_owner = crate::jvm::jvm_class_map::to_jvm_type_name(owner);
-        if !seen.insert(jvm_owner) {
+        if !seen.insert((jvm_owner, declarer)) {
             continue;
         }
         if let Some(kotlin) =
             crate::jvm::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name(jvm_owner)
         {
-            return Some(Ty::obj_args_name(kotlin, applied.non_null().type_args()));
+            return Some(match declarer {
+                Declarer::Kotlin => applied.non_null(),
+                Declarer::Java => Ty::obj_args_name(kotlin, applied.non_null().type_args()),
+            });
         }
         let Some(info) = classpath.find_name(jvm_owner) else {
             continue;
         };
-        pending.extend(applied_supertypes(&info, applied));
+        if info.meta.class_visibility.is_some() {
+            pending.extend(
+                kotlin_supertypes(&info, applied)
+                    .into_iter()
+                    .map(|supertype| (supertype, Declarer::Kotlin)),
+            );
+        } else {
+            pending.extend(
+                applied_supertypes(&info, applied)
+                    .into_iter()
+                    .map(|supertype| (supertype, Declarer::Java)),
+            );
+        }
     }
     None
+}
+
+/// Which language declared a supertype edge, and so what a mapped collection interface on it means.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Declarer {
+    /// Kotlin metadata names the read-only or mutable interface it means.
+    Kotlin,
+    /// A Java collection interface is always the mutable one.
+    Java,
+}
+
+/// A Kotlin class's metadata supertypes at the type arguments `applied` gives its parameters.
+fn kotlin_supertypes(info: &ClassInfo, applied: Ty) -> Vec<Ty> {
+    let bindings: HashMap<String, Ty> = info
+        .meta
+        .class_type_parameters
+        .type_params
+        .iter()
+        .cloned()
+        .zip(applied.non_null().type_args().iter().copied())
+        .collect();
+    ty_subst_all(&info.meta.class_supertypes, &bindings)
 }
 
 fn java_superclass_chain(classpath: &Classpath, start: Ty) -> Vec<AppliedClass> {
@@ -516,16 +581,30 @@ fn member_bridges(
     let mut bridges = vec![InheritedCollectionBridge {
         name: specialized_name.clone(),
         parameters: specification.parameters.clone(),
-        parameter_names: (0..specification.parameters.len())
-            .map(crate::jvm::parameter_names::inherited_collection_specialized_local)
-            .collect(),
+        parameter_names: member.declared_parameter_names.clone().unwrap_or_else(|| {
+            (0..specification.parameters.len())
+                .map(crate::jvm::parameter_names::inherited_collection_specialized_local)
+                .collect()
+        }),
         result: specialized_result,
         body: InheritedCollectionBridgeBody::SuperDelegate {
             owner: class.superclass,
             name: specification.physical_name.clone(),
             descriptor: member.method.descriptor.clone(),
             delegate_result: super_result,
-            signature: specialized_property_signature.map(|pair| pair.0),
+            // A function's entry is the fake override itself, signed at its specialized types
+            // (`contains(Ljava/util/Map$Entry<LZ;LZ;>;)Z`).
+            signature: Some(specialized_property_signature.map_or_else(
+                || {
+                    let parameters = specification
+                        .parameters
+                        .iter()
+                        .map(|parameter| signature_type(*parameter, true))
+                        .collect::<String>();
+                    format!("({parameters}){}", signature_type(specialized_result, true))
+                },
+                |pair| pair.0,
+            )),
         },
     }];
 
