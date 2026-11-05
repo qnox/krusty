@@ -908,7 +908,6 @@ controlStructures/breakContinueInExpressions/tryFinally1.kt
 controlStructures/breakContinueInExpressions/tryFinally2.kt
 controlStructures/breakInFinally.kt
 controlStructures/breakInWhen.kt
-controlStructures/compareBoxedIntegerToZero.kt
 controlStructures/continueInExpr.kt
 controlStructures/continueInFor.kt
 controlStructures/continueInForCondition.kt
@@ -1584,7 +1583,6 @@ dataClasses/hashCode/short.kt
 dataClasses/kt49715.kt
 dataClasses/multiDeclaration.kt
 dataClasses/multiDeclarationFor.kt
-dataClasses/nonTrivialMemberInSuperClass.kt
 dataClasses/propertyOfDnnType.kt
 dataClasses/toString/arrayParams.kt
 dataClasses/toString/genericParam.kt
@@ -2251,11 +2249,9 @@ increment/nullable.kt
 increment/postfixIncrementOnClass.kt
 increment/postfixIncrementOnClassSmartCast.kt
 increment/postfixNullableClassIncrement.kt
-increment/postfixNullableIncrement.kt
 increment/prefixIncrementOnClass.kt
 increment/prefixIncrementOnClassSmartCast.kt
 increment/prefixNullableClassIncrement.kt
-increment/prefixNullableIncrement.kt
 inference/builderInferenceLeakingVariable.kt
 inference/capturedSelfInsideIntersection.kt
 inference/capturedSelfInsideIntersection2.kt
