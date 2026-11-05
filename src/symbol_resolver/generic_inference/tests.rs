@@ -276,7 +276,7 @@ fn selected_bindings_publish_formals_implied_by_dependent_bounds() {
         &signature,
         0,
         &mut bindings,
-        GSigBinds::from_iter([("T2".to_string(), c)]),
+        GSigBinds::from_iter([("T2".into(), c)]),
     );
 
     assert_eq!(bindings.get("T1"), Some(&c));
@@ -305,7 +305,7 @@ fn argument_merge_completes_dependent_formal_before_intersection_bounds() {
         0,
         &GSigBinds::default(),
         &mut bindings,
-        GSigBinds::from_iter([("T".to_string(), uint)]),
+        GSigBinds::from_iter([("T".into(), uint)]),
     );
 
     assert_eq!(bindings.get("T"), Some(&uint));
@@ -329,7 +329,7 @@ fn postponed_platform_argument_preserves_an_expected_non_null_binding() {
     // The expected call result contextualizes R before a postponed Java producer contributes its
     // flexible result. Joining those two faces must retain the declaration's platform interval;
     // rigid nullable would reject the very non-null expectation that selected this call.
-    let mut bindings = GSigBinds::from_iter([("R".to_string(), list)]);
+    let mut bindings = GSigBinds::from_iter([("R".into(), list)]);
 
     merge_call_argument_bindings(
         &crate::libraries::EmptySymbolSource,
@@ -337,7 +337,7 @@ fn postponed_platform_argument_preserves_an_expected_non_null_binding() {
         0,
         &GSigBinds::default(),
         &mut bindings,
-        GSigBinds::from_iter([("R".to_string(), flexible_list)]),
+        GSigBinds::from_iter([("R".into(), flexible_list)]),
     );
 
     assert_eq!(bindings.get("R"), Some(&flexible_list));
@@ -364,7 +364,7 @@ fn projected_receiver_binding_can_widen_to_a_nullable_argument_constraint() {
         ret: k,
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let receiver_bindings = GSigBinds::from_iter([("K".to_string(), Ty::String)]);
+    let receiver_bindings = GSigBinds::from_iter([("K".into(), Ty::String)]);
     let mut bindings = receiver_bindings.clone();
 
     assert_eq!(
@@ -382,7 +382,7 @@ fn projected_receiver_binding_can_widen_to_a_nullable_argument_constraint() {
         0,
         &receiver_bindings,
         &mut bindings,
-        GSigBinds::from_iter([("K".to_string(), Ty::nullable(Ty::String))]),
+        GSigBinds::from_iter([("K".into(), Ty::nullable(Ty::String))]),
     );
 
     assert_eq!(bindings.get("K"), Some(&Ty::nullable(Ty::String)));
@@ -407,7 +407,7 @@ fn partially_specified_type_arguments_fix_only_written_positions() {
         &signature,
         written_then_hole.as_slice(),
         &mut bindings,
-        GSigBinds::from_iter([("K".to_string(), Ty::String), ("T".to_string(), Ty::Float)]),
+        GSigBinds::from_iter([("K".into(), Ty::String), ("T".into(), Ty::Float)]),
     );
     assert_eq!(bindings.get("K"), Some(&Ty::Int));
     assert_eq!(bindings.get("T"), Some(&Ty::Float));
@@ -418,7 +418,7 @@ fn partially_specified_type_arguments_fix_only_written_positions() {
         &signature,
         hole_then_written.as_slice(),
         &mut bindings,
-        GSigBinds::from_iter([("K".to_string(), Ty::Int), ("T".to_string(), Ty::Float)]),
+        GSigBinds::from_iter([("K".into(), Ty::Int), ("T".into(), Ty::Float)]),
     );
     assert_eq!(bindings.get("K"), Some(&Ty::Int));
     assert_eq!(bindings.get("T"), Some(&Ty::String));
@@ -481,8 +481,7 @@ fn callable_reference_expectation_keeps_inputs_fixed_and_postpones_results() {
         ret: Ty::Unit,
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let bindings =
-        GSigBinds::from_iter([("T".to_string(), Ty::String), ("R".to_string(), Ty::String)]);
+    let bindings = GSigBinds::from_iter([("T".into(), Ty::String), ("R".into(), Ty::String)]);
 
     let expected = callable_reference_expected_bindings(
         &crate::libraries::EmptySymbolSource,
@@ -519,7 +518,7 @@ fn callable_reference_expectation_keeps_invariant_expected_result_equalities() {
         ret: Ty::fun(vec![r], r),
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let bindings = GSigBinds::from_iter([("R".to_string(), Ty::String)]);
+    let bindings = GSigBinds::from_iter([("R".into(), Ty::String)]);
     let fixed = expected_result_equality_formals(
         &crate::libraries::EmptySymbolSource,
         &signature,
@@ -551,7 +550,7 @@ fn nested_flexible_result_occurrence_is_an_expected_equality() {
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
     let expected = Ty::fun(Vec::new(), Ty::String);
-    let expected_bindings = GSigBinds::from_iter([("T".to_string(), Ty::String)]);
+    let expected_bindings = GSigBinds::from_iter([("T".into(), Ty::String)]);
 
     assert_eq!(
         formal_variance_in_type(&crate::libraries::EmptySymbolSource, signature.ret, "T"),
@@ -581,7 +580,7 @@ fn root_flexible_result_occurrence_is_not_an_expected_equality() {
         ret: Ty::platform_nullable(variable),
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let expected_bindings = GSigBinds::from_iter([("T".to_string(), Ty::String)]);
+    let expected_bindings = GSigBinds::from_iter([("T".into(), Ty::String)]);
     let nullable = Ty::nullable(Ty::String);
     let inferred = infer_generic_call_constraints_from_symbols(
         &crate::libraries::EmptySymbolSource,
@@ -617,7 +616,7 @@ fn contravariant_nested_flexible_occurrence_is_not_an_expected_equality() {
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
     let expected = Ty::fun(vec![Ty::String], Ty::String);
-    let expected_bindings = GSigBinds::from_iter([("T".to_string(), Ty::String)]);
+    let expected_bindings = GSigBinds::from_iter([("T".into(), Ty::String)]);
 
     assert_eq!(
         formal_variance_in_type(&crate::libraries::EmptySymbolSource, signature.ret, "T"),
@@ -646,8 +645,8 @@ fn projected_expected_result_does_not_widen_an_argument_binding() {
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
     let expected = Ty::obj_args("test/Box", &[Ty::out_projection(nullable_any)]);
-    let expected_bindings = GSigBinds::from_iter([("X".to_string(), nullable_any)]);
-    let mut bindings = GSigBinds::from_iter([("X".to_string(), any)]);
+    let expected_bindings = GSigBinds::from_iter([("X".into(), nullable_any)]);
+    let mut bindings = GSigBinds::from_iter([("X".into(), any)]);
 
     widen_invariant_expected_bindings(
         &crate::libraries::EmptySymbolSource,
@@ -719,7 +718,7 @@ fn inferred_dependency_materializes_an_otherwise_unobserved_bound_formal() {
         ret: Ty::obj_args("kotlin/Pair", &[Ty::String, e]),
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let mut bindings = GSigBinds::from_iter([("E".to_string(), any)]);
+    let mut bindings = GSigBinds::from_iter([("E".into(), any)]);
 
     complete_dependency_instantiated_bound_bindings(&signature, &mut bindings, 0);
 
@@ -766,10 +765,8 @@ fn captured_self_bound_keeps_denotable_caller_type_parameters() {
         ret: method,
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let receiver_bindings = GSigBinds::from_iter([
-        ("owner:D".to_string(), data),
-        ("owner:S".to_string(), captured_self),
-    ]);
+    let receiver_bindings =
+        GSigBinds::from_iter([("owner:D".into(), data), ("owner:S".into(), captured_self)]);
     let mut bindings = GSigBinds::default();
 
     complete_return_only_captured_receiver_bindings(
@@ -868,7 +865,7 @@ fn expected_result_can_intersect_an_independent_declared_bound() {
     assert_eq!(
         infer_generic_return_bindings(&signature, expected, |actual, bound| actual == bound),
         Some(GSigBinds::from_iter([(
-            "T".to_string(),
+            "T".into(),
             Ty::obj("test/Expected")
         )]))
     );

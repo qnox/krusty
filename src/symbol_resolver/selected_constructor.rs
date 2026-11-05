@@ -79,13 +79,15 @@ fn result_from_expected(
     }
     let arguments = formals
         .iter()
-        .map(|formal| bindings.get(formal).copied().expect("complete"))
+        .map(|formal| bindings.get(formal.as_str()).copied().expect("complete"))
         .collect::<Vec<_>>();
     Some(Ty::obj_args_name(owner, &arguments))
 }
 
 fn complete(formals: &[String], bindings: &GSigBinds) -> bool {
-    formals.iter().all(|formal| bindings.contains_key(formal))
+    formals
+        .iter()
+        .all(|formal| bindings.contains_key(formal.as_str()))
 }
 
 fn bind_direct_supertype(
@@ -122,7 +124,7 @@ fn bind_direct_supertype(
             continue;
         };
         bindings
-            .entry(name.to_string())
+            .entry(crate::types::TyParamName::new(&name))
             .or_insert(actual.projection_inner().unwrap_or(actual));
     }
 }

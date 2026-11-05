@@ -106,6 +106,8 @@ mod tests {
                 "libraries",
                 "symbol_source",
                 "types",
+                // The provider-neutral value-class traversal the KLIB backends' policy runs over.
+                "value_classes",
             ],
         );
         // The class tables every backend lays its objects out from read only the checked IR: no
@@ -555,9 +557,10 @@ mod tests {
     #[test]
     fn the_class_model_uses_only_ir_contract_dependencies() {
         assert_allowed_crate_modules("src/native/intrinsics.rs", &["types"]);
-        // `value_classes` is the traversal every backend shares; what this file adds is the policy.
+        // `value_classes` is the traversal every backend shares; what this file adds is the KLIB
+        // backends' policy.
         assert_allowed_crate_modules(
-            "src/native/value_classes.rs",
+            "src/backend/value_classes.rs",
             &["ir", "types", "value_classes"],
         );
     }
@@ -576,7 +579,11 @@ mod tests {
             "src/native/codegen/lower.rs",
             &["backend", "fir", "ir", "types"],
         );
-        assert_allowed_crate_modules("src/native/codegen/lower/functions.rs", &["ir", "types"]);
+        // `backend` supplies the shared value-class inventory a capture layout stores values by.
+        assert_allowed_crate_modules(
+            "src/native/codegen/lower/functions.rs",
+            &["backend", "ir", "types"],
+        );
         assert_allowed_crate_modules("src/native/codegen/lower/arrays.rs", &["types"]);
         for path in rust_files_under("src/native/codegen") {
             let text = fs::read_to_string(&path).expect("read native code generator source");

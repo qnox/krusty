@@ -143,7 +143,7 @@ pub(crate) fn projected_classifier_argument_bindings(
     let unbounded_star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
     formals
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .zip(arguments.iter().copied())
         .map(|(formal, argument)| (formal, argument.unwrap_or(unbounded_star)))
         .collect()
@@ -187,7 +187,7 @@ fn apply_alias_expansion(
     let bindings = alias
         .formals
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .zip(args.iter().copied())
         .collect::<crate::symbol_resolver::GSigBinds>();
     let expansion = crate::types::ty_subst_alias_expansion(alias.expansion, &bindings);

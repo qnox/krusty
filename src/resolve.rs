@@ -39,6 +39,7 @@ mod null_check_narrowing;
 use constructor_references::ReferenceReceiver;
 mod access_control;
 mod accessor_annotations;
+mod accessor_bodies;
 mod actualization_names;
 mod alias_constructor_application;
 mod alias_projection;
@@ -308,6 +309,7 @@ use selected_argument_commitment::{
 mod signature_collection;
 mod signature_parameter_identity;
 mod type_parameter_bounds;
+mod type_parameter_scope;
 mod type_spellings;
 #[cfg(test)]
 pub(crate) use signature_collection::collect_signatures_with_cp_headers;
@@ -1662,8 +1664,8 @@ pub struct GenericMethod {
 
 struct GenericMemberPlan {
     method: GenericMethod,
-    class_bindings: HashMap<String, Ty>,
-    call_bindings: HashMap<String, Ty>,
+    class_bindings: crate::types::TyParamBindings,
+    call_bindings: crate::types::TyParamBindings,
 }
 
 struct GenericMemberQuery<'a> {
@@ -1819,7 +1821,7 @@ impl ClassSig {
         self.flags = self.flags.with_final(on);
     }
 
-    pub(crate) fn type_parameter_bindings(&self, applied: Ty) -> HashMap<String, Ty> {
+    pub(crate) fn type_parameter_bindings(&self, applied: Ty) -> crate::types::TyParamBindings {
         let mut bindings = self
             .type_params
             .iter()
@@ -1831,11 +1833,11 @@ impl ClassSig {
                     .copied()
                     .filter(|bound| *bound != Ty::Error)
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                (name.clone(), bound)
+                (crate::types::TyParamName::from(name), bound)
             })
             .collect::<HashMap<_, _>>();
         for (name, argument) in self.type_params.iter().zip(applied.type_args()) {
-            bindings.insert(name.clone(), *argument);
+            bindings.insert(crate::types::TyParamName::from(name), *argument);
         }
         bindings.extend(
             self.captured_type_parameters
@@ -1850,7 +1852,7 @@ impl ClassSig {
                         .copied()
                         .filter(|bound| *bound != Ty::Error)
                         .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                    (name.clone(), bound)
+                    (crate::types::TyParamName::from(name), bound)
                 }),
         );
         for (name, argument) in self
@@ -1859,7 +1861,7 @@ impl ClassSig {
             .iter()
             .zip(applied.type_args().iter().skip(self.type_params.len()))
         {
-            bindings.insert(name.clone(), *argument);
+            bindings.insert(crate::types::TyParamName::from(name), *argument);
         }
         bindings
     }
@@ -2494,7 +2496,12 @@ fn extension_property_headers_alpha_equivalent(left: &ExtPropSig, right: &ExtPro
         .formals
         .iter()
         .zip(right.formals.iter().zip(&right.formal_bounds))
-        .map(|(left, (right, bound))| (left.clone(), Ty::ty_param(right, *bound)))
+        .map(|(left, (right, bound))| {
+            (
+                crate::types::TyParamName::from(left),
+                Ty::ty_param(right, *bound),
+            )
+        })
         .collect::<crate::symbol_resolver::GSigBinds>();
     crate::symbol_resolver::ty_subst_keep_unbound(left.receiver, &placeholders) == right.receiver
         && left
@@ -7166,13 +7173,13 @@ fn unify_ty_common(
     shape: Ty,
     actual: Ty,
     tparams: &[String],
-    binds: &mut HashMap<String, Ty>,
+    binds: &mut crate::types::TyParamBindings,
     join: &dyn Fn(Ty, Ty) -> Ty,
 ) {
     match (shape.kind(), actual.kind()) {
         (TyKind::TyParam(name, _), _) if tparams.iter().any(|parameter| parameter == name) => {
             binds
-                .entry(name.to_string())
+                .entry(crate::types::TyParamName::new(&name))
                 .and_modify(|bound| {
                     if *bound != actual {
                         *bound = join(*bound, actual);
@@ -9172,7 +9179,7 @@ impl TypeInfo {
                 .iter()
                 .zip(arguments)
                 .filter_map(|(formal, argument)| {
-                    argument.map(|argument| (formal.clone(), argument))
+                    argument.map(|argument| (crate::types::TyParamName::from(formal), argument))
                 })
                 .collect::<crate::symbol_resolver::GSigBinds>();
             crate::symbol_resolver::ty_subst_keep_unbound(result, &bindings)
@@ -9443,610 +9450,8 @@ struct Wanted {
     value_required: bool,
 }
 
-/// Generic type parameters in scope, each with its JVM erasure. A parameter with a wrappable standard
-/// primitive upper bound (`<T : Int>`) erases to that PRIMITIVE — kotlinc specializes it (descriptor
-/// `(I)I`, not `(Object)Object`); every other parameter erases to `java/lang/Object`.
-#[derive(Default, Clone)]
-pub struct TParams {
-    erasure: crate::fx_hash::HashMap<String, Ty>,
-    /// The subset declared `reified` (only an `inline fun` may). A class literal `T::class` is
-    /// valid only on one of these. Kept HERE rather than beside the parameters so the two cannot
-    /// Bounds BEYOND the first, for a parameter declared with several (`where T : A, T : B`). Kotlin
-    /// gives such a parameter an INTERSECTION bound; `Ty::TyParam` carries a single one — the erasure,
-    /// which is the FIRST, matching kotlinc's JVM rule. Member lookup consults these so a member
-    /// declared only on a later bound still resolves.
-    extra_bounds: crate::fx_hash::HashMap<String, Vec<Ty>>,
-}
-
-impl TParams {
-    /// Record one parameter's bound (and the bounds beyond the first), replacing any entry of the
-    /// same name — used to reassemble a `TParams` view from the scope chain's classifier bindings,
-    /// outermost rung first, so an inner declaration's parameter shadows the outer one.
-    pub(crate) fn insert_binding(&mut self, name: &str, bound: Ty, extra_bounds: Vec<Ty>) {
-        self.erasure.insert(name.to_string(), bound);
-        if extra_bounds.is_empty() {
-            self.extra_bounds.remove(name);
-        } else {
-            self.extra_bounds.insert(name.to_string(), extra_bounds);
-        }
-    }
-
-    /// The bounds `name` declares beyond the first.
-    pub(crate) fn extra_bounds_of(&self, name: &str) -> Vec<Ty> {
-        self.extra_bounds.get(name).cloned().unwrap_or_default()
-    }
-
-    pub(crate) fn contains(&self, name: &str) -> bool {
-        self.erasure.contains_key(name)
-    }
-
-    /// The erasure of type parameter `name` (`Object` if unbounded / reference-bounded).
-    /// The declared upper bound of `name` — what the checker types `T` as.
-    pub(crate) fn bound(&self, name: &str) -> Ty {
-        self.erasure
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| Ty::obj("kotlin/Any"))
-    }
-
-    /// Build directly from explicit name→type bindings — a SUBSTITUTION (concrete types), not an
-    /// erasure. Used to map a generic method's type parameters to their receiver-supplied / inferred
-    /// concrete types so `ty_of_ref` realizes `T`/`R` to `String`/`Int` rather than the erased `Object`.
-    pub(crate) fn from_bindings(bindings: impl IntoIterator<Item = (String, Ty)>) -> Self {
-        TParams {
-            erasure: bindings.into_iter().collect(),
-            ..Default::default()
-        }
-    }
-
-    /// CLASS type parameters, erased to their declared REFERENCE bound: `class Bounded<T : Cargo>`
-    /// signs its constructor/field/accessors with `Lapp/Cargo;`, exactly as kotlinc does and as the
-    /// FUNCTION path ([`from_decl_with`](Self::from_decl_with)) already did. A primitive-bounded
-    /// parameter still erases to `Any` — kotlinc specializes those too, but krusty's value-class pass
-    /// owns class-param bound handling and naive specialization there breaks the Object/value-class
-    /// boundary (VerifyError), so scalar bounds keep an `Any` erasure.
-    pub(crate) fn erased_with(
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Self {
-        let mut out = TParams::from_decl_with(names, bounds, resolve);
-        for erased in out.erasure.values_mut() {
-            if !erased.is_reference() {
-                *erased = Ty::obj("kotlin/Any");
-            }
-        }
-        out
-    }
-
-    /// [`erased_with`](Self::erased_with) layered over an enclosing scope — the class counterpart of
-    /// [`extended_with`](Self::extended_with), used to fold an inner/local class's enclosing
-    /// declarations before its own parameters.
-    pub(crate) fn erased_extended_with(
-        &self,
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Self {
-        let mut out = self.clone();
-        let mut declared = TParams::erased_with(names, bounds, resolve);
-        for name in names {
-            if let Some(bound) = self.enclosing_bound_erasure(name, names, bounds) {
-                declared.erasure.insert(name.clone(), bound);
-            }
-        }
-        out.erasure.extend(declared.erasure);
-        out.extra_bounds.extend(declared.extra_bounds);
-        out
-    }
-
-    /// Build from declared names + their upper bounds, resolving a CLASS/interface bound to its JVM
-    /// type so member access on `T` resolves and the descriptor erases to the bound (`<T: CharSequence>`
-    /// → `java/lang/CharSequence`, not `Object`). `resolve` maps a bound's simple class name to its JVM
-    /// internal name (primitive/`String` bounds need no resolver). Without a resolver (`from_decl`) only
-    /// primitive bounds are recovered — a reference bound stays `Any`.
-    pub(crate) fn from_decl_with(
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Self {
-        let erasure = names
-            .iter()
-            .map(|n| {
-                // A bound may name ANOTHER type parameter of the same declaration
-                // (`<T1 : C, T2 : T1>`): follow the chain to the first bound that is a real
-                // class/primitive so `T2` erases to `C`, not `Any`. Cycle-guarded (`<A : B, B : A>`).
-                let mut cur = n.as_str();
-                let mut seen: crate::fx_hash::HashSet<&str> = crate::fx_hash::HashSet::default();
-                let erased = loop {
-                    let b = bounds.iter().find_map(|(bn, b)| (bn == cur).then_some(b));
-                    match b {
-                        // The bound is itself a (non-nullable, un-parameterized) type parameter of this
-                        // declaration — hop to it and keep chasing.
-                        Some(tb)
-                            if !tb.nullable()
-                                && names.iter().any(|m| m == &tb.name)
-                                && seen.insert(cur) =>
-                        {
-                            cur = tb.name.as_str();
-                        }
-                        other => break tparam_bound_erasure(other, resolve),
-                    }
-                };
-                (n.clone(), erased)
-            })
-            .collect();
-        // Every bound after the first for each name. The first IS the erasure above; the rest are only
-        // reachable through `extra_bounds`, since `Ty::TyParam` holds exactly one.
-        let extra_bounds = names
-            .iter()
-            .filter_map(|n| {
-                let rest: Vec<Ty> = bounds
-                    .iter()
-                    .filter(|(bn, _)| bn == n)
-                    .skip(1)
-                    .map(|(_, b)| tparam_bound_erasure(Some(b), resolve))
-                    .filter(|ty| *ty != Ty::obj("kotlin/Any"))
-                    .collect();
-                (!rest.is_empty()).then(|| (n.clone(), rest))
-            })
-            .collect();
-        TParams {
-            erasure,
-            extra_bounds,
-        }
-    }
-
-    /// Build the physical type-parameter view used by a JVM-facing callable signature. Kotlin
-    /// permits an interface bound to be written before a concrete class bound, but classfile
-    /// erasure always uses the class bound (`T : Comparable<T>, T : Number` -> `Number`). Reorder
-    /// each parameter's bound list only for this erased view; [`Self::symbolic_from_decl_with`]
-    /// retains the complete source intersection used by inference and overload applicability.
-    pub(crate) fn from_decl_with_primary_class(
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-        is_interface: &dyn Fn(TypeName) -> bool,
-    ) -> Self {
-        let mut ordered = Vec::with_capacity(bounds.len());
-        for name in names {
-            let mut declared = bounds
-                .iter()
-                .filter(|(owner, _)| owner == name)
-                .cloned()
-                .collect::<Vec<_>>();
-            if let Some(primary) = declared.iter().position(|(_, bound)| {
-                !bound.nullable() && resolve(&bound.name).is_some_and(|name| !is_interface(name))
-            }) {
-                let class_bound = declared.remove(primary);
-                ordered.push(class_bound);
-            }
-            ordered.extend(declared);
-        }
-        Self::from_decl_with(names, &ordered, resolve)
-    }
-
-    pub(crate) fn extended_with(
-        &self,
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Self {
-        let mut out = self.clone();
-        let mut declared = TParams::from_decl_with(names, bounds, resolve);
-        for name in names {
-            if let Some(bound) = self.enclosing_bound_erasure(name, names, bounds) {
-                declared.erasure.insert(name.clone(), bound);
-            }
-        }
-        out.erasure.extend(declared.erasure);
-        out.extra_bounds.extend(declared.extra_bounds);
-        out
-    }
-
-    pub(crate) fn enclosing_bound_erasure(
-        &self,
-        name: &str,
-        local_names: &[String],
-        bounds: &[(String, TypeRef)],
-    ) -> Option<Ty> {
-        let mut current = name;
-        let mut seen = crate::fx_hash::HashSet::default();
-        loop {
-            if !seen.insert(current) {
-                return None;
-            }
-            let bound = bounds
-                .iter()
-                .find_map(|(owner, bound)| (owner == current).then_some(bound))?;
-            if bound.nullable()
-                || bound.arg.is_some()
-                || !bound.targs.is_empty()
-                || !bound.fun_params.is_empty()
-            {
-                return None;
-            }
-            if local_names.iter().any(|local| local == &bound.name) {
-                current = &bound.name;
-                continue;
-            }
-            let mut erased = self.erasure.get(&bound.name).copied()?;
-            let mut bound_names = crate::fx_hash::HashSet::default();
-            while let TyKind::TyParam(parameter, upper) = erased.kind() {
-                if !bound_names.insert(parameter) {
-                    return None;
-                }
-                erased = upper;
-            }
-            return Some(erased);
-        }
-    }
-
-    /// Preserve type variables while inferring a declaration's semantic shape.
-    pub(crate) fn symbolic_from_decl_with(
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Self {
-        Self::symbolic_from_decl_enclosing(names, bounds, resolve, &|_| None)
-    }
-
-    /// As [`Self::symbolic_from_decl_with`], but a bound may also name a type parameter of an
-    /// ENCLOSING declaration: a local function's `fun <S : T> h(..)` inside `fun <T> outer(..)`
-    /// bounds `S` by the outer `T`. Without that lookup the bound resolves to nothing and the whole
-    /// declaration reads as `unresolved reference 'T'`.
-    pub(crate) fn symbolic_from_decl_enclosing(
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-        enclosing: &dyn Fn(&str) -> Option<Ty>,
-    ) -> Self {
-        let implicit = Ty::nullable(Ty::obj("kotlin/Any"));
-        /// Resolve a bound through the ordinary shared type-shape operations while keeping references
-        /// to this declaration's and enclosing declarations' type parameters symbolic.
-        fn semantic_bound(
-            bound: &TypeRef,
-            names: &[String],
-            bounds: &[(String, TypeRef)],
-            enclosing: &dyn Fn(&str) -> Option<Ty>,
-            resolve: &dyn Fn(&str) -> Option<TypeName>,
-            visiting: &mut crate::fx_hash::HashSet<String>,
-        ) -> Ty {
-            tparam_bound_semantic_with(bound, resolve, &mut |candidate| {
-                if let Some(ty) = enclosing(candidate) {
-                    return Some(ty);
-                }
-                names.iter().any(|name| name == candidate).then(|| {
-                    Ty::ty_param(
-                        candidate,
-                        parameter_bound(candidate, names, bounds, resolve, enclosing, visiting),
-                    )
-                })
-            })
-        }
-        fn parameter_bound(
-            name: &str,
-            names: &[String],
-            bounds: &[(String, TypeRef)],
-            resolve: &dyn Fn(&str) -> Option<TypeName>,
-            enclosing: &dyn Fn(&str) -> Option<Ty>,
-            visiting: &mut crate::fx_hash::HashSet<String>,
-        ) -> Ty {
-            let implicit = Ty::nullable(Ty::obj("kotlin/Any"));
-            if !visiting.insert(name.to_string()) {
-                return implicit;
-            }
-            let bound = bounds
-                .iter()
-                .find_map(|(owner, bound)| (owner == name).then_some(bound));
-            let result = match bound {
-                Some(bound)
-                    if !bound.nullable()
-                        && !bound.definitely_non_null()
-                        && bound.arg.is_none()
-                        && bound.targs.is_empty()
-                        && bound.fun_params.is_empty()
-                        && names.iter().any(|candidate| candidate == &bound.name) =>
-                {
-                    Ty::ty_param(
-                        &bound.name,
-                        parameter_bound(&bound.name, names, bounds, resolve, enclosing, visiting),
-                    )
-                }
-                Some(bound) => semantic_bound(bound, names, bounds, enclosing, resolve, visiting),
-                None => implicit,
-            };
-            visiting.remove(name);
-            result
-        }
-        let mut out = TParams::default();
-        for name in names {
-            let direct_bounds = bounds
-                .iter()
-                .filter_map(|(owner, bound)| (owner == name).then_some(bound))
-                .map(|bound| {
-                    let is_parameter_bound = !bound.nullable()
-                        && !bound.definitely_non_null()
-                        && bound.arg.is_none()
-                        && bound.targs.is_empty()
-                        && bound.fun_params.is_empty()
-                        && names.iter().any(|candidate| candidate == &bound.name);
-                    if is_parameter_bound {
-                        Ty::ty_param(
-                            &bound.name,
-                            parameter_bound(
-                                &bound.name,
-                                names,
-                                bounds,
-                                resolve,
-                                enclosing,
-                                &mut crate::fx_hash::HashSet::default(),
-                            ),
-                        )
-                    } else {
-                        semantic_bound(
-                            bound,
-                            names,
-                            bounds,
-                            enclosing,
-                            resolve,
-                            &mut crate::fx_hash::HashSet::default(),
-                        )
-                    }
-                })
-                .collect::<Vec<_>>();
-            let bound = direct_bounds.first().copied().unwrap_or(implicit);
-            out.erasure.insert(name.clone(), Ty::ty_param(name, bound));
-            let mut extra_bounds = direct_bounds.into_iter().skip(1).collect::<Vec<_>>();
-            // `direct_bounds` already contains every constraint written on this parameter. Flatten
-            // additional constraints only through a bare type-parameter edge (`T : X`); starting
-            // the traversal at `T` itself would decode each direct generic bound a second time
-            // without symbolic arguments (`Comparable<T>` -> `Comparable<Any>`).
-            for inherited in bounds
-                .iter()
-                .filter_map(|(owner, candidate)| {
-                    (owner == name
-                        && !candidate.nullable()
-                        && !candidate.definitely_non_null()
-                        && candidate.arg.is_none()
-                        && candidate.targs.is_empty()
-                        && candidate.fun_params.is_empty()
-                        && names.iter().any(|parameter| parameter == &candidate.name))
-                    .then_some(candidate.name.as_str())
-                })
-                .flat_map(|inherited| {
-                    declared_tparam_semantic_bounds(inherited, names, bounds, resolve)
-                })
-            {
-                if inherited != bound && !extra_bounds.contains(&inherited) {
-                    extra_bounds.push(inherited);
-                }
-            }
-            if !extra_bounds.is_empty() {
-                out.extra_bounds.insert(name.clone(), extra_bounds);
-            }
-        }
-        out
-    }
-
-    /// Give one declaration's semantic formals stable identities while keeping source names as the
-    /// keys used by lexical type lookup. Distinct declarations may both write `T`; their inference
-    /// variables must still be distinct.
-    fn alpha_renamed(&self, names: &[String], key: impl Fn(usize, &str) -> &'static str) -> Self {
-        let identities = names
-            .iter()
-            .enumerate()
-            .map(|(index, source)| (source.as_str(), key(index, source)))
-            .collect::<crate::fx_hash::HashMap<_, _>>();
-        let mut out = self.clone();
-        for source in names {
-            out.insert_binding(
-                source,
-                crate::types::ty_rename_params(self.bound(source), &identities),
-                self.extra_bounds_of(source)
-                    .into_iter()
-                    .map(|bound| crate::types::ty_rename_params(bound, &identities))
-                    .collect(),
-            );
-        }
-        out
-    }
-
-    /// A declaration start is unique within its file and stable for the compilation. It gives
-    /// top-level, member, class, and local formals the same semantic identity scheme.
-    fn alpha_renamed_declaration(
-        &self,
-        names: &[String],
-        compilation: u64,
-        file: u32,
-        declaration_start: u32,
-    ) -> Self {
-        self.alpha_renamed(names, |index, source| {
-            crate::types::declaration_type_parameter(
-                compilation,
-                file,
-                declaration_start,
-                index,
-                source,
-            )
-        })
-    }
-
-    pub(crate) fn symbolic_extended_with(
-        &self,
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Self {
-        let declared = TParams::symbolic_from_decl_enclosing(names, bounds, resolve, &|name| {
-            self.erasure.get(name).copied()
-        });
-        let mut out = self.clone();
-        out.erasure.extend(declared.erasure);
-        out.extra_bounds.extend(declared.extra_bounds);
-        out
-    }
-}
-
-/// The JVM erasure of a type parameter from its declared upper bound. kotlinc erases a bounded `T` to
-/// its bound's type — a specializable scalar bound (`<T: Int>`) to that primitive, any other
-/// reference bound (`<T: CharSequence>`, `<T: Comparable<T>>`, a user class) to the bound's class — so a
-/// value of type `T` accesses the bound's members and the descriptor uses the bound, not `Object`.
-/// `Any` when there's no bound, a nullable bound, an unresolved bound, or a non-specializable
-/// unsigned/value primitive.
-pub(crate) fn tparam_bound_erasure(
-    b: Option<&TypeRef>,
-    resolve: &dyn Fn(&str) -> Option<TypeName>,
-) -> Ty {
-    let any = Ty::obj("kotlin/Any");
-    let Some(b) = b else { return any };
-    // A nullable / generic-instantiated bound name still resolves by its head: `<T: Comparable<T>>`
-    // erases to `Comparable` (type args drop on erasure). A nullable bound keeps `Any` (conservative).
-    if b.nullable() {
-        return any;
-    }
-    if let Some(prim) = Ty::from_name(&b.name) {
-        // Scalar bounds specialize; `String`/`Any` reference bounds erase to themselves; unsigned
-        // and value primitives are not specialized here.
-        return if prim.is_specializable_bound() || prim.is_reference() {
-            prim
-        } else {
-            any
-        };
-    }
-    match resolve(&b.name) {
-        Some(internal) => Ty::obj_name(internal),
-        None => any,
-    }
-}
-
-/// Follow a declared bound through bare type-parameter references.
-pub(crate) fn declared_tparam_semantic_bound(
-    name: &str,
-    names: &[String],
-    bounds: &[(String, TypeRef)],
-    resolve: &dyn Fn(&str) -> Option<TypeName>,
-) -> Option<Ty> {
-    let mut current = name;
-    let mut seen = crate::fx_hash::HashSet::default();
-    loop {
-        let bound = bounds
-            .iter()
-            .find_map(|(parameter, bound)| (parameter == current).then_some(bound))?;
-        if !bound.nullable()
-            && !bound.definitely_non_null()
-            && bound.arg.is_none()
-            && bound.targs.is_empty()
-            && bound.fun_params.is_empty()
-            && names.iter().any(|candidate| candidate == &bound.name)
-        {
-            if !seen.insert(current) {
-                return Some(Ty::obj("kotlin/Any"));
-            }
-            current = &bound.name;
-            continue;
-        }
-        return Some(tparam_bound_semantic(bound, resolve));
-    }
-}
-
-/// All semantic upper bounds of `name`, including bounds inherited through another parameter.
-/// `<T : X, X : Comparable<UInt>> where X : UInt` therefore gives `T` the same intersection
-/// `[Comparable, UInt]` as `X`. JVM erasure still uses the first entry; member/operator lookup sees
-/// the complete intersection.
-fn declared_tparam_semantic_bounds(
-    name: &str,
-    names: &[String],
-    bounds: &[(String, TypeRef)],
-    resolve: &dyn Fn(&str) -> Option<TypeName>,
-) -> Vec<Ty> {
-    fn collect(
-        current: &str,
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-        visiting: &mut crate::fx_hash::HashSet<String>,
-        out: &mut Vec<Ty>,
-    ) {
-        if !visiting.insert(current.to_string()) {
-            return;
-        }
-        for bound in bounds
-            .iter()
-            .filter_map(|(parameter, bound)| (parameter == current).then_some(bound))
-        {
-            let parameter_bound = !bound.nullable()
-                && !bound.definitely_non_null()
-                && bound.arg.is_none()
-                && bound.targs.is_empty()
-                && bound.fun_params.is_empty()
-                && names.iter().any(|candidate| candidate == &bound.name);
-            if parameter_bound {
-                collect(&bound.name, names, bounds, resolve, visiting, out);
-            } else {
-                let ty = tparam_bound_semantic(bound, resolve);
-                if !out.contains(&ty) {
-                    out.push(ty);
-                }
-            }
-        }
-        visiting.remove(current);
-    }
-
-    let mut out = Vec::new();
-    collect(
-        name,
-        names,
-        bounds,
-        resolve,
-        &mut crate::fx_hash::HashSet::default(),
-        &mut out,
-    );
-    out
-}
-
-/// Resolve a type-parameter bound without erasing nullability.
-fn tparam_bound_semantic_with(
-    b: &TypeRef,
-    resolve: &dyn Fn(&str) -> Option<TypeName>,
-    parameter: &mut dyn FnMut(&str) -> Option<Ty>,
-) -> Ty {
-    let parameter_reference = (b.arg.is_none() && b.targs.is_empty() && b.fun_params.is_empty())
-        .then(|| parameter(&b.name))
-        .flatten();
-    let base = parameter_reference
-        .or_else(|| {
-            typeref_leaf(b, &mut |component| {
-                tparam_bound_semantic_with(component, resolve, parameter)
-            })
-        })
-        .or_else(|| {
-            resolve(&b.name).map(|internal| {
-                let arguments = b
-                    .targs
-                    .iter()
-                    .map(|argument| {
-                        projected_typeref_argument(
-                            argument,
-                            tparam_bound_semantic_with(argument, resolve, parameter),
-                            Ty::nullable(Ty::obj("kotlin/Any")),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                Ty::obj_args_name(internal, &arguments)
-            })
-        })
-        .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-    if b.nullable() {
-        Ty::nullable(base)
-    } else {
-        base
-    }
-}
-
-fn tparam_bound_semantic(b: &TypeRef, resolve: &dyn Fn(&str) -> Option<TypeName>) -> Ty {
-    tparam_bound_semantic_with(b, resolve, &mut |_| None)
-}
+pub(crate) use type_parameter_scope::declared_tparam_semantic_bound;
+pub use type_parameter_scope::TParams;
 
 impl CheckerScope<'_> {
     /// Bind `names` as this scope's type parameters, taking each one's bound (and any bounds beyond
@@ -10642,7 +10047,10 @@ fn unify_member_extension_slot(
     crate::symbol_resolver::unify_ty(applied, actual, &mut inferred);
     crate::symbol_resolver::unify_ty(declared, actual, &mut inferred);
     for (formal, solution) in inferred {
-        if !deferred_type_variables.contains(&formal) {
+        if !deferred_type_variables
+            .iter()
+            .any(|deferred| *deferred == formal)
+        {
             bindings.insert(formal, solution);
         }
     }
@@ -12527,12 +11935,18 @@ impl<'a> Checker<'a> {
     /// allowed to consider an extension overload. Deferring this check until the outer call is
     /// solved loses the overload decision and reports the violation at the wrong call.
     fn postponed_argument_constraint_is_satisfiable(&self, expected: Ty, actual: Ty) -> bool {
-        fn collect_declared_bounds(ty: Ty, formals: &[String], bounds: &mut HashMap<String, Ty>) {
+        fn collect_declared_bounds(
+            ty: Ty,
+            formals: &[String],
+            bounds: &mut crate::types::TyParamBindings,
+        ) {
             match ty.kind() {
                 TyKind::TyParam(formal, bound)
                     if formals.iter().any(|candidate| candidate == formal) =>
                 {
-                    bounds.entry(formal.to_string()).or_insert(bound);
+                    bounds
+                        .entry(crate::types::TyParamName::new(&formal))
+                        .or_insert(bound);
                 }
                 TyKind::Obj(_, arguments) => {
                     for &argument in arguments {
@@ -12577,7 +11991,7 @@ impl<'a> Checker<'a> {
                 &shadowed_formals,
             );
             for (formal, &lower) in &trial.lower {
-                if shadowed_formals.contains(formal)
+                if shadowed_formals.contains(formal.as_str())
                     || lower == Ty::Error
                     // Evidence may itself be a lexically fixed outer type parameter (`T? <: FT`).
                     // It is not a concrete bound violation and must remain available to PCLA.
@@ -12588,7 +12002,7 @@ impl<'a> Checker<'a> {
                 let bounds = declared_bounds.get(formal).copied().into_iter().chain(
                     trial
                         .upper
-                        .get(formal)
+                        .get(formal.as_str())
                         .into_iter()
                         .flat_map(|bounds| bounds.iter().copied()),
                 );
@@ -12736,15 +12150,15 @@ impl<'a> Checker<'a> {
             let mut bindings =
                 crate::symbol_resolver::seeded_gsig_binds(&signature, generics.type_args);
             for (formal, actual) in generics.fixed_bindings {
-                if signature.formals.contains(formal) {
-                    bindings.insert(formal.clone(), *actual);
+                if signature.formals.iter().any(|declared| declared == formal) {
+                    bindings.insert(*formal, *actual);
                 }
             }
             let contextual_result_is_bound = signature
                 .formals
                 .iter()
                 .filter(|formal| ty_mentions_param(signature.ret, std::slice::from_ref(*formal)))
-                .all(|formal| bindings.contains_key(formal));
+                .all(|formal| bindings.contains_key(formal.as_str()));
             if !contextual_result_is_bound {
                 if let Some(expected) = generics.expected_result {
                     let Ok(contextual) =
@@ -12792,8 +12206,8 @@ impl<'a> Checker<'a> {
                 // Fixed bindings were supplied by the enclosing inference frame and are not
                 // candidates for refinement by this argument.
                 for (formal, actual) in generics.fixed_bindings {
-                    if signature.formals.contains(formal) {
-                        bindings.insert(formal.clone(), *actual);
+                    if signature.formals.iter().any(|declared| declared == formal) {
+                        bindings.insert(*formal, *actual);
                     }
                 }
             }
@@ -13412,7 +12826,7 @@ impl<'a> Checker<'a> {
                 "expected_call",
                 "member {name} applied_return={applied_return:?} expected={expected:?} result_bindings={inferred:?}",
             );
-            inferred.retain(|formal, _| signature.formals.contains(formal));
+            inferred.retain(|formal, _| signature.formals.iter().any(|declared| declared == formal));
             (!inferred.is_empty()).then_some(inferred)
         });
         if let Some(inferred) = expected_bindings.as_ref() {
@@ -13541,7 +12955,7 @@ impl<'a> Checker<'a> {
                 let resolved = signature
                     .formals
                     .iter()
-                    .map(|formal| bindings.get(formal).copied())
+                    .map(|formal| bindings.get(formal.as_str()).copied())
                     .collect::<Vec<_>>();
                 if !resolved.is_empty() && resolved.iter().all(Option::is_some) {
                     inferred_member_type_args = Some(resolved);
@@ -13982,9 +13396,7 @@ impl<'a> Checker<'a> {
             let visible = scope.visible_tparams();
             for captured in &signature.type_params()[signature.own_type_parameter_count..] {
                 let exact = visible
-                    .erasure
-                    .values()
-                    .copied()
+                    .binding_types()
                     .find(|binding| binding.ty_param_name() == Some(captured.as_str()));
                 let source_name = crate::types::type_parameter_source_name(captured);
                 let lexical = scope
@@ -14182,7 +13594,7 @@ impl<'a> Checker<'a> {
                     let resolved = signature
                         .formals
                         .iter()
-                        .map(|formal| selected.bindings.get(formal).copied())
+                        .map(|formal| selected.bindings.get(formal.as_str()).copied())
                         .collect::<Vec<_>>();
                     self.replace_selected_generic_call(
                         call,
@@ -17594,7 +17006,10 @@ impl<'a> Checker<'a> {
                             if argument.is_inference_placeholder() {
                                 continue;
                             }
-                            bindings.insert(formal.clone(), self.type_ref_ty(scope, &argument));
+                            bindings.insert(
+                                crate::types::TyParamName::new(formal),
+                                self.type_ref_ty(scope, &argument),
+                            );
                         }
                     }
                     if let Some(expected) = expected {
@@ -18034,7 +17449,7 @@ impl<'a> Checker<'a> {
                                     let postponed = plan
                                         .type_params
                                         .iter()
-                                        .filter(|formal| !binds.contains_key(*formal))
+                                        .filter(|formal| !binds.contains_key((*formal).as_str()))
                                         .cloned()
                                         .collect();
                                     Some((
@@ -18355,7 +17770,9 @@ impl<'a> Checker<'a> {
                             // turns that fixed caller identity back into a callee-owned variable.
                             let postponed_formals = selected_lambda_formals
                                 .iter()
-                                .filter(|formal| !known_generic_bindings.contains_key(*formal))
+                                .filter(|formal| {
+                                    !known_generic_bindings.contains_key((*formal).as_str())
+                                })
                                 .cloned()
                                 .collect::<Vec<_>>();
                             let (
@@ -18582,7 +17999,8 @@ impl<'a> Checker<'a> {
                                             .formals
                                             .iter()
                                             .filter(|formal| {
-                                                !known_generic_bindings.contains_key(*formal)
+                                                !known_generic_bindings
+                                                    .contains_key((*formal).as_str())
                                             })
                                             .cloned()
                                             .collect::<Vec<_>>()
@@ -18640,8 +18058,9 @@ impl<'a> Checker<'a> {
                                                 generic,
                                                 std::iter::once((pi, inference_actual)),
                                             );
-                                        callable_reference_constraints
-                                            .extend(inferred.keys().cloned());
+                                        callable_reference_constraints.extend(
+                                            inferred.keys().map(|formal| formal.to_string()),
+                                        );
                                         crate::symbol_resolver::merge_generic_bindings(
                                             generic,
                                             explicit_type_args.as_slice(),
@@ -18667,7 +18086,8 @@ impl<'a> Checker<'a> {
                                     generic,
                                     std::iter::once((pi, checked)),
                                 );
-                                callable_reference_constraints.extend(inferred.keys().cloned());
+                                callable_reference_constraints
+                                    .extend(inferred.keys().map(|formal| formal.to_string()));
                                 crate::trace_compiler!(
                                         "resolve",
                                         "callable-reference argument call={fname} parameter={pi} declared={:?} nominal={checked:?} inferred={inferred:?}",
@@ -18738,7 +18158,7 @@ impl<'a> Checker<'a> {
                                         .formals
                                         .iter()
                                         .filter(|formal| {
-                                            !known_generic_bindings.contains_key(*formal)
+                                            !known_generic_bindings.contains_key((*formal).as_str())
                                         })
                                         .cloned()
                                         .collect::<Vec<_>>()
@@ -18765,7 +18185,7 @@ impl<'a> Checker<'a> {
                                         });
                                     declared.and_then(Ty::fun_ret).is_some_and(|result| {
                                         generic.formals.iter().any(|formal| {
-                                            !known_generic_bindings.contains_key(formal)
+                                            !known_generic_bindings.contains_key(formal.as_str())
                                                 && ty_mentions_param(
                                                     result,
                                                     std::slice::from_ref(formal),
@@ -18923,7 +18343,7 @@ impl<'a> Checker<'a> {
                                 let has_open_callee_formal =
                                     sig.generic_sig.as_ref().is_some_and(|generic| {
                                         generic.formals.iter().any(|formal| {
-                                            !known_generic_bindings.contains_key(formal)
+                                            !known_generic_bindings.contains_key(formal.as_str())
                                                 && ty_mentions_param(
                                                     expected,
                                                     std::slice::from_ref(formal),
@@ -18989,7 +18409,7 @@ impl<'a> Checker<'a> {
                             .and_then(|shape| Some((shape, *shape.argument_parameters.get(i)?)))
                             .is_some_and(|(shape, declared)| {
                                 shape.generic_formals.iter().any(|formal| {
-                                    !known_generic_bindings.contains_key(formal)
+                                    !known_generic_bindings.contains_key(formal.as_str())
                                         && ty_mentions_param(declared, std::slice::from_ref(formal))
                                 })
                             }),
@@ -21796,12 +21216,14 @@ impl<'a> Checker<'a> {
             .map(|(parameter, ty)| lexical_context_receiver(self.file, parameter, *ty))
             .collect::<Vec<_>>();
         let semantic_erasure = semantic_tparams
-            .erasure
-            .iter()
+            .bindings()
             .filter_map(|(source, semantic)| {
-                semantic
-                    .ty_param_name()
-                    .map(|identity| (identity.to_string(), physical_tparams.bound(source)))
+                semantic.ty_param_name().map(|identity| {
+                    (
+                        crate::types::TyParamName::from(identity),
+                        physical_tparams.bound(source),
+                    )
+                })
             })
             .collect::<crate::symbol_resolver::GSigBinds>();
 
@@ -30363,8 +29785,14 @@ pub(crate) fn join_applied_classifier(
             visiting,
         )?;
         let formal = classifier.type_params[index].clone();
-        left_formals.insert(formal.clone(), left.projection_inner().unwrap_or(left));
-        right_formals.insert(formal, right.projection_inner().unwrap_or(right));
+        left_formals.insert(
+            crate::types::TyParamName::new(&formal),
+            left.projection_inner().unwrap_or(left),
+        );
+        right_formals.insert(
+            crate::types::TyParamName::new(&formal),
+            right.projection_inner().unwrap_or(right),
+        );
         arguments.push(argument);
     }
     Some(Ty::obj_args_name(owner, &arguments))
@@ -33226,7 +32654,7 @@ struct MemberExtensionFunctionShape {
     /// Selection failure must not trigger another symbol lookup or reconstruct this declaration
     /// from its owner/name/arity.
     diagnostic_candidate: crate::libraries::FunctionInfo,
-    class_bindings: HashMap<String, Ty>,
+    class_bindings: crate::types::TyParamBindings,
     /// Applied declaration parameter types, retained beside the receiver so inherited `operator`
     /// capability can be matched without re-reading either provider's source representation.
     declared_params: Vec<Ty>,
@@ -33988,7 +33416,7 @@ struct SourceConstructorBindings<'a> {
     lower: &'a mut [Vec<(Ty, ExprId)>],
     upper: &'a mut [Vec<(Ty, ExprId)>],
     explicitly_bound: &'a [bool],
-    seeded: &'a HashMap<String, Ty>,
+    seeded: &'a crate::types::TyParamBindings,
     lexically_fixed_seed: &'a [bool],
     argument_fits_seed: &'a dyn Fn(Ty, Ty) -> bool,
 }
@@ -36524,7 +35952,7 @@ impl<'a> Checker<'a> {
                         }
                         for &upper in upper_bounds {
                             let mut trial = bindings.clone();
-                            trial.insert(formal.clone(), upper);
+                            trial.insert(crate::types::TyParamName::new(formal), upper);
                             let expected_receiver = crate::symbol_resolver::ty_subst_keep_unbound(
                                 declared_receiver,
                                 &trial,
@@ -36543,8 +35971,8 @@ impl<'a> Checker<'a> {
             }
             if let Some((formal, upper, coerced)) = unit_coerced_receiver {
                 inference_receiver = Some(coerced);
-                bindings.insert(formal.clone(), upper);
-                receiver_bindings.insert(formal, upper);
+                bindings.insert(crate::types::TyParamName::new(&formal), upper);
+                receiver_bindings.insert(crate::types::TyParamName::new(&formal), upper);
                 inferred = crate::symbol_resolver::CallSiteVariables::solve(
                     &signature,
                     at_call_site,
@@ -36611,7 +36039,7 @@ impl<'a> Checker<'a> {
                         result_bindings,
                     );
                     let mut contextual = result_bindings.clone();
-                    contextual.retain(|formal, _| unprojected.contains(formal));
+                    contextual.retain(|formal, _| unprojected.contains(formal.as_str()));
                     crate::symbol_resolver::merge_generic_upper_bindings(
                         &signature,
                         type_args,
@@ -36750,7 +36178,9 @@ impl<'a> Checker<'a> {
                 // evidence. The nested producer contributes Kotlin's most-specific bottom
                 // solution here; its readable upper is a bound, not a concrete outer binding.
                 for formal in nested_constraints.upper_only {
-                    inferred_nested.entry(formal).or_insert(Ty::Nothing);
+                    inferred_nested
+                        .entry(crate::types::TyParamName::new(&formal))
+                        .or_insert(Ty::Nothing);
                 }
                 // The producer's result is a lower bound for a bare outer variable.
                 if open_formal.is_some() {
@@ -36794,8 +36224,8 @@ impl<'a> Checker<'a> {
                 {
                     let widening_bindings = result_bindings
                         .iter()
-                        .filter(|(formal, _)| !nullable_flexible_roots.contains(*formal))
-                        .map(|(formal, &binding)| (formal.clone(), binding))
+                        .filter(|(formal, _)| !nullable_flexible_roots.contains(formal.as_str()))
+                        .map(|(formal, &binding)| (*formal, binding))
                         .collect::<crate::symbol_resolver::GSigBinds>();
                     crate::symbol_resolver::widen_invariant_expected_bindings(
                         &source,
@@ -36821,18 +36251,18 @@ impl<'a> Checker<'a> {
                         if nullable_flexible_roots.contains(&formal) {
                             continue;
                         }
-                        let Some(&fixed_ty) = result_bindings.get(&formal) else {
+                        let Some(&fixed_ty) = result_bindings.get(formal.as_str()) else {
                             continue;
                         };
-                        if bindings.get(&formal).copied() == Some(fixed_ty)
+                        if bindings.get(formal.as_str()).copied() == Some(fixed_ty)
                             || non_value_argument_bindings
-                                .get(&formal)
+                                .get(formal.as_str())
                                 .is_some_and(|&ty| ty != fixed_ty)
                         {
                             continue;
                         }
                         let mut trial = bindings.clone();
-                        trial.insert(formal.clone(), fixed_ty);
+                        trial.insert(crate::types::TyParamName::new(&formal), fixed_ty);
                         if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
                             &signature,
                             &trial,
@@ -37026,7 +36456,7 @@ impl<'a> Checker<'a> {
                             .filter(|identity| flow_intersections.contains_key(identity))
                             .and_then(|_| actual.non_null().ty_param_bound())
                             .unwrap_or(actual);
-                        (formal.clone(), runtime)
+                        (*formal, runtime)
                     })
                     .collect::<crate::symbol_resolver::GSigBinds>()
             };
@@ -37288,7 +36718,10 @@ impl<'a> Checker<'a> {
                     {
                         declared = declared.array_read_elem().unwrap_or(declared);
                     }
-                    Some(crate::types::ty_subst(declared, &HashMap::default()))
+                    Some(crate::types::ty_subst(
+                        declared,
+                        &crate::types::TyParamBindings::default(),
+                    ))
                 })
                 .collect::<Option<Vec<_>>>()?;
             let inferred_ret = crate::symbol_resolver::instantiate_slot(
@@ -37356,7 +36789,7 @@ impl<'a> Checker<'a> {
                     flow_intersections
                         .get(identity)
                         .cloned()
-                        .map(|bounds| (formal.clone(), bounds))
+                        .map(|bounds| (formal.to_string(), bounds))
                 })
                 .collect::<HashMap<_, _>>();
             for (formal, inputs) in &inferred_lower_inputs {
@@ -37370,7 +36803,7 @@ impl<'a> Checker<'a> {
                 if type_args
                     .get(formal_index)
                     .is_some_and(|argument| *argument != Ty::Error)
-                    || intersection_bindings.contains_key(formal)
+                    || intersection_bindings.contains_key(formal.as_str())
                     || inputs.len() < 2
                     || inputs
                         .iter()
@@ -37545,7 +36978,9 @@ impl<'a> Checker<'a> {
                 .is_extension()
                 .then(|| candidate.semantic_receiver())
                 .flatten()
-                .map(|receiver| crate::types::ty_subst(receiver, &HashMap::default()))
+                .map(|receiver| {
+                    crate::types::ty_subst(receiver, &crate::types::TyParamBindings::default())
+                })
         };
         if maximal.len() > 1 {
             // Fewer omitted defaults wins only between equally specific declarations.
@@ -38578,7 +38013,7 @@ impl<'a> Checker<'a> {
                 &mut bindings,
             );
         }
-        bindings.retain(|formal, _| property.formals.contains(formal));
+        bindings.retain(|formal, _| property.formals.iter().any(|declared| declared == formal));
         if !bindings.is_empty() {
             crate::symbol_resolver::apply_property_bindings(&source, property, &bindings);
         }
@@ -39251,7 +38686,7 @@ impl<'a> Checker<'a> {
         // `String <: E(call)` to the surrounding builder inference problem.
         if let Some(signature) = selected.generic_sig.as_ref() {
             for (index, formal) in signature.formals.iter().enumerate() {
-                let Some(actual) = selected_bindings.get(formal).copied() else {
+                let Some(actual) = selected_bindings.get(formal.as_str()).copied() else {
                     continue;
                 };
                 for &bound in signature.formal_bounds.get(index).into_iter().flatten() {
@@ -39354,8 +38789,8 @@ impl<'a> Checker<'a> {
             let has_postponed_constraints =
                 !inferred.is_empty() || !constraints.upper_only.is_empty();
             for (formal, upper) in constraints.denotable_upper_bindings(&source) {
-                if !selected_bindings.contains_key(&formal) {
-                    inferred.insert(formal, upper);
+                if !selected_bindings.contains_key(formal.as_str()) {
+                    inferred.insert(crate::types::TyParamName::new(&formal), upper);
                 }
             }
             crate::trace_compiler!(
@@ -39649,7 +39084,7 @@ impl<'a> Checker<'a> {
                         // A concrete reference input (or an explicit type argument) binds the
                         // formal before this diagnostic path.
                         let unresolved = bindings
-                            .get(formal)
+                            .get(formal.as_str())
                             .is_none_or(|binding| binding.non_null() == Ty::Nothing);
                         if inferred_from_callable_reference && unresolved {
                             self.diags.error(
@@ -39661,7 +39096,7 @@ impl<'a> Checker<'a> {
                             );
                             return true;
                         }
-                        if bindings.contains_key(formal) {
+                        if bindings.contains_key(formal.as_str()) {
                             continue;
                         }
                     }
@@ -40127,7 +39562,10 @@ impl<'a> Checker<'a> {
                 if type_ref.is_inference_placeholder() {
                     continue;
                 }
-                bindings.insert(formal.clone(), self.type_ref_ty_silent(scope, type_ref));
+                bindings.insert(
+                    crate::types::TyParamName::new(formal),
+                    self.type_ref_ty_silent(scope, type_ref),
+                );
                 explicitly_bound.insert(formal.clone());
             }
         }
@@ -40141,7 +39579,7 @@ impl<'a> Checker<'a> {
                 continue;
             };
             let null_only = bindings
-                .get(formal)
+                .get(formal.as_str())
                 .is_some_and(|binding| Self::null_only_type(*binding));
             if explicitly_bound.contains(formal) || !null_only {
                 continue;
@@ -40158,7 +39596,7 @@ impl<'a> Checker<'a> {
                         "cannot infer type for type parameter '{name}'. Specify it explicitly."
                     ),
                 );
-                bindings.insert(formal.clone(), Ty::Error);
+                bindings.insert(crate::types::TyParamName::new(formal), Ty::Error);
             }
         }
 
@@ -40180,7 +39618,7 @@ impl<'a> Checker<'a> {
             let Some(formal) = semantic_formal(&declared.name) else {
                 continue;
             };
-            let Some(mut expected) = bindings.get(formal).copied() else {
+            let Some(mut expected) = bindings.get(formal.as_str()).copied() else {
                 continue;
             };
             if declared.definitely_non_null() {
@@ -43383,7 +42821,7 @@ impl<'a> Checker<'a> {
         let star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
         let bindings = formals
             .into_iter()
-            .map(|formal| (formal, star))
+            .map(|formal| (crate::types::TyParamName::from(formal), star))
             .collect::<crate::symbol_resolver::GSigBinds>();
         let mut resolved = crate::types::ty_subst_alias_expansion(expansion, &bindings);
         if reference.definitely_non_null() {
@@ -44847,7 +44285,7 @@ impl<'a> Checker<'a> {
             if let Some(captured) = self.active_classifier_captured_type_parameters(d) {
                 let visible = scope.visible_tparams();
                 for (_, semantic, bound) in captured {
-                    let lexical = visible.erasure.values().copied().find(|binding| {
+                    let lexical = visible.binding_types().find(|binding| {
                         binding.ty_param_name().is_some_and(|name| name == semantic)
                     });
                     dispatch_arguments
@@ -44895,12 +44333,12 @@ impl<'a> Checker<'a> {
                         })
                         .collect::<Vec<_>>();
                     for (captured_ordinal, semantic) in captured.iter().enumerate() {
-                        let lexical = visible.erasure.values().copied().find(|binding| {
+                        let lexical = visible.binding_types().find(|binding| {
                             binding.ty_param_name().is_some_and(|name| name == semantic)
                         });
                         let receiver = receiver_bindings
                             .iter()
-                            .find_map(|bindings| bindings.get(semantic).copied());
+                            .find_map(|bindings| bindings.get(semantic.as_str()).copied());
                         match lexical.or(receiver) {
                             Some(argument) => dispatch_arguments.push(argument),
                             None => {
@@ -45602,7 +45040,7 @@ impl<'a> Checker<'a> {
                     } else {
                         property_scope
                     };
-                    let property_suppression_depth = self.push_declaration_policies(
+                    let property_suppression_depth = self.push_property_declaration_policies(
                         property_scope,
                         &property.annotations,
                         &property.annotation_args,
@@ -46352,46 +45790,24 @@ impl<'a> Checker<'a> {
                         let field_ty =
                             (bp.receiver.is_none() && bp.context_params.is_empty()).then_some(ty);
                         if let Some(getter) = &bp.getter {
-                            let getter_field = field_ty
-                                .filter(|_| backing_field_binding::getter_declares_field(bp));
-                            self.with_ret_field(ty, getter_field, &accessor_scope, |checker| {
-                                match getter {
-                                    FunBody::Expr(body) => {
-                                        checker.check_expression_getter(
-                                            &accessor_scope,
-                                            *body,
-                                            ty,
-                                            bp.ty.is_some(),
-                                            None,
-                                        );
-                                    }
-                                    FunBody::Block(body) => {
-                                        checker.check_executable_body(&accessor_scope, *body);
-                                    }
-                                    FunBody::None => {}
-                                }
-                            });
+                            let result = accessor_bodies::GetterResult {
+                                ty,
+                                field: field_ty
+                                    .filter(|_| backing_field_binding::getter_declares_field(bp)),
+                                declared: bp.ty.is_some(),
+                                declaration: None,
+                            };
+                            self.check_getter_body(&accessor_scope, bp, getter, result);
                         }
                         if let Some(setter) = &bp.setter {
                             if let Some(body) = &setter.body {
-                                self.with_ret_field(
-                                    Ty::Unit,
-                                    field_ty,
+                                self.check_setter_body(
                                     &accessor_scope,
-                                    |checker| {
-                                        let setter_scope = accessor_scope
-                                            .child(ScopeKind::Function { receiver: None });
-                                        let parameter = crate::ast::setter_param_or_value(
-                                            setter.param.as_ref(),
-                                        );
-                                        checker.declare(&setter_scope, &parameter, ty, true);
-                                        match body {
-                                            FunBody::Expr(body) | FunBody::Block(body) => {
-                                                checker.check_executable_body(&setter_scope, *body);
-                                            }
-                                            FunBody::None => {}
-                                        }
-                                    },
+                                    bp,
+                                    setter,
+                                    body,
+                                    ty,
+                                    field_ty,
                                 );
                             }
                         }
@@ -47168,8 +46584,11 @@ impl<'a> Checker<'a> {
                         self.check_bodyless_property_bounds(scope, bp, declaration);
                         continue;
                     }
-                    let property_suppression_depth =
-                        self.push_declaration_policies(scope, &bp.annotations, &bp.annotation_args);
+                    let property_suppression_depth = self.push_property_declaration_policies(
+                        scope,
+                        &bp.annotations,
+                        &bp.annotation_args,
+                    );
                     let check_ordinary_property_body = self
                         .selected_body_declarations
                         .as_ref()
@@ -47768,32 +47187,14 @@ impl<'a> Checker<'a> {
                             .as_ref()
                             .filter(|body| self.should_check_selected_fun_body(body))
                         {
-                            let getter_field = field_ty
-                                .filter(|_| backing_field_binding::getter_declares_field(bp));
-                            self.with_ret_field(prop_ty, getter_field, scope, |c| match getter {
-                                FunBody::Expr(g) => {
-                                    c.check_expression_getter(
-                                        scope,
-                                        *g,
-                                        prop_ty,
-                                        bp.declared_ty().is_some(),
-                                        stable_property,
-                                    );
-                                    if bp.declared_ty().is_none() {
-                                        if let Some(declaration) = stable_property {
-                                            c.record_inferred_property_publication(
-                                                declaration,
-                                                *g,
-                                                prop_ty,
-                                            );
-                                        }
-                                    }
-                                }
-                                FunBody::Block(g) => {
-                                    c.check_executable_body(scope, *g);
-                                }
-                                FunBody::None => {}
-                            });
+                            let result = accessor_bodies::GetterResult {
+                                ty: prop_ty,
+                                field: field_ty
+                                    .filter(|_| backing_field_binding::getter_declares_field(bp)),
+                                declared: bp.declared_ty().is_some(),
+                                declaration: stable_property,
+                            };
+                            self.check_getter_body(scope, bp, getter, result);
                         }
                         if let Some(setter) = &bp.setter {
                             if let Some(body) = setter
@@ -47801,20 +47202,7 @@ impl<'a> Checker<'a> {
                                 .as_ref()
                                 .filter(|body| self.should_check_selected_fun_body(body))
                             {
-                                self.with_ret_field(Ty::Unit, field_ty, scope, |c| {
-                                    let setter_scope =
-                                        scope.child(ScopeKind::Function { receiver: None });
-                                    let scope = &setter_scope;
-                                    let pname =
-                                        crate::ast::setter_param_or_value(setter.param.as_ref());
-                                    c.declare(scope, &pname, prop_ty, true);
-                                    match body {
-                                        FunBody::Expr(g) | FunBody::Block(g) => {
-                                            c.check_executable_body(scope, *g);
-                                        }
-                                        FunBody::None => {}
-                                    }
-                                });
+                                self.check_setter_body(scope, bp, setter, body, prop_ty, field_ty);
                             }
                         }
                     }
@@ -48700,9 +48088,9 @@ impl<'a> Checker<'a> {
             .filter(|formal| ty_mentions_param(signature.ret, std::slice::from_ref(formal)))
             .filter_map(|formal| {
                 defaults
-                    .get(formal)
+                    .get(formal.as_str())
                     .copied()
-                    .map(|completion| (formal.clone(), completion))
+                    .map(|completion| (crate::types::TyParamName::from(formal), completion))
             })
             .collect::<crate::symbol_resolver::GSigBinds>();
         crate::symbol_resolver::unify_ty(signature.ret, completed, &mut completion_bindings);
@@ -49270,7 +48658,7 @@ impl<'a> Checker<'a> {
             if explicitly_bound.get(index).copied().unwrap_or(false) {
                 continue;
             }
-            if let Some(expected) = expected_bindings.get(name).copied() {
+            if let Some(expected) = expected_bindings.get(name.as_str()).copied() {
                 *binding = expected.projection_inner().unwrap_or(expected);
             }
         }
@@ -49281,17 +48669,13 @@ impl<'a> Checker<'a> {
         let mut seeded = class
             .type_params
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(bindings.iter().copied())
             .filter(|(_, binding)| *binding != Ty::Error)
             .collect::<HashMap<_, _>>();
         let captured_bindings =
             self.source_constructor_captured_bindings(scope, class, bound_outer);
-        seeded.extend(
-            captured_bindings
-                .iter()
-                .map(|(name, ty)| (name.clone(), *ty)),
-        );
+        seeded.extend(captured_bindings.iter().map(|(name, ty)| (*name, *ty)));
         let mut contextual_actuals = HashMap::default();
         for (slot, &(shape, definitely_non_null)) in parameter_shapes.iter().enumerate() {
             let Some((argument, _)) = self.source_constructor_argument(slot, slots, args, arg_tys)
@@ -49308,7 +48692,7 @@ impl<'a> Checker<'a> {
                 class.type_params.iter().enumerate().any(|(index, formal)| {
                     ty_mentions_param(expected, std::slice::from_ref(formal))
                         && !explicitly_bound.get(index).copied().unwrap_or(false)
-                        && !expected_bindings.contains_key(formal)
+                        && !expected_bindings.contains_key(formal.as_str())
                 });
             if retains_constructor_formal {
                 continue;
@@ -49341,8 +48725,7 @@ impl<'a> Checker<'a> {
         let mut enclosing_context_formals = vec![false; bindings.len()];
         let lexical_type_parameters = scope
             .visible_tparams()
-            .erasure
-            .values()
+            .binding_types()
             .filter_map(|binding| binding.ty_param_name())
             .collect::<crate::fx_hash::HashSet<_>>();
         let lexically_fixed_seed = bindings
@@ -49490,7 +48873,7 @@ impl<'a> Checker<'a> {
         let mut result_bindings = class
             .type_params
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(bindings.iter().copied())
             .filter(|(_, binding)| *binding != Ty::Error)
             .collect::<HashMap<_, _>>();
@@ -49504,7 +48887,7 @@ impl<'a> Checker<'a> {
         );
         for (index, formal) in class.type_params.iter().enumerate() {
             if bindings[index] == Ty::Error {
-                if let Some(&seed) = result_bindings.get(formal) {
+                if let Some(&seed) = result_bindings.get(formal.as_str()) {
                     bindings[index] = seed;
                 }
             }
@@ -49656,14 +49039,10 @@ impl<'a> Checker<'a> {
         let mut constructor_bindings = class
             .type_params
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(bindings.iter().copied())
             .collect::<HashMap<_, _>>();
-        constructor_bindings.extend(
-            captured_bindings
-                .iter()
-                .map(|(name, ty)| (name.clone(), *ty)),
-        );
+        constructor_bindings.extend(captured_bindings.iter().map(|(name, ty)| (*name, *ty)));
         if let Some(written) = explicit_refs.as_ref() {
             let declaration = self
                 .resolved_type_name(class.internal_name())
@@ -49824,7 +49203,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         class: &ClassSig,
         bound_outer: Option<Ty>,
-    ) -> HashMap<String, Ty> {
+    ) -> crate::types::TyParamBindings {
         let captured = &class.captured_type_parameters.type_params;
         if captured.is_empty() {
             return HashMap::default();
@@ -49841,7 +49220,7 @@ impl<'a> Checker<'a> {
             if let Some(applied_outer) = applied_outer {
                 return captured
                     .iter()
-                    .cloned()
+                    .map(crate::types::TyParamName::from)
                     .zip(applied_outer.type_args().iter().copied())
                     .collect();
             }
@@ -49851,11 +49230,9 @@ impl<'a> Checker<'a> {
             .iter()
             .filter_map(|captured| {
                 visible
-                    .erasure
-                    .values()
-                    .copied()
+                    .binding_types()
                     .find(|binding| binding.ty_param_name() == Some(captured.as_str()))
-                    .map(|binding| (captured.clone(), binding))
+                    .map(|binding| (crate::types::TyParamName::from(captured), binding))
             })
             .collect()
     }
@@ -49909,7 +49286,9 @@ impl<'a> Checker<'a> {
             }
             match declared.kind() {
                 TyKind::TyParam(name, _) => {
-                    bindings.entry(name.to_string()).or_insert(expected);
+                    bindings
+                        .entry(crate::types::TyParamName::new(&name))
+                        .or_insert(expected);
                 }
                 TyKind::Nullable(inner)
                 | TyKind::PlatformNullable(inner)
@@ -49980,7 +49359,9 @@ impl<'a> Checker<'a> {
             return;
         };
         collect_exact_expected_bindings(applied, expected, bindings);
-        bindings.retain(|name, ty| classifier.type_params().contains(name) && *ty != Ty::Error);
+        bindings.retain(|name, ty| {
+            classifier.type_params().iter().any(|formal| formal == name) && *ty != Ty::Error
+        });
     }
 
     /// Match a bare `T`, `T?`, or `T & Any` constructor parameter.
@@ -51051,7 +50432,9 @@ impl<'a> Checker<'a> {
             return;
         };
         if formals.iter().any(|candidate| candidate == formal) {
-            bindings.entry(formal.to_string()).or_insert(actual);
+            bindings
+                .entry(crate::types::TyParamName::new(&formal))
+                .or_insert(actual);
         }
     }
 
@@ -60076,7 +59459,10 @@ impl<'a> Checker<'a> {
                     .copied()
                     .filter(|bound| *bound != Ty::Error)
                     .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                class_binds.insert(formal.clone(), Ty::ty_param(formal, bound));
+                class_binds.insert(
+                    crate::types::TyParamName::new(formal),
+                    Ty::ty_param(formal, bound),
+                );
             }
             if selected_owner.is_none_or(|selected| selected == owner) {
                 let overloads =
@@ -60166,7 +59552,7 @@ impl<'a> Checker<'a> {
                     }
                     let mut input_subst = class_binds.clone();
                     for (formal, actual) in gm.signature.formals.iter().zip(explicit_type_args) {
-                        input_subst.insert(formal.clone(), *actual);
+                        input_subst.insert(crate::types::TyParamName::new(formal), *actual);
                     }
                     if let Some(expected) =
                         expected_result.filter(|expected| *expected != Ty::Error)
@@ -60229,7 +59615,7 @@ impl<'a> Checker<'a> {
                             constraints
                                 .lower
                                 .iter()
-                                .map(|(formal, actual)| (formal.clone(), *actual)),
+                                .map(|(formal, actual)| (*formal, *actual)),
                         );
                     }
                     return Some(GenericMemberPlan {
@@ -60268,7 +59654,7 @@ impl<'a> Checker<'a> {
         let mut bindings = crate::symbol_resolver::classifier_bindings(&class, applied);
         if let Some(signature) = member.generic_sig.as_ref() {
             for method_parameter in &signature.formals {
-                bindings.remove(method_parameter);
+                bindings.remove(method_parameter.as_str());
             }
         }
         bindings
@@ -60281,12 +59667,12 @@ impl<'a> Checker<'a> {
     fn generic_member_ret(
         &self,
         gm: &GenericMethod,
-        class_binds: &HashMap<String, Ty>,
+        class_binds: &crate::types::TyParamBindings,
         arg_tys: &[Ty],
     ) -> Ty {
         let mut binds = class_binds.clone();
         for parameter in &gm.signature.formals {
-            binds.remove(parameter);
+            binds.remove(parameter.as_str());
         }
         for (i, shape) in gm.signature.params.iter().enumerate() {
             if let Some(a) = arg_tys.get(i) {
@@ -60302,7 +59688,7 @@ impl<'a> Checker<'a> {
         }
         for (index, parameter) in gm.signature.formals.iter().enumerate() {
             binds
-                .entry(parameter.clone())
+                .entry(crate::types::TyParamName::new(parameter))
                 .or_insert_with(|| gm.signature.primary_formal_bound(index));
         }
         crate::symbol_resolver::ty_subst(gm.signature.ret, &binds)
@@ -60585,7 +59971,7 @@ impl<'a> Checker<'a> {
                     if let Some(explicit) = resolved_partial_explicit.as_ref() {
                         for (formal, actual) in class.type_params.iter().zip(explicit) {
                             if !actual.mentions_error() && !actual.mentions_pending() {
-                                bindings.insert(formal.clone(), *actual);
+                                bindings.insert(crate::types::TyParamName::new(formal), *actual);
                             }
                         }
                     }
@@ -60601,12 +59987,12 @@ impl<'a> Checker<'a> {
                     if class
                         .type_params
                         .iter()
-                        .all(|formal| bindings.contains_key(formal))
+                        .all(|formal| bindings.contains_key(formal.as_str()))
                     {
                         let inferred = class
                             .type_params
                             .iter()
-                            .map(|formal| bindings[formal])
+                            .map(|formal| bindings[formal.as_str()])
                             .collect::<Vec<_>>();
                         return Ty::obj_args_name(internal, &inferred);
                     }
@@ -60662,7 +60048,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .enumerate()
                         .map(|(index, name)| {
-                            bindings.get(name).copied().unwrap_or_else(|| {
+                            bindings.get(name.as_str()).copied().unwrap_or_else(|| {
                                 class
                                     .type_param_bounds
                                     .get(index)
@@ -60746,7 +60132,7 @@ impl<'a> Checker<'a> {
                         let Some(arguments) = classifier
                             .type_params()
                             .iter()
-                            .map(|parameter| bindings.get(parameter).copied())
+                            .map(|parameter| bindings.get(parameter.as_str()).copied())
                             .collect::<Option<Vec<_>>>()
                         else {
                             continue;
@@ -60798,7 +60184,7 @@ impl<'a> Checker<'a> {
             (TyKind::TyParam(formal, _), TyKind::TyParam(actual_name, _))
                 if actual_name == formal =>
             {
-                bindings.insert(formal.to_string(), actual.non_null());
+                bindings.insert(crate::types::TyParamName::new(&formal), actual.non_null());
                 return;
             }
             (
@@ -60951,7 +60337,7 @@ impl<'a> Checker<'a> {
                     let Some(semantic) = index.type_parameter_semantic_name(*parameter) else {
                         return Ty::Error;
                     };
-                    let binding = visible.erasure.values().copied().find(|binding| {
+                    let binding = visible.binding_types().find(|binding| {
                         binding.ty_param_name().is_some_and(|name| name == semantic)
                     });
                     let Some(binding) = binding else {
@@ -61077,10 +60463,9 @@ impl<'a> Checker<'a> {
         } else {
             let visible = scope.visible_tparams();
             for captured in &class.type_params()[own_count..] {
-                let binding =
-                    visible.erasure.values().copied().find(|binding| {
-                        binding.ty_param_name().is_some_and(|name| name == captured)
-                    });
+                let binding = visible
+                    .binding_types()
+                    .find(|binding| binding.ty_param_name().is_some_and(|name| name == captured));
                 let Some(binding) = binding else {
                     self.diags.error(
                         self.span(call),
