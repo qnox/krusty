@@ -10,6 +10,9 @@ use crate::backend::class_tables::AnyMember;
 use super::objects::any;
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 impl Body<'_> {
     /// Push the hash of property value `value`, declared of type `ty`.
     pub(super) fn generated_property_hash(

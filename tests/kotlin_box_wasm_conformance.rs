@@ -1009,19 +1009,17 @@ fn wasm_declines_a_generated_hash_that_can_reach_the_identity_hash() {
 }
 
 #[test]
+fn wasm_generated_members_keep_the_whole_portable_scalar_and_reference_control() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassEqualsAndHashCode.kt"),
+        "wasmDataClassEqualsAndHashCode",
+    );
+}
+
+#[test]
 fn wasm_a_generated_hash_of_an_erased_property_dispatches_when_every_class_has_a_body() {
     expect_wasm_box(
-        "class Keyed(val key: Int) {\n\
-             override fun hashCode() = key\n\
-             override fun equals(other: Any?) = other is Keyed && other.key == key\n\
-         }\n\
-         data class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
-         fun box(): String {\n\
-             if (Holder(Keyed(7)).hashCode() != 7) return \"Keyed\"\n\
-             if (Holder(\"a\").hashCode() != 97) return \"String\"\n\
-             if (Holder(5).hashCode() != 5) return \"Int\"\n\
-             return \"OK\"\n\
-         }",
+        include_str!("box_regressions/dataClassErasedPropertyHash.kt"),
         "wasmGeneratedHashOfAnErasedPropertyWithBodies",
     );
 }
