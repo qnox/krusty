@@ -48,6 +48,9 @@ pub(super) struct InheritedCollectionBridge {
 
 #[derive(Clone, Debug)]
 pub(super) enum InheritedCollectionBridgeBody {
+    /// `ACC_PUBLIC|ACC_ABSTRACT`: the superclass leaves the member abstract (`AbstractList.size()`),
+    /// so its specialization stays abstract (`abstract int getSize()`) for a subclass to implement.
+    Abstract { signature: Option<String> },
     /// `ACC_PUBLIC|ACC_BRIDGE`: call the immediate superclass implementation.
     SuperDelegate {
         owner: TypeName,
@@ -133,47 +136,88 @@ fn synthesize(
     if class.is_interface || class.is_annotation {
         return BridgeSelection::default();
     }
-    let Some(super_info) = classpath.find_name(class.superclass) else {
-        return BridgeSelection::default();
-    };
-    // A Kotlin superclass already publishes its final special bridges. Only the first Kotlin class
-    // whose immediate superclass is Java materializes inherited fake overrides.
-    if super_info.meta.class_kind.is_some() || class.superclass == crate::types::wk::java_object() {
+    // A dependency superclass, Java or Kotlin, leaves the class its inherited fake overrides. A
+    // final special bridge the superclass chain already publishes is not repeated below.
+    if class.superclass == crate::types::wk::java_object()
+        || classpath.find_name(class.superclass).is_none()
+    {
         return BridgeSelection::default();
     }
 
     let Some(start) = direct_supertype(class) else {
         return BridgeSelection::default();
     };
-    let Some(collection_face) = applied_collection_face(classpath, start) else {
-        return BridgeSelection::default();
+    // A Java superclass's members are the mutable face's Java methods, their type-parameter slots
+    // references. A Kotlin superclass's are the fake overrides of the class's own builtin faces,
+    // mapped like any Kotlin declaration: a substituted `Int` parameter is `int`, and only a result
+    // a type parameter declares is boxed (kotlinc's `forceBoxedReturnType`).
+    let kotlin_superclass = classpath
+        .find_name(class.superclass)
+        .is_some_and(|info| info.meta.class_kind.is_some());
+    let (faces, slots) = if kotlin_superclass {
+        (
+            kotlin_collection_faces(ir, classpath, class),
+            SlotMapping::Kotlin,
+        )
+    } else {
+        (
+            applied_collection_face(classpath, start)
+                .into_iter()
+                .collect(),
+            SlotMapping::JavaReferences,
+        )
     };
-    let specifications = builtin_bridge_members(classpath, collection_face);
+    let specifications = builtin_bridge_members(classpath, faces, slots);
     if specifications.is_empty() {
         return BridgeSelection::default();
     }
 
     let mut found = Vec::new();
     let mut seen = HashSet::default();
-    for node in java_superclass_chain(classpath, start) {
+    let mut found_members = HashSet::default();
+    let chain = java_superclass_chain(classpath, start);
+    // After the superclass chain, the interface defaults it inherits without redeclaring
+    // (`java.util.Map.getOrDefault` under `kotlin.collections.AbstractMap`).
+    let defaults = interface_chain(classpath, &chain);
+    for (node, interface) in chain
+        .iter()
+        .map(|node| (node, false))
+        .chain(defaults.iter().map(|node| (node, true)))
+    {
         for method in &node.info.methods {
-            if !is_instance_api(method) {
+            if !is_instance_api(method) || (interface && method.is_abstract()) {
                 continue;
             }
             let key = (method.name.clone(), method.descriptor.clone());
             if !seen.insert(key) {
                 continue;
             }
+            // A Kotlin class declares a renamed member under its Kotlin JVM name (`removeAt`,
+            // `getSize`); its physical-name method is the final special bridge to it.
+            let kotlin_node = node.info.meta.class_kind.is_some();
             let Some(specification) = specifications.iter().find(|specification| {
-                specification.physical_name == method.name
-                    && specification.descriptor == method.descriptor
+                let name = if kotlin_node {
+                    specification.kotlin_jvm_name()
+                } else {
+                    specification.physical_name.clone()
+                };
+                name == method.name && specification.descriptor == method.descriptor
             }) else {
                 continue;
             };
+            if !found_members.insert((
+                specification.source_name.clone(),
+                specification.descriptor.clone(),
+                specification.kind,
+            )) {
+                continue;
+            }
             found.push(FoundMember {
                 specification: specification.clone(),
                 method: method.clone(),
                 class_bindings: node.bindings.clone(),
+                kotlin_declared: kotlin_node,
+                interface_default: interface,
             });
         }
     }
@@ -200,6 +244,18 @@ struct BridgeMember {
     result: Ty,
     generic_result: Ty,
     policy: Option<CollectionBridgePolicy>,
+    slots: SlotMapping,
+}
+
+impl BridgeMember {
+    /// The name a Kotlin declaration of the member has on the JVM: its getter for a property.
+    fn kotlin_jvm_name(&self) -> String {
+        if self.kind == MappedBuiltinMemberKind::Property {
+            property_getter_name(&self.source_name)
+        } else {
+            self.source_name.clone()
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -207,11 +263,16 @@ struct FoundMember {
     specification: BridgeMember,
     method: MethodSig,
     class_bindings: HashMap<String, Ty>,
+    /// Declared by a Kotlin class under its Kotlin name, so not renamed there.
+    kotlin_declared: bool,
+    /// An interface default the superclass chain inherits; these follow the chain's members.
+    interface_default: bool,
 }
 
 #[derive(Clone)]
 struct AppliedClass {
     info: Arc<ClassInfo>,
+    applied: Ty,
     bindings: HashMap<String, Ty>,
 }
 
@@ -268,11 +329,48 @@ fn java_superclass_chain(classpath: &Classpath, start: Ty) -> Vec<AppliedClass> 
                 .into_iter()
                 .find(|ty| ty.non_null().obj_internal() == Some(superclass))
         });
-        chain.push(AppliedClass { info, bindings });
+        chain.push(AppliedClass {
+            info,
+            applied,
+            bindings,
+        });
         let Some(next) = next else { break };
         applied = next;
     }
     chain
+}
+
+/// Every interface the superclass chain implements, breadth first in declaration order.
+fn interface_chain(classpath: &Classpath, chain: &[AppliedClass]) -> Vec<AppliedClass> {
+    let mut interfaces = Vec::new();
+    let mut seen = HashSet::default();
+    let mut pending: VecDeque<Ty> = chain
+        .iter()
+        .flat_map(|node| {
+            applied_supertypes(&node.info, node.applied)
+                .into_iter()
+                .filter(|ty| ty.non_null().obj_internal() != node.info.super_class)
+        })
+        .collect();
+    while let Some(applied) = pending.pop_front() {
+        let Some(owner) = applied.non_null().obj_internal() else {
+            continue;
+        };
+        if !seen.insert(owner) {
+            continue;
+        }
+        let Some(info) = classpath.find_name(owner) else {
+            continue;
+        };
+        pending.extend(applied_supertypes(&info, applied));
+        let bindings = class_bindings(&info, applied);
+        interfaces.push(AppliedClass {
+            info,
+            applied,
+            bindings,
+        });
+    }
+    interfaces
 }
 
 fn class_bindings(info: &ClassInfo, applied: Ty) -> HashMap<String, Ty> {
@@ -307,9 +405,46 @@ fn applied_supertypes(info: &ClassInfo, applied: Ty) -> Vec<Ty> {
         .collect()
 }
 
-fn builtin_bridge_members(classpath: &Classpath, start: Ty) -> Vec<BridgeMember> {
+/// The most specific mapped builtin collections in the class's checked applied hierarchy.
+fn kotlin_collection_faces(ir: &IrFile, classpath: &Classpath, class: &IrClass) -> Vec<Ty> {
+    let Some(hierarchy) = ir.classifier_hierarchies.get(&class.fq_name_id()) else {
+        return Vec::new();
+    };
+    let mapped: Vec<_> = hierarchy
+        .iter()
+        .filter(|entry| entry.depth > 0)
+        .filter(|entry| crate::jvm::jvm_class_map::mapped_collection(entry.classifier).is_some())
+        .collect();
+    mapped
+        .iter()
+        .filter(|entry| {
+            !mapped.iter().any(|other| {
+                other.classifier != entry.classifier
+                    && crate::jvm::read_only_collection_stubs::builtin_extends(
+                        classpath,
+                        other.classifier,
+                        entry.classifier,
+                    )
+            })
+        })
+        .map(|entry| entry.applied)
+        .collect()
+}
+
+/// How a builtin member's type-parameter slots map onto the inherited JVM member.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SlotMapping {
+    JavaReferences,
+    Kotlin,
+}
+
+fn builtin_bridge_members(
+    classpath: &Classpath,
+    starts: Vec<Ty>,
+    slots: SlotMapping,
+) -> Vec<BridgeMember> {
     let mut members = Vec::new();
-    let mut pending = VecDeque::from([start]);
+    let mut pending = VecDeque::from(starts);
     let mut seen_classes = HashSet::default();
     let mut seen_members = HashSet::default();
     while let Some(applied) = pending.pop_front() {
@@ -361,7 +496,10 @@ fn builtin_bridge_members(classpath: &Classpath, start: Ty) -> Vec<BridgeMember>
                     .generic_sig
                     .params
                     .iter()
-                    .map(|ty| specialize_generic_slot(*ty, &bindings))
+                    .map(|ty| match slots {
+                        SlotMapping::JavaReferences => specialize_generic_slot(*ty, &bindings),
+                        SlotMapping::Kotlin => ty_subst(*ty, &bindings),
+                    })
                     .collect(),
                 generic_parameters: declaration
                     .generic_sig
@@ -373,6 +511,7 @@ fn builtin_bridge_members(classpath: &Classpath, start: Ty) -> Vec<BridgeMember>
                 result: specialize_generic_slot(declaration.generic_sig.ret, &bindings),
                 generic_result: ty_subst(declaration.generic_sig.ret, &bindings),
                 policy,
+                slots,
             });
         }
         pending.extend(
@@ -407,7 +546,9 @@ fn specialized_slot_accepts_null(declared: Ty, bindings: &HashMap<String, Ty>) -
             && substituted.upper_bound_admits_null())
 }
 
-/// kotlinc groups overloads of one Kotlin name together, then emits renamed physical members last.
+/// kotlinc groups overloads of one Kotlin name together, then emits the members a Java class
+/// realizes under a renamed physical name, then the interface defaults no superclass member's name
+/// already grouped (`getOrDefault` after `keys`, while `remove(K, V)` joins `remove(K)`).
 fn order_members(found: Vec<FoundMember>) -> Vec<FoundMember> {
     let mut grouped = Vec::new();
     let mut used = vec![false; found.len()];
@@ -416,20 +557,29 @@ fn order_members(found: Vec<FoundMember>) -> Vec<FoundMember> {
             continue;
         }
         used[index] = true;
-        grouped.push(found[index].clone());
+        let default_group = found[index].interface_default;
+        grouped.push((default_group, found[index].clone()));
         let name = &found[index].specification.source_name;
         for later in index + 1..found.len() {
             if !used[later] && found[later].specification.source_name == *name {
                 used[later] = true;
-                grouped.push(found[later].clone());
+                grouped.push((default_group, found[later].clone()));
             }
         }
     }
-    let (mut direct, renamed): (Vec<_>, Vec<_>) = grouped
-        .into_iter()
-        .partition(|member| member.specification.physical_name == member.specification.source_name);
-    direct.extend(renamed);
-    direct
+    // Stable: each rank keeps the grouped order.
+    grouped.sort_by_key(|(default_group, member)| {
+        if *default_group {
+            2
+        } else if member.kotlin_declared
+            || member.specification.physical_name == member.specification.source_name
+        {
+            0
+        } else {
+            1
+        }
+    });
+    grouped.into_iter().map(|(_, member)| member).collect()
 }
 
 fn member_bridges(
@@ -440,13 +590,9 @@ fn member_bridges(
     member: FoundMember,
 ) -> BridgeSelection {
     let specification = &member.specification;
-    let specialized_name = if specification.kind == MappedBuiltinMemberKind::Property {
-        property_getter_name(&specification.source_name)
-    } else {
-        specification.source_name.clone()
-    };
+    let specialized_name = specification.kotlin_jvm_name();
     let Some((substituted_parameters, substituted_result)) =
-        substituted_java_method(&member.method, &member.class_bindings)
+        substituted_java_method(&member.method, &member.class_bindings, specification.slots)
     else {
         return BridgeSelection::default();
     };
@@ -516,16 +662,31 @@ fn member_bridges(
     let mut bridges = vec![InheritedCollectionBridge {
         name: specialized_name.clone(),
         parameters: specification.parameters.clone(),
-        parameter_names: (0..specification.parameters.len())
-            .map(crate::jvm::parameter_names::inherited_collection_specialized_local)
-            .collect(),
+        // A Java class method has no parameter names to keep. A Kotlin fake override, and the
+        // default of a mapped builtin interface (`getOrDefault(key, defaultValue)` under
+        // `java.util.AbstractMap`), keep the builtin declaration's.
+        parameter_names: if specification.slots == SlotMapping::JavaReferences
+            && !member.interface_default
+        {
+            (0..specification.parameters.len())
+                .map(crate::jvm::parameter_names::inherited_collection_specialized_local)
+                .collect()
+        } else {
+            specification.parameter_names.clone()
+        },
         result: specialized_result,
-        body: InheritedCollectionBridgeBody::SuperDelegate {
-            owner: class.superclass,
-            name: specification.physical_name.clone(),
-            descriptor: member.method.descriptor.clone(),
-            delegate_result: super_result,
-            signature: specialized_property_signature.map(|pair| pair.0),
+        body: if member.method.is_abstract() {
+            InheritedCollectionBridgeBody::Abstract {
+                signature: specialized_property_signature.map(|pair| pair.0),
+            }
+        } else {
+            InheritedCollectionBridgeBody::SuperDelegate {
+                owner: class.superclass,
+                name: member.method.name.clone(),
+                descriptor: member.method.descriptor.clone(),
+                delegate_result: super_result,
+                signature: specialized_property_signature.map(|pair| pair.0),
+            }
         },
     }];
 
@@ -560,6 +721,29 @@ fn member_bridges(
         access: InheritedCollectionBridgeAccess::Final,
         signature: physical_signature,
     }));
+    // A Kotlin superclass's renamed member keeps its erased slot, which an ordinary bridge to the
+    // specialization overrides (`Object removeAt(int)` beside `abstract String removeAt(int)`).
+    if member.method.name == specialized_name
+        && specialized_name != specification.physical_name
+        && member.method.descriptor != specialized_descriptor
+    {
+        let Some((parameters, result)) =
+            crate::jvm::jvm_libraries::parse_method_desc(&member.method.descriptor)
+        else {
+            return BridgeSelection::default();
+        };
+        bridges.push(checked_bridge(CheckedBridgeInput {
+            specification,
+            name: specialized_name.clone(),
+            parameters,
+            result,
+            delegate_name: &specialized_name,
+            delegate_descriptor: &specialized_descriptor,
+            delegate_result: specialized_result,
+            access: InheritedCollectionBridgeAccess::Synthetic,
+            signature: None,
+        }));
+    }
     if let Some(ordinary) = &replaced_ordinary {
         if ordinary.descriptor != specialized_descriptor {
             bridges.push(checked_bridge(CheckedBridgeInput {
@@ -587,6 +771,7 @@ fn member_bridges(
 fn substituted_java_method(
     method: &MethodSig,
     bindings: &HashMap<String, Ty>,
+    slots: SlotMapping,
 ) -> Option<(Vec<Ty>, Ty)> {
     let Some(raw_signature) = method.signature.as_deref() else {
         return crate::jvm::jvm_libraries::parse_method_desc(&method.descriptor);
@@ -595,7 +780,10 @@ fn substituted_java_method(
     let parameters = signature
         .params
         .iter()
-        .map(|ty| specialize_generic_slot(*ty, bindings))
+        .map(|ty| match slots {
+            SlotMapping::JavaReferences => specialize_generic_slot(*ty, bindings),
+            SlotMapping::Kotlin => ty_subst(*ty, bindings),
+        })
         .collect();
     let result = specialize_generic_slot(signature.ret, bindings);
     Some((parameters, result))
