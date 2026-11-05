@@ -890,14 +890,28 @@ fn record_class_property_exports(
             }
             if let Some(function) = function {
                 if crate::backend::has_standalone_dependency_code(ir, function) {
-                    let receiver = ir.declared_class_self_type(name).ok_or_else(|| {
-                        format!(
-                            "class {} has no declared accessor receiver application",
-                            source.fq_name()
-                        )
-                    })?;
+                    let receiver = match ir.functions[function as usize].dispatch_receiver {
+                        Some(owner) => {
+                            if owner != name {
+                                return Err(format!(
+                                    "{}.{} lost its accessor receiver identity",
+                                    source.fq_name(),
+                                    declaration.name
+                                ));
+                            }
+                            Some(ir.declared_class_self_type(owner).ok_or_else(|| {
+                                format!(
+                                    "class {} has no declared accessor receiver application",
+                                    source.fq_name()
+                                )
+                            })?)
+                        }
+                        None => None,
+                    };
                     exports.record_callable(function, accessor(role)?);
-                    exports.record_member_receiver(function, receiver);
+                    if let Some(receiver) = receiver {
+                        exports.record_member_receiver(function, receiver);
+                    }
                 }
             } else if !source.is_interface
                 && modifiers.is_default
