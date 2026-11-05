@@ -318,7 +318,7 @@ mod tests {
 
         let mut declared = partial.clone();
         let signature = crate::libraries::GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: vec![Vec::new()],
             receiver: None,
             params: Vec::new(),

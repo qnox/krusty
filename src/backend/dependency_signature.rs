@@ -168,7 +168,7 @@ fn instantiate(
     let mut bindings = HashMap::default();
     for (formal, value) in signature.formals.iter().zip(values) {
         let value = value.ok_or("a dependency call is missing a type substitution")?;
-        if bindings.insert(formal.clone(), value).is_some() {
+        if bindings.insert(*formal, value).is_some() {
             return Err("a dependency declaration repeats a formal identity");
         }
     }

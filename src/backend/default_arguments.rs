@@ -33,14 +33,20 @@ pub use masks::{mask_words, omission_masks};
 
 use super::CheckedBackendCallables;
 use crate::fx_hash::HashSet;
-use crate::ir::IrFile;
+use crate::ir::{FunId, IrFile};
 
 /// Build the default-argument entries of `ir`'s declarations and rewrite every emitted call that
 /// leaves arguments out to call one. `callables` are the facts frozen for `ir` before this
 /// lowering; each expression an entry copies from a default gets the facts of its original.
-pub fn realize(ir: &mut IrFile, callables: &mut CheckedBackendCallables) {
+/// `exported` says which declarations a later module calls by their dependency export; each of
+/// those publishes its entry too.
+pub fn realize(
+    ir: &mut IrFile,
+    callables: &mut CheckedBackendCallables,
+    exported: impl Fn(FunId) -> bool,
+) {
     let mut entries = entries::Entries::default();
-    entries.publish(ir);
+    entries.publish(ir, exported);
     constructor_calls::rewrite_delegations(ir, &mut entries);
     entries.take_new_bodies();
     // Every emitted body, the entries' own included: a default may itself call with omissions.

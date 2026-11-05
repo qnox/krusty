@@ -343,7 +343,7 @@ impl Checker<'_> {
         &mut self,
         signature: &crate::libraries::GenericSig,
         owner: String,
-        unresolved: &[String],
+        unresolved: &[crate::types::TyParamName],
     ) -> TypeParameterOwnerScope {
         let formals = signature.formals.iter().enumerate().map(|(index, formal)| {
             let platform = unresolved.contains(formal).then(|| {

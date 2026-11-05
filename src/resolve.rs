@@ -2446,7 +2446,7 @@ pub struct ExtPropSig {
     /// Source-declared names retained only for metadata/display.
     pub formal_names: Vec<String>,
     /// Stable semantic identities used inside receiver/result types and generic inference.
-    pub formals: Vec<String>,
+    pub formals: Vec<crate::types::TyParamName>,
     pub formal_bounds: Vec<Ty>,
     pub receiver: Ty,
     pub ty: Ty,
@@ -2517,7 +2517,7 @@ pub struct SourcePropertySig {
     pub name: String,
     /// Semantic identities of the property's own type parameters. Context arguments and an
     /// extension receiver may both constrain these at a read/write site.
-    pub formals: Vec<String>,
+    pub formals: Vec<crate::types::TyParamName>,
     /// Declared upper bound parallel to `formals`. The stable signature bridge uses these semantic
     /// identities while resolving the property's compact context/result header; retaining only the
     /// source spelling (`T`) would make a generic property a different declaration in Pass 1 and
@@ -7173,12 +7173,12 @@ fn infer_lit_ty_scoped_on_demand(
 fn unify_ty_common(
     shape: Ty,
     actual: Ty,
-    tparams: &[String],
+    tparams: &[crate::types::TyParamName],
     binds: &mut crate::types::TyParamBindings,
     join: &dyn Fn(Ty, Ty) -> Ty,
 ) {
     match (shape.kind(), actual.kind()) {
-        (TyKind::TyParam(name, _), _) if tparams.iter().any(|parameter| parameter == name) => {
+        (TyKind::TyParam(name, _), _) if tparams.contains(&name) => {
             binds
                 .entry(crate::types::TyParamName::new(&name))
                 .and_modify(|bound| {
@@ -10058,7 +10058,7 @@ fn contextual_call_shape_with(
 fn unify_member_extension_slot(
     declared: Ty,
     actual: Ty,
-    deferred_type_variables: &[String],
+    deferred_type_variables: &[crate::types::TyParamName],
     bindings: &mut crate::symbol_resolver::GSigBinds,
 ) {
     let mut inferred = bindings.clone();
@@ -10066,10 +10066,7 @@ fn unify_member_extension_slot(
     crate::symbol_resolver::unify_ty(applied, actual, &mut inferred);
     crate::symbol_resolver::unify_ty(declared, actual, &mut inferred);
     for (formal, solution) in inferred {
-        if !deferred_type_variables
-            .iter()
-            .any(|deferred| *deferred == formal)
-        {
+        if !deferred_type_variables.contains(&formal) {
             bindings.insert(formal, solution);
         }
     }
@@ -10433,10 +10430,11 @@ impl<'a> Checker<'a> {
         if overriding_formals.len() != method_type_parameters.len() {
             return None;
         }
-        let same_type = |candidate: Ty, overriding: Ty, candidate_formals: &[String]| {
-            crate::types::ty_canonicalize_params(candidate, candidate_formals)
-                == crate::types::ty_canonicalize_params(overriding, &overriding_formals)
-        };
+        let same_type =
+            |candidate: Ty, overriding: Ty, candidate_formals: &[crate::types::TyParamName]| {
+                crate::types::ty_canonicalize_params(candidate, candidate_formals)
+                    == crate::types::ty_canonicalize_params(overriding, &overriding_formals)
+            };
         let mut candidates =
             <Self as crate::assignable::TypeOracle>::direct_supertypes(self, dispatch)
                 .into_iter()
@@ -11956,13 +11954,11 @@ impl<'a> Checker<'a> {
     fn postponed_argument_constraint_is_satisfiable(&self, expected: Ty, actual: Ty) -> bool {
         fn collect_declared_bounds(
             ty: Ty,
-            formals: &[String],
+            formals: &[crate::types::TyParamName],
             bounds: &mut crate::types::TyParamBindings,
         ) {
             match ty.kind() {
-                TyKind::TyParam(formal, bound)
-                    if formals.iter().any(|candidate| candidate == formal) =>
-                {
+                TyKind::TyParam(formal, bound) if formals.contains(&formal) => {
                     bounds
                         .entry(crate::types::TyParamName::new(&formal))
                         .or_insert(bound);
@@ -16946,7 +16942,7 @@ impl<'a> Checker<'a> {
                             else {
                                 continue;
                             };
-                            if generic.formals.iter().any(|candidate| candidate == formal) {
+                            if generic.formals.contains(&formal) {
                                 constraints
                                     .entry(formal.to_string())
                                     .or_default()
@@ -18077,9 +18073,8 @@ impl<'a> Checker<'a> {
                                                 generic,
                                                 std::iter::once((pi, inference_actual)),
                                             );
-                                        callable_reference_constraints.extend(
-                                            inferred.keys().map(|formal| formal.to_string()),
-                                        );
+                                        callable_reference_constraints
+                                            .extend(inferred.keys().copied());
                                         crate::symbol_resolver::merge_generic_bindings(
                                             generic,
                                             explicit_type_args.as_slice(),
@@ -18105,8 +18100,7 @@ impl<'a> Checker<'a> {
                                     generic,
                                     std::iter::once((pi, checked)),
                                 );
-                                callable_reference_constraints
-                                    .extend(inferred.keys().map(|formal| formal.to_string()));
+                                callable_reference_constraints.extend(inferred.keys().copied());
                                 crate::trace_compiler!(
                                         "resolve",
                                         "callable-reference argument call={fname} parameter={pi} declared={:?} nominal={checked:?} inferred={inferred:?}",
@@ -33079,11 +33073,11 @@ struct Checker<'a> {
     /// Unsolved callee-owned formals used as ordinary lambda inputs, or whose provisional lambda
     /// result solution still depends on another call's open variable. Receiver-lambda builder
     /// inference has separate body-constraint semantics and is deliberately absent here.
-    unbound_value_lambda_call_formals: HashMap<ExprId, Vec<String>>,
+    unbound_value_lambda_call_formals: HashMap<ExprId, Vec<crate::types::TyParamName>>,
     /// The subset of [`Self::unbound_value_lambda_call_formals`] whose provisional lambda result
     /// solution depends on another call's open variable; its resolved type argument is not
     /// completion evidence.
-    open_lambda_result_call_formals: HashMap<ExprId, Vec<String>>,
+    open_lambda_result_call_formals: HashMap<ExprId, Vec<crate::types::TyParamName>>,
     /// Diagnostics produced while a lambda input still contains a callee-owned type parameter.
     /// They remain outside the shared sink until the surrounding statement either rechecks the
     /// expression with closed inputs or commits the open probe as its final verdict. A vector keeps
@@ -36271,7 +36265,7 @@ impl<'a> Checker<'a> {
                         &result_bindings,
                     );
                     for formal in fixed {
-                        if nullable_flexible_roots.contains(&formal) {
+                        if nullable_flexible_roots.contains(formal.as_str()) {
                             continue;
                         }
                         let Some(&fixed_ty) = result_bindings.get(formal.as_str()) else {
@@ -39589,7 +39583,7 @@ impl<'a> Checker<'a> {
                     crate::types::TyParamName::new(formal),
                     self.type_ref_ty_silent(scope, type_ref),
                 );
-                explicitly_bound.insert(formal.clone());
+                explicitly_bound.insert(*formal);
             }
         }
         // `selected_bindings` is the ordinary resolver's completed constraint solution. Do not
@@ -48108,7 +48102,7 @@ impl<'a> Checker<'a> {
         let mut completion_bindings = signature
             .formals
             .iter()
-            .filter(|formal| ty_mentions_param(signature.ret, std::slice::from_ref(formal)))
+            .filter(|formal| ty_mentions_param(signature.ret, std::slice::from_ref(*formal)))
             .filter_map(|formal| {
                 defaults
                     .get(formal.as_str())
@@ -50446,7 +50440,7 @@ impl<'a> Checker<'a> {
     /// overload inference; only a bare variable gives this argument a complete, non-contextualized
     /// value type at this point.
     fn publish_uncontextualized_argument_binding(
-        formals: &[String],
+        formals: &[crate::types::TyParamName],
         parameter: Option<Ty>,
         actual: Ty,
         bindings: &mut crate::symbol_resolver::GSigBinds,
@@ -50454,7 +50448,7 @@ impl<'a> Checker<'a> {
         let Some(TyKind::TyParam(formal, _)) = parameter.map(|ty| ty.non_null().kind()) else {
             return;
         };
-        if formals.iter().any(|candidate| candidate == formal) {
+        if formals.contains(&formal) {
             bindings
                 .entry(crate::types::TyParamName::new(&formal))
                 .or_insert(actual);
@@ -58149,7 +58143,7 @@ impl<'a> Checker<'a> {
                         }
                         return Ty::Error;
                     };
-                    let expected_array = Ty::obj_args("kotlin/Array", &[contributed]);
+                    let expected_array = Ty::array(Ty::out_projection(contributed));
                     self.expect_assignable(
                         expected_array,
                         actual,

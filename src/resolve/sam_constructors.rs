@@ -165,7 +165,7 @@ pub(super) fn select_sam_constructor(
             });
     }
     let generic = GenericSig {
-        formals: formals.clone(),
+        formals: crate::types::TyParamName::all(&formals),
         formal_bounds: classifier.type_param_bounds.clone(),
         receiver: None,
         params: signature.params.clone(),

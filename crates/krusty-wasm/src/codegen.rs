@@ -149,7 +149,11 @@ impl Backend for WasmBackend {
             return Vec::new();
         }
         krusty::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
-        krusty::backend::default_arguments::realize(&mut file.ir, &mut file.callables);
+        krusty::backend::default_arguments::realize(
+            &mut file.ir,
+            &mut file.callables,
+            |function| file.dependency_exports.callable(function).is_some(),
+        );
         let Ok(properties) = krusty::backend::local_properties::realize(&mut file.ir) else {
             decline(state, "a local delegated property".to_string());
             return Vec::new();

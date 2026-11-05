@@ -165,7 +165,7 @@ pub fn compile_native(
         .zip(&texts)
         .map(|(path, text)| (path.as_str(), text.as_str()))
         .collect::<Vec<_>>();
-    let report = diags.render_all(&rendered);
+    let report = diags.render_all(&rendered, krusty::diag::DiagnosticNames::Hidden);
     if diags.has_errors() {
         return Err(NativeCompileError::Diagnostics(report));
     }

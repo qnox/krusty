@@ -990,3 +990,6 @@ fn wasm_declines_an_enum_class_by_name() {
         "an enum class (`Color`)",
     );
 }
+
+#[path = "wasm_value_hash.rs"]
+mod value_hash;

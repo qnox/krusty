@@ -7,7 +7,7 @@
 
 use super::*;
 
-const MESSAGE: &str = "object access cannot have explicit type arguments.";
+const MESSAGE: &str = "Object access cannot have explicit type arguments.";
 
 impl Checker<'_> {
     /// Report a standalone singleton qualifier after the classifier tower has committed its
