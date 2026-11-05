@@ -636,17 +636,18 @@ impl JvmDefaultMode {
     }
 }
 
-/// Drop every implicit not-null guard on a narrowed platform value.
+/// Drop the implicit not-null guards on narrowed platform values that `removed` selects.
 ///
-/// `-Xno-call-assertions` removes the null checks kotlinc emits where a Java call's `T!` result is
-/// committed to a declared non-null type. The guard is an expression wrapper, so it is removed by
-/// rewriting the node into its operand's value: `x!!` is a SOURCE assertion the flag leaves alone.
-pub(crate) fn strip_call_assertions(ir: &mut IrFile) {
+/// `-Xno-call-assertions` removes every null check kotlinc emits where a Java call's `T!` result is
+/// committed to a declared non-null type, and `-Xno-receiver-assertions` removes those whose value
+/// reaches an extension receiver. The guard is an expression wrapper, so it is removed by rewriting
+/// the node into its operand's value: `x!!` is a SOURCE assertion neither flag selects.
+pub(crate) fn strip_null_assertions(ir: &mut IrFile, removed: fn(&crate::ir::NullCheck) -> bool) {
     for expr in &mut ir.exprs {
         let IrExpr::NotNullAssert { operand, check } = expr else {
             continue;
         };
-        if check.is_implicit() {
+        if removed(check) {
             *expr = IrExpr::Block {
                 stmts: Vec::new(),
                 value: Some(*operand),

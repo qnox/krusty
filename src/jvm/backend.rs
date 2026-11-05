@@ -554,6 +554,9 @@ pub struct JvmBackend {
     /// Whether to emit the `Intrinsics.checkNotNullExpressionValue` guard on a narrowed platform
     /// value (`-Xno-call-assertions` clears this).
     call_assertions: bool,
+    /// Whether to emit that guard on a platform value that reaches an extension receiver
+    /// (`-Xno-receiver-assertions` clears this).
+    receiver_assertions: bool,
     /// `-language-version X.Y`: the `@kotlin.Metadata` `mv` and `.kotlin_module` header version to
     /// stamp; `None` keeps the default ([`crate::jvm::ir_emit::DEFAULT_METADATA_VERSION`]).
     metadata_version: Option<[i32; 3]>,
@@ -578,6 +581,7 @@ impl JvmBackend {
             inline_scopes_numbers: false,
             param_assertions: true,
             call_assertions: true,
+            receiver_assertions: true,
             metadata_version: None,
             annotations_in_metadata: true,
             pre_release_metadata: false,
@@ -625,6 +629,13 @@ impl JvmBackend {
     /// where a platform value is narrowed to a declared non-null type.
     pub fn with_call_assertions(mut self, enabled: bool) -> JvmBackend {
         self.call_assertions = enabled;
+        self
+    }
+
+    /// `-Xno-receiver-assertions` passes `false`: emit no such guard where the narrowed value is an
+    /// extension call's receiver.
+    pub fn with_receiver_assertions(mut self, enabled: bool) -> JvmBackend {
+        self.receiver_assertions = enabled;
         self
     }
 
@@ -1172,7 +1183,12 @@ impl JvmBackend {
             crate::jvm::parameter_assertions::strip(&mut ir);
         }
         if !self.call_assertions {
-            crate::jvm::ir_emit::strip_call_assertions(&mut ir);
+            crate::jvm::ir_emit::strip_null_assertions(&mut ir, crate::ir::NullCheck::is_implicit);
+        } else if !self.receiver_assertions {
+            crate::jvm::ir_emit::strip_null_assertions(
+                &mut ir,
+                crate::ir::NullCheck::guards_extension_receiver,
+            );
         }
         // Suspend lowering can move a catch onto a fresh `try`. Rebuild the marker plan from the
         // declaration parameters so emission names the handler that is actually written.
