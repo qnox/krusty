@@ -262,7 +262,14 @@ impl Body<'_> {
                 self.code.call(entry);
             }
             None => {
-                self.code.call(function);
+                // An ordinary call to an overridable member runs the receiver's override.
+                let dispatch = match call {
+                    DependencyExportCall::Member | DependencyExportCall::MemberExtension => {
+                        self.calls.external_dispatch(*target)
+                    }
+                    _ => None,
+                };
+                self.code.call(dispatch.unwrap_or(function));
             }
         }
         self.coerce_emitted_value(signature.result(), *ret)

@@ -12,6 +12,7 @@ mod dependency_call_shape;
 mod dependency_facts;
 mod dependency_metadata;
 mod dependency_signature;
+pub(crate) mod dispatch_entries;
 mod entry;
 pub(crate) mod interface_identity;
 pub(crate) mod local_properties;
