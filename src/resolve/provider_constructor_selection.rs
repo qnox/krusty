@@ -288,7 +288,7 @@ impl Checker<'_> {
                             let mut carries_enclosing_context = false;
                             for formal in &signature.formals {
                                 if ty_mentions_param(declared, std::slice::from_ref(formal)) {
-                                    enclosing_context_formals.insert(formal.clone());
+                                    enclosing_context_formals.insert(*formal);
                                     carries_enclosing_context = true;
                                 }
                             }
@@ -298,7 +298,8 @@ impl Checker<'_> {
                         }
                         let mut actual = kind.ty();
                         let mut bounded = declared.non_null();
-                        while let TyKind::TyParam(_, bound) = bounded.kind() {
+                        while let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = bounded.kind()
+                        {
                             let value_bound = self.integer_literal_semantic_type(bound);
                             if kind.adapts_integer_literal_to(value_bound) {
                                 actual = value_bound;
@@ -419,7 +420,7 @@ impl Checker<'_> {
                             let Some(index) = signature
                                 .formals
                                 .iter()
-                                .position(|candidate| candidate == &formal)
+                                .position(|candidate| candidate == formal)
                             else {
                                 continue;
                             };
@@ -497,7 +498,7 @@ impl Checker<'_> {
                 // postponed producer completes from its declared upper bound. Substitute preceding
                 // solutions so dependent bounds (`U : Base<T>`) retain their semantic application.
                 for (index, formal) in classifier.type_params().iter().enumerate() {
-                    if !enclosing_context_formals.contains(formal)
+                    if !enclosing_context_formals.contains(&crate::types::TyParamName::new(formal))
                         || bindings
                             .get(formal.as_str())
                             .is_some_and(|binding| *binding != Ty::Error)

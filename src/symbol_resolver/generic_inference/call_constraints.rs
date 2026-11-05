@@ -134,14 +134,14 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
                 && formal_variance_in_type(source, shape, formal)
                     == Some(crate::types::TypeVariance::Invariant)
             {
-                invariantly_fixed.insert(formal.clone());
+                invariantly_fixed.insert(*formal);
                 let nullable_formal = generic_sig.formal_bounds.get(index).is_none_or(|bounds| {
                     bounds.iter().all(|bound| bound.upper_bound_admits_null())
                 });
                 if formal_fixed_exactly_by(source, shape, formal, nullable_formal) {
                     constraints
                         .invariant_arguments
-                        .entry(formal.clone())
+                        .entry(formal.to_string())
                         .or_default()
                         .push(argument);
                 }
@@ -149,7 +149,7 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
         }
     }
     for (argument, variable, actual) in deferred_flexible_roots {
-        let TyKind::TyParam(formal, _) = variable.kind() else {
+        let (TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) = variable.kind() else {
             unreachable!("deferred flexible root is a declaration variable")
         };
         if invariantly_fixed.contains(formal.as_str()) {
@@ -232,7 +232,7 @@ pub(crate) fn collect_assignability_constraints_from_symbols(
     ) {
         let actual = actual.projection_inner().unwrap_or(actual);
         match actual.kind() {
-            TyKind::TyParam(name, _) => {
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
                 let expected = expected.projection_inner().unwrap_or(expected);
                 constraints.insert(
                     source,
@@ -489,7 +489,8 @@ impl CallInferenceConstraints {
             return false;
         }
         let actual = inference_actual(actual);
-        if matches!(actual.kind(), TyKind::TyParam(actual_name, _) if actual_name == name) {
+        if matches!(actual.kind(), TyKind::TyParam(actual_name, _) | TyKind::Var(actual_name, _) if actual_name == name)
+        {
             return false;
         }
         match position {
@@ -527,25 +528,93 @@ impl CallInferenceConstraints {
     /// one denotable solution. For `T : R` (`T <: R`), every lower bound of `T` is a lower bound of
     /// `R`, while every upper bound of `R` is an upper bound of `T`. A nullable bound `T : R?`
     /// admits null itself, so a lower bound `X` of `T` says only `X & Any <: R`.
+    ///
+    /// A classifier bound is incorporated the same way: each lower bound of `E` must reach
+    /// `E : EntityID<T>?`, so its applied `EntityID` supertype constrains `T` at the argument's
+    /// position (`E := EntityID<X>` contributes `X` to `T`). A bound that mentions its own formal
+    /// (`T : Comparable<T>`) relates the variable to itself and is left to bound checking.
     fn propagate_declaration_bounds(&mut self, source: &dyn SymbolSource, signature: &GenericSig) {
+        // kotlinc incorporates a derived constraint only while its type is at most one level
+        // deeper than the deepest constraint the call itself supplied. Mutually recursive bounds
+        // over an expanding hierarchy (`A : Link<B>, B : Link<A>` with `Nest<T> :
+        // Link<Nest<List<T>>>`) otherwise derive an ever deeper input on every pass.
+        let depth_limit = self
+            .lower_inputs
+            .values()
+            .flatten()
+            .map(|(actual, _)| *actual)
+            .chain(self.upper.values().flatten().copied())
+            .map(type_depth)
+            .max()
+            .unwrap_or(0)
+            + 1;
         loop {
             let mut changed = false;
             let lower = self.lower_inputs.clone();
             let upper = self.upper.clone();
             for (formal, bounds) in signature.formals.iter().zip(&signature.formal_bounds) {
                 for bound in bounds {
-                    let TyKind::TyParam(bound_formal, _) = bound.non_null().kind() else {
-                        continue;
-                    };
-                    if !signature
-                        .formals
-                        .iter()
-                        .any(|candidate| candidate == bound_formal)
+                    if matches!(bound.non_null().kind(), TyKind::Obj(..))
+                        && crate::types::ty_mentions_param(*bound, &signature.formals)
+                        && !crate::types::ty_mentions_param(*bound, std::slice::from_ref(formal))
                     {
+                        for &(actual, origin) in lower
+                            .get(formal.as_str())
+                            .map(Vec::as_slice)
+                            .unwrap_or_default()
+                        {
+                            let mut incorporated = CallInferenceConstraints::default();
+                            collect_call_inference_constraints(
+                                source,
+                                *bound,
+                                actual,
+                                ConstraintPosition::Lower,
+                                origin,
+                                &mut incorporated,
+                            );
+                            for (bound_formal, inputs) in incorporated.lower_inputs {
+                                for (input, origin) in inputs {
+                                    if type_depth(input) > depth_limit {
+                                        continue;
+                                    }
+                                    changed |= self.insert(
+                                        source,
+                                        bound_formal.as_str(),
+                                        input,
+                                        ConstraintPosition::Lower,
+                                        origin,
+                                    );
+                                }
+                            }
+                            for (bound_formal, inputs) in incorporated.upper {
+                                for input in inputs {
+                                    if type_depth(input) > depth_limit {
+                                        continue;
+                                    }
+                                    changed |= self.insert(
+                                        source,
+                                        bound_formal.as_str(),
+                                        input,
+                                        ConstraintPosition::Upper,
+                                        origin,
+                                    );
+                                }
+                            }
+                        }
                         continue;
                     }
-                    for &(actual, origin) in
-                        lower.get(formal).map(Vec::as_slice).unwrap_or_default()
+                    let (TyKind::TyParam(bound_formal, _) | TyKind::Var(bound_formal, _)) =
+                        bound.non_null().kind()
+                    else {
+                        continue;
+                    };
+                    if !signature.formals.contains(&bound_formal) {
+                        continue;
+                    }
+                    for &(actual, origin) in lower
+                        .get(formal.as_str())
+                        .map(Vec::as_slice)
+                        .unwrap_or_default()
                     {
                         let actual = if bound.is_nullable() {
                             actual.contributed_through_nullable_formal()
@@ -740,7 +809,7 @@ impl CallInferenceConstraints {
             }
             let lowers = self
                 .lower_inputs
-                .get(formal)
+                .get(formal.as_str())
                 .map(Vec::as_slice)
                 .unwrap_or_default();
             // `lower_inputs` are the contributions collected after nullable-formal absorption, not
@@ -838,6 +907,37 @@ impl CallInferenceConstraints {
     }
 }
 
+/// The nesting depth of a type's arguments, as kotlinc measures it for incorporation: a type with
+/// no arguments is 1, and each level of type arguments, function parameters or result adds one.
+/// Nullability, flexibility, projections and definite non-nullness do not add a level.
+fn type_depth(ty: Ty) -> usize {
+    match ty.kind() {
+        TyKind::Obj(_, arguments) => {
+            1 + arguments.iter().copied().map(type_depth).max().unwrap_or(0)
+        }
+        TyKind::Fun(function) => {
+            1 + function
+                .params
+                .iter()
+                .copied()
+                .chain(std::iter::once(function.ret))
+                .map(type_depth)
+                .max()
+                .unwrap_or(0)
+        }
+        TyKind::Intersection(parts) => parts.iter().copied().map(type_depth).max().unwrap_or(1),
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner)
+        | TyKind::DefinitelyNotNull(inner) => type_depth(inner),
+        _ => 1,
+    }
+}
+
 fn collect_call_inference_constraints(
     source: &dyn SymbolSource,
     shape: Ty,
@@ -847,7 +947,7 @@ fn collect_call_inference_constraints(
     constraints: &mut CallInferenceConstraints,
 ) {
     match shape.kind() {
-        TyKind::TyParam(name, _) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
             constraints.insert(source, name.as_str(), actual, position, origin);
         }
         TyKind::Nullable(inner) => {
@@ -935,9 +1035,16 @@ fn collect_call_inference_constraints(
             // A caller-owned type parameter contributes the applied shape of its upper bound to a
             // classifier-shaped constraint. Treating the variable itself as the callee's element
             // argument makes `T : Iterable<*>` bind `Iterable<E>.withIndex` as `E = T`; project
-            // through the bound so it correctly binds `E` to the star's readable upper type.
-            while let TyKind::TyParam(_, bound) = actual.kind() {
-                actual = bound.projection_inner().unwrap_or(bound).non_null();
+            // through the bound so it correctly binds `E` to the star's readable upper type. A
+            // definitely-non-null `E & Any` read through a nullable formal reaches the same bound.
+            loop {
+                actual = match actual.kind() {
+                    TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
+                        bound.projection_inner().unwrap_or(bound).non_null()
+                    }
+                    TyKind::DefinitelyNotNull(inner) => inner,
+                    _ => break,
+                };
             }
             let projected = supertype_with_classifier(source, actual, owner);
             let Some(TyKind::Obj(_, actual_arguments)) = projected.map(Ty::kind) else {

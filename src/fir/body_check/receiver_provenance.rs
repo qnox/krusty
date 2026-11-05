@@ -243,7 +243,23 @@ impl BodyFirChecker<'_> {
             .enclosing_classifier(owner)
             .expect("an instance owner is a classifier or an enum entry of one")
             .classifier;
-        FirCapturedReceiver::Enclosing { classifier }
+        let kind = match self
+            .index
+            .declaration_anchor(owner)
+            .expect("a selected enclosing instance has its declaration")
+            .kind
+        {
+            DeclarationKind::Classifier => crate::fir::EnclosingInstanceKind::Classifier,
+            DeclarationKind::EnumEntry => crate::fir::EnclosingInstanceKind::EnumEntry,
+            _ => panic!("an enclosing instance is owned by a classifier or enum entry"),
+        };
+        FirCapturedReceiver::Enclosing {
+            classifier,
+            owner: Some(crate::fir::EnclosingInstanceOwner {
+                declaration: owner,
+                kind,
+            }),
+        }
     }
 
     pub(super) fn current_storage_owner(&self) -> Option<DeclarationId> {

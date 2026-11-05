@@ -1555,10 +1555,14 @@ impl FunctionInfo {
             return declared.into_owned();
         }
 
-        fn merge_method_arguments(declared: Ty, selected: Ty, formals: &[String]) -> Ty {
+        fn merge_method_arguments(
+            declared: Ty,
+            selected: Ty,
+            formals: &[crate::types::TyParamName],
+        ) -> Ty {
             match (declared.kind(), selected.kind()) {
-                (TyKind::TyParam(formal, _), _)
-                    if formals.iter().any(|candidate| candidate == formal) =>
+                (TyKind::TyParam(formal, _) | TyKind::Var(formal, _), _)
+                    if formals.contains(&formal) =>
                 {
                     selected
                 }
@@ -1946,7 +1950,7 @@ pub struct PropertyInfo {
     /// static storage of a companion `@JvmField`, published in the same namespace, is not.
     pub companion_associated: bool,
     /// The property's own formal type parameters (`val <T> List<T>.foo`); empty for a plain property.
-    pub formals: Vec<String>,
+    pub formals: Vec<crate::types::TyParamName>,
     /// The property's declared type.
     pub ty: Ty,
     /// Number of leading context parameters in each accessor's parameter list.

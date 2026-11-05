@@ -125,7 +125,7 @@ impl ProductionSignatureSemantics<'_> {
         receivers: &[Ty],
         mut candidate: crate::libraries::FunctionInfo,
         bindings: crate::symbol_resolver::GSigBinds,
-        fixed_formals: &[String],
+        fixed_formals: &[crate::types::TyParamName],
     ) -> Result<
         (
             crate::libraries::FunctionInfo,
@@ -181,25 +181,28 @@ impl ProductionSignatureSemantics<'_> {
         signature: &crate::libraries::GenericSig,
         type_arguments: &[Ty],
         expected: Option<Ty>,
-    ) -> (crate::symbol_resolver::GSigBinds, Vec<String>) {
+    ) -> (
+        crate::symbol_resolver::GSigBinds,
+        Vec<crate::types::TyParamName>,
+    ) {
         let mut bindings = crate::symbol_resolver::seeded_gsig_binds(signature, type_arguments);
         let mut fixed_formals = signature
             .formals
             .iter()
             .take(type_arguments.len())
-            .cloned()
+            .copied()
             .collect::<Vec<_>>();
         if type_arguments.is_empty() {
             if let Some(expected) = expected {
                 let mut inferred = crate::symbol_resolver::GSigBinds::default();
                 crate::symbol_resolver::unify_ty(signature.ret, expected, &mut inferred);
                 for (formal, ty) in inferred {
-                    if signature.formals.iter().any(|declared| *declared == formal)
+                    if signature.formals.contains(&formal)
                         && !ty.mentions_pending()
                         && ty != Ty::Error
                     {
                         bindings.entry(formal).or_insert(ty);
-                        fixed_formals.push(formal.to_string());
+                        fixed_formals.push(formal);
                     }
                 }
             }
@@ -212,7 +215,7 @@ impl ProductionSignatureSemantics<'_> {
         receivers: &[Ty],
         parameters: &[Ty],
         mut bindings: crate::symbol_resolver::GSigBinds,
-        fixed_formals: &[String],
+        fixed_formals: &[crate::types::TyParamName],
     ) -> (crate::symbol_resolver::GSigBinds, bool) {
         let oracle = crate::symbol_resolver::SourceOracle(source);
         let mut complete = true;
@@ -232,7 +235,7 @@ impl ProductionSignatureSemantics<'_> {
                             bindings
                                 .get(formal.as_str())
                                 .copied()
-                                .map(|ty| (formal.clone(), ty))
+                                .map(|ty| (*formal, ty))
                         })
                         .collect::<Vec<_>>();
                     crate::symbol_resolver::unify_inferred_ty(parameter, actual, &mut bindings);

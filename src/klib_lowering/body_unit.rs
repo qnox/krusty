@@ -12,8 +12,8 @@ use crate::fx_hash::HashMap;
 use std::collections::VecDeque;
 
 use super::body_lowering::{
-    BodyLowering, CallLinker, LinkedAccessor, LinkedCallableReference, LinkedCallee,
-    LinkedConstructor, LoweredFunction,
+    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor, LinkedCallableReference,
+    LinkedCallee, LinkedConstructor, LoweredFunction,
 };
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -496,7 +496,17 @@ impl DependencyBodyUnit {
             );
             let lowered = match &body.initialization {
                 Some((class, plan)) => lowering.initialize_class(*class, plan),
-                None => lowering.body(body.statements),
+                None => lowering.body(body.statements).and_then(|lowered| {
+                    publish_parameter_defaults(
+                        body.arena,
+                        function,
+                        &body.header,
+                        &self.builtins,
+                        &mut self.ir,
+                        &mut linker,
+                    )
+                    .map(|()| lowered)
+                }),
             }
             .map_err(|reason| match reason {
                 KlibBodyDeclineReason::CalleeDeclined(decline) => *decline,
@@ -870,6 +880,7 @@ impl CallLinker for Linker<'_, '_> {
                 type_parameters: Vec::new(),
                 type_parameter_bounds: Some(Vec::new()),
                 class_type_parameters: self.class_type_parameters(selected)?,
+                parameter_defaults: Vec::new(),
             });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
@@ -973,6 +984,7 @@ impl CallLinker for Linker<'_, '_> {
                     .and_then(|selected| selected.generic_signature())
                     .map(|signature| signature.formal_bounds.clone()),
                 class_type_parameters,
+                parameter_defaults: Vec::new(),
             });
         }
         if declaration.dispatch_receiver.is_some() {
@@ -997,6 +1009,13 @@ impl CallLinker for Linker<'_, '_> {
                 .declare(ir, &identity, selected, arena, declaration)
                 .map_err(callee_declined)?,
         };
+        let parameter_defaults = declaration
+            .context_parameters
+            .iter()
+            .chain(&declaration.extension_receiver)
+            .chain(&declaration.regular_parameters)
+            .map(|parameter| parameter.default_value.is_some())
+            .collect();
         let declaration = &ir.functions[function as usize];
         Ok(LinkedCallee {
             callee: Callee::Local(function),
@@ -1012,6 +1031,7 @@ impl CallLinker for Linker<'_, '_> {
                 .and_then(|selected| selected.generic_signature())
                 .map(|signature| signature.formal_bounds.clone()),
             class_type_parameters: Vec::new(),
+            parameter_defaults,
         })
     }
 }

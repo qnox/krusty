@@ -608,7 +608,8 @@ fn comparable_range_to(
     let element = facts.receiver?;
     let bound = element.ty_param_bound()?;
     let is_element = |ty: &Ty| match (ty.kind(), element.kind()) {
-        (TyKind::TyParam(name, _), TyKind::TyParam(declared, _)) => name == declared,
+        (TyKind::TyParam(name, _), TyKind::TyParam(declared, _))
+        | (TyKind::Var(name, _), TyKind::Var(declared, _)) => name == declared,
         _ => false,
     };
     let applied_to_element = |ty: Ty, class| {
@@ -1393,7 +1394,7 @@ mod tests {
             ),
         );
         same_shape.generic_sig = Some(crate::libraries::GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: vec![vec![Ty::obj("kotlin/Enum")]],
             receiver: None,
             params: Vec::new(),

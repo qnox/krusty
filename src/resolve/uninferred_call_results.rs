@@ -192,8 +192,8 @@ impl Checker<'_> {
         let open_formals = signature
             .formals
             .iter()
-            .filter(|formal| !lexical_formals.contains(formal))
-            .cloned()
+            .filter(|formal| !lexical_formals.iter().any(|lexical| lexical == *formal))
+            .copied()
             .collect::<Vec<_>>();
         let unbound_value_lambda_formals = self.unbound_value_lambda_call_formals.get(&call);
         let open_lambda_result_formals = self.open_lambda_result_call_formals.get(&call);
@@ -230,7 +230,7 @@ impl Checker<'_> {
                 (ty_mentions_param(actual, std::slice::from_ref(*formal))
                     || ty_mentions_param(signature.ret, std::slice::from_ref(*formal)))
                     && (unbound_value_lambda_formals
-                        .is_some_and(|formals| formals.contains(formal))
+                        .is_some_and(|formals| formals.contains(*formal))
                         || open_dependency
                         || had_postponed_argument_diagnostic
                         || has_nested_diagnostic
@@ -241,7 +241,7 @@ impl Checker<'_> {
                                 ty_mentions_param(*parameter, std::slice::from_ref(*formal))
                             }))
                     && (open_lambda_result_formals
-                        .is_some_and(|formals| formals.contains(formal))
+                        .is_some_and(|formals| formals.contains(*formal))
                         || open_dependency
                         || resolved
                             .and_then(|arguments| arguments.get(*index))
@@ -371,7 +371,7 @@ mod tests {
         let [Some(argument)] = arguments.as_slice() else {
             panic!("the captured `T` must be recorded as the lexical parameter: {arguments:?}")
         };
-        let TyKind::TyParam(name, bound) = argument.kind() else {
+        let (TyKind::TyParam(name, bound) | TyKind::Var(name, bound)) = argument.kind() else {
             panic!("the captured `T` must be recorded as the lexical parameter: {arguments:?}")
         };
         assert_eq!(crate::types::type_parameter_source_name(&name), "T");
