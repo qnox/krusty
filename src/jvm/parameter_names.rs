@@ -1348,6 +1348,7 @@ mod suspend_lambda_member_tests {
             vec![captured, IrParameterIdentity::captured_receiver(0)],
             1,
             vec![IrCapturedReceiver::Enclosing {
+                owner: None,
                 classifier: crate::types::type_name("Outer"),
             }],
             None,

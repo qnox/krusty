@@ -63,7 +63,7 @@ pub use crate::backend::{Entry, BOX_RESULT_FRAME};
 
 pub struct CraneliftBackend {
     target: NativeTarget,
-    entry: Entry,
+    entry: crate::backend::ProgramEntry,
     verify: bool,
 }
 
@@ -71,7 +71,7 @@ impl CraneliftBackend {
     pub fn new(target: NativeTarget) -> Self {
         Self {
             target,
-            entry: Entry::Main,
+            entry: crate::backend::ProgramEntry::new(Entry::Main),
             verify: false,
         }
     }
@@ -86,7 +86,14 @@ impl CraneliftBackend {
 
     /// Start the program in `entry` instead of `main`.
     pub fn with_entry(mut self, entry: Entry) -> Self {
-        self.entry = entry;
+        self.entry.kind = entry;
+        self
+    }
+
+    /// Emit the synthetic program entry only for this exact declared source module. Ordinary
+    /// library functions, dependency exports and initialization are still emitted.
+    pub fn with_entry_module(mut self, module: impl Into<String>) -> Self {
+        self.entry = self.entry.in_module(module.into());
         self
     }
 }
@@ -425,7 +432,7 @@ impl Backend for CraneliftBackend {
             },
             self.target,
             &object_stem,
-            self.entry,
+            self.entry.for_module(file.module_name),
             self.verify,
         ) {
             Ok(lowered) => lowered,
