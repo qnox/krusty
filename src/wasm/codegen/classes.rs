@@ -38,7 +38,7 @@ use super::super::encode::{
 };
 use super::super::interface_dispatch::ClassRef;
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
-use super::lower::{carrier, Unsupported};
+use super::lower::{carrier, parameter_carrier, Unsupported};
 
 mod constructor_prefix;
 
@@ -155,8 +155,11 @@ pub(super) fn method_type(
 ) -> Result<u32, Unsupported> {
     let declaration = &ir.functions[function as usize];
     let mut params = vec![REFERENCE];
-    for param in &declaration.params {
-        params.push(carrier(*param)?.ok_or_else(|| "a `Unit` parameter".to_string())?);
+    for parameter in 0..declaration.params.len() {
+        params.push(
+            parameter_carrier(module, ir, function, parameter as u32)?
+                .ok_or_else(|| "a `Unit` parameter".to_string())?,
+        );
     }
     let results = carrier(declaration.ret)?.into_iter().collect();
     Ok(module.func_type(params, results))

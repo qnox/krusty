@@ -35,6 +35,7 @@ pub(super) mod value_hash;
 use tests::lower_alone;
 
 pub(super) use scalar_instructions::is_scalar_operation;
+pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
@@ -144,7 +145,11 @@ pub(super) fn lower_file(
         let params = function
             .params
             .iter()
-            .map(|param| carrier(*param)?.ok_or_else(|| "a `Unit` parameter".to_string()))
+            .enumerate()
+            .map(|(parameter, _)| {
+                parameter_carrier(module, ir, id as FunId, parameter as u32)?
+                    .ok_or_else(|| "a `Unit` parameter".to_string())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
@@ -246,6 +251,7 @@ pub(super) fn lower_file(
             function.ret,
         );
         body.scope = crate::ir::IrEnclosure::Function(id as FunId);
+        body.shared_cell_parameters(id as FunId)?;
         match body.function_body(root, function.ret) {
             Ok(()) => {
                 let Body { code, locals, .. } = body;
@@ -1030,8 +1036,8 @@ impl<'a> Body<'a> {
                 if params.len() != args.len() {
                     return Err("a call whose arguments do not match its parameters".into());
                 }
-                for (arg, param) in args.iter().zip(params) {
-                    self.value(*arg, param)?;
+                for (parameter, &arg) in args.iter().enumerate() {
+                    self.function_argument(*function, parameter as u32, arg)?;
                 }
                 let function = self.emitted_function(*function)?;
                 self.code.call(function);
