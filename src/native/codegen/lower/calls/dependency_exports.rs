@@ -105,7 +105,20 @@ impl BodyLowering<'_, '_, '_> {
         }
         .authenticate()
         .map_err(Unsupported::from)?;
-        let declared = export.signature.parameters();
+        // A call leaving arguments out goes through the default provider's entry, so its operands
+        // and result take that declaration's own ABI: an override's can differ from the inherited
+        // declaration's when the class it inherits from is generic.
+        let abi_export = if defaults.is_empty() {
+            export
+        } else {
+            provider.export
+        };
+        if abi_export.signature.parameters().len() != export.signature.parameters().len() {
+            return Err(
+                "an inherited default provider whose operands disagree with its override".into(),
+            );
+        }
+        let declared = abi_export.signature.parameters();
         let inserts_receiver = matches!(
             call,
             DependencyExportCall::Member
@@ -298,11 +311,11 @@ impl BodyLowering<'_, '_, '_> {
         };
         let id = self
             .file
-            .import(symbol, &signature, export.signature.result())?;
+            .import(symbol, &signature, abi_export.signature.result())?;
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
         match self.builder.inst_results(call).first().copied() {
-            Some(value) => self.convert(value, Some(export.signature.result()), *ret),
+            Some(value) => self.convert(value, Some(abi_export.signature.result()), *ret),
             None => Ok(None),
         }
     }

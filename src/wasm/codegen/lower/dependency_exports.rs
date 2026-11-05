@@ -78,11 +78,24 @@ impl Body<'_> {
             .calls
             .external(*target)
             .ok_or_else(|| "an unregistered dependency callable identity".to_owned())?;
-        let signature = self
+        // A call leaving arguments out goes through the default provider's entry, so its operands
+        // and result take that declaration's own ABI: an override's can differ from the inherited
+        // declaration's when the class it inherits from is generic.
+        let signature = match default_entry {
+            Some(_) => self.calls.external_default_signature(*target),
+            None => self.calls.signature(*target),
+        }
+        .ok_or_else(|| "an emitted dependency without its declared signature".to_owned())?
+        .clone();
+        if self
             .calls
             .signature(*target)
-            .ok_or_else(|| "an emitted dependency without its declared signature".to_owned())?
-            .clone();
+            .is_none_or(|own| own.parameters().len() != signature.parameters().len())
+        {
+            return Err(
+                "an inherited default provider whose operands disagree with its override".into(),
+            );
+        }
         let callable = self
             .callables
             .callable(*target)

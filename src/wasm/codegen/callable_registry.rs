@@ -51,6 +51,8 @@ pub(super) struct FileCallTargets {
     module_defaults: HashMap<CallableId, u32>,
     external: HashMap<ExternalCallableId, u32>,
     external_defaults: HashMap<ExternalCallableId, u32>,
+    /// The ABI of each default entry, which is its provider declaration's own.
+    external_default_signatures: HashMap<ExternalCallableId, DependencyFunctionSignature>,
     signatures: HashMap<ExternalCallableId, DependencyFunctionSignature>,
     member_receivers: HashMap<ExternalCallableId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
@@ -157,6 +159,7 @@ impl CallableRegistry {
             module_defaults: HashMap::default(),
             external: HashMap::default(),
             external_defaults: HashMap::default(),
+            external_default_signatures: HashMap::default(),
             signatures: HashMap::default(),
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
@@ -227,8 +230,9 @@ impl CallableRegistry {
                         Some(provider) if !defaults.is_empty() => callables.callable(*provider),
                         _ => Some(callable),
                     };
-                    let default_entry = provider
-                        .and_then(|provider| provider.dependency_callable.as_ref())
+                    let provider_identity =
+                        provider.and_then(|provider| provider.dependency_callable.as_ref());
+                    let default_entry = provider_identity
                         .and_then(|identity| self.dependency_defaults.get(identity))
                         .copied();
                     if !defaults.is_empty() && default_entry.is_none() {
@@ -294,6 +298,15 @@ impl CallableRegistry {
                     targets.external.insert(*target, index);
                     if let Some(entry) = default_entry {
                         targets.external_defaults.insert(*target, entry);
+                        let signature = provider_identity
+                            .and_then(|identity| self.signatures.get(identity))
+                            .ok_or_else(|| {
+                                "a default entry without its provider's declared signature"
+                                    .to_owned()
+                            })?;
+                        targets
+                            .external_default_signatures
+                            .insert(*target, signature.clone());
                     }
                     targets.signatures.insert(
                         *target,
@@ -436,6 +449,14 @@ impl FileCallTargets {
     /// The default entry of the dependency declaration `target`, when its module published one.
     pub(super) fn external_default(&self, target: ExternalCallableId) -> Option<u32> {
         self.external_defaults.get(&target).copied()
+    }
+
+    /// The ABI of the default entry a call to `target` leaving arguments out goes through.
+    pub(super) fn external_default_signature(
+        &self,
+        target: ExternalCallableId,
+    ) -> Option<&DependencyFunctionSignature> {
+        self.external_default_signatures.get(&target)
     }
 
     pub(super) fn signature(
