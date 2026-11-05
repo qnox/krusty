@@ -1725,10 +1725,10 @@ pub(crate) fn specialize_typed_call_signature(
 /// and the expected result independently, then retain the first complete substitution which admits
 /// every input. This is provider- and callable-name-neutral; metadata merely supplies the formal
 /// names carrying the policy.
-pub(crate) fn apply_only_input_type_bindings(
+pub(crate) fn apply_only_input_type_bindings<F: crate::types::TyParamKey>(
     source: &dyn SymbolSource,
     signature: &GenericSig,
-    only_input_formals: &[String],
+    only_input_formals: &[F],
     explicit_type_arguments: impl ExplicitTypeArgumentFixity,
     actual_receiver: Option<Ty>,
     actual_arguments: &[(usize, CallArgKind, bool)],
@@ -1740,12 +1740,13 @@ pub(crate) fn apply_only_input_type_bindings(
         return true;
     }
 
-    let mut constrained = Vec::<(String, Vec<Ty>)>::new();
+    let mut constrained = Vec::<(&str, Vec<Ty>)>::new();
     for formal in only_input_formals {
+        let formal: &str = formal.borrow();
         let Some(formal_index) = signature
             .formals
             .iter()
-            .position(|declared| declared == formal)
+            .position(|declared| declared.as_str() == formal)
         else {
             continue;
         };
@@ -1757,7 +1758,7 @@ pub(crate) fn apply_only_input_type_bindings(
         let mut collect = |shape: Ty, actual: Ty| {
             let mut one_input = GSigBinds::default();
             unify_ty_from_symbols(source, shape, actual, &mut one_input);
-            let Some(candidate) = one_input.get(formal.as_str()).copied() else {
+            let Some(candidate) = one_input.get(formal).copied() else {
                 return;
             };
             // Error/pending and null-only types are not proper inference solutions. In particular,
@@ -1788,10 +1789,10 @@ pub(crate) fn apply_only_input_type_bindings(
             collect(shape, argument.ty());
             // A result-only producer (`emptyList()`) has no input type of its own until the call
             // completes it: its input occurrence is the solution it is completed to.
-            if let Some(&solved) = bindings.get(formal.as_str()) {
+            if let Some(&solved) = bindings.get(formal) {
                 let completed = ty_subst_keep_unbound(
                     shape,
-                    &GSigBinds::from_iter([(crate::types::TyParamName::from(formal), solved)]),
+                    &GSigBinds::from_iter([(crate::types::TyParamName::new(formal), solved)]),
                 );
                 if argument.binds_unconstrained_result_to(source, completed) {
                     collect(shape, completed);
@@ -1804,7 +1805,7 @@ pub(crate) fn apply_only_input_type_bindings(
         if candidates.is_empty() {
             return false;
         }
-        constrained.push((formal.clone(), candidates));
+        constrained.push((formal, candidates));
     }
 
     fn inputs_admit(
@@ -1846,7 +1847,7 @@ pub(crate) fn apply_only_input_type_bindings(
         receiver: Option<Ty>,
         arguments: &[(usize, CallArgKind, bool)],
         vararg_index: Option<usize>,
-        constrained: &[(String, Vec<Ty>)],
+        constrained: &[(&str, Vec<Ty>)],
         index: usize,
         trial: &mut GSigBinds,
     ) -> bool {
@@ -1857,7 +1858,7 @@ pub(crate) fn apply_only_input_type_bindings(
                 });
         }
         let (formal, candidates) = &constrained[index];
-        let previous = trial.remove(formal.as_str());
+        let previous = trial.remove(*formal);
         for &candidate in candidates {
             trial.insert(crate::types::TyParamName::new(formal), candidate);
             if choose(
@@ -1873,7 +1874,7 @@ pub(crate) fn apply_only_input_type_bindings(
                 return true;
             }
         }
-        trial.remove(formal.as_str());
+        trial.remove(*formal);
         if let Some(previous) = previous {
             trial.insert(crate::types::TyParamName::new(formal), previous);
         }

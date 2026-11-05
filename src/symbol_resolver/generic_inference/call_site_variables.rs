@@ -170,6 +170,18 @@ impl CallSiteVariables {
         &self.signature
     }
 
+    /// This call's variables for the declaration formals `formals` names, such as the formals an
+    /// `@OnlyInputTypes` policy restricts.
+    pub(crate) fn instantiate_formals<F: crate::types::TyParamKey>(
+        &self,
+        formals: &[F],
+    ) -> Vec<TyParamName> {
+        formals
+            .iter()
+            .map(|formal| self.variables.instantiate_formal(formal.borrow()))
+            .collect()
+    }
+
     /// Express a solution for [`Self::signature`] over the declaration's own formals.
     pub(crate) fn declared_bindings(&self, inferred: InferredCallBindings) -> InferredCallBindings {
         let ty = |ty: Ty| self.variables.declared_type(ty);
@@ -364,6 +376,53 @@ mod tests {
             Ty::nullable(solved).non_null().ty_param_bound(),
             Some(Ty::nullable(any))
         );
+    }
+
+    /// `fun <@OnlyInputTypes T> Iterable<T>.contains(element: T)` keeps its policy at a call: the
+    /// policy names the declaration's `T`, and the call solves its own variable for it, so
+    /// `listOf(1).contains("a")` has no input type that admits both inputs.
+    #[test]
+    fn an_only_input_types_policy_restricts_the_calls_own_variable() {
+        let formal = "kotlin.collections:contains:T";
+        let element = Ty::ty_param(formal, Ty::nullable(Ty::obj("kotlin/Any")));
+        let signature = GenericSig {
+            formals: vec![crate::types::TyParamName::new(formal)],
+            formal_bounds: vec![Vec::new()],
+            receiver: Some(Ty::obj_args("kotlin/collections/Iterable", &[element])),
+            params: vec![element],
+            ret: Ty::Boolean,
+            return_policy: GenericReturnPolicy::Exact,
+        };
+        let call = CallSiteVariables::instantiate(&signature, site(1));
+        let policy = call.instantiate_formals(&[formal.to_owned()]);
+        let receiver = Ty::obj_args("kotlin/collections/Iterable", &[Ty::Int]);
+        let admits = |argument: Ty| {
+            let actuals = [(
+                0,
+                crate::symbol_resolver::CallArgKind::Typed(argument),
+                false,
+            )];
+            let mut bindings = GSigBinds::from_iter([(
+                call.signature().formals[0],
+                Ty::nullable(Ty::obj("kotlin/Any")),
+            )]);
+            super::super::apply_only_input_type_bindings(
+                &EmptySymbolSource,
+                call.signature(),
+                &policy,
+                0usize,
+                Some(receiver),
+                &actuals,
+                None,
+                None,
+                &mut bindings,
+            )
+            .then(|| bindings[call.signature().formals[0].as_str()])
+        };
+
+        assert_eq!(policy, call.signature().formals);
+        assert_eq!(admits(Ty::Int), Some(Ty::Int));
+        assert_eq!(admits(Ty::String), None);
     }
 
     #[test]
