@@ -32401,7 +32401,7 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
             syms,
             Some(index),
             diags,
-            CaptureDiscovery::Published,
+            CaptureDiscovery::AtConstruction,
             None,
             None,
             Some(active_declarations),
