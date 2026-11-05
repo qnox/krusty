@@ -353,8 +353,7 @@ fn forwarder(
 /// `Continuation<? super R>` and the method returns `Object`.
 ///
 /// A member's own type parameters would need their declarations ahead of the parameter list,
-/// which the inherited record does not carry; such a forwarder keeps descriptor-only shape
-/// (recorded in docs/SPEC.md).
+/// which the inherited record does not carry; such a forwarder keeps descriptor-only shape.
 fn forwarder_signature(
     formatter: &JvmSignatureFormatter<'_>,
     class_type_params: &[String],

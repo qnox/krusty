@@ -2,6 +2,18 @@
 
 use super::common;
 
+#[path = "../classpath_suspend_receiver_lambda_e2e.rs"]
+mod classpath_suspend_receiver_lambda_e2e;
+#[path = "../constructor_continuation_e2e.rs"]
+mod constructor_continuation_e2e;
+#[path = "../continuation_spill_order_e2e.rs"]
+mod continuation_spill_order_e2e;
+#[path = "../coroutine_intrinsics_e2e.rs"]
+mod coroutine_intrinsics_e2e;
+#[path = "../generic_suspend_member_return_e2e.rs"]
+mod generic_suspend_member_return_e2e;
+#[path = "../local_suspend_default_e2e.rs"]
+mod local_suspend_default_e2e;
 #[path = "../suspend_anonymous_object_name_e2e.rs"]
 mod suspend_anonymous_object_name_e2e;
 #[path = "../suspend_arg_order_e2e.rs"]
@@ -78,6 +90,8 @@ mod suspend_lambda_private_property_e2e;
 mod suspend_lambda_shared_capture_e2e;
 #[path = "../suspend_lambda_sites_e2e.rs"]
 mod suspend_lambda_sites_e2e;
+#[path = "../suspend_lambda_supertype_wildcards_e2e.rs"]
+mod suspend_lambda_supertype_wildcards_e2e;
 #[path = "../suspend_lambda_unit_tail_e2e.rs"]
 mod suspend_lambda_unit_tail_e2e;
 #[path = "../suspend_lambda_value_class_invoke_e2e.rs"]
@@ -120,6 +134,8 @@ mod suspend_statement_when_block_arms_e2e;
 mod suspend_super_call_refusal_e2e;
 #[path = "../suspend_super_calls_e2e.rs"]
 mod suspend_super_calls_e2e;
+#[path = "../suspend_tail_call_line_e2e.rs"]
+mod suspend_tail_call_line_e2e;
 #[path = "../suspend_throw_operand_e2e.rs"]
 mod suspend_throw_operand_e2e;
 #[path = "../suspend_try_catch_shapes_e2e.rs"]
@@ -134,6 +150,8 @@ mod suspend_under_try_e2e;
 mod suspend_unit_receiver_e2e;
 #[path = "../suspend_unit_tail_conditional_e2e.rs"]
 mod suspend_unit_tail_conditional_e2e;
+#[path = "../suspend_value_class_carrier_cast_e2e.rs"]
+mod suspend_value_class_carrier_cast_e2e;
 #[path = "../suspend_value_class_carrier_rebox_e2e.rs"]
 mod suspend_value_class_carrier_rebox_e2e;
 #[path = "../suspend_value_class_delegation_e2e.rs"]
@@ -150,3 +168,13 @@ mod suspend_when_branch_resume_line_e2e;
 mod suspend_when_branch_spill_e2e;
 #[path = "../suspend_withlock_nonlocal_return_e2e.rs"]
 mod suspend_withlock_nonlocal_return_e2e;
+#[path = "../suspending_concat_operands_e2e.rs"]
+mod suspending_concat_operands_e2e;
+#[path = "../uncast_continuation_operand_e2e.rs"]
+mod uncast_continuation_operand_e2e;
+#[path = "../value_class_suspend_member_reentry_e2e.rs"]
+mod value_class_suspend_member_reentry_e2e;
+#[path = "../value_class_suspend_override_e2e.rs"]
+mod value_class_suspend_override_e2e;
+#[path = "../value_class_suspend_resume_e2e.rs"]
+mod value_class_suspend_resume_e2e;

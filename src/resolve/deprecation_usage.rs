@@ -577,7 +577,7 @@ pub(super) fn emit_deprecated_use(
     match deprecation.level {
         DeprecationLevel::Warning => {
             if !suppresses("DEPRECATION") {
-                diags.warning_named(span, crate::diag::CompilerWarningName::Deprecation, message);
+                diags.warning_named(span, crate::diag::names::DEPRECATION, message);
             }
         }
         DeprecationLevel::Error | DeprecationLevel::Hidden => {
@@ -591,14 +591,14 @@ pub(super) fn emit_deprecated_use(
                     // regular `DEPRECATION`/`DEPRECATION_ERROR` report in kotlinc.
                     diags.warning_named(
                         span,
-                        crate::diag::CompilerWarningName::DeprecationErrorMigrationPeriodWarning,
+                        crate::diag::names::DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING,
                         format.message(&message),
                     );
                     return;
                 }
             }
             if !suppresses("DEPRECATION_ERROR") {
-                diags.error(span, message);
+                diags.error_named(span, crate::diag::names::DEPRECATION_ERROR, message);
             }
         }
     }
