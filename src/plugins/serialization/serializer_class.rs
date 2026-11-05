@@ -482,6 +482,7 @@ pub(super) fn complete(
             internal: ser_internal,
             args,
             ctor_params: Some(type_serializers.clone()),
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),
