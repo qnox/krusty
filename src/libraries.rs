@@ -1524,11 +1524,13 @@ impl FunctionInfo {
     /// Parameters after overload selection has applied receiver, argument, and expected-result
     /// constraints. Raw declaration parameters remain available through [`Self::semantic_params`].
     pub fn applied_params(&self) -> Cow<'_, [Ty]> {
-        drop_extension_receiver(
-            &self.callable.params,
-            self.is_extension(),
-            self.context_count,
-        )
+        self.applied_layout(&self.callable.params)
+    }
+
+    /// `params`, laid out like this callable's physical parameters, in the layout of
+    /// [`Self::applied_params`].
+    pub fn applied_layout<'p>(&self, params: &'p [Ty]) -> Cow<'p, [Ty]> {
+        drop_extension_receiver(params, self.is_extension(), self.context_count)
     }
 
     /// The selected Kotlin parameter shape after combining receiver/class specialization from the

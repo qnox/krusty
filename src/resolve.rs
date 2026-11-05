@@ -309,7 +309,7 @@ mod selected_argument_commitment;
 mod selected_result_publication;
 use selected_argument_commitment::{
     indexed_operator_argument_parameters, indexed_operator_argument_slots, SelectedArgumentBinding,
-    SelectedArgumentCommitment,
+    SelectedArgumentCommitment, SelectedParameters,
 };
 mod erased_overload_keys;
 mod signature_collection;
@@ -11244,6 +11244,7 @@ impl<'a> Checker<'a> {
             ) else {
                 return ClassifierValueCall::Checked(Ty::Error);
             };
+            let site_params = shape.call_site_params(&selected.applied_call_site_params());
             if !self.expect_selected_call_args(
                 scope,
                 CallArgs {
@@ -11251,8 +11252,11 @@ impl<'a> Checker<'a> {
                     args,
                     arg_tys: &argument_types,
                 },
-                &shape.params,
-                &shape.params,
+                SelectedParameters {
+                    applied: &shape.params,
+                    declared: &shape.params,
+                    call_site: site_params.as_deref(),
+                },
                 &shape.call_sig,
                 None,
             ) {
@@ -12778,8 +12782,11 @@ impl<'a> Checker<'a> {
                 args,
                 arg_tys,
             },
-            &params,
-            &params,
+            SelectedParameters {
+                applied: &params,
+                declared: &params,
+                call_site: None,
+            },
             &cs,
             None,
         ) {
@@ -13479,6 +13486,7 @@ impl<'a> Checker<'a> {
                 ) else {
                     return Ty::Error;
                 };
+                let site_params = shape.call_site_params(&selected.applied_call_site_params());
                 if !self.expect_selected_call_args(
                     scope,
                     CallArgs {
@@ -13486,8 +13494,11 @@ impl<'a> Checker<'a> {
                         args,
                         arg_tys: &argument_types,
                     },
-                    &shape.params,
-                    &shape.params,
+                    SelectedParameters {
+                        applied: &shape.params,
+                        declared: &shape.params,
+                        call_site: site_params.as_deref(),
+                    },
                     &shape.call_sig,
                     None,
                 ) {
@@ -14530,8 +14541,11 @@ impl<'a> Checker<'a> {
                                         args,
                                         arg_tys: &arg_tys,
                                     },
-                                    &m.params,
-                                    &m.params,
+                                    SelectedParameters {
+                                        applied: &m.params,
+                                        declared: &m.params,
+                                        call_site: None,
+                                    },
                                     &m.call_sig,
                                     None,
                                 ) {
@@ -14607,8 +14621,11 @@ impl<'a> Checker<'a> {
                                     args,
                                     arg_tys: &arg_tys,
                                 },
-                                &member.params,
-                                &member.params,
+                                SelectedParameters {
+                                    applied: &member.params,
+                                    declared: &member.params,
+                                    call_site: None,
+                                },
                                 &member.call_sig,
                                 None,
                             ) {
@@ -14775,8 +14792,11 @@ impl<'a> Checker<'a> {
                                 args,
                                 arg_tys: &arg_tys,
                             },
-                            &shape.params,
-                            &shape.params,
+                            SelectedParameters {
+                                applied: &shape.params,
+                                declared: &shape.params,
+                                call_site: None,
+                            },
                             &shape.call_sig,
                             None,
                         ) {
@@ -18983,6 +19003,7 @@ impl<'a> Checker<'a> {
                 let top_level = top_level_sam_pick
                     .map(|(info, bindings)| {
                         CallableCandidateSelection::Selected(Box::new(SelectedCallable {
+                            call_site_params: info.callable.params.clone(),
                             info,
                             bindings,
                             intersection_bindings: HashMap::default(),
@@ -32352,6 +32373,9 @@ struct InapplicableTopLevelCall<'a> {
 
 struct SelectedCallable {
     info: crate::libraries::FunctionInfo,
+    /// `info.callable.params` over the call's own variables: a variable selection left unsolved is
+    /// still this call's, never the declared formal `info` publishes it as.
+    call_site_params: Vec<Ty>,
     bindings: crate::symbol_resolver::GSigBinds,
     intersection_bindings: HashMap<String, Vec<Ty>>,
     /// Position in the exact family passed to `select_callable_candidate`. A postponed call can
@@ -38532,6 +38556,7 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         let SelectedCallable {
             info: mut selected,
+            call_site_params,
             bindings: mut selected_bindings,
             mut intersection_bindings,
             ..
@@ -38618,6 +38643,7 @@ impl<'a> Checker<'a> {
                     .is_some()
             })
             .collect::<crate::fx_hash::HashSet<_>>();
+        let site_params = shape.call_site_params(&call_site_params);
         let selected_arguments_valid =
             self.with_lambda_mutation(selected.flags.inline.can_inline(), |checker| {
                 checker.expect_selected_call_args(
@@ -38627,8 +38653,11 @@ impl<'a> Checker<'a> {
                         args,
                         arg_tys,
                     },
-                    &shape.params,
-                    &declared_params,
+                    SelectedParameters {
+                        applied: &shape.params,
+                        declared: &declared_params,
+                        call_site: site_params.as_deref(),
+                    },
                     &shape.call_sig,
                     (!expectations.is_empty()).then_some(&expectations),
                 )
@@ -57588,6 +57617,7 @@ impl<'a> Checker<'a> {
             argument_names,
         )?;
         let declared_params = shape.declared_params(&selected.semantic_params());
+        let site_params = shape.call_site_params(&selected.applied_call_site_params());
         if !self.expect_selected_call_args(
             scope,
             CallArgs {
@@ -57595,8 +57625,11 @@ impl<'a> Checker<'a> {
                 args,
                 arg_tys,
             },
-            &shape.params,
-            &declared_params,
+            SelectedParameters {
+                applied: &shape.params,
+                declared: &declared_params,
+                call_site: site_params.as_deref(),
+            },
             &shape.call_sig,
             None,
         ) {
@@ -58400,8 +58433,11 @@ impl<'a> Checker<'a> {
                 args,
                 arg_tys: &arg_tys,
             },
-            &visible_params,
-            &declared_params,
+            SelectedParameters {
+                applied: &visible_params,
+                declared: &declared_params,
+                call_site: None,
+            },
             &shape.call_sig,
             None,
         );
@@ -59718,8 +59754,11 @@ impl<'a> Checker<'a> {
                 args,
                 arg_tys: &arg_tys,
             },
-            &contextual.params,
-            &contextual.declared_params(declared.unwrap_or(&member.params)),
+            SelectedParameters {
+                applied: &contextual.params,
+                declared: &contextual.declared_params(declared.unwrap_or(&member.params)),
+                call_site: None,
+            },
             &contextual.call_sig,
             None,
         )
