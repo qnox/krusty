@@ -709,8 +709,9 @@ impl BodyLowering<'_> {
                 ));
             }
         }
-        let bound =
-            |parameter: &String, value: Ty| captured.get(parameter).copied().unwrap_or(value);
+        let bound = |parameter: &crate::types::TyParamName, value: Ty| {
+            captured.get(parameter).copied().unwrap_or(value)
+        };
         if let Callee::Local(_) = linked.callee {
             // A call of a function the unit declares binds its type parameters as checked FIR
             // lowers a source call of a module generic function: the arguments are read at the
@@ -722,7 +723,7 @@ impl BodyLowering<'_> {
                     "a call that leaves a type argument unset",
                 ))?;
                 let value = semantic_type(self.arena, self.header.type_parameters(), argument)?;
-                bindings.insert(parameter.clone(), bound(parameter, value));
+                bindings.insert(*parameter, bound(parameter, value));
             }
             for param in &mut linked.params {
                 *param = param.substitute_erased(&bindings);
@@ -757,7 +758,7 @@ impl BodyLowering<'_> {
                 parameter,
                 semantic_type(self.arena, self.header.type_parameters(), argument)?,
             );
-            bindings.insert(parameter.clone(), value);
+            bindings.insert(*parameter, value);
             substitutions.push(IrCheckedSubstitution {
                 parameter: FirTypeParameterRef::External {
                     callable: *target,
@@ -798,7 +799,7 @@ impl BodyLowering<'_> {
         &self,
         linked: &LinkedCallee,
         access: &KlibIrMemberAccess,
-    ) -> Lowered<crate::fx_hash::HashMap<String, Ty>> {
+    ) -> Lowered<crate::fx_hash::HashMap<crate::types::TyParamName, Ty>> {
         let values = arguments(access)
             .into_iter()
             .skip(usize::from(linked.receiver.is_some()));
@@ -838,8 +839,7 @@ impl BodyLowering<'_> {
                 ) {
                     continue;
                 }
-                let name = name.as_str();
-                let sole = captured.insert(name.to_owned(), projected).is_none()
+                let sole = captured.insert(name, projected).is_none()
                     && formals
                         .iter()
                         .enumerate()
@@ -870,7 +870,12 @@ impl BodyLowering<'_> {
     /// `name`: every bound of `name` admits `read` and names no type parameter, and no bound of
     /// any other type parameter names `name`, since that peer would constrain the capture too. A
     /// selection with no complete ledger is no proof.
-    fn bounds_admit_capture(&self, linked: &LinkedCallee, name: &str, read: Ty) -> bool {
+    fn bounds_admit_capture(
+        &self,
+        linked: &LinkedCallee,
+        name: crate::types::TyParamName,
+        read: Ty,
+    ) -> bool {
         let Some(ledger) = linked
             .type_parameter_bounds
             .as_ref()
@@ -883,7 +888,7 @@ impl BodyLowering<'_> {
             .iter()
             .zip(ledger)
             .all(|(parameter, bounds)| {
-                if parameter != name {
+                if *parameter != name {
                     return bounds.iter().all(|&bound| !names(bound, name));
                 }
                 bounds.iter().all(|&bound| {
@@ -898,18 +903,21 @@ impl BodyLowering<'_> {
 
 /// Whether `ty` names the type parameter `name` anywhere, including through the declared bound
 /// of another type parameter it names.
-fn names(ty: Ty, name: &str) -> bool {
-    fn walk(ty: Ty, name: &str, seen: &mut Vec<String>) -> bool {
+fn names(ty: Ty, name: crate::types::TyParamName) -> bool {
+    fn walk(
+        ty: Ty,
+        name: crate::types::TyParamName,
+        seen: &mut Vec<crate::types::TyParamName>,
+    ) -> bool {
         match ty.kind() {
             TyKind::TyParam(parameter, bound) => {
-                let parameter = parameter.as_str();
                 if parameter == name {
                     return true;
                 }
-                if seen.iter().any(|visited| visited == parameter) {
+                if seen.contains(&parameter) {
                     return false;
                 }
-                seen.push(parameter.to_owned());
+                seen.push(parameter);
                 walk(bound, name, seen)
             }
             TyKind::Nullable(inner)

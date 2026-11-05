@@ -284,16 +284,7 @@ impl Parser<'_> {
         }
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
-        let mut trailing = None;
-        if let Some(&last) = stmts.last() {
-            if let Stmt::Expr(e) = self.file.stmt(last) {
-                trailing = Some(*e);
-                stmts.pop();
-            }
-        }
-        let body = self
-            .file
-            .add_expr(Expr::Block { stmts, trailing }, Span::new(start.lo, end.hi));
+        let body = self.block_with_trailing_value(stmts, Span::new(start.lo, end.hi));
         let lam = self
             .file
             .add_expr(Expr::Lambda { params, body }, Span::new(start.lo, end.hi));

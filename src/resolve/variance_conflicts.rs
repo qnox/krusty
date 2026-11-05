@@ -429,8 +429,11 @@ impl Checker<'_> {
             variances: walk.variances,
             dnn_and_flexible: walk.dnn_and_flexible,
         };
-        let policy_depth =
-            self.push_declaration_policies(scope, &property.annotations, &property.annotation_args);
+        let policy_depth = self.push_property_declaration_policies(
+            scope,
+            &property.annotations,
+            &property.annotation_args,
+        );
         self.report_variance_conflicts(&walk, occurrences);
         self.restore_type_parameter_owners(owned);
         self.active_lexical_policies.truncate(policy_depth);

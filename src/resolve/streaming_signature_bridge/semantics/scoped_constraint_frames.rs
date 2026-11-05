@@ -212,7 +212,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         parameters: &[Ty],
         arguments: &[Ty],
-        callee_formals: &[String],
+        callee_formals: &[crate::types::TyParamName],
     ) {
         let constraint_frame = self.active_scoped_constraint_frame(scope.owner);
         crate::trace_compiler!(

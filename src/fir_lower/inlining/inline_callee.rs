@@ -98,7 +98,7 @@ impl InlineCallee {
                 template
                     .class_type_parameters
                     .iter()
-                    .cloned()
+                    .map(|parameter| parameter.as_str().to_owned())
                     .zip(class_arguments.iter().copied()),
             );
         }
@@ -214,7 +214,10 @@ mod tests {
             template: DependencyInlineTemplate {
                 function: 0,
                 name: "scope".to_owned(),
-                type_parameters: vec!["opaque-T".to_owned(), "opaque-R".to_owned()],
+                type_parameters: vec![
+                    crate::types::TyParamName::new("opaque-T"),
+                    crate::types::TyParamName::new("opaque-R"),
+                ],
                 class_type_parameters: Vec::new(),
             },
             class_arguments: Vec::new(),
@@ -287,7 +290,7 @@ mod tests {
                 function: 0,
                 name: "getOrNull".to_owned(),
                 type_parameters: Vec::new(),
-                class_type_parameters: vec!["opaque-class-T".to_owned()],
+                class_type_parameters: vec![crate::types::TyParamName::new("opaque-class-T")],
             },
             class_arguments,
         }

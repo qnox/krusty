@@ -16,6 +16,7 @@ mod control_forms;
 mod demo_package;
 mod elvis_blocks;
 mod inline_templates;
+mod parameter_defaults;
 mod primitive_calls;
 mod range_membership_producers;
 mod returnable_blocks;
