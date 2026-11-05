@@ -1573,7 +1573,7 @@ fn reflective_unbound_inner_constructor_reference_keeps_structural_identity() {
     assert!(reference.captures.is_empty());
     assert!(matches!(
         reference.target,
-        crate::ir::IrCallableReferenceTarget::Constructor { classifier }
+        crate::ir::IrCallableReferenceTarget::Constructor { classifier, .. }
             if classifier == crate::types::type_name("Outer$Inner")
     ));
     assert!(

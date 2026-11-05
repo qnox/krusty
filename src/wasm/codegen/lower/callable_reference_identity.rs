@@ -29,7 +29,7 @@ impl Body<'_> {
                 file: self.reference_file,
                 function: *function,
             },
-            Target::Constructor { classifier } => Declaration::Constructor {
+            Target::Constructor { classifier, .. } => Declaration::Constructor {
                 classifier: *classifier,
                 parameters: reference.declaration_parameters.clone(),
                 result: reference.declaration_result,

@@ -348,8 +348,13 @@ impl Backend for CraneliftBackend {
                 .then(|| format!("{symbol}__dispatch"));
             let reference_declaration = match file.kind {
                 crate::backend::CheckedIrUnitKind::Source => {
-                    match ReferenceDeclaration::source_export(&file.ir, file.module_name, callable)
-                    {
+                    match ReferenceDeclaration::source_export(
+                        &file.ir,
+                        file.module_name,
+                        callable,
+                        &file.dependency_exports,
+                        identity,
+                    ) {
                         Ok(identity) => identity,
                         Err(error) => {
                             diags.error(crate::diag::Span::new(0, 0), error);

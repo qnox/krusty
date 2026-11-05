@@ -55,6 +55,19 @@ impl BodyLowering<'_> {
             return Err(failed());
         };
         let arity = u8::try_from(reference.params.len()).map_err(|_| failed())?;
+        let declaration = match target {
+            crate::fir::FirConstructorTarget::Module { declaration, .. } => {
+                crate::ir::IrConstructorReferenceDeclaration::Module(
+                    self.index
+                        .callable(*declaration)
+                        .ok_or(FirLoweringFailure::MissingCallable(*declaration))?
+                        .declaration,
+                )
+            }
+            crate::fir::FirConstructorTarget::External { declaration, .. } => {
+                crate::ir::IrConstructorReferenceDeclaration::External(*declaration)
+            }
+        };
 
         // Invocation uses a checked static adapter; reflection retains the selected constructor's
         // declared signature separately. Inner references also carry the checked outer slot.
@@ -94,6 +107,7 @@ impl BodyLowering<'_> {
 
             return Ok(self.structural_constructor_reference(
                 classifier,
+                declaration,
                 function,
                 reference_ty,
                 self.constructor_reference_signature(target, outer)?,
@@ -233,6 +247,7 @@ impl BodyLowering<'_> {
             };
             return Ok(self.structural_constructor_reference(
                 classifier,
+                declaration,
                 function,
                 reference_ty,
                 self.constructor_reference_signature(target, outer)?,
@@ -284,6 +299,7 @@ impl BodyLowering<'_> {
     fn structural_constructor_reference(
         &mut self,
         classifier: TypeName,
+        declaration: crate::ir::IrConstructorReferenceDeclaration,
         adapter: crate::ir::FunId,
         function_type: Ty,
         declaration_parameters: Vec<Ty>,
@@ -291,7 +307,10 @@ impl BodyLowering<'_> {
     ) -> ExprId {
         self.ir.add_expr(IrExpr::CallableReference(Box::new(
             crate::ir::IrCallableReference {
-                target: crate::ir::IrCallableReferenceTarget::Constructor { classifier },
+                target: crate::ir::IrCallableReferenceTarget::Constructor {
+                    classifier,
+                    declaration,
+                },
                 adapter,
                 captures: Vec::new(),
                 bound_receiver: capture,
