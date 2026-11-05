@@ -17,14 +17,14 @@ impl BodyLowering<'_, '_, '_> {
         let export = self.file.dependency_symbols.get(identity)?;
         Some((|| {
             let callee = access.callee().map_err(Unsupported::from)?;
+            let selected = ExportedDeclaration {
+                realization,
+                export,
+            };
             self.emitted_dependency_call(
                 site,
-                export,
-                realization,
-                DefaultProvider {
-                    realization,
-                    export,
-                },
+                selected,
+                selected,
                 &callee,
                 access.receiver,
                 access.arguments,
@@ -35,13 +35,16 @@ impl BodyLowering<'_, '_, '_> {
     pub(super) fn emitted_dependency_call(
         &mut self,
         site: u32,
-        export: &super::super::super::DependencyExport,
-        realization: &crate::backend::BackendCallableFact,
-        provider: DefaultProvider<'_>,
+        selected: ExportedDeclaration<'_>,
+        provider: ExportedDeclaration<'_>,
         callee: &Callee,
         dispatch_receiver: Option<u32>,
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
+        let ExportedDeclaration {
+            realization,
+            export,
+        } = selected;
         let Callee::External {
             params,
             ret,

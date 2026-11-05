@@ -11,11 +11,12 @@ mod dependency_exports;
 use super::*;
 use crate::backend::class_tables::module_slots::PlanKey;
 
-/// The dependency declaration whose defaults a call omits: the selected one's own, or those of
-/// the declaration an override inherits them from. Its flags admit the omission and its entry
-/// evaluates the defaults before dispatching to the actual member.
+/// A dependency declaration's checked realization together with the export its module emitted.
+/// A call carries two: the selected declaration, and the one whose defaults it omits (the
+/// selected one's own, or those of the declaration an override inherits them from), whose flags
+/// admit the omission and whose entry evaluates the defaults before dispatching to the member.
 #[derive(Clone, Copy)]
-pub(super) struct DefaultProvider<'a> {
+pub(super) struct ExportedDeclaration<'a> {
     pub(super) realization: &'a crate::backend::BackendCallableFact,
     pub(super) export: &'a super::super::DependencyExport,
 }
@@ -445,12 +446,12 @@ impl BodyLowering<'_, '_, '_> {
                         .callables
                         .callable(*provider)
                         .and_then(|provider| {
-                            Some(DefaultProvider {
+                            Some(ExportedDeclaration {
                                 realization: provider,
                                 export: export_of(provider)?,
                             })
                         }),
-                    _ => export.map(|export| DefaultProvider {
+                    _ => export.map(|export| ExportedDeclaration {
                         realization,
                         export,
                     }),
@@ -458,14 +459,16 @@ impl BodyLowering<'_, '_, '_> {
                 if let Some(export) =
                     direct_dependency_export(export, provider.map(|p| p.export), defaults)?
                 {
-                    let provider = provider.unwrap_or(DefaultProvider {
+                    let provider = provider.unwrap_or(ExportedDeclaration {
                         realization,
                         export,
                     });
                     return self.emitted_dependency_call(
                         site,
-                        export,
-                        realization,
+                        ExportedDeclaration {
+                            realization,
+                            export,
+                        },
                         provider,
                         callee,
                         dispatch_receiver,
