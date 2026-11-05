@@ -377,21 +377,29 @@ impl SymbolResolver<'_> {
         fits: &dyn Fn(&Ty, &CallArgKind) -> bool,
         adapts: &dyn Fn(&Ty, &CallArgKind, usize) -> bool,
     ) -> CandidateSelectionWithTies<&'p Instantiated<'a>> {
-        let exact = |candidate: &&Instantiated<'_>| {
-            candidate.params.len() == args.len()
-                && candidate
-                    .params
-                    .iter()
-                    .zip(args)
-                    .all(|(parameter, argument)| *parameter == argument.type_for(*parameter))
+        let exact = |adapted: bool| {
+            move |candidate: &&Instantiated<'_>| {
+                candidate.params.len() == args.len()
+                    && candidate
+                        .params
+                        .iter()
+                        .zip(args)
+                        .all(|(parameter, argument)| {
+                            *parameter == argument.type_for(*parameter)
+                                && (adapted
+                                    || !argument.adapts_integer_literal_to(parameter.non_null()))
+                        })
+            }
         };
         // A generic declaration the call instantiates to a non-generic one's parameters is the
-        // less specific of the two (`discriminate_generics`).
+        // less specific of the two (`discriminate_generics`). Only an argument's own type decides
+        // that here: integer-literal adaptation (`maxOf(1, 2)` against `maxOf(Long, Long)`) is the
+        // next step's choice.
         if let Some(exact) = parsed
             .iter()
-            .filter(exact)
+            .filter(exact(false))
             .find(|candidate| !is_generic(candidate.function))
-            .or_else(|| parsed.iter().find(exact))
+            .or_else(|| parsed.iter().find(exact(true)))
         {
             return CandidateSelectionWithTies::Selected(exact);
         }
