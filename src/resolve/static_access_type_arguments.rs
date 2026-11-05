@@ -138,11 +138,18 @@ impl Checker<'_> {
                 arguments.span,
                 self.file.forbid_useless_type_arguments,
                 self.file.type_arguments_not_allowed_warning.as_deref(),
-                crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_WARNING,
+                DeprecationNames {
+                    error: crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED,
+                    warning: crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_WARNING,
+                },
                 MESSAGE,
             ),
             QualifierAccessKind::CompanionAssociated => {
-                self.diags.error(arguments.span, MESSAGE.to_string());
+                self.diags.error_named(
+                    arguments.span,
+                    crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED,
+                    MESSAGE,
+                );
             }
         }
     }
