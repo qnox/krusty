@@ -37,13 +37,13 @@ fn bound_inner_alias_constructor_candidates(
     let substitutions = classifier
         .type_params()
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .zip(target.type_args().iter().copied())
         .collect::<crate::symbol_resolver::GSigBinds>();
     let declaration_substitutions = classifier
         .type_params()
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .zip(arguments.iter().copied())
         .collect::<crate::symbol_resolver::GSigBinds>();
     let bounds = alias
@@ -68,7 +68,10 @@ fn bound_inner_alias_constructor_candidates(
                 .first()
                 .copied()
                 .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            (formal.clone(), Ty::ty_param(formal, bound))
+            (
+                crate::types::TyParamName::from(formal),
+                Ty::ty_param(formal, bound),
+            )
         })
         .collect::<crate::symbol_resolver::GSigBinds>();
     classifier

@@ -48,6 +48,7 @@ mod class_lambda_reflection;
 mod class_literals;
 mod class_mode_lambda_members;
 mod class_pool_seed;
+mod collection_to_array;
 mod companion_blocks;
 mod comparison_branches;
 mod condition_emission;
@@ -2428,8 +2429,7 @@ fn emit_class(
         markers: &markers,
         byte_parity,
     };
-    // A value class's declared members and `Any` overrides precede its private primary `<init>`,
-    // which its generated representation members follow; every other class starts with `<init>`.
+    // A value class's members precede its `<init>`, which the representation members follow.
     let (before_primary, after_primary) = split_around_primary_constructor(
         ir,
         c,
@@ -2439,6 +2439,7 @@ fn emit_class(
         emit_scheduled_member(&member_emission, member, &mut cw);
     }
     if c.is_value {
+        bridge_emission::emit_value_class_stubs(ir, c, &mut cw, env);
         inherited_default_forwarders::emit_value_class_inherited_defaults(ir, c, &mut cw, env);
     }
     seed_value_ctor_after_members(byte_parity, pool_seed(), &mut cw);
@@ -2812,6 +2813,7 @@ fn emit_class(
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
     accessor_emission_order::emit(ir, c, &fq_name, facade, env, &mut cw);
+    collection_to_array::emit(c, &mut cw, env);
     if !static_storage(ir, c) {
         static_fields::emit_class_static_initializer(
             ir,
@@ -2997,18 +2999,6 @@ fn finish_code_sig<const ACCESS: u16>(
     code.ensure_locals(locals);
     code.link();
     cw.add_method_sig(ACCESS, name, desc, code, signature);
-}
-
-/// `Arrays.equals`/`Arrays.hashCode`/`Arrays.toString` parameter descriptor for an array member: a
-/// primitive specialized array has its own overload (`[I`), a reference `Array<T>` uses
-/// `[Ljava/lang/Object;` (array covariance lets a `String[]`/`Enum[]` flow in). Keyed off the array
-/// KIND (its class), not the element — `Array<Int>` is a reference `Integer[]`, not `[I`.
-fn arrays_param_desc(array: Ty) -> String {
-    if array.is_reference_array() {
-        "[Ljava/lang/Object;".to_string()
-    } else {
-        type_descriptor(array)
-    }
 }
 
 /// Emit an `interface`: `ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT`, extends `java/lang/Object`. A method
@@ -3839,6 +3829,7 @@ fn emit_enum_class(
         static_accessors::class_declaration_line(c),
         &mut cw,
     );
+    collection_to_array::emit(c, &mut cw, env);
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
     // their names, descriptors and body constants between the entry constants and `<clinit>`, so
     // building the initializer earlier claimed those pool slots first.

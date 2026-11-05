@@ -61,7 +61,7 @@ impl ProductionSignatureSemantics<'_> {
         let mut bindings = class
             .type_params
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(selected_arguments.iter().copied())
             .collect::<crate::symbol_resolver::GSigBinds>();
         // A selected constructor result can contain an early partial solution (for example the
@@ -93,8 +93,8 @@ impl ProductionSignatureSemantics<'_> {
                 .get(index)
                 .is_some_and(|argument| *argument != Ty::Error);
             if !explicitly_fixed {
-                if let Some(inferred) = inferred.get(formal).copied() {
-                    completed_bindings.insert(formal.clone(), inferred);
+                if let Some(inferred) = inferred.get(formal.as_str()).copied() {
+                    completed_bindings.insert(crate::types::TyParamName::new(formal), inferred);
                 }
             }
         }
@@ -156,7 +156,7 @@ impl ProductionSignatureSemantics<'_> {
             .iter()
             .enumerate()
             .map(|(index, formal)| {
-                bindings.get(formal).copied().unwrap_or_else(|| {
+                bindings.get(formal.as_str()).copied().unwrap_or_else(|| {
                     class
                         .type_param_bounds
                         .get(index)
@@ -186,7 +186,7 @@ impl ProductionSignatureSemantics<'_> {
             {
                 let argument = receiver_bindings
                     .iter()
-                    .find_map(|bindings| bindings.get(captured).copied())
+                    .find_map(|bindings| bindings.get(captured.as_str()).copied())
                     .unwrap_or_else(|| {
                         Ty::ty_param(
                             captured,
