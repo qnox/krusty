@@ -20,7 +20,7 @@ use super::reference_recording_support::{kotlin_native_root, recorded};
 /// are assigned to their original fragments and its refinement edges are preserved.
 pub fn kotlin_native_multimodule_box(source: &str) -> Option<String> {
     let recorded_source = [("modules.kt", source)];
-    let fingerprint_arguments = ["native-module-graph-v4-versioned-friend-precedence".to_string()];
+    let fingerprint_arguments = ["native-module-graph-v5-qualified-box-entry".to_string()];
     let files = recorded(
         CompilationTarget::Native,
         "multimodule-program",
@@ -228,6 +228,60 @@ fn order_libraries_for_native_linker(
     }
 }
 
+/// Select the callable the final module's generated runner can invoke. Libraries are not in this
+/// source set, and only parsed top-level declarations can supply the box entry.
+fn box_call_in_final_unit(sources: &[(String, String)]) -> Result<String, &'static str> {
+    let named = sources
+        .iter()
+        .map(|(name, source)| (name.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let mut diags = krusty::diag::DiagSink::new();
+    let files = super::common::parse_source_set_named(&named, &mut diags)
+        .ok_or("cannot parse the final Native module's box sources")?;
+    let mut selected = None;
+    for file in files {
+        for &declaration in &file.decls {
+            let krusty::ast::Decl::Fun(function) = file.decl(declaration) else {
+                continue;
+            };
+            if function.name != "box"
+                || !function.params.is_empty()
+                || function.receiver.is_some()
+                || !function.type_params.is_empty()
+                || function.context_count != 0
+                || function.is_suspend()
+                || function.visibility.is_private()
+                || matches!(function.body, krusty::ast::FunBody::None)
+                || file
+                    .expect_decls
+                    .iter()
+                    .any(|header| header.declaration == declaration)
+            {
+                continue;
+            }
+            if selected.is_some() {
+                return Err(
+                    "the final Native module has multiple executable top-level box() entries",
+                );
+            }
+            // The runner stays in the root package so its main entry is unchanged. Quote the
+            // parsed package components when rendering a Kotlin call, including escaped keywords.
+            selected = Some(match &file.package {
+                Some(package) => format!(
+                    "{}.box",
+                    package
+                        .split('.')
+                        .map(|component| format!("`{component}`"))
+                        .collect::<Vec<_>>()
+                        .join(".")
+                ),
+                None => "box".to_string(),
+            });
+        }
+    }
+    selected.ok_or("the final Native module has no executable top-level box() entry")
+}
+
 fn write_native_module_sources(
     unit_root: &Path,
     sources: &[(String, String)],
@@ -248,10 +302,11 @@ fn write_native_module_sources(
     let runner = with_runner.then(|| {
         let path = unit_root.join("KrustyNativeBoxRunner.kt");
         std::fs::create_dir_all(unit_root).expect("create final kotlinc-native module directory");
+        let call = box_call_in_final_unit(sources).expect("select the final Native box entry");
         let frame = krusty::backend::BOX_RESULT_FRAME.replace('\0', "\\u0000");
         std::fs::write(
             &path,
-            format!("fun main() {{ val answer = box(); print(\"{frame}\"); print(answer) }}\n"),
+            format!("fun main() {{ val answer = {call}(); print(\"{frame}\"); print(answer) }}\n"),
         )
         .expect("write kotlinc-native box runner");
         path
@@ -351,6 +406,83 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::*;
+
+    #[test]
+    fn the_runner_calls_the_box_in_its_declaring_final_unit_file() {
+        let source = include_str!("../box_regressions/multimodule/packagedFinalModuleBox.kt");
+        let modules =
+            krusty::conformance::split_modules(source).expect("valid packaged module graph");
+        let unit = krusty::conformance::module_units(&modules)
+            .pop()
+            .expect("the main module is built last");
+        let root = super::super::common::scratch_dir().expect("private runner test directory");
+        let (_, runner) = write_native_module_sources(&root, &unit.files, true);
+        let runner = runner.expect("the final unit gets a runner");
+        let frame = krusty::backend::BOX_RESULT_FRAME.replace('\0', "\\u0000");
+        assert_eq!(
+            std::fs::read_to_string(runner).expect("read generated runner"),
+            format!(
+                "fun main() {{ val answer = `packageentry`.`when`.box(); print(\"{frame}\"); print(answer) }}\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_helper_package_and_non_entry_boxes_do_not_replace_a_root_box() {
+        let sources = [
+            (
+                "Members.kt",
+                "package members\nclass Holder { fun box() = \"member\" }",
+            ),
+            (
+                "Extension.kt",
+                "package extensions\nfun String.box() = this",
+            ),
+            (
+                "Private.kt",
+                "package hidden\nprivate fun box() = \"private\"",
+            ),
+            ("Generic.kt", "package generic\nfun <T> box() = \"generic\""),
+            (
+                "Suspend.kt",
+                "package suspended\nsuspend fun box() = \"suspend\"",
+            ),
+            ("Main.kt", "fun box() = \"OK\""),
+        ]
+        .map(|(name, source)| (name.to_string(), source.to_string()));
+        assert_eq!(box_call_in_final_unit(&sources), Ok("box".to_string()));
+    }
+
+    #[test]
+    fn a_refined_actual_box_is_selected_instead_of_its_expect_header() {
+        let sources = [
+            ("Common.kt", "package refinement\nexpect fun box(): String"),
+            ("Main.kt", "package refinement\nactual fun box() = \"OK\""),
+        ]
+        .map(|(name, source)| (name.to_string(), source.to_string()));
+        assert_eq!(
+            box_call_in_final_unit(&sources),
+            Ok("`refinement`.box".to_string())
+        );
+    }
+
+    #[test]
+    fn missing_and_ambiguous_final_boxes_are_rejected_without_a_package_fallback() {
+        let missing = [("Main.kt".to_string(), "fun helper() = \"OK\"".to_string())];
+        assert_eq!(
+            box_call_in_final_unit(&missing),
+            Err("the final Native module has no executable top-level box() entry")
+        );
+        let ambiguous = [
+            ("First.kt", "package first\nfun box() = \"first\""),
+            ("Second.kt", "package second\nfun box() = \"second\""),
+        ]
+        .map(|(name, source)| (name.to_string(), source.to_string()));
+        assert_eq!(
+            box_call_in_final_unit(&ambiguous),
+            Err("the final Native module has multiple executable top-level box() entries")
+        );
+    }
 
     #[test]
     fn friend_library_precedence_follows_the_native_linker_version() {

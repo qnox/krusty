@@ -84,6 +84,7 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         | IrIntrinsic::StringGet
         | IrIntrinsic::StringLength
         | IrIntrinsic::EnumName
+        | IrIntrinsic::EnumOrdinal
         | IrIntrinsic::NullableAnyToString
         | IrIntrinsic::CoroutineContext => Ok(()),
     }
@@ -373,6 +374,10 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumValueOf { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumConstant { .. }
+        | IrExpr::EnumAllocation { .. }
+        | IrExpr::EnumEntriesList { .. }
+        | IrExpr::NoSuchEnumConstant { .. }
         | IrExpr::EnumSwitchOrdinal { .. }
         | IrExpr::EnumSwitchKey { .. }
         | IrExpr::ReifiedClassMarker { .. }
