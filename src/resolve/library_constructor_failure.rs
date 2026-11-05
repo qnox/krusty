@@ -133,9 +133,9 @@ impl Checker<'_> {
 
     /// The bound and argument of the first of a constructor's explicit type arguments `explicit`
     /// outside its bound, when every one of the classifier's `formals` is given explicitly.
-    pub(super) fn explicit_constructor_bound_violation(
+    pub(super) fn explicit_constructor_bound_violation<F: crate::types::TyParamKey>(
         &self,
-        formals: &[String],
+        formals: &[F],
         signature: &crate::libraries::GenericSig,
         explicit: &[Ty],
     ) -> Option<(Ty, Ty)> {
@@ -148,7 +148,7 @@ impl Checker<'_> {
         }
         let bindings = formals
             .iter()
-            .map(crate::types::TyParamName::from)
+            .map(|formal| crate::types::TyParamName::new(formal.borrow()))
             .zip(explicit.iter().copied())
             .collect::<crate::symbol_resolver::GSigBinds>();
         crate::symbol_resolver::generic_binding_bound_violation(

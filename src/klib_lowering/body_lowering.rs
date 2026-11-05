@@ -64,7 +64,7 @@ pub(super) struct LinkedCallee {
     pub(super) singleton_dispatch: Option<TypeName>,
     /// The semantic identities of the callee's own type parameters, which the receiver,
     /// parameters and result name and a call's type arguments bind, in declaration order.
-    pub(super) type_parameters: Vec<String>,
+    pub(super) type_parameters: Vec<crate::types::TyParamName>,
     /// The complete declared upper bounds of each of [`Self::type_parameters`], as the selected
     /// declaration authenticates them (an empty slot is the implicit `Any?`). `None` when the
     /// selection carries no generic signature to read them from.

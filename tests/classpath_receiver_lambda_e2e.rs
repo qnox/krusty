@@ -257,7 +257,7 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
             .map(|signature| signature
                 .formals
                 .iter()
-                .map(String::as_str)
+                .map(|formal| formal.as_str())
                 .collect::<Vec<_>>()),
         Some(vec![]),
         "GenericUi.bind metadata: {generic_bind_metadata:#?}"

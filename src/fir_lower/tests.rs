@@ -18,6 +18,7 @@ mod catch_clauses;
 mod checked_hierarchy;
 mod checked_operand_types;
 mod checked_substitutions;
+mod enum_realization;
 mod external_constructions;
 mod external_references;
 mod inline_only;

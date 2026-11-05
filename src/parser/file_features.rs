@@ -41,7 +41,7 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         features.has("ForbidValueClassRecursionViaTypeParameters");
     file.value_class_recursion_via_type_parameters_warning = features.deprecation_warning_message(
         "ForbidValueClassRecursionViaTypeParameters",
-        "value class cannot be recursive.",
+        "Value class cannot be recursive.",
     );
     file.deprecation_migrations = crate::features::DeprecationMigrations::from_features(features);
     file.forbid_operator_equals_in_enum_entries_and_anonymous_objects =
@@ -68,11 +68,11 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     );
     file.type_arguments_not_allowed_warning = features.deprecation_warning_message(
         "ForbidUselessTypeArgumentsIn25",
-        "type arguments are not allowed when static member is accessed.",
+        "Type arguments are not allowed when static member is accessed.",
     );
     file.explicit_type_arguments_in_property_access_warning = features.deprecation_warning_message(
         "ForbidUselessTypeArgumentsIn25",
-        "object access cannot have explicit type arguments.",
+        "Object access cannot have explicit type arguments.",
     );
     file.error_about_data_class_copy_visibility_change =
         features.has("ErrorAboutDataClassCopyVisibilityChange");
@@ -117,22 +117,22 @@ mod tests {
         let mut current = File::default();
         apply_file_features(&mut current, &settings(KotlinVersion::V2_4_20));
         let type_arguments_not_allowed_warning = Some(
-            "type arguments are not allowed when static member is accessed. This will become an \
+            "Type arguments are not allowed when static member is accessed. This will become an \
              error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-390.",
         );
         let property_access_warning = Some(
-            "object access cannot have explicit type arguments. This will become an error in \
+            "Object access cannot have explicit type arguments. This will become an error in \
              language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-390.",
         );
         let dynamic_warning = |file: &File| {
             file.useless_type_arguments_warning_format
                 .as_ref()
                 .map(|format| {
-                    format.message("one type argument expected for 'typealias Box<T> = String'.")
+                    format.message("One type argument expected for 'typealias Box<T> = String'.")
                 })
         };
         let expected_dynamic_warning = Some(
-            "one type argument expected for 'typealias Box<T> = String'. This will become an \
+            "One type argument expected for 'typealias Box<T> = String'. This will become an \
              error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-390."
                 .to_string(),
         );
@@ -143,14 +143,14 @@ mod tests {
         assert_eq!(
             current.parenthesized_package_qualifier_warning.as_deref(),
             Some(
-                "wrapping package qualifiers in parentheses is not allowed. This will become an \
+                "Wrapping package qualifiers in parentheses is not allowed. This will become an \
                  error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-396."
             )
         );
         assert_eq!(
             current.package_qualifier_type_arguments_warning.as_deref(),
             Some(
-                "type arguments are not allowed for packages. This will become an error in \
+                "Type arguments are not allowed for packages. This will become an error in \
                  language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-396."
             )
         );
@@ -158,13 +158,13 @@ mod tests {
         assert_eq!(
             old.data_class_copy_visibility_change_warning.as_deref(),
             Some(
-                "non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.\n\nThe generated 'copy()' will change its visibility in future releases.\n\nTo suppress the warning do one of the following:\n- Annotate the data class with the '@ConsistentCopyVisibility' annotation.\n- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.\n- Annotate the data class with the '@ExposedCopyVisibility' annotation \n  (Discouraged, but can be used to keep binary compatibility).\n\nTo learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.\n\nThis will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914."
+                "Non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.\n\nThe generated 'copy()' will change its visibility in future releases.\n\nTo suppress the warning do one of the following:\n- Annotate the data class with the '@ConsistentCopyVisibility' annotation.\n- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.\n- Annotate the data class with the '@ExposedCopyVisibility' annotation \n  (Discouraged, but can be used to keep binary compatibility).\n\nTo learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.\n\nThis will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914."
             )
         );
         assert_eq!(
             old.data_class_invisible_copy_usage_warning.as_deref(),
             Some(
-                "this 'copy()' exposes the non-public primary constructor of a 'data class'. See the appropriate 'data class' documentation or contact the 'data class' author for migration guidance. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914."
+                "This 'copy()' exposes the non-public primary constructor of a 'data class'. See the appropriate 'data class' documentation or contact the 'data class' author for migration guidance. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914."
             )
         );
         assert_eq!(
@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(
             current.value_class_recursion_via_type_parameters_warning,
             Some(
-                "value class cannot be recursive. This will become an error in language version \
+                "Value class cannot be recursive. This will become an error in language version \
                  2.5. See https://youtrack.jetbrains.com/issue/KT-85848."
                     .to_string()
             )
