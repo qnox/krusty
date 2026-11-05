@@ -104,6 +104,7 @@ fn construction(
         internal: type_name(name),
         args,
         ctor_params,
+        declared_params: None,
         ctor_desc: None,
         external_target: None,
         defaults: defaults.into(),
@@ -189,6 +190,7 @@ fn a_construction_reaches_a_constructor_entry_that_fills_and_delegates() {
         )
     );
     assert_eq!(ir.construction_targets[&site], target(1));
+    assert_eq!(ir.construction_declared_params(site), None);
     assert_eq!(
         crate::backend::selected_constructor(&ir, site, class, Some(&[Ty::Int; 3])),
         Some(1)
@@ -291,9 +293,20 @@ fn an_entry_takes_the_prefix_first_and_counts_masks_after_it() {
         1,
         Some(1),
     );
+    let IrExpr::New {
+        declared_params, ..
+    } = &mut ir.exprs[site as usize]
+    else {
+        panic!("a construction");
+    };
+    *declared_params = Some(vec![outer, Ty::String].into_boxed_slice());
 
     realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
+    assert_eq!(
+        ir.construction_declared_params(site),
+        Some([outer, Ty::String, Ty::Int].as_slice())
+    );
     let entry = &ir.classes[class as usize].secondary_ctors[1];
     assert_eq!(entry.prefix_params, vec![outer]);
     assert_eq!(entry.params, vec![Ty::String, Ty::Int]);

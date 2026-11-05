@@ -1225,6 +1225,7 @@ fn construct(ir: &mut IrFile, site: &Site, constructor: Option<Vec<Ty>>, fresh_i
                 internal,
                 args: captures,
                 ctor_params: constructor.clone(),
+                declared_params: None,
                 ctor_desc: None,
                 external_target: None,
                 defaults: Box::new([]),

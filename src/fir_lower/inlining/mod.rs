@@ -1765,7 +1765,11 @@ pub(super) fn specialize_recorded_facts(
         };
         specialize_tys(parameters, bindings);
     }
-    if let Some(parameters) = ir.construction_declared_params.get_mut(&expression) {
+    if let IrExpr::New {
+        declared_params: Some(parameters),
+        ..
+    } = &mut ir.exprs[expression as usize]
+    {
         specialize_tys(parameters, bindings);
     }
     if let Some(substitutions) = ir.reified_call_subst.get_mut(&expression) {
