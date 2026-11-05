@@ -211,11 +211,11 @@ impl Checker<'_> {
                 let Some(classifier) = self.resolver().classifier(*owner) else {
                     return TypeEnhancement::NONE;
                 };
-                let formals = classifier.type_params();
+                let formals = crate::types::TyParamName::all(classifier.type_params());
                 let mut bindings = HashMap::default();
                 bind_type_parameters(
                     self,
-                    formals,
+                    &formals,
                     declaration_params,
                     None,
                     &arguments.argument_bindings,
@@ -227,7 +227,7 @@ impl Checker<'_> {
                     formals
                         .iter()
                         .take(argument_count)
-                        .map(|name| bindings.get(name).cloned().unwrap_or_default())
+                        .map(|name| bindings.get(name.as_str()).cloned().unwrap_or_default())
                         .collect(),
                 );
             }
@@ -377,7 +377,7 @@ fn bind_callable_parameters(
 
 fn bind_type_parameters(
     checker: &Checker<'_>,
-    formals: &[String],
+    formals: &[crate::types::TyParamName],
     parameters: &[Ty],
     receiver: Option<(Ty, &(Ty, TypeEnhancement))>,
     arguments: &[super::SelectedArgumentBinding],
@@ -418,7 +418,7 @@ fn bind_type_parameters(
 /// occurring in the `declared` parameter type it is passed to.
 fn constrain(
     checker: &Checker<'_>,
-    formals: &[String],
+    formals: &[crate::types::TyParamName],
     declared: Ty,
     actual: Ty,
     marks: &TypeEnhancement,

@@ -138,7 +138,7 @@ impl Checker<'_> {
                 Some(ReifiedTypeArgument {
                     ordinal,
                     argument,
-                    formal,
+                    formal: formal.to_string(),
                     intersection: call.intersections.get(&ordinal).cloned(),
                     provenance: call
                         .argument_provenance(ordinal)

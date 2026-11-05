@@ -13,7 +13,7 @@ use super::{Checker, ClassSig, ResolvedConstructor};
 /// inspecting a constructor realization or querying a symbol provider again.
 #[derive(Clone, Debug)]
 pub(super) struct ConstructorDeclarationShape {
-    pub(super) formals: Vec<String>,
+    pub(super) formals: Vec<crate::types::TyParamName>,
     pub(super) bounds: Vec<Ty>,
     pub(super) parameters: Vec<Ty>,
 }
@@ -21,7 +21,7 @@ pub(super) struct ConstructorDeclarationShape {
 impl ConstructorDeclarationShape {
     pub(super) fn source(class: &ClassSig, parameters: Vec<Ty>) -> Self {
         Self {
-            formals: class.type_params().clone(),
+            formals: crate::types::TyParamName::all(class.type_params()),
             bounds: class.type_param_bounds().clone(),
             parameters,
         }
@@ -30,7 +30,7 @@ impl ConstructorDeclarationShape {
     pub(super) fn provider(classifier: &LibraryType, member: &LibraryMember) -> Self {
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
         Self {
-            formals: classifier.type_params().clone(),
+            formals: crate::types::TyParamName::all(classifier.type_params()),
             bounds: classifier
                 .type_param_bounds()
                 .iter()
@@ -117,11 +117,11 @@ impl Checker<'_> {
             let Some(index) = signature
                 .formals
                 .iter()
-                .position(|candidate| candidate == &formal)
+                .position(|candidate| *candidate == formal)
             else {
                 continue;
             };
-            if !nullable_flexible_roots.contains(&formal)
+            if !nullable_flexible_roots.contains(formal.as_str())
                 || explicit_type_arguments
                     .get(index)
                     .is_some_and(|argument| *argument != Ty::Error)

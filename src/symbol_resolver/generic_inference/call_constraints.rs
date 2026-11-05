@@ -134,14 +134,14 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
                 && formal_variance_in_type(source, shape, formal)
                     == Some(crate::types::TypeVariance::Invariant)
             {
-                invariantly_fixed.insert(formal.clone());
+                invariantly_fixed.insert(*formal);
                 let nullable_formal = generic_sig.formal_bounds.get(index).is_none_or(|bounds| {
                     bounds.iter().all(|bound| bound.upper_bound_admits_null())
                 });
                 if formal_fixed_exactly_by(source, shape, formal, nullable_formal) {
                     constraints
                         .invariant_arguments
-                        .entry(formal.clone())
+                        .entry(formal.to_string())
                         .or_default()
                         .push(argument);
                 }
@@ -603,15 +603,13 @@ impl CallInferenceConstraints {
                     let TyKind::TyParam(bound_formal, _) = bound.non_null().kind() else {
                         continue;
                     };
-                    if !signature
-                        .formals
-                        .iter()
-                        .any(|candidate| candidate == bound_formal)
-                    {
+                    if !signature.formals.contains(&bound_formal) {
                         continue;
                     }
-                    for &(actual, origin) in
-                        lower.get(formal).map(Vec::as_slice).unwrap_or_default()
+                    for &(actual, origin) in lower
+                        .get(formal.as_str())
+                        .map(Vec::as_slice)
+                        .unwrap_or_default()
                     {
                         let actual = if bound.is_nullable() {
                             actual.contributed_through_nullable_formal()
@@ -806,7 +804,7 @@ impl CallInferenceConstraints {
             }
             let lowers = self
                 .lower_inputs
-                .get(formal)
+                .get(formal.as_str())
                 .map(Vec::as_slice)
                 .unwrap_or_default();
             // `lower_inputs` are the contributions collected after nullable-formal absorption, not
