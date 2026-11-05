@@ -1107,6 +1107,20 @@ fn record_program_failure(
     }
 }
 
+/// Surface complete hidden rejection reasons for exactly the ratchet's unexpected failure keys.
+/// Trace order is the compiler's case order; neither keys nor diagnostic text are reconstructed.
+fn unexpected_failure_reason_report(
+    traced: &[(PathBuf, String)],
+    unexpected: &BTreeSet<String>,
+    relative: impl Fn(&Path) -> String,
+) -> String {
+    traced
+        .iter()
+        .filter(|(file, _)| unexpected.contains(&relative(file)))
+        .map(|(file, reason)| format!("  unexpected {}: {reason}\n", file.display()))
+        .collect()
+}
+
 /// Run the whole corpus through `lane` and hold it to the lane's committed ratchet.
 pub fn run(lane: &dyn Lane) {
     let env = |knob: &str| format!("KRUSTY_{}_{knob}", lane.env_infix());
@@ -1260,9 +1274,11 @@ pub fn run(lane: &dyn Lane) {
         box_ratchet::write(platform, version, &current)
             .unwrap_or_else(|error| panic!("failed to write {label} box expectations: {error}"));
     }
+    let mut unexpected_failure_keys = BTreeSet::new();
     if !bless {
         if let Some(baseline) = &baseline {
             let mismatches = box_ratchet::compare(baseline, &current, &corpus_cases);
+            unexpected_failure_keys.extend(mismatches.unexpected_failures.iter().cloned());
             if !mismatches.is_empty() {
                 failed.push((
                     PathBuf::from(format!("<{} box expectations>", platform.name())),
@@ -1294,6 +1310,10 @@ pub fn run(lane: &dyn Lane) {
         ],
     );
     eprintln!("{report} ({:.1}s)", started.elapsed().as_secs_f64());
+    eprint!(
+        "{}",
+        unexpected_failure_reason_report(&traced, &unexpected_failure_keys, relative)
+    );
 
     // Triage: name the cases behind one decline reason, so a line in the table below can be
     // followed back to the source that produced it.
@@ -1430,6 +1450,47 @@ fn an_unexpected_program_failure_preserves_its_case_and_complete_reason() {
     record_program_failure(file, reason.to_string(), true, &mut known, &mut failed);
     assert_eq!(known, [(file.to_path_buf(), reason.to_string())]);
     assert_eq!(failed, Vec::new());
+}
+
+#[test]
+fn unexpected_rejection_reporting_uses_exact_ratchet_keys_and_preserves_diagnostic_order() {
+    let known = "regressions/a.kt.extra".to_string();
+    let first = "regressions/z.kt".to_string();
+    let second = "regressions/a.kt".to_string();
+    let expected = box_ratchet::Baseline {
+        failures: BTreeSet::from([known.clone()]),
+        not_applicable: BTreeSet::new(),
+    };
+    let current = BTreeMap::from([
+        (known.clone(), box_ratchet::Outcome::Fail),
+        (first.clone(), box_ratchet::Outcome::Fail),
+        (second.clone(), box_ratchet::Outcome::Fail),
+    ]);
+    let cases = current.keys().cloned().collect();
+    let mismatches = box_ratchet::compare(&expected, &current, &cases);
+    assert_eq!(
+        mismatches.unexpected_failures,
+        BTreeSet::from([first, second])
+    );
+    let traced = [
+        (
+            PathBuf::from("/corpus/regressions/a.kt.extra"),
+            "known rejection".to_string(),
+        ),
+        (
+            PathBuf::from("/corpus/regressions/z.kt"),
+            "z.kt:2:3: unresolved reference\nz.kt:4:5: second diagnostic".to_string(),
+        ),
+        (
+            PathBuf::from("/corpus/regressions/a.kt"),
+            "the checked operation `SelectedCall`".to_string(),
+        ),
+    ];
+    assert_eq!(
+        unexpected_failure_reason_report(&traced, &mismatches.unexpected_failures, |file|
+            file.strip_prefix("/corpus").unwrap().to_string_lossy().into_owned()),
+        "  unexpected /corpus/regressions/z.kt: z.kt:2:3: unresolved reference\nz.kt:4:5: second diagnostic\n  unexpected /corpus/regressions/a.kt: the checked operation `SelectedCall`\n",
+    );
 }
 
 #[test]
