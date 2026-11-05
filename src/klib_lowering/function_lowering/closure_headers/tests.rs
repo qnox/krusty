@@ -20,6 +20,7 @@ fn a_receiver_after_a_value_capture_keeps_its_origin_through_nested_recapture() 
         extension_receiver: true,
         dispatch_receiver: None,
         receiver_slot: None,
+        value_receiver: None,
         singleton_extension_unread_receiver: None,
         values: [
             (

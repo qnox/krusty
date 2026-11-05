@@ -2797,3 +2797,96 @@ fn an_invariant_member_extension_receiver_keeps_its_exact_binding() {
                   }\n";
     assert_rejection_same_as_kotlinc("InvariantMemberExtensionReceiver", source);
 }
+
+/// A member extension's formal reached only through another formal's bound is the receiver's own
+/// type argument, so a conflicting expected result is reported against that argument
+/// (`Table<U>`), not against the bound's fallback (`Table<Any>`), as kotlinc reports.
+#[test]
+fn a_member_extension_bound_only_formal_reports_the_receiver_argument_like_kotlinc() {
+    let sources = [(
+        "Tables.kt",
+        r#"class Column<T>(val name: String)
+class Table<T : Any>(val name: String)
+open class Entity<T : Any>(val id: T)
+
+class Tables {
+    fun <T : Any, E : Entity<T>> Column<out E>.table(): Table<T> = Table(name)
+
+    fun <U : Any> wrongTable(column: Column<Entity<U>>): Table<String> = column.table()
+}
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Tables.kt:8:74: return type mismatch: expected 'Table<String>', actual 'Table<U (of fun <U : Any> wrongTable)>'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+#[test]
+fn a_member_extension_nothing_argument_takes_the_expected_result_like_kotlinc() {
+    // `T` of `value: T` holds a lower bound (`Nothing`, `String`), which the expected result raises
+    // to `String` or `CharSequence`. A slot that fixes `T` as an equality (`MutableList<T>`) keeps
+    // its own solution and the call reports the result mismatch. (The Wasm lanes decline the
+    // widened argument, so this stays a JVM comparison.)
+    let sources = [(
+        "Invoke.kt",
+        r#"class Box<T>(val value: T)
+
+class Host {
+    operator fun <T> String.invoke(value: T): Box<T> = Box(value)
+    fun <T> String.fromList(list: MutableList<T>): Box<T> = Box(list[0])
+
+    fun fromNothing(value: Nothing): Box<String> = ""(value)
+    fun widened(): Box<CharSequence> = "prefix"("ab")
+    fun fromList(list: MutableList<String>): Box<CharSequence> = "".fromList(list)
+}
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Invoke.kt:9:66: return type mismatch: expected 'Box<CharSequence>', actual 'Box<String>'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+/// A safe cast proves its operand only where its result is known non-null: an elvis whose right
+/// side completes normally, an `if` that only guards a statement, and a chain compared with
+/// `false` leave the operand unnarrowed, as kotlinc reports.
+#[test]
+fn a_safe_cast_without_a_non_null_proof_does_not_smart_cast_like_kotlinc() {
+    let sources = [(
+        "Cast.kt",
+        r#"fun fallsThrough(value: Any?): Int {
+    (value as? String) ?: println("miss")
+    return value.length
+}
+
+fun checksOtherwise(value: Any?): Int {
+    if ((value as? String) != null) println("hit")
+    return value.length
+}
+
+fun comparesFalse(value: Any): Int {
+    if ((value as? String)?.isEmpty() == false) println("hit")
+    return value.length
+}
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Cast.kt:3:18: unresolved reference 'length' on receiver of type 'Any?'.",
+            "Cast.kt:8:18: unresolved reference 'length' on receiver of type 'Any?'.",
+            "Cast.kt:13:18: unresolved reference 'length' on receiver of type 'Any'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}

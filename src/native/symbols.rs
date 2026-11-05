@@ -191,14 +191,15 @@ fn mangle_ty(out: &mut String, ty: crate::types::Ty) -> Option<()> {
         TyKind::StarProjection(bound) => nested(out, 'S', bound)?,
         TyKind::RawProjection(erased) => nested(out, 'J', erased)?,
         TyKind::DefinitelyNotNull(inner) => nested(out, 'D', inner)?,
-        TyKind::Error | TyKind::Pending => return None,
+        TyKind::Error | TyKind::Pending | TyKind::Var(..) => return None,
     }
     Some(())
 }
 
-/// Symbol of the entry another file calls when it leaves arguments of a top-level function out:
-/// the function's whole parameter frame followed by a mask of the omitted ordinals. See
-/// `codegen::lower::defaults`.
+/// Symbol of the default-argument entry another file calls when it leaves arguments of a
+/// top-level function out, by the identity the entry is published under: the function's whole
+/// parameter frame followed by a mask of the omitted ordinals. See
+/// `crate::backend::default_arguments`.
 pub(super) fn module_default_symbol(module_name: &str, callable: crate::fir::CallableId) -> String {
     format!(
         "kt_mod_{}_{}__defaults",
@@ -297,16 +298,30 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
         }
         let symbol = module_function_symbol(module_name, *callable);
         taken.insert(symbol.clone());
-        let default_identity = match ir.inherited_param_default_provider(*function) {
-            Some(provider) => crate::ir::module_override_callable(provider),
-            None => Some(*callable),
-        };
-        if let Some(default_identity) = default_identity {
-            taken.insert(module_default_symbol(module_name, default_identity));
-        }
         functions[index] = symbol;
         cross_file[index] = true;
     }
+    // A default-argument entry another file calls is named by the identity it is published under,
+    // like the function it fills the defaults of.
+    let mut default_entries = ir.default_entries.iter().collect::<Vec<_>>();
+    default_entries.sort_unstable();
+    let mut declarations = crate::fx_hash::HashMap::default();
+    for (&declaration, &entry) in default_entries {
+        declarations.insert(entry, declaration);
+        if let Some(&identity) =
+            crate::backend::default_arguments::published_identities(ir, declaration).first()
+        {
+            let symbol = module_default_symbol(module_name, identity);
+            taken.insert(symbol.clone());
+            functions[entry as usize] = symbol;
+            cross_file[entry as usize] = true;
+        }
+    }
+    let dispatched = ir
+        .dispatch_entries
+        .iter()
+        .map(|(&declaration, &entry)| (entry, declaration))
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     // A property's entry points are synthesized from its identity rather than being entries in
     // `functions`. Reserving them keeps a function from being handed the same spelling.
     for property in ir
@@ -369,6 +384,29 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
     }
     for (index, function) in ir.functions.iter().enumerate() {
         if !functions[index].is_empty() {
+            continue;
+        }
+        // An entry no other file calls is named after the declaration it fills the defaults of,
+        // or dispatches to, whose symbol is already unique in the module. A compiler-generated
+        // name alone is not: two files of one module can each generate the same one.
+        if let Some(&declaration) = declarations.get(&(index as crate::ir::FunId)) {
+            let base = format!("{}__defaults", functions[declaration as usize]);
+            functions[index] = unique(base, &|name| vec![name.to_string()]);
+            continue;
+        }
+        // An entry constructing a class, or answering its object, is named after that class.
+        if let Some(&class) = ir.construction_entries.get(&(index as crate::ir::FunId)) {
+            let base = format!(
+                "kt_{}_{}",
+                classes[class as usize],
+                c_identifier(&function.name)
+            );
+            functions[index] = unique(base, &|name| vec![name.to_string()]);
+            continue;
+        }
+        if let Some(&declaration) = dispatched.get(&(index as crate::ir::FunId)) {
+            let base = format!("{}__dispatch", functions[declaration as usize]);
+            functions[index] = unique(base, &|name| vec![name.to_string()]);
             continue;
         }
         // Local and compiler-generated functions have no checked callable identity. They still

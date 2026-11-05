@@ -1,7 +1,15 @@
 //! Compact call-argument facts shared by signature extraction, evaluation, and selection.
 
 use super::ResolvedTy;
-use crate::fir::{OriginId, SigExprId, SigNameId};
+use crate::fir::{DeclarationId, OriginId, SigExprId, SigNameId};
+
+/// A contextual function literal written as a call argument: the declaration whose body holds it,
+/// and the argument's own source origin, which identifies this literal among that body's others.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextualFunctionSite {
+    pub declaration: DeclarationId,
+    pub argument: OriginId,
+}
 
 /// Source call facts needed by ordinary argument mapping and overload selection. The spelling is
 /// temporary lookup input interned in the signature graph; no parser expression id survives.

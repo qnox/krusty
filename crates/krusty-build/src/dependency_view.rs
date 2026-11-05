@@ -101,19 +101,26 @@ fn file_view(relative: &str, bytes: &[u8]) -> (&'static str, Digest) {
 }
 
 fn bytecode_reaches_dependents(class: &ClassInfo) -> bool {
-    let meta = &class.meta;
+    // Metadata whose members do not decode is digested as bytes, as a class that does not parse.
+    let Ok(members) = class
+        .meta
+        .members
+        .decode(&class.methods, &class.meta.type_parameter_scope)
+    else {
+        return true;
+    };
     class.access & ACC_SYNTHETIC != 0
         || class
             .inner_class_self()
             .is_some_and(|entry| entry.name.is_none())
-        || meta
+        || members
             .class_functions
             .iter()
-            .chain(meta.package_functions.iter())
+            .chain(members.package_functions.iter())
             .any(|function| function.is_inline())
-        || meta
+        || members
             .class_properties
             .iter()
-            .chain(meta.package_properties.iter())
+            .chain(members.package_properties.iter())
             .any(|property| property.getter_inline || property.setter_inline)
 }

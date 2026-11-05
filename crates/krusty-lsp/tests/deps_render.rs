@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
-use krusty::jvm::metadata::KotlinMeta;
+use krusty::jvm::metadata::KotlinMembers;
 use krusty::libraries::LibraryType;
 use krusty::symbol_source::SymbolSource;
 use krusty::toolchain::stdlib_classpath;
@@ -11,12 +11,12 @@ use krusty_lsp::deps_render::{
     attached_source, materialize, render_library_class, MaterializedSource,
 };
 
-fn load(internal: &str) -> Option<(LibraryType, Option<KotlinMeta>)> {
+fn load(internal: &str) -> Option<(LibraryType, Option<KotlinMembers>)> {
     let cp = Rc::new(stdlib_classpath());
     if cp.scan_types().is_empty() {
         return None;
     }
-    let meta = cp.find(internal).map(|ci| ci.meta.clone());
+    let meta = cp.find(internal).map(|ci| cp.class_members(&ci).clone());
     let libs = JvmLibraries::new(cp).expect("JVM provider initialization");
     let lib = libs.classifier(type_name(internal))?;
     Some(((*lib).clone(), meta))

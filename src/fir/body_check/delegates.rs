@@ -871,6 +871,7 @@ fn selected_delegate_call(
                     default_provider: *external_default_provider,
                     receiver: Some(receiver),
                     declared_receiver: None,
+                    declaring_receiver: None,
                     parameters: parameters.clone(),
                     result: resolved(*ret)?,
                     declared_result: None,
@@ -976,6 +977,7 @@ fn selected_delegate_call(
                     default_provider: callable.external_default_provider,
                     receiver: Some(receiver),
                     declared_receiver: callable.source_receiver.map(resolved).transpose()?,
+                    declaring_receiver: None,
                     parameters: parameters.clone(),
                     result: resolved(callable.ret)?,
                     declared_result: callable.declared_ret.map(resolved).transpose()?,
@@ -1085,6 +1087,7 @@ fn selected_delegate_call(
                         default_provider: *external_default_provider,
                         receiver: Some(resolved(dispatch_receiver.ty)?),
                         declared_receiver: None,
+                        declaring_receiver: None,
                         parameters: parameters
                             .into_iter()
                             .map(resolved)

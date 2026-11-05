@@ -18,7 +18,7 @@ impl Checker<'_> {
         &self,
         declared: Ty,
         actual: Ty,
-        formals: &[String],
+        formals: &[crate::types::TyParamName],
     ) -> bool {
         match declared.non_null().kind() {
             // `() -> T?` can infer `T` later, but it can never accept a known non-function value
@@ -43,7 +43,7 @@ impl Checker<'_> {
 
 /// `declared` with every type argument that depends on an inferable formal replaced by a star
 /// projection, keeping the classifier and nullability fixed.
-fn constructor_shape(declared: Ty, formals: &[String]) -> Ty {
+fn constructor_shape(declared: Ty, formals: &[crate::types::TyParamName]) -> Ty {
     match declared.kind() {
         TyKind::Nullable(inner) => Ty::nullable(constructor_shape(inner, formals)),
         TyKind::PlatformNullable(inner) => Ty::platform_nullable(constructor_shape(inner, formals)),
