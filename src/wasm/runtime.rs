@@ -16,6 +16,8 @@
 //! `String` is on every target. A string constant is copied out of the module's passive data
 //! segment with `array.new_data`.
 
+mod string_hash;
+
 use crate::fx_hash::HashMap;
 
 use super::boxes::Boxes;
@@ -42,6 +44,7 @@ pub(super) struct Runtime {
     /// Reference-element array storage shared by every applied Kotlin `Array<T>`.
     pub(super) references: u32,
     pub(super) string_equals: u32,
+    pub(super) string_hash: u32,
     pub(super) string_concat: u32,
     pub(super) string_of_i32: u32,
     pub(super) string_of_i64: u32,
@@ -106,6 +109,7 @@ impl Runtime {
             string,
             references,
             string_equals: module.declare(),
+            string_hash: module.declare(),
             string_concat: module.declare(),
             string_of_i32: module.declare(),
             string_of_i64: module.declare(),
@@ -122,6 +126,7 @@ impl Runtime {
             constants: HashMap::default(),
         };
         runtime.define_string_equals(module);
+        runtime.define_string_hash(module);
         runtime.define_string_concat(module);
         runtime.define_string_of_i64(module);
         runtime.define_string_of_i32(module);
