@@ -13762,7 +13762,10 @@ impl<'a> Checker<'a> {
                         || anonymous_descendant_writes_name(
                             self.file,
                             declaration,
-                            &self.anonymous_lexical_scope,
+                            capture_storage::anonymous_descendants(
+                                declaration,
+                                &self.anonymous_lexical_scope,
+                            ),
                             name,
                             function_local,
                             capture_storage::ConstructorArgumentUses::Candidates,
@@ -13928,6 +13931,7 @@ impl<'a> Checker<'a> {
                         expressions: &self.expr_lowers,
                         statements: &self.stmt_lowers,
                         constructor_arguments: capture_storage::ConstructorArgumentUses::Candidates,
+                        forwarded: None,
                     },
                     &mut self.discovered_anonymous_captures,
                 );
@@ -14015,44 +14019,13 @@ impl<'a> Checker<'a> {
                 if !provisional {
                     self.finalized_anonymous_captures.insert(declaration);
                 }
-                let original_captures = self
-                    .discovered_anonymous_captures
-                    .get(&declaration)
-                    .cloned()
-                    .unwrap_or_default();
-                let storage_field_remap = record_anonymous_construction_captures(
-                    self.file,
+                if !self.finish_anonymous_capture_layout(
+                    scope,
+                    declaration,
                     call,
-                    &self.anonymous_lexical_scope,
                     &candidates,
                     provisional,
-                    SelectedLocalCallableCaptures {
-                        calls: &self.resolved_calls,
-                        expressions: &self.expr_lowers,
-                        statements: &self.stmt_lowers,
-                        constructor_arguments: capture_storage::ConstructorArgumentUses::Checked {
-                            expressions: &self.expr_lowers,
-                            types: &self.expr_types,
-                            delegations: &self.resolved_primary_ctor_delegations,
-                        },
-                    },
-                    &mut self.discovered_anonymous_captures,
-                );
-                // Descendants were checked while every addressable receiver rung occupied a
-                // provisional field. Rewrite their exact `ClassStorage` coordinates through the
-                // finalized field permutation instead of replaying the class body. Rechecking the
-                // whole subtree here doubles the work at every nesting level (and is exponential
-                // for deeply nested anonymous objects); the structural owner edge identifies the
-                // only constructions whose storage owner is this declaration.
-                if !anonymous_capture_remap::remap_direct_anonymous_class_storage_captures(
-                    declaration,
-                    &self.anonymous_lexical_scope,
-                    anonymous_capture_remap::CaptureFieldRemap {
-                        fields: &storage_field_remap,
-                        original: &original_captures,
-                        forwarded: &forwarded_uses,
-                    },
-                    &mut self.discovered_anonymous_captures,
+                    &forwarded_uses,
                 ) {
                     self.diags.error(
                         span,
@@ -14060,32 +14033,21 @@ impl<'a> Checker<'a> {
                     );
                     return Ty::Error;
                 }
-                if let Some(mut captures) = self.discovered_anonymous_captures.remove(&declaration)
-                {
-                    self.extend_anonymous_superclass_captures(scope, declaration, &mut captures);
-                    self.discovered_anonymous_captures
-                        .insert(declaration, captures);
-                }
-                self.refresh_anonymous_receiver_capture_fields(declaration, &candidates);
                 if self.discover_anonymous_captures {
                     return self.anonymous_object_type(scope, declaration);
                 }
             }
-            let captures = self
+            let Some(captures) = self
                 .discovered_anonymous_captures
                 .get(&declaration)
                 .cloned()
-                .or_else(|| match &self.module {
-                    CheckerModuleSymbols::Legacy(source) => source
-                        .pass_one_symbols()
-                        .anonymous_object_captures
-                        .get(&(self.file_index, declaration))
-                        .cloned(),
-                    CheckerModuleSymbols::Streamed(_) => None,
-                })
-                .unwrap_or_default();
+            else {
+                self.diags
+                    .error(span, "anonymous object capture selection was not published");
+                return Ty::Error;
+            };
             {
-                for capture in captures {
+                for capture in &captures {
                     let actual = match capture.source {
                         AnonymousObjectCaptureSource::EnclosingInstance { depth, .. } => {
                             // The outer-instance capture is not a scope local; the construction site's
@@ -14136,6 +14098,9 @@ impl<'a> Checker<'a> {
                     self.set_anonymous_lexical_class_context(declaration);
                     self.check_class(scope, &class, declaration);
                     self.restore_body_state(saved);
+                    if !self.discovers_captures_at_construction {
+                        self.publish_anonymous_capture_layout(scope, declaration, &captures, None);
+                    }
                 }
                 return self.anonymous_object_type(scope, declaration);
             }
@@ -31539,9 +31504,19 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.selected_body_declarations = selected_body_declarations.cloned();
     c.selected_stable_body_declarations = selected_stable_bodies.cloned();
     match captures {
+        CaptureDiscovery::Published => {
+            c.discovered_anonymous_captures = anonymous_object_capture::published_captures(
+                file,
+                file_index,
+                syms.pass_one_symbols()
+                    .expect("published captures require live Pass-1 bindings"),
+                active_declarations,
+                resolved_index,
+            );
+        }
         CaptureDiscovery::Seeded(seeded) => c.discovered_anonymous_captures = seeded.clone(),
         CaptureDiscovery::AtConstruction => c.discovers_captures_at_construction = true,
-        CaptureDiscovery::Published | CaptureDiscovery::Scratch => {}
+        CaptureDiscovery::Scratch => {}
     }
     c.fragment = fragment;
     if fragment.publishes_annotation_metadata() {
@@ -32125,24 +32100,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         .flatten()
         .map(|span| (span.lo, span.hi))
         .collect();
-    let anonymous_object_captures_by_class = if let CaptureDiscovery::Published = captures {
-        let pass_one = syms
-            .pass_one_symbols()
-            .expect("legacy checking requires Pass-1 anonymous-object bindings");
-        file.anonymous_object_classes
-            .values()
-            .copied()
-            .filter_map(|declaration| {
-                pass_one
-                    .anonymous_object_captures
-                    .get(&(file_index, declaration))
-                    .cloned()
-                    .map(|captures| (declaration, captures))
-            })
-            .collect::<HashMap<_, _>>()
-    } else {
-        discovered_anonymous_captures
-    };
+    let anonymous_object_captures_by_class = discovered_anonymous_captures;
     let anonymous_object_captures_by_construction = file
         .anonymous_object_classes
         .iter()
@@ -32359,7 +32317,7 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
             syms,
             Some(index),
             diags,
-            CaptureDiscovery::Published,
+            CaptureDiscovery::AtConstruction,
             None,
             None,
             Some(active_declarations),

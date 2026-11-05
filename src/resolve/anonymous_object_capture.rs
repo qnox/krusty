@@ -5,6 +5,7 @@ use super::capture_storage::{
     anonymous_body_expressions, anonymous_descendant_uses_name, anonymous_descendant_writes_name,
     anonymous_descendants, enclosing_value_visible_beside_member, ConstructorArgumentUses,
 };
+use super::receiver_uses::{ReceiverUseSite, ReceiverUseSites};
 use super::scope::ContextReceiverKind;
 use super::{
     capture_field_order, AnonymousLexicalClassScope, Checker, CheckerScope, ExprLowering,
@@ -15,6 +16,47 @@ use crate::diag::Span;
 use crate::fir::{CapturedCallableOwner, FirCapturedReceiver};
 use crate::fx_hash::HashMap;
 use crate::types::{CapturedContextKind, Ty};
+
+#[cfg(test)]
+mod tests;
+
+/// Project completed Pass-1 selections into the current retained file before checking its bodies.
+/// A selected empty vector is authoritative; an absent record remains absent. Finalized checking
+/// uses stable classifier identity to reach the original Pass-1 arena, never a coincident parser ID.
+pub(super) fn published_captures(
+    file: &File,
+    file_index: u32,
+    pass_one: &super::SymbolTable,
+    active: Option<&crate::fir::ActiveSourceDeclarations>,
+    index: Option<&crate::fir::ResolvedModuleIndex>,
+) -> HashMap<DeclId, Vec<AnonymousObjectCapture>> {
+    file.anonymous_object_classes
+        .values()
+        .copied()
+        .filter_map(|declaration| {
+            let original = match active {
+                Some(active) => {
+                    let stable = active.canonical_classifier_declaration(
+                        declaration,
+                        index.expect("active declarations require their finalized index"),
+                    )?;
+                    let class = pass_one.class_by_stable_declaration(stable)?;
+                    if class.source_file != file_index {
+                        return None;
+                    }
+                    class.source_decl?
+                }
+                // Annotation-only legacy fragments still hold the same Pass-1 parser arena.
+                None => declaration,
+            };
+            pass_one
+                .anonymous_object_captures
+                .get(&(file_index, original))
+                .cloned()
+                .map(|captures| (declaration, captures))
+        })
+        .collect()
+}
 
 /// What a visit knows about a captured value's type, least first.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1076,6 +1118,7 @@ pub(super) struct SelectedLocalCallableCaptures<'a> {
     pub(super) expressions: &'a HashMap<ExprId, ExprLowering>,
     pub(super) statements: &'a HashMap<StmtId, StmtLowering>,
     pub(super) constructor_arguments: ConstructorArgumentUses<'a>,
+    pub(super) forwarded: Option<&'a ReceiverUseSites>,
 }
 
 fn expression_uses_selected_local_callable_capture(
@@ -1134,12 +1177,11 @@ fn expression_uses_selected_local_callable_capture(
 
 fn anonymous_descendant_uses_selected_local_callable_capture(
     file: &File,
-    declaration: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
+    mut descendants: impl Iterator<Item = DeclId>,
     name: &str,
     selected: SelectedLocalCallableCaptures<'_>,
 ) -> bool {
-    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
+    descendants.any(|candidate| {
         anonymous_body_expressions(file, candidate, selected.constructor_arguments)
             .into_iter()
             .any(|expression| {
@@ -1159,6 +1201,15 @@ pub(super) fn record_anonymous_construction_captures(
 ) -> Vec<Option<u32>> {
     let Some(&declaration) = file.anonymous_object_classes.get(&construction) else {
         return Vec::new();
+    };
+    // A forwarded argument and its nested declarations execute outside this classifier.
+    // Their captures belong to the construction site, not this classifier's storage prefix.
+    let descendants = || {
+        anonymous_descendants(declaration, lexical_scope).filter(|candidate| {
+            !selected_local_callables.forwarded.is_some_and(|forwarded| {
+                forwarded.contains(ReceiverUseSite::Declaration(*candidate))
+            })
+        })
     };
     crate::trace_compiler!(
         "resolve",
@@ -1190,39 +1241,38 @@ pub(super) fn record_anonymous_construction_captures(
             // Enclosing-instance need was decided against the anonymous body's receiver uses.
             // It has no source variable name, so lexical bound/write/use filters do not apply.
             AnonymousObjectCaptureSource::EnclosingInstance { .. }
-            | AnonymousObjectCaptureSource::ImplicitReceiver { .. }
-            | AnonymousObjectCaptureSource::ClassStorage { .. } => true,
-            AnonymousObjectCaptureSource::LexicalValue => {
+            | AnonymousObjectCaptureSource::ImplicitReceiver { .. } => true,
+            AnonymousObjectCaptureSource::ClassStorage { .. } if candidate.receiver.is_some() => {
+                true
+            }
+            AnonymousObjectCaptureSource::LexicalValue
+            | AnonymousObjectCaptureSource::ClassStorage { .. } => {
                 enclosing_value_visible_beside_member(
                     file,
                     declaration,
                     &candidate.name,
                     candidate.function_local,
-                ) && (candidate.delegate_storage.is_some()
-                    || anonymous_descendant_uses_name(
-                        file,
-                        declaration,
-                        lexical_scope,
-                        &candidate.name,
-                        candidate.ty,
-                        candidate.function_local,
-                        selected_local_callables.constructor_arguments,
-                    )
-                    || anonymous_descendant_uses_selected_local_callable_capture(
-                        file,
-                        declaration,
-                        lexical_scope,
-                        &candidate.name,
-                        selected_local_callables,
-                    )
-                    || anonymous_descendant_writes_name(
-                        file,
-                        declaration,
-                        lexical_scope,
-                        &candidate.name,
-                        candidate.function_local,
-                        selected_local_callables.constructor_arguments,
-                    ))
+                ) && (anonymous_descendant_uses_name(
+                    file,
+                    declaration,
+                    descendants(),
+                    &candidate.name,
+                    candidate.ty,
+                    candidate.function_local,
+                    selected_local_callables.constructor_arguments,
+                ) || anonymous_descendant_uses_selected_local_callable_capture(
+                    file,
+                    descendants(),
+                    &candidate.name,
+                    selected_local_callables,
+                ) || anonymous_descendant_writes_name(
+                    file,
+                    declaration,
+                    descendants(),
+                    &candidate.name,
+                    candidate.function_local,
+                    selected_local_callables.constructor_arguments,
+                ))
             }
         })
         .map(|(_, candidate)| AnonymousObjectCapture {
