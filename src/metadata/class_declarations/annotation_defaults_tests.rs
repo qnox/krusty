@@ -46,6 +46,7 @@ fn recorded_defaults_follow_recursive_classifier_remapping() {
             AnnoValue::Class(Ty::obj_name(classifier)),
             AnnoValue::Enum(classifier, "ENTRY".into()),
             AnnoValue::Annotation(AppliedAnnotation {
+                written_order: None,
                 internal: classifier,
                 values: vec![("type".into(), AnnoValue::Class(Ty::obj_name(classifier)))],
             }),
