@@ -144,7 +144,7 @@ impl Checker<'_> {
             return false;
         };
         let source = self.fed_source();
-        let provisional = self.expr_types[expression.0 as usize];
+        let provisional = self.recorded_result_evidence(expression, &generic);
         crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
             &source,
             &generic,
@@ -159,6 +159,27 @@ impl Checker<'_> {
                 &bindings,
             )
         })
+    }
+
+    /// The nested call's result as evidence from its own inputs. A result formal its selection
+    /// recorded without a solution is still open: the checked type's default completion for it
+    /// (`Completion<Any?>` for `Completion {}`, whose lambda takes `T` from context) is not a
+    /// lower bound an enclosing expectation must keep.
+    fn recorded_result_evidence(&self, expression: ExprId, generic: &GenericSig) -> Ty {
+        let provisional = self.expr_types[expression.0 as usize];
+        let Some(recorded) = self.selected_call_type_arguments(expression) else {
+            return provisional;
+        };
+        if recorded.len() != generic.formals.len() || recorded.iter().all(Option::is_some) {
+            return provisional;
+        }
+        let solved = generic
+            .formals
+            .iter()
+            .zip(recorded)
+            .filter_map(|(formal, argument)| argument.map(|argument| (*formal, argument)))
+            .collect::<crate::symbol_resolver::GSigBinds>();
+        crate::symbol_resolver::ty_subst_keep_unbound(generic.ret, &solved)
     }
 
     /// Whether this nested call has no input-fixed result shape and therefore receives an ordinary
