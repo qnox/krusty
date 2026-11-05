@@ -6,10 +6,15 @@ use crate::ir::{
 };
 use crate::types::{EqualityMode, Ty, TypeName, Visibility};
 
-use super::Realized;
+use super::{Contract, Realized};
 
 /// Build the slots, initializer, `values()` and `valueOf` of the enum `class`.
-pub(super) fn build(ir: &mut IrFile, class: ClassId, reads_entries: bool) -> Realized {
+pub(super) fn build(
+    ir: &mut IrFile,
+    class: ClassId,
+    reads_entries: bool,
+    contract: Contract,
+) -> Realized {
     let declaration = &ir.classes[class as usize];
     let classifier = declaration.fq_name_id();
     let owner = declaration.fq_name();
@@ -28,8 +33,11 @@ pub(super) fn build(ir: &mut IrFile, class: ClassId, reads_entries: bool) -> Rea
     let entries = reads_entries
         .then(|| static_slot(ir, format!("{owner}$entries"), Ty::nullable(entries_ty)));
 
-    let initializer = initializer(ir, class, &slots, flag, entries);
-    let values = values(ir, classifier, &owner, &names, &slots, initializer);
+    let initializer = initializer(ir, class, &slots, flag, entries, contract);
+    let values = match contract {
+        Contract::KotlinNative => values(ir, classifier, &owner, &names, &slots, initializer),
+        Contract::KotlinWasm => current_values(ir, classifier, &owner, &slots, initializer),
+    };
     let value_of = value_of(ir, classifier, &owner, &names, &slots, initializer);
     Realized {
         slots,
@@ -72,16 +80,16 @@ fn static_slot(ir: &mut IrFile, name: String, ty: Ty) -> u32 {
 /// The enum's initializer: when the enum is not built yet, allocate and publish every constant,
 /// then construct each in declaration order, then build `entries`, then the companion.
 ///
-/// This is Kotlin/Native's order (its `EnumClassLowering` fills `VALUES` with uninitialized
-/// instances and then runs `initInstance` per entry): a constructor that reaches back into its
-/// enum finds every constant already allocated, the ones not constructed yet with their
-/// `kotlin.Enum` storage unset.
+/// Under [`Contract::KotlinNative`] every constant is allocated and published before the first is
+/// constructed. Under [`Contract::KotlinWasm`] each is published once constructed (a constant with
+/// a body right after its super call), and `entries` is built on its first read instead.
 fn initializer(
     ir: &mut IrFile,
     class: ClassId,
     slots: &[u32],
     flag: u32,
     entries: Option<u32>,
+    contract: Contract,
 ) -> FunId {
     let declaration = &ir.classes[class as usize];
     let classifier = declaration.fq_name_id();
@@ -90,7 +98,8 @@ fn initializer(
     let constants = declaration.enum_entries.clone();
 
     let mut build = vec![write(ir, flag, IrConst::Boolean(true))];
-    for (entry, &slot) in constants.iter().zip(slots) {
+    let published_first = contract == Contract::KotlinNative;
+    for (entry, &slot) in constants.iter().zip(slots).filter(|_| published_first) {
         let instance = entry.subclass.unwrap_or(classifier);
         let allocation = ir.add_expr(IrExpr::EnumAllocation {
             classifier,
@@ -150,12 +159,22 @@ fn initializer(
             name: entry.name.as_str().into(),
             ordinal: u32::try_from(ordinal).expect("too many enum constants"),
             construction,
-            published: Some(slots[ordinal]),
+            published: published_first.then_some(slots[ordinal]),
         });
         ir.set_logical_type(constant, Ty::obj_name(classifier));
-        build.push(constant);
+        if published_first {
+            build.push(constant);
+        } else {
+            build.push(ir.add_expr(IrExpr::SetStatic {
+                index: slots[ordinal],
+                value: constant,
+            }));
+            if let Some(subclass) = entry.subclass {
+                publish_after_super_call(ir, subclass, slots[ordinal]);
+            }
+        }
     }
-    if let Some(entries) = entries {
+    if let Some(entries) = entries.filter(|_| published_first) {
         let array = values_array(ir, classifier, slots);
         let list = ir.add_expr(IrExpr::EnumEntriesList {
             classifier,
@@ -290,6 +309,51 @@ fn values(
     function(ir, name, Vec::new(), array_ty, body)
 }
 
+/// `values()` as kotlinc-js/wasm builds it: run the initializer, then answer a fresh array of the
+/// constants' slots as they stand, in declaration order (`arrayOf` of each entry's instance).
+fn current_values(
+    ir: &mut IrFile,
+    classifier: TypeName,
+    owner: &str,
+    slots: &[u32],
+    initializer: FunId,
+) -> FunId {
+    let name = format!("{owner}$values");
+    let build = call(ir, initializer, Vec::new(), Ty::Unit);
+    let array = values_array(ir, classifier, slots);
+    let result = ir.add_expr(IrExpr::Return(Some(array)));
+    ir.set_logical_type(result, Ty::Nothing);
+    let body = unit_block(ir, vec![build, result]);
+    function(ir, name, Vec::new(), array_type(classifier), body)
+}
+
+/// Publish a constant with a body from its subclass's constructor, right after the super call:
+/// kotlinc-js/wasm's `EnumEntryInstancesBodyLowering`, so the body's own initializers already
+/// find the constant.
+fn publish_after_super_call(ir: &mut IrFile, subclass: TypeName, slot: u32) {
+    let Some(class) = ir.class_id_by_name(subclass) else {
+        return;
+    };
+    let this = ir.add_expr(IrExpr::GetValue(0));
+    ir.set_logical_type(this, Ty::obj_name(subclass));
+    let publish = ir.add_expr(IrExpr::SetStatic {
+        index: slot,
+        value: this,
+    });
+    ir.set_logical_type(publish, Ty::Unit);
+    let body = match ir.classes[class as usize].init_body {
+        Some(body) => {
+            let IrExpr::Block { stmts, .. } = &mut ir.exprs[body as usize] else {
+                unreachable!("a constructor body is an effect block");
+            };
+            stmts.insert(0, publish);
+            body
+        }
+        None => unit_block(ir, vec![publish]),
+    };
+    ir.classes[class as usize].init_body = Some(body);
+}
+
 /// The constants' declaration indices in Kotlin's name order: `String.compareTo`, which compares
 /// UTF-16 units.
 fn name_order(names: &[String]) -> Vec<usize> {
@@ -345,7 +409,7 @@ fn value_of(
 }
 
 /// A fresh `Array<E>` of the constants' slots as they stand.
-fn values_array(ir: &mut IrFile, classifier: TypeName, slots: &[u32]) -> ExprId {
+pub(super) fn values_array(ir: &mut IrFile, classifier: TypeName, slots: &[u32]) -> ExprId {
     let enum_ty = Ty::obj_name(classifier);
     let elements: Vec<ExprId> = slots
         .iter()

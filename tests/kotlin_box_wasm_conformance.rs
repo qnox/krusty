@@ -414,6 +414,53 @@ fun box(): String {
     );
 }
 
+/// What a constructor that reaches back into its own enum finds, as kotlinc-wasm builds an enum:
+/// each constant is published once constructed, and a constant with a body right after its super
+/// call, so its own body already finds it. The expected log is kotlinc-wasm's for this program
+/// (2.4.21; wasm-js and wasm-wasi agree), taken by running it there. Kotlin/Native publishes every
+/// constant before constructing any (`native_enum_publication_e2e`), so this is target-owned.
+#[test]
+fn wasm_enum_constants_are_published_once_constructed() {
+    expect_wasm_box(
+        r##"
+var log = ""
+
+fun describe(x: Any?, self: Any): String = when {
+    x == null -> "null"
+    x === self -> "self"
+    else -> "other"
+}
+
+fun seen(self: Any): String =
+    "[" + describe(E.C, self) + describe(E.A, self) + describe(E.B, self) + "]"
+
+enum class E(val tag: Int) {
+    C(3),
+    A(1),
+    B(2) {
+        init { log += "body" + seen(this) }
+    };
+
+    init { log += ordinal.toString() + seen(this) }
+}
+
+fun box(): String {
+    E.A
+    val values = E.values()
+    val missing = try {
+        E.valueOf("D").name
+    } catch (e: Throwable) {
+        e.message
+    }
+    val result = log + "#" + values[0].name + values[1].name + values[2].name + "#" + missing
+    val expected = "0[nullnullnull]1[othernullnull]2[otherothernull]body[otherotherself]#CAB#No enum constant E.D"
+    return if (result == expected) "OK" else result
+}
+"##,
+        "wasmEnumPublication",
+    );
+}
+
 /// A same-module `@InlineOnly` wrapper is never emitted, so its function-typed parameter reaches no
 /// Wasm signature while its lambda expands through common IR. The lambda's ordinary assignments to
 /// a captured `var` are checked as `Unit` statements and must leave nothing on the stack: inside an

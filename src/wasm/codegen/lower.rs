@@ -1233,9 +1233,12 @@ impl<'a> Body<'a> {
                 name,
                 ordinal,
                 construction,
+                published: None,
                 ..
             } => self.enum_constant(&name, ordinal, construction)?,
-            IrExpr::NoSuchEnumConstant { name, .. } => self.no_such_enum_constant(name)?,
+            IrExpr::NoSuchEnumConstant { classifier, name } => {
+                self.no_such_enum_constant(classifier, name)?
+            }
             IrExpr::Throw { operand } => self.throw_value(operand)?,
             IrExpr::Vararg {
                 array_type,

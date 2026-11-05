@@ -74,14 +74,24 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// `valueOf` found no constant of that name: Kotlin throws `IllegalArgumentException`.
-    pub(super) fn no_such_enum_constant(&mut self, name: u32) -> Result<(), Unsupported> {
+    /// `valueOf` found no constant of that name: Kotlin throws `IllegalArgumentException`, which
+    /// kotlinc-wasm words `No enum constant <the enum's Kotlin name>.<name>`.
+    pub(super) fn no_such_enum_constant(
+        &mut self,
+        classifier: crate::types::TypeName,
+        name: u32,
+    ) -> Result<(), Unsupported> {
         let structure = self.runtime.exceptions.ensure_class(
             self.module,
             self.classifiers,
             RuntimeExceptionKind::IllegalArgument.classifier(),
         )?;
-        let prefix = "No enum constant ".encode_utf16().collect::<Vec<_>>();
+        let prefix = format!(
+            "No enum constant {}.",
+            Ty::obj_name(classifier).source_name()
+        )
+        .encode_utf16()
+        .collect::<Vec<_>>();
         self.runtime
             .string_constant(self.module, &mut self.code, &prefix);
         self.string_of(name)?;

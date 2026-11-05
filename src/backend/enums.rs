@@ -63,8 +63,25 @@ struct Realized {
     value_of: FunId,
 }
 
+/// Which official compiler's enum initialization a target follows. Kotlin leaves unspecified what
+/// a constructor that reaches back into its own enum observes, and the two differ there; once the
+/// enum is built they agree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Contract {
+    /// kotlinc-native's `EnumClassLowering`: every constant is allocated and published before the
+    /// first is constructed, each is then constructed in place; `values()` stores each constant
+    /// at its current ordinal in name order (`valuesForEnum`); `entries` is built after the
+    /// constants, so it is `null` inside a constructor.
+    KotlinNative,
+    /// kotlinc-js/wasm's enum lowerings: each constant is published once constructed, and a
+    /// constant with a body right after its super call (`EnumEntryInstancesBodyLowering`);
+    /// `values()` is an array of the constants as they stand, in declaration order; `entries` is
+    /// built from `values()` on its first read.
+    KotlinWasm,
+}
+
 /// Realize every enum class `ir` declares and rewrite every emitted use of one.
-pub(crate) fn realize(ir: &mut IrFile) {
+pub(crate) fn realize(ir: &mut IrFile, contract: Contract) {
     let enums: Vec<ClassId> = (0..ir.classes.len())
         .map(|class| ClassId::try_from(class).expect("too many classes"))
         .filter(|&class| is_enum(&ir.classes[class as usize]))
@@ -73,12 +90,12 @@ pub(crate) fn realize(ir: &mut IrFile) {
     let mut realized: HashMap<TypeName, Realized> = HashMap::default();
     for class in enums {
         let reads_entries = entries_read.contains(&ir.classes[class as usize].fq_name_id());
-        let enum_class = initializer::build(ir, class, reads_entries);
+        let enum_class = initializer::build(ir, class, reads_entries, contract);
         ir.enum_initializers.insert(class, enum_class.initializer);
         realized.insert(ir.classes[class as usize].fq_name_id(), enum_class);
     }
     if !realized.is_empty() {
-        uses::rewrite(ir, &realized);
+        uses::rewrite(ir, &realized, contract);
     }
 }
 
