@@ -987,6 +987,45 @@ fn wasm_declines_kotlin_any_rendering_it_has_no_body_for() {
     );
 }
 
+// A generated hash dispatches a property's value through its table's `hashCode` slot. A class
+// that keeps `kotlin.Any`'s identity hash has no body there, whether the property names that class
+// or erases it to `Any`, which can hold an instance of every class in the file. Each `Holder`
+// renders itself, since its generated `toString` would reach `Any`'s rendering first.
+#[test]
+fn wasm_declines_a_generated_hash_that_can_reach_the_identity_hash() {
+    let reason = "`kotlin.Any.hashCode`'s identity hash";
+    expect_wasm_decline(
+        "class Plain\ndata class Holder(val value: Plain) { override fun toString() = \"Holder\" }\n\
+         fun box(): String = if (Holder(Plain()).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfAClassProperty",
+        reason,
+    );
+    expect_wasm_decline(
+        "class Plain\ndata class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
+         fun box(): String = if (Holder(Plain()).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfAnErasedProperty",
+        reason,
+    );
+}
+
+#[test]
+fn wasm_a_generated_hash_of_an_erased_property_dispatches_when_every_class_has_a_body() {
+    expect_wasm_box(
+        "class Keyed(val key: Int) {\n\
+             override fun hashCode() = key\n\
+             override fun equals(other: Any?) = other is Keyed && other.key == key\n\
+         }\n\
+         data class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
+         fun box(): String {\n\
+             if (Holder(Keyed(7)).hashCode() != 7) return \"Keyed\"\n\
+             if (Holder(\"a\").hashCode() != 97) return \"String\"\n\
+             if (Holder(5).hashCode() != 5) return \"Int\"\n\
+             return \"OK\"\n\
+         }",
+        "wasmGeneratedHashOfAnErasedPropertyWithBodies",
+    );
+}
+
 #[test]
 fn wasm_declines_an_enum_class_by_name() {
     expect_wasm_decline(

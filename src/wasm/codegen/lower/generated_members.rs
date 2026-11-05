@@ -29,10 +29,8 @@ impl Body<'_> {
             }
             // An object, a nullable primitive's box, or `Unit`'s one instance: through its table.
             Some(ValType::Ref { .. }) | None => {
-                if let Some(class) = self.class_of_type(ty) {
-                    if self.reaches_any_default(class, AnyMember::HashCode)? {
-                        return Err("`kotlin.Any.hashCode`'s identity hash".to_string());
-                    }
+                if self.may_reach_any_default(ty, AnyMember::HashCode)? {
+                    return Err("`kotlin.Any.hashCode`'s identity hash".to_string());
                 }
                 self.value(value, any())?;
                 self.code.call(self.runtime.hashing.hash_code);

@@ -1069,6 +1069,32 @@ impl Body<'_> {
         }))
     }
 
+    /// Whether a call through `member`'s slot on a value statically of type `ty` could reach
+    /// `kotlin.Any`'s own member. A type naming a class of this file is answered by that class's
+    /// hierarchy; any other reference type (`Any`, a type parameter, an interface) is erased, so
+    /// its value can be an instance of every class here. A scalar's box and `Unit` answer the
+    /// member themselves.
+    pub(super) fn may_reach_any_default(
+        &self,
+        ty: Ty,
+        member: AnyMember,
+    ) -> Result<bool, Unsupported> {
+        if let Some(class) = self.class_of_type(ty) {
+            return self.reaches_any_default(class, member);
+        }
+        if !matches!(carrier(ty.non_null())?, Some(ValType::Ref { .. })) {
+            return Ok(false);
+        }
+        let Some(classes) = self.classes else {
+            return Ok(false);
+        };
+        Ok(self.ir.classes.iter().enumerate().any(|(id, class)| {
+            !class.is_interface
+                && classes.tables.table(id as ClassId).vtable[member.slot() as usize]
+                    == Slot::AnyMember(member)
+        }))
+    }
+
     /// `lhs == rhs` on objects: `lhs?.equals(rhs) ?: (rhs === null)`.
     pub(super) fn object_equality(&mut self, lhs: u32, rhs: u32) -> Result<(), Unsupported> {
         // Both operands run once, left first, even when the left value is null. The static
