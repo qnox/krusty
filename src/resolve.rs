@@ -36306,7 +36306,7 @@ impl<'a> Checker<'a> {
             if !crate::symbol_resolver::apply_only_input_type_bindings(
                 &source,
                 &result_signature,
-                &candidate.call_sig.only_input_type_formals,
+                &call_variables.instantiate_formals(&candidate.call_sig.only_input_type_formals),
                 type_args,
                 candidate_receiver,
                 &only_input_actuals,
