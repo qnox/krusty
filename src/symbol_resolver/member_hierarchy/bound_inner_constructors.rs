@@ -57,7 +57,7 @@ impl BoundInnerConstructorContext {
             .filter_map(|(&formal, &capture)| {
                 outer_bindings
                     .get(formal)
-                    .map(|&actual| (capture.to_owned(), actual))
+                    .map(|&actual| (crate::types::TyParamName::from(capture), actual))
             })
             .collect();
         let renamed = identities
@@ -125,7 +125,7 @@ impl BoundInnerConstructorContext {
                         .first()
                         .copied()
                         .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                    (formal.clone(), Ty::ty_param(formal, bound))
+                    (*formal, Ty::ty_param(formal, bound))
                 })
                 .collect();
             signature.params = signature

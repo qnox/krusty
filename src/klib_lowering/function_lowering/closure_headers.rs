@@ -30,6 +30,7 @@ impl FunctionHeader {
         let offset = usize::from(self.receiver_slot.is_some());
         let receiver = if (value.index as usize) < offset {
             Some(IrCapturedReceiver::Enclosing {
+                owner: None,
                 classifier: self
                     .receiver_slot
                     .expect("a receiver slot has its classifier"),
@@ -100,6 +101,12 @@ impl FunctionHeader {
                             _ => IrCapturedDeclaration::Parameter,
                         },
                         capturer,
+                        crossinline_parameter: match original.role {
+                            IrParameterRole::CapturedValue { capture, .. } => {
+                                capture.crossinline_parameter
+                            }
+                            _ => None,
+                        },
                     },
                 )
             }

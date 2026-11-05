@@ -140,7 +140,7 @@ impl DataField {
         // Generated members have no source FIR expression whose finalization can attach this
         // fact. Equality, hashing, and rendering still operate on the declared Kotlin field type,
         // independently of the backend carrier or getter realization.
-        ir.logical_types.insert(read, self.ty);
+        ir.set_logical_type(read, self.ty);
         read
     }
 }
@@ -232,6 +232,7 @@ fn synthesize_components_and_copy(
         internal: ir.classes[class as usize].fq_name_id(),
         args,
         ctor_params: None,
+        declared_params: None,
         ctor_desc: None,
         external_target: None,
         defaults: Box::new([]),
@@ -467,7 +468,7 @@ fn field_hash(class: ClassId, field: &DataField, ir: &mut IrFile) -> ExprId {
     let combined = ir.add_expr(IrExpr::When {
         branches: vec![(Some(is_null), zero), (None, hash)],
     });
-    ir.logical_types.insert(combined, Ty::Int);
+    ir.set_logical_type(combined, Ty::Int);
     combined
 }
 

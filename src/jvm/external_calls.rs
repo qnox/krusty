@@ -310,7 +310,7 @@ fn realize_expressions(
             };
             *args = realized_arguments;
             args.extend(realization_operands);
-            *ctor_desc = Some(if let Some(default) = default {
+            *ctor_desc = Some(Box::from(if let Some(default) = default {
                 default.descriptor.clone()
             } else if let Some(constructor) = constructor {
                 constructor.descriptor.clone()
@@ -321,7 +321,7 @@ fn realize_expressions(
                 )
             } else {
                 callable.descriptor
-            });
+            }));
             *external_target = None;
             *defaults = Box::new([]);
             *default_prefix_count = 0;
@@ -552,7 +552,7 @@ fn realize_expressions(
                 ir.ext_call_source_receiver.remove(&expression);
                 operation.commit(ir, expression);
                 if matches!(result.canonical_semantic().non_null(), Ty::UInt | Ty::ULong) {
-                    ir.logical_types.insert(expression, result);
+                    ir.set_logical_type(expression, result);
                 }
                 continue;
             }
@@ -856,8 +856,10 @@ fn realize_expressions(
                 true,
                 inline_modifiers,
             )?;
-            let physical_call =
-                bridge_external_result(ir, index, callable.physical_ret, semantic_ret);
+            // The invoked operation is the provider's `$default` bridge, so its descriptor result is
+            // the physical value on the stack. An inherited provider can erase a generic result
+            // (`Base<T>.f$default(...): Object`) that the selected override returns as `int`.
+            let physical_call = bridge_external_result(ir, index, default.ret, semantic_ret);
             default_call_operands.record(physical_call, operand_plan);
             default_call_operands.record_declaration(
                 physical_call,
@@ -1639,7 +1641,7 @@ fn publish_inline_substitutions(
             }
             signature.formals.get(ordinal as usize).map(|name| {
                 (
-                    name.clone(),
+                    name.to_string(),
                     substitution.value,
                     substitution.reified_runtime,
                     substitution.reified,
@@ -1723,8 +1725,8 @@ pub(super) fn bridge_external_result(
     // value-class lowering needs both facts on the cloned operation to distinguish an erased generic
     // read (`Iterator<X>.next(): Object`, which returns a boxed `X`) from a declaration whose value-
     // class result is already returned as its unboxed carrier.
-    ir.logical_types.insert(call, semantic);
-    ir.physical_types.insert(call, physical);
+    ir.set_logical_type(call, semantic);
+    ir.set_physical_type(call, physical);
     ir.exprs[index] = IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::ImplicitCoercion,
         arg: call,

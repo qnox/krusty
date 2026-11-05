@@ -650,6 +650,7 @@ impl BodyLowering<'_> {
                 default_provider,
                 receiver,
                 declared_receiver,
+                declaring_receiver,
                 parameters,
                 result,
                 declared_result,
@@ -669,6 +670,7 @@ impl BodyLowering<'_> {
                     default_provider: *default_provider,
                     receiver_ty: *receiver,
                     declared_receiver: *declared_receiver,
+                    declaring_receiver: *declaring_receiver,
                     parameters,
                     result: *result,
                     declared_result: *declared_result,
@@ -689,6 +691,7 @@ impl BodyLowering<'_> {
                 .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration))
             }
             FirCallTarget::Super {
+                qualifier,
                 owner,
                 dispatch_owner,
                 enclosing_dispatch,
@@ -731,6 +734,7 @@ impl BodyLowering<'_> {
                 // The semantic super target stays explicit through common lowering. A provider may
                 // already have fixed its physical descriptor; source declarations leave it empty.
                 let callee = crate::ir::Callee::Super {
+                    qualifier: *qualifier,
                     owner: *owner,
                     dispatch_owner: *dispatch_owner,
                     enclosing_dispatch: *enclosing_dispatch,

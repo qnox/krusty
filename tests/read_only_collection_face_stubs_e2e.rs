@@ -9,9 +9,9 @@
 //! final special bridge testing `instanceof String`, and an inherited `Base<T>.remove(T)` under
 //! `Base<String>` implements it with the erased descriptor itself, so it needs nothing.
 //!
-//! The JDK default `removeIf` and the `toArray` pair are later realizations, and so is the
-//! signature of a declared `containsAll` override; these comparisons leave those members out by
-//! their exact spelling and compare every other member byte for byte.
+//! The mutable-only JDK default `removeIf` is stubbed after them. These comparisons cover every
+//! member, the `toArray` pair and the declared `containsAll` override included, byte for byte,
+//! apart from the later realizations a test names.
 
 use super::common;
 
@@ -93,38 +93,6 @@ fun box(): String {{
 
 const ABSTRACT_BAG: &str = "abstract class Bag : Collection<String>\n";
 
-/// The members a later realization writes, as `javap -p` spells them in either compiler's class.
-const LATER_REALIZATIONS: &[&str] = &[
-    "public boolean containsAll(java.util.Collection<?>);",
-    "public boolean containsAll(java.util.Collection<java.lang.String>);",
-    "public boolean containsAll(java.util.Collection<java.lang.Integer>);",
-    "public boolean containsAll(java.util.Collection<? extends T>);",
-    "public boolean removeIf(java.util.function.Predicate<? super java.lang.String>);",
-    "public boolean removeIf(java.util.function.Predicate<? super java.lang.Integer>);",
-    "public boolean removeIf(java.util.function.Predicate<? super T>);",
-    "public <T> T[] toArray(T[]);",
-    "public java.lang.Object[] toArray();",
-];
-
-/// The `javap -v -p` block of each method `listing` declares, keyed by its declaration line. A
-/// blank line ends each member's block.
-fn method_blocks(listing: &str) -> Vec<(String, String)> {
-    let mut blocks: Vec<(String, String)> = Vec::new();
-    let mut current: Option<(String, Vec<&str>)> = None;
-    for line in listing.lines().map(str::trim) {
-        if line.is_empty() || line == "}" {
-            if let Some((declaration, body)) = current.take() {
-                blocks.push((declaration, body.join("\n")));
-            }
-        } else if let Some((_, body)) = current.as_mut() {
-            body.push(line);
-        } else if line.contains('(') && line.ends_with(';') {
-            current = Some((line.to_string(), Vec::new()));
-        }
-    }
-    blocks
-}
-
 /// The fake-override bridges an abstract class's unimplemented `contains` and `size` get, a later
 /// realization as well.
 const ABSTRACT_FAKE_OVERRIDE_BRIDGES: &[&str] = &[
@@ -156,15 +124,11 @@ fn assert_members_match_kotlinc_beside(source: &str, members: &[&str], later: &[
     let realized_here = |declarations: Vec<String>| {
         declarations
             .into_iter()
-            .filter(|declaration| {
-                !LATER_REALIZATIONS.contains(&declaration.as_str())
-                    && !later.contains(&declaration.as_str())
-            })
+            .filter(|declaration| !later.contains(&declaration.as_str()))
             .collect::<Vec<_>>()
     };
     assert_eq!(realized_here(krusty), realized_here(reference));
-    let (reference, krusty) = classes.class_listing("faces/Bag");
-    let (reference, krusty) = (method_blocks(&reference), method_blocks(&krusty));
+    let (reference, krusty) = classes.method_blocks("faces/Bag");
     for member in members {
         let block = |blocks: &[(String, String)]| {
             blocks

@@ -81,11 +81,12 @@ impl JvmLibraries {
                 .package_facades_name(package)
                 .into_iter()
                 .any(|facade| {
-                    self.cp.meta_functions_name(facade).iter().any(|function| {
-                        function.kotlin_name == name
-                            && self.function_hidden_at_api(function)
-                            && !self.since_kotlin_withheld(function.since_kotlin())
-                    })
+                    self.cp.facade_declares_function(facade, name)
+                        && self.cp.meta_functions_name(facade).iter().any(|function| {
+                            function.kotlin_name == name
+                                && self.function_hidden_at_api(function)
+                                && !self.since_kotlin_withheld(function.since_kotlin())
+                        })
                 })
         });
         hidden_property || hidden_function
@@ -121,7 +122,9 @@ impl JvmLibraries {
             .map(|declaration| declaration.kotlin_name.clone())
             .collect::<crate::fx_hash::HashSet<_>>();
         hidden.extend(
-            crate::jvm::metadata::class_properties(class)
+            self.cp
+                .class_members(class)
+                .class_properties
                 .iter()
                 .filter(|property| self.property_hidden_at_api(property))
                 .map(|property| property.name.clone()),

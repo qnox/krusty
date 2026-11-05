@@ -33,12 +33,15 @@ use rayon::prelude::*;
 
 use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::classreader::parse_class;
 
 use super::box_byte_score;
 use super::box_ratchet::{self, Outcome, Platform};
 use super::box_reference_classes;
 use super::common;
+
+#[path = "kotlin_box_ir_jvm_conformance/entry.rs"]
+mod entry;
+use entry::{find_box_class, CompiledClasses};
 
 // BoxRunner.java source embedded at compile time; compiled once at test start.
 const BOX_RUNNER_SRC: &str = r#"
@@ -483,7 +486,7 @@ fn compile_multifile(
     // sees the emitted classes as an overlay on the shared jar classpath, and they ride along to
     // BoxRunner's loader. When javac-first fails — the Java references Kotlin declarations, so it
     // cannot be ordered first — fall back to the KOTLIN-FIRST pipeline: signature stubs → krusty →
-    // real javac (docs/JAVA_INTEROP.md slice 2).
+    // real javac.
     let mut java_classes: Vec<(String, Vec<u8>)> = Vec::new();
     if !java_blocks.is_empty() {
         match common::javac_compile(&java_blocks, cp_jars) {
@@ -687,38 +690,6 @@ fn write_classes_to_dir(classes: &[(String, Vec<u8>)], dir: &Path) -> Option<()>
     Some(())
 }
 
-/// krusty's emitted classes for one box case: the flat list the JVM runner loads, plus the module
-/// boundaries byte scoring pairs on. Every class is kept once in `flat`; `module_ranges` records
-/// each module's contiguous half-open range into it, in emission order. A single-module topology
-/// holds one range covering every class under [`box_reference_classes::MAIN_MODULE`]; a multi-module
-/// build records one range per module so a class name shared by two modules stays two identities.
-struct CompiledClasses {
-    flat: Vec<(String, Vec<u8>)>,
-    module_ranges: Vec<(String, std::ops::Range<usize>)>,
-}
-
-impl CompiledClasses {
-    /// Wrap a single module's flat class list (ordinary, `// FILE:`, or mixed-Java topology).
-    fn single_module(flat: Vec<(String, Vec<u8>)>) -> Self {
-        let range = 0..flat.len();
-        CompiledClasses {
-            module_ranges: vec![(box_reference_classes::MAIN_MODULE.to_string(), range)],
-            flat,
-        }
-    }
-
-    /// The module-qualified inventory for byte scoring, keyed by `(module, internal name)`.
-    fn qualified(&self) -> box_byte_score::QualifiedClasses {
-        let mut out = box_byte_score::QualifiedClasses::new();
-        for (module, range) in &self.module_ranges {
-            for (name, bytes) in &self.flat[range.clone()] {
-                out.insert((module.clone(), name.clone()), bytes.clone());
-            }
-        }
-        out
-    }
-}
-
 /// Compile a `// MODULE:` test the way a Gradle multi-module build (or kotlinc's separate-compilation
 /// test mode) does — but with EVERY module compiled by KRUSTY, so this also exercises krusty's own
 /// `@Metadata` WRITE→READ round-trip across a real classpath boundary. Each module is compiled in
@@ -888,21 +859,6 @@ fn compile_box_case(
         compile_source(src, stem, cp_jars, jdk_modules, progress)
             .map(CompiledClasses::single_module)
     }
-}
-
-/// Find the class that declares `static box()Ljava/lang/String;`.
-fn find_box_class(classes: &[(String, Vec<u8>)]) -> Option<String> {
-    for (name, bytes) in classes {
-        if let Ok(ci) = parse_class(bytes) {
-            if ci
-                .method("box", "()Ljava/lang/String;")
-                .is_some_and(|m| m.is_static())
-            {
-                return Some(name.replace('/', "."));
-            }
-        }
-    }
-    None
 }
 
 /// Read exactly `buf.len()` bytes from `fd`, aborting after `deadline`.
@@ -1360,6 +1316,9 @@ fun box(): String = Registry.value()\n";
     let classpath = common::classpath_jars_for(&source);
     let classes = compile_module_test(&source, &classpath, Some(jdk.as_path()), &|_| {})
         .expect("the folded common source compiles through the module harness");
+    let box_class = classes
+        .box_class()
+        .expect("the platform source emits box()");
     let classes: Vec<_> = classes
         .flat
         .into_iter()
@@ -1397,7 +1356,6 @@ fun box(): String = Registry.value()\n";
         "the module-harness output must be byte-identical to kotlinc"
     );
 
-    let box_class = find_box_class(&classes).expect("the platform source emits box()");
     assert_eq!(
         common::run_box(&classes, &box_class, std::slice::from_ref(&stdlib)),
         Some("OK".to_string())
@@ -1932,7 +1890,7 @@ fn kotlin_codegen_box_conformance() {
                                 );
                             }
                         }
-                        let box_class = match find_box_class(&compiled.flat) {
+                        let box_class = match compiled.box_class() {
                             Some(c) => c,
                             None => {
                                 return (
