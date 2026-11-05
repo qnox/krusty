@@ -571,11 +571,17 @@ fn defaults_reading_a_constant_are_realized() {
     let light = read(&mut ir, "Shade", "LIGHT");
     ir.add_class(crate::ir::test_support::blank_class("Holder"));
     ir.insert_class_ctor_defaults_name(type_name("Holder"), vec![Some(light)]);
+    // `annotation class Tagged(val shade: Shade = Shade.DARK)`.
+    let tagged = read(&mut ir, "Shade", "DARK");
+    let mut annotation = crate::ir::test_support::blank_class("Tagged");
+    annotation.is_annotation = true;
+    ir.add_class(annotation);
+    ir.insert_class_ctor_defaults_name(type_name("Tagged"), vec![Some(tagged)]);
     let ir = lowered(ir);
 
     let mut defaults = super::uses::function_defaults(&ir);
     defaults.extend(super::uses::constructor_defaults(&ir));
-    assert_eq!(defaults, [dark, light]);
+    assert_eq!(defaults, [dark, light, tagged]);
     for default in defaults {
         assert!(
             matches!(ir.expr(default), IrExpr::Block { value: Some(value), .. } if matches!(ir.expr(*value), IrExpr::GetStatic(_))),
