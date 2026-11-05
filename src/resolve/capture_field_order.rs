@@ -162,7 +162,7 @@ impl super::Checker<'_> {
         &mut self,
         scope: &CheckerScope<'_>,
         declaration: DeclId,
-        candidates: &[AnonymousObjectCapture],
+        candidates: &[super::AnonymousCaptureCandidate],
         remap: super::anonymous_capture_remap::CaptureFieldRemap<'_>,
     ) -> bool {
         let storage_fields = remap.fields;
