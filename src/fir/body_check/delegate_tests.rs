@@ -10,7 +10,10 @@ fn expressions(body: &FirBody) -> impl Iterator<Item = &FirExpr> {
     })
 }
 
-fn assert_production_frontend_accepts(source: &str) {
+fn production_analysis(
+    source: &str,
+    diagnostics: &mut crate::diag::DiagSink,
+) -> crate::frontend::SourceSetAnalysis {
     let inputs = [crate::source::SourceInput::kotlin(source).with_file_stem("DelegateFir")];
     let stems = ["DelegateFir".to_string()];
     let mut paths = Vec::new();
@@ -21,8 +24,7 @@ fn assert_production_frontend_accepts(source: &str) {
         paths.push(jdk);
     }
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
-    let mut diagnostics = crate::diag::DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
@@ -30,13 +32,60 @@ fn assert_production_frontend_accepts(source: &str) {
         )),
         &crate::features::LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
-        &mut diagnostics,
-    );
+        diagnostics,
+    )
+}
 
+fn assert_production_frontend_accepts(source: &str) {
+    let mut diagnostics = crate::diag::DiagSink::new();
+    let analysis = production_analysis(source, &mut diagnostics);
     let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
-
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+}
+
+fn checked_production_function_body(source: &str, function_name: &str) -> FirBody {
+    struct FunctionBody<'a> {
+        name: &'a str,
+        selected: Option<FirBody>,
+    }
+
+    impl crate::compiler::CheckedBodyObserver for FunctionBody<'_> {
+        fn begin_module(&mut self, _module: crate::compiler::ObservedModule<'_>) {}
+
+        fn observe(&mut self, observed: crate::compiler::ObservedBody<'_>) {
+            let declaration = DeclarationId::from_raw(observed.owner.raw());
+            if observed
+                .declarations
+                .function(observed.file, declaration)
+                .is_some_and(|function| function.name == self.name)
+            {
+                assert!(
+                    self.selected.is_none(),
+                    "one selected function body expected"
+                );
+                self.selected = Some(observed.body.clone());
+            }
+        }
+    }
+
+    let mut diagnostics = crate::diag::DiagSink::new();
+    let analysis = production_analysis(source, &mut diagnostics);
+    let mut observer = FunctionBody {
+        name: function_name,
+        selected: None,
+    };
+    crate::compiler::lower_analyzed_observing(
+        analysis,
+        &["DelegateFir".to_string()],
+        "main",
+        &mut observer,
+        &mut diagnostics,
+    );
+    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+    observer
+        .selected
+        .expect("the production pass checks the selected body")
 }
 
 #[test]
@@ -374,7 +423,7 @@ fn local_class_inferred_callable_property_is_visible_to_the_enclosing_body() {
 
 #[test]
 fn an_anonymous_member_with_its_own_delegate_does_not_capture_an_unused_outer_delegate() {
-    let (body, _) = checked_function_body(
+    let body = checked_production_function_body(
         &format!(
             "{DELEGATE}fun make(): String {{
                 val outer by Delegate(\"O\")
@@ -406,7 +455,7 @@ fn an_anonymous_member_with_its_own_delegate_does_not_capture_an_unused_outer_de
 
 #[test]
 fn an_anonymous_member_read_captures_the_selected_delegate_storage_identity() {
-    let (body, _) = checked_function_body(
+    let body = checked_production_function_body(
         &format!(
             "{DELEGATE}fun make(): Any {{
                 val outer by Delegate(\"OK\")
