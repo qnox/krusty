@@ -982,6 +982,12 @@ impl<'a> Parser<'a> {
             .adopt_hoisted_classifiers(id, declaration_index + 1);
     }
 
+    /// Whether the current token is `import` in a position where the grammar has an import list.
+    /// `import` is a soft keyword: everywhere else it is an ordinary name.
+    fn at_import_directive(&self) -> bool {
+        self.token_keyword_text(self.tok(), "import")
+    }
+
     /// Parse one `import` directive, recording its path (and, for a single-name import, the
     /// classifier reference it names).
     fn parse_import_directive(&mut self) {
@@ -1043,8 +1049,7 @@ impl<'a> Parser<'a> {
                 self.parse_annotation();
                 continue;
             }
-            let file_header_item =
-                matches!(self.kind(), TokenKind::KwPackage | TokenKind::KwImport);
+            let file_header_item = self.at(TokenKind::KwPackage) || self.at_import_directive();
             if !file_header_item {
                 if let Some((name, definition)) = self.script.take() {
                     self.parse_script_class(&name, &definition);
@@ -1105,7 +1110,7 @@ impl<'a> Parser<'a> {
                         self.file.package = Some(pkg);
                     }
                 }
-                TokenKind::KwImport => self.parse_import_directive(),
+                TokenKind::Ident if self.at_import_directive() => self.parse_import_directive(),
                 // `fun interface F { fun m(…): R }` — a SAM interface (parsed as an interface).
                 TokenKind::KwFun
                     if self
@@ -1310,7 +1315,7 @@ impl<'a> Parser<'a> {
             return false;
         };
         match token.kind {
-            KwFun | KwClass | KwVal | KwVar | KwImport | KwPackage | At => true,
+            KwFun | KwClass | KwVal | KwVar | KwPackage | At => true,
             Ident => {
                 self.token_is_modifier(token)
                     || (!self.token_is_escaped_ident(token)
@@ -1323,6 +1328,7 @@ impl<'a> Parser<'a> {
                                 | "typealias"
                                 | "data"
                                 | "companion"
+                                | "import"
                         ))
             }
             _ => false,
