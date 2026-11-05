@@ -1941,7 +1941,7 @@ impl super::Emitter<'_> {
                 // An inlined operand leaves the caller's line forgotten. kotlinc marks the checked
                 // expression's line again at the implicit check, so the check owns an entry even
                 // though the restored caller line is already in effect.
-                if matches!(check, NullCheck::Named(_)) && code.line_forgotten() {
+                if matches!(check, NullCheck::Named { .. }) && code.line_forgotten() {
                     if let Some(line) = code.current_line() {
                         code.mark_line(line.into());
                     }
@@ -1951,7 +1951,7 @@ impl super::Emitter<'_> {
                 // in its failure (`getenv(...) must not be null`); `x!!` has no such name and uses the
                 // one-argument form. Both consume the duplicate and leave the value in place.
                 let m = match check {
-                    NullCheck::Named(message) => {
+                    NullCheck::Named { message, .. } => {
                         code.push_string(message, self.cw);
                         self.cw.methodref(
                             "kotlin/jvm/internal/Intrinsics",
@@ -1959,13 +1959,13 @@ impl super::Emitter<'_> {
                             "(Ljava/lang/Object;Ljava/lang/String;)V",
                         )
                     }
-                    NullCheck::Source | NullCheck::Unnamed => self.cw.methodref(
+                    NullCheck::Source | NullCheck::Unnamed { .. } => self.cw.methodref(
                         "kotlin/jvm/internal/Intrinsics",
                         "checkNotNull",
                         "(Ljava/lang/Object;)V",
                     ),
                 };
-                let arguments = if matches!(check, NullCheck::Named(_)) {
+                let arguments = if matches!(check, NullCheck::Named { .. }) {
                     2
                 } else {
                     1
