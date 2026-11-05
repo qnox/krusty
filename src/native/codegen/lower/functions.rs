@@ -196,7 +196,7 @@ fn reference_identity(
 
 fn dependency_reference_declaration(
     file: &FileLowering<'_>,
-    declaration: crate::fir::ExternalCallableId,
+    declaration: crate::ir::ExternalCallableId,
 ) -> Result<Option<ReferenceDeclaration>, Unsupported> {
     let fact = file
         .callables
