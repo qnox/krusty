@@ -22,6 +22,7 @@ mod candidate_union;
 mod catalog_availability;
 mod class_entry_bytes;
 mod class_locations;
+mod class_members;
 pub mod content_snapshot;
 mod ct_sym_index;
 mod declaration_annotations;
@@ -1897,26 +1898,28 @@ impl Classpath {
         let mut prop_segments: Vec<std::sync::Arc<[super::metadata::MetaProp]>> = Vec::new();
         let mut merged_parts = false;
         if let Some(ci) = &ci {
-            if !ci.meta.package_functions.is_empty() {
-                fn_segments.push(ci.meta.package_functions.clone());
+            let members = self.class_members(ci);
+            if !members.package_functions.is_empty() {
+                fn_segments.push(members.package_functions.clone());
             }
-            if !ci.meta.package_properties.is_empty() {
-                prop_segments.push(ci.meta.package_properties.clone());
+            if !members.package_properties.is_empty() {
+                prop_segments.push(members.package_properties.clone());
             }
             // A multifile FACADE has no function/property metadata of its own — its `d1` lists the
             // PART class names, which hold them; each part slice becomes a shared segment (the same
             // fns-empty/props-empty gating the merged-copy version used).
-            let merge_fns = ci.meta.package_functions.is_empty();
-            let merge_props = ci.meta.package_properties.is_empty();
+            let merge_fns = members.package_functions.is_empty();
+            let merge_props = members.package_properties.is_empty();
             if merge_fns || merge_props {
                 for part in &ci.meta.multifile_parts {
                     let Some(pci) = self.find(part) else { continue };
+                    let part_members = self.class_members(&pci);
                     merged_parts |= merge_fns;
-                    if merge_fns && !pci.meta.package_functions.is_empty() {
-                        fn_segments.push(pci.meta.package_functions.clone());
+                    if merge_fns && !part_members.package_functions.is_empty() {
+                        fn_segments.push(part_members.package_functions.clone());
                     }
-                    if merge_props && !pci.meta.package_properties.is_empty() {
-                        prop_segments.push(pci.meta.package_properties.clone());
+                    if merge_props && !part_members.package_properties.is_empty() {
+                        prop_segments.push(part_members.package_properties.clone());
                     }
                 }
             }
@@ -2060,36 +2063,6 @@ impl Classpath {
             extension,
             value_underlying,
         )
-    }
-
-    /// The metadata-declared RETURN type of the PROPERTY getter realized by JVM method
-    /// `jvm_name`/`jvm_desc`, with full structure when the metadata generic signature carries it and
-    /// the bare classifier otherwise. Function returns travel in [`MetadataCallFacts::declared_ret`]
-    /// from the already descriptor-aligned callable; a getter is not a metadata function, so this
-    /// deliberately separate fallback matches its `JvmPropertySignature` without repeating function
-    /// alignment. Together they carry collection identity that JVM signatures erase at every depth.
-    pub fn metadata_property_ret_ty_name(
-        &self,
-        internal: TypeName,
-        jvm_name: &str,
-        jvm_desc: &str,
-    ) -> Option<Ty> {
-        let ci = self.find_name(internal)?;
-        super::metadata::class_properties(&ci)
-            .iter()
-            .find(|property| {
-                property
-                    .getter
-                    .as_ref()
-                    .is_some_and(|getter| getter.name == jvm_name && getter.desc == jvm_desc)
-            })
-            .and_then(|property| {
-                property
-                    .generic_sig
-                    .as_ref()
-                    .map(|gsig| gsig.ret)
-                    .or_else(|| property.ret_class.map(kotlin_type_name_to_ty))
-            })
     }
 
     /// A facade class's lambda-return-overload Kotlin names, cached (part-merged for a multifile facade).
@@ -3343,6 +3316,7 @@ impl Classpath {
         let mut m = PkgMembers::default();
         if let Some(pe) = jp.entry_name(pkg) {
             let mut seen_facade = crate::fx_hash::HashSet::default();
+            let mut function_names = HashMap::default();
             let mut roots: Vec<String> = Vec::new();
             for &part_id in &pe.facades {
                 let part = jp.names.render(part_id);
@@ -3386,12 +3360,14 @@ impl Classpath {
                     // metadata (a Java method / synthetic) keeps its JVM name as the source key.
                     // The declaring class's metadata names it: a facade's merged parts never offer
                     // a part's private function for the facade's forwarder of the same JVM name.
-                    let metas = self.meta_functions_name(cand.owner);
+                    let names = function_names
+                        .entry(cand.owner)
+                        .or_insert_with(|| self.facade_function_names(cand.owner));
                     let source = indexed_source_name(&cand.name, |jvm_name| {
-                        metas
-                            .named(jvm_name)
-                            .next()
-                            .map(|metadata| metadata.kotlin_name.clone())
+                        names
+                            .iter()
+                            .find(|name| name.jvm_name == jvm_name)
+                            .map(|name| name.kotlin_name.clone())
                     });
                     // The receiver (first-parameter) descriptor marks `facade` as an extension owner for it
                     // — the scoped `find_extension_owners`. Recorded before `cand` is moved into the maps.
@@ -4798,17 +4774,26 @@ mod fq_tests {
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
-    fn write_invalid_package_facade(directory: &Path, internal: &str) {
-        let malformed_type_parameter = [
-            0x00, // empty StringTableTypes prefix
-            0x1a, 0x08, // Package.function
-            0x22, 0x06, // Function.type_parameter
-            0x08, 0x00, // id
-            0x10, 0x00, // name
-            0x20, 0x03, // invalid variance enum
-        ];
+    /// A `Package.function` whose type parameter has an invalid variance enum.
+    const MALFORMED_PACKAGE_FUNCTION: [u8; 10] = [
+        0x1a, 0x08, // Package.function
+        0x22, 0x06, // Function.type_parameter
+        0x08, 0x00, 0x10, 0x00, // id, name
+        0x20, 0x03, // invalid variance enum
+    ];
+    /// A `Package.type_alias` whose type parameter has an invalid variance enum.
+    const MALFORMED_PACKAGE_TYPE_ALIAS: [u8; 10] = [
+        0x2a, 0x08, // Package.type_alias
+        0x1a, 0x06, // TypeAlias.type_parameter
+        0x08, 0x00, 0x10, 0x00, // id, name
+        0x20, 0x03, // invalid variance enum
+    ];
+
+    fn write_invalid_package_facade(directory: &Path, internal: &str, declaration: [u8; 10]) {
+        // An empty StringTableTypes prefix, then the declaration.
+        let malformed_type_parameter = std::iter::once(0x00).chain(declaration);
         let d1 = std::iter::once('\0')
-            .chain(malformed_type_parameter.into_iter().map(char::from))
+            .chain(malformed_type_parameter.map(char::from))
             .collect::<String>();
         let mut class = crate::jvm::classfile::ClassWriter::new(internal, "java/lang/Object");
         class.set_kotlin_metadata(
@@ -5159,7 +5144,11 @@ mod fq_tests {
     #[test]
     fn invalid_alias_metadata_is_not_published_to_the_global_index() {
         let directory = test_temp_dir("invalid-alias-metadata");
-        write_invalid_package_facade(&directory, "shadow/TypeAliasesKt");
+        write_invalid_package_facade(
+            &directory,
+            "shadow/TypeAliasesKt",
+            MALFORMED_PACKAGE_TYPE_ALIAS,
+        );
         let classpath = Classpath::new(vec![directory.clone()]);
         let cache_key = classpath.cache_key[0].clone();
 
@@ -5186,7 +5175,11 @@ mod fq_tests {
     #[test]
     fn invalid_extension_metadata_is_not_published_to_the_global_index() {
         let directory = test_temp_dir("invalid-extension-metadata");
-        write_invalid_package_facade(&directory, "shadow/ExtensionsKt");
+        write_invalid_package_facade(
+            &directory,
+            "shadow/ExtensionsKt",
+            MALFORMED_PACKAGE_FUNCTION,
+        );
         let classpath = Classpath::new(vec![directory.clone()]);
         let cache_key = classpath.cache_key[0].clone();
 
