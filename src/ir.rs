@@ -1834,6 +1834,9 @@ pub struct IrFile {
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each entry another module constructs a class of this file, or reads its object, through,
+    /// by the entry's `FunId`: the class it answers. See [`crate::backend::construction_entries`].
+    pub(crate) construction_entries: crate::fx_hash::HashMap<FunId, ClassId>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: crate::fx_hash::HashMap<u32, FnParamInfo>,
     /// Per declared method/function, whether each SOURCE parameter was declared nullable (`a: String?`).

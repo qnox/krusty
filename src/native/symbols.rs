@@ -388,6 +388,18 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
             functions[index] = unique(base, &|name| vec![name.to_string()]);
             continue;
         }
+        // An entry constructing a class, or answering its object, is named after that class,
+        // whose symbol is unique in the module; a compiler-generated name alone is not, since two
+        // files of one module each generate the same one.
+        if let Some(&class) = ir.construction_entries.get(&(index as crate::ir::FunId)) {
+            let base = format!(
+                "kt_{}_{}",
+                classes[class as usize],
+                c_identifier(&function.name)
+            );
+            functions[index] = unique(base, &|name| vec![name.to_string()]);
+            continue;
+        }
         // Local and compiler-generated functions have no checked callable identity. They still
         // belong to one source module: independently analyzed dependencies restart their local
         // function ids and may otherwise export identical strong symbols at the final link.

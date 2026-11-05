@@ -254,6 +254,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         inline_anonymous_lambdas: _,
         class_method_owners: _,
         default_entries: _,
+        construction_entries: _,
         fn_params: _,
         fn_param_declared_nullable: _,
         fn_declared_spellings: _,

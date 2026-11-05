@@ -20,6 +20,7 @@ pub(crate) fn realize(ir: &mut IrFile, exports: &mut DependencyExportSignatures)
     let constructors = exports.constructors().to_vec();
     for (constructor, identity) in constructors {
         if let Some(entry) = build(ir, constructor) {
+            ir.construction_entries.insert(entry, constructor.class);
             exports.record_callable(entry, identity);
         }
     }
@@ -27,6 +28,7 @@ pub(crate) fn realize(ir: &mut IrFile, exports: &mut DependencyExportSignatures)
     for class in singletons {
         let classifier = ir.classes[class as usize].fq_name;
         if let Some(entry) = instance(ir, classifier) {
+            ir.construction_entries.insert(entry, class);
             exports.record_singleton_entry(classifier, entry);
         }
     }
