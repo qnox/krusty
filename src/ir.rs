@@ -1869,6 +1869,9 @@ pub struct IrFile {
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each entry another module constructs a class of this file, or reads its object, through,
+    /// by the entry's `FunId`: the class it answers. See [`crate::backend::construction_entries`].
+    pub(crate) construction_entries: crate::fx_hash::HashMap<FunId, ClassId>,
     /// Each exported overridable member's dispatching entry, by the member's `FunId`: the function
     /// another module's call reaches it through, which dispatches on the receiver.
     pub(crate) dispatch_entries: crate::fx_hash::HashMap<FunId, FunId>,

@@ -58,9 +58,11 @@ impl PostponedCallConstraints {
     pub(super) fn for_call(site: PostponedCallSite, formals: &[crate::types::TyParamName]) -> Self {
         let variables = crate::symbol_resolver::CallSiteVariableMap::for_postponed_call(
             formals,
-            site.compilation,
-            site.file,
-            site.call.0,
+            crate::types::CallSiteIdentity {
+                compilation: site.compilation,
+                file: site.file,
+                call: site.call.0,
+            },
             site.argument,
         );
         Self {
@@ -74,12 +76,15 @@ impl PostponedCallConstraints {
     }
 
     #[cfg(test)]
-    fn for_formals(
-        formals: &[crate::types::TyParamName],
-        lexically_visible: impl Fn(&str) -> bool,
-    ) -> Self {
-        let variables =
-            crate::symbol_resolver::CallSiteVariableMap::new(formals, lexically_visible);
+    fn for_formals(formals: &[crate::types::TyParamName]) -> Self {
+        let variables = crate::symbol_resolver::CallSiteVariableMap::for_call(
+            formals,
+            crate::types::CallSiteIdentity {
+                compilation: 0,
+                file: 0,
+                call: 0,
+            },
+        );
         Self {
             formals: formals
                 .iter()
@@ -610,6 +615,25 @@ impl Checker<'_> {
             })
     }
 
+    /// `solutions` of `call`'s declared formals as solutions of the inference variables the call's
+    /// function arguments were checked under. A postponed argument's checked type speaks about the
+    /// call's own variables, the same ones its candidate selection solves; the commit substitutes
+    /// the solved ones and leaves an unsolved one a variable for selection to solve.
+    pub(super) fn postponed_call_variable_solutions(
+        &self,
+        call: ExprId,
+        solutions: &crate::symbol_resolver::GSigBinds,
+    ) -> crate::symbol_resolver::GSigBinds {
+        let site = self.call_site(call);
+        solutions
+            .iter()
+            .map(|(formal, &solution)| {
+                let variable = crate::types::call_site_type_variable(site, formal.as_str());
+                (crate::types::TyParamName::new(variable), solution)
+            })
+            .collect()
+    }
+
     /// Reach the fixed point of the constraints contributed by postponed function arguments.
     /// Rechecks and their diagnostic ownership stay together here; the call-site facade supplies
     /// only the selected parameter shapes and consumes the finalized argument types.
@@ -804,7 +828,6 @@ impl Checker<'_> {
         aggregate: &mut PostponedCallConstraints,
         frame: PostponedCallConstraints,
     ) -> Ty {
-        let checked = frame.declared_type(checked);
         aggregate.merge(&self.fed_source(), frame);
         self.set(expression, checked);
         checked
@@ -984,12 +1007,11 @@ mod tests {
 
     #[test]
     fn a_call_owned_variables_own_shapes_are_not_constraints() {
-        let name = "example:build:V".to_string();
-        let value = formal(&name);
+        let declared = "example:build:V".to_string();
         let mut constraints =
-            PostponedCallConstraints::for_formals(&[crate::types::TyParamName::new(&name)], |_| {
-                false
-            });
+            PostponedCallConstraints::for_formals(&[crate::types::TyParamName::new(&declared)]);
+        let value = constraints.instantiate_type(formal(&declared));
+        let name = constraints.formals[0].to_string();
 
         assert!(constraints.is_trivial_self_bound(&name, value, true));
         assert!(constraints.is_trivial_self_bound(
@@ -1010,9 +1032,7 @@ mod tests {
         let name = "example:recurse:T".to_string();
         let enclosing = formal(&name);
         let mut call =
-            PostponedCallConstraints::for_formals(&[crate::types::TyParamName::new(&name)], |_| {
-                true
-            });
+            PostponedCallConstraints::for_formals(&[crate::types::TyParamName::new(&name)]);
         let call_owned = call.instantiate_type(enclosing);
         assert_ne!(call_owned, enclosing);
 
@@ -1029,11 +1049,9 @@ mod tests {
     fn a_rechecked_lambda_replaces_its_provisional_result_constraint() {
         let name = "example:specialize:R".to_string();
         let mut constraints =
-            PostponedCallConstraints::for_formals(&[crate::types::TyParamName::new(&name)], |_| {
-                false
-            });
+            PostponedCallConstraints::for_formals(&[crate::types::TyParamName::new(&name)]);
         let formals = constraints.formals.clone();
-        let result = formal(&formals[0]);
+        let result = constraints.instantiate_type(formal(&name));
         let declared = Ty::fun(vec![Ty::obj("example/Base")], result);
         let argument = ExprId(1);
 

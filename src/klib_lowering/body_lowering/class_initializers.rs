@@ -59,6 +59,10 @@ impl<'a> BodyLowering<'a> {
         value: Option<KlibIrExprId>,
         ty: Ty,
     ) -> Lowered<ExprId> {
+        if let (None, Some((class, field)), None) = (self.initialization, self.value_member, value)
+        {
+            return self.value_field(class, field, symbol, receiver, ty);
+        }
         let Some(frame) = self.initialization else {
             return unsupported(if value.is_some() {
                 "a field write"
@@ -110,6 +114,41 @@ impl<'a> BodyLowering<'a> {
                 })
             }
         };
+        Ok(self.typed(lowered, ty))
+    }
+
+    /// A value class member's read of its class's one field: the value the receiver holds.
+    fn value_field(
+        &mut self,
+        class: ClassId,
+        field: &crate::metadata::klib_ir::tree::KlibIrField,
+        symbol: &KlibIrSymbol,
+        receiver: Option<KlibIrExprId>,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        if &field.base.symbol != symbol {
+            return Err(mismatch(
+                "a value class member reads a field outside its declaring class",
+            ));
+        }
+        let declared = self.ir.classes[class as usize].fields[0].ty;
+        if ty != declared {
+            return Err(mismatch(
+                "a field read disagrees with its declared storage type",
+            ));
+        }
+        let receiver_ty = self
+            .header
+            .value_receiver()
+            .ok_or_else(|| mismatch("a value class member has no receiver"))?;
+        let receiver =
+            receiver.ok_or_else(|| mismatch("an instance field access has no receiver"))?;
+        let receiver = self.operand(receiver, receiver_ty)?;
+        let lowered = self.ir.add_expr(IrExpr::GetField {
+            receiver,
+            class,
+            index: 0,
+        });
         Ok(self.typed(lowered, ty))
     }
 }

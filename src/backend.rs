@@ -3,6 +3,7 @@
 //! A backend consumes checked frontend output and emits target artifacts.
 
 pub(crate) mod class_tables;
+pub(crate) mod construction_entries;
 mod constructor_selection;
 pub(crate) mod coroutines;
 pub(crate) mod counted_loops;
@@ -31,7 +32,6 @@ pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
     CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
-pub(crate) use dependency_metadata::KlibDependencyCallable;
 pub(crate) use dependency_metadata::{
     authenticated_singleton_receiver, has_standalone_dependency_code,
     inert_staged_singleton_bindings,
@@ -40,6 +40,7 @@ pub use dependency_metadata::{
     DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata,
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
+pub(crate) use dependency_metadata::{ExportedConstructor, KlibDependencyCallable};
 pub(crate) use dependency_signature::{
     instantiate_dependency_signature, DependencyFunctionSignature,
 };

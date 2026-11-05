@@ -11,9 +11,16 @@
 //! `Object remove(Object)` that boxes the result, then a final `String remove(Object)`. A member
 //! that a value class renames gets the same pair for `get(Object)`.
 //!
-//! The `Map` faces also carry the JDK's own `java.util.Map` defaults (`putIfAbsent`, ...), which
-//! are a later realization; their comparison leaves those out by their exact spelling and compares
-//! every other member byte for byte.
+//! The `Map` faces also stub the mutable-only defaults of the JDK's `java.util.Map`
+//! (`putIfAbsent`, ...), mangled by their value-class positions, as a `Collection` face stubs
+//! `removeIf`; every comparison covers a class's complete method inventory.
+//!
+//! A value class over `Collection<Z>` writes its interface entries by the overridden collection
+//! declaration's signature policy (`containsAll(Collection<?>)`) and bridges `size()` as an
+//! ordinary synthetic override, which its box test also reads back through reflection. A class
+//! extending a Kotlin `AbstractList`/`AbstractSet` gets the special bridges of the fake overrides
+//! it inherits, and a value-class box passed to a declared parameter that names a type parameter
+//! without being one (`Iterable<T>`, `Tagged<out T>`) is cast to it, as kotlinc's implicit cast is.
 
 use super::common;
 
@@ -151,43 +158,17 @@ fun box(): String {
 }
 ";
 
-/// The members of `java.util.Map` a later realization writes, as `javap -p` spells them.
-const LATER_REALIZATIONS: &[&str] = &[
-    "public void replaceAll(java.util.function.BiFunction<? super java.lang.String, ? super stubs.S, ? extends stubs.S>);",
-    "public java.lang.String putIfAbsent-",
-    "public boolean replace-",
-    "public java.lang.String replace-",
-    "public java.lang.String computeIfAbsent-",
-    "public java.lang.String computeIfPresent-",
-    "public java.lang.String compute-",
-    "public java.lang.String merge-",
-    "public void replaceAll(java.util.function.BiFunction<? super stubs.Z, ? super java.lang.String, ? extends java.lang.String>);",
-    "public java.lang.Object putIfAbsent(java.lang.Object, java.lang.Object);",
-    "public boolean replace(java.lang.Object, java.lang.Object, java.lang.Object);",
-    "public java.lang.Object replace(java.lang.Object, java.lang.Object);",
-    "public java.lang.Object computeIfAbsent(java.lang.Object, java.util.function.Function);",
-    "public java.lang.Object computeIfPresent(java.lang.Object, java.util.function.BiFunction);",
-    "public java.lang.Object compute(java.lang.Object, java.util.function.BiFunction);",
-    "public java.lang.Object merge(java.lang.Object, java.lang.Object, java.util.function.BiFunction);",
-];
-
 fn assert_map_matches_kotlinc(class: &str, members: &[&str]) {
-    let classes = common::classes_against_kotlinc_module(&[("Maps.kt", &packaged(MAPS))]);
+    assert_members_match_kotlinc(("Maps.kt", MAPS), class, members);
+}
+
+/// `class`'s complete method declarations, and the code of each of `members`, match kotlinc's.
+fn assert_members_match_kotlinc((file, source): (&str, &str), class: &str, members: &[&str]) {
+    let classes = common::classes_against_kotlinc_module(&[(file, &packaged(source))]);
     let (reference, krusty) = classes
         .method_declarations(class)
         .unwrap_or_else(|| panic!("both compilers write {class}"));
-    let realized_here = |declarations: Vec<String>| {
-        declarations
-            .into_iter()
-            .filter(|declaration| {
-                !LATER_REALIZATIONS.iter().any(|later| {
-                    declaration.as_str() == *later
-                        || later.ends_with('-') && declaration.starts_with(later)
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(realized_here(krusty), realized_here(reference));
+    assert_eq!(krusty, reference);
     let (reference, krusty) = classes.method_blocks(class);
     for member in members {
         let block = |blocks: &[(String, String)]| {
@@ -239,4 +220,116 @@ fn a_member_renamed_by_its_value_class_key_gets_kotlincs_special_get_bridges() {
 #[test]
 fn value_class_map_bridges_answer_like_kotlinc() {
     common::expect_box_same_as_kotlinc(MAPS, "read_only_value_class_map_stubs");
+}
+
+const COLLECTIONS: &str = "interface Tagged<T>
+
+@JvmInline value class Z(val x: Int) : Tagged<String>
+
+class Words(private val words: Array<String>) : AbstractList<String>() {
+    override val size get() = words.size
+    override fun get(index: Int) = words[index]
+}
+
+class Pairs(private val count: Int) : AbstractSet<Map.Entry<String, Z>>() {
+    override val size get() = count
+    override fun iterator(): Iterator<Map.Entry<String, Z>> = emptyList<Map.Entry<String, Z>>().iterator()
+}
+
+@JvmInline value class Zs(private val xs: IntArray) : Collection<Z> {
+    override val size get() = xs.size
+    override fun isEmpty() = xs.isEmpty()
+    override fun iterator(): Iterator<Z> = xs.map(::Z).iterator()
+    override fun contains(element: Z) = element.x in xs
+    override fun containsAll(elements: Collection<Z>) = elements.all { contains(it) }
+}
+
+fun <T> Iterable<T>.holds(element: T) = contains(element)
+
+fun held(zs: Zs, z: Z) = zs.holds(z)
+
+fun position(zs: Zs, z: Z) = zs.indexOf(z)
+
+fun <T> tagOf(tagged: Tagged<out T>) = tagged.toString()
+
+fun <T : Tagged<String>> bound(tagged: T) = tagged.toString()
+
+fun tags(z: Z) = tagOf(z) + bound(z)
+
+/// The Java caller, kept off the file facade the class comparison names.
+object Java {
+    /// `name` called through the JDK interface `face`.
+    fun through(face: String, receiver: Any, name: String, vararg arguments: Any?): String {
+        val method = Class.forName(face).methods.single { it.name == name && it.parameterCount == arguments.size }
+        return \"$name=${method.invoke(receiver, *arguments)}\"
+    }
+
+    /// The methods named `name` that `receiver`'s class declares, as reflection spells them.
+    fun declared(receiver: Any, name: String): String {
+        val type = receiver.javaClass
+        return type.declaredMethods.filter { it.name == name }
+            .joinToString { it.toGenericString().replace(type.name + \".\", \"\") }
+    }
+}
+
+fun box(): String {
+    val collection = \"java.util.Collection\"
+    val words = Words(arrayOf(\"a\", \"b\"))
+    val zs = Zs(intArrayOf(1, 2))
+    val outcomes = listOf(
+        Java.through(collection, words, \"contains\", \"b\"),
+        Java.through(collection, words, \"contains\", 1),
+        Java.through(\"java.util.List\", words, \"indexOf\", \"b\"),
+        Java.through(\"java.util.List\", words, \"lastIndexOf\", 1),
+        Java.through(collection, Pairs(0), \"contains\", \"x\"),
+        Java.through(collection, zs, \"contains\", Z(2)),
+        Java.through(collection, zs, \"contains\", 2),
+        Java.through(collection, zs, \"containsAll\", listOf(Z(1))),
+        Java.through(collection, zs, \"size\"),
+        Java.declared(zs, \"contains\"),
+        Java.declared(zs, \"containsAll\"),
+        Java.declared(zs, \"size\"),
+        \"held=${held(zs, Z(1))}\",
+        \"position=${position(zs, Z(2))}\",
+        tags(Z(3)),
+    ).joinToString(\"; \")
+    val expected = \"contains=true; contains=false; indexOf=1; lastIndexOf=-1; \" +
+        \"contains=false; contains=true; contains=false; containsAll=true; size=2; \" +
+        \"public final boolean contains(java.lang.Object); \" +
+        \"public boolean containsAll(java.util.Collection<?>); public int size(); held=true; position=1; Z(x=3)Z(x=3)\"
+    return if (outcomes == expected) \"OK\" else outcomes
+}
+";
+
+#[test]
+fn a_kotlin_collection_superclass_leaves_its_fake_overrides_kotlincs_special_bridges() {
+    common::assert_class_matches_kotlinc("ValueCollections", &packaged(COLLECTIONS), "stubs/Words");
+    common::assert_class_matches_kotlinc("ValueCollections", &packaged(COLLECTIONS), "stubs/Pairs");
+}
+
+#[test]
+fn a_value_class_box_passed_to_a_generic_parameter_shape_is_cast_like_kotlinc() {
+    common::assert_class_matches_kotlinc(
+        "ValueCollections",
+        &packaged(COLLECTIONS),
+        "stubs/ValueCollectionsKt",
+    );
+}
+
+#[test]
+fn a_value_class_collection_maps_its_special_members_like_kotlinc() {
+    assert_members_match_kotlinc(
+        ("ValueCollections.kt", COLLECTIONS),
+        "stubs/Zs",
+        &[
+            "public final boolean contains(java.lang.Object);",
+            "public boolean containsAll(java.util.Collection<?>);",
+            "public int size();",
+        ],
+    );
+}
+
+#[test]
+fn value_class_collection_members_answer_like_kotlinc() {
+    common::expect_box_same_as_kotlinc(COLLECTIONS, "read_only_value_class_collections");
 }
