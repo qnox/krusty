@@ -1,8 +1,6 @@
 //! A source classifier's applied supertype hierarchy: its direct parents in declaration order,
 //! with the class's type arguments substituted, and the walks over them.
 
-use crate::fx_hash::HashMap;
-
 use super::{ClassSig, SymbolTable};
 use crate::types::{Ty, TypeName};
 
@@ -12,7 +10,7 @@ impl SymbolTable {
     pub(crate) fn applied_source_parents(
         &self,
         class: &ClassSig,
-        bindings: HashMap<String, Ty>,
+        bindings: crate::types::TyParamBindings,
     ) -> Vec<(TypeName, Ty)> {
         let mut parents = class
             .interfaces

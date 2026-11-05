@@ -142,9 +142,8 @@ pub(super) fn ordinary_roots<'a>(
     {
         let target = match source.ir.expr(expression) {
             IrExpr::Call { callee, .. } => match &**callee {
-                Callee::External {
-                    target, defaults, ..
-                } if defaults.is_empty() => *target,
+                // A call leaving arguments out reaches the same body through its default entry.
+                Callee::External { target, .. } => *target,
                 _ => continue,
             },
             IrExpr::Checked(operation) => match &**operation {
