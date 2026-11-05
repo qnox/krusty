@@ -13,7 +13,7 @@ use crate::jvm::bytecode_passes::coroutines::markers::inline_call_marker;
 use crate::jvm::bytecode_passes::descriptors;
 use crate::jvm::method_node::{Category, Insn, LabelId, LocalVariable, MethodNode, Node};
 
-use super::functional_arguments::is_invoke_on_lambda;
+use super::functional_arguments::{is_invoke_on_lambda, InvokeTarget};
 use super::inline_scopes::{self, InlineScopes};
 use super::local_sorter::Sorter;
 use super::{preparation, returns, InlineError, Parameter, Parameters};
@@ -285,13 +285,16 @@ impl LabelImport {
 }
 
 /// The body with its lambdas expanded and every local renumbered, its lines mapped into the
-/// caller's source map. `invokes` names the lambda each `FunctionN.invoke` of the body calls.
+/// caller's source map. `invokes` names what each `FunctionN.invoke` of the body calls: an inline
+/// lambda's body replaces it, and one of a value the call passes for an inline suspend parameter
+/// without inlining it is marked as a suspension point (kotlinc's `markNoinlineLambdaIfSuspend`
+/// and `surroundInvokesWithSuspendMarkersIfNeeded`).
 /// `scopes` numbers each lambda's scopes as it is inlined; kotlinc renames the lambda's own node,
 /// so a lambda invoked again is numbered from the names its previous expansion gave it.
 pub(super) fn expand(
     node: &MethodNode,
     context: &Context<'_>,
-    invokes: Vec<Option<usize>>,
+    invokes: Vec<InvokeTarget>,
     lines: &mut dyn SourceLines,
     mut scopes: Option<&mut InlineScopes>,
 ) -> Result<Expanded, InlineError> {
@@ -310,6 +313,7 @@ pub(super) fn expand(
         -1
     };
     let mut invokes = invokes.into_iter();
+    let mut suspend_invokes = Vec::new();
     for entry in &node.nodes {
         match entry {
             Node::Line { line, start } => {
@@ -328,8 +332,12 @@ pub(super) fn expand(
                     InlineError::Analysis("an invoke the analysis did not see".to_string())
                 })?;
                 match lambda {
-                    None => out.nodes.push(entry.clone()),
-                    Some(lambda) => {
+                    InvokeTarget::Value => out.nodes.push(entry.clone()),
+                    InvokeTarget::NonInlineSuspend => {
+                        suspend_invokes.push(out.nodes.len());
+                        out.nodes.push(entry.clone());
+                    }
+                    InvokeTarget::Lambda(lambda) => {
                         let expansion = Expansion {
                             context,
                             lambda: &context.lambdas[lambda],
@@ -377,6 +385,7 @@ pub(super) fn expand(
         out.local_variables.push(local);
     }
     out.max_locals = sorter.max_locals();
+    super::suspend_invoke_markers::surround_invokes(&mut out, &suspend_invokes)?;
     Ok(Expanded {
         node: out,
         lambda_blocks,
