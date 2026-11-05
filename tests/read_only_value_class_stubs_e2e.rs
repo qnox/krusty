@@ -11,9 +11,11 @@
 //! `Object remove(Object)` that boxes the result, then a final `String remove(Object)`. A member
 //! that a value class renames gets the same pair for `get(Object)`.
 //!
-//! The `Map` faces also carry the JDK's own `java.util.Map` defaults (`putIfAbsent`, ...), which
-//! are a later realization; their comparison leaves those out by their exact spelling and compares
-//! every other member byte for byte.
+//! The `Map` faces also carry the JDK's own `java.util.Map` defaults (`putIfAbsent`, ...), whose
+//! positions take kotlinc's predefined enhancement before the face's arguments: `merge` of a
+//! `Map<String, S?>` takes the value as `S` and returns `S?` (`merge--vSzEUQ`), while
+//! `putIfAbsent` of a `Map<Z, String>` keeps the declared key `Z` (`putIfAbsent-4urwq08(int,
+//! String)`). Every member is compared byte for byte.
 
 use super::common;
 
@@ -143,51 +145,26 @@ fun box(): String {
         through(ByKey(), \"get\", \"x\"),
         through(ByKey(), \"remove\", Z(1)),
         through(ByKey(), \"put\", Z(2), \"w\"),
+        through(ByName(), \"putIfAbsent\", \"k\", S(\"w\")),
+        through(ByName(), \"merge\", \"k\", S(\"w\"), java.util.function.BiFunction<Any?, Any?, Any?> { _, w -> w }),
+        through(ByKey(), \"putIfAbsent\", Z(2), \"w\"),
+        through(ByKey(), \"computeIfAbsent\", Z(2), java.util.function.Function<Any?, Any?> { \"w\" }),
     ).joinToString(\"; \")
     val expected = \"get=S(s=v); get=null; get=null; remove: UnsupportedOperationException; \" +
         \"put: UnsupportedOperationException; get=v; get=null; \" +
-        \"remove: UnsupportedOperationException; put: UnsupportedOperationException\"
+        \"remove: UnsupportedOperationException; put: UnsupportedOperationException; \" +
+        \"putIfAbsent: UnsupportedOperationException; merge: UnsupportedOperationException; \" +
+        \"putIfAbsent: UnsupportedOperationException; computeIfAbsent: UnsupportedOperationException\"
     return if (outcomes == expected) \"OK\" else outcomes
 }
 ";
-
-/// The members of `java.util.Map` a later realization writes, as `javap -p` spells them.
-const LATER_REALIZATIONS: &[&str] = &[
-    "public void replaceAll(java.util.function.BiFunction<? super java.lang.String, ? super stubs.S, ? extends stubs.S>);",
-    "public java.lang.String putIfAbsent-",
-    "public boolean replace-",
-    "public java.lang.String replace-",
-    "public java.lang.String computeIfAbsent-",
-    "public java.lang.String computeIfPresent-",
-    "public java.lang.String compute-",
-    "public java.lang.String merge-",
-    "public void replaceAll(java.util.function.BiFunction<? super stubs.Z, ? super java.lang.String, ? extends java.lang.String>);",
-    "public java.lang.Object putIfAbsent(java.lang.Object, java.lang.Object);",
-    "public boolean replace(java.lang.Object, java.lang.Object, java.lang.Object);",
-    "public java.lang.Object replace(java.lang.Object, java.lang.Object);",
-    "public java.lang.Object computeIfAbsent(java.lang.Object, java.util.function.Function);",
-    "public java.lang.Object computeIfPresent(java.lang.Object, java.util.function.BiFunction);",
-    "public java.lang.Object compute(java.lang.Object, java.util.function.BiFunction);",
-    "public java.lang.Object merge(java.lang.Object, java.lang.Object, java.util.function.BiFunction);",
-];
 
 fn assert_map_matches_kotlinc(class: &str, members: &[&str]) {
     let classes = common::classes_against_kotlinc_module(&[("Maps.kt", &packaged(MAPS))]);
     let (reference, krusty) = classes
         .method_declarations(class)
         .unwrap_or_else(|| panic!("both compilers write {class}"));
-    let realized_here = |declarations: Vec<String>| {
-        declarations
-            .into_iter()
-            .filter(|declaration| {
-                !LATER_REALIZATIONS.iter().any(|later| {
-                    declaration.as_str() == *later
-                        || later.ends_with('-') && declaration.starts_with(later)
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(realized_here(krusty), realized_here(reference));
+    assert_eq!(krusty, reference);
     let (reference, krusty) = classes.method_blocks(class);
     for member in members {
         let block = |blocks: &[(String, String)]| {
@@ -217,6 +194,21 @@ fn a_type_safe_stub_renamed_by_its_value_class_result_gets_kotlincs_special_brid
             "public final java.lang.Object get(java.lang.Object);",
             "public final java.lang.String get(java.lang.Object);",
             "public java.lang.Object put(java.lang.Object, java.lang.Object);",
+            "public void replaceAll(java.util.function.BiFunction<? super java.lang.String, ? super stubs.S, ? extends stubs.S>);",
+            "public java.lang.String putIfAbsent-VsWcXTM(java.lang.String, java.lang.String);",
+            "public boolean replace-OH16CYI(java.lang.String, java.lang.String, java.lang.String);",
+            "public java.lang.String replace-VsWcXTM(java.lang.String, java.lang.String);",
+            "public java.lang.String computeIfAbsent-cKo1FWk(java.lang.String, java.util.function.Function<? super java.lang.String, ? extends stubs.S>);",
+            "public java.lang.String computeIfPresent-cKo1FWk(java.lang.String, java.util.function.BiFunction<? super java.lang.String, ? super stubs.S, ? extends stubs.S>);",
+            "public java.lang.String compute-cKo1FWk(java.lang.String, java.util.function.BiFunction<? super java.lang.String, ? super stubs.S, ? extends stubs.S>);",
+            "public java.lang.String merge--vSzEUQ(java.lang.String, java.lang.String, java.util.function.BiFunction<? super stubs.S, ? super stubs.S, ? extends stubs.S>);",
+            "public java.lang.Object putIfAbsent(java.lang.Object, java.lang.Object);",
+            "public boolean replace(java.lang.Object, java.lang.Object, java.lang.Object);",
+            "public java.lang.Object replace(java.lang.Object, java.lang.Object);",
+            "public java.lang.Object computeIfAbsent(java.lang.Object, java.util.function.Function);",
+            "public java.lang.Object computeIfPresent(java.lang.Object, java.util.function.BiFunction);",
+            "public java.lang.Object compute(java.lang.Object, java.util.function.BiFunction);",
+            "public java.lang.Object merge(java.lang.Object, java.lang.Object, java.util.function.BiFunction);",
         ],
     );
 }
@@ -232,6 +224,21 @@ fn a_member_renamed_by_its_value_class_key_gets_kotlincs_special_get_bridges() {
             "public final java.lang.String get(java.lang.Object);",
             "public java.lang.Object put(java.lang.Object, java.lang.Object);",
             "public java.lang.Object remove(java.lang.Object);",
+            "public void replaceAll(java.util.function.BiFunction<? super stubs.Z, ? super java.lang.String, ? extends java.lang.String>);",
+            "public java.lang.String putIfAbsent-4urwq08(int, java.lang.String);",
+            "public boolean replace-OX4Q0o0(int, java.lang.String, java.lang.String);",
+            "public java.lang.String replace-4urwq08(int, java.lang.String);",
+            "public java.lang.String computeIfAbsent-4urwq08(int, java.util.function.Function<? super stubs.Z, ? extends java.lang.String>);",
+            "public java.lang.String computeIfPresent-4urwq08(int, java.util.function.BiFunction<? super stubs.Z, ? super java.lang.String, ? extends java.lang.String>);",
+            "public java.lang.String compute-4urwq08(int, java.util.function.BiFunction<? super stubs.Z, ? super java.lang.String, ? extends java.lang.String>);",
+            "public java.lang.String merge-OX4Q0o0(int, java.lang.String, java.util.function.BiFunction<? super java.lang.String, ? super java.lang.String, ? extends java.lang.String>);",
+            "public java.lang.Object putIfAbsent(java.lang.Object, java.lang.Object);",
+            "public boolean replace(java.lang.Object, java.lang.Object, java.lang.Object);",
+            "public java.lang.Object replace(java.lang.Object, java.lang.Object);",
+            "public java.lang.Object computeIfAbsent(java.lang.Object, java.util.function.Function);",
+            "public java.lang.Object computeIfPresent(java.lang.Object, java.util.function.BiFunction);",
+            "public java.lang.Object compute(java.lang.Object, java.util.function.BiFunction);",
+            "public java.lang.Object merge(java.lang.Object, java.lang.Object, java.util.function.BiFunction);",
         ],
     );
 }
@@ -239,4 +246,65 @@ fn a_member_renamed_by_its_value_class_key_gets_kotlincs_special_get_bridges() {
 #[test]
 fn value_class_map_bridges_answer_like_kotlinc() {
     common::expect_box_same_as_kotlinc(MAPS, "read_only_value_class_map_stubs");
+}
+
+/// The JDK defaults over every kind of argument: a non-null value class takes its carrier
+/// (`computeIfAbsent-4G9NThA(int, Function)int` returns the declared `V`), a nullable result is the
+/// box (`putIfAbsent-kQKnxJI(int, int)Z` returns `V?`), a nullable key stays the box, and a scalar
+/// in the JDK's reference slot is its wrapper (`addFirst(Integer)`, `Integer removeFirst()`), which
+/// leaves the hash to the semantic type. Each class header and every member, code included, is
+/// kotlinc's.
+const REFERENCE_SLOTS: &str = "@JvmInline value class Z(val x: Int)
+
+class Both(map: Map<Z, Z>) : Map<Z, Z> by map
+class Counts(map: Map<Z, Int>) : Map<Z, Int> by map
+class Optional(map: Map<Z?, String>) : Map<Z?, String> by map
+class Ints(private val items: List<Int>) : List<Int> {
+    override val size get() = items.size
+    override fun isEmpty() = items.isEmpty()
+    override fun contains(element: Int) = items.contains(element)
+    override fun containsAll(elements: Collection<Int>) = items.containsAll(elements)
+    override fun get(index: Int) = items[index]
+    override fun indexOf(element: Int) = items.indexOf(element)
+    override fun lastIndexOf(element: Int) = items.lastIndexOf(element)
+    override fun iterator() = items.iterator()
+    override fun listIterator() = items.listIterator()
+    override fun listIterator(index: Int) = items.listIterator(index)
+    override fun subList(fromIndex: Int, toIndex: Int) = items.subList(fromIndex, toIndex)
+}
+class Zs(private val items: List<Z>) : List<Z> {
+    override val size get() = items.size
+    override fun isEmpty() = items.isEmpty()
+    override fun contains(element: Z) = items.contains(element)
+    override fun containsAll(elements: Collection<Z>) = items.containsAll(elements)
+    override fun get(index: Int) = items[index]
+    override fun indexOf(element: Z) = items.indexOf(element)
+    override fun lastIndexOf(element: Z) = items.lastIndexOf(element)
+    override fun iterator() = items.iterator()
+    override fun listIterator() = items.listIterator()
+    override fun listIterator(index: Int) = items.listIterator(index)
+    override fun subList(fromIndex: Int, toIndex: Int) = items.subList(fromIndex, toIndex)
+}
+class Bag(private val items: Collection<Z>) : Collection<Z> {
+    override val size get() = items.size
+    override fun isEmpty() = items.isEmpty()
+    override fun contains(element: Z) = items.contains(element)
+    override fun containsAll(elements: Collection<Z>) = items.containsAll(elements)
+    override fun iterator() = items.iterator()
+}
+";
+
+#[test]
+fn jdk_defaults_take_kotlincs_enhanced_value_class_slots() {
+    let source = packaged(REFERENCE_SLOTS);
+    for class in [
+        "stubs/Both",
+        "stubs/Counts",
+        "stubs/Optional",
+        "stubs/Ints",
+        "stubs/Zs",
+        "stubs/Bag",
+    ] {
+        common::assert_class_code_matches_kotlinc("ReferenceSlotStubs", &source, class);
+    }
 }

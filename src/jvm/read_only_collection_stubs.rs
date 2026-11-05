@@ -25,8 +25,9 @@ use crate::jvm::jvm_class_map::{
 use crate::jvm::jvm_libraries::{declared_desc_to_ty, parse_method_gsig, signature_formals};
 use crate::jvm::mapped_builtin_declarations::{
     collection_bridge_policy_for_declaration, collection_signature_policy_for_declaration,
-    is_mutable_only_jdk_method, realization_for_declaration, CollectionBridgeFailure,
-    CollectionBridgePolicy, CollectionSignaturePolicy, MappedBuiltinMemberKind,
+    enhance_jdk_signature, is_mutable_only_jdk_method, realization_for_declaration,
+    CollectionBridgeFailure, CollectionBridgePolicy, CollectionSignaturePolicy,
+    MappedBuiltinMemberKind,
 };
 use crate::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
 use crate::jvm::names::{method_descriptor, parse_method_descriptor};
@@ -114,6 +115,11 @@ pub(super) struct ReadOnlyStub {
     /// kotlinc's `forceBoxedReturnTypeOnOverride`: a scalar result over the mutable declaration's
     /// reference result is the scalar's wrapper on the JVM (`set(II)Ljava/lang/Integer;`).
     pub(super) boxed_result: bool,
+    /// The parameters a JDK method declares as references that the face's arguments make scalars:
+    /// the JVM slot stays the scalar's wrapper (`putIfAbsent(Integer, Integer)` for `Map<Int,
+    /// Int>`). A physical fact only: the semantic parameter keeps its own nullability. A builtin
+    /// member's scalar parameters are unboxed (`put(String, int)`), so it has none.
+    pub(super) boxed_parameters: Vec<bool>,
     /// The generic signature writes every declaration-site variance of the parameters (kotlinc's
     /// methods with declaration-site wildcards).
     pub(super) declaration_site_wildcards: bool,
@@ -175,7 +181,28 @@ pub(super) enum StubBody {
 
 impl ReadOnlyStub {
     pub(super) fn descriptor(&self) -> String {
-        method_descriptor(&jvm_tys(&self.parameters), self.physical_result())
+        method_descriptor(&self.physical_parameters(), self.physical_result())
+    }
+
+    /// The JVM parameters of the stub's own descriptor.
+    pub(super) fn physical_parameters(&self) -> Vec<Ty> {
+        jvm_tys(&self.signature_parameters())
+    }
+
+    /// The semantic parameters the generic signature is written from: the wrapper where a
+    /// reference slot holds a scalar.
+    pub(super) fn signature_parameters(&self) -> Vec<Ty> {
+        self.parameters
+            .iter()
+            .zip(&self.boxed_parameters)
+            .map(|(&parameter, &boxed)| {
+                if boxed {
+                    Ty::nullable(parameter)
+                } else {
+                    parameter
+                }
+            })
+            .collect()
     }
 
     /// The JVM result of the stub's own descriptor.
@@ -343,7 +370,7 @@ fn class_stubs(
             let erased = stub
                 .bridge
                 .clone()
-                .unwrap_or_else(|| (jvm_tys(&stub.parameters), stub.physical_result()));
+                .unwrap_or_else(|| (stub.physical_parameters(), stub.physical_result()));
             let bridge = (method_descriptor(&erased.0, erased.1)
                 != method_descriptor(&implementation.parameters, implementation.physical_result))
             .then_some(erased);
@@ -378,12 +405,13 @@ fn replaced_by_value_classes(ir: &IrFile, class: &IrClass, stub: ReadOnlyStub) -
         stub.is_renamed(),
         &stub.physical_name,
         &stub.parameters,
+        &stub.boxed_parameters,
         stub.signature_result(),
     );
     let erased = stub
         .bridge
         .clone()
-        .unwrap_or_else(|| (jvm_tys(&stub.parameters), stub.physical_result()));
+        .unwrap_or_else(|| (stub.physical_parameters(), stub.physical_result()));
     let moved = realized.name != stub.physical_name
         || method_descriptor(&realized.parameters, realized.result)
             != method_descriptor(&erased.0, erased.1);
@@ -570,6 +598,7 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
                 physical_name,
                 realized,
                 body: StubBody::Throwing,
+                boxed_parameters: vec![false; parameters.len()],
                 parameters,
                 override_parameters,
                 parameter_names: member.parameter_names,
@@ -599,9 +628,11 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
 /// kotlinc's candidates from the mutable face's JDK interface: each method that interface declares
 /// which only the mutable face carries (`List.sort`, `Map.putIfAbsent`), in classfile order after
 /// the builtin members, unless a builtin member already stands for it (`MutableMap.remove(K, V)`).
-/// A Java signature's uses of the interface's type parameters are platform types, so they take the
-/// face's arguments as references (`putIfAbsent(K, V)` is `(Integer, Integer)` for `Map<Int, Int>`),
-/// and the stub's bridge is the JDK method's own descriptor when that differs.
+/// The declared signature takes kotlinc's predefined enhancement of each position before the face's
+/// arguments are substituted (`merge` of a `Map<String, S?>` takes an `S` and returns an `S?`).
+/// Apart from that, a reference slot holding a scalar stays its wrapper on the JVM
+/// (`putIfAbsent(K, V)` is `(Integer, Integer)` for `Map<Int, Int>`), and the stub's bridge is the
+/// JDK method's own descriptor when that differs.
 fn mutable_jdk_stubs(
     classpath: &Classpath,
     face: Face,
@@ -620,10 +651,8 @@ fn mutable_jdk_stubs(
     if formals.len() != arguments.len() {
         return Vec::new();
     }
-    let bindings: HashMap<String, Ty> = formals
-        .into_iter()
-        .zip(arguments.iter().map(|argument| Ty::nullable(*argument)))
-        .collect();
+    let bindings: HashMap<String, Ty> =
+        formals.into_iter().zip(arguments.iter().copied()).collect();
     interface
         .methods
         .iter()
@@ -642,49 +671,64 @@ fn mutable_jdk_stubs(
             let (erased_parameters, erased_result) = parse_method_descriptor(&method.descriptor)?;
             let erased_parameters: Vec<Ty> = erased_parameters
                 .into_iter()
-                .map(|parameter| jvm_declared_ty(&declared_desc_to_ty(parameter)))
+                .map(declared_desc_to_ty)
                 .collect();
-            let erased_result = jvm_declared_ty(&declared_desc_to_ty(erased_result));
-            let (parameters, result) = match method.signature.as_deref() {
+            let erased_result = declared_desc_to_ty(erased_result);
+            let (declared_parameters, declared_result) = match method.signature.as_deref() {
                 Some(signature) => {
                     let declared = parse_method_gsig(signature)?;
-                    (
-                        declared
-                            .params
-                            .iter()
-                            .map(|ty| ty_subst_applied_arguments(*ty, &bindings))
-                            .collect(),
-                        ty_subst_applied_arguments(declared.ret, &bindings),
-                    )
+                    (declared.params, declared.ret)
                 }
                 None => (erased_parameters.clone(), erased_result),
             };
-            let realized = StubRealization {
-                name: method.name.clone(),
-                parameters: jvm_tys(&parameters),
-                result: physical_stub_result(result, false),
-                result_box: None,
-            };
-            let stub_descriptor = method_descriptor(&realized.parameters, realized.result);
-            let bridge = (method.descriptor != stub_descriptor)
-                .then_some((erased_parameters, erased_result));
-            Some(ReadOnlyStub {
+            let (enhanced_parameters, enhanced_result) = enhance_jdk_signature(
+                jvm_owner,
+                &method.name,
+                &method.descriptor,
+                &declared_parameters,
+                declared_result,
+            );
+            let parameters: Vec<Ty> = enhanced_parameters
+                .iter()
+                .map(|ty| ty_subst_applied_arguments(*ty, &bindings))
+                .collect();
+            let result = ty_subst_applied_arguments(enhanced_result, &bindings);
+            let boxed_parameters = parameters
+                .iter()
+                .zip(&declared_parameters)
+                .map(|(&parameter, &declared)| scalar_over_reference(parameter, declared))
+                .collect();
+            let boxed_result = scalar_over_reference(result, declared_result);
+            let erased_parameters = jvm_tys(&erased_parameters);
+            let erased_result = jvm_declared_ty(&erased_result);
+            let mut stub = ReadOnlyStub {
                 name: method.name.clone(),
                 physical_name: method.name.clone(),
-                realized,
+                realized: StubRealization {
+                    name: method.name.clone(),
+                    parameters: Vec::new(),
+                    result: Ty::Unit,
+                    result_box: None,
+                },
                 body: StubBody::Throwing,
                 parameter_names: (0..parameters.len())
                     .map(crate::jvm::parameter_names::unnamed_java_parameter)
                     .collect(),
                 override_parameters: parameters.clone(),
                 parameters,
+                boxed_parameters,
                 result,
-                boxed_result: false,
+                boxed_result,
                 declaration_site_wildcards: false,
-                bridge,
+                bridge: None,
                 type_safe: false,
                 barrier: None,
-            })
+            };
+            stub.realized.parameters = stub.physical_parameters();
+            stub.realized.result = stub.physical_result();
+            stub.bridge = (method.descriptor != stub.descriptor())
+                .then_some((erased_parameters, erased_result));
+            Some(stub)
         })
         .collect()
 }

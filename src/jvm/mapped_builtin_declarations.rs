@@ -8,8 +8,10 @@ use crate::libraries::LibraryMember;
 use crate::types::{type_name, TypeName};
 
 mod mutable_jdk_methods;
+mod predefined_enhancements;
 
 pub(super) use mutable_jdk_methods::is_mutable_only_jdk_method;
+pub(super) use predefined_enhancements::enhance_jdk_signature;
 
 const SPECIAL_REALIZATIONS_2_4: &str =
     include_str!("mapped_builtin_declarations/special_realizations_2_4.tsv");
