@@ -1507,9 +1507,10 @@ fn stdlib_calls_reach_header_declared_callees() {
     // Selected generic roots now pass their own declared headers and can reach unselected
     // generic callees. These exact deeper-decline counts are measured on every manifest release;
     // they are not expected-failure allowances for executable conformance tests. Elvis and safe-call
-    // blocks, then generic calls and `when` subject blocks, then declarations with parameter
-    // defaults, now reach further declared callees; the same complete inputs were measured on
-    // every release.
+    // blocks, then generic calls and `when` subject blocks, now reach further declared callees;
+    // so do callees that declare parameter defaults, which their headers now carry, and the
+    // body calls that leave an argument to such a default. The same complete inputs were
+    // measured on every release.
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
@@ -1560,7 +1561,7 @@ fn stdlib_calls_reach_header_declared_callees() {
 }
 
 /// Bodies that declined at their first call before callees were declared from their headers, and
-/// now decline inside the callee.
+/// now decline inside the callee or, once that callee lowers, further on in their own body.
 #[test]
 fn stdlib_bodies_decline_inside_header_declared_callees() {
     let Some(root) = super::distribution_root() else {

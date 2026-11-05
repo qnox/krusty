@@ -7,8 +7,6 @@
 //! statement of another type to `Unit`. This module rebuilds the source shape from the statement
 //! forms, so a block lowers to the block checked FIR lowering produces for its source.
 
-use super::super::function_lowering::FunctionHeader;
-use super::super::ir_builtins::IrBuiltinOperators;
 use super::{mismatch, unsupported, BodyLowering, CallLinker, Lowered, LoweredFunction};
 use crate::ir::{ExprId, IrExpr, IrFile};
 use crate::metadata::klib_ir::tree::{
@@ -18,6 +16,8 @@ use crate::metadata::klib_ir::KlibIrConstant;
 use crate::types::Ty;
 
 use super::super::decline::KlibBodyDeclineReason;
+use super::super::function_lowering::FunctionHeader;
+use super::super::ir_builtins::IrBuiltinOperators;
 
 impl BodyLowering<'_> {
     /// The function's body. Checked FIR lowering lowers a block body as the source block, typed
@@ -45,34 +45,45 @@ impl BodyLowering<'_> {
         Ok(body)
     }
 
-    /// Each parameter's default, lowered as checked FIR lowers a source default: a value of the
-    /// parameter's declared type, which may read the parameters before it. `None` when the
-    /// function declares none, as checked FIR lowering publishes no defaults for it.
-    pub(in super::super) fn parameter_defaults(
-        arena: &KlibIrArena,
-        function: LoweredFunction<'_>,
-        header: &FunctionHeader,
-        builtins: &IrBuiltinOperators,
-        ir: &mut IrFile,
-        linker: &mut dyn CallLinker,
-    ) -> Lowered<Option<Vec<Option<ExprId>>>> {
-        if header.defaults().iter().all(Option::is_none) {
-            return Ok(None);
-        }
-        let mut defaults = Vec::with_capacity(header.params().len());
-        for (default, &declared) in header.defaults().iter().zip(header.params()) {
-            defaults.push(match *default {
-                // Each default is its own expression of the declaration's frame.
-                Some(default) => Some(
-                    BodyLowering::new(arena, function, header, builtins, ir, linker)
-                        .declared_operand(default, declared)?,
-                ),
-                None => None,
-            });
-        }
-        Ok(Some(defaults))
+    /// A parameter's default, lowered as checked FIR lowers the source default: a value of the
+    /// parameter's declared type, which may read the parameters before it.
+    fn default_value(mut self, default: KlibIrExprId, declared: Ty) -> Lowered<ExprId> {
+        self.declared_operand(default, declared)
     }
+}
 
+/// Publish the serialized parameter defaults of `function`, each lowered in the function's own
+/// frame, as checked FIR lowering publishes a source declaration's: one slot per parameter, and
+/// only when the declaration has a default at all.
+pub(in super::super) fn publish_parameter_defaults(
+    arena: &KlibIrArena,
+    function: LoweredFunction<'_>,
+    header: &FunctionHeader,
+    builtins: &IrBuiltinOperators,
+    ir: &mut IrFile,
+    linker: &mut dyn CallLinker,
+) -> Lowered<()> {
+    if header.defaults().iter().all(Option::is_none) {
+        return Ok(());
+    }
+    let mut defaults = Vec::with_capacity(header.params().len());
+    for (default, &declared) in header.defaults().iter().zip(header.params()) {
+        defaults.push(match *default {
+            Some(default) => Some(
+                BodyLowering::new(arena, function, header, builtins, ir, linker)
+                    .default_value(default, declared)?,
+            ),
+            None => None,
+        });
+    }
+    ir.fn_params
+        .get_mut(&function.function)
+        .expect("a declared function publishes its parameters")
+        .defaults = Some(defaults);
+    Ok(())
+}
+
+impl BodyLowering<'_> {
     /// Whether `statement` is a loop whose condition is the constant `true` and whose lowered
     /// body contains no `break` naming that loop.
     fn loops_forever(&self, statement: &KlibIrStatement) -> bool {

@@ -16,8 +16,8 @@
 //! template leaves the file as it was.
 
 use super::body_lowering::{
-    BodyLowering, CallLinker, LinkedAccessor, LinkedCallableReference, LinkedCallee,
-    LinkedConstructor, LoweredFunction,
+    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor, LinkedCallableReference,
+    LinkedCallee, LinkedConstructor, LoweredFunction,
 };
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::function_header;
@@ -176,7 +176,7 @@ fn lower(
     )
     .body(statements)?;
     ir.functions[template as usize].body = Some(body);
-    if let Some(defaults) = BodyLowering::parameter_defaults(
+    publish_parameter_defaults(
         arena,
         LoweredFunction {
             symbol: &function.base.symbol,
@@ -186,12 +186,7 @@ fn lower(
         &builtins,
         ir,
         &mut calls,
-    )? {
-        ir.fn_params
-            .get_mut(&template)
-            .expect("a declared function publishes its parameters")
-            .defaults = Some(defaults);
-    }
+    )?;
     ir.inline_fns.insert(template);
     ir.inline_only_fns.insert(template);
     Ok(template)
