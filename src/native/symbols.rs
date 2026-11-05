@@ -191,7 +191,7 @@ fn mangle_ty(out: &mut String, ty: crate::types::Ty) -> Option<()> {
         TyKind::StarProjection(bound) => nested(out, 'S', bound)?,
         TyKind::RawProjection(erased) => nested(out, 'J', erased)?,
         TyKind::DefinitelyNotNull(inner) => nested(out, 'D', inner)?,
-        TyKind::Error | TyKind::Pending => return None,
+        TyKind::Error | TyKind::Pending | TyKind::Var(..) => return None,
     }
     Some(())
 }

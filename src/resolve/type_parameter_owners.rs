@@ -156,7 +156,9 @@ impl TypeParameterNumbering {
 /// Every type-parameter identity `ty` mentions, in the order a rendering of it writes them.
 pub(super) fn mentioned_type_parameters(ty: Ty, mentioned: &mut Vec<&'static str>) {
     match ty.kind() {
-        TyKind::TyParam(parameter, _) => mentioned.push(parameter.as_str()),
+        TyKind::TyParam(parameter, _) | TyKind::Var(parameter, _) => {
+            mentioned.push(parameter.as_str())
+        }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
         | TyKind::MutabilityFlexible(inner)
@@ -181,7 +183,7 @@ pub(super) fn mentioned_type_parameters(ty: Ty, mentioned: &mut Vec<&'static str
 /// Every type-parameter identity `ty` explicitly mentions in source position order.
 pub(super) fn ty_param_names_into(ty: Ty, out: &mut Vec<&'static str>) {
     match ty.kind() {
-        TyKind::TyParam(name, _) => out.push(name.as_str()),
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => out.push(name.as_str()),
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
         | TyKind::MutabilityFlexible(inner)
@@ -211,7 +213,7 @@ fn nullable_type_parameter(ty: Ty) -> Option<&'static str> {
     let TyKind::Nullable(inner) = ty.kind() else {
         return None;
     };
-    let TyKind::TyParam(parameter, _) = inner.kind() else {
+    let (TyKind::TyParam(parameter, _) | TyKind::Var(parameter, _)) = inner.kind() else {
         return None;
     };
     Some(parameter.as_str())
