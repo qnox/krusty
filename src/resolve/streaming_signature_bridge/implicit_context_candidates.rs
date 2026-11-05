@@ -194,12 +194,12 @@ impl ProductionSignatureSemantics<'_> {
                 let mut inferred = crate::symbol_resolver::GSigBinds::default();
                 crate::symbol_resolver::unify_ty(signature.ret, expected, &mut inferred);
                 for (formal, ty) in inferred {
-                    if signature.formals.contains(&formal)
+                    if signature.formals.iter().any(|declared| *declared == formal)
                         && !ty.mentions_pending()
                         && ty != Ty::Error
                     {
-                        bindings.entry(formal.clone()).or_insert(ty);
-                        fixed_formals.push(formal);
+                        bindings.entry(formal).or_insert(ty);
+                        fixed_formals.push(formal.to_string());
                     }
                 }
             }
@@ -229,12 +229,15 @@ impl ProductionSignatureSemantics<'_> {
                     let fixed_bindings = fixed_formals
                         .iter()
                         .filter_map(|formal| {
-                            bindings.get(formal).copied().map(|ty| (formal.clone(), ty))
+                            bindings
+                                .get(formal.as_str())
+                                .copied()
+                                .map(|ty| (formal.clone(), ty))
                         })
                         .collect::<Vec<_>>();
                     crate::symbol_resolver::unify_inferred_ty(parameter, actual, &mut bindings);
                     for (formal, ty) in fixed_bindings {
-                        bindings.insert(formal, ty);
+                        bindings.insert(crate::types::TyParamName::new(&formal), ty);
                     }
                 }
                 None => complete = false,

@@ -41,7 +41,7 @@ impl Checker<'_> {
                 self.file
                     .explicit_type_arguments_in_property_access_warning
                     .as_deref(),
-                crate::diag::CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess,
+                crate::diag::names::EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING,
                 MESSAGE,
             );
         } else {

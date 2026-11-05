@@ -30,6 +30,7 @@ mod objects;
 mod scalar_instructions;
 mod shared_cells;
 mod string_conversion;
+pub(super) mod value_hash;
 
 #[cfg(test)]
 use tests::lower_alone;
@@ -41,6 +42,7 @@ pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntr
         || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
+        || operation == crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
 }
 
 use crate::backend::class_tables::module_interfaces::ModuleInterfaces;
@@ -1110,6 +1112,9 @@ impl<'a> Body<'a> {
             {
                 self.throwable_message(dispatch_receiver, &args, *ret)?;
             }
+            IrExpr::Call { .. } if value_hash::call_kind(self.ir, self.callables, id).is_some() => {
+                self.value_hash_call(id)?;
+            }
             IrExpr::Call {
                 callee: ref call_callee,
                 dispatch_receiver,
@@ -1675,6 +1680,17 @@ impl<'a> Body<'a> {
                 self.code.ref_eq();
             }
             (None, Some(ValType::Ref { .. })) | (Some(ValType::Ref { .. }), None) => {
+                self.object_equality(lhs, rhs)?
+            }
+            // `any == 3`: the primitive side is boxed and the left value's `equals` decides, as
+            // kotlinc's `Intrinsics.areEqual` does. IEEE-754 equality of a nullable floating
+            // value is a different relation and stays unsupported.
+            (Some(ValType::Ref { .. }), Some(scalar))
+            | (Some(scalar), Some(ValType::Ref { .. }))
+                if rank(scalar).is_some()
+                    && matches!(op, IrBinOp::Eq | IrBinOp::Ne)
+                    && mode != EqualityMode::Ieee754 =>
+            {
                 self.object_equality(lhs, rhs)?
             }
             _ => {

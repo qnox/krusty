@@ -1,7 +1,7 @@
 //! Value classes through the native code generator.
 //!
 //! What a value class IS comes from the checked declarations, and how this target carries one is
-//! its representation policy (`native::value_classes`): a non-null `V` is its value, a `V?` is its
+//! the KLIB backends' representation policy (`backend::value_classes`): a non-null `V` is its value, a `V?` is its
 //! value where the value's own `null` is free to mean the outer one, and a BOX of `V`'s own type
 //! everywhere a position does not know it holds a `V`. These programs cross every one of those
 //! boundaries, because a crossing is where a wrong representation shows: a box answering as the
