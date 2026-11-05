@@ -59,7 +59,7 @@ pub struct PropertyAnnotations {
 /// Checked applications on a package property's own declaration and its backing field. Accessor
 /// applications retain their separate checked accessor identities.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct PackagePropertyAnnotations {
+pub struct PackagePropertyAnnotations {
     /// Checked PROPERTY or FIELD destinations declare property metadata annotations. Accessor-only
     /// destinations retain their own flags. Presence is independent of the PROPERTY-site payload.
     pub declares_metadata_annotations: bool,
@@ -91,7 +91,7 @@ pub struct DeclarationAnnotations {
 
 impl DeclarationAnnotations {
     /// These annotations without the applications of `annotation`.
-    pub(crate) fn without(&self, annotation: TypeName) -> Self {
+    pub fn without(&self, annotation: TypeName) -> Self {
         let checked = self.retained.len() - self.lowered;
         let mut retained = Vec::with_capacity(self.retained.len());
         let mut lowered = 0;
@@ -163,13 +163,13 @@ impl DeclarationAnnotations {
     }
 
     /// Whether ordinary SOURCE presence survives independently of its dropped payload.
-    pub(crate) fn has_source_application(&self) -> bool {
+    pub fn has_source_application(&self) -> bool {
         !self.source_applications.is_empty()
     }
 
     /// Whether a checked application of `annotation`, of any retention, is written on the
     /// declaration.
-    pub(crate) fn declares(&self, annotation: TypeName) -> bool {
+    pub fn declares(&self, annotation: TypeName) -> bool {
         self.applications()
             .any(|application| application.internal == annotation)
             || self.source_applications.contains(&annotation)

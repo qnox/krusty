@@ -20,8 +20,9 @@ mod capture_order;
 mod capture_parameters;
 pub use capture_parameters::FirCaptureParameter;
 mod class_captures;
+pub use class_captures::ClassCaptureIdentity;
 pub(crate) use class_captures::{
-    ClassBodyContext, ClassCaptureBinding, ClassCaptureIdentity, ClassReceiverCaptureSource,
+    ClassBodyContext, ClassCaptureBinding, ClassReceiverCaptureSource,
 };
 mod lifting_sites;
 mod local_type_parameters;

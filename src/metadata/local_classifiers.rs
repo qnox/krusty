@@ -12,7 +12,7 @@ use crate::types::TypeName;
 /// anonymous object too, so what it nests is local, although the body itself keeps an ordinary
 /// member's nullability annotations. kotlinc's lambda and callable-reference classes are local
 /// too; their writers here annotate nothing to begin with.
-pub(crate) fn is_local(ir: &IrFile, class: &IrClass) -> bool {
+pub fn is_local(ir: &IrFile, class: &IrClass) -> bool {
     is_local_in(ir, class, &|owner| ir.class_id_by_name(owner))
 }
 
@@ -56,7 +56,7 @@ pub(crate) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<Str
 /// classes rather than a scan of them per lookup. Locality starts at a local class, an anonymous
 /// object or an enum entry body: a file declaring none of them has no local class id, and its
 /// classes' owners need no lookup at all.
-pub(crate) fn names(ir: &IrFile) -> HashSet<TypeName> {
+pub fn names(ir: &IrFile) -> HashSet<TypeName> {
     if !ir
         .classes
         .iter()
@@ -81,7 +81,7 @@ pub(crate) fn names(ir: &IrFile) -> HashSet<TypeName> {
 
 /// The enum entry bodies of the file. Their local class ids keep the entry's `Enum.ENTRY` name
 /// rather than the raw internal name a local class's id takes, and so do the ids nested in them.
-pub(crate) fn enum_entry_bodies(ir: &IrFile) -> HashSet<TypeName> {
+pub fn enum_entry_bodies(ir: &IrFile) -> HashSet<TypeName> {
     ir.classes
         .iter()
         .filter(|class| class.is_enum_entry)

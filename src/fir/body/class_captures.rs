@@ -29,7 +29,7 @@ pub(crate) struct ClassCaptureBinding {
 /// An implicit receiver is the checker's receiver-rung identity, shared by every classifier that
 /// captured that rung. Label spelling is not part of either coordinate.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum ClassCaptureIdentity {
+pub enum ClassCaptureIdentity {
     Field { owner: TypeName, field: u32 },
     Receiver(u32),
 }

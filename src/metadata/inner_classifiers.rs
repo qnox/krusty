@@ -11,7 +11,7 @@ use crate::types::TypeName;
 
 /// The split of `classifier` when it is an `inner` class. `Ok(None)` means a checked non-inner
 /// declaration; `Err(classifier)` means the backend boundary supplied no declaration fact.
-pub(crate) fn inner_classifier(
+pub fn inner_classifier(
     ir: &IrFile,
     symbols: &dyn BackendClassifierSource,
     classifier: TypeName,

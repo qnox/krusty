@@ -77,7 +77,7 @@ impl IrGeneratedDeclarationDebug {
 /// The `Any` member a value class's synthesis generated because source did not declare it. Each
 /// is published in `@Metadata` like kotlinc's synthesized override, in this declaration order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum IrValueClassAnyMember {
+pub enum IrValueClassAnyMember {
     Equals,
     HashCode,
     ToString,
@@ -123,7 +123,7 @@ pub struct IrGeneratedMemberPublication {
 /// exact edge when it declares the function; a later phase completing the function finds it here,
 /// never by its name, arity or synthetic flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum IrGeneratedFunctionRole {
+pub enum IrGeneratedFunctionRole {
     SerializationDescriptor,
     SerializationSerialize,
     SerializationDeserialize,
@@ -137,7 +137,7 @@ pub(crate) enum IrGeneratedFunctionRole {
 
 /// A compiler-generated classifier's semantic role within its source owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum IrGeneratedClassRole {
+pub enum IrGeneratedClassRole {
     /// kotlinx.serialization's nested `$serializer` classifier.
     SerializationSerializer,
 }
@@ -189,7 +189,7 @@ impl IrFile {
 
     /// Whether `function` is a member kotlinc's IR plugin adds to `owner` after its declared
     /// members and constructors.
-    pub(crate) fn follows_declared_constructors(&self, owner: TypeName, function: FunId) -> bool {
+    pub fn follows_declared_constructors(&self, owner: TypeName, function: FunId) -> bool {
         self.generated_functions
             .iter()
             .any(|(&(member_owner, role), &member)| {
@@ -314,7 +314,7 @@ impl IrFile {
         self.generated_member_publications.get(&owner)
     }
 
-    pub(crate) fn generated_function_publication(
+    pub fn generated_function_publication(
         &self,
         function: FunId,
     ) -> Option<&IrGeneratedFunctionPublication> {

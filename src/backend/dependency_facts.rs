@@ -10,8 +10,8 @@
 
 mod references;
 
-#[cfg(test)]
-pub(crate) use references::referenced_dependencies;
+#[cfg(any(test, feature = "test-support"))]
+pub use references::referenced_dependencies;
 
 use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
@@ -96,14 +96,13 @@ pub struct BackendCallableFact {
     /// Exact Native C entry the selected interop declaration's provider authenticated.
     pub direct_c_function: Option<DirectCFunction>,
     /// Frozen KLIB-only receiver contract for an associated companion extension body.
-    pub(crate) klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
-    pub(crate) klib_body_type_parameters: Box<[Ty]>,
-    pub(crate) klib_body_declaration_modifiers:
-        Option<crate::libraries::KlibBodyDeclarationModifiers>,
-    pub(crate) klib_body_class_contract: Option<crate::libraries::KlibBodyClassContract>,
-    pub(crate) klib_body_accessor: Option<crate::libraries::KlibBodyAccessor>,
-    pub(crate) klib_body_vararg_index: Option<usize>,
-    pub(crate) klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
+    pub klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
+    pub klib_body_type_parameters: Box<[Ty]>,
+    pub klib_body_declaration_modifiers: Option<crate::libraries::KlibBodyDeclarationModifiers>,
+    pub klib_body_class_contract: Option<crate::libraries::KlibBodyClassContract>,
+    pub klib_body_accessor: Option<crate::libraries::KlibBodyAccessor>,
+    pub klib_body_vararg_index: Option<usize>,
+    pub klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
     /// Qualified identities of the annotations the provider recorded on this declaration. A
     /// compiler plugin keys its own calling convention on them (Compose's `@Composable`).
     pub annotations: Box<[TypeName]>,
@@ -159,7 +158,7 @@ impl BackendCallableFact {
     /// The serialized receiver coordinate retained by an associated companion extension body.
     /// Source calls have no receiver operand; a target may insert an inert reference only when
     /// this exact provider contract and the lowered body's receiver effect are both present.
-    pub(crate) fn klib_body_companion_receiver_position(&self) -> Option<usize> {
+    pub fn klib_body_companion_receiver_position(&self) -> Option<usize> {
         self.klib_body_companion_receiver
             .as_ref()
             .map(|_| self.context_count)
@@ -168,7 +167,7 @@ impl BackendCallableFact {
     /// Authenticate a serialized associated-extension call whose dependency body already carries
     /// the retained companion receiver in `call_params`. This is a provider-owned callable-shape
     /// check, so target registries do not need to import the compiler type model to repeat it.
-    pub(crate) fn serialized_companion_receiver_position(
+    pub fn serialized_companion_receiver_position(
         &self,
         call_params: &[Ty],
         extension_receiver_parameter: Option<u32>,
@@ -608,13 +607,13 @@ pub struct CheckedBackendCallables {
 
 impl CheckedBackendCallables {
     /// Whether native plugins selected `identity` at the handoff for the code they generate.
-    pub(crate) fn is_plugin_runtime_callable(&self, identity: ExternalCallableId) -> bool {
+    pub fn is_plugin_runtime_callable(&self, identity: ExternalCallableId) -> bool {
         self.plugin_runtime.contains_key(&identity)
     }
 
     /// The parameters a native plugin's transform appended to the runtime declaration `identity`,
     /// which its generated calls pass after the declared ones; empty for any other declaration.
-    pub(crate) fn plugin_runtime_appended(&self, identity: ExternalCallableId) -> &[Ty] {
+    pub fn plugin_runtime_appended(&self, identity: ExternalCallableId) -> &[Ty] {
         self.plugin_runtime
             .get(&identity)
             .map_or(&[], |appended| appended)
@@ -648,10 +647,7 @@ impl CheckedBackendCallables {
     }
 
     /// Exact singleton dispatch chosen for this checked call edge, if it has one.
-    pub(crate) fn singleton_dispatch(
-        &self,
-        expression: crate::ir::ExprId,
-    ) -> Option<SingletonDispatch> {
+    pub fn singleton_dispatch(&self, expression: crate::ir::ExprId) -> Option<SingletonDispatch> {
         self.singleton_dispatches.get(&expression).copied()
     }
 
@@ -667,7 +663,7 @@ impl CheckedBackendCallables {
     }
 
     /// Copy the provider's facts for every dependency identity `ir` references.
-    pub(crate) fn freeze(
+    pub fn freeze(
         ir: &crate::ir::IrFile,
         provider: &dyn SymbolSource,
     ) -> Result<Self, DependencyFactError> {
@@ -753,7 +749,7 @@ impl CheckedBackendCallables {
     /// ordinary file facts were copied. Re-scan that narrow carrier in the now-final IR at this one
     /// boundary; identities already present remain the original frozen records, while each newly
     /// selected identity is copied exactly once before super-call realization consumes it.
-    pub(crate) fn freeze_plugin_super_callables(
+    pub fn freeze_plugin_super_callables(
         &mut self,
         ir: &crate::ir::IrFile,
         provider: impl FnMut(

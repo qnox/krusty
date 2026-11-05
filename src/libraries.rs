@@ -4,7 +4,7 @@ mod annotation_application;
 mod annotation_argument_provenance;
 mod array_factories;
 pub(crate) mod builtin_declaration;
-pub(crate) mod builtin_member_realization;
+pub mod builtin_member_realization;
 pub(crate) mod builtin_top_level_realization;
 mod call_arg_mapping_failure;
 mod call_realization;
@@ -24,7 +24,7 @@ mod dependency_access_policy;
 mod dependency_body_contract;
 mod dependency_body_modifiers;
 mod enhanced_nullability;
-pub(crate) mod function_classifiers;
+pub mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod inline_kind;
@@ -35,7 +35,7 @@ mod member_flags;
 mod member_records;
 mod metadata_normalization;
 mod param_flags;
-pub(crate) mod physical_parameter_plan;
+pub mod physical_parameter_plan;
 mod platform_abi;
 mod platform_contract;
 mod property_producer;
@@ -52,13 +52,14 @@ pub use annotation_application::{
 };
 pub use annotation_argument_provenance::AnnotationArgumentProvenance;
 pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
+pub(crate) use call_realization::KlibBodyCallableShape;
+pub use call_realization::KlibBodyCompanionReceiver;
 pub use call_realization::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
     ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
     KlibDependencyCallable, NonvirtualCallRealization, OverriddenCallKind,
     OverriddenCallRealization,
 };
-pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::{

@@ -158,7 +158,7 @@ fn declares_defaults(ir: &IrFile, function: FunId) -> bool {
 
 /// The entry of `declaration` that callers this file cannot see reach, when it publishes one: the
 /// entry of a top-level declaration with defaults, built whether or not this file calls it.
-pub(crate) fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> {
+pub fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> {
     is_publishable(ir, declaration)
         .then(|| ir.default_entries.get(&declaration).copied())
         .flatten()
@@ -167,7 +167,7 @@ pub(crate) fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> 
 /// The identities other files of the module call `declaration`'s entry by: the declaration whose
 /// defaults it evaluates. An `actual` declaration's entry is keyed by its `expect`, which is what
 /// the callers selected; one whose defaults come from a dependency has no module identity.
-pub(crate) fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> {
+pub fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> {
     if ir.functions[declaration as usize]
         .dispatch_receiver
         .is_some()

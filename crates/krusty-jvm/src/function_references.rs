@@ -1,0 +1,1090 @@
+//! JVM realization of checked dependency function references.
+//!
+//! FIR has already selected the declaration and fixed the logical invocation signature. This pass
+//! performs one provider-identity lookup to attach JVM owner/name/descriptor facts and synthesizes
+//! the runtime `FunctionReferenceImpl` carrier; it does not resolve a source name or select an
+//! overload.
+
+use krusty::fir::ExternalCallableId;
+use krusty::ir::{ExprId, FrDispatch, FuncRef, IrClass, IrExpr, IrFile};
+use krusty::jvm::classpath::ExternalCallableKind;
+use krusty::types::{type_name, Ty, TyKind};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FunctionReferenceRealizationTarget {
+    External(ExternalCallableId),
+    Module(krusty::fir::CallableId),
+    Adapter(krusty::ir::FunId),
+    Invalid,
+}
+
+fn adapted_flags(adaptation: &krusty::fir::FirReferenceAdaptation, declaration_result: Ty) -> i32 {
+    let vararg_conversion = adaptation.arguments.iter().any(|argument| {
+        matches!(
+            argument,
+            krusty::fir::FirAdaptedReferenceArgument::Vararg {
+                whole_array: false,
+                ..
+            }
+        )
+    });
+    let unit_conversion =
+        adaptation.result_type.get() == Ty::Unit && declaration_result != Ty::Unit;
+    i32::from(vararg_conversion)
+        | (i32::from(adaptation.suspend_conversion) << 1)
+        | (i32::from(unit_conversion) << 2)
+}
+
+/// The JVM type of a reflected declaration slot specialized through a covariant capture. The
+/// capture records its exact upper bound, which is the declaration's erased value type. An `in`
+/// projection records only a lower bound and remains intact for the descriptor boundary to erase
+/// to `Object`; it cannot be narrowed to its write-only lower bound.
+fn reflection_descriptor_ty(ty: Ty) -> Ty {
+    match ty.kind() {
+        TyKind::OutProjection(upper_bound) | TyKind::StarProjection(upper_bound) => upper_bound,
+        _ => ty,
+    }
+}
+
+/// Reflection names the method the declaration was compiled as. A use-site specialization of
+/// that declaration (`::foo` typed `KFunction1<Int, Int>`) belongs to the adapter, not to this
+/// descriptor: the generic method is still the declaration's erased JVM signature
+/// (`foo(Ljava/lang/Object;)Ljava/lang/Object;` for an unbounded `T`, and
+/// `foo(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;` when `T : CharSequence`).
+///
+/// A companion-associated extension's receiver names the classifier whose static scope it joins.
+/// It is not a parameter of the method kotlin-reflect looks up. The receiver is identified by the
+/// parameter identity parallel to the declaration parameter; a signature whose identities do not
+/// line up is not a different reflection shape.
+fn module_declaration_reflection(
+    declaration: &krusty::ir::IrModuleCallable,
+) -> Result<(Vec<Ty>, Ty), FunctionReferenceRealizationTarget> {
+    let companion = declaration
+        .flags
+        .has(krusty::fir::DeclarationFlags::COMPANION);
+    let parameters = if companion {
+        if declaration.parameters.len() != declaration.parameter_identities.len() {
+            return Err(FunctionReferenceRealizationTarget::Invalid);
+        }
+        declaration
+            .parameters
+            .iter()
+            .zip(declaration.parameter_identities.iter())
+            .filter(|(_, identity)| identity.role != krusty::ir::IrParameterRole::ExtensionReceiver)
+            .map(|(parameter, _)| *parameter)
+            .collect()
+    } else {
+        declaration.parameters.to_vec()
+    };
+    let parameters = super::generic_erasure::erased_callable_parameters(
+        &parameters,
+        &declaration.type_parameters,
+    );
+    let result = super::generic_erasure::erased_callable_parameters(
+        std::slice::from_ref(&declaration.result),
+        &declaration.type_parameters,
+    );
+    let Some(result) = result.into_iter().next() else {
+        return Err(FunctionReferenceRealizationTarget::Invalid);
+    };
+    Ok((parameters, result))
+}
+
+/// The class a callable reference at `expression` compiles to: the name the source file's
+/// local-class naming walk gives it. A reference that walk never saw (one lowering synthesized, or
+/// a second copy an inline splice made) keeps an internal name.
+pub(super) fn reference_class_name(
+    ir: &IrFile,
+    current_facade: &str,
+    expression: usize,
+    kind: &str,
+) -> krusty::types::TypeName {
+    u32::try_from(expression)
+        .ok()
+        .and_then(|raw| crate::local_class_names::callable_reference_name(ir, raw))
+        // A second node carrying the same source name is a copy of the first; it cannot share
+        // the class.
+        .filter(|name| ir.classes.iter().all(|class| class.fq_name != *name))
+        .unwrap_or_else(|| type_name(&format!("{current_facade}$fir${kind}${}", ir.classes.len())))
+}
+
+/// What a carrier reflects for a dependency target: kotlinc names the declaration's physical
+/// owner and JVM signature, except that a member is owned by the classifier it was referenced on.
+/// A top-level or extension function is flagged top-level, as its owner is a file facade. A package
+/// builtin the compiler implements has no facade: kotlinc reflects it on `Intrinsics.Kotlin`, not
+/// top-level, with the JVM signature its declaration maps to.
+fn external_reflection(
+    callables: &krusty::backend::CheckedBackendCallables,
+    declaration: ExternalCallableId,
+    receiver: Option<Ty>,
+) -> Result<
+    (
+        Option<krusty::types::TypeName>,
+        String,
+        bool,
+        Option<String>,
+    ),
+    FunctionReferenceRealizationTarget,
+> {
+    let callable = callables
+        .callable(declaration)
+        .cloned()
+        .ok_or(FunctionReferenceRealizationTarget::External(declaration))?;
+    let name = callable
+        .reflection_name
+        .clone()
+        .unwrap_or_else(|| callable.name.clone());
+    let physical_name = callable.physical_name().to_string();
+    let descriptor = if callable.descriptor.is_empty() {
+        // A compiler-implemented declaration has no JVM method; its signature is the one its
+        // declaration maps to. That includes a member the provider realizes as a compiler
+        // operation (an array's `get`), which kotlinc reflects by that same mapped signature.
+        let compiler_implemented = callable.compiler_intrinsic.is_some()
+            || matches!(
+                callable.member_realization,
+                krusty::libraries::MemberRealization::Intrinsic(_)
+            );
+        if !compiler_implemented {
+            return Err(FunctionReferenceRealizationTarget::External(declaration));
+        }
+        let parameters = callable
+            .physical_params
+            .iter()
+            .map(krusty::jvm::physical_type::ir_ty_to_jvm)
+            .collect::<Vec<_>>();
+        krusty::jvm::names::method_descriptor(
+            &parameters,
+            krusty::jvm::physical_type::ir_ty_to_jvm(&callable.physical_ret),
+        )
+    } else {
+        callable.descriptor.clone()
+    };
+    let (owner_class, physical_name, top_level) = match callable.kind {
+        ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
+            if callable.descriptor.is_empty() =>
+        {
+            (
+                Some(krusty::types::wk::kotlin_intrinsics_reflection_owner()),
+                physical_name.as_str(),
+                false,
+            )
+        }
+        ExternalCallableKind::TopLevel | ExternalCallableKind::Extension => {
+            (Some(callable.physical_owner), physical_name.as_str(), true)
+        }
+        ExternalCallableKind::Member => (
+            receiver.and_then(Ty::kotlin_class_internal),
+            krusty::jvm::names::mapped_builtin_virtual_name(
+                callable.physical_owner,
+                &physical_name,
+                &descriptor,
+            ),
+            false,
+        ),
+        // A selected function reference names a function, never a constructor or a field.
+        _ => return Err(FunctionReferenceRealizationTarget::External(declaration)),
+    };
+    let signature = format!("{physical_name}{descriptor}");
+    Ok((owner_class, name, top_level, Some(signature)))
+}
+
+/// The scope the reference at `expression` is written in, which its class is enclosed by.
+pub(super) fn reference_enclosure(
+    ir: &IrFile,
+    expression: usize,
+) -> Option<krusty::ir::IrEnclosure> {
+    u32::try_from(expression)
+        .ok()
+        .and_then(|raw| ir.callable_reference_enclosures.get(&raw))
+        .copied()
+}
+
+/// The file facades the module's references can name: the one this file compiles to, and each
+/// source file's by its stem.
+#[derive(Clone, Copy)]
+pub(super) struct Facades<'a> {
+    pub(super) current: &'a str,
+    pub(super) facades: &'a [String],
+}
+
+fn realize_adapter_reference(
+    ir: &mut IrFile,
+    callables: &krusty::backend::CheckedBackendCallables,
+    facades: Facades<'_>,
+    expression: usize,
+    adapter_owner: Option<krusty::types::TypeName>,
+    own_invoke: bool,
+    reference: krusty::ir::IrCallableReference,
+) -> Result<(), FunctionReferenceRealizationTarget> {
+    let function = ir
+        .functions
+        .get(reference.adapter as usize)
+        .ok_or(FunctionReferenceRealizationTarget::Adapter(
+            reference.adapter,
+        ))?
+        .clone();
+    let TyKind::Fun(function_type) = reference.function_type.non_null().kind() else {
+        return Err(FunctionReferenceRealizationTarget::Invalid);
+    };
+    let arity = u8::try_from(function_type.params.len())
+        .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?;
+    // A shared mutable capture travels as its JVM holder, as the adapter declares it.
+    let capture_types = holder_parameters(
+        ir,
+        reference.adapter,
+        function.params.get(..reference.captures.len()).ok_or(
+            FunctionReferenceRealizationTarget::Adapter(reference.adapter),
+        )?,
+    );
+    if adapter_owner.is_some() {
+        // The carrier is a separate JVM class. A class-owned common adapter therefore crosses a
+        // classfile access boundary even though both artifacts represent one Kotlin lexical scope.
+        // The adapter has no source declaration or metadata entry, so expose it only physically and
+        // mark it synthetic rather than leaking an access-bridge decision into common lowering.
+        ir.set_method_visibility(reference.adapter, krusty::types::Visibility::Public);
+        ir.synthetic_methods.insert(reference.adapter);
+    }
+    // Converting an ordinary function to a `suspend` function type adapts it even when nothing
+    // else about the call changes.
+    let suspend_conversion = function_type.suspend && !reference.declaration_suspend;
+    let adaptation_flags = reference.adaptation.as_deref().map_or(0, |adaptation| {
+        adapted_flags(adaptation, reference.declaration_result)
+    }) | (i32::from(suspend_conversion) << 1);
+    let capture_fields = local_capture_fields(ir, &reference).unwrap_or_else(|| {
+        (0..reference.captures.len())
+            .map(|index| format!("$captured${index}"))
+            .collect()
+    });
+    let mut module_reflection = None;
+    let reflected_function = match reference.target {
+        krusty::ir::IrCallableReferenceTarget::Module(target) => {
+            ir.checked_callable_functions.get(&target).copied()
+        }
+        _ => None,
+    };
+    let reflected = match reference.target {
+        krusty::ir::IrCallableReferenceTarget::Module(_) => krusty::ir::ReflectedCallable::Source,
+        krusty::ir::IrCallableReferenceTarget::Local { function, .. } => {
+            krusty::ir::ReflectedCallable::LocalFunction(function)
+        }
+        krusty::ir::IrCallableReferenceTarget::Constructor { .. } => {
+            krusty::ir::ReflectedCallable::Constructor
+        }
+        // A classifier callable is a source declaration of that classifier, reflected by the
+        // operation's Kotlin name.
+        krusty::ir::IrCallableReferenceTarget::Classifier { .. } => {
+            krusty::ir::ReflectedCallable::Source
+        }
+        // A conversion is a compiler builtin whose reflected name and signature are fixed.
+        krusty::ir::IrCallableReferenceTarget::External { .. }
+        | krusty::ir::IrCallableReferenceTarget::FunctionValueConversion { .. }
+        | krusty::ir::IrCallableReferenceTarget::FunctionInvoke => {
+            krusty::ir::ReflectedCallable::Physical
+        }
+    };
+    // A local function is reflected by the physical signature it was lifted to, in which a
+    // shared mutable capture is its JVM holder.
+    let lifted = match reference.target {
+        krusty::ir::IrCallableReferenceTarget::Local { function, .. } => {
+            let lifted = ir
+                .functions
+                .get(function as usize)
+                .ok_or(FunctionReferenceRealizationTarget::Adapter(function))?;
+            Some((holder_parameters(ir, function, &lifted.params), lifted.ret))
+        }
+        _ => None,
+    };
+    let fun_interface_constructor = matches!(
+        &reference.target,
+        krusty::ir::IrCallableReferenceTarget::Classifier {
+            operation: krusty::ir::IrClassifierCallable::SamConstructor,
+            ..
+        }
+    );
+    let inherited_owner = reference.reflection_owner;
+    let (owner_class, name, top_level, reflection_signature) = match reference.target {
+        krusty::ir::IrCallableReferenceTarget::Module(target) => {
+            let declaration = ir
+                .referenced_module_callables
+                .get(&target)
+                .ok_or(FunctionReferenceRealizationTarget::Module(target))?;
+            // A companion-block member is reflected on the class that declared its block, like
+            // any member of it; only a package declaration is owned by a file facade, the one of
+            // the file declaring it.
+            let (owner, top_level) = match (declaration.placement, declaration.owner) {
+                (krusty::ir::IrStaticPlacement::CompanionBlock { declaring_class }, _) => {
+                    (Some(declaring_class), false)
+                }
+                (krusty::ir::IrStaticPlacement::Package, Some(owner)) => {
+                    // `A::foo` names the member on A even when the declaration lives on a supertype.
+                    // kotlin-reflect substitutes the return type from that owner (`test.A?`), not
+                    // from the declaring class (`T?`). `H<A>::foo` still names H.
+                    (Some(inherited_owner.unwrap_or(owner)), false)
+                }
+                (krusty::ir::IrStaticPlacement::Package, None) => (
+                    Some(
+                        super::module_calls::facade_for(declaration.source, facades.facades)
+                            .ok_or(FunctionReferenceRealizationTarget::Module(target))?,
+                    ),
+                    true,
+                ),
+            };
+            module_reflection = Some(module_declaration_reflection(declaration)?);
+            (owner, declaration.name.to_string(), top_level, None)
+        }
+        krusty::ir::IrCallableReferenceTarget::Constructor { classifier } => {
+            (Some(classifier), "<init>".to_string(), false, None)
+        }
+        krusty::ir::IrCallableReferenceTarget::Classifier {
+            classifier,
+            operation,
+        } => match operation {
+            krusty::ir::IrClassifierCallable::EnumValueOf => {
+                (Some(classifier), "valueOf".to_string(), false, None)
+            }
+            krusty::ir::IrClassifierCallable::SamConstructor => {
+                // The runtime carrier stores only the interface `Class`. A capture or a bound
+                // receiver has no slot on `FunInterfaceConstructorReference`.
+                if !reference.captures.is_empty() || reference.bound_receiver.is_some() {
+                    return Err(FunctionReferenceRealizationTarget::Invalid);
+                }
+                (Some(classifier), "<init>".to_string(), false, None)
+            }
+        },
+        // A local function has no declaration of its own on the JVM: kotlinc reflects it on
+        // `Intrinsics.Kotlin`, not top-level, under the function it was lifted to.
+        krusty::ir::IrCallableReferenceTarget::Local { name, .. } => (
+            Some(krusty::types::wk::kotlin_intrinsics_reflection_owner()),
+            name.into(),
+            false,
+            None,
+        ),
+        krusty::ir::IrCallableReferenceTarget::External {
+            declaration,
+            receiver,
+        } => external_reflection(callables, declaration, receiver)?,
+        // kotlinc reflects every function-value conversion, suspend or `Unit`, as a synthesized
+        // `suspendConversion<N>` compiler builtin on `Intrinsics.Kotlin`.
+        krusty::ir::IrCallableReferenceTarget::FunctionValueConversion { ordinal } => (
+            Some(krusty::types::wk::kotlin_intrinsics_reflection_owner()),
+            format!("suspendConversion{ordinal}"),
+            false,
+            None,
+        ),
+        krusty::ir::IrCallableReferenceTarget::FunctionInvoke => {
+            let arity =
+                reference.declaration_parameters.len() + usize::from(reference.declaration_suspend);
+            let owner = type_name(&krusty::jvm::names::function_interface_internal_name(arity));
+            let erased = if krusty::jvm::names::uses_function_n(arity) {
+                "[Ljava/lang/Object;".to_string()
+            } else {
+                "Ljava/lang/Object;".repeat(arity)
+            };
+            (
+                Some(owner),
+                "invoke".to_string(),
+                false,
+                Some(format!("invoke({erased})Ljava/lang/Object;")),
+            )
+        }
+    };
+    let adapted = reference.adaptation.is_some() || suspend_conversion;
+    let bound = reference.bound_receiver.is_some();
+    let continuation = Ty::obj("kotlin/coroutines/Continuation");
+    let mut invoke_parameters = function_type.params.clone();
+    let mut target_parameters = holder_parameters(ir, reference.adapter, &function.params);
+    let mut invoke_result = function_type.ret;
+    let mut target_result = function.ret;
+    if function_type.suspend {
+        invoke_parameters.push(continuation);
+        target_parameters.push(continuation);
+        invoke_result = Ty::obj("kotlin/Any");
+        target_result = Ty::obj("kotlin/Any");
+    }
+    let (mut reflection_parameters, mut reflection_result) = if let Some(lifted) = lifted {
+        lifted
+    } else if let Some(declared) = module_reflection {
+        // The published declaration signature, not the use-site specialization stored on the
+        // reference. A local function is reflected by the signature it was lifted to instead.
+        declared
+    } else {
+        (
+            reference.declaration_parameters.into_vec(),
+            reference.declaration_result,
+        )
+    };
+    // A projection left in that signature is not a JVM value type: the carrier's physical
+    // reflection descriptor uses its readable upper bound. This is representation of an
+    // already-selected declaration, not another resolution or a descriptor fallback.
+    reflection_parameters = reflection_parameters
+        .into_iter()
+        .map(reflection_descriptor_ty)
+        .collect();
+    reflection_result = reflection_descriptor_ty(reflection_result);
+    if reference.declaration_suspend {
+        reflection_parameters.push(continuation);
+        reflection_result = Ty::obj("kotlin/Any");
+    }
+    let internal = reference_class_name(ir, facades.current, expression, "function");
+    let mut class = IrClass::synthetic(internal);
+    class.enclosure = reference_enclosure(ir, expression);
+    class.superclass = type_name(if fun_interface_constructor {
+        "kotlin/jvm/internal/FunInterfaceConstructorReference"
+    } else if adapted {
+        "kotlin/jvm/internal/AdaptedFunctionReference"
+    } else {
+        "kotlin/jvm/internal/FunctionReferenceImpl"
+    });
+    class.func_ref = Some(FuncRef {
+        adapted,
+        fun_interface_constructor,
+        bound,
+        field_capture_count: u32::try_from(reference.captures.len())
+            .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?,
+        capture_fields,
+        arity,
+        is_suspend: function_type.suspend,
+        declaration_suspend: reference.declaration_suspend,
+        module_target: None,
+        local_target: Some(reference.adapter),
+        owner_class,
+        fn_name: name,
+        flags: i32::from(top_level) | (adaptation_flags << 1),
+        dispatch: if bound {
+            FrDispatch::StaticBound
+        } else {
+            FrDispatch::Static
+        },
+        call_owner: adapter_owner,
+        call_name: function.name,
+        reflection_name: None,
+        reflection_receiver_parameter: false,
+        reflection_target_ret_ty: Some(reflection_result),
+        reflection_target_param_tys: Some(reflection_parameters),
+        call_interface: false,
+        param_tys: invoke_parameters,
+        ret_ty: invoke_result,
+        target_param_tys: target_parameters,
+        target_ret_ty: target_result,
+        unbox_params: vec![None; function_type.params.len()],
+        unbox_param_nullable: vec![false; function_type.params.len()],
+        box_ret: None,
+        staticbound_recv_unbox: None,
+        invoke: None,
+        function_type: reference.function_type.non_null(),
+        reflection_signature,
+        reflected,
+        reflected_function,
+        invoke_renamed: false,
+    });
+    let class = ir.add_class(class);
+    if own_invoke {
+        realize_own_invoke(
+            ir,
+            expression,
+            class,
+            reference.adapter,
+            bound,
+            function_type,
+            adapter_owner,
+        );
+    }
+    let mut constructor_arguments = reference.captures;
+    constructor_arguments.extend(reference.bound_receiver);
+    // The constructor's declared parameters say that a value-class receiver is bound as its box.
+    let mut declared_parameters = None;
+    let carrier = match constructor_arguments.as_slice() {
+        arguments if !arguments.is_empty() => {
+            let mut constructor_parameters = capture_types;
+            if bound {
+                constructor_parameters.push(Ty::obj("kotlin/Any"));
+            }
+            declared_parameters = Some(constructor_parameters.clone().into_boxed_slice());
+            IrExpr::New {
+                internal,
+                args: arguments.to_vec(),
+                ctor_params: Some(constructor_parameters),
+                ctor_desc: None,
+                external_target: None,
+                defaults: Box::new([]),
+                default_prefix_count: 0,
+            }
+        }
+        [] => IrExpr::StaticInstance {
+            owner: class,
+            ty: class,
+            field: "INSTANCE",
+        },
+        _ => unreachable!("empty and non-empty capture shapes are exhaustive"),
+    };
+    let carrier = install_carrier(ir, expression, carrier, internal);
+    if let Some(parameters) = declared_parameters {
+        ir.construction_declared_params.insert(carrier, parameters);
+    }
+    Ok(())
+}
+
+/// Replace the reference expression with its carrier. kotlinc's `FunctionReferenceLowering` hands
+/// the carrier to its use site through an implicit cast, which writes no instruction: the value
+/// keeps its class's type, and a consumer that needs its `FunctionN`, `KFunction` or other function
+/// type casts it there, as a lambda class's consumer does.
+fn install_carrier(
+    ir: &mut IrFile,
+    expression: usize,
+    carrier: IrExpr,
+    class: krusty::types::TypeName,
+) -> ExprId {
+    ir.exprs[expression] = carrier;
+    let carrier = ExprId::try_from(expression).expect("an expression id fits its index");
+    ir.set_logical_type(carrier, Ty::obj_name(class));
+    carrier
+}
+
+/// `parameters` of `function`, with each shared mutable capture realized as its JVM holder.
+fn holder_parameters(ir: &IrFile, function: krusty::ir::FunId, parameters: &[Ty]) -> Vec<Ty> {
+    parameters
+        .iter()
+        .enumerate()
+        .map(|(parameter, &ty)| {
+            let ordinal = u32::try_from(parameter).expect("a function has few parameters");
+            ir.shared_capture_parameters
+                .get(&(function, ordinal))
+                .map_or(ty, super::shared_captures::holder_ty)
+        })
+        .collect()
+}
+
+/// kotlinc's fields for the values a local function's reference captures: each is named after the
+/// captured value, as the lifted function's own parameter is, whether it holds the value or its
+/// shared mutable cell. `None` for a captured receiver, which keeps the dispatching `invoke`.
+fn local_capture_fields(
+    ir: &IrFile,
+    reference: &krusty::ir::IrCallableReference,
+) -> Option<Vec<String>> {
+    if reference.captures.is_empty() {
+        return Some(Vec::new());
+    }
+    let krusty::ir::IrCallableReferenceTarget::Local { function, .. } = reference.target else {
+        return None;
+    };
+    let identities = ir.function_parameter_identities(function)?;
+    (0..reference.captures.len())
+        .map(|capture| {
+            let identity = identities.get(capture)?;
+            matches!(
+                identity.role,
+                krusty::ir::IrParameterRole::CapturedValue { .. }
+            )
+            .then(|| super::parameter_names::local_variable(identity, ""))
+            .flatten()
+        })
+        .collect()
+}
+
+/// Whether a structural reference's adapter can become the carrier's own `invoke`.
+fn own_invoke_realizable(ir: &IrFile, reference: &krusty::ir::IrCallableReference) -> bool {
+    local_capture_fields(ir, reference).is_some()
+        && ir
+            .functions
+            .get(reference.adapter as usize)
+            .is_some_and(|adapter| adapter.body.is_some())
+}
+
+/// Turn the reference's generated adapter into the carrier's specialized `invoke`, the method
+/// kotlinc's `FunctionReferenceLowering` writes: an instance method over the function type's own
+/// parameters that returns its result, boxed where it overrides the generic `R`. The adapter's
+/// static layout (bound receiver, then parameters) becomes the instance layout: `this` takes value
+/// 0, and the bound receiver is read from the inherited `receiver` field and cast to its type.
+fn realize_own_invoke(
+    ir: &mut IrFile,
+    expression: usize,
+    class: krusty::ir::ClassId,
+    adapter: krusty::ir::FunId,
+    bound: bool,
+    function_type: &krusty::types::FnSig,
+    adapter_owner: Option<krusty::types::TypeName>,
+) {
+    let internal = ir.classes[class as usize].fq_name;
+    let Some(body) = ir.functions[adapter as usize].body else {
+        return;
+    };
+    let expressions = krusty::ir::value_namespace_expressions(ir, body);
+    // The adapter takes its captured values first, then the bound receiver, then the function
+    // type's parameters. The carrier keeps each captured value in a field of its own and the bound
+    // receiver in the runtime base class's; its `invoke` takes `this` and the parameters.
+    let capture_fields = ir.classes[class as usize]
+        .func_ref
+        .as_ref()
+        .map(|reference| reference.capture_fields.clone())
+        .unwrap_or_default();
+    let stored = capture_fields.len() + usize::from(bound);
+    let stored_reads = expressions
+        .iter()
+        .filter_map(|&current| match ir.exprs[current as usize] {
+            IrExpr::GetValue(value) if (value as usize) < stored => Some((current, value as usize)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match stored {
+        0 => krusty::ir::shift_value_indices(ir, body, 0, 1),
+        1 => {}
+        _ => krusty::ir::lower_value_indices(ir, body, stored as u32, stored as u32 - 1),
+    }
+    let mut fields = Vec::with_capacity(stored);
+    for (capture, name) in capture_fields.into_iter().enumerate() {
+        // A shared mutable capture's field holds its cell, which the adapter no longer declares.
+        let ordinal = u32::try_from(capture).expect("a reference has few captures");
+        let ty = match ir.shared_capture_parameters.remove(&(adapter, ordinal)) {
+            Some(element) => super::shared_captures::holder_ty(&element),
+            None => ir.functions[adapter as usize].params[capture],
+        };
+        fields.push((ir.classes[class as usize].fields.len(), None));
+        ir.classes[class as usize].fields.push(krusty::ir::IrField {
+            name,
+            ty,
+            constructor_store_line: 0,
+            type_param: None,
+            default: None,
+            flags: krusty::ir::IrfFlags::default(),
+        });
+    }
+    if bound {
+        let receiver_ty = ir.functions[adapter as usize].params[stored - 1];
+        fields.push((ir.classes[class as usize].fields.len(), Some(receiver_ty)));
+        ir.classes[class as usize].fields.push(krusty::ir::IrField {
+            name: "receiver".to_string(),
+            ty: Ty::nullable(Ty::obj("kotlin/Any")),
+            constructor_store_line: 0,
+            type_param: None,
+            default: None,
+            flags: krusty::ir::IrfFlags::default(),
+        });
+    }
+    let mut captured_reads = Vec::new();
+    for (current, value) in stored_reads {
+        let (field, coerced) = fields[value];
+        if coerced.is_none() {
+            captured_reads.push(current);
+        }
+        let this = ir.add_expr(IrExpr::GetValue(0));
+        let read = IrExpr::GetField {
+            receiver: this,
+            class,
+            index: u32::try_from(field).expect("a reference carrier has few fields"),
+        };
+        ir.exprs[current as usize] = match coerced {
+            // The runtime base class stores the bound receiver as an object.
+            Some(receiver_ty) => IrExpr::TypeOp {
+                op: krusty::ir::IrTypeOp::ImplicitCoercion,
+                arg: ir.add_expr(read),
+                type_operand: receiver_ty,
+            },
+            None => read,
+        };
+    }
+    // kotlinc attributes the whole body to the reference's line, entered where the call's own
+    // operands begin: at each parameter or captured value read, or at a constructed object's
+    // `new`. Every other node enters it only at its dispatch, so a bound receiver's read stays
+    // ahead of the line.
+    if let Some(line) = ir.source_line(expression as u32) {
+        // The bridge maps its whole body to the same line.
+        ir.fn_decl_lines.insert(adapter, line);
+        let parameter_count = function_type.params.len() as u32;
+        for &current in &expressions {
+            let marks = match &ir.exprs[current as usize] {
+                IrExpr::GetValue(value) => (1..=parameter_count).contains(value),
+                IrExpr::GetField { .. } => captured_reads.contains(&current),
+                IrExpr::New { .. } => true,
+                _ => false,
+            };
+            if marks {
+                ir.set_source_line(current, line);
+            } else {
+                ir.take_source_line(current);
+                ir.mark_dispatch_line(current, line);
+            }
+        }
+    }
+    let parameters = function_type.params.clone();
+    // A suspend `invoke` keeps its declared result: the suspend lowering that follows appends the
+    // continuation and returns the result as an object, boxed as a coroutine boxes it. An unsigned
+    // result stays its carrier, which the bridge boxes, as a value class does. Past the numbered
+    // interfaces no generic `R` is overridden, so the result stays scalar too.
+    let high_arity = parameters.len() > krusty::jvm::names::MAX_NUMBERED_FUNCTION_ARITY;
+    let result = match function_type.ret {
+        ret if ret.is_jvm_scalar()
+            && !function_type.suspend
+            && !ret.is_unsigned()
+            && !high_arity =>
+        {
+            Ty::nullable(ret)
+        }
+        ret => ret,
+    };
+    // The adapter returns the `FunctionN` result value; the specialized `invoke` returns its own
+    // declared result instead: nothing for `Unit` (a `void` method), and the boxed value where a
+    // scalar result overrides the generic `R`.
+    for &current in &expressions {
+        let IrExpr::Return(Some(value)) = ir.exprs[current as usize] else {
+            continue;
+        };
+        if result == Ty::Unit && matches!(ir.exprs[value as usize], IrExpr::UnitInstance) {
+            ir.exprs[current as usize] = IrExpr::Return(None);
+        } else if result != function_type.ret {
+            let boxed = ir.add_expr(IrExpr::TypeOp {
+                op: krusty::ir::IrTypeOp::ImplicitCoercion,
+                arg: value,
+                type_operand: result,
+            });
+            ir.exprs[current as usize] = IrExpr::Return(Some(boxed));
+        }
+    }
+    // kotlinc checks no parameter of a suspend reference's `invoke`.
+    let param_checks = parameters
+        .iter()
+        .map(|ty| {
+            (!function_type.suspend && ty.is_reference() && !ty.upper_bound_admits_null())
+                .then_some(krusty::ir::IrParameterCheck::NonNull)
+        })
+        .collect();
+    // kotlinc's reference lowering declares the `invoke` parameters itself.
+    let identities = (0..parameters.len())
+        .map(|ordinal| {
+            krusty::ir::IrParameterIdentity::generated(
+                krusty::ir::IrGeneratedParameterRole::ReferenceInvokeValue {
+                    ordinal: u32::try_from(ordinal).expect("too many reference parameters"),
+                },
+                None,
+            )
+        })
+        .collect();
+    ir.fn_params
+        .insert(adapter, krusty::ir::FnParamInfo::identities(identities));
+    let function = &mut ir.functions[adapter as usize];
+    function.name = "invoke".to_string();
+    function.params = parameters;
+    function.ret = result;
+    function.is_static = false;
+    function.dispatch_receiver = Some(internal);
+    function.param_checks = param_checks;
+    ir.set_method_visibility(adapter, krusty::types::Visibility::Public);
+    ir.synthetic_methods.remove(&adapter);
+    ir.class_static_local_functions.remove(&adapter);
+    ir.lambda_own_params_from.remove(&adapter);
+    ir.fn_debug_locals.insert(adapter);
+    // kotlinc writes no nullability annotations on a reference carrier's `invoke`.
+    ir.jvm_nullability_unannotated_methods.insert(adapter);
+    if let Some(owner) = adapter_owner {
+        if let Some(owner) = ir
+            .classes
+            .iter_mut()
+            .find(|candidate| candidate.fq_name == owner)
+        {
+            owner.methods.retain(|&method| method != adapter);
+        }
+    }
+    let carrier = &mut ir.classes[class as usize];
+    carrier.methods.push(adapter);
+    let reference = carrier
+        .func_ref
+        .as_mut()
+        .expect("the carrier was just built as a function reference");
+    reference.local_target = None;
+    reference.invoke = Some(adapter);
+}
+
+pub(super) fn realize(
+    ir: &mut IrFile,
+    callables: &krusty::backend::CheckedBackendCallables,
+    facades: Facades<'_>,
+) -> Result<(), FunctionReferenceRealizationTarget> {
+    // Join each dependency inline call with the exact selected declaration while its argument
+    // vector is still semantic. This publishes consumption once; carrier planning below does not
+    // scan expression parents or infer inline-parameter roles from syntax.
+    let mut consumed_references = Vec::new();
+    for raw in 0..ir.exprs.len() {
+        let call = raw as u32;
+        let (inline_parameters, args) = match &ir.exprs[raw] {
+            IrExpr::Call {
+                callee: call_callee,
+                args,
+                ..
+            } if let krusty::ir::Callee::External { target, params, .. } = &**call_callee
+                && ir.inline_call_sites.contains(&call) =>
+            {
+                let callable = callables
+                    .callable(*target)
+                    .ok_or(FunctionReferenceRealizationTarget::External(*target))?;
+                if !callable.inline.can_inline() {
+                    continue;
+                }
+                let inline_parameters = (0..args.len())
+                    .map(|parameter| {
+                        matches!(
+                            params.get(parameter).map(|ty| ty.kind()),
+                            Some(TyKind::Fun(_))
+                        ) && callable
+                            .inline_modifiers
+                            .get(parameter)
+                            .is_some_and(|modifier| {
+                                *modifier != krusty::types::InlineParameterModifier::Noinline
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                (inline_parameters, args)
+            }
+            // A same-module call the backend inlines from its callee's compiled body carries its
+            // declaration's parameter types and modifiers on the call.
+            IrExpr::Call { args, .. } if ir.compiled_inline_call(call).is_some() => {
+                let inline_parameters = (0..args.len())
+                    .map(|parameter| {
+                        crate::inline_parameters::is_inline_parameter(ir, call, parameter)
+                            == Some(true)
+                    })
+                    .collect::<Vec<_>>();
+                (inline_parameters, args)
+            }
+            _ => continue,
+        };
+        for (&argument, inline) in args.iter().zip(inline_parameters) {
+            if inline
+                && matches!(ir.expr(argument), IrExpr::CallableReference(_))
+                && ir.callable_reference_inline_template(argument).is_some()
+            {
+                consumed_references.push(argument);
+            }
+        }
+    }
+    ir.inline_callable_reference_arguments
+        .extend(consumed_references);
+    let adapter_owners = ir
+        .classes
+        .iter()
+        .flat_map(|class| {
+            class
+                .methods
+                .iter()
+                .copied()
+                .map(|function| (function, class.fq_name_id()))
+        })
+        .collect::<krusty::fx_hash::HashMap<_, _>>();
+    // An adapter several reference nodes share (an inline splice copies the node, not its
+    // adapter) stays one static method every carrier calls; only a sole reference owns it.
+    let mut adapter_uses = krusty::fx_hash::HashMap::<krusty::ir::FunId, usize>::default();
+    for expression in &ir.exprs {
+        if let IrExpr::CallableReference(reference) = expression {
+            *adapter_uses.entry(reference.adapter).or_default() += 1;
+        }
+    }
+    let expression_count = ir.exprs.len();
+    let mut carrier_adapters = krusty::fx_hash::HashSet::default();
+    for raw in 0..expression_count {
+        let adapter = match &ir.exprs[raw] {
+            IrExpr::CallableReference(reference) => reference.adapter,
+            _ => continue,
+        };
+        if !ir
+            .inline_callable_reference_arguments
+            .contains(&(raw as u32))
+        {
+            carrier_adapters.insert(adapter);
+        }
+    }
+    for raw in 0..expression_count {
+        let IrExpr::CallableReference(reference) = ir.exprs[raw].clone() else {
+            continue;
+        };
+        // A callable reference the splice places has no carrier: kotlinc writes neither the
+        // reference class nor the adapter, and names the inline marker after the class the
+        // reference would have been. A use that still evaluates the reference keeps the carrier,
+        // and with it the adapter.
+        let sole = adapter_uses.get(&reference.adapter) == Some(&1);
+        if ir
+            .inline_callable_reference_arguments
+            .contains(&(raw as u32))
+        {
+            if !carrier_adapters.contains(&reference.adapter) {
+                if let Some(name) =
+                    crate::local_class_names::callable_reference_name(ir, raw as u32)
+                {
+                    ir.lambda_class_names.insert(reference.adapter, name);
+                }
+                ir.inline_only_fns.insert(reference.adapter);
+            }
+            continue;
+        }
+        let adapter_owner = adapter_owners.get(&reference.adapter).copied();
+        let own_invoke = sole && own_invoke_realizable(ir, &reference);
+        realize_adapter_reference(
+            ir,
+            callables,
+            facades,
+            raw,
+            adapter_owner,
+            own_invoke,
+            *reference,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a reference's single capture is, as the lifted local function declares it.
+    #[derive(Clone, Copy)]
+    enum Capture {
+        None,
+        /// A captured value the lifted function names after its source variable.
+        Named,
+        /// A capture the lifted function records no source identity for.
+        Unnamed,
+    }
+
+    fn own_invoke_plan(function_type: Ty, declaration_suspend: bool, capture: Capture) -> bool {
+        let mut ir = IrFile::default();
+        let body = ir.add_expr(IrExpr::UnitInstance);
+        let TyKind::Fun(signature) = function_type.non_null().kind() else {
+            unreachable!("test function type")
+        };
+        let mut params = signature.params.clone();
+        if !matches!(capture, Capture::None) {
+            params.insert(0, Ty::String);
+        }
+        let adapter = ir.add_fun(krusty::ir::IrFunction {
+            name: "selected".to_string(),
+            params,
+            ret: signature.ret,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        if matches!(capture, Capture::Named) {
+            let mut identities = vec![krusty::ir::IrParameterIdentity::captured_value(
+                Some("prefix".to_string()),
+                0,
+                krusty::ir::IrValueCapture {
+                    declaration: krusty::ir::IrCapturedDeclaration::Parameter,
+                    capturer: krusty::ir::IrCapturingCallable::LocalFunction,
+                    crossinline_parameter: None,
+                },
+            )];
+            identities.extend(
+                (0..signature.params.len())
+                    .map(|index| krusty::ir::IrParameterIdentity::source(format!("value{index}"))),
+            );
+            ir.fn_params
+                .insert(adapter, krusty::ir::FnParamInfo::identities(identities));
+        }
+        let captures = if matches!(capture, Capture::None) {
+            Vec::new()
+        } else {
+            vec![ir.add_expr(IrExpr::UnitInstance)]
+        };
+        let reference = krusty::ir::IrCallableReference {
+            target: krusty::ir::IrCallableReferenceTarget::Local {
+                owner: None,
+                name: "selected".into(),
+                function: adapter,
+            },
+            adapter,
+            captures,
+            bound_receiver: None,
+            function_type,
+            declaration_parameters: signature.params.clone().into_boxed_slice(),
+            declaration_result: signature.ret,
+            declaration_suspend,
+            adaptation: None,
+            reflection_owner: None,
+        };
+        own_invoke_realizable(&ir, &reference)
+    }
+
+    #[test]
+    fn own_invoke_plan_excludes_only_unrealized_carrier_shapes() {
+        let plans = [
+            (
+                "ordinary",
+                own_invoke_plan(Ty::fun(vec![Ty::Int], Ty::Int), false, Capture::None),
+            ),
+            (
+                "captured",
+                own_invoke_plan(Ty::fun(vec![Ty::String], Ty::String), false, Capture::Named),
+            ),
+            (
+                "unnamed capture",
+                own_invoke_plan(
+                    Ty::fun(vec![Ty::String], Ty::String),
+                    false,
+                    Capture::Unnamed,
+                ),
+            ),
+            (
+                "suspend",
+                own_invoke_plan(Ty::fun_suspend(vec![Ty::Int], Ty::Int), true, Capture::None),
+            ),
+            (
+                "high arity",
+                own_invoke_plan(Ty::fun(vec![Ty::Int; 23], Ty::Int), false, Capture::None),
+            ),
+            (
+                "value class",
+                own_invoke_plan(Ty::fun(vec![Ty::UInt], Ty::String), false, Capture::None),
+            ),
+        ];
+
+        assert_eq!(
+            plans,
+            [
+                ("ordinary", true),
+                ("captured", true),
+                ("unnamed capture", false),
+                ("suspend", true),
+                ("high arity", true),
+                ("value class", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn adapter_body_walk_keeps_nested_lambda_value_and_return_namespaces_separate() {
+        let mut ir = IrFile::default();
+        let capture = ir.add_expr(IrExpr::GetValue(2));
+        let nested_value = ir.add_expr(IrExpr::GetValue(0));
+        let nested_return = ir.add_expr(IrExpr::Return(Some(nested_value)));
+        let nested_body = ir.add_expr(IrExpr::Block {
+            stmts: vec![nested_return],
+            value: None,
+        });
+        let lambda = ir.add_expr(IrExpr::Lambda {
+            impl_fn: 0,
+            arity: 1,
+            captures: vec![capture],
+            sam: None,
+            inline_body: Some(nested_body),
+        });
+        let outer_value = ir.add_expr(IrExpr::GetValue(0));
+        let outer_return = ir.add_expr(IrExpr::Return(Some(outer_value)));
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![lambda, outer_return],
+            value: None,
+        });
+
+        let expressions = krusty::ir::value_namespace_expressions(&ir, body);
+
+        for expected in [body, lambda, capture, outer_return, outer_value] {
+            assert!(
+                expressions.contains(&expected),
+                "missing outer expression {expected}"
+            );
+        }
+        for nested in [nested_body, nested_return, nested_value] {
+            assert!(
+                !expressions.contains(&nested),
+                "nested lambda expression {nested} crossed its value namespace"
+            );
+        }
+    }
+}

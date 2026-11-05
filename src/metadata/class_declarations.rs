@@ -28,7 +28,7 @@ use crate::types::{Ty, TyKind, TypeName, Visibility};
 
 /// Which declaration a property record describes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PropertyOrigin {
+pub enum PropertyOrigin {
     /// The class's declared property at this index.
     Declared(usize),
     /// A class `const val`, by its static storage.
@@ -41,7 +41,7 @@ pub(crate) enum PropertyOrigin {
 
 /// Which declaration a function record describes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FunctionOrigin {
+pub enum FunctionOrigin {
     /// A declared member function, by its checked callable identity.
     Declared(crate::fir::CallableId),
     /// An `interface by` forwarder the class generates for its delegate.
@@ -69,15 +69,15 @@ pub(crate) struct SecondaryConstructorRecord {
 }
 
 /// Everything a class's `Class` record is built from, owned, with the declaration behind each entry.
-pub(crate) struct ClassDeclarationRecord {
+pub struct ClassDeclarationRecord {
     class: TypeName,
     ctor_params: Vec<(String, Ty)>,
-    pub(crate) props: Vec<PropMeta>,
+    pub props: Vec<PropMeta>,
     /// Which declaration each of `props` describes.
-    pub(crate) prop_origins: Vec<PropertyOrigin>,
-    pub(crate) methods: Vec<FnMeta>,
+    pub prop_origins: Vec<PropertyOrigin>,
+    pub methods: Vec<FnMeta>,
     /// Which declaration each of `methods` describes.
-    pub(crate) method_origins: Vec<FunctionOrigin>,
+    pub method_origins: Vec<FunctionOrigin>,
     enum_entries: Vec<(String, MetadataAnnotations)>,
     spellings: crate::spelling::DeclaredSpellings,
     supertype_spellings: Vec<crate::spelling::Spelled>,
@@ -95,14 +95,14 @@ pub(crate) struct ClassDeclarationRecord {
     secondary_ctors: Vec<SecondaryConstructorRecord>,
     /// The ordinal in the class's secondary constructors of the declaration each of
     /// `secondary_ctors` describes.
-    pub(crate) secondary_ordinals: Vec<usize>,
+    pub secondary_ordinals: Vec<usize>,
     ctor_param_defaults: Vec<bool>,
     ctor_param_tparams: Vec<Option<u32>>,
     ctor_param_annotations: Vec<MetadataAnnotations>,
     inline_underlying: Option<(String, Option<(Ty, crate::spelling::Spelled)>)>,
     ctor_vararg_index: Option<usize>,
     /// Whether the class records a primary constructor at all.
-    pub(crate) emit_primary_ctor: bool,
+    pub emit_primary_ctor: bool,
     primary_ctor_flags: u64,
     type_params: Vec<String>,
     type_param_bounds: Vec<crate::ir::IrTypeParameter>,
@@ -339,21 +339,21 @@ enum CapturedParameters {
 
 /// What a target sets on a class's record header: options of the compilation, the class's version
 /// requirement, and how it approximates a non-denotable intersection.
-pub(crate) struct ClassTailOptions<'a> {
-    pub(crate) param_assertions: bool,
-    pub(crate) annotations_in_metadata: bool,
-    pub(crate) compiler_version_requirement:
+pub struct ClassTailOptions<'a> {
+    pub param_assertions: bool,
+    pub annotations_in_metadata: bool,
+    pub compiler_version_requirement:
         Option<crate::metadata::version_requirements::VersionRequirement>,
-    pub(crate) intersection: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
-    pub(crate) inner_classifiers: crate::metadata::InnerClassifiers<'a>,
+    pub intersection: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
+    pub inner_classifiers: crate::metadata::InnerClassifiers<'a>,
     /// The primary constructor's annotations in the order the target lists them; the record's own
     /// (source) order when `None`.
-    pub(crate) primary_ctor_annotations: Option<&'a MetadataAnnotations>,
+    pub primary_ctor_annotations: Option<&'a MetadataAnnotations>,
 }
 
 impl ClassDeclarationRecord {
     /// The record's class-level inputs.
-    pub(crate) fn tail<'a>(
+    pub fn tail<'a>(
         &'a self,
         options: ClassTailOptions<'a>,
         secondary_ctors: &'a [CtorMeta<'a>],
@@ -409,7 +409,7 @@ impl ClassDeclarationRecord {
     }
 
     /// The secondary constructors as the class builder takes them.
-    pub(crate) fn secondary_constructors(&self) -> Vec<CtorMeta<'_>> {
+    pub fn secondary_constructors(&self) -> Vec<CtorMeta<'_>> {
         self.secondary_ctors
             .iter()
             .map(|shape| CtorMeta {
@@ -429,7 +429,7 @@ impl ClassDeclarationRecord {
     }
 
     /// The enum entries as the class builder takes them.
-    pub(crate) fn enum_entries(&self) -> Vec<EnumEntryMeta<'_>> {
+    pub fn enum_entries(&self) -> Vec<EnumEntryMeta<'_>> {
         self.enum_entries
             .iter()
             .map(|(name, annotations)| EnumEntryMeta {
@@ -440,7 +440,7 @@ impl ClassDeclarationRecord {
     }
 
     /// The primary constructor's declared parameters.
-    pub(crate) fn ctor_params(&self) -> &[(String, Ty)] {
+    pub fn ctor_params(&self) -> &[(String, Ty)] {
         &self.ctor_params
     }
 
@@ -480,7 +480,7 @@ impl ClassDeclarationRecord {
         self.has_source_file
     }
 
-    pub(crate) fn declaration<'a>(
+    pub fn declaration<'a>(
         &'a self,
         class_id: &'a crate::metadata::class_id::ResolvedClassId,
         tail: &'a ClassTail<'a>,
@@ -497,7 +497,7 @@ impl ClassDeclarationRecord {
         }
     }
 
-    pub(crate) fn classifier(&self) -> TypeName {
+    pub fn classifier(&self) -> TypeName {
         self.class
     }
 }
@@ -563,7 +563,7 @@ fn declared_functions(ir: &IrFile, c: &IrClass) -> Vec<u32> {
 /// Record every class's declarations in `ir`, replacing any recorded before. Runs at the backend
 /// handoff, and again after a target's compiler plugins add declarations, so a record always
 /// describes declarations no target lowering has rewritten yet.
-pub(crate) fn record_all(ir: &mut IrFile) {
+pub fn record_all(ir: &mut IrFile) {
     let records = ir
         .classes
         .iter()
@@ -1419,7 +1419,7 @@ fn any_members_not_overridden<'a>(
 /// Add to each class's record the functions a target's compiler plugins published after the
 /// handoff recorded it (the JVM's serialization `write$Self`): the record names every one
 /// published before it.
-pub(crate) fn add_target_generated_functions(ir: &mut IrFile) {
+pub fn add_target_generated_functions(ir: &mut IrFile) {
     let added = ir
         .classes
         .iter()
@@ -1643,7 +1643,7 @@ fn declared_supertypes(
     (supertypes, class_spellings, supertype_spellings)
 }
 
-pub(crate) use super::classifier_inventory::nested_classifiers;
+pub use super::classifier_inventory::nested_classifiers;
 
 /// The annotations of a PROPERTY's own applications. The records name the same applications a
 /// target's annotation carrier holds; a property whose only application is an erased optional

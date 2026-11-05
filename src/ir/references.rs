@@ -93,7 +93,7 @@ impl IrFile {
     /// The arity is a literal lambda's: the function type's parameters, and for a suspend function
     /// type the `Continuation` its adapter takes after them once a backend gives the adapter its
     /// CPS signature, as a suspend literal's arity counts its implementation's continuation.
-    pub(crate) fn callable_reference_inline_template(
+    pub fn callable_reference_inline_template(
         &self,
         expression: ExprId,
     ) -> Option<(FunId, Vec<ExprId>, ExprId, usize)> {

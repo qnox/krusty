@@ -30,7 +30,7 @@ const INLINE_MARKER_PREFIXES: [&str; 2] = ["$i$f$", "$i$a$"];
 
 /// An inline lambda argument, as kotlinc's `LambdaInfo` hands it to the inliner.
 #[derive(Clone, Debug)]
-pub(crate) struct Lambda {
+pub struct Lambda {
     /// The lambda's compiled body: its parameters (an extension receiver first) from slot 0, then
     /// the values it captures, then its own locals. It ends each path with a return of
     /// `return_type`.
@@ -62,7 +62,7 @@ pub(crate) struct Lambda {
 
 impl Lambda {
     /// The descriptors of the lambda's captured values, which its node takes after its parameters.
-    pub(crate) fn captured_types(&self) -> Option<Vec<String>> {
+    pub fn captured_types(&self) -> Option<Vec<String>> {
         let arguments = descriptors::argument_types(&self.node.desc)?;
         arguments
             .get(self.parameter_types.len()..)
@@ -71,7 +71,7 @@ impl Lambda {
 }
 
 /// How the inlined code's line numbers reach the caller's line table (kotlinc's `SourceMapper`).
-pub(crate) trait SourceLines {
+pub trait SourceLines {
     /// `SourceMapCopier.mapLineNumber` of a line of the inlined function's own file; `None` for a
     /// line nothing maps, which is dropped.
     fn map(&mut self, line: u16) -> Option<u16>;
@@ -288,7 +288,7 @@ impl LabelImport {
 /// caller's source map. `invokes` names the lambda each `FunctionN.invoke` of the body calls.
 /// `scopes` numbers each lambda's scopes as it is inlined; kotlinc renames the lambda's own node,
 /// so a lambda invoked again is numbered from the names its previous expansion gave it.
-pub(super) fn expand(
+pub fn expand(
     node: &MethodNode,
     context: &Context<'_>,
     invokes: Vec<Option<usize>>,

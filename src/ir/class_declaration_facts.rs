@@ -30,7 +30,7 @@ impl IrFile {
         self.declarationless_classes.insert(internal);
     }
 
-    pub(crate) fn is_declarationless_class(&self, internal: TypeName) -> bool {
+    pub fn is_declarationless_class(&self, internal: TypeName) -> bool {
         self.declarationless_classes.contains(&internal)
     }
 
@@ -63,7 +63,7 @@ impl IrFile {
     }
 
     /// Checked primary-constructor default expressions, each an independently emitted value root.
-    pub(crate) fn class_ctor_default_roots(&self) -> impl Iterator<Item = ExprId> + '_ {
+    pub fn class_ctor_default_roots(&self) -> impl Iterator<Item = ExprId> + '_ {
         self.class_ctor_defaults
             .values()
             .flat_map(|defaults| defaults.iter().flatten().copied())
@@ -100,14 +100,14 @@ impl IrFile {
     }
 
     /// The signature the class's classfile is written from: its lowered one, else its declaration.
-    pub(crate) fn lowered_class_signature(&self, internal: TypeName) -> Option<&IrGenericSig> {
+    pub fn lowered_class_signature(&self, internal: TypeName) -> Option<&IrGenericSig> {
         self.lowered_class_signatures
             .get(&internal)
             .or_else(|| self.class_signatures.get(&internal))
     }
 
     /// `class` applied to its own type parameters (`C<T>`): the type of its `this`.
-    pub(crate) fn class_type(&self, class: &IrClass) -> Ty {
+    pub fn class_type(&self, class: &IrClass) -> Ty {
         let arguments: Vec<Ty> = self
             .class_signature_name(class.fq_name)
             .map(|signature| {
