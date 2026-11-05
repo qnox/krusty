@@ -847,6 +847,58 @@ mod tests {
     }
 
     #[test]
+    fn expression_clone_keeps_constructor_declaration_types_separate_from_representation() {
+        let mut ir = IrFile::default();
+        let value = ir.add_expr(super::super::IrExpr::Const(super::super::IrConst::Int(7)));
+        let declared = Ty::obj("sample/Money");
+        let source = ir.add_expr(super::super::IrExpr::New {
+            internal: crate::types::type_name("sample/Holder"),
+            args: vec![value],
+            ctor_params: Some(vec![Ty::Int]),
+            declared_params: Some(vec![declared].into_boxed_slice()),
+            ctor_desc: Some("(I)V".into()),
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        });
+
+        let (target, copies) = clone_expression_dag(&mut ir, source);
+
+        let super::super::IrExpr::New {
+            args,
+            ctor_params,
+            ctor_desc,
+            ..
+        } = ir.expr(target)
+        else {
+            panic!("a construction copy");
+        };
+        assert_ne!(source, target);
+        assert_eq!(args, &[copies[&value]]);
+        assert_eq!(ctor_params.as_deref(), Some([Ty::Int].as_slice()));
+        assert_eq!(ctor_desc.as_deref(), Some("(I)V"));
+        assert_eq!(
+            ir.construction_declared_params(target),
+            Some([declared].as_slice())
+        );
+        let super::super::IrExpr::New {
+            declared_params, ..
+        } = &mut ir.exprs[target as usize]
+        else {
+            panic!("a construction copy");
+        };
+        declared_params.as_mut().expect("the selected declaration")[0] = Ty::String;
+        assert_eq!(
+            ir.construction_declared_params(source),
+            Some([declared].as_slice())
+        );
+        assert_eq!(
+            ir.construction_declared_params(target),
+            Some([Ty::String].as_slice())
+        );
+    }
+
+    #[test]
     fn expression_clone_keeps_the_selected_dependency_edge() {
         // An inlined dependency call keeps both its declaration handle and the per-edge singleton
         // dispatch which distinguishes inherited selections sharing that declaration.

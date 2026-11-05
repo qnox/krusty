@@ -217,6 +217,7 @@ impl super::Emitter<'_> {
                 internal,
                 args,
                 ctor_params,
+                declared_params: _,
                 ctor_desc,
                 external_target: _,
                 defaults: default_parameters,
@@ -258,7 +259,7 @@ impl super::Emitter<'_> {
                         // Every parameter of a verbatim descriptor is a supplied operand; the
                         // descriptor, not the argument count, says how many there are.
                         let parameters = self.constructor_physical_params(e, d).len();
-                        (d.clone(), false, parameters, parameters)
+                        (d.to_string(), false, parameters, parameters)
                     } else {
                         let mut field_tys: Vec<Ty> = match ctor_params {
                             Some(ps) => jvm_tys(&capture_order::physical_for(

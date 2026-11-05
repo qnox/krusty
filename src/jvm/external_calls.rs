@@ -301,7 +301,7 @@ fn realize_expressions(
             };
             *args = realized_arguments;
             args.extend(realization_operands);
-            *ctor_desc = Some(if let Some(default) = default {
+            *ctor_desc = Some(Box::from(if let Some(default) = default {
                 default.descriptor.clone()
             } else if let Some(constructor) = constructor {
                 constructor.descriptor.clone()
@@ -312,7 +312,7 @@ fn realize_expressions(
                 )
             } else {
                 callable.descriptor
-            });
+            }));
             *external_target = None;
             *defaults = Box::new([]);
             *default_prefix_count = 0;
