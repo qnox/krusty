@@ -93,17 +93,19 @@ impl BodyLowering<'_> {
         if !access.type_arguments.is_empty() {
             return Err(mismatch("a common primitive is called with type arguments"));
         }
-        let operands = self.call_operands(
-            access,
-            ty,
-            CalleeShape {
-                receiver: Some(primitive.receiver),
-                params: &primitive.params,
-                ret: primitive.ret,
-                context_count: 0,
-                class_type_parameters: &primitive.class_type_parameters,
-            },
-        )?;
+        let operands = self
+            .call_operands(
+                access,
+                ty,
+                CalleeShape {
+                    receiver: Some(primitive.receiver),
+                    params: &primitive.params,
+                    ret: primitive.ret,
+                    context_count: 0,
+                    class_type_parameters: &primitive.class_type_parameters,
+                },
+            )?
+            .complete()?;
         let receiver = operands
             .receiver
             .expect("a validated primitive has dispatch");
@@ -465,11 +467,26 @@ impl BodyLowering<'_> {
             },
         )?;
         let mut callee = linked.callee;
+        if !operands.omitted.is_empty() {
+            // A function this unit lowers publishes its defaults, from which the target's shared
+            // default-argument lowering builds the entry such a call reaches.
+            let Callee::Local(function) = callee else {
+                return unsupported(
+                    "a call that leaves a parameter of a callee this unit does not lower to its default",
+                );
+            };
+            callee = Callee::LocalWithDefaults {
+                function,
+                defaults: operands.omitted.into_boxed_slice(),
+            };
+        }
         if let Callee::External { params, ret, .. } = &mut callee {
             (*params, *ret) = (operands.params, operands.ret);
         }
         let declared_ret = match callee {
-            Callee::Local(function) => Some(self.ir.functions[function as usize].ret),
+            Callee::Local(function) | Callee::LocalWithDefaults { function, .. } => {
+                Some(self.ir.functions[function as usize].ret)
+            }
             _ => None,
         };
         let (dispatch_receiver, args) = (operands.receiver, operands.args);
@@ -517,20 +534,23 @@ impl BodyLowering<'_> {
         let CallOperands {
             receiver,
             args: arguments,
+            omitted: _,
             receiver_type: source_receiver,
             params: parameters,
             ret: result,
-        } = self.call_operands(
-            access,
-            ty,
-            CalleeShape {
-                receiver: linked.receiver,
-                params: &linked.params,
-                ret: linked.ret,
-                context_count: linked.context_count,
-                class_type_parameters: &linked.class_type_parameters,
-            },
-        )?;
+        } = self
+            .call_operands(
+                access,
+                ty,
+                CalleeShape {
+                    receiver: linked.receiver,
+                    params: &linked.params,
+                    ret: linked.ret,
+                    context_count: linked.context_count,
+                    class_type_parameters: &linked.class_type_parameters,
+                },
+            )?
+            .complete()?;
         let LinkedAccessor {
             property: target,
             write,
@@ -628,15 +648,17 @@ impl BodyLowering<'_> {
             .map(|&param| substitute(param))
             .collect::<Vec<_>>();
         let mut args = Vec::with_capacity(params.len());
-        for (argument, &parameter) in arguments.zip(&params) {
-            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
-                "a call that leaves a parameter to its default",
-            ))?;
-            args.push(self.operand(argument, parameter)?);
+        let mut omitted = Vec::new();
+        for (ordinal, (argument, &parameter)) in arguments.zip(&params).enumerate() {
+            match argument {
+                Some(argument) => args.push(self.operand(argument, parameter)?),
+                None => omitted.push(u32::try_from(ordinal).expect("a parameter list fits u32")),
+            }
         }
         Ok(CallOperands {
             receiver,
             args,
+            omitted,
             receiver_type,
             params,
             ret,
@@ -947,10 +969,25 @@ struct CalleeShape<'a> {
 /// result they were read at.
 struct CallOperands {
     receiver: Option<ExprId>,
+    /// The supplied arguments, in parameter order.
     args: Vec<ExprId>,
+    /// The ordinals of the parameters the call leaves to their defaults, ascending.
+    omitted: Vec<u32>,
     receiver_type: Option<Ty>,
     params: Vec<Ty>,
     ret: Ty,
+}
+
+impl CallOperands {
+    /// The operands of a call that must pass every parameter: a callee this unit does not lower
+    /// has no default-argument entry here to fill one in.
+    fn complete(self) -> Lowered<Self> {
+        if self.omitted.is_empty() {
+            Ok(self)
+        } else {
+            unsupported("a call that leaves a parameter of a callee this unit does not lower to its default")
+        }
+    }
 }
 
 /// A call's arguments in the order of its callee's parameters: dispatch receiver, context
