@@ -208,8 +208,6 @@ bce/forUntilWithStep.kt
 bce/forWithIndex.kt
 bce/inheritance.kt
 bce/withGetter.kt
-binaryOp/bitwiseOpAny.kt
-binaryOp/bitwiseOpNullable.kt
 binaryOp/callAny.kt
 binaryOp/divisionByZero.kt
 binaryOp/eqNullableDoubles.kt
@@ -699,7 +697,6 @@ classes/kt508.kt
 classes/kt5347.kt
 classes/kt6136.kt
 classes/kt633.kt
-classes/kt723.kt
 classes/kt725.kt
 classes/kt8011.kt
 classes/kt8011a.kt
