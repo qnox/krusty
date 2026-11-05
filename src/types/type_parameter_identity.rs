@@ -9,6 +9,8 @@ use super::intern;
 static TYPE_PARAMETER_SOURCES: OnceLock<Mutex<HashMap<&'static str, &'static str>>> =
     OnceLock::new();
 static NEXT_METADATA_TYPE_PARAMETER: AtomicU64 = AtomicU64::new(0);
+static CALL_SITE_VARIABLES: OnceLock<Mutex<HashMap<&'static str, CallSiteVariable>>> =
+    OnceLock::new();
 static POSTPONED_VARIABLE_ORIGINS: OnceLock<Mutex<HashMap<&'static str, PostponedVariableOrigin>>> =
     OnceLock::new();
 
@@ -60,35 +62,36 @@ pub(crate) fn declaration_type_parameter(
     semantic
 }
 
-/// The call-owned inference variable standing for declaration formal `declared` at one call site.
-/// It keeps the declaration's source spelling for diagnostics and never equals a declaration-owned
-/// identity, so the enclosing declaration's own `declared` stays a fixed type while the call's
-/// variable is solved.
-pub(crate) fn call_site_type_variable(declared: &'static str) -> &'static str {
-    let fresh = intern(&format!("\0call:{declared}"));
-    let mut sources = TYPE_PARAMETER_SOURCES
-        .get_or_init(|| Mutex::new(HashMap::default()))
-        .lock()
-        .unwrap();
-    let source = sources.get(declared).copied().unwrap_or(declared);
-    sources.insert(fresh, source);
-    fresh
+/// One call expression, the owner of the inference variables that call solves.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct CallSiteIdentity {
+    pub(crate) compilation: u64,
+    pub(crate) file: u32,
+    pub(crate) call: u32,
 }
 
-/// The inference variable owned by one postponed call expression. Unlike
-/// [`call_site_type_variable`], this identity includes the source call: nested invocations of the
-/// same generic builder are simultaneously active and must not share their variables.
-pub(crate) fn postponed_call_type_variable(
-    compilation: u64,
-    file: u32,
-    expression: u32,
-    argument: crate::diag::Span,
-    declared: &str,
+/// The call and declaration formal an inference variable minted by [`call_site_type_variable`]
+/// stands for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CallSiteVariable {
+    pub(crate) site: CallSiteIdentity,
+    pub(crate) formal: &'static str,
+}
+
+/// The inference variable that call `site` solves for declaration formal `declared`. Every call
+/// owns its own: two calls to one declaration, nested or recursive, never share a variable, and a
+/// variable never equals the declaration-owned identity the enclosing declaration may have in
+/// scope. It keeps the declaration's source spelling for diagnostics.
+pub(crate) fn call_site_type_variable(
+    site: CallSiteIdentity,
+    declared: &'static str,
 ) -> &'static str {
-    let declared = intern(declared);
-    let fresh = intern(&format!(
-        "\0postponed-call:{compilation}:{file}:{expression}:{declared}"
-    ));
+    let CallSiteIdentity {
+        compilation,
+        file,
+        call,
+    } = site;
+    let fresh = intern(&format!("\0call:{compilation}:{file}:{call}:{declared}"));
     {
         let mut sources = TYPE_PARAMETER_SOURCES
             .get_or_init(|| Mutex::new(HashMap::default()))
@@ -97,6 +100,56 @@ pub(crate) fn postponed_call_type_variable(
         let source = sources.get(declared).copied().unwrap_or(declared);
         sources.insert(fresh, source);
     }
+    CALL_SITE_VARIABLES
+        .get_or_init(|| Mutex::new(HashMap::default()))
+        .lock()
+        .unwrap()
+        .insert(
+            fresh,
+            CallSiteVariable {
+                site,
+                formal: declared,
+            },
+        );
+    fresh
+}
+
+/// `ty` with call `site`'s own inference variables expressed as the formals they stand for. A call
+/// publishes its selection over the called declaration's formals; another call's variable is not
+/// this call's to translate and stays.
+pub(crate) fn ty_declared_at_call(ty: super::Ty, site: CallSiteIdentity) -> super::Ty {
+    super::ty_map_symbols(ty, &|symbol, bound| match symbol.kind() {
+        super::TyKind::Var(name, _) => match call_site_variable(name) {
+            Some(variable) if variable.site == site => super::Ty::ty_param(variable.formal, bound),
+            _ => symbol.with_symbol_bound(bound),
+        },
+        _ => symbol.with_symbol_bound(bound),
+    })
+}
+
+/// The call and formal behind a call's inference variable; `None` for every other identity.
+pub(crate) fn call_site_variable(variable: super::TyParamName) -> Option<CallSiteVariable> {
+    CALL_SITE_VARIABLES
+        .get()?
+        .lock()
+        .unwrap()
+        .get(variable.as_str())
+        .copied()
+}
+
+/// The inference variable call `site` solves for `declared`, entered by one of its function
+/// arguments before the call is solved. It is the same variable [`call_site_type_variable`] gives
+/// the call's candidate selection, so the argument's checked type and the selected signature speak
+/// about one variable. It also records `argument` as one of the function arguments analysed under
+/// the variable ([`postponed_variable_origin`]).
+pub(crate) fn postponed_call_type_variable(
+    site: CallSiteIdentity,
+    argument: crate::diag::Span,
+    declared: &str,
+) -> &'static str {
+    let declared = intern(declared);
+    let fresh = call_site_type_variable(site, declared);
+    let file = site.file;
     let mut origins = POSTPONED_VARIABLE_ORIGINS
         .get_or_init(|| Mutex::new(HashMap::default()))
         .lock()
@@ -208,8 +261,9 @@ pub(crate) fn type_parameter_source_name(name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        constructor_type_parameter, declaration_type_parameter, postponed_call_type_variable,
-        postponed_variable_origin, type_parameter_source_name, PostponedVariableOrigin,
+        call_site_type_variable, constructor_type_parameter, declaration_type_parameter,
+        postponed_call_type_variable, postponed_variable_origin, type_parameter_source_name,
+        CallSiteIdentity, PostponedVariableOrigin,
     };
     use crate::diag::Span;
     use crate::types::TyParamName;
@@ -245,11 +299,17 @@ mod tests {
         let outer_block = Span::new(30, 60);
         let outer_trailing = Span::new(62, 90);
         let inner_block = Span::new(40, 50);
-        let outer = postponed_call_type_variable(23, 1, 40, outer_block, declared);
-        let same_outer = postponed_call_type_variable(23, 1, 40, outer_trailing, declared);
-        let inner = postponed_call_type_variable(23, 1, 55, inner_block, declared);
+        let site = |call| CallSiteIdentity {
+            compilation: 23,
+            file: 1,
+            call,
+        };
+        let outer = postponed_call_type_variable(site(40), outer_block, declared);
+        let same_outer = postponed_call_type_variable(site(40), outer_trailing, declared);
+        let inner = postponed_call_type_variable(site(55), inner_block, declared);
 
         assert_eq!(outer, same_outer);
+        assert_eq!(outer, call_site_type_variable(site(40), declared));
         assert_ne!(outer, inner);
         assert_ne!(outer, declared);
         assert_eq!(type_parameter_source_name(outer), "T");
