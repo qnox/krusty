@@ -412,7 +412,6 @@ callableReference/bound/dontShareReceiver.kt
 callableReference/bound/emptyLHS.kt
 callableReference/bound/enumEntryMember.kt
 callableReference/bound/equals/nullableReceiverInEquals.kt
-callableReference/bound/equals/receiverInEquals.kt
 callableReference/bound/genericBoundPropertyAsCrossinline.kt
 callableReference/bound/genericValOnLHS.kt
 callableReference/bound/kCallableNameIntrinsic.kt
@@ -631,7 +630,6 @@ classes/kt1018.kt
 classes/kt1535.kt
 classes/kt1538.kt
 classes/kt1721.kt
-classes/kt1918.kt
 classes/kt1980.kt
 classes/kt2384.kt
 classes/kt2391.kt
@@ -998,7 +996,6 @@ controlStructures/tryCatchInExpressions/tryInsideTry.kt
 controlStructures/tryFinally.kt
 controlflow/break.kt
 controlflow/break1.kt
-controlflow/callOnSmarcastedNothing.kt
 controlflow/for_loops.kt
 controlflow/for_loops_array_break_continue.kt
 controlflow/for_loops_array_indices.kt
@@ -1476,7 +1473,6 @@ coroutines/tryFinallyInsideInlineLambda.kt
 coroutines/tryFinallyWithHandleResult.kt
 coroutines/unitTypeReturn/coroutineNonLocalReturn.kt
 coroutines/unitTypeReturn/coroutineReturn.kt
-coroutines/unitTypeReturn/inlineUnitFunction.kt
 coroutines/unitTypeReturn/interfaceDelegation.kt
 coroutines/unitTypeReturn/suspendNonLocalReturn.kt
 coroutines/unitTypeReturn/suspendReturn.kt
@@ -1771,7 +1767,6 @@ elvis/genericNull.kt
 elvis/kt6694ExactAnnotationForElvis.kt
 elvis/ofNonNullableResultType.kt
 elvis/primitive.kt
-elvis/withNothingConstraintAndExpectedType.kt
 enum/abstractMethodInEnum.kt
 enum/abstractNestedClass.kt
 enum/asReturnExpression.kt
@@ -2010,7 +2005,6 @@ fir/listAssignmentInWhen.kt
 fir/multipleDefaultsFalsePositiveDelegation.kt
 fir/nestedClassTypeParameterDeserialization.kt
 fir/smartCastToInvisibleClassMember.kt
-fir/starProjectionLambdaNullReturn.kt
 fir/suppressedInvisibleReferenceQualifier.kt
 fir/toLong.kt
 fp/atan2ZeroGuadrantsDouble.kt
@@ -2087,7 +2081,6 @@ function/localFunction2.kt
 function/manglingImportedFromObjectWithNI.kt
 function/minus_eq.kt
 function/named.kt
-function/nothingNReturningSafeCall.kt
 function/plus_eq.kt
 function/referenceBigArity.kt
 function/sum.kt
@@ -2116,7 +2109,6 @@ functions/invoke/kt3297.kt
 functions/kt1038.kt
 functions/kt1199.kt
 functions/kt1413.kt
-functions/kt1649_2.kt
 functions/kt2716.kt
 functions/kt2929.kt
 functions/kt3214.kt
@@ -2132,7 +2124,6 @@ functions/localFunctions/definedWithinLambdaInnerUsage1.kt
 functions/localFunctions/definedWithinLambdaInnerUsage2.kt
 functions/localFunctions/kt3978_2.kt
 functions/localFunctions/liftThroughFunObjectLambda.kt
-functions/localFunctions/localExtensionOnNullableParameter.kt
 functions/localFunctions/localFunctionInConstructor.kt
 functions/localFunctions/nameClashAcrossDifferentContainers.kt
 ieee754/anyCastToPrimitiveCompareTo1.kt
@@ -2189,10 +2180,8 @@ inference/builderInferenceLeakingVariable.kt
 inference/capturedSelfInsideIntersection.kt
 inference/capturedSelfInsideIntersection2.kt
 inference/capturedSelfInsideIntersection3.kt
-inference/capturedTypeAsLambdaInputType.kt
 inference/capturedTypeWhenSubject.kt
 inference/capturedTypesSubstitutionIntoAbbreviation.kt
-inference/coerctionToUnitForLastExpressionWithStarProjection.kt
 inference/earlierReifiedFix.kt
 inference/ifWithAssignmentAndNothingBranch.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
@@ -2261,7 +2250,6 @@ inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/Int.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/IntersectionType.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/LocalClass.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/NothingYieldCase.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/NullableNothing.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/NullableTypeParameter.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/SuspendingFunction.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/TypeParameter.kt
@@ -3707,7 +3695,6 @@ operatorConventions/assignToDotQualifiedWithSideEffect.kt
 operatorConventions/assignmentOperations.kt
 operatorConventions/augmentedAssignmentWithArrayLHS.kt
 operatorConventions/compareTo/comparable.kt
-operatorConventions/compareTo/customCompareTo.kt
 operatorConventions/compareTo/doubleInt.kt
 operatorConventions/compareTo/doubleLong.kt
 operatorConventions/compareTo/extensionArray.kt
@@ -3746,7 +3733,6 @@ platformTypes/primitives/toString.kt
 platformTypes/primitives/unaryMinus.kt
 platformTypes/primitives/unaryPlus.kt
 primitiveTypes/booleanHashCode.kt
-primitiveTypes/comparisonWithNullCallsFun.kt
 primitiveTypes/conversions.kt
 primitiveTypes/equalityWithObject/boxedEqPrimitiveEvaluationOrder.kt
 primitiveTypes/equalityWithObject/intEqualsNullableIntWithSmartCasts.kt
@@ -4778,7 +4764,6 @@ regressions/kt344.kt
 regressions/kt3442.kt
 regressions/kt35914.kt
 regressions/kt3903.kt
-regressions/kt47279.kt
 regressions/kt5056.kt
 regressions/kt5395.kt
 regressions/kt57487.kt
@@ -4842,7 +4827,6 @@ reified/method.kt
 reified/multipleTypeParameters.kt
 reified/newArrayInt.kt
 reified/noValueParameters.kt
-reified/nullableNothingArrayAsStringArray.kt
 reified/parameterSwap.kt
 reified/recursiveNewArray.kt
 reified/reifiedChain.kt
@@ -4866,7 +4850,6 @@ safeCall/genericNull.kt
 safeCall/kt245.kt
 safeCall/kt247.kt
 safeCall/kt3430.kt
-safeCall/parenthesizedSafeCallsAndOperators.kt
 safeCall/primitive.kt
 safeCall/primitiveEqSafeCall.kt
 safeCall/primitiveNotEqSafeCall.kt
@@ -4924,7 +4907,6 @@ smartCasts/kt44814.kt
 smartCasts/kt44932.kt
 smartCasts/kt72391.kt
 smartCasts/negativesmartCastAugmentedAssignment.kt
-smartCasts/nullSmartCast.kt
 smartCasts/propertyInitializationAfterSmartCast.kt
 smartCasts/smartCastedGenericWhenSubjectInRangeCheck.kt
 smartCasts/smartcastFromGenericToString.kt
@@ -5127,17 +5109,10 @@ unaryOp/intrinsicNullable.kt
 underscoredTypeArguments/backTicked.kt
 underscoredTypeArguments/lambdaInputType.kt
 underscoredTypeArguments/simple.kt
-unit/closureReturnsNullableUnit.kt
 unit/kt3634.kt
 unit/kt4212.kt
-unit/kt4265.kt
 unit/kt51036.kt
-unit/nullableUnit.kt
-unit/nullableUnitInWhen1.kt
-unit/nullableUnitInWhen2.kt
-unit/nullableUnitInWhen3.kt
 unit/sillyThings.kt
-unit/unitCoercionWithElvis.kt
 unsignedTypes/boxConstValOfUnsignedType.kt
 unsignedTypes/boxedUnsignedEqualsZero.kt
 unsignedTypes/checkBasicUnsignedLiterals.kt
