@@ -1112,13 +1112,7 @@ impl CallLinker for Linker<'_, '_> {
                 .declare(ir, &identity, selected, arena, declaration)
                 .map_err(callee_declined)?,
         };
-        let parameter_defaults = declaration
-            .context_parameters
-            .iter()
-            .chain(&declaration.extension_receiver)
-            .chain(&declaration.regular_parameters)
-            .map(|parameter| parameter.default_value.is_some())
-            .collect();
+        let parameter_defaults = parameter_defaults(declaration);
         let declaration = &ir.functions[function as usize];
         Ok(LinkedCallee {
             callee: Callee::Local(function),
@@ -1255,6 +1249,7 @@ impl<'s> Linker<'_, 's> {
             type_parameters: Vec::new(),
             type_parameter_bounds: Some(Vec::new()),
             class_type_parameters: Vec::new(),
+            parameter_defaults: parameter_defaults(declaration),
         }))
     }
 
@@ -1298,6 +1293,7 @@ impl<'s> Linker<'_, 's> {
                 .generic_signature()
                 .map(|signature| signature.formal_bounds.clone()),
             class_type_parameters: self.class_type_parameters(Some(selected))?,
+            parameter_defaults: parameter_defaults(declaration),
         })
     }
 
@@ -1627,4 +1623,16 @@ impl UnitCheckpoint {
         unit.value_receivers
             .retain(|identity, _| functions.contains_key(identity));
     }
+}
+
+/// Whether each value parameter of `declaration`, in the order its lowered function declares
+/// them, has a serialized default a call may leave it to.
+fn parameter_defaults(declaration: &KlibIrFunction) -> Vec<bool> {
+    declaration
+        .context_parameters
+        .iter()
+        .chain(&declaration.extension_receiver)
+        .chain(&declaration.regular_parameters)
+        .map(|parameter| parameter.default_value.is_some())
+        .collect()
 }
