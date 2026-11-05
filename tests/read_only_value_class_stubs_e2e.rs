@@ -11,13 +11,13 @@
 //! `Object remove(Object)` that boxes the result, then a final `String remove(Object)`. A member
 //! that a value class renames gets the same pair for `get(Object)`.
 //!
-//! The `Map` faces also carry the JDK's own `java.util.Map` defaults (`putIfAbsent`, ...), which
-//! are a later realization; their comparison leaves those out by their exact spelling and compares
-//! every other member byte for byte.
+//! The `Map` faces also stub the mutable-only defaults of the JDK's `java.util.Map`
+//! (`putIfAbsent`, ...), mangled by their value-class positions, as a `Collection` face stubs
+//! `removeIf`; every comparison covers a class's complete method inventory.
 //!
 //! A value class over `Collection<Z>` writes its interface entries by the overridden collection
 //! declaration's signature policy (`containsAll(Collection<?>)`) and bridges `size()` as an
-//! ordinary synthetic override, which its box test reads back through reflection. A class
+//! ordinary synthetic override, which its box test also reads back through reflection. A class
 //! extending a Kotlin `AbstractList`/`AbstractSet` gets the special bridges of the fake overrides
 //! it inherits, and a value-class box passed to a declared parameter that names a type parameter
 //! without being one (`Iterable<T>`, `Tagged<out T>`) is cast to it, as kotlinc's implicit cast is.
@@ -158,43 +158,17 @@ fun box(): String {
 }
 ";
 
-/// The members of `java.util.Map` a later realization writes, as `javap -p` spells them.
-const LATER_REALIZATIONS: &[&str] = &[
-    "public void replaceAll(java.util.function.BiFunction<? super java.lang.String, ? super stubs.S, ? extends stubs.S>);",
-    "public java.lang.String putIfAbsent-",
-    "public boolean replace-",
-    "public java.lang.String replace-",
-    "public java.lang.String computeIfAbsent-",
-    "public java.lang.String computeIfPresent-",
-    "public java.lang.String compute-",
-    "public java.lang.String merge-",
-    "public void replaceAll(java.util.function.BiFunction<? super stubs.Z, ? super java.lang.String, ? extends java.lang.String>);",
-    "public java.lang.Object putIfAbsent(java.lang.Object, java.lang.Object);",
-    "public boolean replace(java.lang.Object, java.lang.Object, java.lang.Object);",
-    "public java.lang.Object replace(java.lang.Object, java.lang.Object);",
-    "public java.lang.Object computeIfAbsent(java.lang.Object, java.util.function.Function);",
-    "public java.lang.Object computeIfPresent(java.lang.Object, java.util.function.BiFunction);",
-    "public java.lang.Object compute(java.lang.Object, java.util.function.BiFunction);",
-    "public java.lang.Object merge(java.lang.Object, java.lang.Object, java.util.function.BiFunction);",
-];
-
 fn assert_map_matches_kotlinc(class: &str, members: &[&str]) {
-    let classes = common::classes_against_kotlinc_module(&[("Maps.kt", &packaged(MAPS))]);
+    assert_members_match_kotlinc(("Maps.kt", MAPS), class, members);
+}
+
+/// `class`'s complete method declarations, and the code of each of `members`, match kotlinc's.
+fn assert_members_match_kotlinc((file, source): (&str, &str), class: &str, members: &[&str]) {
+    let classes = common::classes_against_kotlinc_module(&[(file, &packaged(source))]);
     let (reference, krusty) = classes
         .method_declarations(class)
         .unwrap_or_else(|| panic!("both compilers write {class}"));
-    let realized_here = |declarations: Vec<String>| {
-        declarations
-            .into_iter()
-            .filter(|declaration| {
-                !LATER_REALIZATIONS.iter().any(|later| {
-                    declaration.as_str() == *later
-                        || later.ends_with('-') && declaration.starts_with(later)
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(realized_here(krusty), realized_here(reference));
+    assert_eq!(krusty, reference);
     let (reference, krusty) = classes.method_blocks(class);
     for member in members {
         let block = |blocks: &[(String, String)]| {
@@ -339,6 +313,19 @@ fn a_value_class_box_passed_to_a_generic_parameter_shape_is_cast_like_kotlinc() 
         "ValueCollections",
         &packaged(COLLECTIONS),
         "stubs/ValueCollectionsKt",
+    );
+}
+
+#[test]
+fn a_value_class_collection_maps_its_special_members_like_kotlinc() {
+    assert_members_match_kotlinc(
+        ("ValueCollections.kt", COLLECTIONS),
+        "stubs/Zs",
+        &[
+            "public final boolean contains(java.lang.Object);",
+            "public boolean containsAll(java.util.Collection<?>);",
+            "public int size();",
+        ],
     );
 }
 
