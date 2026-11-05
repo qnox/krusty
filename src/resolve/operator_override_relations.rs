@@ -9,7 +9,7 @@
 use super::SymbolTable;
 use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, ResolvedFunctionOverrideTarget,
-    ResolvedModuleIndex, ResolvedOperatorEqualsOverride, ResolvedOperatorEqualsTarget,
+    ResolvedModuleIndex, ResolvedOperatorEqualsOverride,
 };
 use crate::libraries::{FnKind, FunctionInfo};
 use crate::module_symbols::ModuleSymbols;
@@ -17,7 +17,7 @@ use crate::symbol_source::{CompositeSource, SymbolSource};
 use crate::types::Ty;
 
 struct DeclaredFunction {
-    formals: Vec<String>,
+    formals: Vec<crate::types::TyParamName>,
     formal_bounds: Vec<Vec<Ty>>,
     parameters: Vec<Ty>,
     receiver: Option<Ty>,
@@ -61,7 +61,7 @@ fn declared_function(
         .map_while(|ordinal| index.type_parameter(declaration, ordinal))
         .filter_map(|parameter| {
             Some((
-                index.type_parameter_semantic_name(parameter)?.to_owned(),
+                crate::types::TyParamName::new(index.type_parameter_semantic_name(parameter)?),
                 index
                     .type_parameter_header(parameter)?
                     .bounds
@@ -70,7 +70,7 @@ fn declared_function(
                     .collect(),
             ))
         })
-        .collect::<Vec<(String, Vec<Ty>)>>();
+        .collect::<Vec<(crate::types::TyParamName, Vec<Ty>)>>();
     let (formals, formal_bounds) = type_parameters.into_iter().unzip();
     Some(DeclaredFunction {
         formals,
@@ -147,22 +147,15 @@ fn inputs_match(
 fn target(
     index: &ResolvedModuleIndex,
     function: &FunctionInfo,
-) -> Option<ResolvedOperatorEqualsTarget> {
+) -> Option<ResolvedFunctionOverrideTarget> {
     if let Some(declaration) = function.stable_declaration {
         let callable = index.callable_for_declaration(declaration)?;
-        return Some(ResolvedOperatorEqualsTarget::Callable(
-            ResolvedFunctionOverrideTarget::Module(callable.id),
-        ));
-    }
-    if let Some(external) = function.callable.external_identity {
-        return Some(ResolvedOperatorEqualsTarget::Callable(
-            ResolvedFunctionOverrideTarget::External(external),
-        ));
+        return Some(ResolvedFunctionOverrideTarget::Module(callable.id));
     }
     function
         .callable
-        .compiler_core_declaration
-        .map(ResolvedOperatorEqualsTarget::CompilerCore)
+        .external_identity
+        .map(ResolvedFunctionOverrideTarget::External)
 }
 
 fn select_declared(

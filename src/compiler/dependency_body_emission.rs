@@ -113,6 +113,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         intrinsics,
         &callees,
         &target_realizes_intrinsic,
+        &target_represents_classifier,
     ) {
         Ok(roots) => roots,
         Err(error) => {
@@ -171,13 +172,16 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
-        let callees = KlibCalleeFacts::with_declarations(
+        let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
-            declarations
-                .iter()
-                .filter_map(|declaration| declaration.klib_body_callable()),
+            declarations.iter().filter_map(|(target, declaration)| {
+                declaration
+                    .klib_body_callable()
+                    .map(|callable| (*target, callable))
+            }),
         )
-        .with_type_oracle(&type_oracle);
+        .with_type_oracle(&type_oracle)
+        .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
@@ -279,6 +283,9 @@ pub(super) fn emit_dependencies<B: Backend>(
             .collect::<Vec<_>>();
         for (identity, function) in &closed {
             exports.record_callable(*function, identity.clone());
+            if let Some(receiver) = unit.value_member_receiver(identity) {
+                exports.record_member_receiver(*function, receiver);
+            }
             if let Some(classifier) = unit.authenticated_singleton_classifier(identity) {
                 let inert_platform_singleton =
                     bodies.singleton_initialization_is_inert(&identity.module, classifier);

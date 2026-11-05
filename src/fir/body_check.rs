@@ -35,6 +35,7 @@ mod destructure_tests;
 mod driver;
 #[cfg(test)]
 mod driver_tests;
+mod enclosing_capture_owners;
 mod enum_entries;
 mod enum_reflection;
 mod failure;
@@ -501,6 +502,9 @@ fn bind_parameters_and_check_defaults(
         checker.body.add_parameter(parameter_record);
         if parameter.inline_expansion_mode() == crate::types::InlineExpansionMode::Splice {
             checker.body.add_spliced_inline_parameter(value);
+        }
+        if parameter.inline_modifier == crate::types::InlineParameterModifier::Crossinline {
+            checker.body.add_crossinline_parameter(value);
         }
     }
     if defaults.next().is_some() {
@@ -1047,15 +1051,10 @@ impl BodyFirChecker<'_> {
         &mut self,
         value: FirExprId,
         target: ResolvedTy,
-        cause: OriginId,
         conversion: Option<FirConversion>,
     ) -> FirExprId {
         conversion.map_or(value, |conversion| {
-            self.body.add_expr(FirExpr {
-                origin: cause,
-                ty: target,
-                kind: FirExprKind::ImplicitConversion { value, conversion },
-            })
+            self.body.add_implicit_conversion(value, target, conversion)
         })
     }
 
@@ -2654,14 +2653,7 @@ impl BodyFirChecker<'_> {
                         let conversion = self
                             .selected_type_conversion(call_ty, unit, origin)
                             .expect("an indexed assignment discards its selected set result");
-                        self.body.add_expr(FirExpr {
-                            origin,
-                            ty: unit,
-                            kind: FirExprKind::ImplicitConversion {
-                                value: call,
-                                conversion,
-                            },
-                        })
+                        self.body.add_implicit_conversion(call, unit, conversion)
                     }
                 } else {
                     if indices.len() != 1 || receiver_ty.array_elem().is_none() {

@@ -166,7 +166,7 @@ fn materialize_unnamed_checks_before_result_coercion(ir: &mut IrFile) {
             };
             let IrExpr::NotNullAssert {
                 operand: checked,
-                check: crate::ir::NullCheck::Unnamed,
+                check: crate::ir::NullCheck::Unnamed { .. },
             } = ir.exprs.get(*assertion as usize)?
             else {
                 return None;
@@ -247,7 +247,7 @@ fn materialize_unnamed_checks_before_result_coercion(ir: &mut IrFile) {
             };
             *value = Some(coerced);
         }
-        ir.physical_types.insert(produced, slot);
+        ir.set_physical_type(produced, slot);
         ir.declaration_result_coercions.remove(&coercion);
     }
 }
@@ -356,7 +356,9 @@ mod tests {
         let checked = ir.add_expr(IrExpr::GetValue(0));
         let assertion = ir.add_expr(IrExpr::NotNullAssert {
             operand: checked,
-            check: NullCheck::Unnamed,
+            check: NullCheck::Unnamed {
+                site: crate::ir::NullCheckSite::Value,
+            },
         });
         let result = ir.add_expr(IrExpr::GetValue(0));
         let block = ir.add_expr(IrExpr::Block {

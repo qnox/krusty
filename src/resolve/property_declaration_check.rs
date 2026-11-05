@@ -368,27 +368,13 @@ impl Checker<'_> {
                 .as_ref()
                 .filter(|body| self.should_check_selected_fun_body(body))
             {
-                let field_ty = has_backing_field.then_some(storage_ty);
-                self.with_ret_field(prop_ty, field_ty, scope, |c| match g {
-                    FunBody::Expr(e) => {
-                        c.check_expression_getter(
-                            scope,
-                            *e,
-                            prop_ty,
-                            p.declared_ty().is_some(),
-                            stable_property,
-                        );
-                        if p.declared_ty().is_none() {
-                            if let Some(declaration) = stable_property {
-                                c.record_inferred_property_publication(declaration, *e, prop_ty);
-                            }
-                        }
-                    }
-                    FunBody::Block(b) => {
-                        c.check_executable_body(scope, *b);
-                    }
-                    FunBody::None => {}
-                });
+                let result = super::accessor_bodies::GetterResult {
+                    ty: prop_ty,
+                    field: has_backing_field.then_some(storage_ty),
+                    declared: p.declared_ty().is_some(),
+                    declaration: stable_property,
+                };
+                self.check_getter_body(scope, p, g, result);
             }
             // A setter body: an extension property's is checked with `this` = receiver; a top-level
             // backing-field property's binds `field` to the property type. Both bind the value param.
@@ -399,18 +385,7 @@ impl Checker<'_> {
                 .filter(|(_, body)| self.should_check_selected_fun_body(body))
             {
                 let field_ty = has_backing_field.then_some(storage_ty);
-                self.with_ret_field(Ty::Unit, field_ty, scope, |c| {
-                    let setter_scope = scope.child(ScopeKind::Function { receiver: None });
-                    let scope = &setter_scope;
-                    let pname = crate::ast::setter_param_or_value(setter.param.as_ref());
-                    c.declare(scope, &pname, prop_ty, true);
-                    match body {
-                        FunBody::Expr(g) | FunBody::Block(g) => {
-                            c.check_executable_body(scope, *g);
-                        }
-                        FunBody::None => {}
-                    }
-                });
+                self.check_setter_body(scope, p, setter, body, prop_ty, field_ty);
             }
             if value_receiver.is_some() {
                 self.extension_receiver_labels.pop();

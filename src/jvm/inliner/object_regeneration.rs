@@ -14,7 +14,7 @@ use crate::jvm::bytecode_passes::analysis::{
     PlainFrames, Value,
 };
 use crate::jvm::bytecode_passes::descriptors;
-use crate::jvm::method_node::{Constant, Insn, MethodNode, Node};
+use crate::jvm::method_node::{Insn, MethodNode, Node};
 
 use super::anonymous_object::{MalformedType, TypeRemapper};
 use super::class_roles::ClassRoles;
@@ -46,14 +46,16 @@ pub(crate) struct ObjectLambda<'a> {
 
 /// Where the objects of one inlined call are regenerated.
 pub(crate) trait AnonymousObjects {
-    /// Regenerate `class`, which the body constructs through `constructor_desc` passing `lambdas`:
-    /// the copy's name and the descriptor of its constructor. The copy takes each lambda's
-    /// captured values, in order, after the arguments that are not lambdas.
+    /// Regenerate `class`, which the body constructs through `constructor_desc` passing `lambdas`
+    /// and, at the arguments `suspend_values`, function values of inline suspend parameters the
+    /// call does not inline: the copy's name and the descriptor of its constructor. The copy takes
+    /// each lambda's captured values, in order, after the arguments that are not lambdas.
     fn regenerate(
         &mut self,
         class: &str,
         constructor_desc: &str,
         lambdas: &[ObjectLambda<'_>],
+        suspend_values: &[usize],
         prior_classes: &[(String, String)],
     ) -> Result<RegeneratedObject, InlineError>;
 
@@ -110,20 +112,16 @@ pub(super) fn regenerate_objects(
     let mut prior_classes = Vec::new();
     // `new` / `getstatic INSTANCE` sites whose copy still uses a reified parameter.
     let mut reemit_markers = Vec::new();
-    // The copies those markers ask the caller to specialize in turn.
-    let mut still_reified = Vec::new();
     let marker_sites = need_class_reification_sites(node);
-    // kotlinc's `awaitClassReification`: a `needClassReification` marker asks the next object
-    // to be specialized for this call.
-    let mut await_reification = false;
+    // The object event each marker asks to be specialized for this call. A marker whose object
+    // is not one the class roles authenticate is refused before anything is regenerated.
+    let marker_targets = reification_targets(node, &marker_sites, &constructions, classes)?;
     // The `new`s of objects a same-module body constructs that this call reuses unchanged.
     let mut reused = BTreeSet::new();
     for at in 0..node.nodes.len() {
-        if marker_sites.contains(&at) {
-            await_reification = true;
-        }
+        let specialize = marker_targets.contains(&at);
         if let Some(owner) = anonymous_singleton_owner(node, at, classes) {
-            if objects.same_module() && !std::mem::take(&mut await_reification) {
+            if objects.same_module() && !specialize {
                 continue;
             }
             let copy = objects.regenerate_singleton(&owner, &prior_classes)?;
@@ -137,7 +135,6 @@ pub(super) fn regenerate_objects(
             prior_classes.push((owner, copy.name.clone()));
             if copy.reified_parameters_remain {
                 reemit_markers.push(at);
-                still_reified.push(copy.name.clone());
             }
             let Node::Insn(insn) = &mut node.nodes[at] else {
                 unreachable!("a singleton load is a field instruction")
@@ -153,7 +150,6 @@ pub(super) fn regenerate_objects(
                 unreachable!("a construction starts at a `new`")
             };
             let passed = &constructions.lambdas[&constructor];
-            let specialize = std::mem::take(&mut await_reification);
             // kotlinc's `shouldRegenerate(sameModule)`: an object that takes none of the call's
             // lambdas, needs no reification, and captures no object regenerated here is reused.
             if objects.same_module()
@@ -178,6 +174,7 @@ pub(super) fn regenerate_objects(
                 class,
                 &constructions.descriptors[&constructor],
                 &object_lambdas,
+                &constructions.suspend_values[&constructor],
                 &prior_classes,
             )?;
             if !passed.is_empty() {
@@ -189,7 +186,6 @@ pub(super) fn regenerate_objects(
             }
             if copy.reified_parameters_remain {
                 reemit_markers.push(at);
-                still_reified.push(copy.name.clone());
             }
             remapper.add_mapping(class, &copy.name);
             prior_classes.push((class.clone(), copy.name.clone()));
@@ -219,9 +215,6 @@ pub(super) fn regenerate_objects(
     }
     for local in &mut node.local_variables {
         local.desc = remapper.map_desc(&local.desc).map_err(malformed)?;
-    }
-    if !marker_sites.is_empty() && names_unreified_class(node, classes, &still_reified) {
-        return Err(InlineError::UnreifiedClass);
     }
     remove_nodes(node, &marker_sites);
     insert_reification_markers(node, &marker_sites, &reemit_markers);
@@ -277,62 +270,45 @@ pub(super) fn is_need_class_reification(insn: &Insn) -> bool {
         if !*interface && owner == INTRINSICS && name == "needClassReification" && desc == "()V")
 }
 
-/// Whether `node` still names a class whose methods call `reifiedOperationMarker`, other than the
-/// `still_reified` copies whose loads keep their marker for the caller.
-fn names_unreified_class(
+/// The object event each `needClassReification` marker asks to be specialized (kotlinc's
+/// `awaitClassReification`): the next anonymous object construction or anonymous singleton load,
+/// as the class roles authenticate them, which are the events regeneration consumes the marker at.
+/// The marker stays pending through every other instruction, an ordinary allocation or singleton
+/// load among them. A marker no such event follows names an object this call cannot regenerate:
+/// its reified operations would stay unspecialized, so the inline is refused.
+fn reification_targets(
     node: &MethodNode,
+    marker_sites: &[usize],
+    constructions: &Constructions,
     classes: &dyn ClassRoles,
-    still_reified: &[String],
+) -> Result<Vec<usize>, InlineError> {
+    marker_sites
+        .iter()
+        .map(|&site| {
+            (site + 1..node.nodes.len())
+                .find(|&at| is_anonymous_object_event(node, at, constructions, classes))
+                .ok_or_else(|| {
+                    crate::trace_compiler!("splice", "unresolved reification marker at {site}");
+                    InlineError::UnreifiedClass
+                })
+        })
+        .collect()
+}
+
+/// Whether instruction `at` constructs an anonymous object (a `new` paired with its constructor
+/// call) or loads an anonymous singleton, by the class roles: the events regeneration handles.
+fn is_anonymous_object_event(
+    node: &MethodNode,
+    at: usize,
+    constructions: &Constructions,
+    classes: &dyn ClassRoles,
 ) -> bool {
-    let mut named = Vec::new();
-    for insn in node.instructions() {
-        note_classes(insn, &mut named);
+    if anonymous_singleton_owner(node, at, classes).is_some() {
+        return true;
     }
-    for block in &node.try_catch_blocks {
-        if let Some(class) = &block.catch_type {
-            named.push(class.clone());
-        }
-    }
-    for local in &node.local_variables {
-        internal_names(&local.desc, &mut named);
-    }
-    named.iter().any(|class| {
-        let marked = !still_reified.contains(class) && classes.contains_reified_marker(class);
-        if marked {
-            crate::trace_compiler!("splice", "unreified class {class}");
-        }
-        marked
-    })
-}
-
-fn note_classes(insn: &Insn, named: &mut Vec<String>) {
-    match insn {
-        Insn::Type { class, .. } => named.push(class.clone()),
-        Insn::Field { owner, desc, .. } | Insn::Method { owner, desc, .. } => {
-            named.push(owner.clone());
-            internal_names(desc, named);
-        }
-        Insn::Ldc(Constant::Class(class)) => named.push(class.clone()),
-        Insn::MultiANewArray { desc, .. } => internal_names(desc, named),
-        Insn::InvokeDynamic { desc, .. } => internal_names(desc, named),
-        _ => {}
-    }
-}
-
-/// Every `L…;` internal name in `desc`.
-fn internal_names(desc: &str, named: &mut Vec<String>) {
-    let bytes = desc.as_bytes();
-    let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at] == b'L' {
-            if let Some(end) = desc[at + 1..].find(';') {
-                named.push(desc[at + 1..at + 1 + end].to_string());
-                at += end + 2;
-                continue;
-            }
-        }
-        at += 1;
-    }
+    constructions.by_new.contains_key(&at)
+        && matches!(&node.nodes[at], Node::Insn(Insn::Type { class, .. })
+            if classes.is_anonymous_object(class))
 }
 
 fn remove_nodes(node: &mut MethodNode, indices: &[usize]) {
@@ -421,49 +397,6 @@ fn malformed(malformed: MalformedType) -> InlineError {
 }
 
 /// Each anonymous `new` and the `<init>` call that initializes it, by instruction index.
-/// Whether an object `callee` constructs is passed one of the call's suspend `lambdas` that one of
-/// its methods reads without a `$$forInline` copy
-/// ([`super::anonymous_object::reads_suspend_lambda_without_for_inline_copy`]). The call's route
-/// is decided from this fact before anything is inlined.
-pub(crate) fn suspend_lambda_without_for_inline_copy(
-    callee: &MethodNode,
-    parameters: &Parameters,
-    lambdas: &[Lambda],
-    classes: &dyn ClassRoles,
-) -> Result<bool, InlineError> {
-    let constructions = pair_constructions(callee, parameters, classes)?;
-    for (at, passed) in &constructions.lambdas {
-        let suspend_arguments: Vec<usize> = passed
-            .iter()
-            .filter(|&&(_, lambda)| lambdas[lambda].suspend)
-            .map(|&(argument, _)| argument)
-            .collect();
-        if suspend_arguments.is_empty() {
-            continue;
-        }
-        let Node::Insn(Insn::Method { owner, .. }) = &callee.nodes[*at] else {
-            unreachable!("a construction ends at an `<init>` call")
-        };
-        let unreadable = || {
-            InlineError::Regeneration(RegenerationError::Unsupported(
-                "an anonymous object whose class file does not read",
-            ))
-        };
-        let bytes = classes.class_file(owner).ok_or_else(unreadable)?;
-        let original = crate::jvm::class_node::ClassNode::read(&bytes).map_err(|_| unreadable())?;
-        if super::anonymous_object::reads_suspend_lambda_without_for_inline_copy(
-            &original,
-            &constructions.descriptors[at],
-            &suspend_arguments,
-        )
-        .map_err(InlineError::Regeneration)?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 struct Constructions {
     by_new: HashMap<usize, usize>,
     by_constructor: HashMap<usize, usize>,
@@ -471,6 +404,9 @@ struct Constructions {
     descriptors: HashMap<usize, String>,
     /// The inline lambdas each constructor call passes, as `(argument, lambda)`.
     lambdas: HashMap<usize, Vec<(usize, usize)>>,
+    /// The arguments of each constructor call that pass a function value of an inline suspend
+    /// parameter the call does not inline.
+    suspend_values: HashMap<usize, Vec<usize>>,
 }
 
 /// Pair every reachable anonymous `new` in `node` with the one `<init>` call whose receiver is the
@@ -488,6 +424,7 @@ fn pair_constructions(
         by_constructor: HashMap::default(),
         descriptors: HashMap::default(),
         lambdas: HashMap::default(),
+        suspend_values: HashMap::default(),
     };
     let constructs = node.instructions().any(|insn| {
         matches!(insn, Insn::Type { op: NEW, class } if classes.is_regenerated(class))
@@ -548,17 +485,23 @@ fn pair_constructions(
                     return Err(unpaired());
                 }
                 let mut passed: Vec<(usize, usize)> = Vec::new();
+                let mut suspend_values = Vec::new();
                 for (argument, value) in stack[stack.len() - arguments..].iter().enumerate() {
-                    if let ConstructionValue::Lambda(lambda, _) = value {
-                        if passed.iter().any(|&(_, known)| known == *lambda) {
-                            return Err(InlineError::LambdaParameterAccess);
+                    match value {
+                        ConstructionValue::Lambda(lambda, _) => {
+                            if passed.iter().any(|&(_, known)| known == *lambda) {
+                                return Err(InlineError::LambdaParameterAccess);
+                            }
+                            passed.push((argument, *lambda));
                         }
-                        passed.push((argument, *lambda));
+                        ConstructionValue::SuspendValue(_) => suspend_values.push(argument),
+                        _ => {}
                     }
                 }
                 constructions.by_constructor.insert(at, new);
                 constructions.descriptors.insert(at, desc.clone());
                 constructions.lambdas.insert(at, passed);
+                constructions.suspend_values.insert(at, suspend_values);
             }
             _ => {}
         }
@@ -570,13 +513,14 @@ fn pair_constructions(
 }
 
 /// A value of the body: a plain value, the uninitialized result of one of the anonymous `new`s at
-/// these indices (more than one only where paths from different `new`s join), or one of the call's
-/// inline lambdas.
+/// these indices (more than one only where paths from different `new`s join), one of the call's
+/// inline lambdas, or a function value of an inline suspend parameter the call does not inline.
 #[derive(Clone, Debug, PartialEq)]
 enum ConstructionValue {
     Basic(BasicValue),
     Uninitialized(BTreeSet<usize>, BasicValue),
     Lambda(usize, BasicValue),
+    SuspendValue(BasicValue),
 }
 
 impl ConstructionValue {
@@ -584,7 +528,8 @@ impl ConstructionValue {
         match self {
             ConstructionValue::Basic(value)
             | ConstructionValue::Uninitialized(_, value)
-            | ConstructionValue::Lambda(_, value) => value,
+            | ConstructionValue::Lambda(_, value)
+            | ConstructionValue::SuspendValue(value) => value,
         }
     }
 }
@@ -617,6 +562,9 @@ impl Interpreter for ConstructionInterpreter<'_> {
         let value = BasicInterpreter.new_parameter_value(slot, ty);
         match self.parameters.lambda_at(slot) {
             Some(lambda) => ConstructionValue::Lambda(lambda, value),
+            None if self.parameters.non_inline_suspend_at(slot) => {
+                ConstructionValue::SuspendValue(value)
+            }
             None => ConstructionValue::Basic(value),
         }
     }
@@ -708,6 +656,9 @@ impl Interpreter for ConstructionInterpreter<'_> {
                 if first == second =>
             {
                 ConstructionValue::Lambda(*first, basic)
+            }
+            (ConstructionValue::SuspendValue(_), ConstructionValue::SuspendValue(_)) => {
+                ConstructionValue::SuspendValue(basic)
             }
             _ => ConstructionValue::Basic(basic),
         }

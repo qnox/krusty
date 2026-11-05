@@ -8,7 +8,7 @@ pub(crate) struct EmitMetadata<'a> {
     pub(crate) facade: Option<&'a KotlinMetadata>,
     pub(crate) continuations: &'a crate::jvm::suspend::ContinuationMetadataMap,
     /// Suspend functions whose state machine this emission owns, because their only suspension is
-    /// inside a body it splices. See `docs/JVM_INLINE_BEFORE_CPS.md`.
+    /// inside a body it splices.
     pub(crate) emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
     /// Forwarded suspend returns requiring the target version's physical `Unit` adaptation.
     pub(crate) suspended_result_returns: &'a crate::jvm::suspend::SuspendedResultReturns,
