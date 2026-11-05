@@ -2308,7 +2308,6 @@ functions/localFunctions/definedWithinLambda.kt
 functions/localFunctions/definedWithinLambdaInnerUsage1.kt
 functions/localFunctions/definedWithinLambdaInnerUsage2.kt
 functions/localFunctions/kt3978_2.kt
-functions/localFunctions/kt4989.kt
 functions/localFunctions/liftThroughFunObjectLambda.kt
 functions/localFunctions/localExtensionOnNullableParameter.kt
 functions/localFunctions/localFunctionInConstructor.kt
