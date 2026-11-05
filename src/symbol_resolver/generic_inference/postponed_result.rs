@@ -212,7 +212,7 @@ fn bind_concrete_parameter(
             outer_formals,
             binds,
         ),
-        TyKind::TyParam(name, _) if nested.formals.contains(&name) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) if nested.formals.contains(&name) => {
             let constraint = actual.projection_inner().unwrap_or(actual);
             let constraint = if through_nullable {
                 constraint.contributed_through_nullable_formal()

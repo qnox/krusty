@@ -39,6 +39,8 @@ pub(super) struct CallableRegistry {
     dependencies: HashMap<KlibDependencyCallable, u32>,
     /// The default entry of each published declaration that declares a default.
     dependency_defaults: HashMap<KlibDependencyCallable, u32>,
+    /// The dispatching entry of each published overridable member.
+    dependency_dispatches: HashMap<KlibDependencyCallable, u32>,
     signatures: HashMap<KlibDependencyCallable, DependencyFunctionSignature>,
     member_receivers: HashMap<KlibDependencyCallable, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<KlibDependencyCallable, SingletonMemberReceiver>,
@@ -55,6 +57,7 @@ pub(super) struct FileCallTargets {
     external_defaults: HashMap<ExternalCallableId, u32>,
     /// The ABI of each default entry, which is its provider declaration's own.
     external_default_signatures: HashMap<ExternalCallableId, DependencyFunctionSignature>,
+    external_dispatches: HashMap<ExternalCallableId, u32>,
     signatures: HashMap<ExternalCallableId, DependencyFunctionSignature>,
     member_receivers: HashMap<ExternalCallableId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
@@ -164,6 +167,7 @@ impl CallableRegistry {
             external: HashMap::default(),
             external_defaults: HashMap::default(),
             external_default_signatures: HashMap::default(),
+            external_dispatches: HashMap::default(),
             signatures: HashMap::default(),
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
@@ -369,6 +373,9 @@ impl CallableRegistry {
                             .external_default_signatures
                             .insert(*target, signature.clone());
                     }
+                    if let Some(&entry) = self.dependency_dispatches.get(identity) {
+                        targets.external_dispatches.insert(*target, entry);
+                    }
                     targets.signatures.insert(
                         *target,
                         self.signatures
@@ -424,6 +431,14 @@ impl CallableRegistry {
                     .flatten()
                     .ok_or_else(|| "a default-argument entry without its function".to_string())?;
                 self.dependency_defaults.insert(identity.clone(), entry);
+            }
+            if let Some(&entry) = ir.dispatch_entries.get(&function) {
+                let entry = functions
+                    .get(entry as usize)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| "a dispatching entry without its function".to_string())?;
+                self.dependency_dispatches.insert(identity.clone(), entry);
             }
             let index = emitted
                 .ok_or_else(|| "an inline-only function exported as Wasm code".to_string())?;
@@ -534,6 +549,12 @@ impl FileCallTargets {
         target: ExternalCallableId,
     ) -> Option<&DependencyFunctionSignature> {
         self.external_default_signatures.get(&target)
+    }
+
+    /// The entry an ordinary call to the overridable dependency member `target` goes through,
+    /// which dispatches on its receiver.
+    pub(super) fn external_dispatch(&self, target: ExternalCallableId) -> Option<u32> {
+        self.external_dispatches.get(&target).copied()
     }
 
     pub(super) fn signature(

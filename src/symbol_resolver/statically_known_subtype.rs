@@ -234,7 +234,8 @@ impl Unification<'_> {
         if original_kind != ProjectionKind::Star && !original_nullable && parameters_nullable {
             return true;
         }
-        if let Some(TyKind::TyParam(name, _)) = parameters_type.map(Ty::kind) {
+        if let Some(TyKind::TyParam(name, _) | TyKind::Var(name, _)) = parameters_type.map(Ty::kind)
+        {
             if self.variables.contains(&name.as_str()) {
                 if result
                     .get(name.as_str())

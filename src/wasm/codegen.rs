@@ -163,6 +163,7 @@ impl Backend for WasmBackend {
             file.dependency_exports.callable(function).is_some()
         });
         crate::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
+        crate::backend::dispatch_entries::realize(&mut file.ir, &file.dependency_exports);
         let Ok(properties) = crate::backend::local_properties::realize(&mut file.ir) else {
             decline(state, "a local delegated property".to_string());
             return Vec::new();

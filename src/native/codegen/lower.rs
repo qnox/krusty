@@ -327,7 +327,6 @@ pub fn lower_file(
         statics: Vec::new(),
         lambdas: HashMap::default(),
         local_delegate_helpers: HashMap::default(),
-        enum_entries: HashMap::default(),
         reference_identities: HashMap::default(),
         holders: HashMap::default(),
         references: HashMap::default(),
@@ -356,14 +355,12 @@ pub fn lower_file(
     lowering.declare_statics()?;
     lowering.declare_lambdas()?;
     lowering.declare_local_delegate_helpers()?;
-    lowering.declare_enum_entries()?;
     // Constructors are bodies too, so property-reference artifacts must exist before classes are
     // defined: a class initializer may itself contain `C::property`.
     lowering.declare_property_references()?;
     lowering.declare_local_property_references()?;
     lowering.define_local_delegate_helpers()?;
     lowering.define_classes()?;
-    lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let file_init_linkage = match unit_kind {
         crate::backend::CheckedIrUnitKind::Source => Linkage::Hidden,
@@ -476,8 +473,6 @@ struct FileLowering<'a> {
     lambdas: HashMap<u32, functions::LambdaItems>,
     /// Native-local accessor helper per checked local-delegate plan and accessor side.
     local_delegate_helpers: HashMap<(u32, bool), FuncId>,
-    /// Per enum class, its constants' static slots and getters, in declaration order.
-    enum_entries: HashMap<ClassId, enums::EnumItems>,
     /// The holder type for a captured `var` of each carrier, by the carrier's spelling.
     holders: HashMap<String, DataId>,
     /// The emitted pieces of each property reference, by the expression that creates it.
@@ -744,6 +739,7 @@ impl<'a> FileLowering<'a> {
                     unresolved_reified: Vec::new(),
                     frame_objects: crate::fx_hash::HashMap::default(),
                     frame_fields: crate::fx_hash::HashMap::default(),
+                    enum_base: None,
                 };
                 let params = body.builder.block_params(entry).to_vec();
                 fill(&mut body, &params)?;
@@ -941,6 +937,9 @@ struct BodyLowering<'a, 'b, 'c> {
     frame_objects: crate::fx_hash::HashMap<u32, u32>,
     /// The field variables of each local that holds a frame object.
     frame_fields: crate::fx_hash::HashMap<u32, Vec<Variable>>,
+    /// The enum constant whose construction is being lowered, taken by that construction: its
+    /// object, and the `kotlin.Enum` storage filled on it before any constructor runs.
+    enum_base: Option<enums::EnumBase>,
 }
 
 /// One `finally` the current position is inside.
@@ -1860,19 +1859,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 elem,
                 value,
             } => self.ref_set(holder, elem, value),
-            IrExpr::EnumEntry { classifier, name } => self.enum_entry(classifier, &name),
-            IrExpr::EnumValues { classifier } => self.enum_values(classifier),
-            IrExpr::EnumEntries { classifier } => self.enum_entries(classifier),
-            // `declaration` separates the classifier's own `E.valueOf(name)` from the standard
-            // library's INLINE `enumValueOf<E>(name)`. Both name the same lookup by entry name, and
-            // the two differ only in what a consumer that records SOURCE POSITIONS attributes an
-            // inline expansion to. This generator records none, so the lookup it emits is the same
-            // one either way; the distinction is read where it is meaningful, not repeated here.
-            IrExpr::EnumValueOf {
-                classifier,
-                arg,
-                declaration: _,
-            } => self.enum_value_of(classifier, arg),
+            // The shared enum lowering realized every enum this file declares; what is left names
+            // an enum another file declares, whose constants live there.
+            IrExpr::EnumEntry { classifier, .. }
+            | IrExpr::EnumValues { classifier }
+            | IrExpr::EnumEntries { classifier }
+            | IrExpr::EnumValueOf { classifier, .. } => Err(declined!(
+                "an enum another file declares (`{}`)",
+                classifier.render()
+            )),
+            IrExpr::EnumConstant {
+                name,
+                ordinal,
+                construction,
+                published,
+                ..
+            } => self.enum_constant(&name, ordinal, construction, published),
+            IrExpr::EnumAllocation { instance, .. } => self.enum_allocation(instance),
+            IrExpr::EnumEntriesList { values, .. } => self.enum_entries_list(values),
+            IrExpr::NoSuchEnumConstant { name, .. } => self.no_such_enum_constant(name),
             IrExpr::EnclosingInstance {
                 receiver, inner, ..
             } => self.enclosing_instance(receiver, inner),

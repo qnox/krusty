@@ -44,6 +44,24 @@ impl<'a> FileLowering<'a> {
             &export.symbol,
             export.signature.parameters().to_vec(),
         )?;
+        if let Some(symbol) = &export.dispatch_entry {
+            // An ordinary call from another module runs the receiver's override.
+            let Some(entry) = self
+                .ir
+                .dispatch_entries
+                .get(&function)
+                .and_then(|&entry| self.functions[entry as usize])
+            else {
+                return Err(declined!("`{symbol}` has no dispatching entry"));
+            };
+            self.define_trampoline(
+                file_init,
+                entry,
+                function,
+                symbol,
+                export.signature.parameters().to_vec(),
+            )?;
+        }
         let Some(symbol) = &export.default_entry else {
             return Ok(());
         };

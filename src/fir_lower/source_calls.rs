@@ -425,6 +425,7 @@ impl BodyLowering<'_> {
                         template,
                         parameter_types: &parameter_types,
                         dispatch_receiver,
+                        dispatch_type: receiver_ty.map(|receiver| receiver.get()),
                         extension_receiver,
                         extension_receiver_parameter,
                         arguments,

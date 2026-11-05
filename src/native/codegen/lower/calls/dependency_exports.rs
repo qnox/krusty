@@ -310,7 +310,18 @@ impl BodyLowering<'_, '_, '_> {
                 ));
                 (entry.as_str(), signature, operands)
             }
-            _ => (export.symbol.as_str(), declared.to_vec(), arguments),
+            // An ordinary call to an overridable member runs the receiver's override.
+            _ => (
+                match call {
+                    DependencyExportCall::Member | DependencyExportCall::MemberExtension => {
+                        export.dispatch_entry.as_deref()
+                    }
+                    _ => None,
+                }
+                .unwrap_or(export.symbol.as_str()),
+                declared.to_vec(),
+                arguments,
+            ),
         };
         let id = self
             .file
