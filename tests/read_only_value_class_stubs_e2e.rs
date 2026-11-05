@@ -332,6 +332,15 @@ fn a_kotlin_collection_superclass_leaves_its_fake_overrides_kotlincs_special_bri
     common::assert_class_matches_kotlinc("ValueCollections", &packaged(COLLECTIONS), "stubs/Pairs");
 }
 
+#[test]
+fn a_value_class_box_passed_to_a_generic_parameter_shape_is_cast_like_kotlinc() {
+    common::assert_class_matches_kotlinc(
+        "ValueCollections",
+        &packaged(COLLECTIONS),
+        "stubs/ValueCollectionsKt",
+    );
+}
+
 /// The members of `java.util.Collection` a later realization writes, as `javap -p` spells them.
 const COLLECTION_LATER_REALIZATIONS: &[&str] =
     &["public boolean removeIf(java.util.function.Predicate<? super stubs.Z>);"];
