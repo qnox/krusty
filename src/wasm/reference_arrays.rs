@@ -28,7 +28,9 @@ impl ReferenceArrays {
             open: false,
         });
         let to_string = objects.trap(module, objects.any_slot_types[2]);
-        let (_, itable) = objects.interfaces.class(module, objects.itable, vec![object]);
+        let (_, itable) = objects
+            .interfaces
+            .class(module, objects.itable, vec![object]);
         let mut init = Code::default();
         for function in [objects.identity_equals, identity.hash_code, to_string] {
             module.reference_function(function);

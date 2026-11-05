@@ -1033,6 +1033,34 @@ fn wasm_generated_members_keep_erased_array_hashes_stable_through_mutation() {
 }
 
 #[test]
+fn wasm_generated_members_compare_callable_declarations_and_receivers() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/dataClassErasedClosureIdentity.kt"),
+            "wasmDataClassErasedClosureIdentity",
+        ),
+        (
+            include_str!("box_regressions/dataClassCallableReferenceEquality.kt"),
+            "wasmDataClassCallableReferenceEquality",
+        ),
+        (
+            include_str!("box_regressions/dataClassReferenceAcrossModules.kt"),
+            "wasmDataClassReferenceAcrossModules",
+        ),
+        (
+            include_str!("box_regressions/dataClassOverloadedConstructorReferences.kt"),
+            "wasmDataClassOverloadedConstructorReferences",
+        ),
+        (
+            include_str!("box_regressions/dataClassNullableBoundReference.kt"),
+            "wasmDataClassNullableBoundReference",
+        ),
+    ] {
+        expect_wasm_box(source, stem);
+    }
+}
+
+#[test]
 fn wasm_a_generated_hash_of_an_erased_property_dispatches_when_every_class_has_a_body() {
     expect_wasm_box(
         include_str!("box_regressions/dataClassErasedPropertyHash.kt"),

@@ -1109,55 +1109,10 @@ impl Body<'_> {
 
     /// `lhs == rhs` on objects: `lhs?.equals(rhs) ?: (rhs === null)`.
     pub(super) fn object_equality(&mut self, lhs: u32, rhs: u32) -> Result<(), Unsupported> {
-        // Both operands run once, left first, even when the left value is null. The static
-        // type can be Any: the GC representation, not that type, selects the equality body.
-        let (left, right) = (self.local(REFERENCE), self.local(REFERENCE));
+        // The shared runtime dispatch begins only after both operands have run, left first.
         self.value(lhs, any())?;
-        self.code.local_set(left);
         self.value(rhs, any())?;
-        self.code.local_set(right);
-        let any_table = self.runtime.objects.any_table;
-        let equals = self.runtime.objects.any_slot_types[0];
-        self.code
-            .local_get(left)
-            .ref_is_null()
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(right)
-            .ref_is_null()
-            .else_()
-            .local_get(left)
-            .ref_test(false, STRING_HEAP)
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(right)
-            .ref_test(false, STRING_HEAP)
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(left)
-            .ref_cast(false, STRING_HEAP)
-            .local_get(right)
-            .ref_cast(false, STRING_HEAP)
-            .call(self.runtime.string_equals)
-            .else_()
-            .i32_const(0)
-            .end()
-            .else_()
-            .local_get(left)
-            .ref_test(false, HeapType::Concrete(self.runtime.objects.object))
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(left)
-            .local_get(right)
-            .local_get(left);
-        self.table_of_object();
-        self.code
-            .struct_get(any_table, AnyMember::Equals.slot())
-            .call_ref(equals)
-            .else_()
-            // Non-object eq references have no virtual override: their default is identity.
-            .local_get(left)
-            .local_get(right)
-            .ref_eq()
-            .end()
-            .end()
-            .end();
+        self.code.call(self.runtime.object_equals);
         Ok(())
     }
 
