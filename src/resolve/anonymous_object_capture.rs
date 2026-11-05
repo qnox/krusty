@@ -1161,9 +1161,12 @@ pub(super) fn record_anonymous_construction_captures(
             // Enclosing-instance need was decided against the anonymous body's receiver uses.
             // It has no source variable name, so lexical bound/write/use filters do not apply.
             AnonymousObjectCaptureSource::EnclosingInstance { .. }
-            | AnonymousObjectCaptureSource::ImplicitReceiver { .. }
-            | AnonymousObjectCaptureSource::ClassStorage { .. } => true,
-            AnonymousObjectCaptureSource::LexicalValue => {
+            | AnonymousObjectCaptureSource::ImplicitReceiver { .. } => true,
+            AnonymousObjectCaptureSource::ClassStorage { .. } if candidate.receiver.is_some() => {
+                true
+            }
+            AnonymousObjectCaptureSource::LexicalValue
+            | AnonymousObjectCaptureSource::ClassStorage { .. } => {
                 enclosing_value_visible_beside_member(
                     file,
                     declaration,

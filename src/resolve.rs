@@ -14146,7 +14146,7 @@ impl<'a> Checker<'a> {
                 })
                 .unwrap_or_default();
             {
-                for capture in captures {
+                for capture in &captures {
                     let actual = match capture.source {
                         AnonymousObjectCaptureSource::EnclosingInstance { depth, .. } => {
                             // The outer-instance capture is not a scope local; the construction site's
@@ -14198,7 +14198,7 @@ impl<'a> Checker<'a> {
                     self.check_class(scope, &class, declaration);
                     self.restore_body_state(saved);
                     if !self.discovers_captures_at_construction {
-                        self.publish_anonymous_class_capture_layout(scope, declaration, None);
+                        self.publish_anonymous_capture_layout(scope, declaration, &captures, None);
                     }
                 }
                 return self.anonymous_object_type(scope, declaration);

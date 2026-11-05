@@ -180,7 +180,18 @@ impl super::Checker<'_> {
                 .insert(declaration, captures);
         }
         self.refresh_anonymous_receiver_capture_fields(declaration, candidates);
-        self.publish_anonymous_class_capture_layout(scope, declaration, Some(storage_fields));
+        if let Some(captures) = self
+            .discovered_anonymous_captures
+            .get(&declaration)
+            .cloned()
+        {
+            self.publish_anonymous_capture_layout(
+                scope,
+                declaration,
+                &captures,
+                Some(storage_fields),
+            );
+        }
         true
     }
 
@@ -221,18 +232,18 @@ impl super::Checker<'_> {
 
     /// Anonymous classes use the same checked storage demands while retaining their established
     /// capture order. They have a declaration identity, not a local-declaration statement.
-    pub(super) fn publish_anonymous_class_capture_layout(
+    pub(super) fn publish_anonymous_capture_layout(
         &mut self,
         scope: &CheckerScope<'_>,
         declaration: DeclId,
+        captures: &[AnonymousObjectCapture],
         storage_fields: Option<&[Option<u32>]>,
     ) {
         let Decl::Class(class) = self.file.decl(declaration) else {
             return;
         };
-        let Some(captures) = self.discovered_anonymous_captures.get(&declaration) else {
-            return;
-        };
+        // The caller supplies the selected vector: a retained inline body may consume canonical
+        // Pass-1 captures without running capture discovery in this checker instance.
         let bindings = captures
             .iter()
             .map(|capture| capture.lexical_binding)
