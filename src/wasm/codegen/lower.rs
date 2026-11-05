@@ -28,6 +28,7 @@ mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
 mod shared_cells;
+pub(super) mod value_hash;
 
 #[cfg(test)]
 use tests::lower_alone;
@@ -38,6 +39,7 @@ pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntr
     is_scalar_operation(operation)
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
+        || operation == crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
 }
 
 use crate::backend::class_tables::module_interfaces::ModuleInterfaces;
@@ -1106,6 +1108,9 @@ impl<'a> Body<'a> {
                 && self.is_throwable_message(*target) =>
             {
                 self.throwable_message(dispatch_receiver, &args, *ret)?;
+            }
+            IrExpr::Call { .. } if value_hash::call_kind(self.ir, self.callables, id).is_some() => {
+                self.value_hash_call(id)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
