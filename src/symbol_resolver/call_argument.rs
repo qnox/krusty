@@ -95,7 +95,7 @@ impl CallArgKind {
         if self.adapts_integer_literal_to(concrete) {
             return concrete;
         }
-        if let TyKind::TyParam(_, bound) = parameter.non_null().kind() {
+        if let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = parameter.non_null().kind() {
             if self.adapts_integer_literal_to(bound) {
                 return bound;
             }
@@ -413,7 +413,7 @@ mod tests {
         CallArgKind::ExpectedTypeCallable {
             provisional,
             generic_sig: std::sync::Arc::new(GenericSig {
-                formals: vec!["T".to_owned()],
+                formals: vec![crate::types::TyParamName::new("T")],
                 formal_bounds: vec![Vec::new()],
                 receiver: None,
                 params,

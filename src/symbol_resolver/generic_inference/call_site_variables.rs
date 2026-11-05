@@ -10,14 +10,16 @@
 //!
 //! The collision exists exactly when a callee formal is lexically visible at the call site: a
 //! constructor of an enclosing generic class, or a generic function called from its own body.
-//! [`CallSiteVariables`] renames those formals to call-owned identities for constraint solving
-//! and maps the solution back onto the declaration's formals, so callers keep substituting the
-//! declaration-owned signature. Formals that are not in scope keep their identity, and a
-//! signature with none in scope is used unchanged.
+//! [`CallSiteVariables`] replaces those formals with the call's inference variables
+//! ([`TyKind::Var`](crate::types::TyKind::Var)) for constraint solving and maps the solution back
+//! onto the declaration's formals, so callers keep substituting the declaration-owned signature.
+//! Formals that are not in scope keep their identity, and a signature with none in scope is used
+//! unchanged.
 
 use super::call_constraints::{GenericBoundViolation, InferredCallBindings};
 use super::{GenericSig, Ty};
 use crate::fx_hash::HashMap;
+use crate::types::{TyKind, TyParamName};
 
 /// The identity translation shared by every constraint phase of one call. Declaration formals
 /// that are also visible in the caller receive call-owned identities; all other formals retain
@@ -26,17 +28,22 @@ use crate::fx_hash::HashMap;
 pub(crate) struct CallSiteVariableMap {
     call_owned: HashMap<&'static str, &'static str>,
     declared: HashMap<&'static str, &'static str>,
+    /// Whether the call-owned identities are inference variables. A postponed call's identities
+    /// are still renamed type parameters, because the lambdas analysed before that call is solved
+    /// see them in their own checked types.
+    variables: bool,
 }
 
 impl CallSiteVariableMap {
-    fn from_call_owned(
-        formals: &[String],
+    fn from_call_owned<F: crate::types::TyParamKey>(
+        formals: &[F],
+        variables: bool,
         mut call_owned_identity: impl FnMut(&'static str) -> Option<&'static str>,
     ) -> Self {
         let call_owned = formals
             .iter()
             .filter_map(|formal| {
-                let declared = crate::types::intern(formal);
+                let declared = crate::types::intern(formal.borrow());
                 call_owned_identity(declared).map(|call_owned| (declared, call_owned))
             })
             .collect::<HashMap<_, _>>();
@@ -47,11 +54,15 @@ impl CallSiteVariableMap {
         Self {
             call_owned,
             declared,
+            variables,
         }
     }
 
-    pub(crate) fn new(formals: &[String], lexically_visible: impl Fn(&str) -> bool) -> Self {
-        Self::from_call_owned(formals, |declared| {
+    pub(crate) fn new<F: crate::types::TyParamKey>(
+        formals: &[F],
+        lexically_visible: impl Fn(&str) -> bool,
+    ) -> Self {
+        Self::from_call_owned(formals, true, |declared| {
             lexically_visible(declared).then(|| crate::types::call_site_type_variable(declared))
         })
     }
@@ -59,13 +70,13 @@ impl CallSiteVariableMap {
     /// Give every still-open formal an identity owned by one postponed call expression. Repeated
     /// construction for different lambda arguments of that call returns the same identities;
     /// a nested call to the same declaration receives different ones.
-    pub(crate) fn for_postponed_call(
-        formals: &[String],
+    pub(crate) fn for_postponed_call<F: crate::types::TyParamKey>(
+        formals: &[F],
         compilation: u64,
         file: u32,
         expression: u32,
     ) -> Self {
-        Self::from_call_owned(formals, |declared| {
+        Self::from_call_owned(formals, false, |declared| {
             Some(crate::types::postponed_call_type_variable(
                 compilation,
                 file,
@@ -79,24 +90,40 @@ impl CallSiteVariableMap {
         self.call_owned.is_empty()
     }
 
+    /// `ty` with every call-owned formal replaced by this call's variable for it.
     pub(crate) fn instantiate_type(&self, ty: Ty) -> Ty {
-        crate::types::ty_rename_params(ty, &self.call_owned)
+        if !self.variables {
+            return crate::types::ty_rename_params(ty, &self.call_owned);
+        }
+        crate::types::ty_map_symbols(ty, &|symbol, bound| match symbol.kind() {
+            TyKind::TyParam(name, _) => match self.call_owned.get(name.as_str()) {
+                Some(&variable) => Ty::type_variable(TyParamName::new(variable), bound),
+                None => symbol.with_symbol_bound(bound),
+            },
+            _ => symbol.with_symbol_bound(bound),
+        })
     }
 
+    /// `ty` with this call's variables expressed as the declaration's formals again.
     pub(crate) fn declared_type(&self, ty: Ty) -> Ty {
-        crate::types::ty_rename_params(ty, &self.declared)
+        if !self.variables {
+            return crate::types::ty_rename_params(ty, &self.declared);
+        }
+        crate::types::ty_map_symbols(ty, &|symbol, bound| match symbol.kind() {
+            TyKind::Var(name, _) => match self.declared.get(name.as_str()) {
+                Some(&formal) => Ty::ty_param(formal, bound),
+                None => symbol.with_symbol_bound(bound),
+            },
+            _ => symbol.with_symbol_bound(bound),
+        })
     }
 
-    pub(crate) fn instantiate_formal(&self, formal: &str) -> String {
-        self.call_owned
-            .get(formal)
-            .map_or_else(|| formal.to_string(), |identity| (*identity).to_string())
+    pub(crate) fn instantiate_formal(&self, formal: &str) -> crate::types::TyParamName {
+        crate::types::TyParamName::new(self.call_owned.get(formal).copied().unwrap_or(formal))
     }
 
-    pub(crate) fn declared_formal(&self, formal: &str) -> String {
-        self.declared
-            .get(formal)
-            .map_or_else(|| formal.to_string(), |identity| (*identity).to_string())
+    pub(crate) fn declared_formal(&self, formal: &str) -> crate::types::TyParamName {
+        crate::types::TyParamName::new(self.declared.get(formal).copied().unwrap_or(formal))
     }
 }
 
@@ -162,17 +189,12 @@ impl CallSiteVariables {
     /// Express a solution for [`Self::signature`] over the declaration's own formals.
     pub(crate) fn declared_bindings(&self, inferred: InferredCallBindings) -> InferredCallBindings {
         let ty = |ty: Ty| self.variables.declared_type(ty);
-        let formal = |formal: String| self.variables.declared_formal(&formal);
+        let formal = |formal: String| self.variables.declared_formal(&formal).to_string();
         InferredCallBindings {
             bindings: inferred
                 .bindings
                 .into_iter()
-                .map(|(name, binding)| {
-                    (
-                        crate::types::TyParamName::from(formal(name.to_string())),
-                        ty(binding),
-                    )
-                })
+                .map(|(name, binding)| (self.variables.declared_formal(&name), ty(binding)))
                 .collect(),
             lower_inputs: inferred
                 .lower_inputs
@@ -221,7 +243,7 @@ mod tests {
     fn cell_constructor(formal: &str) -> GenericSig {
         let item = Ty::ty_param(formal, Ty::nullable(Ty::obj("kotlin/Any")));
         GenericSig {
-            formals: vec![formal.to_string()],
+            formals: vec![crate::types::TyParamName::new(formal)],
             formal_bounds: vec![Vec::new()],
             receiver: None,
             params: vec![item],
@@ -284,7 +306,10 @@ mod tests {
         let first = Ty::ty_param("demo:Couple:A", any);
         let second = Ty::ty_param("demo:Couple:B", any);
         let signature = GenericSig {
-            formals: vec!["demo:Couple:A".to_string(), "demo:Couple:B".to_string()],
+            formals: vec![
+                crate::types::TyParamName::new("demo:Couple:A"),
+                crate::types::TyParamName::new("demo:Couple:B"),
+            ],
             formal_bounds: vec![Vec::new(), Vec::new()],
             receiver: None,
             params: vec![first, second],
@@ -297,6 +322,12 @@ mod tests {
         let renamed = call.signature();
         assert_ne!(renamed.formals[0], signature.formals[0]);
         assert_eq!(renamed.formals[1], signature.formals[1]);
+        // The visible formal is the call's inference variable, not a renamed type parameter; the
+        // formal out of scope stays the declaration's own parameter.
+        assert!(
+            matches!(renamed.params[0].kind(), TyKind::Var(name, _) if name == renamed.formals[0])
+        );
+        assert!(matches!(renamed.params[1].kind(), TyKind::TyParam(..)));
         assert_eq!(renamed.params[1], second);
         assert_eq!(
             renamed.ret,
@@ -324,7 +355,7 @@ mod tests {
         let formal_name = "demo:Owner:R";
         let formal = Ty::ty_param(formal_name, any);
         let signature = GenericSig {
-            formals: vec![formal_name.to_string()],
+            formals: vec![crate::types::TyParamName::new(formal_name)],
             formal_bounds: vec![vec![any]],
             receiver: None,
             params: vec![Ty::nullable(formal)],
@@ -350,5 +381,33 @@ mod tests {
             Ty::nullable(solved).non_null().ty_param_bound(),
             Some(Ty::nullable(any))
         );
+    }
+
+    #[test]
+    fn a_variable_returns_to_its_formal_with_its_bound_chain() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let upper = Ty::ty_param("demo:Pair:A", any);
+        let lower = Ty::ty_param("demo:Pair:B", upper);
+        let declared = Ty::obj_args("demo/Pair", &[upper, Ty::nullable(lower)]);
+        let variables = CallSiteVariableMap::new(
+            &[
+                crate::types::TyParamName::new("demo:Pair:A"),
+                crate::types::TyParamName::new("demo:Pair:B"),
+            ],
+            |_| true,
+        );
+
+        let instantiated = variables.instantiate_type(declared);
+        let TyKind::Obj(_, arguments) = instantiated.kind() else {
+            panic!("the classifier application keeps its shape");
+        };
+        let TyKind::Var(_, bound) = arguments[1].non_null().kind() else {
+            panic!("a visible formal becomes the call's variable");
+        };
+        // The bound of one variable names the call's variable for the other formal, not the
+        // enclosing declaration's fixed parameter.
+        assert!(matches!(bound.kind(), TyKind::Var(..)));
+        assert_eq!(arguments[0], bound);
+        assert_eq!(variables.declared_type(instantiated), declared);
     }
 }

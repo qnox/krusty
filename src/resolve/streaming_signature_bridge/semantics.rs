@@ -286,10 +286,9 @@ impl ProductionSignatureSemantics<'_> {
                     .get(parameter.name)
                     .ok_or_else(Self::failure)?;
                 let semantic = visible.bound(source_name);
-                let formal = semantic
-                    .ty_param_name()
-                    .ok_or_else(Self::failure)?
-                    .to_owned();
+                let formal = crate::types::TyParamName::new(
+                    semantic.ty_param_name().ok_or_else(Self::failure)?,
+                );
                 let mut bounds = vec![semantic
                     .ty_param_bound()
                     .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))];
@@ -331,7 +330,7 @@ impl ProductionSignatureSemantics<'_> {
                 super::DeclarationTypeParameters,
             >,
                           declaration: crate::fir::DeclarationId,
-                          formals: &[String],
+                          formals: &[crate::types::TyParamName],
                           formal_bounds: &[Ty]| {
                 parameters
                     .entry(declaration)

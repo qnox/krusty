@@ -598,7 +598,7 @@ pub(super) fn emit_deprecated_use(
                 }
             }
             if !suppresses("DEPRECATION_ERROR") {
-                diags.error(span, message);
+                diags.error_named(span, crate::diag::names::DEPRECATION_ERROR, message);
             }
         }
     }
