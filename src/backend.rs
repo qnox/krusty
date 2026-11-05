@@ -13,6 +13,7 @@ mod dependency_facts;
 mod dependency_metadata;
 mod dependency_signature;
 mod entry;
+pub(crate) mod enums;
 pub(crate) mod interface_identity;
 pub(crate) mod local_properties;
 mod module_facts;
@@ -44,6 +45,7 @@ pub(crate) use dependency_signature::{
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.
 pub(crate) use crate::ir::MainEntryParameters;
+pub(crate) use entry::ProgramEntry;
 pub use entry::{Entry, BOX_RESULT_FRAME};
 
 pub use module_facts::{

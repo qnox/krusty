@@ -85,7 +85,7 @@ pub(super) fn realization(
             if facts.type_parameter_count == 1
                 && *given_message == message
                 && *given_result == result
-                && matches!(facts.ret.kind(), TyKind::TyParam(_, bound) if bound == throwable)
+                && matches!(facts.ret.kind(), TyKind::TyParam(_, bound) | TyKind::Var(_, bound) if bound == throwable)
                 && *class == Ty::obj_args("kotlin/reflect/KClass", &[facts.ret]) =>
         {
             Some(CompilerIntrinsic::ResultFailure(

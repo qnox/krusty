@@ -20,7 +20,7 @@ impl Checker<'_> {
     ) -> Option<(
         Signature,
         crate::symbol_resolver::GSigBinds,
-        crate::fx_hash::HashSet<String>,
+        crate::fx_hash::HashSet<crate::types::TyParamName>,
     )> {
         let ArgSlots {
             args,
