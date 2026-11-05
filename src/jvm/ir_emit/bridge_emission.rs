@@ -913,23 +913,33 @@ impl EntryHeader {
     ) -> Self {
         // The entry stands for the lowered member less its leading carrier: its signature is the
         // member's declared whole-frame shape (a vararg at its position in that frame, a boxed
-        // override result as its wrapper) without the carrier's element.
-        let signature = super::override_result_emission::declared_method_signature_parts(
+        // override result as its wrapper) without the carrier's element. The entry is the
+        // override the member backs, so a collection declaration's signature policy shapes it.
+        let signature = super::override_result_emission::value_class_entry_collection_signature(
             formatter,
             ir,
             override_results,
             member,
+            descriptor,
         )
-        .map(|mut parts| {
-            assert_eq!(
-                parts.parameters.len(),
-                entry.erased_params.len() + 1,
-                "a lowered value-class member signs its carrier ahead of the entry's parameters"
-            );
-            parts.parameters.remove(0);
-            parts.render()
-        })
-        .filter(|signature| signature != descriptor);
+        .unwrap_or_else(|| {
+            super::override_result_emission::declared_method_signature_parts(
+                formatter,
+                ir,
+                override_results,
+                member,
+            )
+            .map(|mut parts| {
+                assert_eq!(
+                    parts.parameters.len(),
+                    entry.erased_params.len() + 1,
+                    "a lowered value-class member signs its carrier ahead of the entry's parameters"
+                );
+                parts.parameters.remove(0);
+                parts.render()
+            })
+            .filter(|signature| signature != descriptor)
+        });
         let nullability =
             super::override_result_emission::declared_nullability(ir, override_results, member);
         let reflected = if java_parameters {

@@ -235,12 +235,60 @@ fn collection_override_signature(
     policy: OverrideSignature,
 ) -> Option<String> {
     let declaration = &ir.functions[function as usize];
-    let (mut parameters, result) = ir
+    let (parameters, result) = semantic_signature(ir, function);
+    let signature = policy_signature(formatter, parameters, result, policy)?;
+    (signature != ir_method_desc(&declaration.params, &declaration.ret)).then_some(signature)
+}
+
+/// The signature policy's shape for the interface entry a value class writes on its box for the
+/// static replacement `member`, when `member` backs an override with a policy. The entry is that
+/// override: its parameters are the replacement's less its leading carrier. The outer `None` is a
+/// member without a policy; the inner one a policy that writes no signature beyond `descriptor`.
+pub(super) fn value_class_entry_collection_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
+    override_results: &OverrideResults,
+    member: u32,
+    descriptor: &str,
+) -> Option<Option<String>> {
+    let policy = override_results.collection_signatures.policy(member)?;
+    // The member's semantic signature is the override's own; its lowered parameters lead with the
+    // carrier.
+    let (parameters, result) = ir
         .member_semantic_sigs
+        .get(&member)
+        .cloned()
+        .unwrap_or_else(|| {
+            let declaration = &ir.functions[member as usize];
+            assert!(
+                !declaration.params.is_empty(),
+                "a lowered value-class member takes its carrier ahead of the entry's parameters"
+            );
+            (declaration.params[1..].to_vec(), declaration.ret)
+        });
+    Some(
+        policy_signature(formatter, parameters, result, policy)
+            .filter(|signature| signature != descriptor),
+    )
+}
+
+/// `function`'s semantic parameters and result.
+fn semantic_signature(ir: &IrFile, function: u32) -> (Vec<Ty>, Ty) {
+    let declaration = &ir.functions[function as usize];
+    ir.member_semantic_sigs
         .get(&function)
         .cloned()
-        .unwrap_or_else(|| (declaration.params.clone(), declaration.ret));
-    let signature = match policy {
+        .unwrap_or_else(|| (declaration.params.clone(), declaration.ret))
+}
+
+/// `policy` applied to an override's `parameters` and `result`.
+fn policy_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    mut parameters: Vec<Ty>,
+    result: Ty,
+    policy: OverrideSignature,
+) -> Option<String> {
+    match policy {
         OverrideSignature::Policy(CollectionSignaturePolicy::ErasedCollectionParameter(index)) => {
             let parameter = &mut parameters[usize::from(index)];
             *parameter = star_projected(*parameter);
@@ -255,6 +303,5 @@ fn collection_override_signature(
             }
             formatter.method_positions(&parameters, &result)
         }
-    }?;
-    (signature != ir_method_desc(&declaration.params, &declaration.ret)).then_some(signature)
+    }
 }
