@@ -301,6 +301,11 @@ pub enum FirCallTarget {
         default_provider: Option<ExternalCallableId>,
         receiver: Option<ResolvedTy>,
         declared_receiver: Option<ResolvedTy>,
+        /// A member's dispatch receiver applied as the member's declaring class, when the
+        /// receiver's own classifier is a subclass of a generic declaring class: `Base<String>`
+        /// for `Derived : Base<String>`. A call binds the declaring class's type parameters from
+        /// its arguments. `None` when the receiver already names the declaring class.
+        declaring_receiver: Option<ResolvedTy>,
         parameters: Box<[ResolvedTy]>,
         result: ResolvedTy,
         declared_result: Option<ResolvedTy>,

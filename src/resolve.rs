@@ -232,6 +232,7 @@ use operator_calls::{
     range_operator, OperatorOperand, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess,
 };
 mod declaration_publication;
+mod declaring_receivers;
 mod enhanced_values;
 use declaration_publication::inferred_declaration_ty;
 mod overload_diagnostics;
@@ -11330,26 +11331,17 @@ impl<'a> Checker<'a> {
                     .insert(call, ResolvedCall::Companion(member));
                 return ClassifierValueCall::Checked(ret);
             }
-            let origin = selected.callable.origin.clone();
-            let physical_params = selected.callable.physical_params.clone();
             let member = selected.member_with_return(ret);
+            let mut resolved = crate::symbol_resolver::ResolvedMember::from_function(
+                receiver_ty,
+                &selected,
+                member,
+                ret,
+            );
+            resolved.context_args = shape.context_sources;
             return ClassifierValueCall::Checked(
-                self.record_selected_member_call(
-                    scope,
-                    call,
-                    args,
-                    crate::symbol_resolver::ResolvedMember {
-                        receiver: receiver_ty,
-                        member,
-                        physical_params,
-                        context_args: shape.context_sources,
-                        ret,
-                        projected_return_hazard: selected.projected_return_hazard,
-                        suspend: selected.flags.suspend,
-                        origin,
-                    },
-                )
-                .unwrap_or(Ty::Error),
+                self.record_selected_member_call(scope, call, args, resolved)
+                    .unwrap_or(Ty::Error),
             );
         }
 
@@ -31842,6 +31834,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     }
     c.narrow_value_class_receivers();
     c.narrow_script_template_receivers();
+    c.publish_member_declaring_receivers();
     let enhanced_values = c.enhanced_value_heads();
     let Checker {
         expr_types,
@@ -52164,16 +52157,9 @@ impl<'a> Checker<'a> {
                 let target = if selected.kind == crate::libraries::FnKind::Member {
                     let mut member = selected.member_with_return(ret);
                     member.params = params;
-                    ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
-                        receiver: at,
-                        physical_params: selected.callable.physical_params.clone(),
-                        context_args: Vec::new(),
-                        ret,
-                        member,
-                        projected_return_hazard: selected.projected_return_hazard,
-                        suspend: selected.flags.suspend,
-                        origin: selected.callable.origin.clone(),
-                    })
+                    ResolvedCall::Member(crate::symbol_resolver::ResolvedMember::from_function(
+                        at, &selected, member, ret,
+                    ))
                 } else {
                     let mut callable = selected.callable.clone();
                     callable.ret = ret;
@@ -58530,16 +58516,8 @@ impl<'a> Checker<'a> {
             }
             let mut member = selected.member_with_return(ret);
             member.params = params;
-            let resolved = crate::symbol_resolver::ResolvedMember {
-                receiver: recv,
-                physical_params: selected.callable.physical_params.clone(),
-                context_args: Vec::new(),
-                ret,
-                member,
-                projected_return_hazard: selected.projected_return_hazard,
-                suspend: selected.flags.suspend,
-                origin: selected.callable.origin.clone(),
-            };
+            let resolved =
+                crate::symbol_resolver::ResolvedMember::from_function(recv, &selected, member, ret);
             let owner = resolved
                 .member
                 .owner
