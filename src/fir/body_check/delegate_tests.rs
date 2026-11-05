@@ -373,6 +373,83 @@ fn local_class_inferred_callable_property_is_visible_to_the_enclosing_body() {
 }
 
 #[test]
+fn an_anonymous_member_with_its_own_delegate_does_not_capture_an_unused_outer_delegate() {
+    let (body, _) = checked_function_body(
+        &format!(
+            "{DELEGATE}fun make(): String {{
+                val outer by Delegate(\"O\")
+                val holder = object {{
+                    fun read(): String {{ val inner by Delegate(\"K\"); return inner }}
+                }}
+                return outer + holder.read()
+            }}"
+        ),
+        "make",
+    );
+    let [outer] = body.local_delegate_plans() else {
+        panic!("the enclosing body retains its own delegate plan")
+    };
+    assert_eq!(outer.storage_type.get(), Ty::obj("Delegate"));
+    assert_eq!(outer.property_type.get(), Ty::String);
+    assert_eq!(local_delegate_access_plans(&body), [outer.declaration]);
+    let objects = expressions(&body)
+        .filter_map(|expression| match &expression.kind {
+            FirExprKind::AnonymousObject(object) => Some(object),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [object] = objects.as_slice() else {
+        panic!("one anonymous member owner expected")
+    };
+    assert!(object.captures.is_empty(), "{:?}", object.captures);
+}
+
+#[test]
+fn an_anonymous_member_read_captures_the_selected_delegate_storage_identity() {
+    let (body, _) = checked_function_body(
+        &format!(
+            "{DELEGATE}fun make(): Any {{
+                val outer by Delegate(\"OK\")
+                return object {{ fun read(): String = outer }}
+            }}"
+        ),
+        "make",
+    );
+    let [outer] = body.local_delegate_plans() else {
+        panic!("the selected outer property retains its semantic delegate plan")
+    };
+    assert_eq!(outer.storage_type.get(), Ty::obj("Delegate"));
+    assert_eq!(outer.property_type.get(), Ty::String);
+    let objects = expressions(&body)
+        .filter_map(|expression| match &expression.kind {
+            FirExprKind::AnonymousObject(object) => Some(object),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [object] = objects.as_slice() else {
+        panic!("one anonymous member owner expected")
+    };
+    let [capture] = object.captures.as_ref() else {
+        panic!(
+            "one selected delegate storage capture expected: {:?}",
+            object.captures
+        )
+    };
+    assert!(capture.stored);
+    assert!(!capture.shared_cell);
+    assert_eq!(capture.ty, outer.storage_type);
+    let FirExprKind::Block { statements, .. } = &body.expr(root_expression(&body)).unwrap().kind
+    else {
+        panic!("function body must remain a checked block")
+    };
+    let FirStatementKind::Local { target, .. } = &body.statement(statements[0]).unwrap().kind
+    else {
+        panic!("the first local owns the delegate storage")
+    };
+    assert_eq!(capture.source, FirLocalClassCaptureSource::Value(*target));
+}
+
+#[test]
 fn anonymous_inferred_callable_property_can_capture_local_delegate_storage() {
     assert_production_frontend_accepts(
         r#"import kotlin.properties.Delegates.notNull

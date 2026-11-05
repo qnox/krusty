@@ -5,6 +5,7 @@ use super::capture_storage::{
     anonymous_body_expressions, anonymous_descendant_uses_name, anonymous_descendant_writes_name,
     anonymous_descendants, enclosing_value_visible_beside_member, ConstructorArgumentUses,
 };
+use super::receiver_uses::{ReceiverUseSite, ReceiverUseSites};
 use super::scope::ContextReceiverKind;
 use super::{
     capture_field_order, AnonymousLexicalClassScope, Checker, CheckerScope, ExprLowering,
@@ -1117,6 +1118,7 @@ pub(super) struct SelectedLocalCallableCaptures<'a> {
     pub(super) expressions: &'a HashMap<ExprId, ExprLowering>,
     pub(super) statements: &'a HashMap<StmtId, StmtLowering>,
     pub(super) constructor_arguments: ConstructorArgumentUses<'a>,
+    pub(super) forwarded: Option<&'a ReceiverUseSites>,
 }
 
 fn expression_uses_selected_local_callable_capture(
@@ -1175,12 +1177,11 @@ fn expression_uses_selected_local_callable_capture(
 
 fn anonymous_descendant_uses_selected_local_callable_capture(
     file: &File,
-    declaration: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
+    mut descendants: impl Iterator<Item = DeclId>,
     name: &str,
     selected: SelectedLocalCallableCaptures<'_>,
 ) -> bool {
-    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
+    descendants.any(|candidate| {
         anonymous_body_expressions(file, candidate, selected.constructor_arguments)
             .into_iter()
             .any(|expression| {
@@ -1200,6 +1201,15 @@ pub(super) fn record_anonymous_construction_captures(
 ) -> Vec<Option<u32>> {
     let Some(&declaration) = file.anonymous_object_classes.get(&construction) else {
         return Vec::new();
+    };
+    // A forwarded argument and its nested declarations execute outside this classifier.
+    // Their captures belong to the construction site, not this classifier's storage prefix.
+    let descendants = || {
+        anonymous_descendants(declaration, lexical_scope).filter(|candidate| {
+            !selected_local_callables.forwarded.is_some_and(|forwarded| {
+                forwarded.contains(ReceiverUseSite::Declaration(*candidate))
+            })
+        })
     };
     crate::trace_compiler!(
         "resolve",
@@ -1242,31 +1252,27 @@ pub(super) fn record_anonymous_construction_captures(
                     declaration,
                     &candidate.name,
                     candidate.function_local,
-                ) && (candidate.delegate_storage.is_some()
-                    || anonymous_descendant_uses_name(
-                        file,
-                        declaration,
-                        lexical_scope,
-                        &candidate.name,
-                        candidate.ty,
-                        candidate.function_local,
-                        selected_local_callables.constructor_arguments,
-                    )
-                    || anonymous_descendant_uses_selected_local_callable_capture(
-                        file,
-                        declaration,
-                        lexical_scope,
-                        &candidate.name,
-                        selected_local_callables,
-                    )
-                    || anonymous_descendant_writes_name(
-                        file,
-                        declaration,
-                        lexical_scope,
-                        &candidate.name,
-                        candidate.function_local,
-                        selected_local_callables.constructor_arguments,
-                    ))
+                ) && (anonymous_descendant_uses_name(
+                    file,
+                    declaration,
+                    descendants(),
+                    &candidate.name,
+                    candidate.ty,
+                    candidate.function_local,
+                    selected_local_callables.constructor_arguments,
+                ) || anonymous_descendant_uses_selected_local_callable_capture(
+                    file,
+                    descendants(),
+                    &candidate.name,
+                    selected_local_callables,
+                ) || anonymous_descendant_writes_name(
+                    file,
+                    declaration,
+                    descendants(),
+                    &candidate.name,
+                    candidate.function_local,
+                    selected_local_callables.constructor_arguments,
+                ))
             }
         })
         .map(|(_, candidate)| AnonymousObjectCapture {

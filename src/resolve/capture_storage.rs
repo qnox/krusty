@@ -392,13 +392,13 @@ fn anonymous_body_uses_name(
 pub(super) fn anonymous_descendant_uses_name(
     file: &File,
     declaration: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
+    mut descendants: impl Iterator<Item = DeclId>,
     name: &str,
     ty: Ty,
     function_local: bool,
     constructor_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
-    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
+    descendants.any(|candidate| {
         enclosing_value_visible_beside_member(file, candidate, name, function_local)
             && (anonymous_body_uses_name(file, candidate, name, ty, constructor_uses)
                 || candidate != declaration
@@ -429,12 +429,12 @@ pub(super) fn enclosing_value_visible_beside_member(
 pub(super) fn anonymous_descendant_writes_name(
     file: &File,
     declaration: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
+    mut descendants: impl Iterator<Item = DeclId>,
     name: &str,
     function_local: bool,
     constructor_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
-    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
+    descendants.any(|candidate| {
         enclosing_value_visible_beside_member(file, candidate, name, function_local)
             && (anonymous_body_writes_name(file, candidate, name, constructor_uses)
                 || candidate != declaration

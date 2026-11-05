@@ -13945,6 +13945,7 @@ impl<'a> Checker<'a> {
                         expressions: &self.expr_lowers,
                         statements: &self.stmt_lowers,
                         constructor_arguments: capture_storage::ConstructorArgumentUses::Candidates,
+                        forwarded: None,
                     },
                     &mut self.discovered_anonymous_captures,
                 );
@@ -14032,44 +14033,13 @@ impl<'a> Checker<'a> {
                 if !provisional {
                     self.finalized_anonymous_captures.insert(declaration);
                 }
-                let original_captures = self
-                    .discovered_anonymous_captures
-                    .get(&declaration)
-                    .cloned()
-                    .unwrap_or_default();
-                let storage_field_remap = record_anonymous_construction_captures(
-                    self.file,
-                    call,
-                    &self.anonymous_lexical_scope,
-                    &candidates,
-                    provisional,
-                    SelectedLocalCallableCaptures {
-                        calls: &self.resolved_calls,
-                        expressions: &self.expr_lowers,
-                        statements: &self.stmt_lowers,
-                        constructor_arguments: capture_storage::ConstructorArgumentUses::Checked {
-                            expressions: &self.expr_lowers,
-                            types: &self.expr_types,
-                            delegations: &self.resolved_primary_ctor_delegations,
-                        },
-                    },
-                    &mut self.discovered_anonymous_captures,
-                );
-                // Descendants were checked while every addressable receiver rung occupied a
-                // provisional field. Rewrite their exact `ClassStorage` coordinates through the
-                // finalized field permutation instead of replaying the class body. Rechecking the
-                // whole subtree here doubles the work at every nesting level (and is exponential
-                // for deeply nested anonymous objects); the structural owner edge identifies the
-                // only constructions whose storage owner is this declaration.
                 if !self.finish_anonymous_capture_layout(
                     scope,
                     declaration,
+                    call,
                     &candidates,
-                    anonymous_capture_remap::CaptureFieldRemap {
-                        fields: &storage_field_remap,
-                        original: &original_captures,
-                        forwarded: &forwarded_uses,
-                    },
+                    provisional,
+                    &forwarded_uses,
                 ) {
                     self.diags.error(
                         span,

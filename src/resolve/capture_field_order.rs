@@ -155,9 +155,42 @@ impl super::Checker<'_> {
         &mut self,
         scope: &CheckerScope<'_>,
         declaration: DeclId,
+        construction: ExprId,
         candidates: &[super::AnonymousCaptureCandidate],
-        remap: super::anonymous_capture_remap::CaptureFieldRemap<'_>,
+        provisional: bool,
+        forwarded: &super::receiver_uses::ReceiverUseSites,
     ) -> bool {
+        let original = self
+            .discovered_anonymous_captures
+            .get(&declaration)
+            .cloned()
+            .unwrap_or_default();
+        let fields = super::anonymous_object_capture::record_anonymous_construction_captures(
+            self.file,
+            construction,
+            &self.anonymous_lexical_scope,
+            candidates,
+            provisional,
+            super::anonymous_object_capture::SelectedLocalCallableCaptures {
+                calls: &self.resolved_calls,
+                expressions: &self.expr_lowers,
+                statements: &self.stmt_lowers,
+                constructor_arguments: super::capture_storage::ConstructorArgumentUses::Checked {
+                    expressions: &self.expr_lowers,
+                    types: &self.expr_types,
+                    delegations: &self.resolved_primary_ctor_delegations,
+                },
+                forwarded: Some(forwarded),
+            },
+            &mut self.discovered_anonymous_captures,
+        );
+        // Descendants were checked against provisional fields. Rewrite their selected sources
+        // through the finalized permutation instead of replaying the nested class bodies.
+        let remap = super::anonymous_capture_remap::CaptureFieldRemap {
+            fields: &fields,
+            original: &original,
+            forwarded,
+        };
         let storage_fields = remap.fields;
         if !super::anonymous_capture_remap::remap_direct_anonymous_class_storage_captures(
             declaration,
