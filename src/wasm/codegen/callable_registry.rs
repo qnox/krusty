@@ -906,6 +906,7 @@ mod tests {
         crate::backend::default_arguments::realize(
             &mut caller,
             &mut crate::backend::CheckedBackendCallables::default(),
+            |_| false,
         );
         let calls = registry
             .file_calls(&caller, &CheckedBackendCallables::default(), &mut wasm)
@@ -941,6 +942,7 @@ mod tests {
         crate::backend::default_arguments::realize(
             &mut declaration,
             &mut crate::backend::CheckedBackendCallables::default(),
+            |_| false,
         );
         let entry = declaration.default_entries[&function];
         let functions = registry
