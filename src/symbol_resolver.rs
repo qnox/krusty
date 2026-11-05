@@ -1247,17 +1247,7 @@ impl<'a> SymbolResolver<'a> {
         ret: Ty,
     ) -> ResolvedMember {
         let member = selected.member_with_return(ret);
-        ResolvedMember {
-            receiver,
-            declaring_receiver: None,
-            ret,
-            member,
-            physical_params: selected.callable.physical_params.clone(),
-            context_args: Vec::new(),
-            projected_return_hazard: selected.projected_return_hazard,
-            suspend: selected.flags.suspend,
-            origin: selected.callable.origin.clone(),
-        }
+        ResolvedMember::from_function(receiver, &selected, member, ret)
     }
 
     /// Select the nearest in-scope extension property, rejecting equal-rank candidates.
@@ -3069,17 +3059,7 @@ fn resolved_member_from_info_tracking(
     );
     let member = o.member_with_return(o.callable.ret);
     (
-        ResolvedMember {
-            receiver: recv,
-            declaring_receiver: None,
-            ret,
-            member,
-            physical_params: o.callable.physical_params.clone(),
-            context_args: Vec::new(),
-            projected_return_hazard: o.projected_return_hazard,
-            suspend: o.flags.suspend,
-            origin: o.callable.origin.clone(),
-        },
+        ResolvedMember::from_function(recv, &o, member, ret),
         bindings,
     )
 }

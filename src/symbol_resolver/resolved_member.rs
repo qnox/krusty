@@ -104,4 +104,25 @@ impl ResolvedMember {
             origin,
         }
     }
+
+    /// The selection of `function` as the member `member` at `receiver`, with its checked result
+    /// `ret` and no context arguments.
+    pub(crate) fn from_function(
+        receiver: Ty,
+        function: &crate::libraries::FunctionInfo,
+        member: LibraryMember,
+        ret: Ty,
+    ) -> Self {
+        Self {
+            receiver,
+            declaring_receiver: None,
+            member,
+            physical_params: function.callable.physical_params.clone(),
+            context_args: Vec::new(),
+            ret,
+            projected_return_hazard: function.projected_return_hazard,
+            suspend: function.flags.suspend,
+            origin: function.callable.origin.clone(),
+        }
+    }
 }
