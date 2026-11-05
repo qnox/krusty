@@ -95,7 +95,7 @@ impl CallArgKind {
         if self.adapts_integer_literal_to(concrete) {
             return concrete;
         }
-        if let TyKind::TyParam(_, bound) = parameter.non_null().kind() {
+        if let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = parameter.non_null().kind() {
             if self.adapts_integer_literal_to(bound) {
                 return bound;
             }

@@ -947,6 +947,7 @@ impl CallLinker for Linker<'_, '_> {
                 type_parameters: Vec::new(),
                 type_parameter_bounds: Some(Vec::new()),
                 class_type_parameters: self.class_type_parameters(selected)?,
+                parameter_defaults: Vec::new(),
             });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
@@ -1050,6 +1051,7 @@ impl CallLinker for Linker<'_, '_> {
                     .and_then(|selected| selected.generic_signature())
                     .map(|signature| signature.formal_bounds.clone()),
                 class_type_parameters,
+                parameter_defaults: Vec::new(),
             });
         }
         if declaration.dispatch_receiver.is_some() && selected.is_none() {
@@ -1110,6 +1112,13 @@ impl CallLinker for Linker<'_, '_> {
                 .declare(ir, &identity, selected, arena, declaration)
                 .map_err(callee_declined)?,
         };
+        let parameter_defaults = declaration
+            .context_parameters
+            .iter()
+            .chain(&declaration.extension_receiver)
+            .chain(&declaration.regular_parameters)
+            .map(|parameter| parameter.default_value.is_some())
+            .collect();
         let declaration = &ir.functions[function as usize];
         Ok(LinkedCallee {
             callee: Callee::Local(function),
@@ -1125,6 +1134,7 @@ impl CallLinker for Linker<'_, '_> {
                 .and_then(|selected| selected.generic_signature())
                 .map(|signature| signature.formal_bounds.clone()),
             class_type_parameters: Vec::new(),
+            parameter_defaults,
         })
     }
 }

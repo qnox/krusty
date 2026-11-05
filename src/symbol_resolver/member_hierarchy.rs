@@ -1215,7 +1215,7 @@ fn expects_recorded_suspend_result(candidate: &FunctionInfo) -> bool {
     }
     matches!(
         candidate.callable.ret.non_null().kind(),
-        TyKind::Obj(..) | TyKind::TyParam(..)
+        TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Var(..)
     )
 }
 

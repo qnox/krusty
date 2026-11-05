@@ -95,7 +95,7 @@ pub(super) fn collect_type_parameters(
     parameters: &mut crate::fx_hash::HashSet<&'static str>,
 ) {
     match ty.kind() {
-        TyKind::TyParam(name, _) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
             parameters.insert(name.as_str());
         }
         TyKind::Nullable(inner)

@@ -191,7 +191,7 @@ fn mangle_ty(out: &mut String, ty: crate::types::Ty) -> Option<()> {
         TyKind::StarProjection(bound) => nested(out, 'S', bound)?,
         TyKind::RawProjection(erased) => nested(out, 'J', erased)?,
         TyKind::DefinitelyNotNull(inner) => nested(out, 'D', inner)?,
-        TyKind::Error | TyKind::Pending => return None,
+        TyKind::Error | TyKind::Pending | TyKind::Var(..) => return None,
     }
     Some(())
 }
@@ -317,6 +317,11 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
             cross_file[entry as usize] = true;
         }
     }
+    let dispatched = ir
+        .dispatch_entries
+        .iter()
+        .map(|(&declaration, &entry)| (entry, declaration))
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     // A property's entry points are synthesized from its identity rather than being entries in
     // `functions`. Reserving them keeps a function from being handed the same spelling.
     for property in ir
@@ -382,9 +387,15 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
             continue;
         }
         // An entry no other file calls is named after the declaration it fills the defaults of,
-        // whose symbol is already unique in the module.
+        // or dispatches to, whose symbol is already unique in the module. A compiler-generated
+        // name alone is not: two files of one module can each generate the same one.
         if let Some(&declaration) = declarations.get(&(index as crate::ir::FunId)) {
             let base = format!("{}__defaults", functions[declaration as usize]);
+            functions[index] = unique(base, &|name| vec![name.to_string()]);
+            continue;
+        }
+        if let Some(&declaration) = dispatched.get(&(index as crate::ir::FunId)) {
+            let base = format!("{}__dispatch", functions[declaration as usize]);
             functions[index] = unique(base, &|name| vec![name.to_string()]);
             continue;
         }
