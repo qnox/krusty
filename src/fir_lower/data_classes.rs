@@ -232,6 +232,7 @@ fn synthesize_components_and_copy(
         internal: ir.classes[class as usize].fq_name_id(),
         args,
         ctor_params: None,
+        declared_params: None,
         ctor_desc: None,
         external_target: None,
         defaults: Box::new([]),

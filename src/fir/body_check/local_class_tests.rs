@@ -1,3 +1,5 @@
+mod anonymous_capture_demand;
+
 use super::test_support::{checked_function_body, root_expression};
 use super::*;
 use crate::types::TyKind;

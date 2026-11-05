@@ -5,10 +5,13 @@ usage: publish.py <run results dir> <results tree> <projects.tsv> <krusty commit
 
 Each project that produced a comparison in this run replaces its entry under
 `<results tree>/projects/<name>/`: its compare.json, with the run that measured it added as
-`measured`, and the plugin survey of its reference build. Projects the run did not measure keep
-their last result. Entries for projects no longer listed in projects.tsv are removed. One line per
-measured project is appended to `<results tree>/history.tsv`, with what its two builds cost: the
-compile time of the compilations krusty built, peak memory and wall time, kotlinc's then krusty's.
+`measured` and what that run built added as `source` (the upstream repository and pinned commit
+from projects.tsv, the repository path of the patch run.sh applied or null, and the file and key
+whose Kotlin version run.sh rewrote or null), and the plugin survey of its reference build. Projects
+the run did not measure keep their last result. Entries for projects no longer listed in
+projects.tsv are removed. One line per measured project is appended to
+`<results tree>/history.tsv`, with what its two builds cost: the compile time of the compilations
+krusty built, peak memory and wall time, kotlinc's then krusty's.
 Lines from runs that did not measure cost leave those columns out.
 """
 import glob
@@ -22,9 +25,23 @@ HISTORY_HEADER = ('date\tkrusty commit\tproject\treference exit\tbuilt\tcompilat
                   'kotlinc wall s\tkrusty wall s\n')
 
 
-def listed(projects_tsv):
+# The repository checkout this script runs from: run.sh applied the patches of the same checkout.
+REPOSITORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+
+
+def listed(projects_tsv, repository=REPOSITORY):
+    """Each listed project's name mapped to what run.sh builds for it."""
+    projects = {}
     with open(projects_tsv) as f:
-        return {line.split('\t')[0] for line in f if line.strip() and not line.startswith('#')}
+        for line in f:
+            if not line.strip() or line.startswith('#'):
+                continue
+            name, url, commit, _root, _jdk, pin = line.rstrip('\n').split('\t')[:6]
+            patch = f'scripts/oss-corpus/patches/{name}.patch'
+            projects[name] = dict(url=url, commit=commit,
+                                  patch=patch if os.path.isfile(os.path.join(repository, patch)) else None,
+                                  kotlin_pin=None if pin == '-' else pin)
+    return projects
 
 
 def cost_columns(project):
@@ -38,7 +55,7 @@ def cost_columns(project):
         kotlinc['wall_seconds'], krusty['wall_seconds']))
 
 
-def publish(results, tree, names, commit, date, run):
+def publish(results, tree, projects, commit, date, run):
     projects_dir = os.path.join(tree, 'projects')
     os.makedirs(projects_dir, exist_ok=True)
     measured = []
@@ -46,9 +63,10 @@ def publish(results, tree, names, commit, date, run):
         with open(path) as f:
             project = json.load(f)
         name = project['name']
-        if name not in names:
+        if name not in projects:
             continue
         project['measured'] = dict(date=date, commit=commit, run=run)
+        project['source'] = projects[name]
         target = os.path.join(projects_dir, name)
         shutil.rmtree(target, ignore_errors=True)
         os.makedirs(target)
@@ -66,7 +84,7 @@ def publish(results, tree, names, commit, date, run):
             json.dump(project, f, indent=1)
         measured.append(project)
     for entry in os.listdir(projects_dir):
-        if entry not in names:
+        if entry not in projects:
             shutil.rmtree(os.path.join(projects_dir, entry))
     history = os.path.join(tree, 'history.tsv')
     lines = [HISTORY_HEADER]

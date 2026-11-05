@@ -106,6 +106,8 @@ fn initializer(ir: &mut IrFile, class: ClassId, slots: &[u32], flag: u32, entrie
                 internal: subclass,
                 args: Vec::new(),
                 ctor_params: None,
+                // The bare generated subclass constructor has no checked source declaration.
+                declared_params: None,
                 ctor_desc: None,
                 external_target: None,
                 defaults: Box::default(),
@@ -119,6 +121,9 @@ fn initializer(ir: &mut IrFile, class: ClassId, slots: &[u32], flag: u32, entrie
                     args: entry.args.clone(),
                     ctor_params: (!entry.constructor.primary())
                         .then(|| entry.constructor_parameter_types.clone()),
+                    declared_params: Some(
+                        entry.constructor_parameter_types.clone().into_boxed_slice(),
+                    ),
                     ctor_desc: None,
                     external_target: None,
                     defaults: defaults.into(),

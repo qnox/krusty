@@ -625,6 +625,35 @@ fn wasm_nested_source_and_dependency_arguments_share_boxing() {
     }
 }
 
+#[test]
+fn wasm_class_properties_export_their_checked_accessors() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/classPropertyDependencyExports.kt"),
+            "classPropertyDependencyExports",
+        ),
+        (
+            include_str!("box_regressions/delegatedPropertyDependencyExports.kt"),
+            "delegatedPropertyDependencyExports",
+        ),
+    ] {
+        super::box_reference_classes::checked_box(source, stem)
+            .expect("pinned kotlinc must run the whole property export module graph");
+        let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+        let units = krusty::conformance::module_units(&modules);
+        for target in WasmTarget::ALL {
+            let lane = WasmLane { target };
+            assert!(focused_wasm_lane_available(&lane, stem));
+            assert_eq!(
+                lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+                Outcome::Pass,
+                "{stem} on {}",
+                target.name()
+            );
+        }
+    }
+}
+
 // PLATFORM-SPECIFIC: Wasm's checked-access default and host trap are independent of the portable
 // reference-array value/identity/effect-order case in the shared box inventory.
 const REFERENCE_ARRAY_BOUNDS: &str = r#"fun captured(index: Int): Throwable? {

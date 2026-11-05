@@ -103,6 +103,9 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) default_provider: Option<ExternalCallableId>,
     pub(super) receiver_ty: Option<ResolvedTy>,
     pub(super) declared_receiver: Option<ResolvedTy>,
+    /// The checked dispatch receiver applied as the member's generic declaring class, when the
+    /// receiver names a subclass of it.
+    pub(super) declaring_receiver: Option<ResolvedTy>,
     pub(super) parameters: &'a [ResolvedTy],
     pub(super) result: ResolvedTy,
     pub(super) declared_result: Option<ResolvedTy>,
@@ -364,6 +367,7 @@ impl BodyLowering<'_> {
             default_provider,
             receiver_ty,
             declared_receiver,
+            declaring_receiver,
             parameters,
             result,
             declared_result,
@@ -425,7 +429,9 @@ impl BodyLowering<'_> {
                         template,
                         parameter_types: &parameter_types,
                         dispatch_receiver,
-                        dispatch_type: receiver_ty.map(|receiver| receiver.get()),
+                        dispatch_type: declaring_receiver
+                            .or(receiver_ty)
+                            .map(|receiver| receiver.get()),
                         extension_receiver,
                         extension_receiver_parameter,
                         arguments,
@@ -733,6 +739,7 @@ impl BodyLowering<'_> {
             internal: factory_classifier,
             args: factory_arguments,
             ctor_params: Some(factory_parameters.iter().map(|ty| ty.get()).collect()),
+            declared_params: None,
             ctor_desc: None,
             external_target: Some(factory),
             defaults: Box::new([]),
@@ -1345,14 +1352,12 @@ impl BodyLowering<'_> {
             internal: classifier,
             args,
             ctor_params: Some(physical_parameter_types),
+            declared_params: Some(declared_parameter_types.into_boxed_slice()),
             ctor_desc: None,
             external_target: Some(declaration),
             defaults: defaults.into_boxed_slice(),
             default_prefix_count,
         });
-        self.ir
-            .construction_declared_params
-            .insert(construction, declared_parameter_types.into_boxed_slice());
         self.record_annotation_construction(construction, classifier, annotation)?;
         Some(self.wrap_call_statements(statements, construction))
     }
@@ -1466,6 +1471,7 @@ impl BodyLowering<'_> {
                     internal: *classifier,
                     args,
                     ctor_params: Some(ctor_params),
+                    declared_params: None,
                     ctor_desc: None,
                     external_target: None,
                     defaults: Box::new([]),
@@ -1554,14 +1560,12 @@ impl BodyLowering<'_> {
             internal: classifier,
             args,
             ctor_params: (!primary_in_current_file).then_some(declaration_parameter_types),
+            declared_params: Some(declared_parameters),
             ctor_desc: None,
             external_target: None,
             defaults: defaults.into_boxed_slice(),
             default_prefix_count,
         });
-        self.ir
-            .construction_declared_params
-            .insert(construction, declared_parameters);
         self.ir.construction_targets.insert(construction, target);
         self.ir
             .module_constructions
