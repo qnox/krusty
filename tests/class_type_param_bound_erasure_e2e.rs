@@ -410,3 +410,39 @@ fn class_type_param_bound_ignores_nested_classifiers_of_the_class_and_its_supert
         assert_eq!(descriptors(&krusty), descriptors(&kotlinc), "{stem}");
     }
 }
+
+const BOUND_SKIPS_SUPERTYPE_NESTED: &str =
+    include_str!("box_regressions/classTypeParameterBoundSkipsSupertypeNested.kt");
+const BOUND_SKIPS_OWN_NESTED: &str =
+    include_str!("box_regressions/classTypeParameterBoundSkipsOwnNested.kt");
+
+/// The shared portable programs for the same rule run `box()` through the bound's member, which
+/// only type-checks against the top-level `Limit`; this leaf also pins their JVM erasure.
+#[test]
+fn shared_bound_scope_programs_run_and_erase_to_the_top_level_bound() {
+    for (stem, src, class) in [
+        ("BscopeSharedSuper", BOUND_SKIPS_SUPERTYPE_NESTED, "Child"),
+        ("BscopeSharedOwn", BOUND_SKIPS_OWN_NESTED, "Own"),
+    ] {
+        assert_eq!(
+            common::expect_box_run_with_stdlib(src, stem),
+            "OK",
+            "{stem}"
+        );
+        let Some((kotlinc, krusty)) = javap_both(stem, src, class) else {
+            eprintln!("skip ({stem}: reference toolchain unavailable)");
+            return;
+        };
+        assert_eq!(
+            descriptors(&krusty),
+            [
+                "LLimit;",
+                "(LLimit;)V",
+                "()LLimit;",
+                "(LLimit;)Ljava/lang/String;"
+            ],
+            "{stem}"
+        );
+        assert_eq!(descriptors(&krusty), descriptors(&kotlinc), "{stem}");
+    }
+}

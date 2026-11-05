@@ -449,7 +449,7 @@ pub(super) fn integer_literal_overload_with_ties<T>(
 pub(super) struct ExtCtx<'a> {
     pub(super) fn_scope: Option<FunctionScopeRef<'a>>,
     pub(super) source: &'a dyn SymbolSource,
-    pub(super) type_variables: &'a [String],
+    pub(super) type_variables: &'a [crate::types::TyParamName],
     /// `+EagerLambdaAnalysis`: a lambda's checked result decides applicability.
     pub(super) eager_lambda_results: bool,
     /// The use site's member visibility, when the caller has a site. Selection ranks a

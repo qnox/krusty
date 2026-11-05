@@ -255,10 +255,12 @@ pub(super) fn manual_setting_checks(
             cannot_disable.join(", ")
         )
     });
+    // kotlinc reports this one before it reads `-Xwarning-level`, so no level reaches it.
     let warning = (!pre_release.is_empty()).then(|| CliWarning {
-        name: None,
+        name: Some(krusty::diag::names::COMPILER_ARGUMENTS_WARNING),
+        leveled: false,
         message: format!(
-            "following manually enabled features will force generation of pre-release binaries: {}",
+            "Following manually enabled features will force generation of pre-release binaries: {}",
             pre_release.join(", ")
         ),
     });
@@ -298,8 +300,9 @@ pub(super) fn redundancy_warnings(
         warnings.push(if disables_stable {
             CliWarning {
                 name: Some(krusty::diag::names::CLI_ARG_DISABLES_STABLE_FEATURE),
+                leveled: true,
                 message: format!(
-                    "the argument '{rendered}' disables a stable language feature for the current \
+                    "The argument '{rendered}' disables a stable language feature for the current \
                      language version {language_version}. Future support for this mode is not \
                      guaranteed."
                 ),
@@ -307,8 +310,9 @@ pub(super) fn redundancy_warnings(
         } else {
             CliWarning {
                 name: Some(krusty::diag::names::REDUNDANT_CLI_ARG),
+                leveled: true,
                 message: format!(
-                    "the argument '{rendered}' is redundant for the current language version \
+                    "The argument '{rendered}' is redundant for the current language version \
                      {language_version}."
                 ),
             }
