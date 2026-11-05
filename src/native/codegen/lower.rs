@@ -235,7 +235,7 @@ pub fn lower_file(
     input: FileInput<'_>,
     target: NativeTarget,
     stem: &str,
-    entry: Entry,
+    entry: Option<Entry>,
     verify: bool,
 ) -> Result<Lowered, Unsupported> {
     let FileInput {
@@ -367,12 +367,15 @@ pub fn lower_file(
     };
     let file_init = lowering.define_file_init(source, statics_init, file_init_linkage)?;
     let selected = match unit_kind {
-        crate::backend::CheckedIrUnitKind::Source => entry.selected(ir),
+        crate::backend::CheckedIrUnitKind::Source => entry.and_then(|entry| entry.selected(ir)),
         crate::backend::CheckedIrUnitKind::DependencySupport => None,
     };
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
-        if let Some((_, parameters)) = selected.filter(|(function, _)| *function == index as u32) {
+        if let Some(((_, parameters), entry)) = selected
+            .filter(|(function, _)| *function == index as u32)
+            .zip(entry)
+        {
             lowering.define_program_entry(
                 index,
                 entry,
