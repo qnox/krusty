@@ -8,6 +8,7 @@
 use super::*;
 use crate::wasm::encode::{CompositeType, SubType};
 use crate::wasm::function_values::INVOKE_FIELD;
+use crate::wasm::identity::PREFIX_FIELDS;
 use crate::wasm::objects::immutable;
 
 /// Why a lambda or callable reference converted to a `fun interface` declines: SAM conversion
@@ -58,9 +59,10 @@ impl Body<'_> {
         let body = self.emitted_function(function)?;
         let shape = self.runtime.function_shape(self.module, own.len());
 
-        let mut fields = vec![immutable(ValType::reference(
-            self.runtime.objects.any_table,
-        ))];
+        let mut fields = vec![
+            immutable(ValType::reference(self.runtime.objects.any_table)),
+            immutable(ValType::I32),
+        ];
         for parameter in 0..captures.len() {
             let value = parameter_carrier(self.module, self.ir, function, parameter as u32)?
                 .ok_or("a function value capturing a `Unit` value")?;
@@ -68,7 +70,7 @@ impl Body<'_> {
         }
         let structure = self.module.subtype(SubType {
             composite: CompositeType::Struct(fields),
-            supertype: Some(self.runtime.objects.object),
+            supertype: Some(self.runtime.identity.object),
             open: false,
         });
 
@@ -79,7 +81,7 @@ impl Body<'_> {
             entry
                 .local_get(0)
                 .ref_cast(false, HeapType::Concrete(structure))
-                .struct_get(structure, field + 1);
+                .struct_get(structure, field + PREFIX_FIELDS);
         }
         for (index, &param) in own.iter().enumerate() {
             entry.local_get(index as u32 + 1);
@@ -103,7 +105,10 @@ impl Body<'_> {
             FunctionEquality::Identity => self.runtime.objects.identity_equals,
             FunctionEquality::Declaration => self.runtime.objects.trap(self.module, equals_ty),
         };
-        let hash_code = self.runtime.objects.trap(self.module, hash_code_ty);
+        let hash_code = match equality {
+            FunctionEquality::Identity => self.runtime.identity.hash_code,
+            FunctionEquality::Declaration => self.runtime.objects.trap(self.module, hash_code_ty),
+        };
         let to_string = self.runtime.objects.trap(self.module, to_string_ty);
         let objects = &mut self.runtime.objects;
         let (_, itable) = objects
@@ -122,7 +127,9 @@ impl Body<'_> {
             .module
             .constant_global(ValType::reference(shape.table), init);
 
-        self.code.global_get(table);
+        self.code
+            .global_get(table)
+            .call(self.runtime.identity.allocate);
         for (parameter, &capture) in captures.iter().enumerate() {
             self.function_argument(function, parameter as u32, capture)?;
         }

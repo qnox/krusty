@@ -18,6 +18,7 @@ mod encode;
 mod exception_transport;
 mod function_values;
 mod hashing;
+mod identity;
 mod host;
 mod interface_dispatch;
 mod objects;

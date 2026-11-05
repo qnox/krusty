@@ -26,6 +26,7 @@ use super::exception_transport::ExceptionTransport;
 use super::function_values::FunctionShapes;
 use super::hashing::Hashing;
 use super::host::Host;
+use super::identity::IdentityObjects;
 use super::objects::ObjectRoot;
 
 /// Where a host write's bytes are staged in linear memory. The first 16 bytes are left for the
@@ -54,6 +55,7 @@ pub(super) struct Runtime {
     pub(super) i64_div: u32,
     /// The object model's root types and `kotlin.Any`'s members.
     pub(super) objects: ObjectRoot,
+    pub(super) identity: IdentityObjects,
     /// Kotlin's `hashCode()` rules.
     pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
@@ -104,6 +106,7 @@ impl Runtime {
             storage: StorageType::Val(super::objects::REFERENCE),
             mutable: true,
         }));
+        let identity = IdentityObjects::declare(module, &objects);
         let mut runtime = Self {
             chars,
             string,
@@ -119,6 +122,7 @@ impl Runtime {
             i32_div: module.declare(),
             i64_div: module.declare(),
             objects,
+            identity,
             hashing: Hashing::declare(module),
             exceptions,
             boxes: Boxes::default(),

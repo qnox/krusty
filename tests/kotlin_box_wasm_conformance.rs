@@ -1017,6 +1017,14 @@ fn wasm_generated_members_keep_the_whole_portable_scalar_and_reference_control()
 }
 
 #[test]
+fn wasm_generated_members_preserve_closure_identity() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassClosureIdentity.kt"),
+        "wasmDataClassClosureIdentity",
+    );
+}
+
+#[test]
 fn wasm_a_generated_hash_of_an_erased_property_dispatches_when_every_class_has_a_body() {
     expect_wasm_box(
         include_str!("box_regressions/dataClassErasedPropertyHash.kt"),
