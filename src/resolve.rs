@@ -231,6 +231,7 @@ use operator_calls::{
     range_operator, OperatorOperand, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess,
 };
 mod declaration_publication;
+mod declaring_receivers;
 mod enhanced_values;
 use declaration_publication::inferred_declaration_ty;
 mod overload_diagnostics;
@@ -11357,6 +11358,7 @@ impl<'a> Checker<'a> {
                     args,
                     crate::symbol_resolver::ResolvedMember {
                         receiver: receiver_ty,
+                        declaring_receiver: None,
                         member,
                         physical_params,
                         context_args: shape.context_sources,
@@ -31880,6 +31882,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     }
     c.narrow_value_class_receivers();
     c.narrow_script_template_receivers();
+    c.publish_member_declaring_receivers();
     let enhanced_values = c.enhanced_value_heads();
     let Checker {
         expr_types,
@@ -52247,6 +52250,7 @@ impl<'a> Checker<'a> {
                     member.params = params;
                     ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
                         receiver: at,
+                        declaring_receiver: None,
                         physical_params: selected.callable.physical_params.clone(),
                         context_args: Vec::new(),
                         ret,
@@ -58626,6 +58630,7 @@ impl<'a> Checker<'a> {
             member.params = params;
             let resolved = crate::symbol_resolver::ResolvedMember {
                 receiver: recv,
+                declaring_receiver: None,
                 physical_params: selected.callable.physical_params.clone(),
                 context_args: Vec::new(),
                 ret,

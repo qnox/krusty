@@ -1249,6 +1249,7 @@ impl<'a> SymbolResolver<'a> {
         let member = selected.member_with_return(ret);
         ResolvedMember {
             receiver,
+            declaring_receiver: None,
             ret,
             member,
             physical_params: selected.callable.physical_params.clone(),
@@ -3070,6 +3071,7 @@ fn resolved_member_from_info_tracking(
     (
         ResolvedMember {
             receiver: recv,
+            declaring_receiver: None,
             ret,
             member,
             physical_params: o.callable.physical_params.clone(),

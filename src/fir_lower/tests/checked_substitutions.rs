@@ -22,6 +22,7 @@ fn external_call_keeps_checked_type_substitutions_until_provider_realization() {
                 default_provider: None,
                 receiver: None,
                 declared_receiver: None,
+                declaring_receiver: None,
                 parameters: Box::new([]),
                 result: resolved(Ty::String),
                 declared_result: None,
