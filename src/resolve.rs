@@ -13779,7 +13779,10 @@ impl<'a> Checker<'a> {
                         || anonymous_descendant_writes_name(
                             self.file,
                             declaration,
-                            &self.anonymous_lexical_scope,
+                            capture_storage::anonymous_descendants(
+                                declaration,
+                                &self.anonymous_lexical_scope,
+                            ),
                             name,
                             function_local,
                             capture_storage::ConstructorArgumentUses::Candidates,
