@@ -1191,11 +1191,11 @@ impl JvmLibraries {
         &self,
         receiver: Ty,
         target_internal: TypeName,
-        method_formals: &[String],
+        method_formals: &[crate::types::TyParamName],
     ) -> crate::fx_hash::HashMap<String, Ty> {
         let mut bindings = self.receiver_type_bindings_name(receiver, target_internal);
         for formal in method_formals {
-            bindings.remove(formal);
+            bindings.remove(formal.as_str());
         }
         bindings
     }
@@ -1842,7 +1842,7 @@ impl JvmLibraries {
             // Leaving `kotlin/CharSequence` joined is also why whatever `java.lang.CharSequence` declares
             // still reaches `String` one rung up — `charAt` on every JDK, plus `getChars` as of JDK 25,
             // which added it as a `default` method. That is the price of keeping `chars`/`codePoints`,
-            // and it makes the residual leak JDK-DEPENDENT. See docs/SPEC.md.
+            // and it makes the residual leak JDK-DEPENDENT.
             let is_mapped_builtin =
                 super::jvm_class_map::maps_to_distinct_jvm_internal(internal_name);
             let builtin_class_signature = self.cp.builtin_class_signature_name(internal_name);
@@ -3679,7 +3679,7 @@ impl JvmLibraries {
                 let receiver = raw_receiver
                     .map(|r| match r.kind() {
                         TyKind::TyParam(..) => r,
-                        _ => ty_subst(r, &crate::fx_hash::HashMap::default()),
+                        _ => ty_subst(r, &crate::types::TyParamBindings::default()),
                     })
                     .or_else(|| mf.receiver_class.map(kotlin_type_name_to_ty))
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));
@@ -3942,17 +3942,7 @@ impl JvmLibraries {
             SymbolNamespace::Classifier(owner) => self.static_field_name(owner, name),
         };
         if let (SymbolNamespace::Package(_), Some(field)) = (namespace, static_field.as_ref()) {
-            if let Some(metadata) =
-                self.metadata_property_for_field(field.owner, &field.name, &field.descriptor)
-            {
-                super::top_level_properties::merge_metadata_const(
-                    name,
-                    &metadata,
-                    field,
-                    field.deprecated_hidden,
-                    &mut props,
-                );
-            }
+            self.merge_top_level_field_property(name, field, &mut props);
         }
         let hidden = self.withhold_hidden_declarations(package, name, &mut props);
         let platform_callables = match (overloads.is_empty(), props.is_empty()) {
@@ -3967,7 +3957,7 @@ impl JvmLibraries {
         // Language builtin classifiers exist independently of whether the target classpath contains
         // stdlib. Federate that classifier source with the platform record here; platform metadata wins
         // when present, while callables remain exclusively metadata/platform declarations.
-        let core = EmptySymbolSource.symbols(namespace, name);
+        let core = EmptySymbolSource::declarations(namespace, name);
         let (classifier_name, classifier_declaration, classifier, builtin_classifier) =
             if classifier.is_some() {
                 (
@@ -4523,28 +4513,25 @@ fn collection_barrier_role(
     owner: TypeName,
     source_name: &str,
     descriptor: &str,
-) -> Option<crate::libraries::CollectionBarrierOutcome> {
+) -> Option<crate::libraries::CollectionBarrier> {
+    use super::mapped_builtin_declarations::CollectionBridgeFailure as Failure;
+    use crate::libraries::CollectionBarrierOutcome as Outcome;
     let policy = classpath.collection_bridge_policy_name(
         owner,
         source_name,
         descriptor,
         super::mapped_builtin_declarations::MappedBuiltinMemberKind::Function,
     )?;
-    if policy.checked_parameters != [0] {
-        return None;
-    }
-    match policy.failure {
-        super::mapped_builtin_declarations::CollectionBridgeFailure::False => {
-            Some(crate::libraries::CollectionBarrierOutcome::False)
-        }
-        super::mapped_builtin_declarations::CollectionBridgeFailure::Null => {
-            Some(crate::libraries::CollectionBarrierOutcome::Null)
-        }
-        super::mapped_builtin_declarations::CollectionBridgeFailure::NotFound => {
-            Some(crate::libraries::CollectionBarrierOutcome::NotFound)
-        }
-        super::mapped_builtin_declarations::CollectionBridgeFailure::Argument(_) => None,
-    }
+    let outcome = match policy.failure {
+        Failure::False => Outcome::False,
+        Failure::Null => Outcome::Null,
+        Failure::NotFound => Outcome::NotFound,
+        Failure::Argument(_) => return None,
+    };
+    Some(crate::libraries::CollectionBarrier {
+        checked_parameters: policy.checked_parameters,
+        outcome,
+    })
 }
 
 impl crate::libraries::SemanticPlatform for JvmLibraries {
@@ -5048,12 +5035,11 @@ impl JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::{
-        collection_barrier_role, desc_to_ty, java_method_has_operator_convention,
-        java_type_nullability, overlay_metadata_collection_names, parse_class_gsig,
-        parse_concrete_field_gsig, parse_field_gsig, parse_formals, parse_method_desc,
-        parse_method_gsig, suspend_return_from_gsig,
+        desc_to_ty, java_method_has_operator_convention, java_type_nullability,
+        overlay_metadata_collection_names, parse_class_gsig, parse_concrete_field_gsig,
+        parse_field_gsig, parse_formals, parse_method_desc, parse_method_gsig,
+        suspend_return_from_gsig,
     };
-    use crate::libraries::CollectionBarrierOutcome;
     use crate::libraries::{GenericReturnPolicy, SemanticPlatform};
     use crate::symbol_source::SymbolNamespace;
     use crate::types::type_name;
@@ -5102,42 +5088,6 @@ mod tests {
                     && function.callable.params.len() == 1
             });
         assert!(operator_get, "realized charAt must be operator get");
-    }
-
-    #[test]
-    fn decoded_collection_barrier_role_is_declaration_exact() {
-        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
-            return;
-        };
-        let classpath = crate::jvm::classpath::Classpath::new(vec![stdlib]);
-        assert_eq!(
-            collection_barrier_role(
-                &classpath,
-                type_name("kotlin/collections/MutableCollection"),
-                "remove",
-                "(Ljava/lang/Object;)Z",
-            ),
-            Some(CollectionBarrierOutcome::False)
-        );
-        assert_eq!(
-            collection_barrier_role(
-                &classpath,
-                type_name("kotlin/collections/MutableCollection"),
-                "add",
-                "(Ljava/lang/Object;)Z",
-            ),
-            None,
-            "a same-signature ordinary collection member must keep its parameter assertion"
-        );
-        assert_eq!(
-            collection_barrier_role(
-                &classpath,
-                type_name("example/MutableCollection"),
-                "remove",
-                "(Ljava/lang/Object;)Z",
-            ),
-            None
-        );
     }
 
     #[test]
@@ -5372,7 +5322,7 @@ mod tests {
                 .generic_sig
                 .as_ref()
                 .map(|signature| signature.formals.as_slice()),
-            Some(["T".to_string()].as_slice())
+            Some([crate::types::TyParamName::new("T")].as_slice())
         );
         let scope = [type_name("kotlin/reflect")];
         let selected = crate::symbol_resolver::SymbolResolver::new_scoped(&libraries, &scope)

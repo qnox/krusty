@@ -470,7 +470,7 @@ mod tests {
             .get_mut(&ExternalCallableId::from_raw(1))
             .unwrap()
             .generic_sig = Some(Box::new(GenericSig {
-            formals: vec!["owned-T".to_owned()],
+            formals: vec![crate::types::TyParamName::new("owned-T")],
             formal_bounds: vec![Vec::new()],
             receiver: None,
             params: Vec::new(),
@@ -653,6 +653,17 @@ impl CheckedBackendCallables {
         expression: crate::ir::ExprId,
     ) -> Option<SingletonDispatch> {
         self.singleton_dispatches.get(&expression).copied()
+    }
+
+    /// Give each copy of a checked expression the facts frozen for the expression it copies, so
+    /// a lowering that clones a checked body after the handoff keeps its exact selections.
+    /// `clones` pairs each original with its copy.
+    pub(crate) fn extend_to_clones(&mut self, clones: &[(crate::ir::ExprId, crate::ir::ExprId)]) {
+        for &(original, copy) in clones {
+            if let Some(&dispatch) = self.singleton_dispatches.get(&original) {
+                self.singleton_dispatches.insert(copy, dispatch);
+            }
+        }
     }
 
     /// Copy the provider's facts for every dependency identity `ir` references.

@@ -1,0 +1,49 @@
+// A type test on a stable property path keeps the property's declared type beside the tested
+// one, as it does for a local: `delegate is Dated` on `val delegate: Column<T>` reads `delegate`
+// as `Column<T> & Dated`, so members of both are visible.
+interface Column<T> {
+    fun sqlType(): String
+}
+
+interface Dated {
+    val hasTime: Boolean
+}
+
+class DateColumn : Column<String>, Dated {
+    override fun sqlType(): String = "DATE"
+    override val hasTime: Boolean get() = false
+}
+
+class Plain(val delegate: Column<String>) {
+    fun marker(): String = if (delegate is Dated) delegate.sqlType() + delegate.hasTime else "none"
+}
+
+class Generic<T>(val delegate: Column<T>) {
+    fun marker(): String = if (delegate is Dated) delegate.sqlType() + delegate.hasTime else "none"
+}
+
+class Outer(val inner: Plain)
+
+// A nullable test (`is Dated?`) still admits null, so the declared type keeps its `?`: the read
+// is `Column<String>? & Dated?` and only the nullable overload applies.
+fun pick(column: Column<String>): String = "non-null"
+fun pick(value: Any?): String = "nullable"
+
+class Maybe(val delegate: Column<String>?) {
+    fun marker(): String = if (delegate is Dated?) pick(delegate) else "none"
+}
+
+fun local(delegate: Column<String>?): String = if (delegate is Dated?) pick(delegate) else "none"
+
+fun nested(outer: Outer): String =
+    if (outer.inner.delegate is Dated) outer.inner.delegate.sqlType() + outer.inner.delegate.hasTime else "none"
+
+fun box(): String {
+    if (Plain(DateColumn()).marker() != "DATEfalse") return "Fail plain"
+    if (Generic(DateColumn()).marker() != "DATEfalse") return "Fail generic"
+    if (nested(Outer(Plain(DateColumn()))) != "DATEfalse") return "Fail nested"
+    if (Maybe(DateColumn()).marker() != "nullable") return "Fail nullable path"
+    if (Maybe(null).marker() != "nullable") return "Fail null path"
+    if (local(DateColumn()) != "nullable") return "Fail nullable local"
+    return "OK"
+}
