@@ -35471,10 +35471,7 @@ impl<'a> Checker<'a> {
             expression,
             type_arguments.iter().copied().map(Some).collect(),
         );
-        if selected.callable.external_identity.is_none() && selected.callable.owner.matches("")
-            && selected.source_key.is_none()
-            && selected.stable_declaration.is_none()
-        {
+        if callable_reference_publication::lacks_reference_realization(selected) {
             self.expr_lowers.insert(
                 expression,
                 ExprLowering::UnavailableCallableReference {
