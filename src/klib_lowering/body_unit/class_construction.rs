@@ -1,6 +1,7 @@
 //! Materialized dependency storage and its private initialization frame in this closed unit.
 
 use super::*;
+use crate::fx_hash::HashSet;
 use crate::ir::{IrClass, IrCtorArg, IrCtorParameterProvenance, IrExpr, IrField};
 
 impl<'u, 's> Linker<'u, 's> {
@@ -17,7 +18,7 @@ impl<'u, 's> Linker<'u, 's> {
         else {
             return Ok(());
         };
-        let classifier = plan.header.contract.classifier;
+        let classifier = plan.storage.declaration.classifier;
         if ir.class_id_by_name(classifier).is_some() {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "different dependency identities claim the same materialized classifier".to_owned(),
@@ -25,12 +26,13 @@ impl<'u, 's> Linker<'u, 's> {
         }
         let header = super::super::function_lowering::initializer_header(&plan)?;
         let mut class = IrClass::synthetic(classifier);
-        class.supertypes.push(Ty::obj_name(crate::types::wk::any()));
+        class.supertypes.push(plan.storage.superclass);
         class.fields = plan
+            .storage
             .fields
             .iter()
             .map(|field| {
-                IrField::new(field.declaration.name.clone(), field.ty)
+                IrField::new(field.name.clone(), field.ty)
                     .with_is_final(field.final_)
                     .with_is_private(field.private)
             })
@@ -70,7 +72,7 @@ impl<'u, 's> Linker<'u, 's> {
         ir.classes[class as usize].methods.push(function);
         ir.note_class_method(class, function);
         let receiver = ir.add_expr(IrExpr::GetValue(0));
-        ir.logical_types.insert(receiver, Ty::obj_name(classifier));
+        ir.set_logical_type(receiver, Ty::obj_name(classifier));
         let args = header
             .params()
             .iter()
@@ -79,7 +81,7 @@ impl<'u, 's> Linker<'u, 's> {
                 let value = ir.add_expr(IrExpr::GetValue(
                     u32::try_from(index + 1).expect("a value index fits u32"),
                 ));
-                ir.logical_types.insert(value, *ty);
+                ir.set_logical_type(value, *ty);
                 Some(value)
             })
             .collect();
@@ -89,7 +91,7 @@ impl<'u, 's> Linker<'u, 's> {
             receiver,
             args,
         });
-        ir.logical_types.insert(initialize, Ty::Unit);
+        ir.set_logical_type(initialize, Ty::Unit);
         ir.classes[class as usize].init_body = Some(initialize);
         self.classes.insert(identity.clone(), class);
         self.pending.push_back(PendingBody {
@@ -100,7 +102,81 @@ impl<'u, 's> Linker<'u, 's> {
             header,
             function,
             initialization: Some((class, plan)),
+            value_member: None,
         });
         Ok(())
+    }
+
+    /// The class a value class member's body reads its value through: the value class with its
+    /// one backing field. Its representation, the value itself wherever the target carries it
+    /// unboxed, is the target's; the class records only the declaration's storage.
+    pub(super) fn materialize_value_class(
+        &mut self,
+        ir: &mut IrFile,
+        selected: KlibBodyCallable<'s>,
+    ) -> Result<super::ValueMember<'s>, KlibBodyDeclineReason> {
+        let header = super::super::class_headers::authenticate(selected, self.sources.bodies)?;
+        let contract = header.contract;
+        if contract.is_builtin_type() {
+            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                "a member of a builtin type",
+            ));
+        }
+        if !contract.is_value || header.class.value_class_representation.is_none() {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a value class member's class is not a serialized value class".to_owned(),
+            ));
+        }
+        let mut identities = HashSet::default();
+        let mut fields = header
+            .class
+            .members
+            .iter()
+            .filter_map(super::super::class_storage::member_field);
+        let (Some(field), None) = (fields.next(), fields.next()) else {
+            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                "a value class without exactly one backing field",
+            ));
+        };
+        let stored = super::super::class_storage::declared_field(&header, field, &mut identities)?;
+        let identity = KlibDependencyCallable {
+            module: contract.module.clone(),
+            declaration: KlibDeclarationSignature::Public(contract.signature.clone()),
+        };
+        if let Some(&class) = self.classes.get(&identity) {
+            return Ok(super::ValueMember {
+                class,
+                field,
+                contract,
+            });
+        }
+        let classifier = contract.classifier;
+        if ir.class_id_by_name(classifier).is_some() {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "different dependency identities claim the same materialized classifier".to_owned(),
+            ));
+        }
+        let mut class = IrClass::synthetic(classifier);
+        class.declaration_name = Some(super::super::klib_types::classifier_declaration(
+            &contract.signature,
+        )?);
+        class.is_value = true;
+        class.type_params = header.formals.clone();
+        class.fields = vec![IrField::new(stored.name.clone(), stored.ty)
+            .with_is_final(stored.final_)
+            .with_is_private(stored.private)];
+        class.properties = vec![crate::ir::IrProperty::stored_value(
+            stored.name,
+            stored.ty,
+            0,
+        )];
+        class.ctor_param_count = 1;
+        let class = ir.add_class(class);
+        self.classes.insert(identity, class);
+        Ok(super::ValueMember {
+            class,
+            field,
+            contract,
+        })
     }
 }

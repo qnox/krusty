@@ -359,6 +359,7 @@ pub(super) fn synth_value_members(
             internal: box_internal,
             args: vec![arg],
             ctor_params: Some(vec![u_ir]),
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),
@@ -1167,8 +1168,8 @@ fn nested_value_text(
         dispatch_receiver: None,
         args: vec![value],
     });
-    ir.physical_types.insert(call, Ty::String);
-    ir.logical_types.insert(call, Ty::obj_name(nested));
+    ir.set_physical_type(call, Ty::String);
+    ir.set_logical_type(call, Ty::obj_name(nested));
     rendered_value_class_text.insert(call);
     call
 }

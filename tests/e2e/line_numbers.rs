@@ -25,6 +25,8 @@ mod lambda_implicit_return_lines_e2e;
 mod loop_control_lines_e2e;
 #[path = "../loop_transfer_line_e2e.rs"]
 mod loop_transfer_line_e2e;
+#[path = "../nullable_any_lambda_return_line_e2e.rs"]
+mod nullable_any_lambda_return_line_e2e;
 #[path = "../safe_call_null_line_e2e.rs"]
 mod safe_call_null_line_e2e;
 #[path = "../safe_call_return_line_e2e.rs"]

@@ -82,7 +82,7 @@ pub(crate) use local_signatures::{
 pub(crate) use local_signatures::{
     publish_checked_local_signatures, publish_discovered_local_capture_declarations,
 };
-use postponed_argument_mapping::MappedTopLevelSelection;
+use postponed_argument_mapping::{typed_argument_evidence, MappedTopLevelSelection};
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
 use type_resolution::SelectedTypeSite;
 
@@ -96,13 +96,7 @@ struct ProductionSignatureSemantics<'a> {
     source_orders: HashMap<crate::fir::DeclarationId, u32>,
     signature_origins: HashMap<crate::fir::DeclarationId, crate::fir::OriginId>,
     scoped_receivers: RefCell<HashMap<crate::fir::DeclarationId, Vec<SignatureImplicitReceiver>>>,
-    scoped_constraint_inputs: RefCell<HashMap<crate::fir::DeclarationId, Vec<Vec<Ty>>>>,
-    scoped_constraints:
-        RefCell<HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>>,
-    completed_scoped_constraints:
-        RefCell<HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>>,
-    scoped_constraint_checkpoints:
-        RefCell<Vec<semantics::scoped_constraint_frames::ScopedConstraintCheckpoint>>,
+    scoped_frames: semantics::scoped_constraint_frames::ScopedConstraintFrames,
     stable_functions: stable_function_index::StableFunctionIndex,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
     /// What each selected top-level call recorded, by call origin: its contract and the typealias
@@ -131,7 +125,7 @@ struct ProductionSignatureSemantics<'a> {
 
 #[derive(Clone)]
 struct DeclarationTypeParameters {
-    formals: Vec<String>,
+    formals: Vec<crate::types::TyParamName>,
     bounds: Vec<Vec<Ty>>,
 }
 
@@ -459,7 +453,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: &super::CheckerScope<'_>,
         declaration: crate::fir::DeclarationId,
-        semantic_names: &[String],
+        semantic_names: &[crate::types::TyParamName],
         semantic_bounds: &[Vec<Ty>],
     ) {
         let packed = self.header_type_parameters(declaration);
@@ -471,7 +465,7 @@ impl ProductionSignatureSemantics<'_> {
             };
             let semantic_name = semantic_names
                 .get(ordinal)
-                .map(String::as_str)
+                .map(|name| name.as_str())
                 .unwrap_or(source_name);
             let bounds = semantic_bounds
                 .get(ordinal)
@@ -1780,7 +1774,7 @@ impl ProductionSignatureSemantics<'_> {
         let mut bindings = class.type_parameter_bindings(applied);
         if let Some(signature) = generic_signature {
             for formal in &signature.formals {
-                bindings.remove(formal);
+                bindings.remove(formal.as_str());
             }
         }
         let specialized = crate::symbol_resolver::ty_subst_keep_unbound(result, &bindings);
@@ -1841,7 +1835,7 @@ impl ProductionSignatureSemantics<'_> {
                 generic
                     .formals
                     .iter()
-                    .cloned()
+                    .map(crate::types::TyParamName::from)
                     .zip(explicit_type_arguments.iter().copied()),
             );
         }
@@ -2134,7 +2128,7 @@ impl ProductionSignatureSemantics<'_> {
                 )) = resolver.select_receiver_function_with_params_tracking(
                     receiver,
                     member_spelling,
-                    &selected_arguments,
+                    crate::symbol_resolver::FamilyArguments::Shared(&selected_arguments),
                     type_arguments,
                     &callables,
                     None,
@@ -3373,10 +3367,7 @@ pub(crate) fn finalized_streamed_signature_index(
         source_orders: HashMap::default(),
         signature_origins: HashMap::default(),
         scoped_receivers: RefCell::new(HashMap::default()),
-        scoped_constraint_inputs: RefCell::new(HashMap::default()),
-        scoped_constraints: RefCell::new(HashMap::default()),
-        completed_scoped_constraints: RefCell::new(HashMap::default()),
-        scoped_constraint_checkpoints: RefCell::new(Vec::new()),
+        scoped_frames: Default::default(),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
@@ -4149,10 +4140,7 @@ pub(crate) fn finalized_streamed_signature_index(
         source_orders,
         signature_origins,
         scoped_receivers: RefCell::new(HashMap::default()),
-        scoped_constraint_inputs: RefCell::new(HashMap::default()),
-        scoped_constraints: RefCell::new(HashMap::default()),
-        completed_scoped_constraints: RefCell::new(HashMap::default()),
-        scoped_constraint_checkpoints: RefCell::new(Vec::new()),
+        scoped_frames: Default::default(),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
@@ -4403,7 +4391,11 @@ pub(crate) fn finalized_streamed_signature_index(
                 .flags
                 .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
     }) {
+        // A capture a builder lambda recorded before its call was solved takes that solution.
         let Some((parameters, result, receiver)) = stable_members.property(stub.id) else {
+            stop_with_failure!(stub.id);
+        };
+        let Some(result) = semantics.complete_postponed_variables(result) else {
             stop_with_failure!(stub.id);
         };
         if receiver.is_some()

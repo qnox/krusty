@@ -295,25 +295,74 @@ fn kotlinc_native_consumes_a_krusty_reified_inline_body() {
 /// leave the external call in place and would not set `external_inline_expansions`.
 #[test]
 fn krusty_consumes_a_kotlinc_native_reified_inline_body() {
-    let Some(native_root) = kotlin_native_root() else {
+    let Some((diagnostics, expanded)) = official_inline_expansions(
+        "official-inline-ir-krusty-consumer",
+        "package fixture\ninline fun <reified T> probe(value: Any? = null): Boolean = value is T\n",
+        "import fixture.probe\nfun box() = probe<String>(\"OK\") && !probe<String>()\n",
+    ) else {
         return;
     };
+    assert_eq!(diagnostics, Vec::<String>::new());
+    assert_eq!(
+        expanded, 2,
+        "both official prepared IR calls must retain external-inline provenance"
+    );
+}
+
+/// An inline member of a generic class, called through subclasses that apply the class's type
+/// parameter at different depths, binds the declaring class's parameter from the checked call:
+/// each call expands from the prepared copy instead of failing the file.
+#[test]
+fn inherited_generic_class_inline_members_expand_through_subclass_receivers() {
+    let modules = krusty::conformance::split_modules(include_str!(
+        "box_regressions/multimodule/multimoduleInheritedGenericInlineMembers.kt"
+    ))
+    .expect("the shared regression is a two-module graph");
+    let [producer, consumer] = modules.as_slice() else {
+        panic!("the shared regression has exactly a library and a consumer module");
+    };
+    assert_eq!(consumer.deps, std::slice::from_ref(&producer.name));
+    let [(_, producer_source)] = producer.files.as_slice() else {
+        panic!("the library module is one Kotlin file");
+    };
+    let [(_, consumer_source)] = consumer.files.as_slice() else {
+        panic!("the consumer module is one Kotlin file");
+    };
+    let Some((diagnostics, expanded)) = official_inline_expansions(
+        "official-inherited-generic-inline-member",
+        producer_source,
+        consumer_source,
+    ) else {
+        return;
+    };
+    assert_eq!(diagnostics, Vec::<String>::new());
+    assert_eq!(
+        expanded, 4,
+        "every inherited member call expands from its prepared copy"
+    );
+}
+
+/// Compile `producer` with the pinned kotlinc-native as a library, lower `consumer` against it
+/// and the Native stdlib, and answer the emitted diagnostics and the number of external inline
+/// expansions. `None` without a provisioned Native toolchain.
+fn official_inline_expansions(
+    work_name: &str,
+    producer: &str,
+    consumer: &str,
+) -> Option<(Vec<String>, usize)> {
+    let native_root = kotlin_native_root()?;
     let work = common::scratch_dir()
         .expect("allocate the official KLIB producer directory")
-        .join("official-inline-ir-krusty-consumer");
+        .join(work_name);
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).expect("create official KLIB producer directory");
-    let producer = work.join("Probe.kt");
-    std::fs::write(
-        &producer,
-        "package fixture\ninline fun <reified T> probe(value: Any? = null): Boolean = value is T\n",
-    )
-    .expect("write official producer source");
-    let library = work.join("probe");
+    let producer_file = work.join("Producer.kt");
+    std::fs::write(&producer_file, producer).expect("write official producer source");
+    let library = work.join("producer");
     let output = std::process::Command::new(native_root.join("bin/kotlinc-native"))
         .args(["-p", "library", "-nopack", "-o"])
         .arg(&library)
-        .arg(&producer)
+        .arg(&producer_file)
         .output()
         .expect("launch the pinned kotlinc-native producer");
     assert!(
@@ -335,10 +384,7 @@ fn krusty_consumes_a_kotlinc_native_reified_inline_body() {
         krusty::klib_libraries::KlibLibraryInput::dependency(library),
     ])
     .expect("open the official producer and Native stdlib");
-    let source = krusty::source::SourceInput::kotlin(
-        "import fixture.probe\nfun box() = probe<String>(\"OK\") && !probe<String>()\n",
-    )
-    .with_file_stem("Consumer");
+    let source = krusty::source::SourceInput::kotlin(consumer).with_file_stem("Consumer");
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &[source],
@@ -392,20 +438,13 @@ fn krusty_consumes_a_kotlinc_native_reified_inline_body() {
         &mut diags,
     );
     assert!(artifacts.is_empty());
-    assert_eq!(
-        diags
-            .diags
-            .iter()
-            .map(|diagnostic| diagnostic.msg.as_str())
-            .collect::<Vec<_>>(),
-        Vec::<&str>::new()
-    );
-    assert_eq!(
-        expanded.get(),
-        2,
-        "both official prepared IR calls must retain external-inline provenance"
-    );
+    let diagnostics = diags
+        .diags
+        .iter()
+        .map(|diagnostic| diagnostic.msg.clone())
+        .collect();
     std::fs::remove_dir_all(work).expect("remove the official producer directory");
+    Some((diagnostics, expanded.get()))
 }
 
 /// A decoded type as Kotlin spells it, with the internal (`/`-separated) class name.

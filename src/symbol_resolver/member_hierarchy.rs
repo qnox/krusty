@@ -33,9 +33,9 @@ pub(crate) fn member_is_inheritable(visibility: crate::types::Visibility) -> boo
 pub(crate) fn override_parameter_types_match(
     source: &dyn SymbolSource,
     inherited: &[Ty],
-    inherited_formals: &[String],
+    inherited_formals: &[crate::types::TyParamName],
     implementation: &[Ty],
-    implementation_formals: &[String],
+    implementation_formals: &[crate::types::TyParamName],
 ) -> bool {
     inherited.len() == implementation.len()
         && inherited
@@ -60,7 +60,7 @@ pub(crate) fn override_parameter_types_match(
 pub(crate) struct OverrideInputShape<'a> {
     pub params: &'a [Ty],
     pub receiver: Option<Ty>,
-    pub formals: &'a [String],
+    pub formals: &'a [crate::types::TyParamName],
     /// Declared upper bounds, parallel to `formals`; an empty slot is Kotlin's implicit `Any?`.
     pub formal_bounds: &'a [Vec<Ty>],
     pub context_count: usize,
@@ -246,8 +246,8 @@ fn specialize_declared_callables(
         let declared_nullability = property.ty;
         let mut bindings = base_bindings.clone();
         for formal in &property.formals {
-            if !classifier.type_params.contains(formal) {
-                bindings.remove(formal);
+            if !classifier.type_params.iter().any(|owner| owner == formal) {
+                bindings.remove(formal.as_str());
             }
         }
         match property.kind {
@@ -335,7 +335,7 @@ pub(crate) fn specialize_member_function(
             // A method formal always owns its name. In `class Box<T> { fun <T> echo(T): T }`, the
             // method's `T` shadows the receiver-bound class `T`; retaining the class binding here
             // would specialize `Box<String>.echo(42)` before overload inference.
-            bindings.remove(formal);
+            bindings.remove(formal.as_str());
         }
     }
     let raw_receiver = super::raw_member_view::is_raw_receiver(receiver);
@@ -903,7 +903,7 @@ fn normalized_function_result(function: &FunctionInfo) -> Ty {
                 [bound] => *bound,
                 bounds => Ty::intersection(bounds),
             };
-            (formal.clone(), bound)
+            (*formal, bound)
         })
         .collect::<crate::fx_hash::HashMap<_, _>>();
     crate::types::ty_canonicalize_params(
@@ -1215,7 +1215,7 @@ fn expects_recorded_suspend_result(candidate: &FunctionInfo) -> bool {
     }
     matches!(
         candidate.callable.ret.non_null().kind(),
-        TyKind::Obj(..) | TyKind::TyParam(..)
+        TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Var(..)
     )
 }
 
@@ -1946,7 +1946,7 @@ mod tests {
             let mut function = member("sample/Owner", 0, vec![result], None);
             function.callable.ret = result;
             function.generic_sig = Some(crate::libraries::GenericSig {
-                formals: vec![formal.to_string()],
+                formals: vec![crate::types::TyParamName::new(formal)],
                 formal_bounds: vec![Vec::new()],
                 receiver: None,
                 params: vec![result],
@@ -2002,7 +2002,7 @@ mod tests {
     #[test]
     fn override_input_shape_includes_type_parameter_bounds() {
         let source = crate::libraries::EmptySymbolSource;
-        let formals = ["S".to_string()];
+        let formals = [crate::types::TyParamName::new("S")];
         let param = [Ty::ty_param("S", Ty::nullable(Ty::obj("kotlin/Any")))];
         let wide = [vec![Ty::obj("app/Shape")]];
         let narrow = [vec![Ty::obj("app/Circle")]];

@@ -140,11 +140,21 @@ fn anonymous_property_initializer_reads_same_named_lexical_capture() {
         initializer
             .expr(root_expression(initializer))
             .map(|expression| &expression.kind),
-        Some(FirExprKind::ClassStorageRead {
+        Some(FirExprKind::ConstructorCaptureRead {
             owner: selected,
             field: 0,
+            shared_cell: false,
+            site: crate::fir::FirConstructorCaptureSite::Parameter,
         }) if *selected == owner
     ));
+    assert_eq!(
+        initializer
+            .expr(root_expression(initializer))
+            .unwrap()
+            .ty
+            .get(),
+        Ty::Int
+    );
 }
 
 #[test]
