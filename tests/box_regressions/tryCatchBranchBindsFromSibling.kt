@@ -5,13 +5,11 @@ class Pack<T>(val value: T?)
 
 fun <T> empty(): Pack<T> = Pack(null)
 
-class Fail : Exception()
-
 var calls = ""
 
 fun parse(fail: Boolean): Pack<String> {
     calls += "p"
-    if (fail) throw Fail()
+    if (fail) throw IllegalStateException()
     return Pack("a")
 }
 
@@ -26,9 +24,9 @@ fun catchBindsFromBody(fail: Boolean): String? {
 
 fun bodyBindsFromCatch(fail: Boolean): String? {
     val parsed = try {
-        if (fail) throw Fail()
+        if (fail) throw IllegalStateException()
         empty()
-    } catch (t: Fail) {
+    } catch (t: IllegalStateException) {
         parse(false)
     }
     return parsed.value
@@ -37,7 +35,7 @@ fun bodyBindsFromCatch(fail: Boolean): String? {
 fun catchesBindFromEachOther(fail: Boolean): String? {
     val parsed = try {
         parse(fail)
-    } catch (e: Fail) {
+    } catch (e: IllegalStateException) {
         empty()
     } catch (t: Throwable) {
         empty()
@@ -46,7 +44,7 @@ fun catchesBindFromEachOther(fail: Boolean): String? {
 }
 
 fun statements(fail: Boolean) {
-    try { parse(fail) } catch (e: Fail) { empty() }
+    try { parse(fail) } catch (e: IllegalStateException) { empty() }
     if (fail) { parse(false) } else { empty() }
     when { fail -> { empty() } else -> { parse(false) } }
 }
