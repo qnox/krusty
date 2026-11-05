@@ -310,6 +310,7 @@ impl super::Checker<'_> {
         let mut uses = FirstUses {
             checker: self,
             statement: Some(statement),
+            inner_classes: Vec::new(),
             storage_fields: None,
             read_namespace: CaptureReadNamespace::OwnStorage,
             owner: Owner::Function,
@@ -576,6 +577,8 @@ struct FirstUses<'w, 'c> {
     checker: &'w super::Checker<'c>,
     /// The local class's or function's statement, which owns a class's inner classes.
     statement: Option<StmtId>,
+    /// Named inner declarations whose code reaches this class through its enclosing instance.
+    inner_classes: Vec<DeclId>,
     /// A scratch body selected these reads before its owner finalized the receiver prefix.
     /// Included classifiers already carry finalized coordinates and do not use this permutation.
     storage_fields: Option<&'w [Option<u32>]>,
@@ -661,6 +664,7 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         Self {
             checker,
             statement,
+            inner_classes: Vec::new(),
             storage_fields: None,
             read_namespace: CaptureReadNamespace::OwnStorage,
             owner: Owner::Class,
@@ -782,6 +786,33 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         // Only the local class itself is under construction: an inner class's code reads this
         // class's storage through its outer instance.
         self.construction = declaration.is_some();
+        if let Some(declaration) = declaration {
+            self.inner_classes = self
+                .statement
+                .and_then(|statement| self.checker.file.local_class_nested.get(&statement))
+                .cloned()
+                .unwrap_or_default();
+            // Anonymous classes have no local-class statement. Their hoisted inner declarations
+            // belong to the same recorded owner graph as capture discovery. Follow only named
+            // inner edges: crossing another anonymous construction changes the storage namespace.
+            for &candidate in &self.checker.file.decls {
+                let chain = self
+                    .checker
+                    .anonymous_lexical_scope
+                    .declaration_chain(candidate);
+                let Some(depth) = chain.iter().position(|owner| *owner == declaration) else {
+                    continue;
+                };
+                if depth != 0
+                    && chain[..depth].iter().all(|inner| {
+                        matches!(self.checker.file.decl(*inner), Decl::Class(class) if class.inner_of.is_some())
+                    })
+                    && !self.inner_classes.contains(&candidate)
+                {
+                    self.inner_classes.push(candidate);
+                }
+            }
+        }
         let anonymous = declaration.is_some_and(|declaration| {
             self.checker
                 .anonymous_lexical_scope
@@ -872,12 +903,7 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         }
         // An inner class is a local declaration of the class, included where it is constructed.
         let file = self.checker.file;
-        for &declaration in self
-            .statement
-            .and_then(|statement| file.local_class_nested.get(&statement))
-            .into_iter()
-            .flatten()
-        {
+        for &declaration in &self.inner_classes {
             if matches!(file.decl(declaration), Decl::Class(inner) if inner.inner_of.is_some()) {
                 uses.declared.push(Inclusion::Classifier(declaration));
             }
@@ -950,10 +976,7 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                     .collect(),
             ),
             (None, None) => {
-                let inner = self
-                    .statement
-                    .and_then(|statement| file.local_class_nested.get(&statement))
-                    .is_some_and(|nested| nested.contains(&declaration));
+                let inner = self.inner_classes.contains(&declaration);
                 if inner {
                     self.class(class, None, uses);
                 }

@@ -14132,19 +14132,9 @@ impl<'a> Checker<'a> {
                     return self.anonymous_object_type(scope, declaration);
                 }
             }
-            let captures = self
-                .discovered_anonymous_captures
-                .get(&declaration)
-                .cloned()
-                .or_else(|| match &self.module {
-                    CheckerModuleSymbols::Legacy(source) => source
-                        .pass_one_symbols()
-                        .anonymous_object_captures
-                        .get(&(self.file_index, declaration))
-                        .cloned(),
-                    CheckerModuleSymbols::Streamed(_) => None,
-                })
-                .unwrap_or_default();
+            let captures = self.body_class_storage_captures(declaration);
+            self.discovered_anonymous_captures
+                .insert(declaration, captures.clone());
             {
                 for capture in &captures {
                     let actual = match capture.source {
@@ -32191,9 +32181,13 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             .values()
             .copied()
             .filter_map(|declaration| {
-                pass_one
-                    .anonymous_object_captures
-                    .get(&(file_index, declaration))
+                discovered_anonymous_captures
+                    .get(&declaration)
+                    .or_else(|| {
+                        pass_one
+                            .anonymous_object_captures
+                            .get(&(file_index, declaration))
+                    })
                     .cloned()
                     .map(|captures| (declaration, captures))
             })
