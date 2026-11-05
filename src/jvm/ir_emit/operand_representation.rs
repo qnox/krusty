@@ -727,18 +727,18 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         let semantic = self.ir.logical_type(expression).unwrap_or(source);
-        let destination_semantic = self
-            .ir
-            .construction_declared_params(construction)
-            .and_then(|parameters| {
-                super::capture_order::physical_for(
-                    self.ir,
-                    self.constructed_class(construction),
-                    parameters.to_vec(),
-                )
-                .get(parameter_index)
-                .copied()
-            });
+        let destination_semantic =
+            self.ir
+                .construction_declared_params(construction)
+                .and_then(|parameters| {
+                    super::capture_order::physical_for(
+                        self.ir,
+                        self.constructed_class(construction),
+                        parameters.to_vec(),
+                    )
+                    .get(parameter_index)
+                    .copied()
+                });
         self.adapt_physical_operand(source, semantic, destination_semantic, physical, code);
     }
 
