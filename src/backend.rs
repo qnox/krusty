@@ -17,6 +17,7 @@ pub(crate) mod interface_identity;
 pub(crate) mod local_properties;
 mod module_facts;
 mod source_class_members;
+pub(crate) mod value_classes;
 
 pub(crate) use constructor_selection::selected_constructor;
 pub(crate) use dependency_call_shape::{

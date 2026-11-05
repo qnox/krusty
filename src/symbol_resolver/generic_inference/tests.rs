@@ -156,7 +156,8 @@ fn dependent_applied_bounds_wait_for_complete_call_bindings() {
     );
     assert_eq!(inferred.bound_violation, None);
     assert_eq!(inferred.bindings.get("callee:B"), Some(&actual));
-    assert_eq!(inferred.bindings.get("callee:A"), None);
+    // `B <: Marker<A>` with `B := Marker<Int>` is itself evidence for `A`.
+    assert_eq!(inferred.bindings.get("callee:A"), Some(&Ty::Int));
     let mut completed = inferred.bindings;
     completed.insert("callee:A".into(), Ty::Int);
     assert_eq!(
@@ -172,6 +173,70 @@ fn dependent_applied_bounds_wait_for_complete_call_bindings() {
         }),
         Some((Ty::obj_args("test/Marker", &[Ty::String]), actual)),
     );
+}
+
+/// `<T : Any, E : Key<T>?, V : T?> match(key: Expr<E>, value: Expr<V>)`.
+fn keyed_match_signature() -> GenericSig {
+    let any = Ty::obj("kotlin/Any");
+    let t = Ty::ty_param("callee:T", any);
+    let key_bound = Ty::nullable(Ty::obj_args("test/Key", &[t]));
+    let e = Ty::ty_param("callee:E", key_bound);
+    let v = Ty::ty_param("callee:V", Ty::nullable(t));
+    GenericSig {
+        formals: vec!["callee:T".into(), "callee:E".into(), "callee:V".into()],
+        formal_bounds: vec![vec![any], vec![key_bound], vec![Ty::nullable(t)]],
+        receiver: None,
+        params: vec![
+            Ty::obj_args("test/Expr", &[e]),
+            Ty::obj_args("test/Expr", &[v]),
+        ],
+        ret: Ty::Unit,
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    }
+}
+
+#[test]
+fn a_classifier_bound_constrains_the_formal_it_mentions() {
+    let signature = keyed_match_signature();
+    let caller_t = Ty::ty_param("caller:T", Ty::obj("kotlin/Any"));
+    let caller_v = Ty::ty_param("caller:V", Ty::nullable(caller_t));
+    let key = Ty::obj_args("test/Key", &[caller_t]);
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [
+            (0, Ty::obj_args("test/Expr", &[key]), false),
+            (1, Ty::obj_args("test/Expr", &[caller_v]), false),
+        ],
+        None,
+    );
+    assert_eq!(inferred.bound_violations, Vec::new());
+    assert_eq!(inferred.bindings.get("callee:E"), Some(&key));
+    assert_eq!(inferred.bindings.get("callee:V"), Some(&caller_v));
+    assert_eq!(inferred.bindings.get("callee:T"), Some(&caller_t));
+}
+
+#[test]
+fn a_caller_variable_reaches_a_classifier_bound_through_its_own_bound() {
+    let signature = keyed_match_signature();
+    let caller_t = Ty::ty_param("caller:T", Ty::obj("kotlin/Any"));
+    let caller_v = Ty::ty_param("caller:V", Ty::nullable(caller_t));
+    let caller_e = Ty::ty_param(
+        "caller:E",
+        Ty::nullable(Ty::obj_args("test/Key", &[caller_t])),
+    );
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [
+            (0, Ty::obj_args("test/Expr", &[caller_e]), false),
+            (1, Ty::obj_args("test/Expr", &[caller_v]), false),
+        ],
+        None,
+    );
+    assert_eq!(inferred.bound_violations, Vec::new());
+    assert_eq!(inferred.bindings.get("callee:E"), Some(&caller_e));
+    assert_eq!(inferred.bindings.get("callee:T"), Some(&caller_t));
 }
 
 #[test]
@@ -1199,4 +1264,68 @@ fn a_definitely_non_null_argument_joins_its_own_parameter_to_that_parameter() {
     assert_eq!(inferred.bindings.get("T"), Some(&caller_t));
     assert_eq!(inferred.bindings.get("S"), Some(&caller_s));
     assert!(inferred.bound_violations.is_empty());
+}
+
+/// `class Nest<T> : Link<Nest<List<T>>>`: every application reaches `Link` one level deeper.
+struct ExpandingNest;
+
+impl crate::symbol_source::SymbolSource for ExpandingNest {
+    fn symbols(
+        &self,
+        namespace: crate::symbol_source::SymbolNamespace,
+        name: &str,
+    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+        let identity = namespace.existing_classifier(name);
+        let classifier = identity
+            .filter(|identity| identity.matches("test/Nest"))
+            .map(|_| {
+                let any = Ty::nullable(Ty::obj("kotlin/Any"));
+                let mut classifier = crate::libraries::LibraryType::declaration_header();
+                classifier.type_parameters =
+                    crate::types::TypeParameters::invariant(vec!["T".to_string()], vec![vec![any]]);
+                classifier.own_type_parameter_count = 1;
+                let deeper = Ty::obj_args("kotlin/collections/List", &[Ty::ty_param("T", any)]);
+                classifier.supertype_templates = vec![Ty::obj_args(
+                    "test/Link",
+                    &[Ty::obj_args("test/Nest", &[deeper])],
+                )];
+                std::sync::Arc::new(classifier)
+            });
+        std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+            classifier_name: classifier.as_ref().and(identity),
+            classifier,
+            ..crate::libraries::ResolvedSymbols::default()
+        })
+    }
+}
+
+#[test]
+fn mutually_recursive_classifier_bounds_stop_at_the_incorporation_depth() {
+    // `fun <A : Link<B>, B : Link<A>> f(a: A)` called as `f(Nest<String>())`.
+    let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let a = Ty::ty_param("callee:A", any);
+    let b = Ty::ty_param("callee:B", any);
+    let a_bound = Ty::obj_args("test/Link", &[b]);
+    let b_bound = Ty::obj_args("test/Link", &[a]);
+    let signature = GenericSig {
+        formals: vec!["callee:A".into(), "callee:B".into()],
+        formal_bounds: vec![vec![a_bound], vec![b_bound]],
+        receiver: None,
+        params: vec![Ty::ty_param("callee:A", a_bound)],
+        ret: Ty::Unit,
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let actual = Ty::obj_args("test/Nest", &[Ty::String]);
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &ExpandingNest,
+        &signature,
+        [(0, actual, false)],
+        None,
+    );
+    let list = |element| Ty::obj_args("kotlin/collections/List", &[element]);
+    assert_eq!(inferred.lower_inputs.get("callee:A"), Some(&vec![actual]));
+    assert_eq!(
+        inferred.lower_inputs.get("callee:B"),
+        Some(&vec![Ty::obj_args("test/Nest", &[list(Ty::String)])])
+    );
 }

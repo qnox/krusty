@@ -10,9 +10,9 @@
 //! `MutableListIterator<String>` result implements `listIterator`.
 //!
 //! The JDK defaults (`replaceAll`, `sort`, the `SequencedCollection` members) are later
-//! realizations, and so are a declared `containsAll` override's signature and an abstract class's
-//! fake-override bridges; these comparisons leave them out by their exact spelling and compare
-//! every other member, the `toArray` pair included, byte for byte.
+//! realizations, and so are an abstract class's fake-override bridges; these comparisons leave them
+//! out by their exact spelling and compare every other member, the `toArray` pair and the declared
+//! `containsAll` override included, byte for byte.
 
 use super::common;
 
@@ -93,9 +93,6 @@ const ABSTRACT_INT_ITERATOR: &str = "abstract class Row : ListIterator<Int>\n";
 
 /// The members a later realization writes, as `javap -p` spells them in either compiler's class.
 const LATER_REALIZATIONS: &[&str] = &[
-    "public boolean containsAll(java.util.Collection<?>);",
-    "public boolean containsAll(java.util.Collection<java.lang.String>);",
-    "public boolean containsAll(java.util.Collection<java.lang.Integer>);",
     "public void replaceAll(java.util.function.UnaryOperator<java.lang.String>);",
     "public void replaceAll(java.util.function.UnaryOperator<java.lang.Integer>);",
     "public void replaceAll(java.util.function.UnaryOperator<T>);",
