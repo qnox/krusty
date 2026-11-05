@@ -1393,7 +1393,7 @@ mod tests {
             ),
         );
         same_shape.generic_sig = Some(crate::libraries::GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: vec![vec![Ty::obj("kotlin/Enum")]],
             receiver: None,
             params: Vec::new(),

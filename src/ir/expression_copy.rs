@@ -255,6 +255,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         class_method_owners: _,
         default_entries: _,
         dispatch_entries: _,
+        enum_initializers: _,
         fn_params: _,
         fn_param_declared_nullable: _,
         fn_declared_spellings: _,
