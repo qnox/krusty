@@ -1033,6 +1033,7 @@ mod tests {
             singleton_member_receiver: None,
             singleton_extension_receiver: None,
             default_entry: None,
+            dispatch_entry: None,
         };
         assert_eq!(
             direct_dependency_export(Some(&export), &[])
