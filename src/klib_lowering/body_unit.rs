@@ -12,8 +12,8 @@ use crate::fx_hash::HashMap;
 use std::collections::VecDeque;
 
 use super::body_lowering::{
-    BodyLowering, CallLinker, LinkedAccessor, LinkedCallableReference, LinkedCallee,
-    LinkedConstructor, LoweredFunction,
+    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor, LinkedCallableReference,
+    LinkedCallee, LinkedConstructor, LoweredFunction,
 };
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -496,7 +496,17 @@ impl DependencyBodyUnit {
             );
             let lowered = match &body.initialization {
                 Some((class, plan)) => lowering.initialize_class(*class, plan),
-                None => lowering.body(body.statements),
+                None => lowering.body(body.statements).and_then(|lowered| {
+                    publish_parameter_defaults(
+                        body.arena,
+                        function,
+                        &body.header,
+                        &self.builtins,
+                        &mut self.ir,
+                        &mut linker,
+                    )
+                    .map(|()| lowered)
+                }),
             }
             .map_err(|reason| match reason {
                 KlibBodyDeclineReason::CalleeDeclined(decline) => *decline,
