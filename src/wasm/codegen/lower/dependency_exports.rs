@@ -49,6 +49,7 @@ impl Body<'_> {
     ) -> Result<(), Unsupported> {
         let Callee::External {
             target,
+            default_provider,
             params,
             ret,
             defaults,
@@ -88,6 +89,16 @@ impl Body<'_> {
             .ok_or_else(|| "a dependency call without frozen callable facts".to_owned())?;
         let instantiated =
             instantiate_dependency_signature(callable, callee).map_err(str::to_owned)?;
+        // An override's omitted arguments are the defaults of the declaration it inherits them
+        // from, whose entry evaluates them before dispatching to the actual member.
+        let provider = match default_provider {
+            Some(provider) if !defaults.is_empty() => {
+                self.callables.callable(*provider).ok_or_else(|| {
+                    "an inherited default provider without frozen callable facts".to_owned()
+                })?
+            }
+            _ => callable,
+        };
         if callable
             .generic_sig
             .as_ref()
@@ -161,7 +172,7 @@ impl Body<'_> {
                 defaults,
                 crate::backend::DeclaredOperandRoles {
                     context_count: callable.context_count,
-                    defaults: callable
+                    defaults: provider
                         .klib_body_parameter_defaults
                         .map(|defaults| defaults.as_slice()),
                     declared: declared.len(),
@@ -169,6 +180,13 @@ impl Body<'_> {
             )
             .map_err(str::to_owned)?;
         let abi = declared;
+        // A member's receiver leads its operands but is not one of the parameters an omission
+        // mask covers, so the masks number the parameters after it.
+        let receiver_operands = call.unmasked_receiver_operands();
+        let masked = omitted
+            .iter()
+            .map(|&position| position - receiver_operands)
+            .collect::<Vec<_>>();
         match call {
             DependencyExportCall::TopLevel | DependencyExportCall::SerializedExtension => {
                 self.dependency_arguments_omitting(arguments, abi, &omitted)?;
@@ -189,14 +207,14 @@ impl Body<'_> {
                 if effect.evaluate_source() {
                     self.statement(dispatch_receiver.expect("validated singleton receiver"))?;
                 }
-                self.dependency_arguments(arguments, abi)?;
+                self.dependency_arguments_omitting(arguments, abi, &omitted)?;
             }
             DependencyExportCall::Member | DependencyExportCall::MemberExtension => {
                 self.value(
                     dispatch_receiver.expect("validated member receiver"),
                     abi[0],
                 )?;
-                self.dependency_arguments(arguments, &abi[1..])?;
+                self.dependency_arguments_omitting(arguments, &abi[1..], &masked)?;
             }
             DependencyExportCall::SourceExtension {
                 receiver_position, ..
@@ -254,8 +272,8 @@ impl Body<'_> {
         match default_entry {
             Some(entry) => {
                 for mask in crate::backend::default_arguments::omission_masks(
-                    abi.len(),
-                    omitted.iter().copied(),
+                    abi.len() - receiver_operands,
+                    masked.iter().copied(),
                 ) {
                     self.code.i32_const(mask as i32);
                 }

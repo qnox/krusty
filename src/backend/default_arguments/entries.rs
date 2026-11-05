@@ -62,11 +62,15 @@ impl Entries {
             .filter(|&function| is_published(ir, function))
             .collect::<Vec<_>>();
         for function in published {
-            let form = match ir.companion_blocks.declaring_class(function) {
-                Some(class) => StaticForm::ClassStatic(ir.classes[class as usize].fq_name_id()),
-                None => StaticForm::Local,
-            };
-            self.entry(ir, function, Some(form));
+            // A member is reached through its receiver, so its entry has no static form.
+            let form = ir.functions[function as usize]
+                .dispatch_receiver
+                .is_none()
+                .then(|| match ir.companion_blocks.declaring_class(function) {
+                    Some(class) => StaticForm::ClassStatic(ir.classes[class as usize].fq_name_id()),
+                    None => StaticForm::Local,
+                });
+            self.entry(ir, function, form);
         }
     }
 
@@ -104,12 +108,17 @@ impl Entries {
     }
 }
 
-/// Whether `function` is a top-level declaration with defaults that this file publishes to
-/// callers it cannot see.
+/// Whether `function` is a declaration with defaults that this file publishes to callers it
+/// cannot see: a top-level function, or a member of a class another module can name.
 fn is_published(ir: &IrFile, function: FunId) -> bool {
     let declaration = &ir.functions[function as usize];
-    declaration.body.is_some()
-        && declaration.dispatch_receiver.is_none()
+    let reachable = match declaration.dispatch_receiver {
+        None => declaration.body.is_some(),
+        Some(owner) => ir
+            .class_id_by_name(owner)
+            .is_some_and(|class| !ir.local_class_name_provenance.contains_key(&class)),
+    };
+    reachable
         && !ir.inline_only_fns.contains(&function)
         && ir
             .checked_callable_functions
@@ -124,7 +133,8 @@ fn declares_defaults(ir: &IrFile, function: FunId) -> bool {
 }
 
 /// The entry of `declaration` that callers this file cannot see reach, when it publishes one: the
-/// entry of a top-level declaration with defaults, built whether or not this file calls it.
+/// entry of a top-level or member declaration with defaults, built whether or not this file
+/// calls it.
 pub(crate) fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> {
     is_published(ir, declaration)
         .then(|| ir.default_entries.get(&declaration).copied())

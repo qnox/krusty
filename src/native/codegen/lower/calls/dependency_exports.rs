@@ -21,6 +21,10 @@ impl BodyLowering<'_, '_, '_> {
                 site,
                 export,
                 realization,
+                DefaultProvider {
+                    realization,
+                    export,
+                },
                 &callee,
                 access.receiver,
                 access.arguments,
@@ -33,6 +37,7 @@ impl BodyLowering<'_, '_, '_> {
         site: u32,
         export: &super::super::super::DependencyExport,
         realization: &crate::backend::BackendCallableFact,
+        provider: DefaultProvider<'_>,
         callee: &Callee,
         dispatch_receiver: Option<u32>,
         args: &[u32],
@@ -121,7 +126,8 @@ impl BodyLowering<'_, '_, '_> {
                 defaults,
                 crate::backend::DeclaredOperandRoles {
                     context_count: realization.context_count,
-                    defaults: realization
+                    defaults: provider
+                        .realization
                         .klib_body_parameter_defaults
                         .map(|defaults| defaults.as_slice()),
                     declared: declared.len(),
@@ -252,14 +258,17 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
-        let (symbol, signature, arguments) = match &export.default_entry {
+        let (symbol, signature, arguments) = match &provider.export.default_entry {
             Some(entry) if !omitted.is_empty() => {
                 // A zero in each omitted slot and its bit in the mask; the entry evaluates the
                 // marked defaults in the declaring module, in declaration order.
                 let mut supplied = arguments.into_iter();
+                // A member's receiver leads the operands; the masks number the parameters after
+                // it.
+                let receiver_operands = call.unmasked_receiver_operands();
                 let masks = crate::backend::default_arguments::omission_masks(
-                    declared.len(),
-                    omitted.iter().copied(),
+                    declared.len() - receiver_operands,
+                    omitted.iter().map(|&position| position - receiver_operands),
                 );
                 let mut operands = Vec::with_capacity(declared.len() + masks.len());
                 for (position, ty) in declared.iter().enumerate() {
@@ -279,7 +288,9 @@ impl BodyLowering<'_, '_, '_> {
                 let mut signature = declared.to_vec();
                 signature.extend(std::iter::repeat_n(
                     Ty::Int,
-                    crate::backend::default_arguments::mask_words(declared.len()),
+                    crate::backend::default_arguments::mask_words(
+                        declared.len() - receiver_operands,
+                    ),
                 ));
                 (entry.as_str(), signature, operands)
             }

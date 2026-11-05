@@ -211,6 +211,7 @@ impl CallableRegistry {
                 }
                 Callee::External {
                     target,
+                    default_provider,
                     params,
                     defaults,
                     extension_receiver_parameter,
@@ -220,10 +221,14 @@ impl CallableRegistry {
                         "a dependency call without frozen callable facts".to_string()
                     })?;
                     // A call leaving arguments out is realized only through the default entry
-                    // of the declaration's own module.
-                    let default_entry = callable
-                        .dependency_callable
-                        .as_ref()
+                    // of the declaration that owns them, in its own module: the selected one, or
+                    // the one an override inherits its defaults from.
+                    let provider = match default_provider {
+                        Some(provider) if !defaults.is_empty() => callables.callable(*provider),
+                        _ => Some(callable),
+                    };
+                    let default_entry = provider
+                        .and_then(|provider| provider.dependency_callable.as_ref())
                         .and_then(|identity| self.dependency_defaults.get(identity))
                         .copied();
                     if !defaults.is_empty() && default_entry.is_none() {

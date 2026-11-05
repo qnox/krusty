@@ -55,9 +55,12 @@ impl<'a> FileLowering<'a> {
             return Err(declined!("`{symbol}` has no default-argument entry"));
         };
         let mut params = export.signature.parameters().to_vec();
+        // One mask word per 32 of the declaration's own parameters: a member's receiver, which
+        // leads the export's operands, is not one of them.
+        let declared = self.ir.functions[function as usize].params.len();
         params.extend(std::iter::repeat_n(
             Ty::Int,
-            crate::backend::default_arguments::mask_words(params.len()),
+            crate::backend::default_arguments::mask_words(declared),
         ));
         self.define_trampoline(file_init, entry, function, symbol, params)
     }

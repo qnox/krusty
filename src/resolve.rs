@@ -7419,9 +7419,6 @@ pub struct TypeInfo {
     pub resolved_primary_ctor_delegations: HashMap<DeclId, ResolvedCtorDelegation>,
     /// `super.f(...)` targets selected while checking, keyed by the call expression.
     pub resolved_super_calls: HashMap<ExprId, ResolvedSuperCall>,
-    /// Classpath member `$default` synthetic targets selected while checking for calls with omitted
-    /// default arguments.
-    pub resolved_default_member_calls: HashMap<ExprId, ResolvedDefaultMemberCall>,
     /// Library companion constants selected while checking (`Int.MAX_VALUE`, `Double.NaN`, ...), keyed by
     /// the member-read expression. Lowering inlines the recorded constant instead of probing the classpath.
     pub resolved_constants: HashMap<ExprId, crate::libraries::LibraryConst>,
@@ -7995,17 +7992,6 @@ fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
     cycles
 }
 
-#[derive(Clone, Debug)]
-pub struct ResolvedDefaultMemberCall {
-    pub owner: TypeName,
-    pub name: String,
-    pub descriptor: String,
-    pub real_params: Vec<Ty>,
-    pub mask_count: usize,
-    pub ret: Ty,
-    pub suspend: bool,
-}
-
 pub type DestructureComponentTarget = Box<ResolvedCall>;
 
 #[derive(Clone, Debug)]
@@ -8467,10 +8453,6 @@ impl TypeInfo {
     /// The resolved target for a `super.f(...)` call.
     pub fn resolved_super_call(&self, e: ExprId) -> Option<&ResolvedSuperCall> {
         self.resolved_super_calls.get(&e)
-    }
-    /// The resolved `$default` synthetic for a classpath member call with omitted arguments.
-    pub fn resolved_default_member_call(&self, e: ExprId) -> Option<&ResolvedDefaultMemberCall> {
-        self.resolved_default_member_calls.get(&e)
     }
     /// The library companion constant selected for member-read expression `e`, if any.
     pub fn resolved_constant(&self, e: ExprId) -> Option<crate::libraries::LibraryConst> {
@@ -31137,7 +31119,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_ctor_delegations: HashMap::default(),
         resolved_primary_ctor_delegations: HashMap::default(),
         resolved_super_calls: HashMap::default(),
-        resolved_default_member_calls: HashMap::default(),
         resolved_constants: HashMap::default(),
         constant_integer_coercion_reads: crate::fx_hash::HashSet::default(),
         constant_property_reads: HashMap::default(),
@@ -32562,7 +32543,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_ctor_delegations,
         resolved_primary_ctor_delegations,
         resolved_super_calls,
-        resolved_default_member_calls,
         resolved_constants,
         resolved_constant_receivers,
         resolved_enum_entries,
@@ -32885,7 +32865,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_ctor_delegations,
         resolved_primary_ctor_delegations,
         resolved_super_calls,
-        resolved_default_member_calls,
         resolved_constants,
         resolved_constant_receivers,
         resolved_enum_entries,
@@ -33717,7 +33696,6 @@ struct Checker<'a> {
     resolved_ctor_delegations: HashMap<(DeclId, usize), ResolvedCtorDelegation>,
     resolved_primary_ctor_delegations: HashMap<DeclId, ResolvedCtorDelegation>,
     resolved_super_calls: HashMap<ExprId, ResolvedSuperCall>,
-    resolved_default_member_calls: HashMap<ExprId, ResolvedDefaultMemberCall>,
     resolved_constants: HashMap<ExprId, crate::libraries::LibraryConst>,
     /// Selected reads of `const val`s carrying Kotlin's `ImplicitIntegerCoercion` declaration fact.
     /// Constant folding removes the property-get lowering, so applicability keeps this compact fact
@@ -59079,19 +59057,6 @@ impl<'a> Checker<'a> {
         if !arguments_valid {
             return Some(Ty::Error);
         }
-        if matches!(selected.origin, Origin::Library)
-            && self
-                .resolved_call_arg_slots
-                .get(&call)
-                .is_some_and(|slots| {
-                    slots.iter().enumerate().any(|(parameter, argument)| {
-                        argument.is_none() && shape.call_sig.vararg_index != Some(parameter)
-                    })
-                })
-            && !self.record_default_member_call(call, &selected.member)
-        {
-            return Some(Ty::Error);
-        }
 
         let implicit_context_args = shape
             .context_sources
@@ -60464,36 +60429,6 @@ impl<'a> Checker<'a> {
             return Ok(LibraryConstructorSelection::NoMatch);
         };
         self.record_library_constructor(scope, call, internal, &classifier, args, options)
-    }
-
-    fn record_default_member_call(
-        &mut self,
-        call: ExprId,
-        member: &crate::libraries::LibraryMember,
-    ) -> bool {
-        let Some(realization) = member.default_realization.as_deref() else {
-            self.diags.error(
-                self.span(call),
-                format!(
-                    "selected member '{}' uses omitted default arguments, but its declaration provides no default-call realization",
-                    member.name
-                ),
-            );
-            return false;
-        };
-        self.resolved_default_member_calls.insert(
-            call,
-            ResolvedDefaultMemberCall {
-                owner: realization.owner,
-                name: realization.name.clone(),
-                descriptor: realization.descriptor.clone(),
-                real_params: realization.real_params.clone(),
-                mask_count: realization.mask_count,
-                ret: realization.ret,
-                suspend: realization.suspend,
-            },
-        );
-        true
     }
 
     fn reject_abstract_construction(&mut self, internal: TypeName, span: Span) {
