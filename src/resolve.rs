@@ -140,6 +140,7 @@ mod declaration_rules;
 mod declaration_usage;
 mod dependency_platform;
 mod deprecation_phase;
+use deprecation_phase::DeprecationNames;
 mod deprecation_usage;
 mod destructuring;
 mod diagnostic_selection;
