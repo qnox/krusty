@@ -133,7 +133,11 @@ pub(super) trait CallLinker {
     ) -> Lowered<LinkedConstructor>;
 
     /// The dependency property a call of its accessor `callee` reads or writes.
-    fn link_accessor(&mut self, callee: &KlibAccessorIdSignature) -> Lowered<LinkedAccessor>;
+    fn link_accessor(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibAccessorIdSignature,
+    ) -> Lowered<LinkedAccessor>;
 
     /// Proves that `classifier` is a dependency object, whose value a body may read.
     fn singleton(&self, classifier: TypeName) -> Lowered<()>;
@@ -167,7 +171,7 @@ pub(super) struct LinkedConstructor {
 /// and the accessor's dispatch receiver, parameters (context parameters, extension receiver, and a
 /// setter's value) and result.
 pub(super) struct LinkedAccessor {
-    pub(super) property: crate::fir::ExternalPropertyId,
+    pub(super) target: LinkedAccessorTarget,
     pub(super) write: bool,
     pub(super) receiver: Option<Ty>,
     pub(super) params: Vec<Ty>,
@@ -175,6 +179,16 @@ pub(super) struct LinkedAccessor {
     pub(super) context_count: usize,
     /// As [`LinkedCallee::class_type_parameters`].
     pub(super) class_type_parameters: Vec<String>,
+}
+
+/// What an accessor call reaches.
+#[derive(Clone, Copy)]
+pub(super) enum LinkedAccessorTarget {
+    /// The provider's property, read or written through its accessor.
+    External(crate::fir::ExternalPropertyId),
+    /// The getter this unit emits, for a member of a value class: a member function of its
+    /// class, called on the receiver in place of the property read.
+    Local(FunId),
 }
 
 /// The function a body is lowered into: its serialized symbol, the only target its `return`s may
@@ -212,6 +226,11 @@ pub(super) struct BodyLowering<'a> {
     /// declared type cancels.
     erasure_coercions: HashSet<ExprId>,
     initialization: Option<class_initializers::InitializationFrame<'a>>,
+    /// The value class whose member this body is, and the field it reads the value through.
+    value_member: Option<(
+        crate::ir::ClassId,
+        &'a crate::metadata::klib_ir::tree::KlibIrField,
+    )>,
 }
 
 impl<'a> BodyLowering<'a> {
@@ -239,7 +258,18 @@ impl<'a> BodyLowering<'a> {
             breakable_loops: HashSet::default(),
             erasure_coercions: HashSet::default(),
             initialization: None,
+            value_member: None,
         }
+    }
+
+    /// This body as a member of the value class `class`, which reads its value through `field`.
+    pub(super) fn reading_value_through(
+        mut self,
+        class: crate::ir::ClassId,
+        field: &'a crate::metadata::klib_ir::tree::KlibIrField,
+    ) -> Self {
+        self.value_member = Some((class, field));
+        self
     }
 
     fn statement(&mut self, statement: &KlibIrStatement) -> Lowered<ExprId> {

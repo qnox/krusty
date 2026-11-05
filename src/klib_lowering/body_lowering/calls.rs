@@ -6,7 +6,10 @@
 use super::super::ir_builtins::{BuiltinCallDisposition, BuiltinOperator, BuiltinRelation};
 use super::super::klib_types::function_invocation_arity;
 use super::super::klib_types::semantic_type;
-use super::{mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedCallee, Lowered};
+use super::{
+    mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorTarget, LinkedCallee,
+    Lowered,
+};
 use crate::fir::FirTypeParameterRef;
 use crate::ir::{
     Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrPropertyDispatch,
@@ -513,7 +516,7 @@ impl BodyLowering<'_> {
         if let Some(primitive) = self.linker.common_primitive(&signature)? {
             return self.primitive_call(primitive, access, ty);
         }
-        let linked = self.linker.link_accessor(accessor)?;
+        let linked = self.linker.link_accessor(self.ir, accessor)?;
         let CallOperands {
             receiver,
             args: arguments,
@@ -531,11 +534,17 @@ impl BodyLowering<'_> {
                 class_type_parameters: &linked.class_type_parameters,
             },
         )?;
-        let LinkedAccessor {
-            property: target,
-            write,
-            ..
-        } = linked;
+        let LinkedAccessor { target, write, .. } = linked;
+        let target = match target {
+            LinkedAccessorTarget::External(property) => property,
+            LinkedAccessorTarget::Local(function) => {
+                return Ok(self.ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Local(function)),
+                    dispatch_receiver: receiver,
+                    args: arguments,
+                }));
+            }
+        };
         let dispatch = IrPropertyDispatch::Ordinary;
         Ok(self.ir.add_expr(IrExpr::Checked(Box::new(if write {
             IrCheckedOperation::ExternalPropertyWrite {

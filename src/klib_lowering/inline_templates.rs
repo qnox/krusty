@@ -16,8 +16,8 @@
 //! template leaves the file as it was.
 
 use super::body_lowering::{
-    BodyLowering, CallLinker, LinkedAccessor, LinkedCallableReference, LinkedCallee,
-    LinkedConstructor, LoweredFunction,
+    BodyLowering, CallLinker, LinkedAccessor, LinkedAccessorTarget, LinkedCallableReference,
+    LinkedCallee, LinkedConstructor, LoweredFunction,
 };
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::function_header;
@@ -399,6 +399,7 @@ impl CallLinker for TemplateCalls<'_> {
 
     fn link_accessor(
         &mut self,
+        _: &mut IrFile,
         callee: &KlibAccessorIdSignature,
     ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
         let signature = KlibDeclarationSignature::Accessor(callee.clone());
@@ -449,7 +450,7 @@ impl CallLinker for TemplateCalls<'_> {
         .map(|receiver| {
             let (receiver, class_type_parameters) = receiver.unzip();
             LinkedAccessor {
-                property,
+                target: LinkedAccessorTarget::External(property),
                 write: accessors.setter == Some(target),
                 receiver,
                 params: realization.callable.params.clone(),
