@@ -5,6 +5,7 @@
 //! compared in source-argument order ([`super::separately_mapped_selection`]). Both forms run
 //! applicability, `@LowPriorityInOverloadResolution`, integer-literal adaptation and specificity.
 
+use super::declaration_specificity::discriminate_generics;
 use super::overload_selection::low_priority_in_overload_resolution;
 use super::separately_mapped_selection::{select_separately_mapped, SeparatelyMapped};
 use super::*;
@@ -376,51 +377,74 @@ impl SymbolResolver<'_> {
         fits: &dyn Fn(&Ty, &CallArgKind) -> bool,
         adapts: &dyn Fn(&Ty, &CallArgKind, usize) -> bool,
     ) -> CandidateSelectionWithTies<&'p Instantiated<'a>> {
-        if let Some(exact) = parsed.iter().find(|candidate| {
+        let exact = |candidate: &&Instantiated<'_>| {
             candidate.params.len() == args.len()
                 && candidate
                     .params
                     .iter()
                     .zip(args)
                     .all(|(parameter, argument)| *parameter == argument.type_for(*parameter))
-        }) {
+        };
+        // A generic declaration the call instantiates to a non-generic one's parameters is the
+        // less specific of the two (`discriminate_generics`).
+        if let Some(exact) = parsed
+            .iter()
+            .filter(exact)
+            .find(|candidate| !is_generic(candidate.function))
+            .or_else(|| parsed.iter().find(exact))
+        {
             return CandidateSelectionWithTies::Selected(exact);
         }
-        match integer_literal_overload_with_ties(
-            parsed.iter().map(|entry| (entry.params.clone(), entry)),
-            args,
-            |_, param, arg| fits(param, arg),
-            |_position, left, right, arg| {
-                parameter_at_least_as_specific(&self.src, left, right, arg)
-                    || resolution_subtype(&self.src, left, right)
-            },
-            |_, _| false,
+        let generic = |candidate: &Instantiated<'_>| is_generic(candidate.function);
+        match discriminate_generics(
+            integer_literal_overload_with_ties(
+                parsed.iter().map(|entry| (entry.params.clone(), entry)),
+                args,
+                |_, param, arg| fits(param, arg),
+                |_position, left, right, arg| {
+                    parameter_at_least_as_specific(&self.src, left, right, arg)
+                        || resolution_subtype(&self.src, left, right)
+                },
+                |_, _| false,
+            ),
+            generic,
         ) {
             CandidateSelectionWithTies::None => {}
             selection => return selection,
         }
-        match unique_most_specific_with_conflicts_and_ties(
-            parsed.iter().filter_map(|entry| {
-                fixed_parameter_shape(&entry.params, args, |_, param, arg| fits(param, arg))
+        match discriminate_generics(
+            unique_most_specific_with_conflicts_and_ties(
+                parsed.iter().filter_map(|entry| {
+                    fixed_parameter_shape(&entry.params, args, |_, param, arg| fits(param, arg))
+                        .map(|shape| (shape, entry))
+                }),
+                |_, left, right| resolution_subtype(&self.src, left, right),
+                |_, _| false,
+            ),
+            generic,
+        ) {
+            CandidateSelectionWithTies::None => {}
+            selection => return selection,
+        }
+        discriminate_generics(
+            unique_most_specific_with_conflicts_and_ties(
+                parsed.iter().filter_map(|entry| {
+                    candidate_vararg_shape(entry.function, &entry.params, args, |i, param, arg| {
+                        fits(param, arg) || adapts(param, arg, i)
+                    })
                     .map(|shape| (shape, entry))
-            }),
-            |_, left, right| resolution_subtype(&self.src, left, right),
-            |_, _| false,
-        ) {
-            CandidateSelectionWithTies::None => {}
-            selection => return selection,
-        }
-        unique_most_specific_with_conflicts_and_ties(
-            parsed.iter().filter_map(|entry| {
-                candidate_vararg_shape(entry.function, &entry.params, args, |i, param, arg| {
-                    fits(param, arg) || adapts(param, arg, i)
-                })
-                .map(|shape| (shape, entry))
-            }),
-            |_, left, right| resolution_subtype(&self.src, left, right),
-            |_, _| false,
+                }),
+                |_, left, right| resolution_subtype(&self.src, left, right),
+                |_, _| false,
+            ),
+            generic,
         )
     }
+}
+
+/// Whether a declaration declares type parameters of its own.
+fn is_generic(function: &FunctionInfo) -> bool {
+    !function.semantic_signature().formals.is_empty()
 }
 
 /// The declarations an ambiguous selection left tied.
