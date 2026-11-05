@@ -12,6 +12,8 @@ mod common_supertype;
 pub(crate) use common_supertype::{common_super_types, reified_runtime_type};
 mod conditional_result;
 mod postponed_result;
+mod receiver_constraints;
+pub(crate) use receiver_constraints::unify_receiver_from_symbols;
 
 use bound_relations::complete_dependent_bound_bindings;
 pub(crate) use bound_relations::{
@@ -20,13 +22,11 @@ pub(crate) use bound_relations::{
     generic_bindings_admit_expected_return_intersection, generic_bindings_satisfy_bounds,
     resolve_bound_violating_bindings, unsolved_formal_bound,
 };
-#[cfg(test)]
-use call_constraints::GenericBoundViolation;
 pub(crate) use call_constraints::{
     collect_assignability_constraints_from_symbols, infer_generic_call_constraints_from_symbols,
     infer_generic_call_constraints_with_argument_ordinals,
     infer_generic_call_constraints_with_receiver_from_symbols, publish_denotable_upper_bindings,
-    seed_denotable_upper_placeholders, AssignabilityConstraints,
+    seed_denotable_upper_placeholders, AssignabilityConstraints, GenericBoundViolation,
 };
 pub(crate) use call_site_variables::{CallSiteVariableMap, CallSiteVariables};
 pub(crate) use conditional_result::generic_return_expectation_from_sibling;
@@ -54,13 +54,13 @@ pub(crate) fn generic_signature_strictly_more_constrained(
     let left_neutral = left
         .formals
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .map(|formal| (formal, neutral))
         .collect::<GSigBinds>();
     let right_neutral = right
         .formals
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .map(|formal| (formal, neutral))
         .collect::<GSigBinds>();
     let shape = |signature: &GenericSig, neutral: &GSigBinds| {
@@ -154,6 +154,18 @@ impl ExplicitTypeArgumentFixity for &[Ty] {
     }
 }
 
+/// Seed a declaration's formals from explicit call-site type arguments. All inference channels use
+/// this operation before receiver/argument unification so written arguments remain authoritative and
+/// member, extension, static, and lambda-shape probes cannot drift into different binding rules.
+pub(crate) fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
+    gsig.formals
+        .iter()
+        .map(crate::types::TyParamName::from)
+        .zip(type_args.iter().copied())
+        .filter(|(_, argument)| *argument != Ty::Error)
+        .collect()
+}
+
 /// The type arguments of a constructed generic type INFERRED from a construction's argument types
 /// (`Pair(1, 2)` → `[Int, Int]`, so `Pair(1, 2)` types as `Pair<Int, Int>`). Each of the type's formal
 /// parameters (`ty.type_params`) is bound by unifying the matching-arity constructor's parsed generic
@@ -219,7 +231,7 @@ pub(crate) fn infer_constructor_type_args_for_formals(
             .iter()
             .map(|f| {
                 binds
-                    .get(f)
+                    .get(f.as_str())
                     .copied()
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"))
             })
@@ -228,10 +240,10 @@ pub(crate) fn infer_constructor_type_args_for_formals(
 }
 
 /// Seed every unbound constructor formal from an expected applied supertype, or none of them.
-pub(crate) fn seed_unbound_constructor_result_from_symbols(
+pub(crate) fn seed_unbound_constructor_result_from_symbols<S: AsRef<str>>(
     source: &dyn SymbolSource,
     owner: TypeName,
-    type_params: &[String],
+    type_params: &[S],
     type_param_bounds: &[Vec<Ty>],
     expected: Option<Ty>,
     bindings: &mut GSigBinds,
@@ -239,6 +251,7 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
     let Some(expected) = expected.filter(|expected| *expected != Ty::Error) else {
         return;
     };
+    let type_params = &crate::types::TyParamName::all(type_params);
     // The expected type may name the constructed classifier directly while carrying type
     // variables owned by the enclosing declaration. Generic return inference deliberately avoids
     // treating same-shaped symbolic identities as ordinary lower-bound evidence, but constructor
@@ -251,10 +264,13 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
         "expected_call",
         "constructor result seed owner={owner:?} formals={type_params:?} expected={expected:?} existing={bindings:?} direct={direct:?}",
     );
-    if type_params.iter().all(|formal| direct.contains_key(formal)) {
+    if type_params
+        .iter()
+        .all(|formal| direct.contains_key(formal.as_str()))
+    {
         for formal in type_params {
-            if let Some(&seed) = direct.get(formal) {
-                bindings.entry(formal.clone()).or_insert(seed);
+            if let Some(&seed) = direct.get(formal.as_str()) {
+                bindings.entry(*formal).or_insert(seed);
             }
         }
         return;
@@ -272,7 +288,7 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
         })
         .collect::<Vec<_>>();
     let signature = GenericSig {
-        formals: type_params.to_vec(),
+        formals: crate::types::TyParamName::all(type_params),
         formal_bounds: type_param_bounds.to_vec(),
         receiver: None,
         params: Vec::new(),
@@ -287,7 +303,8 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
     // expected owner, then preserve those cross-declaration identities before checking the ordinary
     // concrete-return path below.
     if let Some(projected) = return_shape_at_expected_owner(source, signature.ret, expected) {
-        let symbolic = infer_generic_symbolic_return_constraints(projected, expected, type_params);
+        let symbolic =
+            infer_generic_symbolic_return_constraints(projected, expected, &signature.formals);
         crate::trace_compiler!(
             "expected_call",
             "constructor symbolic result owner={owner:?} projected={projected:?} expected={expected:?} bindings={:?} constrained={:?} conflicts={:?}",
@@ -300,12 +317,16 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
             for (formal, seed) in symbolic.bindings {
                 trial.entry(formal).or_insert(seed);
             }
-            let complete = type_params.iter().all(|formal| trial.contains_key(formal));
+            let complete = type_params
+                .iter()
+                .all(|formal| trial.contains_key(formal.as_str()));
             let valid = complete
                 && generic_bindings_satisfy_bounds(&signature, &trial, |actual, bound| {
                     let mut actual = actual.projection_inner().unwrap_or(actual);
                     let mut seen = crate::fx_hash::HashSet::default();
-                    while let TyKind::TyParam(name, upper) = actual.kind() {
+                    while let TyKind::TyParam(name, upper) | TyKind::Var(name, upper) =
+                        actual.kind()
+                    {
                         if !seen.insert(name) {
                             break;
                         }
@@ -346,22 +367,24 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
     };
     if !type_params
         .iter()
-        .all(|formal| bindings.contains_key(formal) || seeds.contains_key(formal))
+        .all(|formal| bindings.contains_key(formal.as_str()) || seeds.contains_key(formal.as_str()))
     {
         return;
     }
     for formal in type_params {
-        if let Some(&seed) = seeds.get(formal) {
-            bindings.entry(formal.clone()).or_insert(seed);
+        if let Some(&seed) = seeds.get(formal.as_str()) {
+            bindings
+                .entry(crate::types::TyParamName::new(formal))
+                .or_insert(seed);
         }
     }
 }
 
 /// Add the constructed value's expected type to the same inference bindings populated from
 /// constructor arguments. Materialization happens only after both constraint directions have run.
-pub(crate) fn constrain_constructor_result(
+pub(crate) fn constrain_constructor_result<F: crate::types::TyParamKey>(
     owner: TypeName,
-    type_params: &[String],
+    type_params: &[F],
     expected: Option<Ty>,
     binds: &mut GSigBinds,
 ) {
@@ -377,6 +400,7 @@ pub(crate) fn constrain_constructor_result(
         return;
     }
     for (formal, actual) in type_params.iter().zip(expected_args.iter().copied()) {
+        let formal: &str = formal.borrow();
         // A star projection contributes only an existential read approximation. It is not an
         // equality constraint on the constructed classifier's argument: in
         // `consume(LoadConstant(0, SInt32))` where `consume` takes `LoadConstant<*, *>`, the value
@@ -393,9 +417,12 @@ pub(crate) fn constrain_constructor_result(
         if binds.contains_key(formal) && actual.mentions_ty_param() {
             continue;
         }
-        if matches!(actual.non_null().kind(), TyKind::TyParam(actual_formal, _) if actual_formal == formal)
+        if matches!(actual.non_null().kind(), TyKind::TyParam(actual_formal, _) | TyKind::Var(actual_formal, _) if actual_formal == formal)
         {
-            binds.insert(formal.clone(), actual.projection_inner().unwrap_or(actual));
+            binds.insert(
+                crate::types::TyParamName::new(formal),
+                actual.projection_inner().unwrap_or(actual),
+            );
             continue;
         }
         unify_inferred_ty(
@@ -441,17 +468,18 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
         // The bound carried by a star is a read approximation, not a written generic argument
         // from which call type parameters may be inferred.
         TyKind::StarProjection(_) => {}
-        TyKind::TyParam(n, _) => {
+        TyKind::TyParam(n, _) | TyKind::Var(n, _) => {
             if actual.mentions_error() {
                 return;
             }
             // A partially specialized candidate legitimately keeps an unconstrained formal in
             // place (`Mapper<Message, R>`). That is absence of evidence, not the binding `R = R`;
             // recording it would block the lambda result from later binding `R = String`.
-            if matches!(actual.kind(), TyKind::TyParam(actual, _) if actual == n) {
+            if matches!(actual.kind(), TyKind::TyParam(actual, _) | TyKind::Var(actual, _) if actual == n)
+            {
                 return;
             }
-            match binds.entry(n.to_string()) {
+            match binds.entry(n) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(actual);
                 }
@@ -518,8 +546,17 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
             let actual = actual.projection_inner().unwrap_or(actual);
             let flexible_upper = platform_flexible_upper_bound(source, actual).map(Ty::non_null);
             let mut actual = actual.non_null();
-            while let (Some(_), TyKind::TyParam(_, bound)) = (source, actual.kind()) {
-                actual = bound.projection_inner().unwrap_or(bound).non_null();
+            // A caller's variable stands for its bound here, and `V & Any` for the non-null bound
+            // of `V`: binding `E` from `V` through a nullable formal `E?` must still read `T` from
+            // `V : EntityID<String>?` in `E : EntityID<T>`.
+            while source.is_some() {
+                actual = match actual.kind() {
+                    TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
+                        bound.projection_inner().unwrap_or(bound).non_null()
+                    }
+                    TyKind::DefinitelyNotNull(inner) => inner.non_null(),
+                    _ => break,
+                };
             }
             let projected = match actual.kind() {
                 TyKind::Obj(actual_name, _) if name == actual_name => Some(actual),
@@ -566,6 +603,12 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
                 .unwrap_or(inner);
             unify_ty_impl(source, inner, actual, binds);
         }
+        TyKind::MutabilityFlexible(inner) => {
+            let inner = source
+                .map(|source| choose_platform_lower_face(source, inner, actual))
+                .unwrap_or(inner);
+            unify_ty_impl(source, inner, actual, binds);
+        }
         _ => {}
     }
 }
@@ -602,24 +645,29 @@ pub(crate) fn unify_ty_from_symbols(
 pub(crate) fn collect_generic_identity_bindings(
     declared: Ty,
     actual: Ty,
-    formals: &[String],
+    formals: &[crate::types::TyParamName],
     bindings: &mut GSigBinds,
 ) {
     match (declared.kind(), actual.kind()) {
         (TyKind::TyParam(declared, _), TyKind::TyParam(found, _))
-            if declared == found && formals.iter().any(|formal| formal == declared) =>
+        | (TyKind::Var(declared, _), TyKind::Var(found, _))
+            if declared == found && formals.contains(&declared) =>
         {
-            bindings.entry(declared.to_string()).or_insert(actual);
+            bindings.entry(declared).or_insert(actual);
         }
         (TyKind::InProjection(declared), TyKind::InProjection(actual))
         | (TyKind::OutProjection(declared), TyKind::OutProjection(actual))
         | (TyKind::Nullable(declared), TyKind::Nullable(actual))
-        | (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(actual)) => {
+        | (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(actual))
+        | (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(actual)) => {
             collect_generic_identity_bindings(declared, actual, formals, bindings);
         }
-        (TyKind::Nullable(declared) | TyKind::PlatformNullable(declared), _)
-            if !null_only(actual) =>
-        {
+        (
+            TyKind::Nullable(declared)
+            | TyKind::PlatformNullable(declared)
+            | TyKind::MutabilityFlexible(declared),
+            _,
+        ) if !null_only(actual) => {
             collect_generic_identity_bindings(declared, actual.non_null(), formals, bindings);
         }
         (TyKind::Obj(declared_name, declared_args), TyKind::Obj(actual_name, actual_args))
@@ -672,7 +720,7 @@ pub(crate) fn merge_inferred_ty(current: Option<Ty>, actual: Ty) -> Ty {
     } else if matches!(current.kind(), TyKind::Nullable(inner) if inner == Ty::Nothing) {
         Ty::nullable(actual)
     } else if current.non_null() == actual.non_null() {
-        Ty::nullable(current.non_null())
+        Ty::nullable(current)
     } else {
         let any = Ty::obj("kotlin/Any");
         if current.is_nullable() || actual.is_nullable() {
@@ -706,7 +754,7 @@ pub(crate) fn callable_reference_expected_bindings(
     parameter: usize,
     explicit_type_arguments: impl ExplicitTypeArgumentFixity,
     bindings: &GSigBinds,
-    selected_by_prior_callable_references: &crate::fx_hash::HashSet<String>,
+    selected_by_prior_callable_references: &crate::fx_hash::HashSet<crate::types::TyParamName>,
 ) -> GSigBinds {
     let Some(shape) = signature
         .params
@@ -724,7 +772,7 @@ pub(crate) fn callable_reference_expected_bindings(
             && formal_variance_in_type(source, shape, formal)
                 == Some(crate::types::TypeVariance::Out)
         {
-            expected.remove(formal);
+            expected.remove(formal.as_str());
         }
     }
     expected
@@ -742,7 +790,7 @@ pub(crate) fn expected_result_equality_formals(
     signature: &GenericSig,
     expected: Ty,
     expected_bindings: &GSigBinds,
-) -> crate::fx_hash::HashSet<String> {
+) -> crate::fx_hash::HashSet<crate::types::TyParamName> {
     let Some(declared) = return_shape_at_expected_owner(source, signature.ret, expected) else {
         return crate::fx_hash::HashSet::default();
     };
@@ -750,7 +798,7 @@ pub(crate) fn expected_result_equality_formals(
         .formals
         .iter()
         .filter(|formal| {
-            expected_bindings.get(*formal).is_some()
+            expected_bindings.get((*formal).as_str()).is_some()
                 && formal_has_unprojected_expected_occurrence(declared, expected, formal)
                 && match formal_variance_in_type(source, declared, formal) {
                     Some(crate::types::TypeVariance::Invariant) => true,
@@ -776,14 +824,16 @@ fn formal_has_nested_flexible_expected_occurrence(
         match declared.kind() {
             TyKind::PlatformNullable(inner) => {
                 if nested
-                    && matches!(inner.kind(), TyKind::TyParam(name, _) if name == formal)
+                    && matches!(inner.kind(), TyKind::TyParam(name, _) | TyKind::Var(name, _) if name == formal)
                     && !expected.admits_null()
                 {
                     return true;
                 }
                 visit(inner, expected.non_null(), formal, nested)
             }
-            TyKind::Nullable(inner) | TyKind::DefinitelyNotNull(inner) => {
+            TyKind::Nullable(inner)
+            | TyKind::DefinitelyNotNull(inner)
+            | TyKind::MutabilityFlexible(inner) => {
                 visit(inner, expected.non_null(), formal, nested)
             }
             TyKind::InProjection(inner) | TyKind::OutProjection(inner) => visit(
@@ -837,7 +887,7 @@ pub(crate) fn unprojected_expected_result_formals(
     signature: &GenericSig,
     expected: Ty,
     expected_bindings: &GSigBinds,
-) -> crate::fx_hash::HashSet<String> {
+) -> crate::fx_hash::HashSet<crate::types::TyParamName> {
     let Some(declared) = return_shape_at_expected_owner(source, signature.ret, expected) else {
         return crate::fx_hash::HashSet::default();
     };
@@ -845,7 +895,7 @@ pub(crate) fn unprojected_expected_result_formals(
         .formals
         .iter()
         .filter(|formal| {
-            expected_bindings.get(*formal).is_some()
+            expected_bindings.get((*formal).as_str()).is_some()
                 && formal_has_unprojected_expected_occurrence(declared, expected, formal)
         })
         .cloned()
@@ -857,7 +907,9 @@ pub(crate) fn unprojected_expected_result_formals(
 /// inspecting the bound value cannot distinguish invariant `Box<Any?>` from `Box<out Any?>`.
 fn formal_has_unprojected_expected_occurrence(declared: Ty, expected: Ty, formal: &str) -> bool {
     match declared.kind() {
-        TyKind::TyParam(name, _) if name == formal => expected.projection_inner().is_none(),
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) if name == formal => {
+            expected.projection_inner().is_none()
+        }
         TyKind::Obj(declared_name, declared_args) => match expected.non_null().kind() {
             TyKind::Obj(expected_name, expected_args)
                 if declared_name == expected_name && declared_args.len() == expected_args.len() =>
@@ -892,7 +944,9 @@ fn formal_has_unprojected_expected_occurrence(declared: Ty, expected: Ty, formal
                 _ => false,
             }
         }
-        TyKind::Nullable(declared) | TyKind::PlatformNullable(declared) => {
+        TyKind::Nullable(declared)
+        | TyKind::PlatformNullable(declared)
+        | TyKind::MutabilityFlexible(declared) => {
             formal_has_unprojected_expected_occurrence(declared, expected.non_null(), formal)
         }
         TyKind::InProjection(declared) | TyKind::OutProjection(declared) => {
@@ -922,7 +976,7 @@ pub(crate) fn merge_generic_bindings_from(
         let Some(formal_index) = signature
             .formals
             .iter()
-            .position(|declared| declared == &formal)
+            .position(|declared| declared == formal)
         else {
             // A member signature can mention variables owned by its receiver class. They are
             // already substituted from the applied receiver and are constraints on an enclosing
@@ -962,7 +1016,7 @@ pub(crate) fn merge_generic_upper_bindings(
         let Some(formal_index) = signature
             .formals
             .iter()
-            .position(|declared| declared == &formal)
+            .position(|declared| declared == formal)
         else {
             continue;
         };
@@ -990,7 +1044,7 @@ pub(crate) fn merge_call_argument_bindings(
         let Some(formal_index) = signature
             .formals
             .iter()
-            .position(|declared| declared == &formal)
+            .position(|declared| declared == formal)
         else {
             continue;
         };
@@ -1016,8 +1070,7 @@ pub(crate) fn merge_call_argument_bindings(
                     crate::types::TypeVariance::In => actual,
                     crate::types::TypeVariance::Invariant => receiver,
                 };
-                let candidate_binding =
-                    crate::fx_hash::HashMap::from_iter([(formal.clone(), candidate)]);
+                let candidate_binding = crate::fx_hash::HashMap::from_iter([(formal, candidate)]);
                 let receiver_shape = signature
                     .receiver
                     .map(|receiver| ty_subst_keep_unbound(receiver, &candidate_binding))
@@ -1079,7 +1132,8 @@ pub(crate) fn formal_variance_in_type(
 
     // Nullability is orthogonal to variance: `R?` has the same occurrence variance as `R`.
     // Inspect the normalized shape here as well as in the recursive object/function branches.
-    if matches!(shape.non_null().kind(), TyKind::TyParam(name, _) if name == formal) {
+    if matches!(shape.non_null().kind(), TyKind::TyParam(name, _) | TyKind::Var(name, _) if name == formal)
+    {
         return Some(TypeVariance::Out);
     }
     match shape.non_null().kind() {
@@ -1134,6 +1188,103 @@ pub(crate) fn formal_variance_in_type(
     }
 }
 
+/// Whether every occurrence of `formal` in `shape` sits on an invariant path, so an argument at
+/// this parameter fixes the formal exactly. [`formal_variance_in_type`] also answers `Invariant`
+/// for mixed occurrences such as `(T) -> T`, which keep independent lower and upper bounds.
+///
+/// An occurrence that writes its own nullability (`T?` or `T & Any`) of a formal whose declared
+/// bound admits null fixes the formal only up to nullability: `Inv<T & Any>` against
+/// `Inv<String>` admits both `String` and `String?`, so it does not fix `T` exactly.
+pub(crate) fn formal_fixed_exactly_by(
+    source: &dyn SymbolSource,
+    shape: Ty,
+    formal: &str,
+    nullable_formal: bool,
+) -> bool {
+    use crate::types::TypeVariance;
+
+    fn occurrences(
+        source: &dyn SymbolSource,
+        shape: Ty,
+        formal: &str,
+        nullable_formal: bool,
+        invariant_path: bool,
+        found: &mut Vec<bool>,
+    ) {
+        let (occurrence, written_nullability) = match shape.kind() {
+            TyKind::Nullable(inner) | TyKind::DefinitelyNotNull(inner) => (inner, true),
+            _ => (shape.non_null(), false),
+        };
+        if let TyKind::TyParam(name, bound) | TyKind::Var(name, bound) = occurrence.kind() {
+            if name == formal {
+                // A compact `T & Any` carries a non-null occurrence bound.
+                let pinned_nullability =
+                    nullable_formal && (written_nullability || !bound.upper_bound_admits_null());
+                found.push(invariant_path && !pinned_nullability);
+                return;
+            }
+        }
+        match shape.non_null().kind() {
+            TyKind::InProjection(inner) | TyKind::OutProjection(inner) => occurrences(
+                source,
+                inner,
+                formal,
+                nullable_formal,
+                invariant_path,
+                found,
+            ),
+            TyKind::Obj(owner, arguments) => {
+                let classifier = source.classifier(owner);
+                for (index, argument) in arguments.iter().enumerate() {
+                    let invariant = !matches!(
+                        argument.kind(),
+                        TyKind::InProjection(_)
+                            | TyKind::OutProjection(_)
+                            | TyKind::StarProjection(_)
+                    ) && classifier
+                        .as_ref()
+                        .and_then(|classifier| classifier.type_param_variances.get(index).copied())
+                        .unwrap_or(TypeVariance::Invariant)
+                        == TypeVariance::Invariant;
+                    occurrences(
+                        source,
+                        *argument,
+                        formal,
+                        nullable_formal,
+                        invariant_path || invariant,
+                        found,
+                    );
+                }
+            }
+            TyKind::Fun(function) => {
+                for parameter in &function.params {
+                    occurrences(
+                        source,
+                        *parameter,
+                        formal,
+                        nullable_formal,
+                        invariant_path,
+                        found,
+                    );
+                }
+                occurrences(
+                    source,
+                    function.ret,
+                    formal,
+                    nullable_formal,
+                    invariant_path,
+                    found,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let mut found = Vec::new();
+    occurrences(source, shape, formal, nullable_formal, false, &mut found);
+    !found.is_empty() && found.iter().all(|invariant| *invariant)
+}
+
 pub(super) fn unify_inferred_ty_impl(
     source: Option<&dyn SymbolSource>,
     sig: Ty,
@@ -1158,7 +1309,7 @@ pub(super) fn unify_inferred_ty_impl(
             binds,
         ),
         TyKind::StarProjection(_) => {}
-        TyKind::TyParam(name, _) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
             if actual.mentions_error() {
                 return;
             }
@@ -1173,10 +1324,11 @@ pub(super) fn unify_inferred_ty_impl(
                 TyKind::DefinitelyNotNull(inner) => inner,
                 _ => actual,
             };
-            if matches!(identity.kind(), TyKind::TyParam(actual_name, _) if actual_name == name) {
+            if matches!(identity.kind(), TyKind::TyParam(actual_name, _) | TyKind::Var(actual_name, _) if actual_name == name)
+            {
                 return;
             }
-            match binds.entry(name.to_string()) {
+            match binds.entry(name) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(inference_actual(
                         actual.projection_inner().unwrap_or(actual),
@@ -1243,6 +1395,12 @@ pub(super) fn unify_inferred_ty_impl(
                 .unwrap_or(inner);
             unify_inferred_ty_impl(source, inner, actual, binds);
         }
+        TyKind::MutabilityFlexible(inner) => {
+            let inner = source
+                .map(|source| choose_platform_lower_face(source, inner, actual))
+                .unwrap_or(inner);
+            unify_inferred_ty_impl(source, inner, actual, binds);
+        }
         _ => {}
     }
 }
@@ -1261,8 +1419,8 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     // so substituting the inferred result through `R?` can reopen the original caller `T?`.
     let same_parameter_dnn = |provenance: Ty, compact: Ty| match provenance.kind() {
         TyKind::DefinitelyNotNull(inner) => match inner.kind() {
-            TyKind::TyParam(name, bound) => {
-                compact == Ty::ty_param(name.as_str(), bound.definitely_non_null())
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
+                compact == inner.with_symbol_bound(bound.definitely_non_null())
             }
             _ => false,
         },
@@ -1272,6 +1430,21 @@ pub(crate) fn merge_inferred_ty_from_symbols(
         return current;
     }
     if same_parameter_dnn(actual, current) {
+        return actual;
+    }
+    // `T & Any` is a subtype of `T` (and of `T?`), so the join of a parameter with its own
+    // definitely-non-null face is that parameter, in either representation of the face.
+    let own_dnn_face = |face: Ty, plain: Ty| {
+        let parameter = plain.non_null();
+        matches!(parameter.kind(), TyKind::TyParam(..))
+            && face != parameter
+            && (face == parameter.definitely_non_null()
+                || face == parameter.contributed_through_nullable_formal())
+    };
+    if own_dnn_face(actual, current) {
+        return current;
+    }
+    if own_dnn_face(current, actual) {
         return actual;
     }
     if current.non_null() == actual.non_null() {
@@ -1334,63 +1507,18 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     if !merged.is_erased_top() || !current.is_reference() || !actual.is_reference() {
         return merged;
     }
-    let same_generic_classifier = match (current.non_null().kind(), actual.non_null().kind()) {
-        (TyKind::Obj(left, left_arguments), TyKind::Obj(right, right_arguments)) => {
-            left == right
-                && !left_arguments.is_empty()
-                && left_arguments.len() == right_arguments.len()
-        }
-        _ => false,
-    };
-    if same_generic_classifier {
-        // Two invariant instantiations (`Inv<A>` and `Inv<B>`) are not a raw classifier and not
-        // `Any`. Their common supertype keeps the classifier and captures the arguments' own common
-        // supertype. Do not apply this structural join to unrelated top-level classifiers: ordinary
-        // inference already has a stable nearest-hierarchy rule, and replacing it changes such
-        // established results as mixed scalar varargs and Java flexible collection expectations.
-        let supertype =
-            common_supertype::common_super_type(source, current.non_null(), actual.non_null());
-        if !supertype.is_erased_top() {
-            return if current.is_nullable() || actual.is_nullable() {
-                Ty::nullable(supertype.non_null())
-            } else {
-                supertype
-            };
-        }
-    }
-
-    let left = receiver_hierarchy(source, current.non_null());
-    let right = receiver_hierarchy(source, actual.non_null());
-    let mut common = left
-        .iter()
-        .flat_map(|(left_ty, left_depth)| {
-            right.iter().filter_map(move |(right_ty, right_depth)| {
-                let left_name = left_ty.obj_internal()?;
-                let right_name = right_ty.obj_internal()?;
-                (left_name == right_name).then_some((
-                    left_depth + right_depth,
-                    if left_ty == right_ty {
-                        *left_ty
-                    } else {
-                        common_supertype::common_super_type(source, *left_ty, *right_ty)
-                    },
-                ))
-            })
-        })
-        .collect::<Vec<_>>();
-    let Some(nearest) = common.iter().map(|(distance, _)| *distance).min() else {
-        return merged;
-    };
-    common.retain(|(distance, ty)| *distance == nearest && !ty.is_erased_top());
-    common.dedup_by(|left, right| left.1 == right.1);
-    let [(_, common)] = common.as_slice() else {
-        return merged;
-    };
-    if current.is_nullable() || actual.is_nullable() {
-        Ty::nullable(common.non_null())
-    } else {
-        *common
-    }
+    // Two reference lower bounds join at their common supertype, as kotlinc's does: every
+    // most-specific classifier both hierarchies share, however far up each one sits, with type
+    // arguments joined by declaration variance (`Inv<A>` and `Inv<B>` join at `Inv<out C>`, `C` the
+    // common supertype of `A` and `B`), and an intersection when several incomparable classifiers
+    // remain (`A : Base(), I` and `B : Base(), J`, `J : I`, join at `Base & I`). The one
+    // common-supertype relation owns that algebra for every lower-bound join; it also reads a type
+    // parameter through its bounds and keeps a nullable bound's nullability. A missing or invalid
+    // classifier declaration is `Ty::Error`, which propagates rather than becoming `Any`.
+    common_supertype::common_super_types(
+        source,
+        &[inference_actual(current), inference_actual(actual)],
+    )
 }
 
 /// Collapse a complete set of lower constraints in one operation. Keeping the original bounds is
@@ -1548,7 +1676,10 @@ pub(crate) fn infer_generic_call_bindings_with_receiver_from_symbols(
     let formals = inferred.upper_only.iter().cloned().collect::<Vec<_>>();
     for formal in formals {
         let binding = inferred.denotable_upper_binding(source, &formal);
-        inferred.bindings.entry(formal).or_insert(binding);
+        inferred
+            .bindings
+            .entry(crate::types::TyParamName::new(&formal))
+            .or_insert(binding);
     }
     inferred.bindings
 }
@@ -1682,7 +1813,7 @@ pub(crate) fn apply_only_input_type_bindings(
         let mut collect = |shape: Ty, actual: Ty| {
             let mut one_input = GSigBinds::default();
             unify_ty_from_symbols(source, shape, actual, &mut one_input);
-            let Some(candidate) = one_input.get(formal).copied() else {
+            let Some(candidate) = one_input.get(formal.as_str()).copied() else {
                 return;
             };
             // Error/pending and null-only types are not proper inference solutions. In particular,
@@ -1713,9 +1844,11 @@ pub(crate) fn apply_only_input_type_bindings(
             collect(shape, argument.ty());
             // A result-only producer (`emptyList()`) has no input type of its own until the call
             // completes it: its input occurrence is the solution it is completed to.
-            if let Some(&solved) = bindings.get(formal) {
-                let completed =
-                    ty_subst_keep_unbound(shape, &GSigBinds::from_iter([(formal.clone(), solved)]));
+            if let Some(&solved) = bindings.get(formal.as_str()) {
+                let completed = ty_subst_keep_unbound(
+                    shape,
+                    &GSigBinds::from_iter([(crate::types::TyParamName::from(formal), solved)]),
+                );
                 if argument.binds_unconstrained_result_to(source, completed) {
                     collect(shape, completed);
                 }
@@ -1780,9 +1913,9 @@ pub(crate) fn apply_only_input_type_bindings(
                 });
         }
         let (formal, candidates) = &constrained[index];
-        let previous = trial.remove(formal);
+        let previous = trial.remove(formal.as_str());
         for &candidate in candidates {
-            trial.insert(formal.clone(), candidate);
+            trial.insert(crate::types::TyParamName::new(formal), candidate);
             if choose(
                 source,
                 signature,
@@ -1796,9 +1929,9 @@ pub(crate) fn apply_only_input_type_bindings(
                 return true;
             }
         }
-        trial.remove(formal);
+        trial.remove(formal.as_str());
         if let Some(previous) = previous {
-            trial.insert(formal.clone(), previous);
+            trial.insert(crate::types::TyParamName::new(formal), previous);
         }
         false
     }
@@ -1838,11 +1971,13 @@ pub(crate) fn complete_bottom_constraint_bindings(
     loop {
         let mut changed = false;
         for (formal, bounds) in generic_sig.formals.iter().zip(&generic_sig.formal_bounds) {
-            let Some(actual) = bindings.get(formal).copied() else {
+            let Some(actual) = bindings.get(formal.as_str()).copied() else {
                 continue;
             };
             for bound in bounds {
-                let TyKind::TyParam(bound_formal, _) = bound.non_null().kind() else {
+                let (TyKind::TyParam(bound_formal, _) | TyKind::Var(bound_formal, _)) =
+                    bound.non_null().kind()
+                else {
                     continue;
                 };
                 let Some(position) = generic_sig
@@ -1865,7 +2000,7 @@ pub(crate) fn complete_bottom_constraint_bindings(
                             actual
                         };
                         if joined != bottom {
-                            bindings.insert(bound_formal.to_string(), joined);
+                            bindings.insert(crate::types::TyParamName::new(&bound_formal), joined);
                             changed = true;
                         }
                     }
@@ -1903,7 +2038,7 @@ fn infer_generic_return_bindings_impl(
         return None;
     }
     for (formal, bounds) in generic_sig.formals.iter().zip(&generic_sig.formal_bounds) {
-        let Some(actual) = bindings.get(formal).copied() else {
+        let Some(actual) = bindings.get(formal.as_str()).copied() else {
             continue;
         };
         if !actual.is_nullable() || bounds.is_empty() {
@@ -1917,7 +2052,7 @@ fn infer_generic_return_bindings_impl(
             .iter()
             .all(|bound| admits(narrowed, ty_subst(*bound, &bindings)));
         if !actual_satisfies && narrowed_satisfies {
-            bindings.insert(formal.clone(), narrowed);
+            bindings.insert(crate::types::TyParamName::new(formal), narrowed);
         }
     }
     // An expected result is an upper constraint on a produced value. If a return-only variable's
@@ -1927,7 +2062,7 @@ fn infer_generic_return_bindings_impl(
     // the precise flow type needed by the consumer. Incomparable reference constituents remain on
     // the non-denotable intersection path below.
     for (formal, bounds) in generic_sig.formals.iter().zip(&generic_sig.formal_bounds) {
-        let Some(mut actual) = bindings.get(formal).copied() else {
+        let Some(mut actual) = bindings.get(formal.as_str()).copied() else {
             continue;
         };
         let formal_slice = std::slice::from_ref(formal);
@@ -1948,7 +2083,7 @@ fn infer_generic_return_bindings_impl(
                 actual = bound;
             }
         }
-        bindings.insert(formal.clone(), actual);
+        bindings.insert(crate::types::TyParamName::new(formal), actual);
     }
     if generic_bindings_satisfy_bounds(generic_sig, &bindings, |actual, bound| {
         admits(actual, bound)
@@ -1965,7 +2100,7 @@ fn infer_generic_return_bindings_impl(
     // evidence and its declared bounds remain mandatory applicability constraints.
     let mut has_intersection = false;
     for (formal, bounds) in generic_sig.formals.iter().zip(&generic_sig.formal_bounds) {
-        let Some(mut actual) = bindings.get(formal).copied() else {
+        let Some(mut actual) = bindings.get(formal.as_str()).copied() else {
             continue;
         };
         let formal_slice = std::slice::from_ref(formal);
@@ -1982,7 +2117,7 @@ fn infer_generic_return_bindings_impl(
         }
         if actual.is_nullable() && bounds.iter().all(|bound| !bound.admits_null()) {
             actual = actual.non_null();
-            bindings.insert(formal.clone(), actual);
+            bindings.insert(crate::types::TyParamName::new(formal), actual);
         }
         if !actual.is_reference() {
             return None;
@@ -2098,6 +2233,9 @@ fn platform_argument_shape(source: &dyn SymbolSource, shape: Ty, actual: Ty) -> 
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(choose_platform_lower_face(source, inner, actual))
         }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(choose_platform_lower_face(source, inner, actual))
+        }
         _ => shape,
     }
 }
@@ -2164,8 +2302,9 @@ pub(crate) fn widen_invariant_expected_bindings(
         if explicit_type_arguments.fixes(index) {
             continue;
         }
-        let Some((&expected_argument, &inferred)) =
-            expected_bindings.get(formal).zip(bindings.get(formal))
+        let Some((&expected_argument, &inferred)) = expected_bindings
+            .get(formal.as_str())
+            .zip(bindings.get(formal.as_str()))
         else {
             continue;
         };
@@ -2180,7 +2319,7 @@ pub(crate) fn widen_invariant_expected_bindings(
             continue;
         }
         let mut trial = bindings.clone();
-        trial.insert(formal.clone(), expected_argument);
+        trial.insert(crate::types::TyParamName::new(formal), expected_argument);
         if generic_bindings_satisfy_bounds(signature, &trial, &mut admits) {
             *bindings = trial;
         }
@@ -2203,12 +2342,14 @@ pub(crate) struct SymbolicReturnConstraints {
 pub(crate) fn infer_generic_symbolic_return_constraints(
     declared: Ty,
     expected: Ty,
-    formals: &[String],
+    formals: &[crate::types::TyParamName],
 ) -> SymbolicReturnConstraints {
     fn symbolic_parameter(ty: Ty) -> bool {
         match ty.kind() {
-            TyKind::TyParam(..) => true,
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => symbolic_parameter(inner),
+            TyKind::TyParam(..) | TyKind::Var(..) => true,
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => symbolic_parameter(inner),
             _ => false,
         }
     }
@@ -2227,12 +2368,12 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
     fn collect(
         declared: Ty,
         expected: Ty,
-        formals: &[String],
+        formals: &[crate::types::TyParamName],
         candidates: &mut crate::fx_hash::HashMap<String, (Option<Ty>, bool)>,
         constrained_formals: &mut crate::fx_hash::HashSet<String>,
     ) {
         match (declared.kind(), expected.kind()) {
-            (TyKind::TyParam(declared, _), _)
+            (TyKind::TyParam(declared, _) | TyKind::Var(declared, _), _)
                 if formals.iter().any(|formal| formal.as_str() == declared) =>
             {
                 let expected_ty = expected_argument(expected);
@@ -2280,6 +2421,7 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
             }
             (TyKind::Nullable(declared), TyKind::Nullable(expected))
             | (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(expected))
+            | (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(expected))
             | (TyKind::InProjection(declared), TyKind::InProjection(expected))
             | (TyKind::OutProjection(declared), TyKind::OutProjection(expected)) => {
                 collect(declared, expected, formals, candidates, constrained_formals);
@@ -2302,7 +2444,7 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
     let mut conflicting_formals = crate::fx_hash::HashSet::default();
     for (formal, (actual, all_symbolic)) in candidates {
         if let Some(actual) = actual.filter(|_| all_symbolic) {
-            bindings.insert(formal, actual);
+            bindings.insert(crate::types::TyParamName::new(&formal), actual);
         } else if actual.is_none() {
             conflicting_formals.insert(formal);
         }
@@ -2319,14 +2461,14 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
 pub(super) fn seed_undeclared_return_bindings(
     sig: Ty,
     actual: Ty,
-    declared_formals: &[String],
+    declared_formals: &[crate::types::TyParamName],
     binds: &mut GSigBinds,
 ) {
     match sig.kind() {
-        TyKind::TyParam(n, _)
-            if !declared_formals.iter().any(|formal| formal == n) && actual != Ty::Error =>
+        TyKind::TyParam(n, _) | TyKind::Var(n, _)
+            if !declared_formals.contains(&n) && actual != Ty::Error =>
         {
-            binds.entry(n.to_string()).or_insert(actual);
+            binds.entry(n).or_insert(actual);
         }
         TyKind::Fun(fsig) => {
             if let TyKind::Fun(afsig) = actual.kind() {
@@ -2353,6 +2495,9 @@ pub(super) fn seed_undeclared_return_bindings(
             } else {
                 seed_undeclared_return_bindings(inner, actual, declared_formals, binds);
             }
+        }
+        TyKind::MutabilityFlexible(inner) => {
+            seed_undeclared_return_bindings(inner, actual.non_null(), declared_formals, binds);
         }
         TyKind::Obj(_, args) => {
             if let TyKind::Obj(_, actual_args) = actual.kind() {
@@ -2392,6 +2537,12 @@ pub(super) fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
         (_, TyKind::PlatformNullable(inferred)) => {
             Ty::platform_nullable(merge_specialized_return(provider.non_null(), inferred))
         }
+        (TyKind::MutabilityFlexible(provider), _) => {
+            Ty::mutability_flexible(merge_specialized_return(provider, inferred.non_null()))
+        }
+        (_, TyKind::MutabilityFlexible(inferred)) => {
+            Ty::mutability_flexible(merge_specialized_return(provider.non_null(), inferred))
+        }
         (TyKind::Nullable(provider), TyKind::Nullable(inferred)) => {
             Ty::nullable(merge_specialized_return(provider, inferred))
         }
@@ -2426,6 +2577,9 @@ pub(super) fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
                 .collect::<Vec<_>>();
             Ty::obj_args_name(provider_name, &args)
         }
+        // The declaration's formal specialized to a caller variable (`A := X` for `X : Number?`)
+        // names that variable; restoring the declaration formal would leak it out of the call.
+        (TyKind::TyParam(..), TyKind::TyParam(..)) | (TyKind::Var(..), TyKind::Var(..)) => inferred,
         _ => provider,
     }
 }

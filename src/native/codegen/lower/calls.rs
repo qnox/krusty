@@ -5,6 +5,7 @@
 //! it. Name-based runtime tables remain explicit migration debt inside `native::intrinsics`.
 
 mod c_calls;
+mod default_entries;
 mod dependency_exports;
 
 use super::*;
@@ -15,7 +16,8 @@ use crate::backend::class_tables::module_slots::PlanKey;
 /// An absent symbol is not an error here: platform KLIB declarations have no preceding source
 /// object and continue to their compiler-intrinsic/runtime realization below. Once an exact source
 /// export exists, however, it owns the call. An omission cannot fall through to a name-based
-/// realization, and the ordinary export cannot receive fewer operands than its declared ABI.
+/// realization, and the ordinary export cannot receive fewer operands than its declared ABI: a
+/// call leaving arguments out goes through the export's default entry, or not at all.
 fn direct_dependency_export<'a>(
     export: Option<&'a super::super::DependencyExport>,
     defaults: &[u32],
@@ -23,7 +25,7 @@ fn direct_dependency_export<'a>(
     let Some(export) = export else {
         return Ok(None);
     };
-    if !defaults.is_empty() {
+    if !defaults.is_empty() && export.default_entry.is_none() {
         return Err(declined!(
             "a top-level dependency call with omitted arguments and no exported default bridge"
         ));
@@ -302,42 +304,33 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
         match callee {
-            Callee::LocalWithDefaults { function, defaults }
-            | Callee::ClassStaticWithDefaults {
-                function, defaults, ..
-            } => self.defaulted_call(*function, defaults, dispatch_receiver, args, site),
-            // A top-level function in another file: that file exports the entry that fills the
-            // omitted arguments, because only it holds their defaults.
-            Callee::ModuleWithDefaults {
+            // Another file's default-argument entry fills the omitted arguments, because only
+            // that file holds their defaults.
+            Callee::ModuleDefaultEntry {
                 target,
-                default_provider: crate::fir::ResolvedFunctionOverrideTarget::Module(provider),
+                provider,
                 params,
                 ret,
-                defaults,
-                dispatch_receiver_ty: None,
-                ..
             } if dispatch_receiver.is_none() => {
-                self.module_defaulted_call(*provider, *target, params, *ret, defaults, args)
-            }
-            Callee::ModuleWithDefaults { defaults, .. } => {
-                match self.file.inherited_default_provider(callee) {
-                    Some(provider) => {
-                        self.defaulted_call(provider, defaults, dispatch_receiver, args, site)
-                    }
-                    None => Err(declined!("a {} call", callee_kind(callee))),
-                }
+                self.module_default_entry_call(*provider, *target, params, *ret, args)
             }
             // A static method owned by a class is, to this generator, a function with a symbol —
             // the owner is a JVM placement fact, and there is no flat facade here for it to be
             // placed differently from. A local function declared inside a member is the shape that
             // arrives this way.
             Callee::Local(function) | Callee::ClassStatic { function, .. } => {
-                if dispatch_receiver.is_some() {
-                    return Err("a static call with a receiver".into());
-                }
+                let mut arguments = match dispatch_receiver {
+                    None => Vec::new(),
+                    Some(receiver) => {
+                        match self.value_class_member_receiver(*function, receiver)? {
+                            Some(value) => vec![value],
+                            None => return Ok(None),
+                        }
+                    }
+                };
                 let params =
                     super::super::super::captures::carried_parameters(self.file.ir, *function);
-                let arguments = self.arguments(args, &params)?;
+                arguments.extend(self.arguments(args, &params)?);
                 if self.terminated {
                     return Ok(None);
                 }
@@ -1022,6 +1015,7 @@ mod tests {
     fn an_exact_dependency_export_never_receives_too_few_arguments() {
         let export = DependencyExport {
             symbol: "kt_klib_export_0".to_string(),
+            reference_declaration: None,
             signature: {
                 let mut ir = crate::ir::IrFile::default();
                 let function = ir.add_fun(crate::ir::IrFunction {
@@ -1038,6 +1032,8 @@ mod tests {
             member_receiver: None,
             singleton_member_receiver: None,
             singleton_extension_receiver: None,
+            default_entry: None,
+            dispatch_entry: None,
         };
         assert_eq!(
             direct_dependency_export(Some(&export), &[])
@@ -1054,6 +1050,15 @@ mod tests {
             direct_dependency_export(None, &[0])
                 .expect("a platform declaration may have an authenticated intrinsic realization"),
             None
+        );
+        let defaulted = DependencyExport {
+            default_entry: Some("kt_klib_export_0__defaults".to_string()),
+            ..export
+        };
+        assert_eq!(
+            direct_dependency_export(Some(&defaulted), &[0])
+                .expect("an omission goes through the export's default entry"),
+            Some(&defaulted)
         );
     }
 

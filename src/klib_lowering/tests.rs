@@ -3,18 +3,26 @@
 
 use std::path::PathBuf;
 
+mod accessor_calls;
 mod body_forms;
+mod callable_references;
 mod callee_headers;
+mod captured_projections;
 mod closure_frames;
 mod closure_producers;
 mod constructor_calls;
 mod constructor_contracts;
 mod control_forms;
 mod demo_package;
+mod elvis_blocks;
 mod inline_templates;
+mod parameter_defaults;
 mod primitive_calls;
+mod range_membership_producers;
 mod returnable_blocks;
+mod safe_calls;
 mod target_calls;
+mod target_members;
 mod varargs;
 
 use super::*;
@@ -291,7 +299,8 @@ pub(super) fn type_name_of(ty: Ty) -> String {
 /// logical type, a return's depth (`@0`), a stable (`!`) or mutable (`~`) binding read, a `when`'s
 /// exhaustiveness (`exhaustive:`), a callable scope (`scope`) and a recorded negation
 /// (`negation`), a short circuit (`and`, `or`) and a written cast (`written`). A call names its
-/// callee by source name, so two units' bodies compare whatever order their functions were
+/// callee by source name, and a call leaving arguments to their defaults the parameters it omits
+/// (`omitting`), so two units' bodies compare whatever order their functions were
 /// declared in, and a loop label by its order of appearance (`@L0`), so two lowerings that name
 /// their loops differently compare.
 pub(super) fn render(ir: &IrFile, expression: ExprId) -> String {
@@ -421,6 +430,21 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
                 .join(", ");
             format!("call {}({args})", ir.fn_source_names[function])
         }
+        IrExpr::Call {
+            callee: call_callee,
+            dispatch_receiver: None,
+            args,
+        } if let Callee::LocalWithDefaults { function, defaults } = &**call_callee => {
+            let args = args
+                .iter()
+                .map(|argument| render(ir, *argument))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "call {}({args}) omitting {defaults:?}",
+                ir.fn_source_names[function]
+            )
+        }
         IrExpr::InvokeFunction { func, args, .. } => {
             let operands = std::iter::once(func)
                 .chain(args)
@@ -539,10 +563,33 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             completion,
         } => format!("{completion:?}({})", render(ir, *producer)),
         IrExpr::UnitInstance => "Unit".to_owned(),
+        IrExpr::SingletonValue { classifier } => format!("object {}", classifier.render()),
+        IrExpr::Checked(checked) => match checked.as_ref() {
+            crate::ir::IrCheckedOperation::RangeContains {
+                operation,
+                value,
+                start,
+                end,
+                negated,
+                counter,
+                unsigned_compare,
+            } => format!(
+                "{}{operation:?}<{}{}>({} in {}, {})",
+                if *negated { "!" } else { "" },
+                type_name_of(*counter),
+                unsigned_compare
+                    .as_ref()
+                    .map_or(String::new(), |compare| format!(", {compare:?}")),
+                render(ir, *value),
+                render(ir, *start),
+                render(ir, *end)
+            ),
+            other => panic!("a lowered body holds no {other:?}"),
+        },
         other => panic!("a lowered body holds no {other:?}"),
     };
-    match ir.logical_types.get(&expression) {
-        Some(ty) => format!("{node}: {}", type_name_of(*ty)),
+    match ir.logical_type(expression) {
+        Some(ty) => format!("{node}: {}", type_name_of(ty)),
         None => node,
     }
 }
@@ -1020,7 +1067,7 @@ fn declined(body: impl FnOnce(&Parts, &mut KlibIrArena) -> Option<KlibIrBody>) -
     );
     assert!(unit.ir().exprs.is_empty());
     assert!(unit.ir().functions.is_empty());
-    assert!(unit.ir().logical_types.is_empty());
+    assert_eq!(unit.ir().logical_types().count(), 0);
     assert!(unit.ir().binding_read_stability.is_empty());
     decline.to_string()
 }
@@ -1030,7 +1077,7 @@ const INT_COERCE_AT_LEAST: &str = "fun Int.coerceAtLeast(minimumValue: Int): Int
      }\n";
 
 const LOWERED_INT_COERCE_AT_LEAST: &str = "scope {scope {return@Some(0) when[\
-     Lt(v0: Int, v1!: Int): Boolean -> v1!: Int, else -> v0: Int]: Int: Nothing}: Nothing}";
+     Lt(v0!: Int, v1!: Int): Boolean -> v1!: Int, else -> v0!: Int]: Int: Nothing}: Nothing}";
 
 #[test]
 fn a_built_in_relation_lowers_as_the_source_comparison_does() {
@@ -1592,8 +1639,8 @@ fn stdlib_coerce_bodies_lower_as_their_source_does() {
     );
     assert_eq!(
         lowered_stdlib_body(&libraries, bodies, &mut unit, "coerceAtMost", Ty::Double),
-        "scope {scope {return@Some(0) when[Gt(v0: Double, v1!: Double): Boolean -> v1!: Double, \
-         else -> v0: Double]: Double: Nothing}: Nothing}"
+        "scope {scope {return@Some(0) when[Gt(v0!: Double, v1!: Double): Boolean -> v1!: Double, \
+         else -> v0!: Double]: Double: Nothing}: Nothing}"
     );
     assert_eq!(unit.ir().functions.len(), 8);
 }

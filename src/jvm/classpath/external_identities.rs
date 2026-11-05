@@ -75,6 +75,7 @@ impl Classpath {
             klib_body_type_parameters: Box::new([]),
             klib_body_declaration_modifiers: None,
             klib_body_class_contract: None,
+            klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
         });
@@ -317,7 +318,7 @@ mod tests {
 
         let mut declared = partial.clone();
         let signature = crate::libraries::GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: vec![Vec::new()],
             receiver: None,
             params: Vec::new(),

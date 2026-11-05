@@ -20,7 +20,7 @@ public @interface Aliased {
     String plain();
 
     @Retention(RetentionPolicy.RUNTIME)
-    @Target(ElementType.METHOD)
+    @Target({ElementType.PARAMETER, ElementType.TYPE, ElementType.METHOD, ElementType.FIELD})
     @interface Alias {
         Class<? extends Annotation> annotation();
 

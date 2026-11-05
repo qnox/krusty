@@ -21,7 +21,7 @@ pub struct MemberExtPropSig {
     pub(super) context_params: Vec<Ty>,
     pub(super) context_param_names: Vec<String>,
     pub(super) context_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
-    pub(super) type_params: Vec<String>,
+    pub(super) type_params: Vec<crate::types::TyParamName>,
     pub(super) type_param_bounds: Vec<Ty>,
     pub(super) formal_bounds: Vec<Vec<Ty>>,
     pub(super) is_var: bool,
@@ -67,7 +67,7 @@ impl MemberExtPropSig {
     }
 
     /// The property's own type parameters (`val <T> T.x`); empty for the supported shape.
-    pub(crate) fn type_params(&self) -> &[String] {
+    pub(crate) fn type_params(&self) -> &[crate::types::TyParamName] {
         &self.type_params
     }
 
@@ -326,7 +326,7 @@ pub(super) fn select(
                     class
                         .type_params
                         .iter()
-                        .cloned()
+                        .map(crate::types::TyParamName::from)
                         .zip(owner_ty.type_args().iter().copied())
                         .collect()
                 });
@@ -342,26 +342,28 @@ pub(super) fn select(
                         .iter()
                         .zip(&sig.formal_bounds)
                         .all(|(parameter, bounds)| {
-                            applicability_bindings.get(parameter).is_none_or(|actual| {
-                                bounds.iter().copied().all(|bound| {
-                                    crate::assignable::is_assignable(
-                                        &crate::assignable::TyCtx::new(),
-                                        oracle,
-                                        *actual,
-                                        crate::symbol_resolver::ty_subst(
-                                            bound,
-                                            &applicability_bindings,
-                                        ),
-                                    )
+                            applicability_bindings
+                                .get(parameter.as_str())
+                                .is_none_or(|actual| {
+                                    bounds.iter().copied().all(|bound| {
+                                        crate::assignable::is_assignable(
+                                            &crate::assignable::TyCtx::new(),
+                                            oracle,
+                                            *actual,
+                                            crate::symbol_resolver::ty_subst(
+                                                bound,
+                                                &applicability_bindings,
+                                            ),
+                                        )
+                                    })
                                 })
-                            })
                         });
                 if !bounds_satisfied {
                     continue;
                 }
                 for (parameter, bound) in sig.type_params.iter().zip(&sig.type_param_bounds) {
                     applicability_bindings
-                        .entry(parameter.clone())
+                        .entry(crate::types::TyParamName::new(parameter))
                         .or_insert(*bound);
                 }
                 let declared_receiver =
@@ -379,9 +381,14 @@ pub(super) fn select(
                 }
                 let mut bindings = class_bindings.clone();
                 for parameter in &sig.type_params {
-                    bindings.remove(parameter);
+                    bindings.remove(parameter.as_str());
                 }
-                crate::symbol_resolver::unify_ty(sig.receiver, extension_receiver, &mut bindings);
+                crate::symbol_resolver::unify_ty_from_symbols(
+                    source,
+                    sig.receiver,
+                    extension_receiver,
+                    &mut bindings,
+                );
                 let context_params = sig
                     .context_params
                     .iter()
@@ -394,7 +401,9 @@ pub(super) fn select(
                     crate::symbol_resolver::unify_ty(*parameter, *actual, &mut bindings);
                 }
                 for (parameter, bound) in sig.type_params.iter().zip(&sig.type_param_bounds) {
-                    bindings.entry(parameter.clone()).or_insert(*bound);
+                    bindings
+                        .entry(crate::types::TyParamName::new(parameter))
+                        .or_insert(*bound);
                 }
                 let ty = crate::symbol_resolver::ty_subst(sig.ret, &bindings);
                 let context_params = sig

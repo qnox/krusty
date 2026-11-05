@@ -1,7 +1,6 @@
 //! JVM class-file reading, writing, and bytecode emission (all JVM-specific code).
 
 mod abstract_builtin_overrides;
-mod abstract_method_nullability;
 mod annotation_constructions;
 mod annotation_kclass;
 mod anonymous_context_labels;
@@ -26,6 +25,7 @@ mod collection_override_signatures;
 mod collection_to_array;
 mod common_metadata;
 pub mod companion;
+mod companion_storage;
 pub mod compilation_inputs;
 mod concatenated_to_string;
 mod constructor_debug;
@@ -35,7 +35,9 @@ mod declaration_collisions;
 mod declared_type_nullability;
 mod default_call_operands;
 mod default_parameter_representation;
+mod default_wrappers;
 mod deferred_local_storage;
+mod enclosing_capture_storage;
 mod enum_when_mappings;
 mod external_calls;
 mod field_compaction;
@@ -76,6 +78,7 @@ mod method_descriptors;
 pub mod method_node;
 mod method_parameters;
 mod module_calls;
+mod multifile_facades;
 pub mod names;
 mod operation_relocation;
 mod optional_annotations;
@@ -113,6 +116,7 @@ mod suspend_inline_functions;
 mod top_level_properties;
 mod type_intrinsics;
 mod type_of;
+mod type_parameter_carriers;
 mod value_class_declarations;
 pub mod value_classes;
 

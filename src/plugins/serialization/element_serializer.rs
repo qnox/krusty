@@ -4,10 +4,9 @@ use super::constructed_standard_serializers::constructed_standard_serializer;
 use super::type_argument_serializers::named_serializer;
 use super::type_parameter_serializers::TypeParameterSerializers;
 use super::{
-    build_contextual_property_serializer, build_contextual_serializer,
-    build_polymorphic_serializer, class_ty, generated_serializer_accessor, is_nullable,
-    kserializer_of, serializer_of_name, type_is_contextual, wrap_nullable_serializer,
-    KSERIALIZER_FQ,
+    build_contextual_property_serializer, build_polymorphic_serializer, class_ty,
+    generated_serializer_accessor, is_nullable, kserializer_of, serializer_of_name,
+    type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
 };
 use crate::ir::Spelled;
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
@@ -27,9 +26,9 @@ pub(super) enum ElementSerializerPlan {
         arguments: Vec<ElementSerializerPlan>,
     },
     Nullable(Box<ElementSerializerPlan>),
-    Contextual(TypeName),
-    /// A contextual PROPERTY's serializer: `ContextualSerializer(T::class, <fallback>, [<type
-    /// argument serializers>])`, the fallback being `T`'s own serializer when it has one.
+    /// A contextual property's or file-contextual element's serializer: `ContextualSerializer(T::class,
+    /// <fallback>, [<type argument serializers>])`, the fallback being `T`'s own serializer when it
+    /// has one.
     ContextualProperty {
         classifier: TypeName,
         fallback: Option<Box<ElementSerializerPlan>>,
@@ -429,11 +428,11 @@ fn serializer_plan(
         }
     }
     // An element whose TYPE the file declares contextual (`@file:UseContextualSerialization`)
-    // serializes through a `ContextualSerializer`, exactly as a property of that type would. The
-    // property-level rule cannot see this one: the contextual type appears only as a collection's
-    // element (`List<FlexibleMap>`).
+    // serializes through the same `ContextualSerializer(T::class, fallback, [type arguments])` a
+    // property of that type does. The property-level rule cannot see this one: the contextual type
+    // appears only as a collection's element (`List<FlexibleMap>`).
     if file_contextual == FileContextual::Applies && type_is_contextual(ctx, ir, fq_name) {
-        return Some(ElementSerializerPlan::Contextual(fq_name));
+        return contextual_property_plan_in(ir, ctx, ty, scope, annotated);
     }
     // A `@Serializable object` has no `$serializer` either: its serializer is an `ObjectSerializer`
     // over its `INSTANCE`, which kotlinc constructs at the use site.
@@ -805,9 +804,6 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
             let inner = emit_element_serializer(ir, *inner);
             let inner = narrow_to_kserializer(ir, inner);
             wrap_nullable_serializer(ir, inner)
-        }
-        ElementSerializerPlan::Contextual(classifier) => {
-            build_contextual_serializer(ir, classifier)
         }
         ElementSerializerPlan::ContextualProperty {
             classifier,

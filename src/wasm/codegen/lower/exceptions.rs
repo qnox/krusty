@@ -3,28 +3,107 @@
 use crate::backend::BackendCompilerIntrinsic as CompilerIntrinsic;
 use crate::fir::ExternalCallableId;
 use crate::ir::IrCatch;
-use crate::types::{type_name, TypeName};
+use crate::types::TypeName;
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
+/// The selected constructor's complete source frame, independent of a target descriptor.
+fn constructor_frame(
+    internal: TypeName,
+    selected: Option<&[Ty]>,
+    argument_count: usize,
+    kind: crate::libraries::RuntimeExceptionKind,
+    message: bool,
+    declaration: &crate::backend::BackendCallableFact,
+) -> Result<(), Unsupported> {
+    let message_parameter = [Ty::nullable(Ty::String)];
+    let parameters = if message { &message_parameter[..] } else { &[] };
+    if internal != kind.classifier()
+        || declaration.declaration_owner
+            != Some(crate::types::SemanticCallableOwner::Classifier(internal))
+        || declaration.kind != crate::libraries::ExternalCallableKind::Constructor
+        || declaration.params != parameters
+        || selected != Some(parameters)
+        || argument_count != parameters.len()
+        || declaration.ret != Ty::Unit
+        || declaration.context_count != 0
+        || declaration.source_receiver.is_some()
+        || declaration.generic_sig.is_some()
+    {
+        return Err(
+            "an authenticated exception constructor with a mismatched declaration frame".into(),
+        );
+    }
+    Ok(())
+}
+
 impl Body<'_> {
+    /// A reference assertion keeps its precise heap carrier and evaluates its input once. Its
+    /// failed edge throws the authenticated Kotlin NPE through the ordinary exception tag.
+    pub(super) fn assert_nonnull_reference(
+        &mut self,
+        operand: u32,
+        reference: ValType,
+    ) -> Result<(), Unsupported> {
+        let structure = self.runtime.exceptions.ensure_class(
+            self.module,
+            self.classifiers,
+            crate::libraries::RuntimeExceptionKind::NullPointer.classifier(),
+        )?;
+        let value = self.local(reference);
+        self.expression(operand)?;
+        self.code
+            .local_set(value)
+            .local_get(value)
+            .ref_is_null()
+            .if_(BlockType::Empty);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            structure,
+            None,
+            self.runtime.string,
+        );
+        self.code
+            .throw(self.runtime.exceptions.tag)
+            .end()
+            .local_get(value)
+            .ref_as_non_null();
+        Ok(())
+    }
+
     pub(super) fn new_object(
         &mut self,
+        site: u32,
         internal: TypeName,
         args: &[u32],
         params: Option<&[Ty]>,
         external: Option<ExternalCallableId>,
         defaults: &[u32],
     ) -> Result<(), Unsupported> {
+        // The shared default-argument lowering rewrites every construction with omitted
+        // arguments it can realize to construct through its constructor's entry.
         if !defaults.is_empty() {
             return Err("a constructor call with omitted arguments".to_string());
         }
-        let operation = external
+        let Some((declaration, kind, message)) = external
             .and_then(|target| self.callables.callable(target))
-            .and_then(|fact| fact.member_realization.compiler_intrinsic());
-        let Some(CompilerIntrinsic::ThrowableConstructor { message }) = operation else {
-            return self.construction(internal, args, params);
+            .and_then(|fact| match fact.compiler_operation() {
+                Some(CompilerIntrinsic::ThrowableConstructor { kind, message }) => {
+                    Some((fact, kind, message))
+                }
+                _ => None,
+            })
+        else {
+            return self.construction(site, internal, args, params);
         };
+        constructor_frame(internal, params, args.len(), kind, message, declaration)?;
+        let structure =
+            self.runtime
+                .exceptions
+                .ensure_class(self.module, self.classifiers, internal)?;
         let message = match (message, args) {
             (false, []) => None,
             (true, [message]) => {
@@ -37,15 +116,18 @@ impl Body<'_> {
                 return Err("an authenticated Throwable constructor with malformed operands".into())
             }
         };
-        self.runtime
-            .exceptions
-            .construct(&mut self.code, message, self.runtime.string);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            structure,
+            message,
+            self.runtime.string,
+        );
         Ok(())
     }
 
     pub(super) fn is_throwable_message(&self, target: ExternalCallableId) -> bool {
         self.callables.callable(target).is_some_and(|fact| {
-            fact.compiler_intrinsic == Some(CompilerIntrinsic::ThrowableMessage)
+            fact.compiler_operation() == Some(CompilerIntrinsic::ThrowableMessage)
         })
     }
 
@@ -98,7 +180,14 @@ impl Body<'_> {
         let [catch] = catches else {
             return Err("a `try` without exactly one Throwable catch".into());
         };
-        if catch.ty != Ty::obj_name(type_name("kotlin/Throwable")) {
+        let catch_layout = catch
+            .ty
+            .obj_internal()
+            .and_then(|identity| self.classifiers.classifier(identity))
+            .and_then(|fact| fact.runtime_exception);
+        if catch.ty.is_nullable()
+            || !matches!(catch_layout, Some(layout) if layout.kind == crate::libraries::RuntimeExceptionKind::Throwable)
+        {
             return Err(format!("a catch of `{}`", describe(catch.ty)));
         }
         let result_block = carrier(result)?.map_or(BlockType::Empty, BlockType::Value);

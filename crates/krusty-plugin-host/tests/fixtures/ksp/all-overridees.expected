@@ -1,0 +1,26 @@
+# What KSP2 2.3.12 (KSPJvmMain) logs with AllOverridees.kt over all-overridees/: findOverridee of
+# every function each source classifier lists in getAllFunctions, with its origin and classifier.
+w: [ksp] Point.component1 SYNTHETIC parent=alloverridees.Point overrides null origin=null
+w: [ksp] Point.copy SYNTHETIC parent=alloverridees.Point overrides null origin=null
+w: [ksp] Point.equals SYNTHETIC parent=alloverridees.Point overrides kotlin.Any.equals origin=KOTLIN_LIB
+w: [ksp] Point.hashCode SYNTHETIC parent=alloverridees.Point overrides kotlin.Any.hashCode origin=KOTLIN_LIB
+w: [ksp] Point.toString SYNTHETIC parent=alloverridees.Point overrides kotlin.Any.toString origin=KOTLIN_LIB
+w: [ksp] Point.<init> KOTLIN parent=alloverridees.Point overrides null origin=null
+w: [ksp] Origin.equals SYNTHETIC parent=alloverridees.Origin overrides kotlin.Any.equals origin=KOTLIN_LIB
+w: [ksp] Origin.hashCode SYNTHETIC parent=alloverridees.Origin overrides kotlin.Any.hashCode origin=KOTLIN_LIB
+w: [ksp] Origin.toString SYNTHETIC parent=alloverridees.Origin overrides kotlin.Any.toString origin=KOTLIN_LIB
+w: [ksp] Origin.<init> SYNTHETIC parent=alloverridees.Origin overrides null origin=null
+w: [ksp] Plain.equals KOTLIN_LIB parent=kotlin.Any overrides null origin=null
+w: [ksp] Plain.hashCode KOTLIN_LIB parent=kotlin.Any overrides null origin=null
+w: [ksp] Plain.toString KOTLIN_LIB parent=kotlin.Any overrides null origin=null
+w: [ksp] Plain.<init> SYNTHETIC parent=alloverridees.Plain overrides null origin=null
+w: [ksp] Named.toString KOTLIN parent=alloverridees.Named overrides kotlin.Any.toString origin=KOTLIN_LIB
+w: [ksp] Named.equals KOTLIN_LIB parent=kotlin.Any overrides null origin=null
+w: [ksp] Named.hashCode KOTLIN_LIB parent=kotlin.Any overrides null origin=null
+w: [ksp] Named.<init> SYNTHETIC parent=alloverridees.Named overrides null origin=null
+w: [ksp] Label.component1 SYNTHETIC parent=alloverridees.Label overrides null origin=null
+w: [ksp] Label.copy SYNTHETIC parent=alloverridees.Label overrides null origin=null
+w: [ksp] Label.toString SYNTHETIC parent=alloverridees.Label overrides alloverridees.Named.toString origin=KOTLIN
+w: [ksp] Label.equals SYNTHETIC parent=alloverridees.Label overrides kotlin.Any.equals origin=KOTLIN_LIB
+w: [ksp] Label.hashCode SYNTHETIC parent=alloverridees.Label overrides kotlin.Any.hashCode origin=KOTLIN_LIB
+w: [ksp] Label.<init> KOTLIN parent=alloverridees.Label overrides null origin=null

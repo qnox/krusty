@@ -366,7 +366,11 @@ fn classpath_shapes(info: &ClassInfo, same_package_path: bool, shapes: &mut Shap
             let Some(signature) = function.generic_sig.as_ref() else {
                 continue;
             };
-            let formals: Vec<&str> = signature.formals.iter().map(String::as_str).collect();
+            let formals: Vec<&str> = signature
+                .formals
+                .iter()
+                .map(|formal| formal.as_str())
+                .collect();
             shapes.record(
                 &formals,
                 function.is_extension(),

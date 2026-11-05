@@ -14,12 +14,16 @@ use crate::ir::{IrFile, IrTypeParameter};
 use crate::types::{wk, Ty, TyKind};
 
 pub(super) fn declared_primary_bound(parameter: &IrTypeParameter) -> Option<Ty> {
-    parameter
-        .bounds
+    primary_bound(&parameter.bounds).map(|index| parameter.bounds[index].0)
+}
+
+/// The position of the bound a type parameter erases through: the first written class bound,
+/// otherwise the first written bound. `None` for a parameter with no written bound.
+pub(super) fn primary_bound(bounds: &[(Ty, bool)]) -> Option<usize> {
+    bounds
         .iter()
-        .find(|(bound, is_interface)| !*is_interface && !bound.non_null().is_ty_param())
-        .or_else(|| parameter.bounds.first())
-        .map(|(bound, _)| *bound)
+        .position(|(bound, is_interface)| !*is_interface && !bound.non_null().is_ty_param())
+        .or_else(|| (!bounds.is_empty()).then_some(0))
 }
 
 fn parameter_named<'a>(
@@ -121,6 +125,7 @@ pub(super) fn erased_callable_parameters(
             bounds: parameter.bounds.to_vec(),
             variance: crate::types::TypeVariance::Invariant,
             reified: false,
+            captured_from_enclosing: false,
         })
         .collect::<Vec<_>>();
     erased_parameters(parameters, &type_parameters)
@@ -216,6 +221,7 @@ mod tests {
             bounds: vec![(bound, false)],
             variance: TypeVariance::Invariant,
             reified: false,
+            captured_from_enclosing: false,
         }
     }
 

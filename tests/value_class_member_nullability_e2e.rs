@@ -113,3 +113,47 @@ fn repository_emission_records_the_exact_value_class_annotation_policy() {
     assert_eq!(declared.return_nullability, Some(NotNull));
     assert_eq!(declared.parameter_nullability, vec![None, Some(Nullable)]);
 }
+
+/// An abstract method's value-class parameters are annotated from their declared Kotlin types, as a
+/// concrete method's are: `R<Int>` over `Any?` and `Result<Int>` are non-null, so `@NotNull`, and a
+/// nullable value class is `@Nullable`. krusty classified the abstract method from its erased
+/// carrier, writing `@Nullable` for every carrier that admits null.
+const ABSTRACT_CARRIERS: &str = r#"@JvmInline
+value class R<T>(val a: Any?)
+
+@JvmInline
+value class S(val a: String)
+
+abstract class Receiver {
+    abstract fun receive(r: R<Int>, k: Result<Int>, s: S, n: R<Int>?): String
+    fun forward(r: R<Int>, k: Result<Int>, s: S, n: R<Int>?): String = receive(r, k, s, n)
+}
+
+interface Handler {
+    fun handle(r: R<Int>, k: Result<Int>): String
+}
+
+class Impl : Receiver(), Handler {
+    override fun receive(r: R<Int>, k: Result<Int>, s: S, n: R<Int>?): String = s.a
+    override fun handle(r: R<Int>, k: Result<Int>): String = "K"
+}
+
+fun box(): String {
+    val impl = Impl()
+    return impl.forward(R(1), Result.success(2), S("O"), null) + impl.handle(R(3), Result.success(4))
+}
+"#;
+
+#[test]
+fn an_abstract_method_annotates_value_class_parameters_from_their_declaration() {
+    common::assert_classes_identical_to_kotlinc(
+        "AbstractValueClassNullability",
+        ABSTRACT_CARRIERS,
+        &["Receiver", "Handler", "Impl"],
+    );
+}
+
+#[test]
+fn abstract_value_class_carriers_run() {
+    common::expect_box_ok_with_stdlib(ABSTRACT_CARRIERS, "AbstractValueClassNullability");
+}

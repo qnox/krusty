@@ -32,6 +32,22 @@ pub enum IrParameterRole {
     Generated(IrGeneratedParameterRole),
 }
 
+impl IrParameterRole {
+    /// A declared context or value parameter: what [`IrVarargParameter::index`] counts. Receivers,
+    /// captures and compiler-generated parameters are not declared parameters.
+    pub const fn is_declared_parameter(self) -> bool {
+        matches!(
+            self,
+            Self::Value
+                | Self::UnusedValue
+                | Self::DestructuredValue
+                | Self::ContextValue
+                | Self::AnonymousContextParameter { .. }
+                | Self::ContextReceiver { .. }
+        )
+    }
+}
+
 /// What a lifted callable's captured value was declared as, and what kind of callable captures
 /// it. Both are source facts; a target that names the lifted parameter after them (kotlinc's
 /// `LocalDeclarationsLowering` keeps a variable's own name for a named local function or an
@@ -40,6 +56,10 @@ pub enum IrParameterRole {
 pub struct IrValueCapture {
     pub declaration: IrCapturedDeclaration,
     pub capturer: IrCapturingCallable,
+    /// When the captured declaration is a `crossinline` parameter, captured directly or through
+    /// enclosing callables and classes: its value slot in the inline function that declares it,
+    /// as [`super::IrConstructorCapture::crossinline_parameter`] records it for a class.
+    pub crossinline_parameter: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +142,9 @@ pub enum IrGeneratedParameterRole {
     /// The owner or extension receiver a generated property-delegate accessor receives for its
     /// property. The JVM spells it `<this>`.
     DelegateMethodReceiver,
+    /// The mask of omitted arguments a function takes in place of a `$default` synthetic, as the
+    /// Compose plugin's functions do. It has no local-variable row.
+    DefaultMask,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,6 +365,29 @@ impl FnParamInfo {
 }
 
 impl IrFile {
+    /// Record that `inserted` captured values replace the `removed` parameters at `parameter` of
+    /// lambda implementation `function`. When those parameters lie inside its capture prefix (an
+    /// insertion at the prefix's end included), the boundary to the lambda's own parameters
+    /// ([`IrFile::lambda_own_params_from`]) moves by the difference; parameters after the prefix
+    /// leave it where it is. Several replacements apply from the highest `parameter` down.
+    pub(crate) fn resize_lambda_capture_prefix(
+        &mut self,
+        function: FunId,
+        parameter: usize,
+        removed: usize,
+        inserted: usize,
+    ) {
+        let Some(own_from) = self.lambda_own_params_from.get_mut(&function) else {
+            return;
+        };
+        let prefix = *own_from as usize;
+        if parameter + removed > prefix {
+            return;
+        }
+        *own_from =
+            u32::try_from(prefix - removed + inserted).expect("a lambda's capture prefix fits u32");
+    }
+
     /// The exact checked declaration that supplied inherited defaults for `fid`.
     pub(crate) fn inherited_param_default_provider(
         &self,
@@ -416,6 +462,20 @@ impl IrFile {
             "published source parameter identities are never empty"
         );
         Some(identities)
+    }
+
+    /// The position of `function`'s `vararg` parameter in its semantic parameter list, which may
+    /// lead with a capture or an extension receiver. [`IrVarargParameter::index`] counts the
+    /// declared context and value parameters, so the position is the declared parameter at that
+    /// ordinal.
+    pub(crate) fn vararg_parameter_position(&self, function: FunId) -> Option<usize> {
+        let vararg = self.fn_varargs.get(&function)?;
+        self.function_parameter_identities(function)?
+            .iter()
+            .enumerate()
+            .filter(|(_, identity)| identity.role.is_declared_parameter())
+            .nth(vararg.index)
+            .map(|(position, _)| position)
     }
 
     /// Expansion modes parallel to [`Self::function_parameter_identities`]. `None` when the
@@ -503,6 +563,7 @@ mod tests {
     const LOCAL_VARIABLE: IrValueCapture = IrValueCapture {
         declaration: IrCapturedDeclaration::Variable,
         capturer: IrCapturingCallable::LocalFunction,
+        crossinline_parameter: None,
     };
 
     #[test]
@@ -566,7 +627,9 @@ mod tests {
 /// The `vararg` parameter of a declared function.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrVarargParameter {
-    /// SOURCE index among the value parameters (receiver excluded).
+    /// Index among the declared parameters: context parameters first, then value parameters.
+    /// Receivers and captures are not counted; a target finds the physical slot through the
+    /// function's parameter identities.
     pub index: usize,
     /// No value parameter follows it.
     pub is_last: bool,

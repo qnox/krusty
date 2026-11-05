@@ -4,10 +4,10 @@
 
 use crate::jvm::classreader::{ClassInfo, MethodSig};
 use crate::libraries::{
-    AnnotationElementDefault, AnnotationParameterPolicy, AnnotationPositionalPolicy, ParamList,
-    Visibility,
+    AnnotationElementDefault, AnnotationParameterPolicy, AnnotationPositionalPolicy, FunctionSet,
+    ParamList, PropKind, PropertyInfo, PropertyProducer, Visibility,
 };
-use crate::types::{AnnotationTargets, AnnotationValue, Ty, TyKind};
+use crate::types::{AnnotationTargets, AnnotationValue, Ty, TyKind, TypeName};
 
 /// The defaults the elements of the annotation class `class` declare, as its language reads them.
 /// A Kotlin class literal names a Kotlin class, and `java.lang.Integer::class` is `Int::class`, so
@@ -99,6 +99,81 @@ pub(super) fn java_annotation_parameter_list(class: &ClassInfo) -> Option<ParamL
             materialize_omitted_vararg: false,
         }),
     })
+}
+
+/// The properties Kotlin reads off the elements named `name` of the Java `@interface` `class`
+/// (`annotation.value`), each moved out of `functions`: Kotlin declares an element as a `val`, so
+/// it is never also a function (`annotation.value()` is not a call kotlinc accepts). Each getter
+/// is the element's own method, publishing the element's Kotlin type (`KClass` for a `Class`)
+/// over its physical result. Any other classifier publishes none.
+pub(super) fn java_annotation_element_properties(
+    class: &ClassInfo,
+    owner: TypeName,
+    receiver: Ty,
+    name: &str,
+    functions: &mut FunctionSet,
+) -> Vec<PropertyInfo> {
+    if class.meta.is_present() || class.access & crate::jvm::classfile::ACC_ANNOTATION == 0 {
+        return Vec::new();
+    }
+    let mut properties = Vec::new();
+    for method in class.methods.iter() {
+        if method.name != name || !is_java_annotation_element(method) {
+            continue;
+        }
+        let Some(ty) = java_annotation_element_type(method) else {
+            continue;
+        };
+        let Some(position) = functions.overloads.iter().position(|function| {
+            function.callable.physical_name() == method.name
+                && function.callable.descriptor == method.descriptor
+        }) else {
+            continue;
+        };
+        let function = functions.overloads.remove(position);
+        let mut getter = function.callable;
+        getter.physical_name = Some(method.name.clone());
+        getter.name = crate::names::property_getter_name(name);
+        getter.ret = ty;
+        properties.push(PropertyInfo {
+            return_value_status: None,
+            name: name.to_owned(),
+            kind: PropKind::Member,
+            receiver: Some(receiver),
+            associated_classifier: None,
+            associated_access_owner: None,
+            companion_associated: false,
+            formals: Vec::new(),
+            ty,
+            context_count: 0,
+            context_param_names: Vec::new(),
+            context_parameter_identities: Vec::new(),
+            getter,
+            setter: None,
+            setter_visibility: Visibility::Public,
+            setter_parameter_name: None,
+            is_const: false,
+            implicit_integer_coercion: false,
+            compile_time_constant: None,
+            metadata_constant_read: false,
+            deprecated_hidden: false,
+            accessor_availability: Default::default(),
+            is_final: true,
+            visibility: Visibility::Public,
+            owner,
+            receiver_rank: 0,
+            source_key: None,
+            stable_declaration: None,
+            source_visible: true,
+            getter_declaration: None,
+            setter_declaration: None,
+            source_member: None,
+            // A declared `val`, not a property derived from a bean accessor.
+            producer: PropertyProducer::KotlinAccessor,
+            read_stability: crate::libraries::PropertyReadStability::Unstable,
+        });
+    }
+    properties
 }
 
 /// Whether `method` is an element of the Java `@interface` that declares it.

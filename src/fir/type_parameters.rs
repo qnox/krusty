@@ -26,7 +26,7 @@ impl ResolvedTypeParameterBound {
         {
             let bound = bound.non_null();
             match bound.kind() {
-                TyKind::Fun(_) | TyKind::TyParam(..) => true,
+                TyKind::Fun(_) | TyKind::TyParam(..) | TyKind::Var(..) => true,
                 _ => bound.obj_internal().is_some_and(classifier_is_interface),
             }
         }

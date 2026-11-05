@@ -7,7 +7,7 @@ use crate::types::{Ty, TyKind, TypeName};
 /// The type parameters a type may name, by their declared names: a dependency callable's own, in
 /// declaration order. A module function's body names none.
 #[derive(Clone, Copy)]
-pub(super) struct TypeParameters<'a>(pub(super) &'a [String]);
+pub(super) struct TypeParameters<'a>(pub(super) &'a [crate::types::TyParamName]);
 
 impl TypeParameters<'_> {
     pub(super) const NONE: TypeParameters<'static> = TypeParameters(&[]);
@@ -38,7 +38,9 @@ pub(super) fn identity(ty: Ty, parameters: TypeParameters<'_>) -> Result<TypeIde
             },
             None => return Err(format!("the type parameter `{name}` of a class")),
         },
-        TyKind::PlatformNullable(_) => return Err("a platform type".into()),
+        TyKind::PlatformNullable(_) | TyKind::MutabilityFlexible(_) => {
+            return Err("a platform type".into())
+        }
         TyKind::Fun(_) => return Err("a function type".into()),
         TyKind::DefinitelyNotNull(_) => return Err("a definitely non-null type".into()),
         TyKind::Intersection(_) => return Err("an intersection type".into()),
@@ -46,7 +48,7 @@ pub(super) fn identity(ty: Ty, parameters: TypeParameters<'_>) -> Result<TypeIde
             return Err("a projection outside a type argument".into())
         }
         TyKind::RawProjection(_) => return Err("a Java raw type argument".into()),
-        TyKind::Null | TyKind::Nullable(_) | TyKind::Error | TyKind::Pending => {
+        TyKind::Null | TyKind::Nullable(_) | TyKind::Error | TyKind::Pending | TyKind::Var(..) => {
             return Err(format!("the unchecked type {ty:?}"))
         }
     };

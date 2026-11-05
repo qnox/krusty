@@ -16,6 +16,26 @@ use krusty::metadata::semantic::{parse_package_fragment_checked, KotlinPackage, 
 
 use crate::common;
 
+#[test]
+fn literal_dollar_headers_preserve_the_complete_klib_class_inventory() {
+    let source = r#"package header_names
+class `Owner$Literal` { class `Child$Name` }
+class `Lone$Name`
+"#;
+    let (messages, packages) = written_packages(&[("Names", source)])
+        .expect("KLIB class metadata requires the provisioned Native toolchain");
+    assert_eq!(messages, Vec::<String>::new());
+    assert_eq!(packages.len(), 1);
+    assert_eq!(
+        packages[0].class_order,
+        [
+            "header_names/Owner$Literal",
+            "header_names/Owner$Literal.Child$Name",
+            "header_names/Lone$Name",
+        ]
+    );
+}
+
 const CLASSES: &str = r#"package shapes
 
 annotation class Marker

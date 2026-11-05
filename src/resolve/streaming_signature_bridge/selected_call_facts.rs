@@ -16,7 +16,17 @@ use crate::resolve::selected_result_publication::CompactSelectedResultPublicatio
 pub(super) struct SelectedCallFacts {
     contracts: RefCell<HashMap<OriginId, SelectedCallContract>>,
     abbreviations: RefCell<HashMap<OriginId, ResolvedTypeAbbreviation>>,
+    inferred_abbreviations: RefCell<HashMap<OriginId, InferredAbbreviation>>,
     publications: RefCell<HashMap<OriginId, CompactSelectedResultPublication>>,
+}
+
+/// The alias shape a constructor call inferred its abbreviation arguments through: the alias
+/// formals and its expansion. The published constructor type binds those formals again, so an
+/// inferred argument carries the same flexibility in the abbreviation as in the expanded type.
+#[derive(Clone)]
+pub(super) struct InferredAbbreviation {
+    pub(super) formals: Box<[String]>,
+    pub(super) expansion: crate::types::Ty,
 }
 
 struct SelectedCallContract {
@@ -96,6 +106,7 @@ impl SelectedCallFacts {
     /// longer describes it.
     pub(super) fn forget_abbreviation(&self, origin: OriginId) {
         self.abbreviations.borrow_mut().remove(&origin);
+        self.inferred_abbreviations.borrow_mut().remove(&origin);
     }
 
     pub(super) fn record_abbreviation(
@@ -108,6 +119,20 @@ impl SelectedCallFacts {
 
     pub(super) fn abbreviation(&self, origin: OriginId) -> Option<ResolvedTypeAbbreviation> {
         self.abbreviations.borrow().get(&origin).cloned()
+    }
+
+    pub(super) fn record_inferred_abbreviation(
+        &self,
+        origin: OriginId,
+        inferred: InferredAbbreviation,
+    ) {
+        self.inferred_abbreviations
+            .borrow_mut()
+            .insert(origin, inferred);
+    }
+
+    pub(super) fn inferred_abbreviation(&self, origin: OriginId) -> Option<InferredAbbreviation> {
+        self.inferred_abbreviations.borrow().get(&origin).cloned()
     }
 
     /// A call is being selected again under refined expectations. Facts from the former winner

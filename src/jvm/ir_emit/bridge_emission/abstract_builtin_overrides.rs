@@ -51,6 +51,7 @@ fn emit_member(
         name: &member.name,
         parameters: &parameters,
         result,
+        result_box: None,
     };
     match &member.bridge {
         SpecialBridge::Renamed { jvm_name, erased } => {

@@ -4,6 +4,7 @@
 //! exact semantic facts each referenced module declaration needs are copied into these records, so
 //! a target realizes the edge without reopening the frontend module index.
 
+use super::expression_copy::InheritedFacts;
 use super::{IrParameterIdentity, IrStaticPlacement, Ty, TypeName};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +46,10 @@ pub struct IrModuleCallable {
     /// Declaration type parameters and their complete bounds. A JVM realization erases a call to
     /// this declaration with the same primary class bound it uses for a same-file signature.
     pub type_parameters: Box<[IrCallableTypeParameter]>,
+    /// The declaring classifier's type parameters, those it captures from enclosing classifiers
+    /// included, with their complete bounds. A class formal in `parameters` or `result` erases
+    /// with these records exactly as it does in the declaring file.
+    pub owner_type_parameters: Box<[IrCallableTypeParameter]>,
     /// Stable source/generated identities parallel to `parameters`. Backends use these for debug
     /// and parameter metadata on synthesized adapters instead of inventing positional names.
     pub parameter_identities: Box<[IrParameterIdentity]>,
@@ -58,6 +63,21 @@ pub struct IrModuleCallable {
     /// classifier published them. A target whose realization of an override's result depends on
     /// the overridden results realizes a call to it, or an override of it, from these in every file.
     pub overridden_results: Box<[Ty]>,
+    /// Every declaration this one overrides, directly or through other module overrides, with the
+    /// unapplied signature its override edge records. A target whose call to an override takes an
+    /// overridden declaration's ABI realizes the call from these in every file.
+    pub overridden_declarations: Box<[IrOverriddenFunction]>,
+}
+
+/// One declaration a module callable overrides, as its override edge records it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrOverriddenFunction {
+    pub target: crate::fir::ResolvedFunctionOverrideTarget,
+    pub owner: TypeName,
+    pub name: Box<str>,
+    /// The overridden declaration's own parameters, any extension receiver in place, and result.
+    pub parameters: Box<[Ty]>,
+    pub result: Ty,
 }
 
 /// Exact current-module declaration selected for a member operation, plus the selected semantic
@@ -110,6 +130,9 @@ pub struct IrModuleConstructor {
     pub parameters: Box<[Ty]>,
     /// An inner class's enclosing classifier, whose instance a construction passes first.
     pub outer: Option<TypeName>,
+    /// The constructed classifier's type parameters, those it captures from enclosing classifiers
+    /// included, with their complete bounds. `parameters` erase with these records.
+    pub owner_type_parameters: Box<[IrCallableTypeParameter]>,
 }
 
 /// The module constructors a file names: what each construction selected, and the record of
@@ -154,5 +177,16 @@ impl super::IrFile {
         self.referenced_module_classifiers
             .get(&classifier)
             .map(|classifier| classifier.kind)
+    }
+}
+
+impl InheritedFacts for IrModuleConstructions {
+    fn inherit(&mut self, source: super::ExprId, target: super::ExprId) {
+        // The constructor records belong to declarations, not to expressions.
+        let Self {
+            selected,
+            records: _,
+        } = self;
+        selected.inherit(source, target);
     }
 }

@@ -1,0 +1,14 @@
+# What KSP2 2.3.12 (KSPJvmMain) logs with Accessors.kt over accessors/: each property getter's
+# origin and its return type: the type, the reference's origin, whether it is the property's
+# own reference and what its parent is.
+w: [ksp] getter accessors.topLevel origin=SYNTHETIC type=kotlin.collections.Map<kotlin.String, kotlin.Int> typeOrigin=SYNTHETIC sameAsProperty=false equalsProperty=false parent=getter
+w: [ksp] getter accessors.topLevelVar origin=SYNTHETIC type=kotlin.Double typeOrigin=SYNTHETIC sameAsProperty=false equalsProperty=false parent=getter
+w: [ksp] getter accessors.Holder.primary origin=SYNTHETIC type=kotlin.String typeOrigin=SYNTHETIC sameAsProperty=false equalsProperty=false parent=getter
+w: [ksp] getter accessors.Holder.mutablePrimary origin=SYNTHETIC type=kotlin.Int? typeOrigin=SYNTHETIC sameAsProperty=false equalsProperty=false parent=getter
+w: [ksp] getter accessors.Holder.plain origin=SYNTHETIC type=kotlin.collections.List<kotlin.String> typeOrigin=SYNTHETIC sameAsProperty=false equalsProperty=false parent=getter
+w: [ksp] getter accessors.Holder.custom origin=KOTLIN type=kotlin.Int typeOrigin=KOTLIN sameAsProperty=false equalsProperty=false parent=getter
+w: [ksp] getter accessors.Holder.inferred origin=SYNTHETIC type=kotlin.Int typeOrigin=SYNTHETIC sameAsProperty=false equalsProperty=false parent=getter
+w: [ksp] getter accessors.Holder.inferredGetter origin=KOTLIN type=kotlin.String typeOrigin=KOTLIN sameAsProperty=false equalsProperty=false parent=getter
+w: [ksp] getter accessors.Holder.annotatedGetter origin=SYNTHETIC type=kotlin.Int typeOrigin=SYNTHETIC sameAsProperty=false equalsProperty=false parent=getter
+w: [ksp] getter accessors.Holder.nullable origin=SYNTHETIC type=kotlin.String? typeOrigin=SYNTHETIC sameAsProperty=false equalsProperty=false parent=getter
+w: [ksp] getter accessors.Holder.late origin=SYNTHETIC type=kotlin.String typeOrigin=SYNTHETIC sameAsProperty=false equalsProperty=false parent=getter

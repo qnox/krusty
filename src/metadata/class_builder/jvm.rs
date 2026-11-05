@@ -6,7 +6,7 @@ use crate::metadata::local_properties::{
 };
 use crate::metadata::protobuf::Pb;
 use crate::metadata::type_encoder::{StringTable, TypeParameters};
-use crate::types::{Ty, TypeName};
+use crate::types::Ty;
 
 use super::carrier::{AnnotationSite, ClassCarrier, ConstructorSlot};
 use super::declarations::{ClassTail, EnumEntryMeta, FnMeta, PropMeta};
@@ -287,14 +287,14 @@ pub(super) fn jvm_method_sig(st: &mut StringTable<'_>, name: Option<&str>, desc:
 /// `ctor_params` are the primary-constructor `(name, type)` pairs; `signatures` how the JVM
 /// realizes the declarations.
 pub fn build_class(
-    class_internal: TypeName,
+    class_id: &crate::metadata::class_id::ResolvedClassId,
     ctor_params: &[(String, Ty)],
     props: &[PropMeta],
     methods: &[FnMeta],
     enum_entries: &[EnumEntryMeta<'_>],
     tail: &ClassTail,
     signatures: &JvmClassSignatures<'_>,
-) -> (Vec<u8>, Vec<String>) {
+) -> Result<(Vec<u8>, Vec<String>), crate::metadata::class_id::ClassIdError> {
     let mut st = StringTable::with_local_classifiers(
         tail.local_classifiers,
         tail.enum_entry_bodies,
@@ -304,7 +304,8 @@ pub fn build_class(
     let class = class_message(
         &mut st,
         &ClassDeclaration {
-            name: class_internal,
+            name: class_id.classifier(),
+            class_id,
             ctor_params,
             props,
             methods,
@@ -312,7 +313,7 @@ pub fn build_class(
             tail,
         },
         &JvmCarrier { signatures },
-    );
+    )?;
     let stt = st.serialize_types();
     let mut bytes = vec![0x00u8]; // UTF8 mode marker
     let mut prefix = Pb::new();
@@ -320,5 +321,5 @@ pub fn build_class(
     bytes.extend_from_slice(&prefix.into_bytes());
     bytes.extend_from_slice(stt.as_bytes());
     bytes.extend_from_slice(class.as_bytes());
-    (bytes, st.into_strings())
+    Ok((bytes, st.into_strings()))
 }
