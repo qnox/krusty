@@ -1240,10 +1240,6 @@ mod ir_lower_bail_coverage_e2e;
 mod ir_lower_deep_coverage_e2e;
 #[path = "is_nullable_and_notnull_smartcast_e2e.rs"]
 mod is_nullable_and_notnull_smartcast_e2e;
-#[path = "is_nullable_primitive_e2e.rs"]
-mod is_nullable_primitive_e2e;
-#[path = "is_primitive_smartcast_e2e.rs"]
-mod is_primitive_smartcast_e2e;
 #[path = "java_abstract_override_e2e.rs"]
 mod java_abstract_override_e2e;
 #[path = "java_annotation_element_property_e2e.rs"]
@@ -1607,6 +1603,8 @@ mod override_formal_identity_e2e;
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
+#[path = "primitive_types_e2e.rs"]
+mod primitive_types_e2e;
 #[path = "public_inline_property_access_e2e.rs"]
 mod public_inline_property_access_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]

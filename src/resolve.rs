@@ -47527,27 +47527,14 @@ impl<'a> Checker<'a> {
     /// Are two reference types comparable as `when`-subject value arms? A `when (s) { A -> … }` over a
     /// sealed subject `s: S` matches the *object* `A` (a subtype of `S`) by `==` — valid in Kotlin
     /// whenever one operand's type is a subtype of the other (the comparison can be non-trivially true).
-    /// A primitive or `String` operand takes part through its REFERENCE form: `when (x: Any) { 1 -> … }`
-    /// compares the boxed `Int` with the `Any` subject (kotlinc emits `Intrinsics.areEqual`), and the
-    /// comparison can be non-trivially true for exactly the same subtype reason.
+    /// A primitive or `String` operand is its own Kotlin classifier (`Int` is `kotlin/Int`), so
+    /// `when (x: Any) { 1 -> … }` is comparable for exactly the same subtype reason.
     fn when_objs_comparable(&self, st: Ty, ct: Ty) -> bool {
-        match (
-            Self::when_reference_form(st).kind(),
-            Self::when_reference_form(ct).kind(),
-        ) {
+        match (st.kind(), ct.kind()) {
             (TyKind::Obj(a, _), TyKind::Obj(b, _)) => {
                 self.obj_name_is_subtype(a, b) || self.obj_name_is_subtype(b, a)
             }
             _ => false,
-        }
-    }
-
-    /// The reference (object) form of a value type: a primitive boxes to its Kotlin class
-    /// (`Int` → `kotlin/Int`), `String` names `kotlin/String`, and any other type is returned as is.
-    fn when_reference_form(t: Ty) -> Ty {
-        match t {
-            Ty::String => Ty::obj("kotlin/String"),
-            _ => t.boxed_ref().unwrap_or(t),
         }
     }
 
@@ -49547,14 +49534,20 @@ impl<'a> Checker<'a> {
         if expected.is_erased_top() {
             return;
         }
-        // A primitive flowing into a reference supertype is checked through its boxed source type; the
-        // provider's type hierarchy decides whether that box implements `Number`, `Comparable`, etc.
-        if let (Some(TyKind::Obj(b, _)), TyKind::Obj(e, _)) =
-            (actual.boxed_ref().map(|ty| ty.kind()), expected.kind())
+        // A primitive flowing into a reference supertype is checked through its own Kotlin
+        // classifier's applied hierarchy: the builtin `kotlin/Int` is a `Number` and a
+        // `Comparable<Int>`, so it reaches `Comparable<Int>` but not `Comparable<String>`.
+        let scalar = actual.is_numeric_or_char() || actual == Ty::Boolean || actual.is_unsigned();
+        if scalar
+            && matches!(expected.kind(), TyKind::Obj(..))
+            && crate::assignable::is_subtype(
+                &crate::assignable::TyCtx::new(),
+                self,
+                actual,
+                expected,
+            )
         {
-            if self.obj_name_is_subtype(b, e) {
-                return;
-            }
+            return;
         }
         // The dedicated `Ty::String` variant and its object form `Obj("kotlin/String")` denote the SAME
         // type (they share an erased key); a value of one flows into the other. A metadata-derived return
