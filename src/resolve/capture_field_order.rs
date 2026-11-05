@@ -75,19 +75,12 @@ fn same_capture(capture: &AnonymousObjectCapture, exact: &AnonymousObjectCapture
     capture.name == exact.name && capture.source == exact.source
 }
 
-/// A capture keeps its established cell sharing, and its established type while the revisit only
-/// knows a pending one.
+/// A capture keeps its established cell sharing, and its established type while the revisit knows
+/// less: a pending type knows less than one that still holds an open call's variable (which that
+/// call's solution completes), and both know less than a determined type.
 fn keep_established_facts(capture: &mut AnonymousObjectCapture, exact: &AnonymousObjectCapture) {
     capture.shared_cell |= exact.shared_cell;
-    if (capture.ty.mentions_pending()
-        || capture
-            .storage_ty
-            .is_some_and(|storage| storage.mentions_pending()))
-        && !exact.ty.mentions_pending()
-        && exact
-            .storage_ty
-            .is_none_or(|storage| !storage.mentions_pending())
-    {
+    if exact.type_knowledge() > capture.type_knowledge() {
         capture.ty = exact.ty;
         capture.storage_ty = exact.storage_ty;
     }

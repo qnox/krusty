@@ -19,18 +19,24 @@ pub(super) fn emit(
     // A non-null `Any` collection parameter shares the Java method's descriptor, so `null` never
     // reaches a bridge. The recorded plan returns the neutral result; that parameter has no
     // further `checkNotNullParameter`, because the guard already proved it present.
-    let mut covered = None;
+    let mut covered = Vec::new();
     if receiver_value && holder_receiver.is_none() {
         if let Some(plan) = env.collection_method_entry_barriers.plan(function) {
-            let value = u32::try_from(plan.parameter).expect("a barrier parameter index fits")
-                + u32::from(receiver_value);
-            if let Some(&(slot, _)) = emitter.slots.get(&value) {
-                let present = code.new_label();
-                code.aload(slot);
-                code.ifnonnull(present);
-                bridge_emission::emit_barrier_outcome(plan.outcome, emitter.cw, code);
-                code.bind(present);
-                covered = Some(plan.parameter);
+            for checked in &plan.parameters {
+                let value = u32::try_from(checked.parameter)
+                    .expect("a barrier parameter index fits")
+                    + u32::from(receiver_value);
+                if let Some(&(slot, _)) = emitter.slots.get(&value) {
+                    bridge_emission::emit_barrier_check(
+                        emitter.cw,
+                        code,
+                        slot,
+                        checked.check,
+                        "java/lang/Object",
+                        plan.outcome,
+                    );
+                    covered.push(checked.parameter);
+                }
             }
         }
     }
@@ -46,7 +52,7 @@ pub(super) fn emit(
         crate::jvm::parameter_names::function_assertions(ir, function, parameter_types),
     );
     for (index, check) in declared.param_checks.iter().enumerate() {
-        if check.is_none() || covered == Some(index) {
+        if check.is_none() || covered.contains(&index) {
             continue;
         }
         let _identity = parameter_identities

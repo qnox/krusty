@@ -141,8 +141,8 @@ pub use resolved_symbol::{
 };
 pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
 use scope_level_callables::{
-    callables_from_symbols, fn_in_scope, function_set_from_symbols, level_functions,
-    level_properties, symbol_levels_in_function_scope, symbols_in_function_scope,
+    callables_from_symbols, fn_in_scope, level_functions, level_properties,
+    symbol_levels_in_function_scope, symbols_in_function_scope,
     tagged_symbol_levels_in_function_scope, FunctionScopeRef,
 };
 pub(crate) use scope_level_callables::{CallableImport, FunctionImportScope};
@@ -1539,12 +1539,7 @@ impl<'a> SymbolResolver<'a> {
     }
 
     pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
-        let functions = self
-            .symbol_levels_in_scope(name)
-            .into_iter()
-            .map(|symbols| function_set_from_symbols(&symbols))
-            .find(|functions| !functions.overloads.is_empty())
-            .unwrap_or_default();
+        let functions = self.nearest_top_level_functions(&self.symbol_levels_in_scope(name));
         crate::trace_compiler!(
             "resolve",
             "top-level candidate inventory {name}: {:?}",
@@ -1839,11 +1834,7 @@ impl<'a> SymbolResolver<'a> {
                 // reads `overloads` to inspect the family, or `top_level_call` for the arg/type-arg selected
                 // callable (default/vararg-aware) ready to emit.
                 let levels = self.symbol_levels_in_scope(name);
-                let fs = levels
-                    .iter()
-                    .map(|symbols| function_set_from_symbols(symbols))
-                    .find(|functions| !functions.overloads.is_empty())
-                    .unwrap_or_default();
+                let fs = self.nearest_top_level_functions(&levels);
                 crate::trace_compiler!(
                     "signature_inference",
                     "top-level candidates={name} {:?}",
@@ -2863,7 +2854,7 @@ fn select_instance_member_ty(
 fn receiver_allows_member_dispatch(receiver: Ty) -> bool {
     match receiver.kind() {
         TyKind::Nullable(_) | TyKind::Null => false,
-        TyKind::TyParam(_, bound) => receiver_allows_member_dispatch(bound),
+        TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => receiver_allows_member_dispatch(bound),
         // Kotlin permits direct member calls on Java platform types despite uncertain nullability.
         TyKind::PlatformNullable(_) => true,
         _ => true,

@@ -140,6 +140,7 @@ mod declaration_rules;
 mod declaration_usage;
 mod dependency_platform;
 mod deprecation_phase;
+use deprecation_phase::DeprecationNames;
 mod deprecation_usage;
 mod destructuring;
 mod diagnostic_selection;
@@ -306,6 +307,7 @@ use selected_argument_commitment::{
     indexed_operator_argument_parameters, indexed_operator_argument_slots, SelectedArgumentBinding,
     SelectedArgumentCommitment,
 };
+mod erased_overload_keys;
 mod signature_collection;
 mod signature_parameter_identity;
 mod type_parameter_bounds;
@@ -408,7 +410,7 @@ use member_extension_selection::{
 };
 pub(crate) use named_class_constructors::publish_named_class_constructors;
 pub(crate) use override_plans::publish_override_plans;
-use postponed_constraints::PostponedCallConstraints;
+use postponed_constraints::{PostponedCallConstraints, PostponedLambdaTypes};
 use postponed_diagnostics::PostponedDiagnostics;
 use property_read_selection::{PropertyReadAmbiguity, PropertyReadMemberSelection};
 use property_write_selection::PropertyWriteSelection;
@@ -3836,48 +3838,9 @@ fn constructor_argument_matches(
         )
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum ErasedTypeKey {
-    Ty(Ty),
-    Function(usize),
-}
-
-fn erased_key_ty(key: ErasedTypeKey) -> Ty {
-    match key {
-        ErasedTypeKey::Ty(t) => t,
-        ErasedTypeKey::Function(n) => Ty::obj(&format!("kotlin/Function{n}")),
-    }
-}
-
-/// Kotlin-level erasure key used by the checker for overload identity. This mirrors the JVM-relevant
-/// distinctions without formatting descriptors: generic arguments and nullability are erased, unsigned
-/// inline primitives fold to their signed representation, nullable primitives box, and type parameters
-/// erase to their bound.
-fn erased_type_key(t: Ty) -> ErasedTypeKey {
-    let key = match t.kind() {
-        _ if t.is_unsigned() => t.scalar_value_repr().unwrap(),
-        TyKind::STRING => Ty::obj("kotlin/String"),
-        TyKind::Obj(n, args) if n.matches("kotlin/Array") => {
-            let e = args
-                .first()
-                .copied()
-                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            Ty::obj_args("kotlin/Array", &[erased_key_ty(erased_type_key(e))])
-        }
-        TyKind::Obj(n, _) => Ty::obj_name(n),
-        TyKind::Null | TyKind::Nothing | TyKind::Error => Ty::obj("kotlin/Any"),
-        TyKind::Fun(s) => return ErasedTypeKey::Function(s.params.len() + usize::from(s.suspend)),
-        TyKind::Nullable(inner) => match inner {
-            Ty::UInt => Ty::obj("kotlin/UInt"),
-            Ty::ULong => Ty::obj("kotlin/ULong"),
-            other if other.boxed_ref().is_some() => other.boxed_ref().unwrap_or(other),
-            other => erased_key_ty(erased_type_key(other)),
-        },
-        TyKind::TyParam(_, bound) => erased_key_ty(erased_type_key(bound)),
-        _ => t,
-    };
-    ErasedTypeKey::Ty(key)
-}
+use erased_overload_keys::{
+    erased_params_semantic_key, erased_type_key, same_erased_params, ErasedTypeKey,
+};
 
 /// The type of an unsigned integer literal (`200u`). Kotlin types an integer literal from its
 /// CONTEXT, unsigned exactly like signed: `val a: UByte = 200u` is a `UByte` the same way
@@ -3892,7 +3855,7 @@ fn unsigned_literal_ty(value: i64, expected: Option<Ty>) -> Ty {
     expected
         .map(Ty::non_null)
         .map(|expected| match expected.kind() {
-            TyKind::TyParam(_, bound) => bound.non_null(),
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => bound.non_null(),
             _ => expected,
         })
         .filter(|ty| constant.fits(*ty))
@@ -3910,7 +3873,7 @@ fn signed_literal_ty(value: i64, expected: Option<Ty>) -> Ty {
     expected
         .map(Ty::non_null)
         .map(|expected| match expected.kind() {
-            TyKind::TyParam(_, bound) => bound.non_null(),
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => bound.non_null(),
             _ => expected,
         })
         .filter(|ty| fits(*ty))
@@ -3936,18 +3899,6 @@ fn signed_unary_literal_ty(value: i64, operator: UnOp, expected: Option<Ty>) -> 
         _ => false,
     };
     fits.then_some(expected)
-}
-
-fn same_erased_params(left: &[Ty], right: &[Ty]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(&left, &right)| erased_type_key(left) == erased_type_key(right))
-}
-
-fn erased_params_semantic_key(sig: &Signature) -> Vec<ErasedTypeKey> {
-    sig.params.iter().copied().map(erased_type_key).collect()
 }
 
 /// A loose, `self`-free argument-fit test for overload disambiguation: is a value of type `a` plausibly
@@ -7177,7 +7128,7 @@ fn unify_ty_common(
     join: &dyn Fn(Ty, Ty) -> Ty,
 ) {
     match (shape.kind(), actual.kind()) {
-        (TyKind::TyParam(name, _), _) if tparams.contains(&name) => {
+        (TyKind::TyParam(name, _) | TyKind::Var(name, _), _) if tparams.contains(&name) => {
             binds
                 .entry(crate::types::TyParamName::new(&name))
                 .and_modify(|bound| {
@@ -9633,7 +9584,7 @@ impl CheckerScope<'_> {
     /// parameter reaches the body already erased to its first bound, so that erasure — not the
     /// parameter's name — is what a member lookup has in hand; this maps back from it.
     fn tparam_extra_bounds(&self, bound: Ty) -> Vec<Ty> {
-        if let TyKind::TyParam(identity, _) = bound.non_null().kind() {
+        if let TyKind::TyParam(identity, _) | TyKind::Var(identity, _) = bound.non_null().kind() {
             for rung in self.classifier_rungs() {
                 let mut matched = None;
                 rung.own_bindings(Ns::Classifier, |_, binding| {
@@ -11957,7 +11908,9 @@ impl<'a> Checker<'a> {
             bounds: &mut crate::types::TyParamBindings,
         ) {
             match ty.kind() {
-                TyKind::TyParam(formal, bound) if formals.contains(&formal) => {
+                TyKind::TyParam(formal, bound) | TyKind::Var(formal, bound)
+                    if formals.contains(&formal) =>
+                {
                     bounds
                         .entry(crate::types::TyParamName::new(&formal))
                         .or_insert(bound);
@@ -14066,15 +14019,15 @@ impl<'a> Checker<'a> {
                 }
                 selected_receiver_candidates.extend(candidates);
                 candidates = selected_receiver_candidates;
-                // Finalize away receiver rungs the scratch body did not select. Pending inference
-                // remains provisional so an incomplete revisit cannot discard an established
-                // field.
+                // Finalize away receiver rungs the scratch body did not select. A capture whose type
+                // is still undetermined (pending inference, or an open call's inference variable)
+                // remains provisional so an incomplete revisit cannot discard an established field
+                // and the solved revisit records the capture's determined type.
+                let undetermined = |ty: Ty| ty.mentions_pending() || ty.mentions_type_variable();
                 let provisional = self.postponed_argument_depth != 0
                     || candidates.iter().any(|candidate| {
-                        candidate.ty.mentions_pending()
-                            || candidate
-                                .delegate_storage
-                                .is_some_and(|storage| storage.mentions_pending())
+                        undetermined(candidate.ty)
+                            || candidate.delegate_storage.is_some_and(undetermined)
                     });
                 if !provisional {
                     self.finalized_anonymous_captures.insert(declaration);
@@ -16925,7 +16878,7 @@ impl<'a> Checker<'a> {
                                 .and_then(|parameters| parameters.get(source))
                                 .copied()
                                 .unwrap_or(source);
-                            let Some(TyKind::TyParam(formal, _)) = generic
+                            let Some(TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) = generic
                                 .params
                                 .get(parameter)
                                 .copied()
@@ -17474,10 +17427,8 @@ impl<'a> Checker<'a> {
                                 });
                             let (shaped, collect_postponed) =
                                 PostponedCallConstraints::enter_for_type(
+                                    self.postponed_call_site(call, a),
                                     &mut self.postponed_call_constraints,
-                                    self.compilation_id,
-                                    self.file_index,
-                                    call,
                                     &postponed_formals,
                                     shaped,
                                 );
@@ -17781,23 +17732,27 @@ impl<'a> Checker<'a> {
                                 })
                                 .cloned()
                                 .collect::<Vec<_>>();
-                            let (
-                                selected_params,
-                                expected_type,
-                                fixed_expected_type,
-                                recv_i,
-                                collect_postponed,
-                            ) = PostponedCallConstraints::enter_lambda(
-                                &mut self.postponed_call_constraints,
-                                self.compilation_id,
-                                self.file_index,
-                                call,
-                                &postponed_formals,
-                                selected_params,
-                                expected_type,
-                                selected_lambda_fixed_expected.as_deref(),
-                                i,
-                                recv_i,
+                            let fixed = selected_lambda_fixed_expected.as_ref();
+                            let (entered, collect_postponed) =
+                                PostponedCallConstraints::enter_lambda(
+                                    self.postponed_call_site(call, a),
+                                    &mut self.postponed_call_constraints,
+                                    &postponed_formals,
+                                    PostponedLambdaTypes {
+                                        parameters: selected_params,
+                                        expected: expected_type,
+                                        fixed: fixed
+                                            .and_then(|fixed| fixed.get(i))
+                                            .copied()
+                                            .flatten(),
+                                        receiver: recv_i,
+                                    },
+                                );
+                            let (selected_params, expected_type, fixed_expected_type, recv_i) = (
+                                entered.parameters,
+                                entered.expected,
+                                entered.fixed,
+                                entered.receiver,
                             );
                             self.argument_lambda_inlining.insert(
                                 a,
@@ -18014,10 +17969,8 @@ impl<'a> Checker<'a> {
                                     .unwrap_or_default();
                                 let (instantiated_expectation, collect_postponed) =
                                     PostponedCallConstraints::enter_for_type(
+                                        self.postponed_call_site(call, a),
                                         &mut self.postponed_call_constraints,
-                                        self.compilation_id,
-                                        self.file_index,
-                                        call,
                                         &postponed_formals,
                                         expected_callable,
                                     );
@@ -18170,10 +18123,8 @@ impl<'a> Checker<'a> {
                                 .unwrap_or_default();
                             let (expected_function, collect_postponed) =
                                 PostponedCallConstraints::enter_for_function(
+                                    self.postponed_call_site(call, a),
                                     &mut self.postponed_call_constraints,
-                                    self.compilation_id,
-                                    self.file_index,
-                                    call,
                                     &postponed_formals,
                                     expected_function,
                                 );
@@ -18849,7 +18800,10 @@ impl<'a> Checker<'a> {
                     let receiver = implicit_receiver.ty;
                     let mut receiver_extension = None;
                     if receiver == Ty::String
-                        || matches!(receiver.kind(), TyKind::Obj(..) | TyKind::TyParam(..))
+                        || matches!(
+                            receiver.kind(),
+                            TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Var(..)
+                        )
                     {
                         match self.record_member_call_with_slots(
                             scope,
@@ -29499,7 +29453,9 @@ pub(crate) fn semantic_common_supertype_inner(
             a
         });
     }
-    if let (TyKind::TyParam(left, _), TyKind::TyParam(right, _)) = (a.kind(), b.kind()) {
+    if let (TyKind::TyParam(left, _), TyKind::TyParam(right, _))
+    | (TyKind::Var(left, _), TyKind::Var(right, _)) = (a.kind(), b.kind())
+    {
         if left == right {
             // Elvis/`!!` represents `T & Any` as the same parameter identity with a non-null
             // bound. Joining it with an ordinary occurrence of T recovers T; widening both to the
@@ -33431,7 +33387,7 @@ fn merge_source_constructor_shape_bindings(
     inference: &mut SourceConstructorBindings<'_>,
 ) {
     match shape.kind() {
-        TyKind::TyParam(name, _) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
             let Some(index) = type_parameters
                 .iter()
                 .position(|parameter| parameter == name)
@@ -33653,7 +33609,12 @@ fn common_result_nullability(a: Ty, b: Ty, base: Ty) -> Ty {
 
 fn same_type_class_join(a: Ty, b: Ty) -> Option<Ty> {
     let (an, bn) = (a.non_null(), b.non_null());
-    let erased = |ty: Ty| matches!(ty.kind(), TyKind::Obj(..) | TyKind::TyParam(..));
+    let erased = |ty: Ty| {
+        matches!(
+            ty.kind(),
+            TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Var(..)
+        )
+    };
     let same_kotlin_class = |left: Ty, right: Ty| {
         matches!(
             (left.kotlin_class_internal(), right.kotlin_class_internal()),
@@ -33663,7 +33624,12 @@ fn same_type_class_join(a: Ty, b: Ty) -> Option<Ty> {
 
     let base = match (erased(an), erased(bn)) {
         (true, true) => match (an.kind(), bn.kind()) {
-            (TyKind::TyParam(left, _), TyKind::TyParam(right, _)) if left == right => an,
+            (TyKind::TyParam(left, _), TyKind::TyParam(right, _))
+            | (TyKind::Var(left, _), TyKind::Var(right, _))
+                if left == right =>
+            {
+                an
+            }
             (TyKind::Obj(left, left_args), TyKind::Obj(right, right_args))
                 if left == right && left_args.is_empty() && right_args.is_empty() =>
             {
@@ -35788,11 +35754,12 @@ impl<'a> Checker<'a> {
                                 .copied()
                                 .unwrap_or(false)
                         {
-                            if let Some(TyKind::TyParam(formal, _)) = signature
-                                .params
-                                .get(declaration_parameter)
-                                .copied()
-                                .map(|ty| ty.non_null().kind())
+                            if let Some(TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) =
+                                signature
+                                    .params
+                                    .get(declaration_parameter)
+                                    .copied()
+                                    .map(|ty| ty.non_null().kind())
                             {
                                 let intersection = self
                                     .expr_access_path(args[argument])
@@ -35904,7 +35871,7 @@ impl<'a> Checker<'a> {
                         declared = declared.array_read_elem().unwrap_or(declared);
                     }
                     let mut bounded = declared.non_null();
-                    while let TyKind::TyParam(_, bound) = bounded.kind() {
+                    while let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = bounded.kind() {
                         let value_bound = self.integer_literal_semantic_type(bound);
                         if kind.adapts_integer_literal_to(value_bound) {
                             actual.1 = value_bound;
@@ -39456,7 +39423,9 @@ impl<'a> Checker<'a> {
         parameter: usize,
         fixed: impl FnOnce(usize) -> bool,
     ) -> Option<String> {
-        let TyKind::TyParam(formal, bound) = (*signature.params.get(parameter)?).kind() else {
+        let (TyKind::TyParam(formal, bound) | TyKind::Var(formal, bound)) =
+            (*signature.params.get(parameter)?).kind()
+        else {
             return None;
         };
         let formal_index = signature
@@ -49275,7 +49244,7 @@ impl<'a> Checker<'a> {
                 return;
             }
             match declared.kind() {
-                TyKind::TyParam(name, _) => {
+                TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
                     bindings
                         .entry(crate::types::TyParamName::new(&name))
                         .or_insert(expected);
@@ -49362,9 +49331,9 @@ impl<'a> Checker<'a> {
     ) -> Option<(usize, bool, bool)> {
         let &(shape, definitely_non_null) = parameter_shapes.get(slot)?;
         let (name, nullable) = match shape.kind() {
-            TyKind::TyParam(name, _) => (name, false),
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => (name, false),
             TyKind::Nullable(inner) => match inner.kind() {
-                TyKind::TyParam(name, _) => (name, true),
+                TyKind::TyParam(name, _) | TyKind::Var(name, _) => (name, true),
                 _ => return None,
             },
             _ => return None,
@@ -50343,7 +50312,7 @@ impl<'a> Checker<'a> {
         };
         let symbolic = expected.non_null();
         let mut bound = symbolic;
-        while let TyKind::TyParam(_, upper) = bound.kind() {
+        while let TyKind::TyParam(_, upper) | TyKind::Var(_, upper) = bound.kind() {
             bound = upper.non_null();
         }
         let scalar = self.integer_literal_semantic_type(bound);
@@ -50418,7 +50387,9 @@ impl<'a> Checker<'a> {
         actual: Ty,
         bindings: &mut crate::symbol_resolver::GSigBinds,
     ) {
-        let Some(TyKind::TyParam(formal, _)) = parameter.map(|ty| ty.non_null().kind()) else {
+        let Some(TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) =
+            parameter.map(|ty| ty.non_null().kind())
+        else {
             return;
         };
         if formals.contains(&formal) {
@@ -60215,6 +60186,7 @@ impl<'a> Checker<'a> {
     ) {
         match (declared.non_null().kind(), actual.non_null().kind()) {
             (TyKind::TyParam(formal, _), TyKind::TyParam(actual_name, _))
+            | (TyKind::Var(formal, _), TyKind::Var(actual_name, _))
                 if actual_name == formal =>
             {
                 bindings.insert(crate::types::TyParamName::new(&formal), actual.non_null());

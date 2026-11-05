@@ -33,7 +33,7 @@ fn formal_erasure<F: TyParamKey>(
     }
     visiting.push(index);
     let erased = match bound.non_null().kind() {
-        TyKind::TyParam(name, _) => match formals
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => match formals
             .iter()
             .position(|formal| formal.borrow() == name.as_str())
         {
