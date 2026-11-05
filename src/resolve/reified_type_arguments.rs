@@ -138,7 +138,7 @@ impl Checker<'_> {
                 Some(ReifiedTypeArgument {
                     ordinal,
                     argument,
-                    formal,
+                    formal: formal.to_string(),
                     intersection: call.intersections.get(&ordinal).cloned(),
                     provenance: call
                         .argument_provenance(ordinal)
@@ -255,7 +255,7 @@ impl Checker<'_> {
         }
         let features = &self.file.reified_type_arguments;
         match argument.kind() {
-            TyKind::TyParam(name, _) => {
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
                 if !reified_type_parameter(scope, name.as_str()) {
                     problems.push(ReifiedProblem::TypeParameter {
                         name: name.as_str(),
@@ -265,7 +265,7 @@ impl Checker<'_> {
                 }
             }
             TyKind::Nullable(inner) if inner.is_ty_param() => {
-                if let TyKind::TyParam(name, _) = inner.kind() {
+                if let TyKind::TyParam(name, _) | TyKind::Var(name, _) = inner.kind() {
                     if !reified_type_parameter(scope, name.as_str()) {
                         problems.push(ReifiedProblem::TypeParameter {
                             name: name.as_str(),
@@ -316,28 +316,39 @@ impl Checker<'_> {
                         span,
                         false,
                         warning.as_deref(),
-                        crate::diag::names::TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING,
+                        DeprecationNames {
+                            error: crate::diag::names::TYPE_PARAMETER_AS_REIFIED,
+                            warning:
+                                crate::diag::names::TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING,
+                        },
                         &message,
                     );
                 } else if in_array {
-                    self.diags.error(
+                    self.diags.error_named(
                         span,
+                        crate::diag::names::TYPE_PARAMETER_AS_REIFIED_ARRAY_ERROR,
                         format!(
-                            "cannot use '{name}' as reified type parameter, since the array type \
+                            "Cannot use '{name}' as reified type parameter, since the array type \
                              parameter is not reified."
                         ),
                     );
                 } else {
-                    self.diags.error(span, type_parameter_as_reified(name));
+                    self.diags.error_named(
+                        span,
+                        crate::diag::names::TYPE_PARAMETER_AS_REIFIED,
+                        type_parameter_as_reified(name),
+                    );
                 }
             }
-            ReifiedProblem::ForbiddenSubstitution(rendered) => self.diags.error(
+            ReifiedProblem::ForbiddenSubstitution(rendered) => self.diags.error_named(
                 span,
-                format!("cannot use '{rendered}' as reified type parameter."),
+                crate::diag::names::REIFIED_TYPE_FORBIDDEN_SUBSTITUTION,
+                format!("Cannot use '{rendered}' as reified type parameter."),
             ),
-            ReifiedProblem::DefinitelyNonNullable => self.diags.error(
+            ReifiedProblem::DefinitelyNonNullable => self.diags.error_named(
                 span,
-                "cannot use definitely-non-nullable type as a reified type argument.",
+                crate::diag::names::DEFINITELY_NON_NULLABLE_AS_REIFIED,
+                "Cannot use definitely-non-nullable type as a reified type argument.",
             ),
             ReifiedProblem::Intersection {
                 parts,
@@ -353,7 +364,10 @@ impl Checker<'_> {
                         span,
                         false,
                         warning.as_deref(),
-                        crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING,
+                        DeprecationNames {
+                            error: crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_ERROR,
+                            warning: crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING,
+                        },
                         &message,
                     );
                 } else {
@@ -365,7 +379,10 @@ impl Checker<'_> {
                         span,
                         features.prohibit_intersection,
                         warning.as_deref(),
-                        crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_WARNING,
+                        DeprecationNames {
+                            error: crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_ERROR,
+                            warning: crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_WARNING,
+                        },
                         &message,
                     );
                 }
@@ -409,7 +426,7 @@ fn array_type_arguments(ty: Ty) -> Option<&'static [Ty]> {
 }
 
 fn type_parameter_as_reified(name: &str) -> String {
-    format!("cannot use '{name}' as reified type parameter. Use a class instead.")
+    format!("Cannot use '{name}' as reified type parameter. Use a class instead.")
 }
 
 fn intersection_as_reified(formal: &str, parts: &[Ty]) -> String {
@@ -427,7 +444,7 @@ fn intersection_as_reified(formal: &str, parts: &[Ty]) -> String {
         .collect::<Vec<_>>()
         .join(" & ");
     format!(
-        "type argument for reified type parameter '{formal}' was inferred to the intersection of \
+        "Type argument for reified type parameter '{formal}' was inferred to the intersection of \
          [{parts}]. Reification of an intersection type results in the common supertype being \
          used. This may lead to subtle issues and an explicit type argument is encouraged."
     )

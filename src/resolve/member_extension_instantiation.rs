@@ -13,7 +13,7 @@ pub(crate) struct MemberExtensionProbes<'p> {
     pub(super) explicit_context_arguments: bool,
     /// Variables owned by an active postponed-call frame. A nested candidate may expose them in an
     /// applied parameter but must not consume their constraints before the owning frame sees them.
-    pub(super) deferred_type_variables: &'p [String],
+    pub(super) deferred_type_variables: &'p [crate::types::TyParamName],
     pub(super) select_context_arguments: &'p ContextArgumentSelector<'p>,
     pub(super) is_spread_arg: &'p dyn Fn(usize) -> bool,
     pub(super) unit_coerced_lambda: &'p dyn Fn(usize, Ty, Ty) -> Option<Ty>,
@@ -314,7 +314,7 @@ pub(super) fn instantiate_member_extension_with(
         let mut refined = false;
         for (formal, solution) in from_expected {
             let name = formal.to_string();
-            let own_formal = generic.is_some_and(|generic| generic.formals.contains(&name));
+            let own_formal = generic.is_some_and(|generic| generic.formals.contains(&formal));
             if !own_formal || determined_by_bound(&name) {
                 continue;
             }
@@ -359,7 +359,7 @@ pub(super) fn instantiate_member_extension_with(
     let open_formals = method_type_params
         .iter()
         .filter(|(_, formal)| !bindings.contains_key((*formal).as_str()))
-        .map(|(_, formal)| (*formal).clone())
+        .map(|(_, formal)| *(*formal))
         .collect::<Vec<_>>();
     let visible_params_under = |bindings: &crate::symbol_resolver::GSigBinds| {
         let mut logical_params = declared_params
@@ -477,7 +477,7 @@ pub(super) struct InstantiatedMemberExtension {
     /// itself here, where `visible_params` has its bound standing in for it.
     pub(super) open_visible_params: Vec<Ty>,
     /// The method formals that evidence leaves open in `open_visible_params`.
-    pub(super) open_formals: Vec<String>,
+    pub(super) open_formals: Vec<crate::types::TyParamName>,
     pub(super) context_sources: Vec<Option<ResolvedContextArgument>>,
     pub(super) ret: Ty,
     pub(super) call_sig: crate::libraries::CallSig,

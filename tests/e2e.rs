@@ -1613,6 +1613,8 @@ mod public_inline_property_access_e2e;
 mod reference_carrier_cast_e2e;
 #[path = "reified_type_arguments_e2e.rs"]
 mod reified_type_arguments_e2e;
+#[path = "render_internal_diagnostic_names_e2e.rs"]
+mod render_internal_diagnostic_names_e2e;
 #[path = "report_all_warnings_e2e.rs"]
 mod report_all_warnings_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
@@ -1876,6 +1878,8 @@ mod native_enum_defaults_e2e;
 mod native_enum_entries_e2e;
 #[path = "native_enum_entry_interface_e2e.rs"]
 mod native_enum_entry_interface_e2e;
+#[path = "native_enum_publication_e2e.rs"]
+mod native_enum_publication_e2e;
 #[path = "native_exceptions_e2e.rs"]
 mod native_exceptions_e2e;
 #[path = "native_experimental_bitwise_e2e.rs"]
