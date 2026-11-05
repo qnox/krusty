@@ -12,10 +12,14 @@ const SOURCE: &str = include_str!("box_regressions/valueClassDiscardedGenericRes
 /// Each discarded generic result is popped boxed; the kept one is unboxed.
 #[test]
 fn a_discarded_value_class_result_is_popped_as_the_slot_holds_it() {
+    // The portable program spells `@JvmInline` as the corpus placeholder, which only the JVM
+    // target expands to the annotation.
+    let source =
+        krusty::conformance::prepare_test_source(SOURCE, krusty::conformance::TestTarget::Jvm);
     common::assert_class_matches_kotlinc(
         "ValueClassDiscardedResult",
-        SOURCE,
+        &source,
         "ValueClassDiscardedResultKt",
     );
-    common::expect_box_same_as_kotlinc(SOURCE, "ValueClassDiscardedResultRun");
+    common::expect_box_same_as_kotlinc(&source, "ValueClassDiscardedResultRun");
 }
