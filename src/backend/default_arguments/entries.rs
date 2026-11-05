@@ -62,10 +62,13 @@ pub(super) struct Entries {
 impl Entries {
     /// Build the entry of every declaration another file or module may call with arguments left
     /// out, whether or not a caller in this file does.
-    pub(super) fn publish(&mut self, ir: &mut IrFile) {
+    pub(super) fn publish(&mut self, ir: &mut IrFile, exported: impl Fn(FunId) -> bool) {
         let published = (0..ir.functions.len())
             .map(|function| FunId::try_from(function).expect("too many functions"))
-            .filter(|&function| is_published(ir, function))
+            .filter(|&function| {
+                is_publishable(ir, function)
+                    && (is_checked_callable(ir, function) || exported(function))
+            })
             .collect::<Vec<_>>();
         for function in published {
             let form = match ir.companion_blocks.declaring_class(function) {
@@ -131,18 +134,21 @@ impl Entries {
     }
 }
 
-/// Whether `function` is a top-level declaration with defaults that this file publishes to
-/// callers it cannot see.
-fn is_published(ir: &IrFile, function: FunId) -> bool {
+/// Whether `function` is a top-level declaration with defaults whose entry callers this file
+/// cannot see may reach: by its checked identity from another file of the module, or by its
+/// dependency export from a later module.
+fn is_publishable(ir: &IrFile, function: FunId) -> bool {
     let declaration = &ir.functions[function as usize];
     declaration.body.is_some()
         && declaration.dispatch_receiver.is_none()
         && !ir.inline_only_fns.contains(&function)
-        && ir
-            .checked_callable_functions
-            .values()
-            .any(|&candidate| candidate == function)
         && declares_defaults(ir, function)
+}
+
+fn is_checked_callable(ir: &IrFile, function: FunId) -> bool {
+    ir.checked_callable_functions
+        .values()
+        .any(|&candidate| candidate == function)
 }
 
 fn declares_defaults(ir: &IrFile, function: FunId) -> bool {
@@ -153,7 +159,7 @@ fn declares_defaults(ir: &IrFile, function: FunId) -> bool {
 /// The entry of `declaration` that callers this file cannot see reach, when it publishes one: the
 /// entry of a top-level declaration with defaults, built whether or not this file calls it.
 pub(crate) fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> {
-    is_published(ir, declaration)
+    is_publishable(ir, declaration)
         .then(|| ir.default_entries.get(&declaration).copied())
         .flatten()
 }
