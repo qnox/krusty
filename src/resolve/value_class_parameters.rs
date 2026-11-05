@@ -154,7 +154,7 @@ impl Checker<'_> {
                         self.file
                             .value_class_recursion_via_type_parameters_warning
                             .as_deref(),
-                        crate::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
+                        crate::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING,
                         "value class cannot be recursive.",
                     );
                     self.active_lexical_policies.truncate(depth);

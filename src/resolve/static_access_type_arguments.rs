@@ -138,7 +138,7 @@ impl Checker<'_> {
                 arguments.span,
                 self.file.forbid_useless_type_arguments,
                 self.file.type_arguments_not_allowed_warning.as_deref(),
-                crate::diag::CompilerWarningName::TypeArgumentsNotAllowed,
+                crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_WARNING,
                 MESSAGE,
             ),
             QualifierAccessKind::CompanionAssociated => {
