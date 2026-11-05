@@ -1,8 +1,11 @@
 // A value class read out of a generic slot and then discarded is popped as the slot holds it;
 // a value the statement keeps is still unboxed.
-@JvmInline value class Foo(val value: Int)
-@JvmInline value class Name(val text: String)
-@JvmInline value class Slot(private val holder: Any?) {
+OPTIONAL_JVM_INLINE_ANNOTATION
+value class Foo(val value: Int)
+OPTIONAL_JVM_INLINE_ANNOTATION
+value class Name(val text: String)
+OPTIONAL_JVM_INLINE_ANNOTATION
+value class Slot(private val holder: Any?) {
     val size: Int get() = holder as Int
 }
 fun <T> id(x: T): T = x
