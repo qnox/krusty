@@ -131,6 +131,18 @@ pub enum FirSamMethod {
 pub struct FirPlatformNarrowing {
     /// The checked producer's name; `None` for a value kotlinc cannot name, such as a block's.
     pub message: Option<Box<str>>,
+    /// The consumer the narrowed value reaches.
+    pub site: FirPlatformNarrowingSite,
+}
+
+/// Where a narrowed platform value is consumed. kotlinc's `-Xno-receiver-assertions` removes the
+/// checks of exactly the values that reach an extension receiver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirPlatformNarrowingSite {
+    /// An argument, an assignment, a returned value or any other non-receiver consumer.
+    Value,
+    /// The receiver of an extension call, written or through an operator convention.
+    ExtensionReceiver,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2180,6 +2192,19 @@ impl FirBody {
 
     pub fn platform_narrowing(&self, id: FirPlatformNarrowingId) -> Option<&FirPlatformNarrowing> {
         self.platform_narrowings.get(id.raw() as usize)
+    }
+
+    /// The number of narrowings recorded so far, which [`Self::consume_narrowings_at`] reads as
+    /// the start of the narrowings one guard records.
+    pub fn platform_narrowing_count(&self) -> usize {
+        self.platform_narrowings.len()
+    }
+
+    /// Record that every narrowing from `start` on guards a value consumed at `site`.
+    pub fn consume_narrowings_at(&mut self, start: usize, site: FirPlatformNarrowingSite) {
+        for narrowing in &mut self.platform_narrowings[start..] {
+            narrowing.site = site;
+        }
     }
 
     /// Finalize the complete capture ABI of every nested callable. A body must forward both values

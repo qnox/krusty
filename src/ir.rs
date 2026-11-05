@@ -129,7 +129,7 @@ pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{
     Bridge, BridgeAccessorRole, BridgeKind, BridgeParameter, BridgePropertyImplementation,
-    CollectionBarrierPlan,
+    CollectionBarrierCheck, CollectionBarrierParameter, CollectionBarrierPlan,
 };
 pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget};
 pub use catches::IrCatch;
@@ -167,7 +167,7 @@ pub use module_records::{
     IrModuleClassifier, IrModuleConstructions, IrModuleConstructor, IrModuleMemberAccess,
     IrModuleSource, IrOverriddenFunction,
 };
-pub use null_checks::NullCheck;
+pub use null_checks::{NullCheck, NullCheckSite};
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use package_declarations::{
@@ -1869,6 +1869,9 @@ pub struct IrFile {
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each entry another module constructs a class of this file, or reads its object, through,
+    /// by the entry's `FunId`: the class it answers. See [`crate::backend::construction_entries`].
+    pub(crate) construction_entries: crate::fx_hash::HashMap<FunId, ClassId>,
     /// Each exported overridable member's dispatching entry, by the member's `FunId`: the function
     /// another module's call reaches it through, which dispatches on the receiver.
     pub(crate) dispatch_entries: crate::fx_hash::HashMap<FunId, FunId>,

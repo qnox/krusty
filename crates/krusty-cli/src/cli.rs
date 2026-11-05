@@ -151,6 +151,9 @@ pub struct Options {
     /// `-Xno-call-assertions`: omit the not-null assertions on platform-typed values coming back
     /// from Java. Recorded, but krusty emits no such assertions yet, so it changes no bytes today.
     pub no_call_assertions: bool,
+    /// `-Xno-receiver-assertions`: omit those assertions where the platform value is the receiver
+    /// of an extension call.
+    pub no_receiver_assertions: bool,
     /// `-jvm-target <v>`: the emitted class-file major version (kotlinc maps `1.8`→52, `9`→53, …,
     /// `25`→69). `None` keeps krusty's default (Java 8 / major 52), which runs on the test JDK.
     pub jvm_target_major: Option<u16>,
@@ -237,6 +240,7 @@ impl Default for Options {
             lambda_modes: LambdaModes::default(),
             no_param_assertions: false,
             no_call_assertions: false,
+            no_receiver_assertions: false,
             plugins: PluginConfig::default(),
             explicit_api: None,
             assertions: None,
@@ -596,6 +600,7 @@ impl Options {
             .with_inline_scopes_numbers(self.inline_scopes_numbers)
             .with_param_assertions(!self.no_param_assertions)
             .with_call_assertions(!self.no_call_assertions)
+            .with_receiver_assertions(!self.no_receiver_assertions)
             .with_annotations_in_metadata(
                 self.language_settings.features.has("AnnotationsInMetadata"),
             )
@@ -840,19 +845,25 @@ mod tests {
         assert!(!parse_args(&["x.kt"]).inline_scopes_numbers);
     }
 
-    /// Both assertion flags must reach `Options`, not fall through to `ignored`: a missing match arm
+    /// Every assertion flag must reach `Options`, not fall through to `ignored`: a missing match arm
     /// is silent, and the build would keep emitting guards it asked to have removed.
     #[test]
     fn assertion_flags_are_read_not_ignored() {
-        let parsed = parse_args(&["-Xno-param-assertions", "-Xno-call-assertions", "x.kt"]);
+        let parsed = parse_args(&[
+            "-Xno-param-assertions",
+            "-Xno-call-assertions",
+            "-Xno-receiver-assertions",
+            "x.kt",
+        ]);
         assert!(parsed.no_param_assertions);
         assert!(parsed.no_call_assertions);
+        assert!(parsed.no_receiver_assertions);
         assert!(
             !parsed
                 .ignored
                 .iter()
                 .any(|entry| entry.contains("assertions")),
-            "neither flag may be reported as unsupported: {:?}",
+            "no assertion flag may be reported as unsupported: {:?}",
             parsed.ignored
         );
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
@@ -860,6 +871,7 @@ mod tests {
         let default = parse_args(&["x.kt"]);
         assert!(!default.no_param_assertions);
         assert!(!default.no_call_assertions);
+        assert!(!default.no_receiver_assertions);
     }
 
     /// `-Xconsistent-data-class-copy-visibility` is genuinely modeled (a `LangFeatures` toggle the
