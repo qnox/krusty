@@ -509,6 +509,9 @@ impl Emitter<'_> {
                     .cw
                     .methodref(&classifier.render(), "unbox-impl", &descriptor);
                 code.invokevirtual(method, 0, slot_words(carrier) as i32);
+            } else if destination_semantic.is_some_and(declared_generic_shape) {
+                // See `coerce_declared_reference`.
+                self.checkcast_box(classifier, physical, code);
             }
             return;
         }
@@ -529,7 +532,53 @@ impl Emitter<'_> {
         } else if source_jvm.is_jvm_scalar() && physical.is_jvm_scalar() {
             emit_num_conv(source_jvm, physical, code);
         } else if source_jvm.is_reference() && physical.is_reference() {
-            self.coerce_reference_on_stack(source_jvm, physical, code);
+            self.coerce_declared_reference(source_jvm, destination_semantic, physical, code);
+        }
+    }
+
+    /// [`Self::coerce_reference_on_stack`] into a slot whose declared, unsubstituted type is
+    /// `declared`. kotlinc's implicit-cast inserter casts an argument that is not a subtype of the
+    /// declared parameter (`Z` passed as `Iterable<T>` or `I<out T>`); the cast survives
+    /// value-class boxing as a `checkcast` of the box.
+    pub(super) fn coerce_declared_reference(
+        &mut self,
+        source: Ty,
+        declared: Option<Ty>,
+        physical: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        match self.value_class_box(source) {
+            Some(classifier) if declared.is_some_and(declared_generic_shape) => {
+                self.checkcast_box(classifier, physical, code);
+            }
+            _ => self.coerce_reference_on_stack(source, physical, code),
+        }
+    }
+
+    /// The value class whose box `source` is on the stack.
+    fn value_class_box(&self, source: Ty) -> Option<crate::types::TypeName> {
+        let source = source.non_null();
+        source
+            .obj_internal()
+            .filter(|_| self.is_value_class_ty(&source))
+    }
+
+    /// Cast a value-class box to the reference `physical` slot unless that slot is `Object` or
+    /// the box's own class.
+    fn checkcast_box(
+        &mut self,
+        classifier: crate::types::TypeName,
+        physical: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        let physical = ir_ty_to_jvm(&physical);
+        if !physical.is_reference() || physical.non_null().obj_internal() == Some(classifier) {
+            return;
+        }
+        let internal = crate::jvm::names::instanceof_internal_name(physical);
+        if internal != "java/lang/Object" {
+            let class = self.cw.class_ref(&internal);
+            code.checkcast(class);
         }
     }
 
@@ -716,4 +765,11 @@ impl Emitter<'_> {
         };
         *internal
     }
+}
+
+/// A declared parameter type that names a type parameter without being one (`Iterable<T>`,
+/// `I<out T>`). No concrete argument is a subtype of it before substitution; a bare `T` is checked
+/// against its bound instead.
+fn declared_generic_shape(declared: Ty) -> bool {
+    !declared.non_null().is_ty_param() && crate::types::ty_mentions_any_param(declared)
 }

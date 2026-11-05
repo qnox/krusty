@@ -202,6 +202,23 @@ pub struct DependencyExportSignatures {
     member_receivers: HashMap<FunId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<FunId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers: HashMap<FunId, SingletonExtensionUnreadReceiver>,
+    /// Every constructor of a class of this file another module may call, by the declaration it
+    /// constructs through. A target realizes each as an ordinary exported callable (see
+    /// `super::construction_entries`), since constructing an object needs its layout.
+    constructors: Vec<(ExportedConstructor, KlibDependencyCallable)>,
+    /// Every object declaration of this file another module may read as a value, and, once a
+    /// target realized it, the entry answering its instance (see `super::construction_entries`).
+    singletons: Vec<crate::ir::ClassId>,
+    singleton_entries: Vec<(crate::types::TypeName, FunId)>,
+}
+
+/// One constructor [`DependencyExportSignatures`] publishes: the class and which of its
+/// constructors, `None` for the primary one and the ordinal in `IrClass::secondary_ctors` for a
+/// secondary one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExportedConstructor {
+    pub class: crate::ir::ClassId,
+    pub secondary: Option<usize>,
 }
 
 impl DependencyExportSignatures {
@@ -253,6 +270,45 @@ impl DependencyExportSignatures {
     /// Exact semantic dispatch receiver retained by an emitted ordinary member body.
     pub fn member_receiver(&self, callable: FunId) -> Option<DependencyMemberReceiver> {
         self.member_receivers.get(&callable).copied()
+    }
+
+    /// Record a constructor another module may call, at the metadata owner that computed its
+    /// exact identity.
+    pub(crate) fn record_constructor(
+        &mut self,
+        constructor: ExportedConstructor,
+        identity: KlibDependencyCallable,
+    ) {
+        self.constructors.push((constructor, identity));
+    }
+
+    /// Every constructor this file publishes, in record order.
+    pub(crate) fn constructors(&self) -> &[(ExportedConstructor, KlibDependencyCallable)] {
+        &self.constructors
+    }
+
+    /// Record an object declaration another module may read as a value.
+    pub(crate) fn record_singleton(&mut self, class: crate::ir::ClassId) {
+        self.singletons.push(class);
+    }
+
+    /// Every object declaration this file publishes, in record order.
+    pub(crate) fn singletons(&self) -> &[crate::ir::ClassId] {
+        &self.singletons
+    }
+
+    /// Record the target-realized entry answering the instance of the object `classifier`.
+    pub(crate) fn record_singleton_entry(
+        &mut self,
+        classifier: crate::types::TypeName,
+        entry: FunId,
+    ) {
+        self.singleton_entries.push((classifier, entry));
+    }
+
+    /// Every object instance entry a target realized, by the object's classifier.
+    pub(crate) fn singleton_entries(&self) -> &[(crate::types::TypeName, FunId)] {
+        &self.singleton_entries
     }
 
     /// Record one declaration at the metadata owner that computed its exact identity.

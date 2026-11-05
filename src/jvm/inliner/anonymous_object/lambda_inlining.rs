@@ -20,7 +20,6 @@ use super::super::lambda_expansion::{self, Lambda, SourceLines};
 use super::super::{functional_arguments, object_regeneration, preparation, try_blocks};
 use super::super::{Binding, ClassRoles, InlineError, Parameter, Parameters};
 use super::{CopiedLines, NestedObjects, RegenerationError};
-use crate::ir::InlineLambdaPlacement;
 
 const ALOAD: u8 = 0x19;
 const GETFIELD: u8 = 0xb4;
@@ -40,36 +39,6 @@ pub(super) fn reads_lambda(method: &MethodNode, lambdas: &[FieldLambda<'_>]) -> 
         matches!(insn, Insn::Field { op: GETFIELD, name, .. }
             if lambdas.iter().any(|lambda| lambda.field == *name))
     })
-}
-
-/// Whether `method` of `owner` invokes a lambda one of `fields` holds (`aload 0; getfield` of the
-/// field, then `FunctionN.invoke` on it), as `functional_arguments::lambda_placements` places each
-/// lambda the method reads: a read only passed on to the constructor of a regenerated object, as a
-/// suspend lambda's `invoke` passes its lambdas to its own constructor, invokes nothing here. An
-/// error names a use the inliner does not place.
-pub(super) fn invokes_field_lambda(
-    method: &MethodNode,
-    owner: &str,
-    fields: &[&str],
-    classes: &dyn ClassRoles,
-) -> Result<bool, RegenerationError> {
-    let reads = method.instructions().any(|insn| {
-        matches!(insn, Insn::Field { op: GETFIELD, name, .. } if fields.contains(&name.as_str()))
-    });
-    if !reads {
-        return Ok(false);
-    }
-    let parameters = own_parameters(method, fields.len())?;
-    let mut node = method.clone();
-    preparation::add_captured_parameters(&mut node, &parameters);
-    replace_lambda_reads(&mut node, owner, fields, parameters.real_size())?;
-    let placements =
-        functional_arguments::lambda_placements(&node, &parameters, fields.len(), classes)
-            .map_err(|_error| {
-                crate::trace_compiler!("splice", "a field lambda is not placed: {_error}");
-                RegenerationError::Unsupported("a lambda use the inliner does not place")
-            })?;
-    Ok(placements.contains(&InlineLambdaPlacement::Invoked))
 }
 
 /// `method` of the copy `owner`, its types already renamed, with every `invoke` of one of `lambdas`
@@ -185,6 +154,7 @@ fn method_parameters(
             parameters: own,
             captured,
             capture_owners: Vec::new(),
+            non_inline_suspend: Vec::new(),
         },
         placed,
     ))
@@ -234,6 +204,7 @@ fn own_parameters(method: &MethodNode, lambdas: usize) -> Result<Parameters, Reg
         parameters,
         captured,
         capture_owners: Vec::new(),
+        non_inline_suspend: Vec::new(),
     })
 }
 

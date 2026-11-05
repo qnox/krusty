@@ -286,10 +286,9 @@ impl ProductionSignatureSemantics<'_> {
                     .get(parameter.name)
                     .ok_or_else(Self::failure)?;
                 let semantic = visible.bound(source_name);
-                let formal = semantic
-                    .ty_param_name()
-                    .ok_or_else(Self::failure)?
-                    .to_owned();
+                let formal = crate::types::TyParamName::new(
+                    semantic.ty_param_name().ok_or_else(Self::failure)?,
+                );
                 let mut bounds = vec![semantic
                     .ty_param_bound()
                     .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))];
@@ -331,7 +330,7 @@ impl ProductionSignatureSemantics<'_> {
                 super::DeclarationTypeParameters,
             >,
                           declaration: crate::fir::DeclarationId,
-                          formals: &[String],
+                          formals: &[crate::types::TyParamName],
                           formal_bounds: &[Ty]| {
                 parameters
                     .entry(declaration)
@@ -2957,7 +2956,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         .iter()
                         .enumerate()
                     {
-                        if let Some(argument) = outer.get(captured).copied() {
+                        if let Some(argument) = outer.get(captured.as_str()).copied() {
                             if let Some(slot) = arguments.get_mut(own + index) {
                                 *slot = argument;
                             }
@@ -2975,7 +2974,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 let bindings = declaration
                     .type_params()
                     .iter()
-                    .cloned()
+                    .map(crate::types::TyParamName::from)
                     .zip(arguments.iter().copied())
                     .collect::<crate::symbol_resolver::GSigBinds>();
                 let declared_parameters = selected
@@ -4508,21 +4507,17 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
 
     fn make_contextual_function_type(
         &self,
-        declaration: crate::fir::DeclarationId,
+        function: crate::fir::ContextualFunctionSite,
         parameters: &[crate::fir::ResolvedTy],
         result: crate::fir::ResolvedTy,
         context_count: u32,
         has_receiver: bool,
         suspend: bool,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let bindings = self
-            .completed_scoped_constraints
-            .borrow_mut()
-            .remove(&declaration)
-            .unwrap_or_default();
+        let bindings = self.complete_contextual_function(function);
         crate::trace_compiler!(
             "signature",
-            "make contextual function declaration={declaration:?} parameters={:?} result={:?} bindings={bindings:?}",
+            "make contextual function {function:?} parameters={:?} result={:?} bindings={bindings:?}",
             parameters.iter().map(|parameter| parameter.get()).collect::<Vec<_>>(),
             result.get(),
         );

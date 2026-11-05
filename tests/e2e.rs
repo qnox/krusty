@@ -155,8 +155,8 @@ mod api_version_availability_e2e;
 mod apt_host_e2e;
 #[path = "arity_error_coverage_e2e.rs"]
 mod arity_error_coverage_e2e;
-#[path = "array_member_reference_e2e.rs"]
-mod array_member_reference_e2e;
+#[path = "e2e/arrays.rs"]
+mod arrays;
 #[path = "assert_intrinsic_e2e.rs"]
 mod assert_intrinsic_e2e;
 #[path = "backend_rejection_coverage_e2e.rs"]
@@ -199,8 +199,6 @@ mod bounded_type_param_e2e;
 mod box_harness_skip_semantics_e2e;
 #[path = "box_runtime_reflect_e2e.rs"]
 mod box_runtime_reflect_e2e;
-#[path = "boxed_array_construction_e2e.rs"]
-mod boxed_array_construction_e2e;
 #[path = "boxed_override_results_e2e.rs"]
 mod boxed_override_results_e2e;
 #[path = "boxed_property_getters_e2e.rs"]
@@ -1250,8 +1248,6 @@ mod is_primitive_smartcast_e2e;
 mod java_abstract_override_e2e;
 #[path = "java_annotation_element_property_e2e.rs"]
 mod java_annotation_element_property_e2e;
-#[path = "java_array_covariance_e2e.rs"]
-mod java_array_covariance_e2e;
 #[path = "java_bridge_members_e2e.rs"]
 mod java_bridge_members_e2e;
 #[path = "java_class_formal_bound_e2e.rs"]
@@ -1483,8 +1479,6 @@ mod map_get_nullable_elvis_e2e;
 mod mapped_collection_scope_e2e;
 #[path = "mapped_string_scope_e2e.rs"]
 mod mapped_string_scope_e2e;
-#[path = "member_array_ctor_inference_e2e.rs"]
-mod member_array_ctor_inference_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]
 mod member_ctrl_inference_e2e;
 #[path = "member_default_implicit_receiver_e2e.rs"]
@@ -1619,6 +1613,8 @@ mod public_inline_property_access_e2e;
 mod reference_carrier_cast_e2e;
 #[path = "reified_type_arguments_e2e.rs"]
 mod reified_type_arguments_e2e;
+#[path = "render_internal_diagnostic_names_e2e.rs"]
+mod render_internal_diagnostic_names_e2e;
 #[path = "report_all_warnings_e2e.rs"]
 mod report_all_warnings_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
@@ -1854,6 +1850,8 @@ mod native_compiler_command_e2e;
 mod native_concurrency_e2e;
 #[path = "native_const_reference_e2e.rs"]
 mod native_const_reference_e2e;
+#[path = "native_constructor_default_calls_e2e.rs"]
+mod native_constructor_default_calls_e2e;
 #[path = "native_context_parameter_sam_e2e.rs"]
 mod native_context_parameter_sam_e2e;
 #[path = "native_cross_file_dispatch_e2e.rs"]
@@ -1880,6 +1878,8 @@ mod native_enum_defaults_e2e;
 mod native_enum_entries_e2e;
 #[path = "native_enum_entry_interface_e2e.rs"]
 mod native_enum_entry_interface_e2e;
+#[path = "native_enum_publication_e2e.rs"]
+mod native_enum_publication_e2e;
 #[path = "native_exceptions_e2e.rs"]
 mod native_exceptions_e2e;
 #[path = "native_experimental_bitwise_e2e.rs"]
@@ -2254,8 +2254,6 @@ mod postponed_bound_inference_e2e;
 mod postponed_constructor_applicability_e2e;
 #[path = "postponed_lambda_probe_e2e.rs"]
 mod postponed_lambda_probe_e2e;
-#[path = "primitive_array_members_e2e.rs"]
-mod primitive_array_members_e2e;
 #[path = "primitive_bound_default_e2e.rs"]
 mod primitive_bound_default_e2e;
 #[path = "primitive_bound_generic_e2e.rs"]
@@ -2638,8 +2636,6 @@ mod top_level_lateinit_e2e;
 mod top_level_property_e2e;
 #[path = "top_level_setter_pool_e2e.rs"]
 mod top_level_setter_pool_e2e;
-#[path = "toplevel_array_inference_e2e.rs"]
-mod toplevel_array_inference_e2e;
 #[path = "toplevel_default_multimask_e2e.rs"]
 mod toplevel_default_multimask_e2e;
 #[path = "toplevel_prop_incdec_e2e.rs"]
@@ -2953,3 +2949,6 @@ mod immediate_lambda_invocation_e2e;
 
 #[path = "facade_local_classifier_metadata_e2e.rs"]
 mod facade_local_classifier_metadata_e2e;
+
+#[path = "plugin_host_compiler_e2e/mod.rs"]
+mod plugin_host_compiler_e2e;
