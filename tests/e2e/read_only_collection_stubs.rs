@@ -7,6 +7,8 @@ use super::common;
 mod collection_override_signature_e2e;
 #[path = "../collection_to_array_e2e.rs"]
 mod collection_to_array_e2e;
+#[path = "../collection_type_safe_members_e2e.rs"]
+mod collection_type_safe_members_e2e;
 #[path = "../read_only_collection_face_stubs_e2e.rs"]
 mod read_only_collection_face_stubs_e2e;
 #[path = "../read_only_iterator_stubs_e2e.rs"]
