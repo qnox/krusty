@@ -286,3 +286,33 @@ fn branches_without_a_binding_sibling_still_cannot_infer() {
         ],
     );
 }
+
+/// Typed catches bind each other's open calls. PLATFORM-SPECIFIC: the Wasm KLIB lanes decline a
+/// typed catch, so this form runs against kotlinc on the JVM; the portable forms are in
+/// `tests/box_regressions/tryCatchBranchBindsFromSibling.kt`.
+#[test]
+fn typed_catches_bind_from_each_other() {
+    const LIB: &str = "class Pack<T>(val value: T?)\n\
+        fun <T> empty(): Pack<T> = Pack(null)\n\
+        fun parse(fail: Boolean): Pack<String> {\n\
+            if (fail) throw IllegalStateException()\n\
+            return Pack(\"a\")\n\
+        }\n\
+        fun typedCatches(fail: Boolean): String {\n\
+            val parsed = try {\n\
+                parse(fail)\n\
+            } catch (e: IllegalStateException) {\n\
+                empty()\n\
+            } catch (t: Throwable) {\n\
+                empty()\n\
+            }\n\
+            return parsed.value ?: \"none\"\n\
+        }\n";
+    const MAIN: &str =
+        "fun box(): String = if (typedCatches(false) == \"a\" && typedCatches(true) == \"none\") \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        common::expect_box_run_against("typed-catch-rebind", LIB, MAIN)
+            .expect("both compilers run"),
+        "OK"
+    );
+}
