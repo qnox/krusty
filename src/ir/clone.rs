@@ -469,6 +469,11 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::LateinitCheck { operand: arg, .. }
         | IrExpr::Throw { operand: arg }
         | IrExpr::EnumValueOf { arg, .. }
+        | IrExpr::EnumConstant {
+            construction: arg, ..
+        }
+        | IrExpr::EnumEntriesList { values: arg, .. }
+        | IrExpr::NoSuchEnumConstant { name: arg, .. }
         | IrExpr::EnumSwitchOrdinal { subject: arg, .. }
         | IrExpr::ReifiedTypeOp { arg, .. }
         | IrExpr::RefGet { holder: arg, .. }
@@ -578,6 +583,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumSwitchKey { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumAllocation { .. }
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation
@@ -809,6 +815,7 @@ mod tests {
                 bounds: vec![(Ty::obj("kotlin/Any"), false)],
                 variance: Default::default(),
                 reified: true,
+                captured_from_enclosing: false,
             }],
             params: vec![parameter],
             ret: Some(parameter),
@@ -899,6 +906,7 @@ mod tests {
                 bounds: vec![(parameter, false)],
                 variance: Default::default(),
                 reified: false,
+                captured_from_enclosing: false,
             }],
         );
         ir.record_lambda_type_parameters(source, vec![signature(parameter).type_params[0].clone()]);

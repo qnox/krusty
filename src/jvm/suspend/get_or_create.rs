@@ -103,14 +103,7 @@ pub(super) fn build_get_or_create(
     let reused_for_label = reused_value(ir);
     let label = label_of(ir, reused_for_label);
     let min_value = k(ir, IrExpr::Const(IrConst::Int(I32_MIN)));
-    let masked = k(
-        ir,
-        IrExpr::PrimitiveBinOp {
-            op: IrBinOp::BitAnd,
-            lhs: label,
-            rhs: min_value,
-        },
-    );
+    let masked = ir.add_arithmetic(IrBinOp::BitAnd, label, min_value, Ty::Int);
     let zero = k(ir, IrExpr::Const(IrConst::Int(0)));
     let resume_bit_set = k(
         ir,
@@ -126,14 +119,7 @@ pub(super) fn build_get_or_create(
     let reused_for_old_label = reused_value(ir);
     let old_label = label_of(ir, reused_for_old_label);
     let min_value = k(ir, IrExpr::Const(IrConst::Int(I32_MIN)));
-    let new_label = k(
-        ir,
-        IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Sub,
-            lhs: old_label,
-            rhs: min_value,
-        },
-    );
+    let new_label = ir.add_arithmetic(IrBinOp::Sub, old_label, min_value, Ty::Int);
     let update_label = k(
         ir,
         IrExpr::SetField {

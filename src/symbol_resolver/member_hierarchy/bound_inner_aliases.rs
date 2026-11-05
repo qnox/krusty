@@ -37,13 +37,13 @@ fn bound_inner_alias_constructor_candidates(
     let substitutions = classifier
         .type_params()
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .zip(target.type_args().iter().copied())
         .collect::<crate::symbol_resolver::GSigBinds>();
     let declaration_substitutions = classifier
         .type_params()
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .zip(arguments.iter().copied())
         .collect::<crate::symbol_resolver::GSigBinds>();
     let bounds = alias
@@ -68,7 +68,10 @@ fn bound_inner_alias_constructor_candidates(
                 .first()
                 .copied()
                 .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            (formal.clone(), Ty::ty_param(formal, bound))
+            (
+                crate::types::TyParamName::from(formal),
+                Ty::ty_param(formal, bound),
+            )
         })
         .collect::<crate::symbol_resolver::GSigBinds>();
     classifier
@@ -85,8 +88,13 @@ fn bound_inner_alias_constructor_candidates(
             let rigid_formals = underlying_signature
                 .formals
                 .iter()
-                .filter(|formal| !classifier.type_params().contains(formal))
-                .cloned()
+                .filter(|formal| {
+                    !classifier
+                        .type_params()
+                        .iter()
+                        .any(|owner| owner == *formal)
+                })
+                .copied()
                 .collect();
             underlying_signature.receiver = Some(expected_receiver);
             underlying_signature.params = original
@@ -113,7 +121,7 @@ fn bound_inner_alias_constructor_candidates(
                 .collect();
             underlying_signature.ret = alias.expansion;
             let declaration_signature = crate::libraries::GenericSig {
-                formals: alias.formals.clone(),
+                formals: crate::types::TyParamName::all(&alias.formals),
                 formal_bounds: vec![Vec::new(); alias.formals.len()],
                 receiver: Some(expected_receiver),
                 params: original
@@ -145,7 +153,7 @@ fn bound_inner_alias_constructor_candidates(
                 .map(|parameter| crate::types::ty_subst_applied_arguments(parameter, &formal_types))
                 .collect();
             let signature = crate::libraries::GenericSig {
-                formals: alias.formals.clone(),
+                formals: crate::types::TyParamName::all(&alias.formals),
                 formal_bounds: bounds.clone(),
                 receiver: Some(crate::types::ty_subst_applied_arguments(
                     expected_receiver,

@@ -45,7 +45,7 @@ impl BodyLowering<'_> {
         // Recorded as checked FIR lowering records the source reference: `Unit` is its builtin
         // type rather than its class.
         let value = self.ir.add_expr(IrExpr::SingletonValue { classifier });
-        self.ir.logical_types.insert(value, object);
+        self.ir.set_logical_type(value, object);
         Ok(value)
     }
 

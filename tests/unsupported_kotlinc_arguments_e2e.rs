@@ -18,7 +18,7 @@ fn an_unsupported_kotlinc_argument_exits_nonzero_and_writes_nothing() {
         "-Xjsr305=strict",
         // JVM output shape.
         "-Xemit-jvm-type-annotations",
-        "-Xno-receiver-assertions",
+        "-Xno-unified-null-checks",
         "-Xjvm-enable-preview",
         "-Xno-source-debug-extension",
     ] {

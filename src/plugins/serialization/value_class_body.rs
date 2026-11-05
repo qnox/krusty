@@ -205,12 +205,12 @@ impl ValueClassBody<'_> {
             branches: vec![(Some(absent), null_result), (None, encode)],
         });
         ir.whens.exhaustive.insert(guarded, Ty::Unit);
-        ir.logical_types.insert(guarded, Ty::Unit);
+        ir.set_logical_type(guarded, Ty::Unit);
         let call = ir.add_expr(IrExpr::Block {
             stmts: vec![declared],
             value: Some(guarded),
         });
-        ir.logical_types.insert(call, Ty::Unit);
+        ir.set_logical_type(call, Ty::Unit);
         let class = &ir.classes[self.serialized_class as usize];
         let (start_line, header_line) = (class.decl_start_line, class.decl_line);
         // On a one-line declaration the implicit return is already on that line.

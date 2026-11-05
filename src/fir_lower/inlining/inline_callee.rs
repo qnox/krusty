@@ -22,6 +22,9 @@ pub(in super::super) enum InlineCallee {
     Dependency {
         target: ExternalCallableId,
         template: DependencyInlineTemplate,
+        /// The type arguments of the call's dispatch receiver, which bind the template's class
+        /// type parameters in order. Empty for a callee outside a generic class.
+        class_arguments: Vec<Ty>,
     },
 }
 
@@ -55,7 +58,9 @@ impl InlineCallee {
                     label: format!("$fir_inline${}", target.raw()),
                 }
             }
-            Self::Dependency { target, template } => InlineFrame {
+            Self::Dependency {
+                target, template, ..
+            } => InlineFrame {
                 name: template.name.clone(),
                 module: None,
                 source: None,
@@ -78,6 +83,25 @@ impl InlineCallee {
     ) -> Option<(HashMap<String, Ty>, HashMap<String, Ty>)> {
         let mut bindings = HashMap::default();
         let mut reified = HashMap::default();
+        if let Self::Dependency {
+            template,
+            class_arguments,
+            ..
+        } = self
+        {
+            // A member of a generic class reads the class's parameters; the dispatch receiver's
+            // type arguments bind them, one for each.
+            if template.class_type_parameters.len() != class_arguments.len() {
+                return None;
+            }
+            bindings.extend(
+                template
+                    .class_type_parameters
+                    .iter()
+                    .map(|parameter| parameter.as_str().to_owned())
+                    .zip(class_arguments.iter().copied()),
+            );
+        }
         for substitution in substitutions {
             let name = match (self, substitution.parameter) {
                 // A substitution of a parameter that has no module name binds nothing in the
@@ -90,7 +114,9 @@ impl InlineCallee {
                 }
                 (Self::Module(_), FirTypeParameterRef::External { .. }) => continue,
                 (
-                    Self::Dependency { target, template },
+                    Self::Dependency {
+                        target, template, ..
+                    },
                     FirTypeParameterRef::External { callable, ordinal },
                 ) if callable == *target => {
                     template.type_parameters.get(ordinal as usize)?.as_str()
@@ -188,8 +214,13 @@ mod tests {
             template: DependencyInlineTemplate {
                 function: 0,
                 name: "scope".to_owned(),
-                type_parameters: vec!["opaque-T".to_owned(), "opaque-R".to_owned()],
+                type_parameters: vec![
+                    crate::types::TyParamName::new("opaque-T"),
+                    crate::types::TyParamName::new("opaque-R"),
+                ],
+                class_type_parameters: Vec::new(),
             },
+            class_arguments: Vec::new(),
         }
     }
 
@@ -248,6 +279,40 @@ mod tests {
             let substitutions = [substitution(parameter, false, Ty::Int)];
             assert!(callee
                 .substitution_bindings(&substitutions, |_| Some("T"))
+                .is_none());
+        }
+    }
+
+    fn member_of_generic_class(class_arguments: Vec<Ty>) -> InlineCallee {
+        InlineCallee::Dependency {
+            target: ExternalCallableId::from_raw(5),
+            template: DependencyInlineTemplate {
+                function: 0,
+                name: "getOrNull".to_owned(),
+                type_parameters: Vec::new(),
+                class_type_parameters: vec![crate::types::TyParamName::new("opaque-class-T")],
+            },
+            class_arguments,
+        }
+    }
+
+    #[test]
+    fn a_dispatch_receiver_type_argument_binds_its_class_type_parameter() {
+        let (bindings, reified) = member_of_generic_class(vec![Ty::Int])
+            .substitution_bindings(&[], |_| None)
+            .expect("the receiver's argument binds the class parameter");
+        assert_eq!(
+            bindings,
+            [("opaque-class-T".into(), Ty::Int)].into_iter().collect()
+        );
+        assert!(reified.is_empty());
+    }
+
+    #[test]
+    fn a_dispatch_receiver_without_one_argument_per_class_parameter_declines() {
+        for arguments in [Vec::new(), vec![Ty::Int, Ty::String]] {
+            assert!(member_of_generic_class(arguments)
+                .substitution_bindings(&[], |_| None)
                 .is_none());
         }
     }

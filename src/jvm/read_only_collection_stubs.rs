@@ -30,7 +30,12 @@ use crate::jvm::mapped_builtin_declarations::{
 use crate::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
 use crate::jvm::names::method_descriptor;
 use crate::jvm::override_results::scalar_over_reference;
+use crate::jvm::value_classes::collection_stub_replacements::{
+    collection_stub_realization, StubRealization,
+};
 use crate::types::{ty_subst, wk, CollectionKind, Ty, TypeName, Visibility};
+
+mod jdk_mutable_members;
 
 /// kotlinc's `preComputedStubs` order: a class's applicable faces contribute their stubs in this
 /// order.
@@ -45,11 +50,13 @@ const FACE_ORDER: [CollectionKind; 8] = [
     CollectionKind::ListIterator,
 ];
 
-/// The faces whose stubs are realized. The JDK members of the mutable collections (`removeIf`) and
-/// the `toArray` lowering are not yet realized for any face.
-const REALIZED_FACES: [CollectionKind; 4] = [
+/// The faces whose stubs are realized. The `toArray` lowering is not yet realized for any face.
+const REALIZED_FACES: [CollectionKind; 7] = [
     CollectionKind::Collection,
+    CollectionKind::Set,
     CollectionKind::List,
+    CollectionKind::Map,
+    CollectionKind::MapEntry,
     CollectionKind::Iterator,
     CollectionKind::ListIterator,
 ];
@@ -60,11 +67,13 @@ const ACC_SYNTHETIC: u16 = 0x1000;
 const ACC_ABSTRACT: u16 = 0x0400;
 
 /// The JVM-only collection members of every class: bridges for members inherited from a Java
-/// collection superclass, and throwing stubs for a read-only face's mutable members.
+/// collection superclass, throwing stubs for a read-only face's mutable members, and the JDK's
+/// `toArray` members.
 #[derive(Default)]
 pub(super) struct CollectionMemberPlans {
     pub(super) inherited_bridges: InheritedCollectionBridges,
     pub(super) read_only_stubs: ReadOnlyCollectionStubs,
+    pub(super) to_array: crate::jvm::collection_to_array::CollectionToArray,
 }
 
 #[derive(Default)]
@@ -96,6 +105,10 @@ pub(super) struct ReadOnlyStub {
     pub(super) override_parameters: Vec<Ty>,
     pub(super) parameter_names: Vec<String>,
     pub(super) result: Ty,
+    /// The stub method as the JVM declares it once kotlinc's value-class lowering has replaced it:
+    /// its name and its physical parameters and result (`add-IQRRRT4(I)Z` for `add(element: Z)`
+    /// over `Z(val x: Int)`). A member that implements the declaration writes no stub.
+    pub(super) realized: StubRealization,
     /// kotlinc's `forceBoxedReturnTypeOnOverride`: a scalar result over the mutable declaration's
     /// reference result is the scalar's wrapper on the JVM (`set(II)Ljava/lang/Integer;`).
     pub(super) boxed_result: bool,
@@ -109,6 +122,9 @@ pub(super) struct ReadOnlyStub {
     /// physical descriptor differs from it, so a `Nothing` member's `Void` result alone also takes
     /// an adapter.
     pub(super) bridge: Option<(Vec<Ty>, Ty)>,
+    /// The declaration is type-safe (`MutableMap.remove(key)`): the stub already takes the erased
+    /// parameters, and kotlinc's bridge for its erased result forwards to it instead of throwing.
+    pub(super) type_safe: bool,
     /// The type-safe declaration's barrier (`MutableCollection.remove`): the bridge to a member
     /// that implements it with a narrower parameter first tests each checked argument.
     pub(super) barrier: Option<StubBarrier>,
@@ -143,6 +159,14 @@ pub(super) enum StubBody {
 impl ReadOnlyStub {
     pub(super) fn descriptor(&self) -> String {
         method_descriptor(&jvm_tys(&self.parameters), self.physical_result())
+    }
+
+    /// The mutable declaration's erased JVM descriptor: its bridge's, or the stub's own.
+    fn erased_descriptor(&self) -> String {
+        self.bridge.as_ref().map_or_else(
+            || self.descriptor(),
+            |(parameters, result)| method_descriptor(parameters, *result),
+        )
     }
 
     /// The JVM result of the stub's own descriptor.
@@ -298,7 +322,7 @@ fn class_stubs(
                         )
                     })
             else {
-                return Some(stub);
+                return Some(replaced_by_value_classes(ir, class, stub));
             };
             // The member is reached at the mutable declaration's erased descriptor, or at the
             // stub's own when they agree (a type-safe `remove(Object)`, a renamed `remove(int)`).
@@ -332,6 +356,33 @@ fn class_stubs(
             })
         })
         .collect())
+}
+
+/// kotlinc's value-class lowering of a throwing stub, which runs after the stubs are selected: the
+/// stub takes its realized name and carriers (see [`collection_stub_realization`]). The mutable
+/// declaration's erased descriptor keeps its bridge whenever the stub moves off it, so a stub
+/// renamed by its value-class signature leaves that bridge as the only method under its JVM name.
+fn replaced_by_value_classes(ir: &IrFile, class: &IrClass, stub: ReadOnlyStub) -> ReadOnlyStub {
+    let realized = collection_stub_realization(
+        ir,
+        class.is_value,
+        stub.is_renamed(),
+        &stub.physical_name,
+        &stub.parameters,
+        stub.signature_result(),
+    );
+    let erased = stub
+        .bridge
+        .clone()
+        .unwrap_or_else(|| (jvm_tys(&stub.parameters), stub.physical_result()));
+    let moved = realized.name != stub.physical_name
+        || method_descriptor(&realized.parameters, realized.result)
+            != method_descriptor(&erased.0, erased.1);
+    ReadOnlyStub {
+        realized,
+        bridge: moved.then_some(erased),
+        ..stub
+    }
 }
 
 /// kotlinc's `computeStubsForCollectionClasses`: each read-only face the class strictly extends
@@ -417,6 +468,10 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
         .decoded_builtin_members_name(face.mutable)
         .into_iter()
         .filter(|member| member.kind == MappedBuiltinMemberKind::Function)
+        .filter(|member| {
+            !member.platform_dependent
+                || jdk_declares(classpath, face, &member.physical_name, &member.descriptor)
+        })
         .map(|member| {
             let declared = &member.generic_sig;
             let parameters: Vec<Ty> = declared
@@ -495,12 +550,16 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
             .map_or_else(|| member.source_name.clone(), |(_, name)| name.to_string());
             let renamed = physical_name != member.source_name;
             let boxed_result = !renamed && scalar_over_reference(result, declared.ret);
-            let stub_parameters = jvm_tys(&parameters);
-            let stub_descriptor =
-                method_descriptor(&stub_parameters, physical_stub_result(result, boxed_result));
+            let realized = StubRealization {
+                name: physical_name.clone(),
+                parameters: jvm_tys(&parameters),
+                result: physical_stub_result(result, boxed_result),
+                result_box: None,
+            };
+            let stub_descriptor = method_descriptor(&realized.parameters, realized.result);
             let (bridge_parameters, bridge_result) = if renamed {
                 (
-                    stub_parameters,
+                    realized.parameters.clone(),
                     jvm_declared_ty(&Ty::nullable(Ty::obj("kotlin/Any"))),
                 )
             } else {
@@ -511,6 +570,7 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
             ReadOnlyStub {
                 name: member.source_name,
                 physical_name,
+                realized,
                 body: StubBody::Throwing,
                 parameters,
                 override_parameters,
@@ -519,6 +579,7 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
                 boxed_result,
                 declaration_site_wildcards,
                 bridge,
+                type_safe: type_safe_policy.is_some(),
                 barrier,
             }
         })
@@ -532,7 +593,35 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
         }
     }
     stubs.sort_by_key(|stub| names.iter().position(|name| *name == stub.name));
+    let jdk = jdk_mutable_members::jdk_mutable_stubs(classpath, face, arguments, &stubs);
+    stubs.extend(jdk);
     stubs
+}
+
+/// Whether the JDK on the classpath declares a `@PlatformDependent` member of the face's mutable
+/// declaration: its mapped JDK interface, or one that interface extends, has a method under the
+/// member's JVM name and erased descriptor. kotlinc's mapped scope hides the member otherwise, so a
+/// Java 7 `java.util.Map` leaves `MutableMap.remove(key, value)` no stub.
+fn jdk_declares(classpath: &Classpath, face: Face, name: &str, descriptor: &str) -> bool {
+    let mut pending = vec![to_jvm_type_name(face.mutable)];
+    let mut seen = HashSet::default();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        let Some(info) = classpath.find_name(current) else {
+            continue;
+        };
+        if info
+            .methods
+            .iter()
+            .any(|method| method.name == name && method.descriptor == descriptor)
+        {
+            return true;
+        }
+        pending.extend(info.interfaces.iter_ids());
+    }
+    false
 }
 
 /// The JVM result of a stub whose semantic result is `result`.
@@ -546,7 +635,7 @@ fn physical_stub_result(result: Ty, boxed: bool) -> Ty {
 
 /// The policy of the declaration a member of the builtin `owner` is, or overrides: `owner`'s own
 /// row first, then each builtin supertype's, nearest first.
-fn overridden_declaration_policy<T>(
+pub(super) fn overridden_declaration_policy<T>(
     classpath: &Classpath,
     owner: TypeName,
     policy: impl Fn(TypeName) -> Option<T>,
@@ -567,7 +656,7 @@ fn overridden_declaration_policy<T>(
 
 /// A collection parameter with each of its arguments star-projected, `Collection<*>` for
 /// `Collection<E>`.
-fn star_projected(parameter: Ty) -> Ty {
+pub(super) fn star_projected(parameter: Ty) -> Ty {
     let inner = parameter.non_null();
     let Some(classifier) = inner.kotlin_class_internal() else {
         return parameter;
@@ -982,7 +1071,7 @@ fn superclass_chain(
 /// class from the class up to that superclass shares the class's package. A private member is
 /// never inherited, and a package-private one only along a path that stays in its package; only
 /// an inherited member can implement a stub's member.
-fn inherited_along(visibility: Visibility, same_package_path: bool) -> bool {
+pub(super) fn inherited_along(visibility: Visibility, same_package_path: bool) -> bool {
     match visibility {
         Visibility::Private => false,
         Visibility::PackagePrivate => same_package_path,

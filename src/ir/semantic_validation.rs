@@ -1,9 +1,10 @@
 //! Common-IR semantic boundary validation.
 //!
-//! `Ty::Pending` and `Ty::Error` are frontend/checker states, not Kotlin types. This module walks
-//! every common-IR type carrier before the IR crosses into a backend. The matches over semantic
-//! operation enums are deliberately exhaustive: adding a new IR node requires deciding where its
-//! types live instead of silently creating an unchecked backend path.
+//! `Ty::Pending`, `Ty::Error` and a call's inference variables are frontend/checker states, not
+//! Kotlin types. This module walks every common-IR type carrier before the IR crosses into a
+//! backend. The matches over semantic operation enums are deliberately exhaustive: adding a new IR
+//! node requires deciding where its types live instead of silently creating an unchecked backend
+//! path.
 
 use crate::types::Ty;
 
@@ -46,7 +47,7 @@ pub enum NullableSamContractViolation {
 }
 
 fn reject(location: &'static str, ty: Ty) -> Result<(), UndeterminedIrType> {
-    if ty.mentions_pending() || ty.mentions_error() {
+    if ty.mentions_pending() || ty.mentions_error() || ty.mentions_type_variable() {
         Err(UndeterminedIrType { location, ty })
     } else {
         Ok(())
@@ -83,6 +84,7 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         | IrIntrinsic::StringGet
         | IrIntrinsic::StringLength
         | IrIntrinsic::EnumName
+        | IrIntrinsic::EnumOrdinal
         | IrIntrinsic::NullableAnyToString
         | IrIntrinsic::CoroutineContext => Ok(()),
     }
@@ -372,6 +374,10 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumValueOf { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumConstant { .. }
+        | IrExpr::EnumAllocation { .. }
+        | IrExpr::EnumEntriesList { .. }
+        | IrExpr::NoSuchEnumConstant { .. }
         | IrExpr::EnumSwitchOrdinal { .. }
         | IrExpr::EnumSwitchKey { .. }
         | IrExpr::ReifiedClassMarker { .. }
@@ -466,6 +472,11 @@ fn validate_class(class: &IrClass) -> Result<(), UndeterminedIrType> {
     }
     for argument in &class.ctor_args {
         reject("constructor argument", argument.ty)?;
+        if let super::IrCtorParameterProvenance::InterfaceDelegate { interface, .. } =
+            argument.provenance
+        {
+            reject("constructor delegate interface", interface)?;
+        }
         if let Some(declared) = argument.declared_ty {
             reject("declared constructor argument", declared)?;
         }
@@ -660,14 +671,17 @@ impl IrFile {
                 construction.members.iter().map(|(_, ty)| *ty),
             )?;
         }
-        reject_all("logical expression", self.logical_types.values().copied())?;
+        reject_all("logical expression", self.logical_types().map(|(_, ty)| ty))?;
         reject_all(
             "deferred local declaration",
             self.deferred_local_types.values().copied(),
         )?;
         reject_all("inline declaration", self.inline_declared_types())?;
         reject_all("exhaustive when", self.whens.exhaustive.values().copied())?;
-        reject_all("physical expression", self.physical_types.values().copied())?;
+        reject_all(
+            "physical expression",
+            self.physical_types().map(|(_, ty)| ty),
+        )?;
         for properties in self.member_ext_props.values() {
             for property in properties {
                 validate_member_extension(property)?;
@@ -834,7 +848,7 @@ impl IrFile {
                     },
                 });
             };
-            let ty = self.logical_types.get(capture).copied();
+            let ty = self.logical_type(*capture);
             if !ty.is_some_and(|ty| ty.is_nullable() && ty.is_reference()) {
                 return Err(InvalidIrContract::NullableSam {
                     expression,
@@ -892,6 +906,7 @@ mod tests {
             nullable: true,
             kotlin_interface: false,
             parameter_identities: Vec::new(),
+            type_parameters: Vec::new(),
         }
     }
 
@@ -942,6 +957,73 @@ mod tests {
         );
     }
 
+    fn function_with_parameter(parameter: Ty) -> IrFile {
+        let mut ir = IrFile::default();
+        ir.functions.push(IrFunction {
+            name: "generic".to_owned(),
+            params: vec![parameter],
+            ret: Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        ir
+    }
+
+    fn inference_variable() -> Ty {
+        Ty::type_variable(
+            crate::types::TyParamName::new("\0call:T"),
+            Ty::nullable(Ty::obj("kotlin/Any")),
+        )
+    }
+
+    #[test]
+    fn rejects_an_inference_variable_at_the_root_and_nested() {
+        for parameter in [
+            inference_variable(),
+            Ty::fun(vec![Ty::Int], inference_variable()),
+            Ty::obj_args("kotlin/collections/List", &[inference_variable()]),
+            Ty::type_variable(crate::types::TyParamName::new("\0call:R"), Ty::String),
+            Ty::ty_param("OuterT", inference_variable()),
+            Ty::obj_args(
+                "kotlin/collections/List",
+                &[Ty::ty_param("OuterT", inference_variable())],
+            ),
+        ] {
+            assert_eq!(
+                function_with_parameter(parameter).validate_determined_types(),
+                Err(UndeterminedIrType {
+                    location: "function parameter",
+                    ty: parameter,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_declaration_type_parameters_and_solved_call_types() {
+        let declared = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let solved = crate::types::ty_subst(
+            Ty::obj_args("kotlin/collections/List", &[inference_variable()]),
+            &crate::fx_hash::HashMap::from_iter([(
+                crate::types::TyParamName::new("\0call:T"),
+                Ty::String,
+            )]),
+        );
+        for parameter in [
+            declared,
+            Ty::obj_args("kotlin/collections/List", &[declared]),
+            Ty::ty_param("R", Ty::obj_args("kotlin/Comparable", &[declared])),
+            solved,
+        ] {
+            assert_eq!(
+                function_with_parameter(parameter).validate_determined_types(),
+                Ok(())
+            );
+        }
+    }
+
     #[test]
     fn rejects_a_nullable_sam_without_its_single_capture() {
         let mut ir = IrFile::default();
@@ -966,8 +1048,7 @@ mod tests {
     fn rejects_a_nullable_sam_that_is_not_a_function_value_adapter() {
         let mut ir = IrFile::default();
         let capture = ir.add_expr(IrExpr::Const(IrConst::Null));
-        ir.logical_types
-            .insert(capture, Ty::nullable(Ty::fun(Vec::new(), Ty::Unit)));
+        ir.set_logical_type(capture, Ty::nullable(Ty::fun(Vec::new(), Ty::Unit)));
         let mut sam = nullable_sam_target();
         sam.wraps_function_value = false;
         ir.exprs.push(IrExpr::Lambda {
@@ -991,7 +1072,7 @@ mod tests {
     fn rejects_a_nullable_sam_with_a_non_reference_capture() {
         let mut ir = IrFile::default();
         let capture = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-        ir.logical_types.insert(capture, Ty::Int);
+        ir.set_logical_type(capture, Ty::Int);
         ir.exprs.push(IrExpr::Lambda {
             impl_fn: 0,
             arity: 0,

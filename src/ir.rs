@@ -53,7 +53,6 @@ pub use compiled_inline_calls::{CompiledInlineOperands, SameModuleInlining};
 mod constants;
 mod constructors;
 mod default_arguments;
-pub(crate) use default_arguments::module_override_callable;
 mod enum_switch_whens;
 pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
@@ -67,6 +66,8 @@ pub(crate) use emitted_body_roots::{
 mod field_flags;
 mod fields;
 mod function_scope;
+mod generic_signature;
+pub use generic_signature::{IrGenericSig, IrTypeParameter};
 mod inline_copies;
 mod suspension_points;
 pub use suspension_points::{IrIntrinsicSuspensionPoint, IrValueClassSuspendResult};
@@ -86,7 +87,10 @@ mod local_property_references;
 mod module_records;
 mod negations;
 mod node_positions;
+mod node_types;
 pub use node_positions::IrNodePosition;
+pub(crate) use node_types::IrNodeTypeColumn;
+pub use node_types::IrNodeTypes;
 mod null_checks;
 mod operators;
 mod overrides;
@@ -97,6 +101,7 @@ mod property_layouts;
 pub(crate) mod referenced_classifiers;
 mod references;
 mod reified_markers;
+mod reified_templates;
 mod sam_target;
 mod source_debug;
 pub(crate) use source_debug::SourceDebug;
@@ -124,7 +129,7 @@ pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{
     Bridge, BridgeAccessorRole, BridgeKind, BridgeParameter, BridgePropertyImplementation,
-    CollectionBarrierPlan,
+    CollectionBarrierCheck, CollectionBarrierParameter, CollectionBarrierPlan,
 };
 pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget};
 pub use catches::IrCatch;
@@ -153,14 +158,16 @@ pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
 pub use lambda_classes::{IrInvokeBridge, IrLambdaCapture, IrLambdaClass, IrSamWrapperClass};
 pub(crate) use lifting_sequences::{IrLiftingEntry, IrLiftingRoot, IrLiftingSequence};
-pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
+pub(crate) use local_class_names::{
+    IrClassDeclarationContext, IrLocalClassNameProvenance, IrLocalClassOwner,
+};
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
     IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
     IrModuleClassifier, IrModuleConstructions, IrModuleConstructor, IrModuleMemberAccess,
     IrModuleSource, IrOverriddenFunction,
 };
-pub use null_checks::NullCheck;
+pub use null_checks::{NullCheck, NullCheckSite};
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use package_declarations::{
@@ -177,7 +184,7 @@ pub use references::{
     FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable, PropRef,
     ReflectedCallable,
 };
-pub use sam_target::{IrSamMethod, IrSamTarget};
+pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
@@ -270,6 +277,7 @@ pub enum IrPropertyDispatch {
 pub struct IrAnnotationConstruction {
     pub interface: TypeName,
     pub members: Vec<(String, Ty)>,
+    pub arguments: crate::libraries::AnnotationArgumentProvenance,
     /// Constructor defaults as lowered declarations, not evaluated call operands.
     pub defaults: Vec<Option<ExprId>>,
     /// The lexical scopes this construction is evaluated in; `None` is the file facade. A written
@@ -617,6 +625,41 @@ pub enum IrExpr {
     EnumEntries {
         classifier: TypeName,
     },
+    /// One constant of `classifier` being built by [`crate::backend::enums`]: `construction`, a
+    /// `New` of the enum or of the constant's body subclass, with `kotlin.Enum`'s `name` and
+    /// `ordinal` storage holding these values before any constructor runs. A target owns that
+    /// storage; the shared lowering owns when and in which order constants are built.
+    ///
+    /// `published` is the static slot that already holds the constant's [`IrExpr::EnumAllocation`]
+    /// when the target publishes constants before constructing them: the construction then
+    /// initializes that object instead of allocating its own. `None` when it allocates.
+    EnumConstant {
+        classifier: TypeName,
+        name: Box<str>,
+        ordinal: u32,
+        construction: ExprId,
+        published: Option<u32>,
+    },
+    /// A constant of `classifier` allocated and nothing more: an instance of `instance` (the enum,
+    /// or the constant's body subclass) whose fields hold their zero values, whose `kotlin.Enum`
+    /// storage is unset, and whose constructor has not run. Its [`IrExpr::EnumConstant`] later
+    /// constructs it in place.
+    EnumAllocation {
+        classifier: TypeName,
+        instance: TypeName,
+    },
+    /// The one `EnumEntries` list of `classifier` over `values`, a fresh array of its constants in
+    /// declaration order. Built once by the enum's initializer ([`crate::backend::enums`]).
+    EnumEntriesList {
+        classifier: TypeName,
+        values: ExprId,
+    },
+    /// `classifier.valueOf(name)` found no constant of that name: Kotlin throws
+    /// `IllegalArgumentException`. Value type `Nothing`.
+    NoSuchEnumConstant {
+        classifier: TypeName,
+        name: ExprId,
+    },
     /// JVM `MappedEnumWhenLowering`: the switch key of `subject`'s entry, read from the emitting
     /// class's `$WhenMappings` table for `classifier` at `subject`'s runtime ordinal. Value type:
     /// `Int`. `registrations` are the table entries this subject `when` (and every subject `when`
@@ -883,6 +926,8 @@ pub enum IrEnclosure {
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
 pub struct IrClass {
+    /// Original checked source context; absent for a class with no source declaration.
+    pub(crate) declaration_context: Option<IrClassDeclarationContext>,
     /// Non-local lexical declaration name retained independently from the class's physical name.
     pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub fq_name: TypeName,
@@ -1752,16 +1797,8 @@ pub struct IrFile {
     pub(crate) inline_anonymous_lambdas: crate::fx_hash::HashSet<FunId>,
     /// Class index of a function already published as that class's method.
     pub(crate) class_method_owners: crate::fx_hash::HashMap<FunId, Vec<u32>>,
-    /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by
-    /// the lowerer — NOT erased. The value-class pass consults it to recover the representation of a value
-    /// whose IR node alone is ambiguous: a library call returns a physical `Object` descriptor, but its
-    /// logical type may be a value class (`runCatching{…}: Result`), so the pass knows the result is the
-    /// value class's UNBOXED underlying, not an opaque `Object`. Populated for every lowered expression;
-    /// consumed by the value-class pass (the sole owner of value-class knowledge) and by target-neutral
-    /// rewrites that preserve a value in a new temporary. Such a rewrite first consults
-    /// [`Self::physical_types`] when a backend has already changed the representation, then uses this
-    /// checked type when no physical override exists.
-    pub logical_types: crate::fx_hash::HashMap<u32, Ty>,
+    /// The checked types of every expression node; see `node_types`.
+    types: node_types::IrNodeTypeColumn,
     /// Deferred source-local declaration → its declared semantic type before an inline expansion
     /// specializes type parameters. The parser supplies a target-neutral zero expression because
     /// the source omitted an initializer; a backend uses this provenance to choose that target's
@@ -1822,8 +1859,6 @@ pub struct IrFile {
     /// nullable value class (`dup; ifnull; box-impl`). It is laid out like a safe call but is a
     /// conversion of one, so it never folds into a safe-call chain's shared null exit.
     pub(crate) jvm_value_class_null_guards: crate::fx_hash::HashSet<ExprId>,
-    /// Physical type before a semantic read coercion.
-    pub physical_types: crate::fx_hash::HashMap<u32, Ty>,
     /// Values a JVM value-class underlying-property read leaves in an erased generic slot as an
     /// ordinary primitive wrapper (`R<Int>.value`: `Object` containing `Integer`). The JVM
     /// representation pass records the exact expression identity; emission must not infer this
@@ -1840,6 +1875,17 @@ pub struct IrFile {
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each entry another module constructs a class of this file, or reads its object, through,
+    /// by the entry's `FunId`: the class it answers. See [`crate::backend::construction_entries`].
+    pub(crate) construction_entries: crate::fx_hash::HashMap<FunId, ClassId>,
+    /// Each exported overridable member's dispatching entry, by the member's `FunId`: the function
+    /// another module's call reaches it through, which dispatches on the receiver.
+    pub(crate) dispatch_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each enum class's initializer, which builds its constants and then its companion, once a
+    /// target's shared enum lowering ([`crate::backend::enums`]) has realized it as an ordinary
+    /// function of this file. A target whose companion getter runs first calls it before building
+    /// the companion, so touching the companion builds the constants first.
+    pub(crate) enum_initializers: crate::fx_hash::HashMap<ClassId, FunId>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: crate::fx_hash::HashMap<u32, FnParamInfo>,
     /// Per declared method/function, whether each SOURCE parameter was declared nullable (`a: String?`).
@@ -2496,52 +2542,6 @@ pub struct IrFile {
     /// realization so emission does not mistake a value-class spelling (`Token`) for the interface
     /// slot that actually exists (`String`, `int`, …).
     pub lambda_sam_jvm_signature: crate::fx_hash::HashMap<u32, (Vec<Ty>, Ty)>,
-}
-
-/// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future
-/// platform's equivalent needs). NO target descriptors here — each backend formats its own.
-#[derive(Clone, Debug)]
-pub struct IrGenericSig {
-    /// Each declared type parameter with its complete semantic bound shape. Whether that bound is an
-    /// interface is declaration metadata, not something a backend may infer from a physical name.
-    pub type_params: Vec<IrTypeParameter>,
-    /// Complete semantic callable parameters for a function signature. An extension receiver occupies
-    /// its physical context-boundary slot so a backend signature retains its declared generic type;
-    /// declaration metadata separates that slot back into a receiver. Empty for a class signature.
-    pub params: Vec<Ty>,
-    /// Complete semantic return type for a function signature. `None` for a class signature.
-    pub ret: Option<Ty>,
-    /// For a CLASS signature with a PARAMETERIZED supertype: the superclass + superinterfaces as
-    /// platform-agnostic `Ty`s carrying their type arguments (`[Any, Operation<Result<Int>>]`), so a
-    /// cross-module reader recovers a member's concrete generic return. The backend formats these into the
-    /// JVM `Signature` string. Empty ⇒ no parameterized supertype (backend emits the default `Object`
-    /// superclass). Empty for a function signature.
-    pub supers: Vec<Ty>,
-}
-
-#[derive(Clone, Debug)]
-pub struct IrTypeParameter {
-    pub name: String,
-    pub semantic_name: String,
-    pub bounds: Vec<(Ty, bool)>,
-    pub variance: crate::types::TypeVariance,
-    /// Kotlin declaration capability retained for targets that materialize runtime type operations.
-    /// The JVM consumes it when choosing its reified-operation marker representation.
-    pub reified: bool,
-}
-
-impl IrTypeParameter {
-    /// A use of this parameter as a type.
-    pub(crate) fn ty(&self) -> Ty {
-        Ty::ty_param(&self.semantic_name, self.upper_bound())
-    }
-
-    /// The representative upper bound: the first declared bound, else `Any?`.
-    pub(crate) fn upper_bound(&self) -> Ty {
-        self.bounds
-            .first()
-            .map_or(Ty::nullable(Ty::obj("kotlin/Any")), |(bound, _)| *bound)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

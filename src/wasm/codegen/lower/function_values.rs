@@ -47,14 +47,23 @@ impl Body<'_> {
             .get(captures.len()..)
             .ok_or("a function value capturing more than its body takes")?
             .to_vec();
+        if self
+            .ir
+            .shared_capture_parameters
+            .keys()
+            .any(|&(owner, parameter)| owner == function && parameter as usize >= captures.len())
+        {
+            return Err("a function value with a shared parameter outside its captures".into());
+        }
         let body = self.emitted_function(function)?;
         let shape = self.runtime.function_shape(self.module, own.len());
 
         let mut fields = vec![immutable(ValType::reference(
             self.runtime.objects.any_table,
         ))];
-        for &captured in &params[..captures.len()] {
-            let value = carrier(captured)?.ok_or("a function value capturing a `Unit` value")?;
+        for parameter in 0..captures.len() {
+            let value = parameter_carrier(self.module, self.ir, function, parameter as u32)?
+                .ok_or("a function value capturing a `Unit` value")?;
             fields.push(immutable(value));
         }
         let structure = self.module.subtype(SubType {
@@ -114,8 +123,8 @@ impl Body<'_> {
             .constant_global(ValType::reference(shape.table), init);
 
         self.code.global_get(table);
-        for (&capture, &captured) in captures.iter().zip(&params) {
-            self.value(capture, captured)?;
+        for (parameter, &capture) in captures.iter().enumerate() {
+            self.function_argument(function, parameter as u32, capture)?;
         }
         self.code.struct_new(structure);
         Ok(())

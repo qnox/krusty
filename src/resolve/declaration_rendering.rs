@@ -733,7 +733,7 @@ pub(super) fn readable_type(source: &dyn SymbolSource, ty: Ty) -> String {
             TyKind::Fun(_) | TyKind::DefinitelyNotNull(_) | TyKind::Intersection(_) => {
                 format!("({})?", readable_type(source, inner))
             }
-            TyKind::TyParam(name, _) => {
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
                 format!(
                     "{}?",
                     crate::types::type_parameter_source_name(name.as_str())
@@ -748,7 +748,7 @@ pub(super) fn readable_type(source: &dyn SymbolSource, ty: Ty) -> String {
                     classifier_display(source, name, arguments.as_slice(), true)
                 )
             }
-            TyKind::TyParam(name, _) => {
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
                 format!(
                     "{}!",
                     crate::types::type_parameter_source_name(name.as_str())
@@ -762,7 +762,7 @@ pub(super) fn readable_type(source: &dyn SymbolSource, ty: Ty) -> String {
         TyKind::InProjection(inner) => format!("in {}", readable_type(source, inner)),
         TyKind::OutProjection(inner) => format!("out {}", readable_type(source, inner)),
         TyKind::StarProjection(_) => "*".to_string(),
-        TyKind::TyParam(name, bound) => format!(
+        TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => format!(
             "{}{}",
             crate::types::type_parameter_source_name(name.as_str()),
             if bound.is_platform_nullable() {
