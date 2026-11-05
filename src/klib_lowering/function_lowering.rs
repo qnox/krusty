@@ -474,7 +474,8 @@ pub(super) enum HeaderPurpose {
     External,
     /// The body of a private member of the value class `TypeName`, which no provider records. A
     /// private member is called only from its class, so the calling member's authenticated class
-    /// is its class, and it is emitted as that class's other members are.
+    /// is its class ([`super::class_headers::authenticate_private_member`] proves the raw header
+    /// against it first), and it is emitted as that class's other members are.
     PrivateValueMember(TypeName),
 }
 
@@ -643,7 +644,12 @@ fn header(
                     .is_some_and(|class| class.is_value) =>
             {
                 // A value class's member is final and is emitted as a member of its class, whose
-                // `this` is the value it is called on.
+                // `this` is the value it is called on. Semantic conversion interns the class path,
+                // so the raw receiver proves the exact class identity first.
+                let class = selected
+                    .class_contract()
+                    .expect("the guard selected a value class member");
+                super::class_headers::authenticate_receiver(class, arena, function)?;
                 let serialized = semantic_type(arena, types, receiver.ty)?;
                 if selected.declaration_owner()
                     != serialized

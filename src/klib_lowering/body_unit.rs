@@ -204,15 +204,22 @@ struct PendingBody<'a> {
         crate::ir::ClassId,
         super::class_initialization::ClassInitialization<'a, 'a>,
     )>,
-    /// A value class member's class and the field its body reads the value through.
-    value_member: Option<(crate::ir::ClassId, &'a KlibIrField)>,
+    value_member: Option<ValueMember<'a>>,
 }
 
-/// The declaration of a body this unit emits, and for a value class member, its class and the
-/// field the body reads the value through.
+/// The declaration of a body this unit emits, and for a value class member, its class.
 struct BodyHeader<'a> {
     header: FunctionHeader,
-    value_member: Option<(crate::ir::ClassId, &'a KlibIrField)>,
+    value_member: Option<ValueMember<'a>>,
+}
+
+/// The class of a value class member this unit emits: the class it materializes, the field the
+/// member's body reads the value through, and the provider's authenticated class contract.
+#[derive(Clone, Copy)]
+struct ValueMember<'a> {
+    class: crate::ir::ClassId,
+    field: &'a KlibIrField,
+    contract: &'a crate::libraries::KlibBodyClassContract,
 }
 
 impl DependencyBodyUnit {
@@ -526,8 +533,8 @@ impl DependencyBodyUnit {
             );
             let lowered = match (&body.initialization, body.value_member) {
                 (Some((class, plan)), _) => lowering.initialize_class(*class, plan),
-                (None, Some((class, field))) => lowering
-                    .reading_value_through(class, field)
+                (None, Some(member)) => lowering
+                    .reading_value_through(member.class, member.field)
                     .body(body.statements),
                 (None, None) => lowering.body(body.statements),
             }
@@ -558,7 +565,7 @@ struct Linker<'u, 's> {
     active_module: String,
     /// The class and value field of the value class member being lowered, the class of every
     /// private member it calls.
-    active_value_class: Option<(crate::ir::ClassId, &'s KlibIrField)>,
+    active_value_class: Option<ValueMember<'s>>,
     sources: Sources<'s>,
 }
 
@@ -1172,7 +1179,7 @@ impl<'s> Linker<'_, 's> {
         ir: &mut IrFile,
         identity: &KlibDependencyCallable,
     ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
-        let Some((class, field)) = self.active_value_class else {
+        let Some(active) = self.active_value_class else {
             return Ok(None);
         };
         if self.sources.callees.get(identity).is_some()
@@ -1180,7 +1187,7 @@ impl<'s> Linker<'_, 's> {
         {
             return Ok(None);
         }
-        let Some((arena, declaration)) = self.sources.bodies.function(identity) else {
+        let Some((_, declaration)) = self.sources.bodies.function(identity) else {
             return Ok(None);
         };
         if declaration.dispatch_receiver.is_none()
@@ -1189,13 +1196,8 @@ impl<'s> Linker<'_, 's> {
         {
             return Ok(None);
         }
-        block_statements(declaration)?;
-        let header = raw_function_header(
-            None,
-            HeaderPurpose::PrivateValueMember(ir.classes[class as usize].fq_name),
-            arena,
-            declaration,
-        )?;
+        let (arena, declaration, header) =
+            private_value_member_header(active.contract, identity, self.sources.bodies)?;
         self.private_members.insert(identity.clone());
         let function = match self.functions.get(identity) {
             Some(&function) => function,
@@ -1207,7 +1209,7 @@ impl<'s> Linker<'_, 's> {
                 declaration,
                 BodyHeader {
                     header,
-                    value_member: Some((class, field)),
+                    value_member: Some(active),
                 },
             )?,
         };
@@ -1427,18 +1429,28 @@ impl<'s> Linker<'_, 's> {
 pub(crate) fn is_private_value_member(
     bodies: &KlibDeclarationBodies,
     identity: &KlibDependencyCallable,
-    class: TypeName,
+    class: &crate::libraries::KlibBodyClassContract,
 ) -> bool {
-    bodies.function(identity).is_some_and(|(arena, function)| {
-        block_statements(function).is_ok()
-            && raw_function_header(
-                None,
-                HeaderPurpose::PrivateValueMember(class),
-                arena,
-                function,
-            )
-            .is_ok()
-    })
+    private_value_member_header(class, identity, bodies).is_ok()
+}
+
+/// The header of `identity`, a private member of the value class `class` with a body, proved
+/// against the class's raw header and read at the class's declared formals.
+fn private_value_member_header<'b>(
+    class: &crate::libraries::KlibBodyClassContract,
+    identity: &KlibDependencyCallable,
+    bodies: &'b KlibDeclarationBodies,
+) -> Result<(&'b KlibIrArena, &'b KlibIrFunction, FunctionHeader), KlibBodyDeclineReason> {
+    let member = super::class_headers::authenticate_private_member(class, identity, bodies)?;
+    block_statements(member.function)?;
+    let header = super::function_lowering::raw_function_header_with_class(
+        None,
+        HeaderPurpose::PrivateValueMember(class.classifier),
+        member.arena,
+        member.function,
+        member.types,
+    )?;
+    Ok((member.arena, member.function, header))
 }
 
 /// The statements of the body `function` serializes.

@@ -3,7 +3,6 @@
 use super::*;
 use crate::fx_hash::HashSet;
 use crate::ir::{IrClass, IrCtorArg, IrCtorParameterProvenance, IrExpr, IrField};
-use crate::metadata::klib_ir::tree::KlibIrField;
 
 impl<'u, 's> Linker<'u, 's> {
     pub(super) fn materialize_class(
@@ -115,7 +114,7 @@ impl<'u, 's> Linker<'u, 's> {
         &mut self,
         ir: &mut IrFile,
         selected: KlibBodyCallable<'s>,
-    ) -> Result<(crate::ir::ClassId, &'s KlibIrField), KlibBodyDeclineReason> {
+    ) -> Result<super::ValueMember<'s>, KlibBodyDeclineReason> {
         let header = super::super::class_headers::authenticate(selected, self.sources.bodies)?;
         let contract = header.contract;
         if contract.is_builtin_type() {
@@ -145,7 +144,11 @@ impl<'u, 's> Linker<'u, 's> {
             declaration: KlibDeclarationSignature::Public(contract.signature.clone()),
         };
         if let Some(&class) = self.classes.get(&identity) {
-            return Ok((class, field));
+            return Ok(super::ValueMember {
+                class,
+                field,
+                contract,
+            });
         }
         let classifier = contract.classifier;
         if ir.class_id_by_name(classifier).is_some() {
@@ -170,6 +173,10 @@ impl<'u, 's> Linker<'u, 's> {
         class.ctor_param_count = 1;
         let class = ir.add_class(class);
         self.classes.insert(identity, class);
-        Ok((class, field))
+        Ok(super::ValueMember {
+            class,
+            field,
+            contract,
+        })
     }
 }

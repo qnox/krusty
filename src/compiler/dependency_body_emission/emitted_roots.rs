@@ -35,7 +35,7 @@ pub(super) fn declarations(
         }
         // A private member of a value class has no provider declaration; the member calling it
         // authenticates its class, and it is emitted as that member is.
-        if let Some(class) = value_class.filter(|&class| {
+        if let Some(class) = value_class.filter(|class| {
             platform
                 .external_callable_by_dependency(&identity)
                 .is_none()
@@ -46,7 +46,7 @@ pub(super) fn declarations(
                 bodies
                     .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
                     .into_iter()
-                    .map(|callee| (callee, Some(class))),
+                    .map(|callee| (callee, Some(class.clone()))),
             );
             continue;
         }
@@ -141,13 +141,13 @@ pub(super) fn declarations(
         }
         if emits_body {
             let value_class = is_value_class_member(selected)
-                .then(|| selected.class_contract().map(|class| class.classifier))
+                .then(|| selected.class_contract().cloned())
                 .flatten();
             pending.extend(
                 bodies
                     .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
                     .into_iter()
-                    .map(|callee| (callee, value_class)),
+                    .map(|callee| (callee, value_class.clone())),
             );
         }
         declarations.push((declaration_target, realization));
