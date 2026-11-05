@@ -265,7 +265,7 @@ impl ProductionSignatureSemantics<'_> {
             for (formal, upper) in constraints.upper {
                 for actual in upper {
                     inferred
-                        .entry(formal.clone())
+                        .entry(crate::types::TyParamName::new(&formal))
                         .and_modify(|known| {
                             *known = crate::symbol_resolver::merge_inferred_ty(Some(*known), actual)
                         })
@@ -318,7 +318,7 @@ mod tests {
         let parent = crate::fir::DeclarationId::from_raw(1);
         let child = crate::fir::DeclarationId::from_raw(2);
         let mut parent_constraints = crate::symbol_resolver::GSigBinds::default();
-        parent_constraints.insert("T".to_owned(), Ty::String);
+        parent_constraints.insert("T".into(), Ty::String);
         let mut active =
             crate::fx_hash::HashMap::from_iter([(parent, vec![parent_constraints.clone()])]);
         let completed = crate::fx_hash::HashMap::default();
@@ -331,7 +331,7 @@ mod tests {
             .unwrap()
             .last_mut()
             .unwrap()
-            .insert("Leaked".to_owned(), Ty::Int);
+            .insert("Leaked".into(), Ty::Int);
         let mut completed_after_failure = completed;
         completed_after_failure.insert(child, parent_constraints);
 
@@ -356,21 +356,21 @@ mod tests {
             .unwrap()
             .last_mut()
             .unwrap()
-            .insert("E".to_owned(), Ty::String);
+            .insert("E".into(), Ty::String);
         checkpoint.restore(&mut active, &mut completed);
         active
             .get_mut(&builder)
             .unwrap()
             .last_mut()
             .unwrap()
-            .insert("E".to_owned(), Ty::Int);
+            .insert("E".into(), Ty::Int);
 
         assert_eq!(
             active,
             crate::fx_hash::HashMap::from_iter([(
                 builder,
                 vec![crate::symbol_resolver::GSigBinds::from_iter([(
-                    "E".to_owned(),
+                    "E".into(),
                     Ty::Int,
                 )])],
             )])

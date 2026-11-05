@@ -263,7 +263,7 @@ impl CompactSelectedResultPublication {
             .filter_map(|(formal, values)| {
                 let first = *values.first()?;
                 let publication = values.iter().copied().skip(1).fold(first, meet_publication);
-                Some((formal, publication))
+                Some((crate::types::TyParamName::from(formal), publication))
             })
             .collect::<HashMap<_, _>>();
         let published = publish_selected(self.declared, self.selected, &bindings);
@@ -404,7 +404,7 @@ fn collect_type_parameters(ty: Ty, output: &mut Vec<String>) {
     }
 }
 
-fn publish_selected(declared: Ty, selected: Ty, bindings: &HashMap<String, Ty>) -> Ty {
+fn publish_selected(declared: Ty, selected: Ty, bindings: &crate::types::TyParamBindings) -> Ty {
     match (declared.kind(), selected.kind()) {
         (TyKind::TyParam(name, declared_bound), _) => {
             let publication = bindings

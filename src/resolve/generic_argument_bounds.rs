@@ -113,7 +113,7 @@ impl Checker<'_> {
             return true;
         }
         for (formal_index, formal) in signature.formals.iter().enumerate() {
-            let Some(actual) = bindings.get(formal).copied() else {
+            let Some(actual) = bindings.get(formal.as_str()).copied() else {
                 continue;
             };
             for &bound in signature
@@ -224,7 +224,7 @@ impl ArgumentContradictions {
                 let mut binding = GSigBinds::default();
                 for violation in rejected.iter().filter(|violation| !violation.uninferred) {
                     binding.insert(
-                        signature.formals[violation.formal].clone(),
+                        crate::types::TyParamName::new(&signature.formals[violation.formal]),
                         violation.expected,
                     );
                 }

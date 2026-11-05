@@ -331,7 +331,7 @@ pub(super) fn specialize_generic_signature(
     };
     let mut validation_bindings = bindings.clone();
     for formal in receiver_validated {
-        validation_bindings.remove(&formal);
+        validation_bindings.remove(formal.as_str());
     }
     if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
         generic,
@@ -343,7 +343,7 @@ pub(super) fn specialize_generic_signature(
     if generic
         .formals
         .iter()
-        .any(|formal| !bindings.contains_key(formal))
+        .any(|formal| !bindings.contains_key(formal.as_str()))
     {
         return Err(CallableRefSpecialization::UnresolvedTypeArguments);
     }
@@ -371,7 +371,7 @@ pub(super) fn specialize_generic_signature(
         type_arguments: generic
             .formals
             .iter()
-            .map(|formal| bindings[formal])
+            .map(|formal| bindings[formal.as_str()])
             .collect(),
     })
 }

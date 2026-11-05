@@ -545,14 +545,23 @@ impl Parser<'_> {
             .truncate_shadows(classifier_shadow_count);
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
-        // A trailing bare expression is the block's value.
+        self.block_with_trailing_value(stmts, Span::new(start.lo, end.hi))
+    }
+
+    /// The block of `stmts`, a block body or a lambda body. A trailing bare expression is the
+    /// block's value, and the annotations written on that statement (`@OptIn(M::class) call()`)
+    /// annotate the value.
+    pub(super) fn block_with_trailing_value(
+        &mut self,
+        mut stmts: Vec<StmtId>,
+        span: Span,
+    ) -> ExprId {
         let mut trailing = None;
         if let Some(&last) = stmts.last() {
             if let Stmt::Expr(e) = self.file.stmt(last) {
                 let e = *e;
                 trailing = Some(e);
                 stmts.pop();
-                // The statement's annotations (`@Suppress("NAME") call()`) annotate the value.
                 if let Some(mut annotations) = self.file.statement_annotations.remove(&last) {
                     if let Some(own) = self.file.expression_annotations.remove(&e) {
                         annotations.extend(own);
@@ -561,8 +570,7 @@ impl Parser<'_> {
                 }
             }
         }
-        self.file
-            .add_expr(Expr::Block { stmts, trailing }, Span::new(start.lo, end.hi))
+        self.file.add_expr(Expr::Block { stmts, trailing }, span)
     }
 
     /// kotlinc's assignment plugin resolves `target = value` on an annotated `val` as the call

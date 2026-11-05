@@ -229,8 +229,15 @@ impl CallableRegistry {
                     if !defaults.is_empty() && default_entry.is_none() {
                         continue;
                     }
+                    if super::lower::value_hash::call_kind(ir, callables, expression).is_some() {
+                        continue;
+                    }
                     if callable
                         .compiler_operation()
+                        .filter(|operation| {
+                            *operation
+                                != crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
+                        })
                         .is_some_and(super::lower::is_direct_operation)
                         && !callable
                             .dependency_callable
@@ -284,6 +291,22 @@ impl CallableRegistry {
                         continue;
                     }
                     let index = self.dependencies.get(identity).copied().ok_or_else(|| {
+                        crate::trace_compiler!(
+                            "lower",
+                            "wasm dependency target not emitted: expression={expression} target={target:?} identity={identity:?} dispatch={dispatch_receiver:?} checked_receiver={:?} receiver_node={:?} selected_source_receiver={:?} operation={:?} semantic_role={:?} call_edge_semantic_role={:?} declaration_owner={:?} kind={:?} declaration_receiver={:?} params={:?} ret={:?} call_params={params:?} overridden={:?}",
+                            dispatch_receiver.and_then(|receiver| ir.checked_type(receiver)),
+                            dispatch_receiver.map(|receiver| ir.expr(receiver)),
+                            ir.ext_call_source_receiver.get(&expression),
+                            callable.compiler_operation(),
+                            callable.semantic_role,
+                            ir.semantic_call_roles.get(&expression),
+                            callable.declaration_owner,
+                            callable.kind,
+                            callable.source_receiver,
+                            callable.params,
+                            callable.ret,
+                            callable.overridden_declarations,
+                        );
                         "a dependency callable whose target code was not emitted".to_string()
                     })?;
                     targets.external.insert(*target, index);
