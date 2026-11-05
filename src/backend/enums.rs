@@ -110,7 +110,7 @@ pub(crate) enum BaseMember {
 /// The `kotlin.Enum` property an external property read names: the getter frozen at the
 /// frontend/backend boundary is declared by `kotlin.Enum`, under the name its provider decoded.
 pub(crate) fn base_member(
-    callables: &crate::backend::CheckedBackendCallables,
+    callables: &super::CheckedBackendCallables,
     target: crate::fir::ExternalPropertyId,
 ) -> Option<BaseMember> {
     let property = callables.property(target)?;
