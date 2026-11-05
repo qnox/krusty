@@ -774,7 +774,11 @@ fn nested_anonymous_super_lambda_captures_its_callers_receiver() {
     assert_eq!(
         capture.receiver,
         crate::fir::FirCapturedReceiver::Enclosing {
-            classifier: receiver_type
+            classifier: receiver_type,
+            owner: Some(crate::fir::EnclosingInstanceOwner {
+                declaration: receiver_declaration,
+                kind: crate::fir::EnclosingInstanceKind::Classifier,
+            }),
         }
     );
     assert_eq!(

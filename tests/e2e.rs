@@ -1878,6 +1878,8 @@ mod native_enum_defaults_e2e;
 mod native_enum_entries_e2e;
 #[path = "native_enum_entry_interface_e2e.rs"]
 mod native_enum_entry_interface_e2e;
+#[path = "native_enum_publication_e2e.rs"]
+mod native_enum_publication_e2e;
 #[path = "native_exceptions_e2e.rs"]
 mod native_exceptions_e2e;
 #[path = "native_experimental_bitwise_e2e.rs"]
