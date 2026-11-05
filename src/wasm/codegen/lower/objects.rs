@@ -959,6 +959,19 @@ impl Body<'_> {
             self.code.unreachable();
             return Ok(());
         }
+        if self.type_of(arg)? == Some(Ty::Unit)
+            && matches!(op, IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf)
+        {
+            // `Unit` has no carrier, so its one instance is known statically: it is a `Unit` and
+            // an `Any`, and implements nothing else.
+            let tested = target.non_null();
+            let is = tested == Ty::Unit
+                || matches!(tested.kind(), TyKind::Obj(name, _) if name == crate::types::wk::any());
+            self.statement(arg)?;
+            self.code
+                .i32_const(i32::from(is == matches!(op, IrTypeOp::InstanceOf)));
+            return Ok(());
+        }
         if !matches!(self.carrier_of(arg)?, Some(ValType::Ref { .. }) | None) {
             return Err(format!(
                 "a type test of a `{}` value",
@@ -1144,7 +1157,7 @@ struct InterfaceCall {
 }
 
 /// `kotlin.Any`, the type every class value is read as before its class is tested.
-fn any() -> Ty {
+pub(super) fn any() -> Ty {
     Ty::obj_name(crate::types::wk::any())
 }
 
