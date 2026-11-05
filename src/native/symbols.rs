@@ -85,6 +85,25 @@ pub(super) fn module_constructor_symbol(
     Some(symbol)
 }
 
+/// Program-wide identity of a constructor reference, from its checked declaration signature.
+/// Its adapter may accept a narrower function type without naming another constructor.
+pub(super) fn constructor_reference_symbol(
+    module_name: &str,
+    owner: crate::types::TypeName,
+    parameters: &[crate::types::Ty],
+) -> Option<String> {
+    let mut symbol = format!(
+        "kt_constructor_reference_{}_",
+        module_namespace(module_name)
+    );
+    mangle_name(&mut symbol, &owner.render());
+    symbol.push_str("__");
+    for parameter in parameters {
+        mangle_ty(&mut symbol, *parameter)?;
+    }
+    Some(symbol)
+}
+
 /// Symbols of the entry points that box a value of a module value class and read one back, which
 /// the file declaring the class defines for every other file of the module. Named from the exact
 /// source module and class's qualified name, which both files hold, and not from anything either

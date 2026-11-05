@@ -56,11 +56,9 @@ impl BodyLowering<'_> {
         };
         let arity = u8::try_from(reference.params.len()).map_err(|_| failed())?;
 
-        // Every constructor reference invokes through a checked static adapter. A plain reference's
-        // adapter signature is already the reflected constructor signature; an unadapted inner
-        // reference additionally carries its checked outer parameter/capture. Adapted reflective
-        // references need a distinct reflected-parameter signature from their adapter ABI, which the
-        // current common-IR carrier does not yet represent.
+        // Invocation uses a checked static adapter; reflection retains the selected constructor's
+        // declared signature separately. Inner references also carry the checked outer slot.
+        // Adapted reflective invocation remains unsupported below.
         let simple = outer.is_none() && dispatch_receiver.is_none() && adaptation.is_none();
         if simple {
             if reference.params.len() != parameters.len() {
@@ -98,7 +96,7 @@ impl BodyLowering<'_> {
                 classifier,
                 function,
                 reference_ty,
-                reference.params.clone(),
+                self.constructor_reference_signature(target, outer)?,
                 None,
             ));
         }
@@ -237,7 +235,7 @@ impl BodyLowering<'_> {
                 classifier,
                 function,
                 reference_ty,
-                wrapper_parameters,
+                self.constructor_reference_signature(target, outer)?,
                 capture,
             ));
         }
@@ -288,7 +286,7 @@ impl BodyLowering<'_> {
         classifier: TypeName,
         adapter: crate::ir::FunId,
         function_type: Ty,
-        target_parameters: Vec<Ty>,
+        declaration_parameters: Vec<Ty>,
         capture: Option<ExprId>,
     ) -> ExprId {
         self.ir.add_expr(IrExpr::CallableReference(Box::new(
@@ -298,13 +296,44 @@ impl BodyLowering<'_> {
                 captures: Vec::new(),
                 bound_receiver: capture,
                 function_type,
-                declaration_parameters: target_parameters.into_boxed_slice(),
+                declaration_parameters: declaration_parameters.into_boxed_slice(),
                 declaration_result: Ty::Unit,
                 declaration_suspend: false,
                 adaptation: None,
                 reflection_owner: None,
             },
         )))
+    }
+
+    /// Reflection/equality names the selected declaration, independent of the adapter's
+    /// contravariant parameter view. An inner constructor retains its explicit outer slot.
+    fn constructor_reference_signature(
+        &self,
+        target: &crate::fir::FirConstructorTarget,
+        outer: Option<ResolvedTy>,
+    ) -> Result<Vec<Ty>, FirLoweringFailure> {
+        let parameters: &[ResolvedTy] = match target {
+            crate::fir::FirConstructorTarget::Module { declaration, .. } => {
+                let callable = self
+                    .index
+                    .callable(*declaration)
+                    .ok_or(FirLoweringFailure::MissingCallable(*declaration))?;
+                &self
+                    .index
+                    .signature(callable.declaration)
+                    .ok_or(FirLoweringFailure::MissingCallable(*declaration))?
+                    .parameters
+            }
+            crate::fir::FirConstructorTarget::External {
+                declared_parameters,
+                ..
+            } => declared_parameters,
+        };
+        Ok(outer
+            .into_iter()
+            .chain(parameters.iter().copied())
+            .map(ResolvedTy::get)
+            .collect())
     }
 
     fn constructor_reference_call(

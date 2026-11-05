@@ -4,6 +4,15 @@
 pub(super) struct ReferenceDeclaration(String);
 
 impl ReferenceDeclaration {
+    pub(super) fn constructor(
+        module: &str,
+        classifier: crate::types::TypeName,
+        parameters: &[crate::types::Ty],
+    ) -> Option<Self> {
+        super::super::symbols::constructor_reference_symbol(module, classifier, parameters)
+            .map(Self)
+    }
+
     pub(super) fn source(module: &str, callable: crate::fir::CallableId) -> Self {
         Self(super::super::symbols::module_function_symbol(
             module, callable,

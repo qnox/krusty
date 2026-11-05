@@ -133,10 +133,17 @@ fn reference_identity(
             ));
         }
         Target::Constructor { classifier } => {
-            format!(
-                "c{}",
-                super::super::super::symbols::c_identifier(&classifier.render())
+            let declaration = ReferenceDeclaration::constructor(
+                file.module_name,
+                *classifier,
+                &reference.declaration_parameters,
             )
+            .ok_or_else(|| {
+                Unsupported::from("a constructor reference with an unchecked declaration signature")
+            })?;
+            return Ok(ReferenceIdentity::Program(
+                declaration.marker(reference.bound_receiver.is_some()),
+            ));
         }
         Target::Local {
             owner,

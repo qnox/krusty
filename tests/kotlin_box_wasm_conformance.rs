@@ -1052,6 +1052,10 @@ fn wasm_generated_members_compare_callable_declarations_and_receivers() {
             "wasmDataClassOverloadedConstructorReferences",
         ),
         (
+            include_str!("box_regressions/constructorReferenceDeclaredSignature.kt"),
+            "wasmConstructorReferenceDeclaredSignature",
+        ),
+        (
             include_str!("box_regressions/dataClassNullableBoundReference.kt"),
             "wasmDataClassNullableBoundReference",
         ),
