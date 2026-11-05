@@ -234,6 +234,8 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         jvm_field_statics: _,
         jvm_companion_property_statics: _,
         jvm_companion_delegate_statics: _,
+        jvm_property_accessor_names: _,
+        jvm_static_accessor_names: _,
         function_annotations: _,
         function_source_annotations: _,
         compose: _,

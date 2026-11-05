@@ -237,8 +237,6 @@ pub(super) fn descriptor_property(
         setter_visibility: Visibility::Public,
         getter: Some(getter),
         setter: None,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         needs_access_bridge: false,
         accessor_annotations: Default::default(),
     }

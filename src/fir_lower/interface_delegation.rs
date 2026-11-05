@@ -553,8 +553,6 @@ fn materialize_delegation(
                     setter_visibility: crate::types::Visibility::Public,
                     getter: Some(getter),
                     setter,
-                    getter_jvm_name: None,
-                    setter_jvm_name: None,
                     needs_access_bridge: false,
                     accessor_annotations: Default::default(),
                 });

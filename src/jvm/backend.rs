@@ -1689,7 +1689,7 @@ pub fn facade_package_metadata_from_ir(
                     setter.is_some() || ir.has_jvm_default_static_setter(*storage),
                     *getter,
                     *setter,
-                    Some(&ir.statics[*storage as usize]),
+                    Some(*storage),
                 ),
                 Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
                     getter, setter, ..
@@ -1736,7 +1736,7 @@ pub fn facade_package_metadata_from_ir(
             let getter = has_getter.then(|| {
                 (
                     accessor_jvm_name(getter_function).unwrap_or_else(|| match storage {
-                        Some(storage) => storage.default_getter_jvm_name(),
+                        Some(storage) => ir.jvm_static_getter_name(storage),
                         None => crate::jvm::names::property_getter_name(&declaration.name),
                     }),
                     value_class_accessor_descriptor(ir, getter_function)
@@ -1748,7 +1748,7 @@ pub fn facade_package_metadata_from_ir(
                 parameters.push_str(&value_descriptor);
                 (
                     accessor_jvm_name(setter_function).unwrap_or_else(|| match storage {
-                        Some(storage) => storage.default_setter_jvm_name(),
+                        Some(storage) => ir.jvm_static_setter_name(storage),
                         None => crate::jvm::names::property_setter_name(&declaration.name),
                     }),
                     value_class_accessor_descriptor(ir, setter_function)
@@ -2212,8 +2212,6 @@ mod tests {
             is_lateinit: false,
             owner: None,
             visibility: crate::types::Visibility::Public,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
             erased_declared_ty: None,
             accessors: crate::ir::IrStaticAccessors::ABSENT,
             line: 0,
