@@ -182,6 +182,7 @@ impl BodyLowering<'_, '_, '_> {
             | IrExpr::EnumValues { .. }
             | IrExpr::EnumEntries { .. }
             | IrExpr::EnumConstant { .. }
+            | IrExpr::EnumAllocation { .. }
             | IrExpr::EnumEntriesList { .. }
             | IrExpr::NewArray { .. }
             | IrExpr::Vararg { .. }

@@ -2111,9 +2111,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
-        let object = match placement {
-            super::frame_objects::Placement::Heap => self.allocate(descriptor, size)?,
-            super::frame_objects::Placement::Frame { local } => {
+        let object = match (&enum_base, placement) {
+            // A constant published before its construction is constructed in place.
+            (
+                Some(super::enums::EnumBase {
+                    published: Some(slot),
+                    ..
+                }),
+                _,
+            ) => self.published_enum_constant(*slot)?,
+            (_, super::frame_objects::Placement::Heap) => self.allocate(descriptor, size)?,
+            (_, super::frame_objects::Placement::Frame { local }) => {
                 return self.frame_object(class, local, &arguments, &params);
             }
         };

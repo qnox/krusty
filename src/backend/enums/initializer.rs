@@ -2,7 +2,7 @@
 
 use crate::ir::{
     Callee, ClassId, ExprId, FunId, IrAccessorLines, IrBinOp, IrCatch, IrConst, IrExpr, IrFile,
-    IrFunction, IrStatic, IrStaticAccessors,
+    IrFunction, IrIntrinsic, IrStatic, IrStaticAccessors,
 };
 use crate::types::{EqualityMode, Ty, TypeName, Visibility};
 
@@ -28,7 +28,7 @@ pub(super) fn build(ir: &mut IrFile, class: ClassId) -> Realized {
     let entries = static_slot(ir, format!("{owner}$entries"), Ty::nullable(entries_ty));
 
     let initializer = initializer(ir, class, &slots, flag, entries);
-    let values = values(ir, classifier, &owner, &slots, initializer);
+    let values = values(ir, classifier, &owner, &names, &slots, initializer);
     let value_of = value_of(ir, classifier, &owner, &names, &slots, initializer);
     Realized {
         slots,
@@ -68,8 +68,13 @@ fn static_slot(ir: &mut IrFile, name: String, ty: Ty) -> u32 {
     index
 }
 
-/// The enum's initializer: when the enum is not built yet, build every constant in declaration
-/// order, then `entries`, then the companion.
+/// The enum's initializer: when the enum is not built yet, allocate and publish every constant,
+/// then construct each in declaration order, then build `entries`, then the companion.
+///
+/// This is Kotlin/Native's order (its `EnumClassLowering` fills `VALUES` with uninitialized
+/// instances and then runs `initInstance` per entry): a constructor that reaches back into its
+/// enum finds every constant already allocated, the ones not constructed yet with their
+/// `kotlin.Enum` storage unset.
 fn initializer(ir: &mut IrFile, class: ClassId, slots: &[u32], flag: u32, entries: u32) -> FunId {
     let declaration = &ir.classes[class as usize];
     let classifier = declaration.fq_name_id();
@@ -78,6 +83,18 @@ fn initializer(ir: &mut IrFile, class: ClassId, slots: &[u32], flag: u32, entrie
     let constants = declaration.enum_entries.clone();
 
     let mut build = vec![write(ir, flag, IrConst::Boolean(true))];
+    for (entry, &slot) in constants.iter().zip(slots) {
+        let instance = entry.subclass.unwrap_or(classifier);
+        let allocation = ir.add_expr(IrExpr::EnumAllocation {
+            classifier,
+            instance,
+        });
+        ir.set_logical_type(allocation, Ty::obj_name(instance));
+        build.push(ir.add_expr(IrExpr::SetStatic {
+            index: slot,
+            value: allocation,
+        }));
+    }
     for (ordinal, entry) in constants.iter().enumerate() {
         // The entry's checked argument evaluation, in source order, before its constructor.
         build.extend(entry.argument_prelude.iter().copied());
@@ -126,11 +143,10 @@ fn initializer(ir: &mut IrFile, class: ClassId, slots: &[u32], flag: u32, entrie
             name: entry.name.as_str().into(),
             ordinal: u32::try_from(ordinal).expect("too many enum constants"),
             construction,
+            published: Some(slots[ordinal]),
         });
-        build.push(ir.add_expr(IrExpr::SetStatic {
-            index: slots[ordinal],
-            value: constant,
-        }));
+        ir.set_logical_type(constant, Ty::obj_name(classifier));
+        build.push(constant);
     }
     let array = values_array(ir, classifier, slots);
     let list = ir.add_expr(IrExpr::EnumEntriesList {
@@ -195,20 +211,82 @@ fn initializer(ir: &mut IrFile, class: ClassId, slots: &[u32], flag: u32, entrie
 }
 
 /// `values()`: run the initializer, then answer a fresh array of the constants.
+///
+/// Each constant goes at its current `ordinal`, visiting them in name order: Kotlin/Native's
+/// `valuesForEnum` over its name-sorted `VALUES`. Once the enum is built that is declaration
+/// order; read from inside a constant's construction, every constant not constructed yet still
+/// has ordinal 0, so the last of them by name lands at 0 and their own places stay `null`.
 fn values(
     ir: &mut IrFile,
     classifier: TypeName,
     owner: &str,
+    names: &[String],
     slots: &[u32],
     initializer: FunId,
 ) -> FunId {
     let name = format!("{owner}$values");
+    let enum_ty = Ty::obj_name(classifier);
+    let array_ty = array_type(classifier);
     let build = call(ir, initializer, Vec::new(), Ty::Unit);
-    let array = values_array(ir, classifier, slots);
-    let result = ir.add_expr(IrExpr::Return(Some(array)));
-    ir.set_logical_type(result, Ty::Nothing);
-    let body = unit_block(ir, vec![build, result]);
-    function(ir, name, Vec::new(), array_type(classifier), body)
+    let size = constant(
+        ir,
+        IrConst::Int(i32::try_from(slots.len()).expect("too many enum constants")),
+        Ty::Int,
+    );
+    let array = ir.add_expr(IrExpr::NewArray {
+        array_type: array_ty,
+        size,
+    });
+    ir.set_logical_type(array, array_ty);
+    let result = 0;
+    let declaration = ir.add_expr(IrExpr::Variable {
+        index: result,
+        ty: array_ty,
+        init: Some(array),
+        named: false,
+    });
+    ir.set_logical_type(declaration, Ty::Unit);
+    let mut stmts = vec![build, declaration];
+    for index in name_order(names) {
+        let constant = read_slot(ir, slots[index], enum_ty);
+        let ordinal = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Intrinsic {
+                operation: IrIntrinsic::EnumOrdinal,
+                ret: Ty::Int,
+            }),
+            dispatch_receiver: Some(constant),
+            args: Vec::new(),
+        });
+        ir.set_logical_type(ordinal, Ty::Int);
+        let target = ir.add_expr(IrExpr::GetValue(result));
+        ir.set_logical_type(target, array_ty);
+        let element = read_slot(ir, slots[index], enum_ty);
+        let store = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Intrinsic {
+                operation: IrIntrinsic::ArraySet,
+                ret: Ty::Unit,
+            }),
+            dispatch_receiver: Some(target),
+            args: vec![ordinal, element],
+        });
+        ir.set_logical_type(store, Ty::Unit);
+        stmts.push(store);
+    }
+    let answer = ir.add_expr(IrExpr::GetValue(result));
+    ir.set_logical_type(answer, array_ty);
+    let answer = ir.add_expr(IrExpr::Return(Some(answer)));
+    ir.set_logical_type(answer, Ty::Nothing);
+    stmts.push(answer);
+    let body = unit_block(ir, stmts);
+    function(ir, name, Vec::new(), array_ty, body)
+}
+
+/// The constants' declaration indices in Kotlin's name order: `String.compareTo`, which compares
+/// UTF-16 units.
+fn name_order(names: &[String]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..names.len()).collect();
+    order.sort_by(|&a, &b| names[a].encode_utf16().cmp(names[b].encode_utf16()));
+    order
 }
 
 /// `valueOf(name)`: run the initializer, then answer the first constant whose name is `name`, in

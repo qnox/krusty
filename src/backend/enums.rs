@@ -7,20 +7,27 @@
 //!
 //! - **Storage.** Each constant gets a static slot of this file, and the enum gets an
 //!   `initialized` flag and a slot for its one `entries` list.
-//! - **The initializer.** Kotlin initializes an enum class as a whole: every constant in
-//!   declaration order, then the `entries` list, then the companion object. One function per enum
-//!   does exactly that when its flag is clear. The flag is set BEFORE anything is built, so a
-//!   constant's constructor that reaches back into the enum finds the work under way instead of
-//!   starting it again. A constant whose construction throws leaves the enum unbuilt: the flag and
-//!   every slot are cleared and the exception rethrown, so the next access builds it again.
+//! - **The initializer.** Kotlin initializes an enum class as a whole: its constants, then the
+//!   `entries` list, then the companion object. One function per enum does that when its flag is
+//!   clear, in Kotlin/Native's order (its `EnumClassLowering`): every constant is first allocated
+//!   and published to its slot ([`IrExpr::EnumAllocation`]), and only then is each constructed in
+//!   place, in declaration order. A constructor that reaches back into its enum therefore finds
+//!   every constant, the ones not constructed yet with zero fields and `kotlin.Enum` storage
+//!   unset. The flag is set BEFORE anything is built, so such a back-edge finds the work under
+//!   way instead of starting it again. A constant whose construction throws leaves the enum
+//!   unbuilt: the flag and every slot are cleared and the exception rethrown, so the next access
+//!   builds it again.
 //! - **Uses.** Reading a constant runs the initializer and reads its slot. `values()` is a
-//!   function returning a fresh array, which is Kotlin's contract: a caller may write to it.
+//!   function returning a fresh array, which is Kotlin's contract: a caller may write to it. It
+//!   places each constant at its current `ordinal`, visiting them in name order, as
+//!   Kotlin/Native's `valuesForEnum` does; once the enum is built that is declaration order.
 //!   `valueOf` is a function comparing its argument with each constant's name in declaration
 //!   order. `entries` runs the initializer and reads the list, which is still `null` when read
 //!   from inside a constant's construction, as on Kotlin/Native.
 //!
-//! What stays with the target is representation: the `kotlin.Enum` storage of `name` and
-//! `ordinal` ([`IrExpr::EnumConstant`]), making the `entries` list
+//! What stays with the target is representation: allocating a constant, the `kotlin.Enum`
+//! storage of `name` and `ordinal` ([`IrExpr::EnumConstant`]) and its reads
+//! ([`crate::ir::IrIntrinsic::EnumOrdinal`]), making the `entries` list
 //! ([`IrExpr::EnumEntriesList`]), the failure of `valueOf` ([`IrExpr::NoSuchEnumConstant`]), and,
 //! for a target whose companion getter runs before the companion is built, calling the enum's
 //! initializer there ([`IrFile::enum_initializers`]).

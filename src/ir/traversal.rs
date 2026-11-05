@@ -147,7 +147,9 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::LateinitCheck { operand: arg, .. }
         | IrExpr::Throw { operand: arg }
         | IrExpr::EnumValueOf { arg, .. }
-        | IrExpr::EnumConstant { construction: arg, .. }
+        | IrExpr::EnumConstant {
+            construction: arg, ..
+        }
         | IrExpr::EnumEntriesList { values: arg, .. }
         | IrExpr::NoSuchEnumConstant { name: arg, .. }
         | IrExpr::EnumSwitchOrdinal { subject: arg, .. }
@@ -254,6 +256,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumSwitchKey { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumAllocation { .. }
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation

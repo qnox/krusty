@@ -4,21 +4,36 @@
 //! constant, one initializer per enum, and `values()`/`valueOf` as functions. What it leaves here
 //! is representation. `kotlin.Enum` is a base no file declares, whose storage of `name` and
 //! `ordinal` the runtime owns (`model::ENUM_NAME_OFFSET`, `model::ENUM_ORDINAL_OFFSET`): a constant
-//! is constructed with that storage filled before any constructor runs, its two reads load it, the
+//! is allocated with that storage unset, as Kotlin/Native's `createUninitializedInstance` leaves
+//! it, constructed in place with it filled before any constructor runs, its two reads load it, the
 //! `entries` list is the runtime's, and so is the failure of `valueOf`.
 
 use super::*;
 
+/// The enum constant a construction builds: the `kotlin.Enum` storage it fills, and the static
+/// slot already holding its allocation when it was published first.
+pub(super) struct EnumBase {
+    name: Box<str>,
+    ordinal: u32,
+    pub(super) published: Option<u32>,
+}
+
 impl BodyLowering<'_, '_, '_> {
     /// One enum constant: its construction, with `kotlin.Enum`'s storage filled right after the
-    /// allocation, so a constructor reading `name` or `ordinal` finds them.
+    /// allocation, or on the published allocation it constructs in place, so a constructor reading
+    /// `name` or `ordinal` finds them.
     pub(super) fn enum_constant(
         &mut self,
         name: &str,
         ordinal: u32,
         construction: u32,
+        published: Option<u32>,
     ) -> Result<Option<Value>, Unsupported> {
-        self.enum_base = Some((name.into(), ordinal));
+        self.enum_base = Some(EnumBase {
+            name: name.into(),
+            ordinal,
+            published,
+        });
         let constant = self.expression(construction)?;
         if self.enum_base.take().is_some() {
             return Err(declined!(
@@ -28,14 +43,31 @@ impl BodyLowering<'_, '_, '_> {
         Ok(constant)
     }
 
-    /// Fill a freshly allocated constant's `kotlin.Enum` storage, when the construction being
-    /// lowered is one.
+    /// A constant allocated and nothing more: its header, every field zero, its `kotlin.Enum`
+    /// storage unset and no constructor run.
+    pub(super) fn enum_allocation(
+        &mut self,
+        instance: crate::types::TypeName,
+    ) -> Result<Option<Value>, Unsupported> {
+        let class = self.file.class_of(instance, "allocation of")?;
+        let descriptor = self.file.classes[class as usize].descriptor;
+        let size = self.file.model.layout(class).instance_size;
+        Ok(Some(self.allocate(descriptor, size)?))
+    }
+
+    /// The published allocation a constant's construction initializes.
+    pub(super) fn published_enum_constant(&mut self, slot: u32) -> Result<Value, Unsupported> {
+        self.static_read(slot)?
+            .ok_or_else(|| declined!("an enum constant's slot with no value"))
+    }
+
+    /// Fill a constant's `kotlin.Enum` storage, when the construction being lowered is one.
     pub(super) fn store_enum_base(
         &mut self,
-        base: Option<(Box<str>, u32)>,
+        base: Option<EnumBase>,
         object: Value,
     ) -> Result<(), Unsupported> {
-        let Some((name, ordinal)) = base else {
+        let Some(EnumBase { name, ordinal, .. }) = base else {
             return Ok(());
         };
         let text = self.string_literal(name.as_bytes())?;

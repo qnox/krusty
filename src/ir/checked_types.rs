@@ -106,6 +106,7 @@ impl IrFile {
             | IrExpr::EnumEntry { classifier, .. }
             | IrExpr::EnumValueOf { classifier, .. }
             | IrExpr::EnumConstant { classifier, .. } => Ty::obj_name(*classifier),
+            IrExpr::EnumAllocation { instance, .. } => Ty::obj_name(*instance),
             // An enclosing-instance edge names the outer classifier it reaches.
             IrExpr::EnclosingInstance { outer, .. } => Ty::obj_name(*outer),
             IrExpr::EnumValues { classifier } => {

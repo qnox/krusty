@@ -474,6 +474,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
                 | super::IrIntrinsic::StringGet
                 | super::IrIntrinsic::StringLength
                 | super::IrIntrinsic::EnumName
+                | super::IrIntrinsic::EnumOrdinal
                 | super::IrIntrinsic::NullableAnyToString
                 | super::IrIntrinsic::CoroutineContext => {}
             }
@@ -602,6 +603,13 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
         | IrExpr::EnumEntriesList { classifier, .. }
         | IrExpr::NoSuchEnumConstant { classifier, .. }
         | IrExpr::EnumSwitchKey { classifier, .. } => name(classifier, names),
+        IrExpr::EnumAllocation {
+            classifier,
+            instance,
+        } => {
+            name(classifier, names);
+            name(instance, names);
+        }
         IrExpr::EnumSwitchOrdinal {
             classifier,
             registrations,

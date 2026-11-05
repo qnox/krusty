@@ -178,6 +178,7 @@ pub(super) fn realize(
             | IrExpr::EnumValueOf { .. }
             | IrExpr::EnumEntries { .. }
             | IrExpr::EnumConstant { .. }
+            | IrExpr::EnumAllocation { .. }
             | IrExpr::EnumEntriesList { .. }
             | IrExpr::NoSuchEnumConstant { .. }
             | IrExpr::EnumSwitchOrdinal { .. }

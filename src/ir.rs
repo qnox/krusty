@@ -623,11 +623,24 @@ pub enum IrExpr {
     /// `New` of the enum or of the constant's body subclass, with `kotlin.Enum`'s `name` and
     /// `ordinal` storage holding these values before any constructor runs. A target owns that
     /// storage; the shared lowering owns when and in which order constants are built.
+    ///
+    /// `published` is the static slot that already holds the constant's [`IrExpr::EnumAllocation`]
+    /// when the target publishes constants before constructing them: the construction then
+    /// initializes that object instead of allocating its own. `None` when it allocates.
     EnumConstant {
         classifier: TypeName,
         name: Box<str>,
         ordinal: u32,
         construction: ExprId,
+        published: Option<u32>,
+    },
+    /// A constant of `classifier` allocated and nothing more: an instance of `instance` (the enum,
+    /// or the constant's body subclass) whose fields hold their zero values, whose `kotlin.Enum`
+    /// storage is unset, and whose constructor has not run. Its [`IrExpr::EnumConstant`] later
+    /// constructs it in place.
+    EnumAllocation {
+        classifier: TypeName,
+        instance: TypeName,
     },
     /// The one `EnumEntries` list of `classifier` over `values`, a fresh array of its constants in
     /// declaration order. Built once by the enum's initializer ([`crate::backend::enums`]).

@@ -928,10 +928,9 @@ struct BodyLowering<'a, 'b, 'c> {
     frame_objects: crate::fx_hash::HashMap<u32, u32>,
     /// The field variables of each local that holds a frame object.
     frame_fields: crate::fx_hash::HashMap<u32, Vec<Variable>>,
-    /// `kotlin.Enum`'s `name` and `ordinal` for the enum constant whose construction is being
-    /// lowered, taken by that construction and stored right after the allocation, before any
-    /// constructor runs.
-    enum_base: Option<(Box<str>, u32)>,
+    /// The enum constant whose construction is being lowered, taken by that construction: its
+    /// object, and the `kotlin.Enum` storage filled on it before any constructor runs.
+    enum_base: Option<enums::EnumBase>,
 }
 
 /// One `finally` the current position is inside.
@@ -1857,8 +1856,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 name,
                 ordinal,
                 construction,
+                published,
                 ..
-            } => self.enum_constant(&name, ordinal, construction),
+            } => self.enum_constant(&name, ordinal, construction, published),
+            IrExpr::EnumAllocation { instance, .. } => self.enum_allocation(instance),
             IrExpr::EnumEntriesList { values, .. } => self.enum_entries_list(values),
             IrExpr::NoSuchEnumConstant { name, .. } => self.no_such_enum_constant(name),
             IrExpr::EnclosingInstance {
