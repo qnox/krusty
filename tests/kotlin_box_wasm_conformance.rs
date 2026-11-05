@@ -1044,10 +1044,6 @@ fn wasm_generated_members_compare_callable_declarations_and_receivers() {
             "wasmDataClassCallableReferenceEquality",
         ),
         (
-            include_str!("box_regressions/dataClassReferenceAcrossModules.kt"),
-            "wasmDataClassReferenceAcrossModules",
-        ),
-        (
             include_str!("box_regressions/dataClassOverloadedConstructorReferences.kt"),
             "wasmDataClassOverloadedConstructorReferences",
         ),
@@ -1057,6 +1053,26 @@ fn wasm_generated_members_compare_callable_declarations_and_receivers() {
         ),
     ] {
         expect_wasm_box(source, stem);
+    }
+}
+
+#[test]
+fn wasm_callable_references_share_identity_across_independent_module_analyses() {
+    let source = include_str!("box_regressions/dataClassReferenceAcrossModules.kt");
+    let stem = "wasmDataClassReferenceAcrossModules";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the whole reference-identity fixture");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name(),
+        );
     }
 }
 
