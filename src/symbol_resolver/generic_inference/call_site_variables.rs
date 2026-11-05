@@ -28,16 +28,11 @@ use crate::types::{TyKind, TyParamName};
 pub(crate) struct CallSiteVariableMap {
     call_owned: HashMap<&'static str, &'static str>,
     declared: HashMap<&'static str, &'static str>,
-    /// Whether the call-owned identities are inference variables. A postponed call's identities
-    /// are still renamed type parameters, because the lambdas analysed before that call is solved
-    /// see them in their own checked types.
-    variables: bool,
 }
 
 impl CallSiteVariableMap {
     fn from_call_owned<F: crate::types::TyParamKey>(
         formals: &[F],
-        variables: bool,
         mut call_owned_identity: impl FnMut(&'static str) -> Option<&'static str>,
     ) -> Self {
         let call_owned = formals
@@ -54,7 +49,6 @@ impl CallSiteVariableMap {
         Self {
             call_owned,
             declared,
-            variables,
         }
     }
 
@@ -62,25 +56,28 @@ impl CallSiteVariableMap {
         formals: &[F],
         lexically_visible: impl Fn(&str) -> bool,
     ) -> Self {
-        Self::from_call_owned(formals, true, |declared| {
+        Self::from_call_owned(formals, |declared| {
             lexically_visible(declared).then(|| crate::types::call_site_type_variable(declared))
         })
     }
 
     /// Give every still-open formal an identity owned by one postponed call expression. Repeated
-    /// construction for different lambda arguments of that call returns the same identities;
-    /// a nested call to the same declaration receives different ones.
+    /// construction for different lambda arguments of that call returns the same identities, and
+    /// records `argument` as one of the function arguments analysed under them; a nested call to
+    /// the same declaration receives different ones.
     pub(crate) fn for_postponed_call<F: crate::types::TyParamKey>(
         formals: &[F],
         compilation: u64,
         file: u32,
         expression: u32,
+        argument: crate::diag::Span,
     ) -> Self {
-        Self::from_call_owned(formals, false, |declared| {
+        Self::from_call_owned(formals, |declared| {
             Some(crate::types::postponed_call_type_variable(
                 compilation,
                 file,
                 expression,
+                argument,
                 declared,
             ))
         })
@@ -92,9 +89,6 @@ impl CallSiteVariableMap {
 
     /// `ty` with every call-owned formal replaced by this call's variable for it.
     pub(crate) fn instantiate_type(&self, ty: Ty) -> Ty {
-        if !self.variables {
-            return crate::types::ty_rename_params(ty, &self.call_owned);
-        }
         crate::types::ty_map_symbols(ty, &|symbol, bound| match symbol.kind() {
             TyKind::TyParam(name, _) => match self.call_owned.get(name.as_str()) {
                 Some(&variable) => Ty::type_variable(TyParamName::new(variable), bound),
@@ -106,9 +100,6 @@ impl CallSiteVariableMap {
 
     /// `ty` with this call's variables expressed as the declaration's formals again.
     pub(crate) fn declared_type(&self, ty: Ty) -> Ty {
-        if !self.variables {
-            return crate::types::ty_rename_params(ty, &self.declared);
-        }
         crate::types::ty_map_symbols(ty, &|symbol, bound| match symbol.kind() {
             TyKind::Var(name, _) => match self.declared.get(name.as_str()) {
                 Some(&formal) => Ty::ty_param(formal, bound),

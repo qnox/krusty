@@ -129,7 +129,7 @@ pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{
     Bridge, BridgeAccessorRole, BridgeKind, BridgeParameter, BridgePropertyImplementation,
-    CollectionBarrierPlan,
+    CollectionBarrierCheck, CollectionBarrierParameter, CollectionBarrierPlan,
 };
 pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget};
 pub use catches::IrCatch;
@@ -167,7 +167,7 @@ pub use module_records::{
     IrModuleClassifier, IrModuleConstructions, IrModuleConstructor, IrModuleMemberAccess,
     IrModuleSource, IrOverriddenFunction,
 };
-pub use null_checks::NullCheck;
+pub use null_checks::{NullCheck, NullCheckSite};
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use package_declarations::{

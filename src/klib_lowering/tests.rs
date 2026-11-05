@@ -23,6 +23,7 @@ mod returnable_blocks;
 mod safe_calls;
 mod target_calls;
 mod target_members;
+mod value_class_members;
 mod varargs;
 
 use super::*;
@@ -420,15 +421,18 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
         }
         IrExpr::Call {
             callee: call_callee,
-            dispatch_receiver: None,
+            dispatch_receiver,
             args,
         } if let Callee::Local(function) = &**call_callee => {
+            let receiver = dispatch_receiver.map_or(String::new(), |receiver| {
+                format!("{}.", render(ir, receiver))
+            });
             let args = args
                 .iter()
                 .map(|argument| render(ir, *argument))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("call {}({args})", ir.fn_source_names[function])
+            format!("call {receiver}{}({args})", ir.fn_source_names[function])
         }
         IrExpr::Call {
             callee: call_callee,
@@ -586,6 +590,15 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             ),
             other => panic!("a lowered body holds no {other:?}"),
         },
+        IrExpr::GetField {
+            receiver,
+            class,
+            index,
+        } => format!(
+            "{}.{}",
+            render(ir, *receiver),
+            ir.classes[*class as usize].fields[*index as usize].name
+        ),
         other => panic!("a lowered body holds no {other:?}"),
     };
     match ir.logical_type(expression) {

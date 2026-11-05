@@ -372,6 +372,18 @@ mod tests {
     }
 
     #[test]
+    fn shared_mutable_cells_reach_nested_escaping_function_bodies() {
+        let source = include_str!(
+            "../../tests/box_regressions/regressions/sharedMutableCaptureTransport.kt"
+        );
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
+    }
+
+    #[test]
     fn a_try_with_finally_still_declines_without_an_artifact() {
         // Wasm backend contract, not a portable semantic claim: finally lowering is a later slice.
         for target in WasmTarget::ALL {

@@ -410,7 +410,7 @@ use member_extension_selection::{
 };
 pub(crate) use named_class_constructors::publish_named_class_constructors;
 pub(crate) use override_plans::publish_override_plans;
-use postponed_constraints::PostponedCallConstraints;
+use postponed_constraints::{PostponedCallConstraints, PostponedLambdaTypes};
 use postponed_diagnostics::PostponedDiagnostics;
 use property_read_selection::{PropertyReadAmbiguity, PropertyReadMemberSelection};
 use property_write_selection::PropertyWriteSelection;
@@ -14001,15 +14001,15 @@ impl<'a> Checker<'a> {
                 }
                 selected_receiver_candidates.extend(candidates);
                 candidates = selected_receiver_candidates;
-                // Finalize away receiver rungs the scratch body did not select. Pending inference
-                // remains provisional so an incomplete revisit cannot discard an established
-                // field.
+                // Finalize away receiver rungs the scratch body did not select. A capture whose type
+                // is still undetermined (pending inference, or an open call's inference variable)
+                // remains provisional so an incomplete revisit cannot discard an established field
+                // and the solved revisit records the capture's determined type.
+                let undetermined = |ty: Ty| ty.mentions_pending() || ty.mentions_type_variable();
                 let provisional = self.postponed_argument_depth != 0
                     || candidates.iter().any(|candidate| {
-                        candidate.ty.mentions_pending()
-                            || candidate
-                                .delegate_storage
-                                .is_some_and(|storage| storage.mentions_pending())
+                        undetermined(candidate.ty)
+                            || candidate.delegate_storage.is_some_and(undetermined)
                     });
                 if !provisional {
                     self.finalized_anonymous_captures.insert(declaration);
@@ -17417,10 +17417,8 @@ impl<'a> Checker<'a> {
                                 });
                             let (shaped, collect_postponed) =
                                 PostponedCallConstraints::enter_for_type(
+                                    self.postponed_call_site(call, a),
                                     &mut self.postponed_call_constraints,
-                                    self.compilation_id,
-                                    self.file_index,
-                                    call,
                                     &postponed_formals,
                                     shaped,
                                 );
@@ -17724,23 +17722,27 @@ impl<'a> Checker<'a> {
                                 })
                                 .cloned()
                                 .collect::<Vec<_>>();
-                            let (
-                                selected_params,
-                                expected_type,
-                                fixed_expected_type,
-                                recv_i,
-                                collect_postponed,
-                            ) = PostponedCallConstraints::enter_lambda(
-                                &mut self.postponed_call_constraints,
-                                self.compilation_id,
-                                self.file_index,
-                                call,
-                                &postponed_formals,
-                                selected_params,
-                                expected_type,
-                                selected_lambda_fixed_expected.as_deref(),
-                                i,
-                                recv_i,
+                            let fixed = selected_lambda_fixed_expected.as_ref();
+                            let (entered, collect_postponed) =
+                                PostponedCallConstraints::enter_lambda(
+                                    self.postponed_call_site(call, a),
+                                    &mut self.postponed_call_constraints,
+                                    &postponed_formals,
+                                    PostponedLambdaTypes {
+                                        parameters: selected_params,
+                                        expected: expected_type,
+                                        fixed: fixed
+                                            .and_then(|fixed| fixed.get(i))
+                                            .copied()
+                                            .flatten(),
+                                        receiver: recv_i,
+                                    },
+                                );
+                            let (selected_params, expected_type, fixed_expected_type, recv_i) = (
+                                entered.parameters,
+                                entered.expected,
+                                entered.fixed,
+                                entered.receiver,
                             );
                             self.argument_lambda_inlining.insert(
                                 a,
@@ -17957,10 +17959,8 @@ impl<'a> Checker<'a> {
                                     .unwrap_or_default();
                                 let (instantiated_expectation, collect_postponed) =
                                     PostponedCallConstraints::enter_for_type(
+                                        self.postponed_call_site(call, a),
                                         &mut self.postponed_call_constraints,
-                                        self.compilation_id,
-                                        self.file_index,
-                                        call,
                                         &postponed_formals,
                                         expected_callable,
                                     );
@@ -18113,10 +18113,8 @@ impl<'a> Checker<'a> {
                                 .unwrap_or_default();
                             let (expected_function, collect_postponed) =
                                 PostponedCallConstraints::enter_for_function(
+                                    self.postponed_call_site(call, a),
                                     &mut self.postponed_call_constraints,
-                                    self.compilation_id,
-                                    self.file_index,
-                                    call,
                                     &postponed_formals,
                                     expected_function,
                                 );
