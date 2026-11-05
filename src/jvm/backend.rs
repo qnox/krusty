@@ -1182,13 +1182,15 @@ impl JvmBackend {
         if !self.param_assertions {
             crate::jvm::parameter_assertions::strip(&mut ir);
         }
-        if !self.call_assertions {
-            crate::jvm::ir_emit::strip_null_assertions(&mut ir, crate::ir::NullCheck::is_implicit);
+        let omitted_null_assertions = if !self.call_assertions {
+            Some(crate::jvm::implicit_null_assertions::OmittedNullAssertions::Implicit)
         } else if !self.receiver_assertions {
-            crate::jvm::ir_emit::strip_null_assertions(
-                &mut ir,
-                crate::ir::NullCheck::guards_extension_receiver,
-            );
+            Some(crate::jvm::implicit_null_assertions::OmittedNullAssertions::ExtensionReceivers)
+        } else {
+            None
+        };
+        if let Some(omitted) = omitted_null_assertions {
+            crate::jvm::implicit_null_assertions::omit(&mut ir, omitted);
         }
         // Suspend lowering can move a catch onto a fresh `try`. Rebuild the marker plan from the
         // declaration parameters so emission names the handler that is actually written.

@@ -636,26 +636,6 @@ impl JvmDefaultMode {
     }
 }
 
-/// Drop the implicit not-null guards on narrowed platform values that `removed` selects.
-///
-/// `-Xno-call-assertions` removes every null check kotlinc emits where a Java call's `T!` result is
-/// committed to a declared non-null type, and `-Xno-receiver-assertions` removes those whose value
-/// reaches an extension receiver. The guard is an expression wrapper, so it is removed by rewriting
-/// the node into its operand's value: `x!!` is a SOURCE assertion neither flag selects.
-pub(crate) fn strip_null_assertions(ir: &mut IrFile, removed: fn(&crate::ir::NullCheck) -> bool) {
-    for expr in &mut ir.exprs {
-        let IrExpr::NotNullAssert { operand, check } = expr else {
-            continue;
-        };
-        if removed(check) {
-            *expr = IrExpr::Block {
-                stmts: Vec::new(),
-                value: Some(*operand),
-            };
-        }
-    }
-}
-
 /// The primary constructor's JVM descriptor: every constructor argument, property-backed or plain.
 fn primary_ctor_descriptor(ir: &IrFile, c: &IrClass) -> String {
     format!("({})V", primary_ctor_parameter_descs(ir, c))
