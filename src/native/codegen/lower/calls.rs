@@ -11,23 +11,35 @@ mod dependency_exports;
 use super::*;
 use crate::backend::class_tables::module_slots::PlanKey;
 
+/// A dependency declaration's checked realization together with the export its module emitted.
+/// A call carries two: the selected declaration, and the one whose defaults it omits (the
+/// selected one's own, or those of the declaration an override inherits them from), whose flags
+/// admit the omission and whose entry evaluates the defaults before dispatching to the member.
+#[derive(Clone, Copy)]
+pub(super) struct ExportedDeclaration<'a> {
+    pub(super) realization: &'a crate::backend::BackendCallableFact,
+    pub(super) export: &'a super::super::DependencyExport,
+}
+
 /// Whether an authenticated source-module dependency export can realize this call directly.
 ///
 /// An absent symbol is not an error here: platform KLIB declarations have no preceding source
 /// object and continue to their compiler-intrinsic/runtime realization below. Once an exact source
 /// export exists, however, it owns the call. An omission cannot fall through to a name-based
 /// realization, and the ordinary export cannot receive fewer operands than its declared ABI: a
-/// call leaving arguments out goes through the export's default entry, or not at all.
+/// call leaving arguments out goes through the default entry of the declaration `provider`
+/// names, or not at all.
 fn direct_dependency_export<'a>(
     export: Option<&'a super::super::DependencyExport>,
+    provider: Option<&super::super::DependencyExport>,
     defaults: &[u32],
 ) -> Result<Option<&'a super::super::DependencyExport>, Unsupported> {
     let Some(export) = export else {
         return Ok(None);
     };
-    if !defaults.is_empty() && export.default_entry.is_none() {
+    if !defaults.is_empty() && provider.is_none_or(|provider| provider.default_entry.is_none()) {
         return Err(declined!(
-            "a top-level dependency call with omitted arguments and no exported default bridge"
+            "a dependency call with omitted arguments and no exported default bridge"
         ));
     }
     Ok(Some(export))
@@ -404,12 +416,12 @@ impl BodyLowering<'_, '_, '_> {
             }
             Callee::External {
                 target,
+                default_provider,
                 params,
                 ret,
                 defaults,
                 extension_receiver_parameter,
                 substitutions,
-                ..
             } => {
                 let Some(realization) = self.file.callables.callable(*target) else {
                     return Err("an unresolvable dependency call".into());
@@ -420,15 +432,44 @@ impl BodyLowering<'_, '_, '_> {
                 {
                     return self.type_of(*target, substitutions);
                 }
-                let export = realization
-                    .dependency_callable
-                    .as_ref()
-                    .and_then(|identity| self.file.dependency_symbols.get(identity));
-                if let Some(export) = direct_dependency_export(export, defaults)? {
+                let symbols = self.file.dependency_symbols;
+                let export_of = |realization: &crate::backend::BackendCallableFact| {
+                    realization
+                        .dependency_callable
+                        .as_ref()
+                        .and_then(|identity| symbols.get(identity))
+                };
+                let export = export_of(realization);
+                let provider = match default_provider {
+                    Some(provider) if !defaults.is_empty() => self
+                        .file
+                        .callables
+                        .callable(*provider)
+                        .and_then(|provider| {
+                            Some(ExportedDeclaration {
+                                realization: provider,
+                                export: export_of(provider)?,
+                            })
+                        }),
+                    _ => export.map(|export| ExportedDeclaration {
+                        realization,
+                        export,
+                    }),
+                };
+                if let Some(export) =
+                    direct_dependency_export(export, provider.map(|p| p.export), defaults)?
+                {
+                    let provider = provider.unwrap_or(ExportedDeclaration {
+                        realization,
+                        export,
+                    });
                     return self.emitted_dependency_call(
                         site,
-                        export,
-                        realization,
+                        ExportedDeclaration {
+                            realization,
+                            export,
+                        },
+                        provider,
                         callee,
                         dispatch_receiver,
                         args,
@@ -1036,18 +1077,24 @@ mod tests {
             dispatch_entry: None,
         };
         assert_eq!(
-            direct_dependency_export(Some(&export), &[])
+            direct_dependency_export(Some(&export), Some(&export), &[])
                 .expect("a full call uses the authenticated export"),
             Some(&export)
         );
         assert_eq!(
-            direct_dependency_export(Some(&export), &[0])
+            direct_dependency_export(Some(&export), Some(&export), &[0])
                 .expect_err("an omission needs a provider-owned default bridge")
                 .construct(),
-            "a top-level dependency call with omitted arguments and no exported default bridge"
+            "a dependency call with omitted arguments and no exported default bridge"
         );
         assert_eq!(
-            direct_dependency_export(None, &[0])
+            direct_dependency_export(Some(&export), None, &[0])
+                .expect_err("an inherited provider without an emitted body has no bridge")
+                .construct(),
+            "a dependency call with omitted arguments and no exported default bridge"
+        );
+        assert_eq!(
+            direct_dependency_export(None, None, &[0])
                 .expect("a platform declaration may have an authenticated intrinsic realization"),
             None
         );
@@ -1056,7 +1103,7 @@ mod tests {
             ..export
         };
         assert_eq!(
-            direct_dependency_export(Some(&defaulted), &[0])
+            direct_dependency_export(Some(&defaulted), Some(&defaulted), &[0])
                 .expect("an omission goes through the export's default entry"),
             Some(&defaulted)
         );

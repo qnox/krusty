@@ -19,7 +19,12 @@
 //!
 //! **Refusals.** Anything this form does not cover declines by name: a class kind other than an
 //! ordinary class, interface or `object`, a superclass declared in another file, and an override
-//! whose signature needs a bridge in a class table.
+//! whose function-type or accessor signature needs a bridge in a class table.
+//!
+//! **Bridges.** An override whose representation differs from the base member it overrides
+//! (`Derived : Base<Int>` returning an `i32` where `Base<T>` returns a reference) stands in the
+//! base's slot through a bridge: a function of the base's signature that converts each operand
+//! and dispatches through the override's own slot (see `Slot::Bridge`).
 
 use crate::fx_hash::HashMap;
 
@@ -76,6 +81,16 @@ pub(super) struct Accessor {
     pub(super) setter: bool,
 }
 
+/// A representation bridge a table slot holds (see [`Slot::Bridge`]): `class` is the class that
+/// introduced it, whose table type every receiver reaching the bridge has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct OverrideBridge {
+    pub(super) class: ClassId,
+    pub(super) declared: FunId,
+    pub(super) target_slot: Option<u32>,
+    pub(super) target: FunId,
+}
+
 /// The lazily constructed instance of an `object` declaration.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Singleton {
@@ -116,6 +131,9 @@ pub(super) struct FileClasses {
     /// The synthesized accessors the tables hold — each with its function and that function's
     /// type — to be defined with the file's bodies.
     pub(super) accessors: Vec<(Accessor, u32, u32)>,
+    /// The representation bridges the tables hold, each with its function and that function's
+    /// type, likewise defined with the file's bodies.
+    pub(super) bridges: Vec<(OverrideBridge, u32, u32)>,
     /// The checked property each realized member read or write (by expression) selected.
     properties: HashMap<u32, PropertyId>,
 }
@@ -283,6 +301,7 @@ pub(super) fn declare(
 
     // One table instance per class that has instances of its own.
     let mut accessors: Vec<(Accessor, u32, u32)> = Vec::new();
+    let mut bridges: Vec<(OverrideBridge, u32, u32)> = Vec::new();
     for &id in &tables.order {
         let class = &ir.classes[id as usize];
         if class.is_interface || class.is_abstract || class.is_sealed {
@@ -330,7 +349,42 @@ pub(super) fn declare(
                     };
                     accessor_function(module, &mut accessors, accessor, ty)
                 }
-                Slot::Bridge { .. } | Slot::FunctionBridge { .. } | Slot::AccessorBridge { .. } => {
+                Slot::Bridge {
+                    declared,
+                    target_slot,
+                    target,
+                } => {
+                    let known = bridges.iter().find(|(bridge, ..)| {
+                        bridge.declared == *declared
+                            && bridge.target_slot == *target_slot
+                            && bridge.target == *target
+                    });
+                    match known {
+                        Some((_, function, _)) => *function,
+                        None => {
+                            // The class that introduced the bridge: every receiver reaching this
+                            // entry is an instance of it, so its table type is the one to cast to,
+                            // whichever subclass's table this happens to be built for first.
+                            let mut introducer = id;
+                            while let Some(parent) = tables.table(introducer).superclass {
+                                if tables.table(parent).vtable.get(slot) != Some(entry) {
+                                    break;
+                                }
+                                introducer = parent;
+                            }
+                            let function = module.declare();
+                            let bridge = OverrideBridge {
+                                class: introducer,
+                                declared: *declared,
+                                target_slot: *target_slot,
+                                target: *target,
+                            };
+                            bridges.push((bridge, function, ty));
+                            function
+                        }
+                    }
+                }
+                Slot::FunctionBridge { .. } | Slot::AccessorBridge { .. } => {
                     return Err(format!(
                         "an override carried differently from the member it overrides (`{}`)",
                         class.fq_name()
@@ -356,6 +410,7 @@ pub(super) fn declare(
         forms,
         slot_types,
         accessors,
+        bridges,
         properties: properties
             .iter()
             .filter(|access| access.direct_member)

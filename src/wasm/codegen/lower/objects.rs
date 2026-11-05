@@ -32,6 +32,8 @@ use super::{carrier, Body, FileContext, Unsupported, STRING};
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
 const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
+mod override_bridges;
+
 #[cfg(test)]
 mod tests;
 
@@ -178,6 +180,12 @@ impl Body<'_> {
         &mut self,
         classifier: crate::types::TypeName,
     ) -> Result<(), Unsupported> {
+        if self.ir.class_id_by_name(classifier).is_none() {
+            if let Some(entry) = self.calls.dependency_singleton(classifier) {
+                self.code.call(entry);
+                return Ok(());
+            }
+        }
         let singleton = self
             .classes
             .and(self.ir.class_id_by_name(classifier))
@@ -1290,7 +1298,7 @@ pub(super) fn define_class_functions(
             },
         );
     }
-    Ok(())
+    override_bridges::define_override_bridges(context, classes, module, runtime)
 }
 
 /// Define the program-wide entries reserved for ordinary member properties of this source file.

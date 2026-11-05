@@ -122,6 +122,9 @@ pub struct CodegenModule {
     /// distinguishes legal same-signature internals in unrelated dependencies.
     dependency_symbols:
         crate::fx_hash::HashMap<crate::backend::KlibDependencyCallable, DependencyExport>,
+    /// The exported entry answering each preceding source module's object instance, by the
+    /// object's classifier.
+    dependency_singletons: crate::fx_hash::HashMap<crate::backend::DependencyClassifier, String>,
     next_dependency_symbol: usize,
     next_dependency_support_object: usize,
     next_disambiguated_source_object: usize,
@@ -233,6 +236,7 @@ impl Backend for CraneliftBackend {
         crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables, |function| {
             file.dependency_exports.callable(function).is_some()
         });
+        crate::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
         crate::backend::dispatch_entries::realize(&mut file.ir, &file.dependency_exports);
         // A local or anonymous classifier arrives with an opaque identity; this target names it
         // from its provenance as Kotlin/Native does. There is no facade class here, so a
@@ -393,6 +397,36 @@ impl Backend for CraneliftBackend {
                 },
             );
         }
+        let mut singletons = file.dependency_exports.singleton_entries().to_vec();
+        singletons.sort_unstable_by_key(|&(_, entry)| entry);
+        for (classifier, entry) in singletons {
+            let symbol = format!("kt_klib_instance_{}", state.next_dependency_symbol);
+            state.next_dependency_symbol += 1;
+            let signature =
+                match crate::backend::DependencyFunctionSignature::from_ir(&file.ir, entry, None) {
+                    Ok(signature) => signature,
+                    Err(error) => {
+                        diags.error(
+                            crate::diag::Span::new(0, 0),
+                            format!("internal error: {error}"),
+                        );
+                        return Vec::new();
+                    }
+                };
+            state
+                .dependency_singletons
+                .insert(classifier, symbol.clone());
+            dependency_exports.insert(
+                entry,
+                DependencyExportDefinition {
+                    symbol,
+                    signature,
+                    member_receiver: None,
+                    default_entry: None,
+                    dispatch_entry: None,
+                },
+            );
+        }
         let lowered = match lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
@@ -411,6 +445,7 @@ impl Backend for CraneliftBackend {
                 dependency_exports: &dependency_exports,
                 dependency_signatures: &file.dependency_exports,
                 dependency_symbols: &state.dependency_symbols,
+                dependency_singletons: &state.dependency_singletons,
             },
             self.target,
             &object_stem,

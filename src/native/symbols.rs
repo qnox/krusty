@@ -394,6 +394,16 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
             functions[index] = unique(base, &|name| vec![name.to_string()]);
             continue;
         }
+        // An entry constructing a class, or answering its object, is named after that class.
+        if let Some(&class) = ir.construction_entries.get(&(index as crate::ir::FunId)) {
+            let base = format!(
+                "kt_{}_{}",
+                classes[class as usize],
+                c_identifier(&function.name)
+            );
+            functions[index] = unique(base, &|name| vec![name.to_string()]);
+            continue;
+        }
         if let Some(&declaration) = dispatched.get(&(index as crate::ir::FunId)) {
             let base = format!("{}__dispatch", functions[declaration as usize]);
             functions[index] = unique(base, &|name| vec![name.to_string()]);
