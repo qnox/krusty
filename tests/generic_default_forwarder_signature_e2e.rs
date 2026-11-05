@@ -146,16 +146,7 @@ fn a_value_class_static_signature_keeps_a_parenthesized_bound_whole() {
 /// A type parameter bounded by another one of the member's own (`U : T`) takes the substituted
 /// bound through it: seen through `Source<String>`, `T : E` becomes `T : String` and `U : T`
 /// erases to `String` too, although `U`'s declared bound names no supertype argument.
-const DEPENDENT_BOUND: &str = "\
-interface Source<E> {\n\
-    fun <T : E, U : T> echo(value: U): U = value\n\
-}\n\
-class Applied : Source<String>\n\
-fun box(): String {\n\
-    val result = Applied().echo<String, String>(\"OK\")\n\
-    return if (result == \"OK\") \"OK\" else \"fail: $result\"\n\
-}\n\
-";
+const DEPENDENT_BOUND: &str = include_str!("box_regressions/dependentDefaultForwarderBound.kt");
 
 #[test]
 fn a_member_formal_bounded_by_another_takes_its_substituted_bound() {
