@@ -68,3 +68,50 @@ fn override_lambda_is_named_after_its_static_impl() {
 fn override_lambda_runs() {
     common::expect_box_ok_with_stdlib(LIFTED, "ValueClassAnyOverrideLambda");
 }
+
+/// A value class's source `equals` override, against kotlinc.
+///
+/// kotlinc realizes the override as the static `equals-impl` over the carrier and gives the box an
+/// `equals(Object)` calling it. That box method is the override, so its parameter keeps
+/// `Any.equals`'s `other: Any?` and is annotated `@Nullable`; krusty annotated it `@NotNull`. The
+/// specialized `equals-impl0` compares two carriers through the override, on their boxes:
+/// `box-impl(p1).equals(box-impl(p2))`. krusty called `equals-impl(p1, box-impl(p2))`.
+const CUSTOM_EQUALS: &str = r#"@file:Suppress("RESERVED_MEMBER_INSIDE_VALUE_CLASS")
+
+@JvmInline
+value class Z(val data: Int) {
+    override fun equals(other: Any?): Boolean =
+        other is Z &&
+                data % 256 == other.data % 256
+}
+
+@JvmInline
+value class T(val text: String) {
+    override fun equals(other: Any?): Boolean {
+        if (other !is T) return false
+        return text.length == other.text.length
+    }
+
+    override fun hashCode(): Int = text.length
+}
+
+fun box(): String {
+    if (Z(0) != Z(256)) return "Z"
+    if (T("ab") != T("cd") || T("a") == T("ab")) return "T"
+    return "OK"
+}
+"#;
+
+#[test]
+fn custom_equals_matches_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "ValueClassCustomEquals",
+        CUSTOM_EQUALS,
+        &["Z", "T"],
+    );
+}
+
+#[test]
+fn custom_equals_runs() {
+    common::expect_box_ok_with_stdlib(CUSTOM_EQUALS, "ValueClassCustomEquals");
+}

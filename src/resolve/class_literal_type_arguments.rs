@@ -156,7 +156,7 @@ impl Checker<'_> {
                 list,
                 forbid,
                 warning.as_deref(),
-                crate::diag::CompilerWarningName::TypeArgumentsNotAllowed,
+                crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_WARNING,
                 message,
             );
             // The diagnostic leaves the literal's type alone, as in kotlinc.
@@ -236,7 +236,7 @@ impl Checker<'_> {
                 list,
                 forbidden,
                 warning.as_deref(),
-                crate::diag::CompilerWarningName::WrongNumberOfTypeArgumentsInGetClass,
+                crate::diag::names::WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING,
                 &message,
             );
             return useless_type.unwrap_or(Ty::Error);
@@ -262,7 +262,7 @@ impl Checker<'_> {
             self.span(literal),
             forbidden,
             warning.as_deref(),
-            crate::diag::CompilerWarningName::ClassLiteralLhsNotAClass,
+            crate::diag::names::CLASS_LITERAL_LHS_NOT_A_CLASS_WARNING,
             NOT_A_CLASS,
         );
         if !useless {

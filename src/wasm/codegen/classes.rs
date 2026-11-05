@@ -30,7 +30,7 @@ use crate::backend::class_tables::{
 };
 use crate::backend::local_properties::RealizedLocalPropertyAccess;
 use crate::fir::{PropertyId, ResolvedPropertyOverrideTarget};
-use crate::ir::{ClassId, FunId, IrClass, IrFile, IrLocalPropertyLayout};
+use crate::ir::{ClassId, FunId, IrClass, IrExpr, IrFile, IrLocalPropertyLayout};
 use crate::types::{Ty, TypeName};
 
 use super::super::encode::{
@@ -39,6 +39,13 @@ use super::super::encode::{
 use super::super::interface_dispatch::ClassRef;
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
 use super::lower::{carrier, Unsupported};
+
+mod constructor_prefix;
+
+#[cfg(test)]
+mod annotation_class_tests;
+#[cfg(test)]
+mod constructor_prefix_tests;
 
 /// How the WasmGC form carries values, as the shared tables ask it.
 struct WasmRepresentation;
@@ -162,10 +169,16 @@ pub(super) fn module_plan(classes: &ModuleClasses) -> ModuleSlotPlan {
 }
 
 /// Reject, by name, a class this form does not lay out.
-fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
+fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
+    let class = &ir.classes[id as usize];
     let name = class.fq_name();
-    let construct = if class.is_annotation || class.annotation_impl_of.is_some() {
-        "an annotation class"
+    // An annotation class that is only applied needs nothing at run time beyond an ordinary
+    // layout. An annotation INSTANCE compares, hashes, and prints by its members, which this
+    // object form does not provide, so a file constructing one is still declined.
+    let construct = if class.annotation_impl_of.is_some()
+        || (class.is_annotation && constructs(ir, class.fq_name))
+    {
+        "an annotation instance"
     } else if class.prop_ref.is_some() || class.func_ref.is_some() {
         "a callable reference"
     } else if class.lambda.is_some() || class.sam_wrapper.is_some() {
@@ -176,8 +189,9 @@ fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
         "a value class"
     // An inner class's enclosing instance is already an ordinary constructor-prefix argument and
     // field in checked IR, which this object form can carry like every other reference field.
-    // Other captured classes still need their broader closure construction semantics.
-    } else if class.constructor_prefix_count > 0 && !class.is_inner_class {
+    // Anonymous superclass operands are also ordinary parameters, without capture storage.
+    // Stored by-value captures use the same checked pre-super field transport.
+    } else if !constructor_prefix::supported(ir, id) {
         "a class capturing its surroundings"
     } else if class.companion_class.is_some() {
         "a class with a companion object"
@@ -193,6 +207,17 @@ fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
     Err(format!("{construct} (`{name}`)"))
 }
 
+/// Whether a body `ir` emits constructs the class named `name`. Orphan expressions and
+/// cloning-only inline templates are not emitted, so a construction there is no obligation.
+fn constructs(ir: &IrFile, name: TypeName) -> bool {
+    crate::ir::emitted_body_roots(ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+        .any(|expression| {
+            matches!(ir.expr(expression), IrExpr::New { internal, .. } if *internal == name)
+        })
+}
+
 /// Lay out every class of `ir` in `module`: types, constructors' and accessors' indices, and the
 /// dispatch tables, whose entries name `functions` (the file's function indices, by `FunId`).
 pub(super) fn declare(
@@ -203,8 +228,8 @@ pub(super) fn declare(
     properties: &RealizedProperties,
     plan: &ModuleSlotPlan,
 ) -> Result<FileClasses, Unsupported> {
-    for class in &ir.classes {
-        check_supported(class)?;
+    for class in 0..ir.classes.len() {
+        check_supported(ir, class as ClassId)?;
     }
     let tables = class_tables::build_numbered(&WasmRepresentation, ir, plan)?;
     let slot_types = slot_types(ir, module, objects, &tables)?;

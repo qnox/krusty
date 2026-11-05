@@ -2,6 +2,11 @@
 
 use crate::types::TypeName;
 
+pub(crate) mod kotlinc_offsets;
+pub mod names;
+
+pub use names::DiagnosticName;
+
 /// A byte range into the source file. `u32` offsets keep this 8 bytes (data-oriented).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Span {
@@ -19,135 +24,6 @@ impl Span {
 pub enum Severity {
     Error,
     Warning,
-}
-
-/// Stable compiler-warning names exposed through kotlinc's `-Xwarning-level` contract.
-///
-/// This is separate from [`DiagnosticIdentity`]: a warning name selects command-line policy,
-/// while an identity says when two reports describe the same semantic occurrence.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub enum CompilerWarningName {
-    DataClassCopyVisibilityWillBeChanged,
-    DataClassInvisibleCopyUsage,
-    ClassLiteralLhsNotAClass,
-    Deprecation,
-    DeprecationErrorMigrationPeriodWarning,
-    ExplicitTypeArgumentsInPropertyAccess,
-    InapplicableOperatorModifier,
-    ParenthesizedPackageQualifier,
-    TypeIntersectionAsReified,
-    TypeIntersectionAsReifiedDeprecation,
-    TypeParameterAsReifiedDeprecation,
-    TypeArgumentsNotAllowed,
-    TypeArgumentsNotAllowedInPackageQualifier,
-    WrongNumberOfTypeArgumentsInGetClass,
-    ValueClassCannotBeRecursiveViaTypeParameters,
-}
-
-impl CompilerWarningName {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::DataClassCopyVisibilityWillBeChanged => {
-                "DATA_CLASS_COPY_VISIBILITY_WILL_BE_CHANGED_WARNING"
-            }
-            Self::DataClassInvisibleCopyUsage => "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING",
-            Self::ClassLiteralLhsNotAClass => "CLASS_LITERAL_LHS_NOT_A_CLASS_WARNING",
-            Self::Deprecation => "DEPRECATION",
-            Self::DeprecationErrorMigrationPeriodWarning => {
-                "DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING"
-            }
-            Self::ExplicitTypeArgumentsInPropertyAccess => {
-                "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING"
-            }
-            Self::InapplicableOperatorModifier => "INAPPLICABLE_OPERATOR_MODIFIER_WARNING",
-            Self::ParenthesizedPackageQualifier => "PARENTHESIZED_PACKAGE_QUALIFIER_WARNING",
-            Self::TypeIntersectionAsReified => "TYPE_INTERSECTION_AS_REIFIED_WARNING",
-            Self::TypeIntersectionAsReifiedDeprecation => {
-                "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING"
-            }
-            Self::TypeParameterAsReifiedDeprecation => {
-                "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING"
-            }
-            Self::TypeArgumentsNotAllowed => "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING",
-            Self::TypeArgumentsNotAllowedInPackageQualifier => {
-                "TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING"
-            }
-            Self::WrongNumberOfTypeArgumentsInGetClass => {
-                "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING"
-            }
-            Self::ValueClassCannotBeRecursiveViaTypeParameters => {
-                "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING"
-            }
-        }
-    }
-
-    pub fn parse(name: &str) -> Option<Self> {
-        Some(match name {
-            "DATA_CLASS_COPY_VISIBILITY_WILL_BE_CHANGED_WARNING" => {
-                Self::DataClassCopyVisibilityWillBeChanged
-            }
-            "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING" => Self::DataClassInvisibleCopyUsage,
-            "CLASS_LITERAL_LHS_NOT_A_CLASS_WARNING" => Self::ClassLiteralLhsNotAClass,
-            "DEPRECATION" => Self::Deprecation,
-            "DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING" => {
-                Self::DeprecationErrorMigrationPeriodWarning
-            }
-            "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING" => {
-                Self::ExplicitTypeArgumentsInPropertyAccess
-            }
-            "INAPPLICABLE_OPERATOR_MODIFIER_WARNING" => Self::InapplicableOperatorModifier,
-            "PARENTHESIZED_PACKAGE_QUALIFIER_WARNING" => Self::ParenthesizedPackageQualifier,
-            "TYPE_INTERSECTION_AS_REIFIED_WARNING" => Self::TypeIntersectionAsReified,
-            "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING" => {
-                Self::TypeIntersectionAsReifiedDeprecation
-            }
-            "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING" => {
-                Self::TypeParameterAsReifiedDeprecation
-            }
-            "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING" => Self::TypeArgumentsNotAllowed,
-            "TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING" => {
-                Self::TypeArgumentsNotAllowedInPackageQualifier
-            }
-            "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING" => {
-                Self::WrongNumberOfTypeArgumentsInGetClass
-            }
-            "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING" => {
-                Self::ValueClassCannotBeRecursiveViaTypeParameters
-            }
-            _ => return None,
-        })
-    }
-}
-
-#[cfg(test)]
-mod warning_name_tests {
-    use super::CompilerWarningName;
-
-    #[test]
-    fn every_compiler_warning_name_round_trips_through_its_wire_spelling() {
-        let names = [
-            CompilerWarningName::DataClassCopyVisibilityWillBeChanged,
-            CompilerWarningName::DataClassInvisibleCopyUsage,
-            CompilerWarningName::ClassLiteralLhsNotAClass,
-            CompilerWarningName::Deprecation,
-            CompilerWarningName::DeprecationErrorMigrationPeriodWarning,
-            CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess,
-            CompilerWarningName::InapplicableOperatorModifier,
-            CompilerWarningName::ParenthesizedPackageQualifier,
-            CompilerWarningName::TypeIntersectionAsReified,
-            CompilerWarningName::TypeIntersectionAsReifiedDeprecation,
-            CompilerWarningName::TypeParameterAsReifiedDeprecation,
-            CompilerWarningName::TypeArgumentsNotAllowed,
-            CompilerWarningName::TypeArgumentsNotAllowedInPackageQualifier,
-            CompilerWarningName::WrongNumberOfTypeArgumentsInGetClass,
-            CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
-        ];
-        assert_eq!(
-            names.map(|name| CompilerWarningName::parse(name.as_str())),
-            names.map(Some)
-        );
-        assert_eq!(CompilerWarningName::parse("UNKNOWN_WARNING"), None);
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
@@ -182,8 +58,9 @@ pub struct Diagnostic {
     /// Optional editor-facing source range.
     pub editor_span: Option<Span>,
     pub severity: Severity,
-    /// The `-Xwarning-level` identity of a warning, when kotlinc exposes one.
-    pub warning_name: Option<CompilerWarningName>,
+    /// kotlinc's name for this diagnostic, the identity `-Xwarning-level` selects. Diagnostics
+    /// whose report does not name its kotlinc factory yet carry `None`.
+    pub name: Option<DiagnosticName>,
     pub kind: DiagnosticKind,
     pub msg: String,
     pub identity: Option<DiagnosticIdentity>,
@@ -207,6 +84,10 @@ pub struct DiagSink {
     /// Warnings about the compilation's configuration rather than a source position, such as an
     /// unresolved `-opt-in` marker. Each message is kept once, in first-report order.
     pub module_warnings: Vec<String>,
+    /// Errors about the module as a whole rather than a source position, such as two files of one
+    /// JVM multifile class declaring the same method. They render last, unlocated, as kotlinc
+    /// reports its backend's module-wide errors.
+    pub module_errors: Vec<String>,
 }
 
 impl DiagSink {
@@ -216,6 +97,7 @@ impl DiagSink {
             current_file: 0,
             authoritative_ranges: None,
             module_warnings: Vec::new(),
+            module_errors: Vec::new(),
         }
     }
 
@@ -225,6 +107,20 @@ impl DiagSink {
         if !self.module_warnings.contains(&message) {
             self.module_warnings.push(message);
         }
+    }
+
+    /// Report an error about the module as a whole, in report order.
+    pub fn module_error(&mut self, message: impl Into<String>) {
+        self.module_errors.push(message.into());
+    }
+
+    /// How many errors the module reports, located and unlocated.
+    pub fn error_count(&self) -> usize {
+        self.diags
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .count()
+            + self.module_errors.len()
     }
 
     fn accepts(&self, span: Span) -> bool {
@@ -284,12 +180,12 @@ impl DiagSink {
         self.push_warning(span, None, msg.into());
     }
 
-    /// Report a warning whose stable name can be configured through `-Xwarning-level`.
-    pub fn warning_named(&mut self, span: Span, name: CompilerWarningName, msg: impl Into<String>) {
+    /// Report a warning under its kotlinc name, which `-Xwarning-level` can configure.
+    pub fn warning_named(&mut self, span: Span, name: DiagnosticName, msg: impl Into<String>) {
         self.push_warning(span, Some(name), msg.into());
     }
 
-    fn push_warning(&mut self, span: Span, name: Option<CompilerWarningName>, msg: String) {
+    fn push_warning(&mut self, span: Span, name: Option<DiagnosticName>, msg: String) {
         if !self.accepts(span) {
             return;
         }
@@ -297,7 +193,7 @@ impl DiagSink {
             span,
             editor_span: None,
             severity: Severity::Warning,
-            warning_name: name,
+            name,
             kind: DiagnosticKind::Compiler,
             msg,
             identity: None,
@@ -319,7 +215,7 @@ impl DiagSink {
             span,
             editor_span: None,
             severity: Severity::Error,
-            warning_name: None,
+            name: None,
             kind,
             msg,
             identity: None,
@@ -347,7 +243,7 @@ impl DiagSink {
             span,
             editor_span: None,
             severity: Severity::Error,
-            warning_name: None,
+            name: None,
             kind: DiagnosticKind::Compiler,
             msg,
             identity: Some(identity),
@@ -375,7 +271,7 @@ impl DiagSink {
             span,
             editor_span: Some(editor_span),
             severity: Severity::Error,
-            warning_name: None,
+            name: None,
             kind: DiagnosticKind::Compiler,
             msg,
             identity: None,
@@ -398,7 +294,7 @@ impl DiagSink {
                 seen_identities.insert((
                     diagnostic.file,
                     diagnostic.severity,
-                    diagnostic.warning_name,
+                    diagnostic.name,
                     diagnostic.kind,
                     identity,
                 ))
@@ -408,7 +304,7 @@ impl DiagSink {
                     diagnostic.span,
                     diagnostic.editor_span,
                     diagnostic.severity,
-                    diagnostic.warning_name,
+                    diagnostic.name,
                     diagnostic.kind,
                     diagnostic.msg.clone(),
                 ))
@@ -437,7 +333,7 @@ impl DiagSink {
     }
 
     pub fn has_errors(&self) -> bool {
-        self.diags.iter().any(|d| d.severity == Severity::Error)
+        !self.module_errors.is_empty() || self.diags.iter().any(|d| d.severity == Severity::Error)
     }
 
     /// Render `path:line:col: severity: msg` lines against the original source. Single-file callers:
@@ -446,6 +342,11 @@ impl DiagSink {
         let mut out = String::new();
         for d in &self.diags {
             out.push_str(&self.render_one(d, path, src));
+        }
+        for error in &self.module_errors {
+            out.push_str("error: ");
+            out.push_str(error);
+            out.push('\n');
         }
         out
     }
@@ -467,6 +368,11 @@ impl DiagSink {
                 .or_else(|| files.first().copied())
                 .unwrap_or(("<unknown>", ""));
             out.push_str(&self.render_one(d, path, src));
+        }
+        for error in &self.module_errors {
+            out.push_str("error: ");
+            out.push_str(error);
+            out.push('\n');
         }
         out
     }
@@ -538,20 +444,17 @@ mod tests {
     }
 
     #[test]
-    fn warning_policy_name_is_part_of_duplicate_identity() {
+    fn kotlinc_name_is_part_of_duplicate_identity() {
         let mut s = DiagSink::new();
         let span = Span::new(3, 4);
         s.warning(span, "same rendering");
-        s.warning_named(span, CompilerWarningName::Deprecation, "same rendering");
+        s.warning_named(span, names::DEPRECATION, "same rendering");
 
         s.collapse_duplicates();
 
         assert_eq!(s.diags.len(), 2, "{:?}", s.diags);
-        assert_eq!(s.diags[0].warning_name, None);
-        assert_eq!(
-            s.diags[1].warning_name,
-            Some(CompilerWarningName::Deprecation)
-        );
+        assert_eq!(s.diags[0].name, None);
+        assert_eq!(s.diags[1].name, Some(names::DEPRECATION));
     }
 
     #[test]

@@ -13,8 +13,33 @@
 //! collected together and selected later by [`crate::symbol_resolver::SymbolResolver`].
 
 pub use crate::libraries::ClassifierAccess;
+pub use crate::libraries::ClassifierDeclarationKey;
 use crate::libraries::{FunctionSet, LibraryType, PropertySet, ResolvedSymbols};
 use crate::types::{Ty, TypeName};
+
+/// Call conventions that kotlinc's frontend plugins configure with annotations. Each list holds
+/// the qualified identities of the annotation classes the compilation names for that plugin.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AnnotationConventions {
+    /// sam-with-receiver: an interface carrying one directly converts a lambda with its abstract
+    /// method's first parameter as the receiver.
+    pub sam_with_receiver: Vec<TypeName>,
+    /// assignment: an assignment to a `val` property whose type's class, or one of its supertypes,
+    /// carries one calls `assign` with the assigned value.
+    pub assignment: Vec<TypeName>,
+}
+
+/// The conventions of a compilation that configures none.
+pub static NO_ANNOTATION_CONVENTIONS: AnnotationConventions = AnnotationConventions {
+    sam_with_receiver: Vec::new(),
+    assignment: Vec::new(),
+};
+
+impl AnnotationConventions {
+    pub fn is_empty(&self) -> bool {
+        self.sam_with_receiver.is_empty() && self.assignment.is_empty()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SymbolNamespace {
@@ -35,6 +60,14 @@ impl SymbolNamespace {
     /// top-level classifier always has a package namespace, including `Package(TypeName::ROOT)`;
     /// a nested classifier has its immediate classifier as namespace.
     pub fn classifier_key(internal: TypeName) -> (Self, &'static str) {
+        // A declaration edge owns the complete source segment, including literal dollars. Names
+        // without that evidence retain the legacy encoded-name decomposition below.
+        if let Some(owner) = internal.exact_nested_owner() {
+            let segment = internal
+                .nested_segment_within(owner)
+                .expect("an exact classifier owner retains its complete nested segment");
+            return (Self::Classifier(owner), segment);
+        }
         internal.nested_owner().map_or_else(
             || (Self::Package(internal.namespace()), internal.segment_ref()),
             |owner| (Self::Classifier(owner), internal.nested_segment_ref()),
@@ -53,6 +86,20 @@ impl SymbolNamespace {
 /// A provider of declarations — a module's AST or a compiled library. The arg-independent metadata
 /// surface that federates across sources; arg-dependent selection/binding lives above (the resolver).
 pub trait SymbolSource {
+    /// The selected declaration record's own name, addressed by an already-bound declaration key.
+    /// `None` means this source has no such declaration; `Some(None)` means its selected record
+    /// has unknown name evidence and must shadow later sources. This projects the same normalized
+    /// classifier/alias records as `symbols`, without decomposing the identity or selecting an
+    /// alias's expansion target. Ordinary and alias keys stay distinct even when their flattened
+    /// identities coincide. This is not a source-name binding operation. Every source publishing
+    /// classifier declarations implements this projection; the default is only for empty sources.
+    fn classifier_declaration_name(
+        &self,
+        _declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        None
+    }
+
     /// Core projection of the classifier half of [`Self::symbols`]. Providers must not override this;
     /// the implementation lives here solely while call sites migrate to reading the record directly.
     fn classifier(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
@@ -194,11 +241,10 @@ pub trait SymbolSource {
         None
     }
 
-    /// The annotations kotlinc's sam-with-receiver plugin is configured with: an interface carrying
-    /// one directly converts a lambda with its abstract method's first parameter as the receiver.
-    /// A compilation fact, published by the current-module provider.
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        &[]
+    /// The annotation-configured call conventions the compilation's frontend plugins select. A
+    /// compilation fact, published by the current-module provider.
+    fn annotation_conventions(&self) -> &AnnotationConventions {
+        &NO_ANNOTATION_CONVENTIONS
     }
 
     /// Whether `companion` declares the exact serialization-plugin accessor shape. This reads a
@@ -223,6 +269,9 @@ pub trait SymbolSource {
     }
 }
 
+#[cfg(test)]
+mod declaration_names_tests;
+
 /// An ordered federation of sources — itself a [`SymbolSource`], so it nests. Earlier children win:
 /// Callables concatenate in order (each overload keeps its own origin); the classifier comes from the
 /// first/earliest contributor on a name clash. Holds children by REFERENCE so a resolver can federate the
@@ -245,6 +294,15 @@ impl<'a> CompositeSource<'a> {
 }
 
 impl SymbolSource for CompositeSource<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        self.children
+            .iter()
+            .find_map(|child| child.classifier_declaration_name(declaration))
+    }
+
     /// A package exists if ANY source declares it — packages are a union across the module and the
     /// classpath, not a shadowing lookup: the same package name legitimately holds declarations from
     /// both, and a qualifier walk must be able to continue through either.
@@ -291,12 +349,12 @@ impl SymbolSource for CompositeSource<'_> {
             .find_map(|child| child.serializable_class_elements(classifier))
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+    fn annotation_conventions(&self) -> &AnnotationConventions {
         self.children
             .iter()
-            .map(|child| child.sam_with_receiver_annotations())
-            .find(|annotations| !annotations.is_empty())
-            .unwrap_or_default()
+            .map(|child| child.annotation_conventions())
+            .find(|conventions| !conventions.is_empty())
+            .unwrap_or(&NO_ANNOTATION_CONVENTIONS)
     }
 
     /// Only the child that assigned `identity` answers for it; the module's own declarations
@@ -432,6 +490,12 @@ impl SymbolSource for CompositeSource<'_> {
 /// cannot outlive or conceal mutation of any contributing provider.
 #[derive(Default)]
 pub(crate) struct SymbolQueryCache {
+    declaration_names: std::cell::RefCell<
+        crate::fx_hash::HashMap<
+            ClassifierDeclarationKey,
+            Option<Option<crate::types::ClassifierDeclarationName>>,
+        >,
+    >,
     /// Keyed by NAME, and every miss and hit hashes that string. The default hasher is SipHash,
     /// which is a cryptographic-strength choice this cache does not need: the keys are internal
     /// declaration spellings, never attacker-supplied, and the map lives and dies inside one source
@@ -461,6 +525,21 @@ impl<'a> CachedCompositeSource<'a> {
 }
 
 impl SymbolSource for CachedCompositeSource<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        if let Some(name) = self.cache.declaration_names.borrow().get(&declaration) {
+            return name.clone();
+        }
+        let name = self.source.classifier_declaration_name(declaration);
+        self.cache
+            .declaration_names
+            .borrow_mut()
+            .insert(declaration, name.clone());
+        name
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         self.source.package_exists(parent, name)
     }
@@ -534,8 +613,8 @@ impl SymbolSource for CachedCompositeSource<'_> {
         self.source.serializable_class_elements(classifier)
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        self.source.sam_with_receiver_annotations()
+    fn annotation_conventions(&self) -> &AnnotationConventions {
+        self.source.annotation_conventions()
     }
 }
 
@@ -547,7 +626,7 @@ mod tests {
         PropKind, PropertyInfo, Visibility,
     };
     use crate::types::Ty;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     struct CountingEmptySource {
         queries: Cell<usize>,
@@ -700,6 +779,7 @@ mod tests {
                     );
                 }
                 Some(std::sync::Arc::new(LibraryType {
+                    runtime_exception: None,
                     declaration_name: None,
                     is_kotlin: true,
                     is_data: false,
@@ -742,6 +822,7 @@ mod tests {
                     retention: None,
                     annotation_targets: None,
                     mapped_collection: None,
+                    mapped_builtin: false,
                     annotation_element_defaults: Vec::new(),
                     deprecation: None,
                 }))
@@ -1015,6 +1096,148 @@ mod tests {
             (
                 SymbolNamespace::Classifier(crate::types::type_name("sample/Outer$Inner")),
                 "Deep",
+            )
+        );
+    }
+
+    #[test]
+    fn exact_classifier_keys_preserve_complete_literal_dollar_segments() {
+        let owner = crate::types::type_name("classifier_keys/ExactSegments");
+        for segment in ["Ordinary", "I$N", "M$N", "$serializer"] {
+            let nested = owner.nested_child(segment);
+            assert_eq!(nested.exact_nested_owner(), Some(owner));
+            assert_eq!(
+                SymbolNamespace::classifier_key(nested),
+                (SymbolNamespace::Classifier(owner), segment)
+            );
+        }
+    }
+
+    #[test]
+    fn exact_classifier_keys_preserve_a_literal_dollar_in_the_owner() {
+        let root = crate::types::type_name("classifier_keys/NestedSegments");
+        let owner = root.nested_child("Holder$Literal");
+        let nested = owner.nested_child("I$N");
+        assert_eq!(
+            SymbolNamespace::classifier_key(owner),
+            (SymbolNamespace::Classifier(root), "Holder$Literal")
+        );
+        assert_eq!(
+            SymbolNamespace::classifier_key(nested),
+            (SymbolNamespace::Classifier(owner), "I$N")
+        );
+    }
+
+    #[test]
+    fn an_exact_classifier_owner_precedes_an_interned_textual_prefix() {
+        let owner = crate::types::type_name("classifier_keys/PrefixOwner");
+        let prefix = owner.nested_child("M");
+        let nested = owner.nested_child("M$N");
+        let other = owner.nested_child("N");
+        assert_eq!(nested.exact_nested_owner(), Some(owner));
+        assert_ne!(nested.exact_nested_owner(), Some(prefix));
+        assert_eq!(
+            SymbolNamespace::classifier_key(nested),
+            (SymbolNamespace::Classifier(owner), "M$N")
+        );
+        assert_ne!(
+            SymbolNamespace::classifier_key(nested),
+            SymbolNamespace::classifier_key(other)
+        );
+    }
+
+    struct DeclaredClassifierSource {
+        records: crate::fx_hash::HashMap<(SymbolNamespace, String), std::rc::Rc<ResolvedSymbols>>,
+        queries: RefCell<Vec<(SymbolNamespace, String)>>,
+    }
+
+    impl SymbolSource for DeclaredClassifierSource {
+        fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
+            let key = (namespace, name.to_owned());
+            self.queries.borrow_mut().push(key.clone());
+            self.records.get(&key).cloned().unwrap_or_default()
+        }
+    }
+
+    #[test]
+    fn literal_nested_classifiers_round_trip_through_direct_and_cached_providers() {
+        let owner = crate::types::type_name("classifier_keys/ProviderOwner");
+        let nested = owner.nested_child("M$N");
+        let other = owner.nested_child("N");
+        let namespace = SymbolNamespace::Classifier(owner);
+        let record = |identity| {
+            std::rc::Rc::new(ResolvedSymbols {
+                classifier_name: Some(identity),
+                classifier_declaration: Some(ClassifierDeclaration::Ordinary(identity)),
+                classifier: Some(std::sync::Arc::new(LibraryType::declaration_header())),
+                ..ResolvedSymbols::default()
+            })
+        };
+        let expected = record(nested);
+        let source = DeclaredClassifierSource {
+            records: [
+                ((namespace, "M$N".to_owned()), expected.clone()),
+                ((namespace, "N".to_owned()), record(other)),
+            ]
+            .into_iter()
+            .collect(),
+            queries: RefCell::default(),
+        };
+        let selected = source.symbols(namespace, "M$N");
+        let projected = source.classifier(nested).expect("the selected declaration");
+        assert!(std::rc::Rc::ptr_eq(&selected, &expected));
+        assert!(std::sync::Arc::ptr_eq(
+            selected.classifier.as_ref().expect("a declared classifier"),
+            &projected
+        ));
+
+        let cache = SymbolQueryCache::default();
+        let cached = CachedCompositeSource::new(vec![&source], &cache);
+        let selected = cached.symbols(namespace, "M$N");
+        let projected = cached
+            .classifier(nested)
+            .expect("the same cached declaration");
+        assert_eq!(selected.classifier_name, Some(nested));
+        assert!(std::sync::Arc::ptr_eq(
+            expected.classifier.as_ref().expect("a declared classifier"),
+            &projected
+        ));
+        assert!(std::rc::Rc::ptr_eq(
+            &selected,
+            &cached.symbols(namespace, "M$N")
+        ));
+        let key = (namespace, "M$N".to_owned());
+        assert_eq!(
+            *source.queries.borrow(),
+            vec![key.clone(), key.clone(), key]
+        );
+    }
+
+    #[test]
+    fn classifier_keys_keep_legacy_encoded_and_package_namespaces() {
+        let owner = crate::types::type_name("classifier_keys_legacy/Outer");
+        // A raw child preserves the legacy encoding without declaring a nested owner.
+        let nested = crate::types::type_name_child(
+            crate::types::type_name("classifier_keys_legacy"),
+            "Outer$Inner",
+        );
+        assert_eq!(nested.exact_nested_owner(), None);
+        assert_eq!(
+            SymbolNamespace::classifier_key(nested),
+            (SymbolNamespace::Classifier(owner), "Inner")
+        );
+        let package = crate::types::type_name("classifier_keys_legacy");
+        let top = crate::types::type_name_child(package, "Top");
+        assert_eq!(
+            SymbolNamespace::classifier_key(top),
+            (SymbolNamespace::Package(package), "Top")
+        );
+        let top = crate::types::type_name("ClassifierKeyDefaultRoot");
+        assert_eq!(
+            SymbolNamespace::classifier_key(top),
+            (
+                SymbolNamespace::Package(TypeName::ROOT),
+                "ClassifierKeyDefaultRoot"
             )
         );
     }

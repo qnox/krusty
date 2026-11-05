@@ -8,6 +8,7 @@
 
 use super::*;
 pub(crate) use crate::lexical_policy::LexicalPolicy;
+use crate::types::PropertyAnnotationSite;
 
 /// Resolve each source's file annotations once, while Pass 1 still holds their syntax, and publish
 /// their policies and checked applications for every later checking unit and backend of that
@@ -20,7 +21,6 @@ pub(crate) fn publish_file_annotations(
     index: &mut crate::fir::ResolvedModuleIndex,
     diags: &mut DiagSink,
 ) {
-    let unsupported_multifile = crate::types::type_name("kotlin/jvm/JvmMultifileClass");
     for (file_index, file) in files.iter().enumerate() {
         if file.file_annotations.is_empty() {
             continue;
@@ -43,17 +43,6 @@ pub(crate) fn publish_file_annotations(
             .filter_map(|(annotation, _)| {
                 let key = (annotation.span.lo, annotation.span.hi);
                 let applied = checker.applied_annotations.get(&key)?;
-                if target == crate::compilation_target::CompilationTarget::Jvm
-                    && applied.internal == unsupported_multifile
-                {
-                    diags.set_file(file_index as u32);
-                    diags.error(
-                        annotation.span,
-                        "@file:JvmMultifileClass is not supported for JVM compilation yet; its \
-                         part classes and delegating facade require distinct physical owners"
-                            .to_string(),
-                    );
-                }
                 Some(crate::types::ResolvedAnnotation {
                     annotation: applied.internal,
                     arguments: applied.values.clone(),
@@ -61,7 +50,32 @@ pub(crate) fn publish_file_annotations(
                     written: None,
                 })
             })
-            .collect();
+            .collect::<Box<[_]>>();
+        if target == crate::compilation_target::CompilationTarget::Jvm
+            && applications.iter().any(|application| {
+                application.annotation == crate::types::type_name("kotlin/jvm/JvmMultifileClass")
+            })
+        {
+            // A multifile facade forwards to its parts' members, and a field cannot be forwarded.
+            for &declaration in &file.decls {
+                let Decl::Property(property) = file.decl(declaration) else {
+                    continue;
+                };
+                if let Some(annotation) = checker.resolved_annotation_in_scope(
+                    &CheckerScope::root(),
+                    &property.annotations,
+                    "kotlin/jvm/JvmField",
+                ) {
+                    diags.set_file(file_index as u32);
+                    diags.error(
+                        Span::new(annotation.at, annotation.span.hi),
+                        "jvmField cannot be applied to top level property of a file annotated \
+                         with JvmMultifileClass."
+                            .to_string(),
+                    );
+                }
+            }
+        }
         index.publish_file_annotations(
             crate::fir::SourceFileId::from_raw(file_index as u32),
             crate::fir::FileAnnotationFacts {
@@ -121,6 +135,54 @@ impl Checker<'_> {
         depth
     }
 
+    /// Open a property's declaration policies: those of the applications written for the property
+    /// itself. A use-site application (`@get:OptIn(M::class)`) covers only its site, which the
+    /// accessor opens ([`Self::push_accessor_policies`]). Returns the depth to truncate back to.
+    pub(super) fn push_property_declaration_policies(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        annotations: &[AnnotationRef],
+        arguments: &[Vec<ExprId>],
+    ) -> usize {
+        self.push_selected_declaration_policies(scope, annotations, arguments, &|annotation| {
+            property_declaration_site(annotation)
+        })
+    }
+
+    /// Open the policies of one accessor of `property`: the property's applications written for
+    /// that accessor's use-site (`@get:`, `@set:`) and the accessor's own (`@A get()`), resolved
+    /// in the scope of the property's annotations. The property's declaration policies are
+    /// already open. Returns the depth to truncate back to.
+    pub(super) fn push_accessor_policies(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        property: &PropDecl,
+        site: PropertyAnnotationSite,
+    ) -> usize {
+        let depth = self.active_lexical_policies.len();
+        for (annotation, arguments) in property.annotations.iter().zip(&property.annotation_args) {
+            if annotation.property_site == Some(site) {
+                let policies = self.application_policies(scope, annotation, arguments);
+                self.active_lexical_policies
+                    .extend(policies.iter().cloned());
+            }
+        }
+        let accessor = match site {
+            PropertyAnnotationSite::Getter => &property.getter_annotations[..],
+            PropertyAnnotationSite::Setter => property
+                .setter
+                .as_ref()
+                .map_or(&[][..], |setter| &setter.annotations[..]),
+            _ => &[],
+        };
+        for entry in accessor {
+            let policies = self.application_policies(scope, &entry.annotation, &entry.arguments);
+            self.active_lexical_policies
+                .extend(policies.iter().cloned());
+        }
+        depth
+    }
+
     /// The policies one annotation application opens, resolved once per application. The
     /// application is checked in `scope`, its owning scope, and its policies come from that check:
     /// the identity it bound and the classes and strings its arguments folded to. The check's own
@@ -137,18 +199,24 @@ impl Checker<'_> {
             return policies.clone();
         }
         let diagnostics = self.diags.diags.len();
-        let identity = self.check_annotation_application(scope, annotation, arguments);
+        let policies: std::rc::Rc<[LexicalPolicy]> = if annotation.property_site.is_some() {
+            // A use-site application is validated and published by its property's host check;
+            // its policies need only the identity and values it binds here.
+            self.use_site_application_values(scope, annotation, arguments)
+                .map(|(identity, values)| LexicalPolicy::of_application(identity, &values))
+        } else {
+            self.check_annotation_application(scope, annotation, arguments)
+                .map(|identity| {
+                    let values = self
+                        .applied_annotations
+                        .get(&key)
+                        .map_or(&[][..], |applied| applied.values.as_slice());
+                    LexicalPolicy::of_application(identity, values)
+                })
+        }
+        .unwrap_or_default()
+        .into();
         self.diags.diags.truncate(diagnostics);
-        let policies: std::rc::Rc<[LexicalPolicy]> = identity
-            .map(|identity| {
-                let values = self
-                    .applied_annotations
-                    .get(&key)
-                    .map_or(&[][..], |applied| applied.values.as_slice());
-                LexicalPolicy::of_application(identity, values)
-            })
-            .unwrap_or_default()
-            .into();
         self.lexical_policy_facts.insert(key, policies.clone());
         policies
     }
@@ -269,4 +337,13 @@ impl Checker<'_> {
         }
         self.active_lexical_policies.truncate(policy_depth);
     }
+}
+
+/// Whether `annotation` is written for the property declaration itself rather than one of its
+/// use-sites.
+pub(super) fn property_declaration_site(annotation: &AnnotationRef) -> bool {
+    matches!(
+        annotation.property_site,
+        None | Some(PropertyAnnotationSite::Property)
+    )
 }

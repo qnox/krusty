@@ -13,7 +13,6 @@ use krusty::features::{FeatureTable, LangFeatures, LanguageVersionPolicy};
 use super::fragments::FragmentArguments;
 use super::{
     jvm_target_to_major, language_features, supported_kotlin_versions, CliWarning, Options,
-    WarningName,
 };
 use crate::kotlinc_arguments::{ArgumentSpec, Catalog, Occurrence, Recorded, Value};
 
@@ -98,7 +97,7 @@ fn version_warnings(settings: &LanguageSettings) -> Vec<CliWarning> {
     let deprecated = |version, api: bool| {
         let kind = if api { "API" } else { "language" };
         CliWarning {
-            name: Some(WarningName::DeprecatedLanguageVersion),
+            name: Some(krusty::diag::names::DEPRECATED_LANGUAGE_VERSION),
             message: format!(
                 "{kind} version {version} is deprecated and its support will be removed in a \
                  future version of Kotlin. Update the version to {}.",
@@ -114,7 +113,7 @@ fn version_warnings(settings: &LanguageSettings) -> Vec<CliWarning> {
     }
     if !status(settings.language_version, false).stable {
         warnings.push(CliWarning {
-            name: Some(WarningName::ExperimentalLanguageVersion),
+            name: Some(krusty::diag::names::EXPERIMENTAL_LANGUAGE_VERSION),
             message: format!(
                 "language version {} is experimental, there are no backwards compatibility \
                  guarantees for new language and library features. Use the stable version {} \
@@ -268,6 +267,7 @@ pub(super) fn apply(
         "-progressive" => parsed.progressive = flag,
         "-Werror" => parsed.all_warnings_as_errors = flag,
         "-nowarn" => parsed.suppress_warnings = flag,
+        "-Xreport-all-warnings" => opts.report_all_warnings = flag,
         "-Xmetadata-version" => match parse_metadata_level(text) {
             Some(version) => opts.metadata_version = Some(version),
             None => opts.errors.push(format!(
@@ -288,6 +288,7 @@ pub(super) fn apply(
         "-jdk-home" => opts.jdk_home = Some(PathBuf::from(text)),
         "-Xno-param-assertions" => opts.no_param_assertions = flag,
         "-Xno-call-assertions" => opts.no_call_assertions = flag,
+        "-Xuse-inline-scopes-numbers" => opts.inline_scopes_numbers = flag,
         // `-Xlambdas` / `-Xsam-conversions` select how a lambda and a SAM conversion are realized:
         // `indy` is a `LambdaMetafactory` call site (kotlinc's default since 2.0), `class` gives each
         // lambda its own class extending `kotlin.jvm.internal.Lambda`. The two differ in the emitted

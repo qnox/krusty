@@ -367,7 +367,7 @@ impl BodyLowering<'_> {
             .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))?;
         // Loop protocol reads are synthesized after FIR, so there is no source expression whose
         // finalization can preserve the selected property's semantic result on a wrapper block.
-        self.ir.logical_types.insert(read, result.get());
+        self.ir.set_logical_type(read, result.get());
         Ok(read)
     }
 
@@ -718,6 +718,7 @@ impl BodyLowering<'_> {
                 declared_result,
                 overridden_results,
                 semantic_role,
+                intrinsic_const: _,
                 overridden_declarations,
                 suspend,
                 inline,

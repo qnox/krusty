@@ -18,6 +18,7 @@ use super::symbols::KlibIrSymbol;
 use super::KlibIrConstant;
 
 mod emitted_callables;
+pub(crate) use emitted_callables::EmittedCallForms;
 mod lexical_values;
 
 macro_rules! arena_id {
@@ -113,6 +114,7 @@ impl KlibIrArena {
 
     /// Calls and constructions reached by executing exactly this body. Parameter defaults and
     /// nested declaration bodies are separate execution roots, not edges of this graph.
+    #[cfg(test)]
     pub(crate) fn callable_symbols_in_body<'a>(
         &'a self,
         function: &'a KlibIrFunction,
@@ -121,7 +123,7 @@ impl KlibIrArena {
         if let Some(KlibIrBody::Block(statements)) = &function.body {
             push_statement_expressions(self, statements, &mut pending);
         }
-        self.callable_symbols_from(pending)
+        self.callable_symbols_from(pending, false)
     }
 
     /// Calls and constructions in a prepared body's executable graph, including defaults.
@@ -142,12 +144,13 @@ impl KlibIrArena {
                 .chain(&function.regular_parameters)
                 .filter_map(|parameter| parameter.default_value),
         );
-        self.callable_symbols_from(pending)
+        self.callable_symbols_from(pending, true)
     }
 
     fn callable_symbols_from(
         &self,
         mut pending: Vec<KlibIrExprId>,
+        include_references: bool,
     ) -> impl Iterator<Item = &KlibIrSymbol> {
         let mut calls = Vec::new();
         while let Some(id) = pending.pop() {
@@ -158,6 +161,13 @@ impl KlibIrArena {
                 | KlibIrExprKind::ConstructorCall { access, .. }
                 | KlibIrExprKind::DelegatingConstructorCall(access)
                 | KlibIrExprKind::EnumConstructorCall(access) => calls.push(&access.symbol),
+                KlibIrExprKind::FunctionReference { access, .. } if include_references => {
+                    calls.push(&access.symbol);
+                }
+                KlibIrExprKind::RichFunctionReference {
+                    reflection_target: Some(target),
+                    ..
+                } if include_references => calls.push(target),
                 _ => {}
             }
         }
@@ -1072,17 +1082,29 @@ mod tests {
         let selected = arena.function(root);
         assert_eq!(
             arena
-                .emitted_callable_symbols(selected, |_, expression| match expression.kind {
-                    KlibIrExprKind::FunctionExpression { function, .. } => Some(function),
-                    _ => None,
-                })
+                .emitted_callable_symbols(
+                    selected,
+                    EmittedCallForms {
+                        closure: |_, expression| match expression.kind {
+                            KlibIrExprKind::FunctionExpression { function, .. } => Some(function),
+                            _ => None,
+                        },
+                        folded_call: |_, _| false,
+                    }
+                )
                 .into_iter()
                 .cloned()
                 .collect::<Vec<_>>(),
             [helper, executed]
         );
         assert!(arena
-            .emitted_callable_symbols(selected, |_, _| None)
+            .emitted_callable_symbols(
+                selected,
+                EmittedCallForms {
+                    closure: |_, _| None,
+                    folded_call: |_, _| false,
+                }
+            )
             .is_empty());
         assert_eq!(arena.callable_symbols_in_body(selected).count(), 0);
         assert_eq!(arena.call_symbols_in_body(selected).count(), 0);

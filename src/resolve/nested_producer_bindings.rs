@@ -45,7 +45,7 @@ pub(super) fn open_variable_bindings(
 ) -> Option<crate::symbol_resolver::GSigBinds> {
     let solves_result = |bindings: &crate::symbol_resolver::GSigBinds| {
         generic_sig.formals.iter().all(|formal| {
-            bindings.contains_key(formal)
+            bindings.contains_key(formal.as_str())
                 || !crate::types::ty_mentions_param(generic_sig.ret, std::slice::from_ref(formal))
         })
     };
@@ -103,6 +103,70 @@ pub(super) fn join_lower_bounds(
     });
 }
 
+/// `signature` with the bounds of its formals restated over the evidence already solved. An
+/// expected result checked against `C : MutableCollection<in T>` after the receiver fixed
+/// `T = Sub` must meet `MutableCollection<in Sub>`, not the erased `MutableCollection<in Any?>` that
+/// would reject every expectation other than one admitting `Any?`.
+pub(super) fn solved_bound_signature(
+    signature: &GenericSig,
+    bindings: &crate::symbol_resolver::GSigBinds,
+) -> GenericSig {
+    let mut solved = signature.clone();
+    for bound in solved.formal_bounds.iter_mut().flatten() {
+        *bound = crate::symbol_resolver::ty_subst_keep_unbound(*bound, bindings);
+    }
+    solved
+}
+
+/// The expectation a postponed producer is solved against at outer parameter `declared`. An open outer variable whose
+/// declared bound depends on another, already bound variable (`S : T?` after `T = String`) is not
+/// a rigid type for the producer: the producer may only produce what that bound admits, so the
+/// variable stands for its substituted bound (`String?`) and later receives the producer's result.
+/// A bound that depends on no other variable (`<S : Any>`, or the implicit `Any?`) is a declared
+/// bound only, and does not on its own justify an inference result.
+pub(super) fn producer_expectation(
+    signature: &GenericSig,
+    type_args: &[Ty],
+    bindings: &crate::symbol_resolver::GSigBinds,
+    declared: Ty,
+) -> Ty {
+    let mut dependent = crate::symbol_resolver::GSigBinds::default();
+    for (index, formal) in signature.formals.iter().enumerate() {
+        if bindings.contains_key(formal.as_str())
+            || type_args
+                .get(index)
+                .is_some_and(|argument| *argument != Ty::Error)
+            || !crate::types::ty_mentions_param(declared, std::slice::from_ref(formal))
+        {
+            continue;
+        }
+        let [bound] = signature
+            .formal_bounds
+            .get(index)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        else {
+            continue;
+        };
+        if !crate::types::ty_mentions_param(*bound, &signature.formals) {
+            continue;
+        }
+        let bound = crate::symbol_resolver::ty_subst_keep_unbound(*bound, bindings);
+        if !crate::types::ty_mentions_param(bound, &signature.formals) {
+            dependent.insert(crate::types::TyParamName::new(formal), bound);
+        }
+    }
+    let substituted = crate::symbol_resolver::ty_subst_keep_unbound(
+        crate::symbol_resolver::ty_subst_keep_unbound(declared, bindings),
+        &dependent,
+    );
+    // A still-open bare variable offers the producer its own bound.
+    match substituted.kind() {
+        TyKind::TyParam(_, bound) => crate::symbol_resolver::ty_subst_keep_unbound(bound, bindings),
+        _ => substituted,
+    }
+}
+
 /// A symbolic outer expectation may bind the nested producer's formal directly to an outer call
 /// variable. That relation is valid only when the OUTER variable's own upper bound satisfies the
 /// nested declaration's bound. For `<Y : Any> produce(): Box<Y>` passed to `<X> consume(Box<X>)`,
@@ -115,7 +179,7 @@ pub(super) fn enforce_declared_bounds(
     mut admits: impl FnMut(Ty, Ty) -> bool,
 ) {
     for (index, formal) in generic_sig.formals.iter().enumerate() {
-        let Some(actual) = nested_bindings.get(formal).copied() else {
+        let Some(actual) = nested_bindings.get(formal.as_str()).copied() else {
             continue;
         };
         let Some(actual_bound) = actual.non_null().ty_param_bound() else {
@@ -135,7 +199,7 @@ pub(super) fn enforce_declared_bounds(
             continue;
         };
         if actual.is_nullable() || !admits(actual_bound, required) {
-            nested_bindings.insert(formal.clone(), required);
+            nested_bindings.insert(crate::types::TyParamName::new(formal), required);
         }
     }
 }

@@ -53,3 +53,32 @@ fn the_constructor_is_reached_through_kotlincs_accessor() {
 fn every_scope_constructs_the_value() {
     common::expect_box_ok_with_stdlib(SOURCE, "PrivateConstructorAccess");
 }
+
+/// A private constructor over a value class is not hidden behind the marker overload: kotlinc
+/// calls the erased `<init>` from the class's own code, keeps the marker one only as the accessor a
+/// nested class reaches it through, and names the erased one in `@Metadata`.
+const PRIVATE_OUTER_CONSTRUCTOR: &str = r#"@JvmInline
+value class S(val string: String)
+
+class Outer private constructor(val s: S) {
+    class Nested {
+        fun test(s: S) = Outer(s)
+    }
+}
+
+fun box() = Outer.Nested().test(S("OK")).s.string
+"#;
+
+#[test]
+fn a_private_constructor_over_a_value_class_names_its_erased_init() {
+    common::assert_classes_identical_to_kotlinc(
+        "PrivateOuterConstructor",
+        PRIVATE_OUTER_CONSTRUCTOR,
+        &["Outer", "Outer$Nested"],
+    );
+}
+
+#[test]
+fn a_private_constructor_over_a_value_class_runs() {
+    common::expect_box_ok_with_stdlib(PRIVATE_OUTER_CONSTRUCTOR, "PrivateOuterConstructor");
+}

@@ -129,12 +129,22 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
             ConstraintOrigin::Argument(argument),
             &mut constraints,
         );
-        for formal in &generic_sig.formals {
-            if constraints.lower.contains_key(formal)
+        for (index, formal) in generic_sig.formals.iter().enumerate() {
+            if constraints.lower.contains_key(formal.as_str())
                 && formal_variance_in_type(source, shape, formal)
                     == Some(crate::types::TypeVariance::Invariant)
             {
                 invariantly_fixed.insert(formal.clone());
+                let nullable_formal = generic_sig.formal_bounds.get(index).is_none_or(|bounds| {
+                    bounds.iter().all(|bound| bound.upper_bound_admits_null())
+                });
+                if formal_fixed_exactly_by(source, shape, formal, nullable_formal) {
+                    constraints
+                        .invariant_arguments
+                        .entry(formal.clone())
+                        .or_default()
+                        .push(argument);
+                }
             }
         }
     }
@@ -189,6 +199,9 @@ struct CallInferenceConstraints {
     lower: GSigBinds,
     lower_inputs: crate::fx_hash::HashMap<String, Vec<(Ty, ConstraintOrigin)>>,
     upper: crate::fx_hash::HashMap<String, Vec<Ty>>,
+    /// Arguments whose parameter mentions the formal only at invariant positions. Their inputs fix
+    /// the formal exactly, so a later argument's input must fit inside them.
+    invariant_arguments: crate::fx_hash::HashMap<String, Vec<usize>>,
     /// Java root-flexible variables fixed by a nullable value argument. Both interval faces become
     /// that nullable type, so a later invariant expected result must not widen the variable back to
     /// a non-null type whose flexible parameter would merely accept the original argument.
@@ -231,6 +244,9 @@ pub(crate) fn collect_assignability_constraints_from_symbols(
             }
             TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => {
                 actual_side(source, expected.non_null(), inner, position, constraints)
+            }
+            TyKind::MutabilityFlexible(inner) => {
+                actual_side(source, expected, inner, position, constraints)
             }
             TyKind::Fun(actual) => {
                 let TyKind::Fun(expected) = expected.non_null().kind() else {
@@ -342,6 +358,9 @@ pub(crate) struct InferredCallBindings {
     /// A definite violation from argument evidence. Bounds still containing this call's open
     /// formals are checked after explicit and expected-result bindings are complete.
     pub bound_violation: Option<GenericBoundViolation>,
+    /// Every argument the constraint system rejects, in argument order; `bound_violation` is the
+    /// first of them.
+    pub bound_violations: Vec<GenericBoundViolation>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -350,6 +369,11 @@ pub(crate) struct GenericBoundViolation {
     pub argument: usize,
     pub expected: Ty,
     pub actual: Ty,
+    /// Index of the violated formal in the signature's formals.
+    pub formal: usize,
+    /// Whether the rejected argument was the formal's only evidence. kotlinc then also reports
+    /// that the formal cannot be inferred: rejecting the contradicting constraint leaves none.
+    pub uninferred: bool,
 }
 
 impl InferredCallBindings {
@@ -366,7 +390,7 @@ impl InferredCallBindings {
                         .iter()
                         .all(|upper| resolution_subtype(source, *candidate, *upper))
                 })?;
-                Some((formal.clone(), selected))
+                Some((crate::types::TyParamName::from(formal), selected))
             })
             .collect()
     }
@@ -408,7 +432,9 @@ pub(crate) fn seed_denotable_upper_placeholders(
     denotable: &[(String, Ty)],
 ) {
     for (formal, _) in denotable {
-        bindings.entry(formal.clone()).or_insert(Ty::Nothing);
+        bindings
+            .entry(crate::types::TyParamName::new(formal))
+            .or_insert(Ty::Nothing);
     }
 }
 
@@ -427,20 +453,20 @@ pub(crate) fn publish_denotable_upper_bindings(
     mut subtype: impl FnMut(Ty, Ty) -> bool,
 ) {
     for (formal, binding) in denotable {
-        let expected_fixed = expected_fixed.and_then(|fixed| fixed.get(&formal).copied());
-        match bindings.get(&formal).copied() {
+        let expected_fixed = expected_fixed.and_then(|fixed| fixed.get(formal.as_str()).copied());
+        match bindings.get(formal.as_str()).copied() {
             None => {
-                bindings.insert(formal, binding);
+                bindings.insert(crate::types::TyParamName::new(&formal), binding);
             }
             Some(Ty::Nothing) if binding != Ty::Nothing && expected_fixed.is_none() => {
-                bindings.insert(formal, binding);
+                bindings.insert(crate::types::TyParamName::new(&formal), binding);
             }
             Some(current)
                 if expected_fixed.is_some_and(|expected| expected == current)
                     && binding != current
                     && subtype(binding, current) =>
             {
-                bindings.insert(formal, binding);
+                bindings.insert(crate::types::TyParamName::new(&formal), binding);
             }
             _ => {}
         }
@@ -483,7 +509,8 @@ impl CallInferenceConstraints {
                     source,
                     &inputs.iter().map(|(actual, _)| *actual).collect::<Vec<_>>(),
                 );
-                self.lower.insert(name.to_string(), merged);
+                self.lower
+                    .insert(crate::types::TyParamName::new(name), merged);
             }
             ConstraintPosition::Upper => {
                 let bounds = self.upper.entry(name.to_string()).or_default();
@@ -498,7 +525,8 @@ impl CallInferenceConstraints {
 
     /// Propagate the declaration's direct variable bounds as constraints before collapsing them to
     /// one denotable solution. For `T : R` (`T <: R`), every lower bound of `T` is a lower bound of
-    /// `R`, while every upper bound of `R` is an upper bound of `T`.
+    /// `R`, while every upper bound of `R` is an upper bound of `T`. A nullable bound `T : R?`
+    /// admits null itself, so a lower bound `X` of `T` says only `X & Any <: R`.
     fn propagate_declaration_bounds(&mut self, source: &dyn SymbolSource, signature: &GenericSig) {
         loop {
             let mut changed = false;
@@ -519,6 +547,11 @@ impl CallInferenceConstraints {
                     for &(actual, origin) in
                         lower.get(formal).map(Vec::as_slice).unwrap_or_default()
                     {
+                        let actual = if bound.is_nullable() {
+                            actual.contributed_through_nullable_formal()
+                        } else {
+                            actual
+                        };
                         changed |= self.insert(
                             source,
                             bound_formal.as_str(),
@@ -548,16 +581,121 @@ impl CallInferenceConstraints {
         }
     }
 
+    /// The arguments kotlinc's constraint system rejects for `formal`, adding their inputs in
+    /// argument order. An argument is rejected when one of its inputs leaves a declared bound
+    /// (`bounds`, empty when the bounds admit every input) or contradicts an earlier accepted
+    /// invariant fixation: `same(mutableListOf<Square>(), shape)` fixes `T` to `Square` and then
+    /// rejects `shape`, rather than joining both inputs to `Shape` and rejecting the list. A
+    /// rejected argument contributes nothing, so it neither fixes the formal nor widens the solution
+    /// a later argument is checked against. When every argument is rejected, the formal is left
+    /// with no evidence: each violation is then `uninferred`.
+    fn rejected_arguments(
+        &self,
+        source: &dyn SymbolSource,
+        formal: &str,
+        index: usize,
+        bounds: &[Ty],
+    ) -> Vec<GenericBoundViolation> {
+        let fixing = self
+            .invariant_arguments
+            .get(formal)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let lowers = self
+            .lower_inputs
+            .get(formal)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut prior: Option<Ty> = None;
+        let mut fixed: Option<Ty> = None;
+        let mut accepted = false;
+        let mut rejected = Vec::new();
+        // One argument may contribute several inputs (each branch of a conditional); they are
+        // accepted or rejected together.
+        for group in lowers.chunk_by(|left, right| left.1 == right.1) {
+            let ConstraintOrigin::Argument(argument) = group[0].1 else {
+                for &(actual, _) in group {
+                    prior = Some(
+                        prior
+                            .map(|known| {
+                                merge_inferred_ty_from_symbols(Some(source), known, actual)
+                            })
+                            .unwrap_or(actual),
+                    );
+                }
+                accepted = true;
+                continue;
+            };
+            let invariant = fixing.contains(&argument);
+            let mut trial = prior;
+            let mut contradiction = None;
+            for &(actual, _) in group {
+                if let Some(expected) = fixed {
+                    if !resolution_subtype(source, actual, expected)
+                        || (invariant && !resolution_subtype(source, expected, actual))
+                    {
+                        contradiction = Some((expected, actual));
+                        break;
+                    }
+                }
+                let merged = trial
+                    .map(|known| merge_inferred_ty_from_symbols(Some(source), known, actual))
+                    .unwrap_or(actual);
+                let mut trial_bindings = self.lower.clone();
+                trial_bindings.insert(crate::types::TyParamName::new(formal), merged);
+                if !bounds.iter().all(|bound| {
+                    resolution_subtype(
+                        source,
+                        actual,
+                        ty_subst_keep_unbound(*bound, &trial_bindings),
+                    )
+                }) {
+                    let expected = trial.unwrap_or_else(|| {
+                        bounds
+                            .first()
+                            .map(|bound| ty_subst_keep_unbound(*bound, &trial_bindings))
+                            .unwrap_or(actual)
+                    });
+                    contradiction = Some((expected, actual));
+                    break;
+                }
+                trial = Some(merged);
+            }
+            match contradiction {
+                Some((expected, actual)) => rejected.push(GenericBoundViolation {
+                    argument,
+                    expected,
+                    actual,
+                    formal: index,
+                    uninferred: false,
+                }),
+                None => {
+                    prior = trial;
+                    accepted = true;
+                    if invariant && fixed.is_none() {
+                        fixed = Some(group[0].0);
+                    }
+                }
+            }
+        }
+        if !accepted {
+            for violation in &mut rejected {
+                violation.uninferred = true;
+            }
+        }
+        rejected
+    }
+
     fn solve(mut self, source: &dyn SymbolSource, signature: &GenericSig) -> InferredCallBindings {
         self.propagate_declaration_bounds(source, signature);
-        let mut bound_violation = None;
+        let mut bound_violations = Vec::new();
         // Lower bounds and the declaration's upper bounds are one constraint system. A raw join may
         // be wider than the declared bound (`Int` + `Double` joins to `Any` in the nominal fallback,
         // while `<T : Number>` has the valid and more precise solution `Number`). Retain every lower
         // input until this point and select a declared bound only when it admits them all and the
         // complete declared-bound graph accepts that substitution.
         for (index, formal) in signature.formals.iter().enumerate() {
-            let Some(mut current) = self.lower.get(formal).copied() else {
+            let Some(mut current) = self.lower.get(formal.as_str()).copied() else {
                 continue;
             };
             let declared_bounds = signature
@@ -595,7 +733,8 @@ impl CallInferenceConstraints {
                         )
                     });
                 if original_fits {
-                    self.lower.insert(formal.clone(), original);
+                    self.lower
+                        .insert(crate::types::TyParamName::new(formal), original);
                     current = original;
                 }
             }
@@ -617,10 +756,14 @@ impl CallInferenceConstraints {
                     )
                 })
             };
+            let fixed_invariantly = self.invariant_arguments.contains_key(formal.as_str());
             if bounds.is_empty()
                 || (contributed_fits(current)
                     && lowers.iter().all(|(actual, _)| contributed_fits(*actual)))
             {
+                if fixed_invariantly {
+                    bound_violations.extend(self.rejected_arguments(source, formal, index, &[]));
+                }
                 continue;
             }
             let mut candidates = bounds
@@ -634,7 +777,7 @@ impl CallInferenceConstraints {
                 })
                 .filter(|candidate| {
                     let mut trial = self.lower.clone();
-                    trial.insert(formal.clone(), *candidate);
+                    trial.insert(crate::types::TyParamName::new(formal), *candidate);
                     bounds.iter().all(|bound| {
                         resolution_subtype(
                             source,
@@ -646,55 +789,30 @@ impl CallInferenceConstraints {
                 .collect::<Vec<_>>();
             candidates.dedup();
             if let [candidate] = candidates.as_slice() {
-                self.lower.insert(formal.clone(), *candidate);
+                let candidate = *candidate;
+                if fixed_invariantly {
+                    let rejected = self.rejected_arguments(source, formal, index, &[]);
+                    if !rejected.is_empty() {
+                        bound_violations.extend(rejected);
+                        continue;
+                    }
+                }
+                self.lower
+                    .insert(crate::types::TyParamName::new(formal), candidate);
                 continue;
             }
-            let mut prior = None;
-            for &(actual, origin) in lowers {
-                let trial = prior
-                    .map(|known| merge_inferred_ty_from_symbols(Some(source), known, actual))
-                    .unwrap_or(actual);
-                let mut trial_bindings = self.lower.clone();
-                trial_bindings.insert(formal.clone(), trial);
-                let within_bounds = bounds.iter().all(|bound| {
-                    resolution_subtype(
-                        source,
-                        actual,
-                        ty_subst_keep_unbound(*bound, &trial_bindings),
-                    )
-                });
-                if !within_bounds {
-                    let ConstraintOrigin::Argument(argument) = origin else {
-                        prior = Some(trial);
-                        continue;
-                    };
-                    let expected = prior.unwrap_or_else(|| {
-                        bounds
-                            .first()
-                            .copied()
-                            .map(|bound| ty_subst_keep_unbound(bound, &trial_bindings))
-                            .unwrap_or(current)
-                    });
-                    let violation = GenericBoundViolation {
-                        argument,
-                        expected,
-                        actual,
-                    };
-                    if bound_violation
-                        .is_none_or(|known: GenericBoundViolation| argument < known.argument)
-                    {
-                        bound_violation = Some(violation);
-                    }
-                    break;
-                }
-                prior = Some(trial);
-            }
+            bound_violations.extend(self.rejected_arguments(source, formal, index, &bounds));
         }
+        // One argument can reject several formals; each keeps its own evidence, in argument order.
+        bound_violations.sort_by_key(|violation: &GenericBoundViolation| {
+            (violation.argument, violation.formal)
+        });
+        bound_violations.dedup_by_key(|violation| (violation.argument, violation.formal));
         let upper_only = self
             .upper
             .iter()
             .filter_map(|(formal, upper)| {
-                (!self.lower.contains_key(formal)
+                (!self.lower.contains_key(formal.as_str())
                     && upper.iter().any(|constraint| *constraint != Ty::Error))
                 .then_some(formal.clone())
             })
@@ -714,7 +832,8 @@ impl CallInferenceConstraints {
             upper_only,
             upper_bounds: self.upper,
             nullable_flexible_roots: self.nullable_flexible_roots,
-            bound_violation,
+            bound_violation: bound_violations.first().copied(),
+            bound_violations,
         }
     }
 }
@@ -746,6 +865,18 @@ fn collect_call_inference_constraints(
             // A Java `List<T>!` is published as `MutableList<T>!`. `listOf("x")` reaches `List`,
             // not `MutableList`, so the element variable has to be read from the provider's
             // read-only face. A value that already reaches the mutable face keeps that face.
+            let inner = super::choose_platform_lower_face(source, inner, actual);
+            collect_call_inference_constraints(
+                source,
+                inner,
+                actual,
+                position,
+                origin,
+                constraints,
+            );
+        }
+        TyKind::MutabilityFlexible(inner) => {
+            // `(Mutable)List<T>` reads its variables from whichever face the value reaches.
             let inner = super::choose_platform_lower_face(source, inner, actual);
             collect_call_inference_constraints(
                 source,

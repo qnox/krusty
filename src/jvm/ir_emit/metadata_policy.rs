@@ -70,6 +70,28 @@ pub(super) fn lambda_class_xi(
     }
 }
 
+/// `@Metadata.xi` of continuation class `class`: public when a method's `$$forInline` copy
+/// constructs it, package-private otherwise, and part of the public ABI when the function it
+/// re-enters is in a public inline function's scope.
+pub(super) fn continuation_class_xi(ir: &crate::ir::IrFile, class: &crate::ir::IrClass) -> i32 {
+    let class = ir
+        .class_id_by_name(class.fq_name_id())
+        .expect("a written continuation class is in the file");
+    let visibility = if crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, class)
+    {
+        SYNTHETIC_PUBLIC
+    } else {
+        SYNTHETIC_PROTECTED
+    };
+    let function = ir.jvm_continuation_functions.get(&class).copied();
+    let enclosure = function.map(crate::ir::IrEnclosure::Function);
+    if enclosure.is_some() && in_public_inline_scope(ir, enclosure) {
+        synthetic_class_xi(visibility) | METADATA_PUBLIC_ABI_FLAG
+    } else {
+        synthetic_class_xi(visibility)
+    }
+}
+
 fn in_public_inline_scope(
     ir: &crate::ir::IrFile,
     enclosure: Option<crate::ir::IrEnclosure>,
@@ -111,6 +133,25 @@ pub(super) fn finish_local_synthetic_class(
         3,
         env.metadata_stamp,
         synthetic_class_xi(SYNTHETIC_LOCAL),
+        &[],
+        &[],
+    );
+    env.run.finish_class(cw)
+}
+
+/// Finish a callable reference's class: a `k=3` synthetic-class record whose visibility and
+/// public-ABI flag follow the scope it is written in, as a lambda's class does
+/// ([`lambda_class_xi`]).
+pub(super) fn finish_reference_class(
+    mut cw: crate::jvm::classfile::ClassWriter,
+    env: &super::EmitEnv,
+    ir: &crate::ir::IrFile,
+    class: &crate::ir::IrClass,
+) -> Vec<u8> {
+    cw.set_kotlin_metadata(
+        3,
+        env.metadata_stamp,
+        lambda_class_xi(ir, class.enclosure),
         &[],
         &[],
     );

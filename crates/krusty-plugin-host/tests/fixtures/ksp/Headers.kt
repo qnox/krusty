@@ -38,7 +38,39 @@ class HeadersProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
                 " same hash=${written.hashCode() == star.hashCode()}",
         )
         assignability(resolver, resolver.getClassDeclarationByName(resolver.getKSNameFromString("headers.Outer"))!!)
+        for (file in resolver.getAllFiles()) {
+            for (declaration in file.declarations) {
+                if (declaration is KSClassDeclaration) projections(declaration)
+            }
+        }
         return emptyList()
+    }
+
+    /**
+     * Logs `starProjection()` of each type a classifier names in its supertypes and type parameter
+     * bounds, of the nullable form of each, and of the classifier's own star-projected type.
+     */
+    private fun projections(declaration: KSClassDeclaration) {
+        val types = declaration.superTypes.map { it.resolve() }.toList() +
+            declaration.typeParameters.flatMap { parameter -> parameter.bounds.map { it.resolve() }.toList() } +
+            declaration.asStarProjectedType()
+        for (named in types) {
+            for (type in listOf(named, named.makeNullable())) {
+                val projected = type.starProjection()
+                val target = projected.declaration
+                val star = (target as? KSClassDeclaration)?.asStarProjectedType()
+                    ?.let { if (projected.isMarkedNullable) it.makeNullable() else it }
+                env.logger.warn(
+                    "projection ${declaration.simpleName.asString()} ${type(type)} -> ${type(projected)}" +
+                        " text=$projected nullable=${projected.isMarkedNullable}" +
+                        " arguments=" + projected.arguments.joinToString(", ", "[", "]") {
+                            "${it.variance} type=${it.type} origin=${it.origin} parent=${it.parent} text=$it"
+                        } +
+                        " equals star=${star?.let { projected == it }}" +
+                        " same=${projected == type}",
+                )
+            }
+        }
     }
 
     private val libraryNames = listOf(
