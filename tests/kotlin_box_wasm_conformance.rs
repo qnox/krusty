@@ -1034,12 +1034,13 @@ fn wasm_declines_kotlin_any_rendering_it_has_no_body_for() {
     );
 }
 
+/// Enum classes realize through the shared enum pass, so the program the Wasm lanes used to
+/// decline by name now runs.
 #[test]
-fn wasm_declines_an_enum_class_by_name() {
-    expect_wasm_decline(
+fn wasm_runs_an_enum_class() {
+    expect_wasm_box(
         "enum class Color { RED }\nfun box(): String = \"OK\"",
         "wasmClassesEnum",
-        "an enum class (`Color`)",
     );
 }
 

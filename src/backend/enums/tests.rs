@@ -720,3 +720,31 @@ fn the_wasm_contract_publishes_each_constant_once_constructed() {
 fn body_of(ir: &IrFile, name: &str) -> ExprId {
     body(ir, function(ir, name))
 }
+
+/// `name` and `ordinal` are `kotlin.Enum`'s only when the getter's checked semantic owner is
+/// `kotlin.Enum`; a package, another classifier, or an unpublished owner is not, whatever class
+/// realizes the getter.
+#[test]
+fn base_members_are_recognized_by_their_semantic_owner() {
+    use super::BaseMember;
+    use crate::types::SemanticCallableOwner::{Classifier, Package};
+    let enum_owner = Some(Classifier(crate::types::wk::kotlin_enum()));
+    assert_eq!(
+        super::declared_base_member(enum_owner, "name"),
+        Some(BaseMember::Name)
+    );
+    assert_eq!(
+        super::declared_base_member(enum_owner, "ordinal"),
+        Some(BaseMember::Ordinal)
+    );
+    assert_eq!(super::declared_base_member(enum_owner, "hashCode"), None);
+    assert_eq!(super::declared_base_member(None, "name"), None);
+    assert_eq!(
+        super::declared_base_member(Some(Package(type_name("kotlin"))), "name"),
+        None
+    );
+    assert_eq!(
+        super::declared_base_member(Some(Classifier(type_name("java/lang/Enum"))), "ordinal"),
+        None
+    );
+}

@@ -115,17 +115,23 @@ pub(crate) fn base_member(
 ) -> Option<BaseMember> {
     let property = callables.property(target)?;
     let getter = callables.callable(property.getter)?;
-    // The semantic owner, not the physical one: on a JVM classpath the getter is realized on the
-    // mapped platform class.
-    let owner = match getter.declaration_owner {
-        Some(crate::types::SemanticCallableOwner::Classifier(owner)) => owner,
-        Some(crate::types::SemanticCallableOwner::Package(_)) => return None,
-        None => getter.physical_owner,
+    declared_base_member(getter.declaration_owner, &property.name)
+}
+
+/// Which `kotlin.Enum` property a getter with this checked semantic owner declares. The physical
+/// owner never decides it: a JVM classpath realizes the getter on the mapped platform class, and a
+/// facade or a getter without a published owner is not `kotlin.Enum`'s.
+fn declared_base_member(
+    owner: Option<crate::types::SemanticCallableOwner>,
+    name: &str,
+) -> Option<BaseMember> {
+    let Some(crate::types::SemanticCallableOwner::Classifier(owner)) = owner else {
+        return None;
     };
     if owner != crate::types::wk::kotlin_enum() {
         return None;
     }
-    match &*property.name {
+    match name {
         "name" => Some(BaseMember::Name),
         "ordinal" => Some(BaseMember::Ordinal),
         _ => None,
