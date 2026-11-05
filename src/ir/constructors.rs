@@ -191,6 +191,10 @@ pub enum IrCtorParameterProvenance {
     Value,
     /// A closure value carried ahead of the parameters the source wrote.
     Capture,
+    /// An anonymous classifier's constructor operand for one checked `Interface by value`.
+    /// Its explicit constructor initializer stores the operand at `field`; this is neither a
+    /// source property parameter nor a pre-super capture. The containing argument owns its slot.
+    InterfaceDelegate { interface: Ty, field: u32 },
     /// The enclosing instance of an inner class. A backend may format this as `this$0`.
     EnclosingInstance,
     /// The completion parameter of a generated continuation constructor.
@@ -227,7 +231,10 @@ pub struct IrConstructorCapture {
 pub enum IrCapturedReceiver {
     /// The instance of the enclosing class `classifier`: the class whose member the capture is
     /// written in, or one further out when the capture is in a local class's member.
-    Enclosing { classifier: TypeName },
+    Enclosing {
+        classifier: TypeName,
+        owner: Option<crate::fir::EnclosingInstanceOwner>,
+    },
     /// The extension receiver of the named callable with this source name, and whether that
     /// callable is a local function or the declaration the capture is written in.
     Callable {

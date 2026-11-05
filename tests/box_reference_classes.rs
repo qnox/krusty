@@ -59,13 +59,27 @@ pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, S
         BoxJdk::Full { root: Some(&jdk) },
         krusty::conformance::COROUTINE_HELPERS,
     )?;
-    // Keep the qualified inventory for comparisons; execution uses the runner's classpath names.
-    let classes = reference
+    let units = plan_units(src, stem, krusty::conformance::COROUTINE_HELPERS)?;
+    let entry = units
+        .last()
+        .ok_or_else(|| format!("{stem}: reference graph has no final module"))?;
+    let entry_classes = reference
+        .module(&entry.module)
+        .ok_or_else(|| format!("{stem}: reference final module emitted no classes"))?;
+    let entry_classes = entry_classes
+        .iter()
+        .map(|(name, bytes)| (name.clone(), bytes.clone()))
+        .collect::<Vec<_>>();
+    let box_class = common::find_box_class(&entry_classes)
+        .ok_or_else(|| format!("{stem}: reference final module emitted no box()"))?;
+    // Keep every module-qualified artifact for comparisons. Execution gives the final module's
+    // own classes precedence over a same-named dependency class, including its selected box owner.
+    let mut runtime = reference
         .qualified()
         .map(|((_, name), bytes)| (name.to_owned(), bytes.to_vec()))
-        .collect::<Vec<_>>();
-    let box_class = common::find_box_class(&classes)
-        .ok_or_else(|| format!("{stem}: reference compiler emitted no box()"))?;
+        .collect::<BTreeMap<_, _>>();
+    runtime.extend(entry_classes);
+    let classes = runtime.into_iter().collect::<Vec<_>>();
     let answer = common::run_box(&classes, &box_class, &classpath);
     if answer.as_deref() != Some("OK") {
         return Err(format!(
@@ -1000,6 +1014,21 @@ mod tests {
 
     fn kotlinc_available() -> bool {
         krusty::toolchain::kotlinc_path().is_some()
+    }
+
+    #[test]
+    fn the_owned_jvm_oracle_runs_the_final_module_box_instead_of_a_library_box() {
+        let source = include_str!("box_regressions/multimodule/packagedFinalModuleBox.kt");
+        let reference = checked_box(source, "PackagedFinalModuleOracle")
+            .expect("the complete module graph must run its final box as OK");
+        assert!(reference
+            .module("library")
+            .expect("retain the library's complete class inventory")
+            .contains_key("packageentry/library/LibraryKt"));
+        assert!(reference
+            .module("main")
+            .expect("retain the final module's complete class inventory")
+            .contains_key("packageentry/when/MainKt"));
     }
 
     #[test]

@@ -117,7 +117,7 @@ fn name(name: &mut TypeName, names: &IdentityRemap<'_>) {
 /// A captured enclosing instance names its class by identity, which follows the class's rename.
 fn captured_receiver(receiver: &mut super::IrCapturedReceiver, names: &IdentityRemap<'_>) {
     match receiver {
-        super::IrCapturedReceiver::Enclosing { classifier } => name(classifier, names),
+        super::IrCapturedReceiver::Enclosing { classifier, .. } => name(classifier, names),
         super::IrCapturedReceiver::Context { types, .. } => tys(types, names),
         super::IrCapturedReceiver::Callable { .. } | super::IrCapturedReceiver::Lambda(_) => {}
     }
@@ -165,7 +165,12 @@ fn ty(value: Ty, names: &IdentityRemap<'_>) -> Ty {
                 .map(|part| ty(*part, names))
                 .collect::<Vec<_>>(),
         ),
-        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => value,
+        TyKind::Unit
+        | TyKind::Null
+        | TyKind::Nothing
+        | TyKind::Error
+        | TyKind::Pending
+        | TyKind::Var(..) => value,
     }
 }
 
@@ -474,6 +479,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
                 | super::IrIntrinsic::StringGet
                 | super::IrIntrinsic::StringLength
                 | super::IrIntrinsic::EnumName
+                | super::IrIntrinsic::EnumOrdinal
                 | super::IrIntrinsic::NullableAnyToString
                 | super::IrIntrinsic::CoroutineContext => {}
             }
@@ -598,7 +604,17 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
         | IrExpr::EnumValues { classifier }
         | IrExpr::EnumValueOf { classifier, .. }
         | IrExpr::EnumEntries { classifier }
+        | IrExpr::EnumConstant { classifier, .. }
+        | IrExpr::EnumEntriesList { classifier, .. }
+        | IrExpr::NoSuchEnumConstant { classifier, .. }
         | IrExpr::EnumSwitchKey { classifier, .. } => name(classifier, names),
+        IrExpr::EnumAllocation {
+            classifier,
+            instance,
+        } => {
+            name(classifier, names);
+            name(instance, names);
+        }
         IrExpr::EnumSwitchOrdinal {
             classifier,
             registrations,
@@ -986,6 +1002,11 @@ fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
     for argument in &mut class.ctor_args {
         argument.ty = ty(argument.ty, names);
         argument.declared_ty = argument.declared_ty.map(|value| ty(value, names));
+        if let super::IrCtorParameterProvenance::InterfaceDelegate { interface, .. } =
+            &mut argument.provenance
+        {
+            *interface = ty(*interface, names);
+        }
         if let Some(receiver) = argument
             .capture
             .as_mut()

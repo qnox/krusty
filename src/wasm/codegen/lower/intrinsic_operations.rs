@@ -19,6 +19,12 @@ impl Body<'_> {
                 };
                 self.reference_array_get(receiver, *index)
             }
+            IrIntrinsic::ArraySet => {
+                let (Some(receiver), [index, value]) = (receiver, args) else {
+                    return Err("an array store with malformed operands".into());
+                };
+                self.reference_array_set(receiver, *index, *value)
+            }
             IrIntrinsic::PrimitiveCompare { operand, .. } => {
                 let (lhs, rhs) = match (receiver, args) {
                     (None, [lhs, rhs]) => (*lhs, *rhs),

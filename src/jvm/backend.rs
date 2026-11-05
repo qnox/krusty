@@ -38,6 +38,8 @@ pub enum SkipReason {
     InlineParameters,
     /// A read-only collection superclass lacks the exact semantic declaration its stubs need.
     ReadOnlyCollectionStubs(String),
+    /// A collection class's supertype lacks the declaration facts its `toArray` members need.
+    CollectionToArray(String),
     /// A `suspend inline` callee's compiled body does not say where it places a suspend lambda
     /// passed to it: in the caller's frame, or in an object it constructs.
     SuspendLambdaPlacement(String),
@@ -232,6 +234,7 @@ fn run_backend_passes_after_plugins(
     let facades = file_classes.map(|classes| &classes.containers[..]);
     // Every later pass reads a type parameter's JVM carrier off its occurrences. Select it once,
     // from the declarations' complete bounds, before any of them runs.
+    crate::jvm::enclosing_capture_storage::realize(ir).map_err(SkipReason::CallArguments)?;
     crate::jvm::type_parameter_carriers::realize(ir);
     let module_value_classes = classifiers.module().source_value_classes();
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
@@ -325,6 +328,8 @@ fn run_backend_passes_after_plugins(
         callables,
         &facts.property_realizations,
     )?;
+    facts.override_results.collection_signatures =
+        crate::jvm::collection_override_signatures::select(ir, classpath);
     crate::jvm::bridges::derive_bridges(
         ir,
         classpath,
@@ -349,6 +354,7 @@ fn run_backend_passes_after_plugins(
             classpath,
             classifiers,
         )?,
+        to_array: crate::jvm::collection_to_array::select(ir, classpath, classifiers)?,
     };
     // The value-class pass reads same-module SOURCE value classes (internal name → sole-field
     // underlying) for its erasure/mangle map from the frontend symbols directly, NOT through the
@@ -1327,6 +1333,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::CollectionToArray(detail) => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("krusty: cannot realize collection toArray members: {detail}"),
+            );
+            return;
+        }
         SkipReason::SuspendLambdaPlacement(detail) => {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1356,6 +1369,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         | SkipReason::CallArguments(_)
         | SkipReason::InlineParameters
         | SkipReason::ReadOnlyCollectionStubs(_)
+        | SkipReason::CollectionToArray(_)
         | SkipReason::SuspendLambdaPlacement(_)
         | SkipReason::MemberDispatch(_) => {
             unreachable!()

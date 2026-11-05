@@ -39,6 +39,8 @@ pub(super) struct CallableRegistry {
     dependencies: HashMap<KlibDependencyCallable, u32>,
     /// The default entry of each published declaration that declares a default.
     dependency_defaults: HashMap<KlibDependencyCallable, u32>,
+    /// The dispatching entry of each published overridable member.
+    dependency_dispatches: HashMap<KlibDependencyCallable, u32>,
     signatures: HashMap<KlibDependencyCallable, DependencyFunctionSignature>,
     member_receivers: HashMap<KlibDependencyCallable, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<KlibDependencyCallable, SingletonMemberReceiver>,
@@ -51,6 +53,7 @@ pub(super) struct FileCallTargets {
     module_defaults: HashMap<CallableId, u32>,
     external: HashMap<ExternalCallableId, u32>,
     external_defaults: HashMap<ExternalCallableId, u32>,
+    external_dispatches: HashMap<ExternalCallableId, u32>,
     signatures: HashMap<ExternalCallableId, DependencyFunctionSignature>,
     member_receivers: HashMap<ExternalCallableId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
@@ -157,6 +160,7 @@ impl CallableRegistry {
             module_defaults: HashMap::default(),
             external: HashMap::default(),
             external_defaults: HashMap::default(),
+            external_dispatches: HashMap::default(),
             signatures: HashMap::default(),
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
@@ -229,8 +233,15 @@ impl CallableRegistry {
                     if !defaults.is_empty() && default_entry.is_none() {
                         continue;
                     }
+                    if super::lower::value_hash::call_kind(ir, callables, expression).is_some() {
+                        continue;
+                    }
                     if callable
                         .compiler_operation()
+                        .filter(|operation| {
+                            *operation
+                                != crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
+                        })
                         .is_some_and(super::lower::is_direct_operation)
                         && !callable
                             .dependency_callable
@@ -284,11 +295,30 @@ impl CallableRegistry {
                         continue;
                     }
                     let index = self.dependencies.get(identity).copied().ok_or_else(|| {
+                        crate::trace_compiler!(
+                            "lower",
+                            "wasm dependency target not emitted: expression={expression} target={target:?} identity={identity:?} dispatch={dispatch_receiver:?} checked_receiver={:?} receiver_node={:?} selected_source_receiver={:?} operation={:?} semantic_role={:?} call_edge_semantic_role={:?} declaration_owner={:?} kind={:?} declaration_receiver={:?} params={:?} ret={:?} call_params={params:?} overridden={:?}",
+                            dispatch_receiver.and_then(|receiver| ir.checked_type(receiver)),
+                            dispatch_receiver.map(|receiver| ir.expr(receiver)),
+                            ir.ext_call_source_receiver.get(&expression),
+                            callable.compiler_operation(),
+                            callable.semantic_role,
+                            ir.semantic_call_roles.get(&expression),
+                            callable.declaration_owner,
+                            callable.kind,
+                            callable.source_receiver,
+                            callable.params,
+                            callable.ret,
+                            callable.overridden_declarations,
+                        );
                         "a dependency callable whose target code was not emitted".to_string()
                     })?;
                     targets.external.insert(*target, index);
                     if let Some(entry) = default_entry {
                         targets.external_defaults.insert(*target, entry);
+                    }
+                    if let Some(&entry) = self.dependency_dispatches.get(identity) {
+                        targets.external_dispatches.insert(*target, entry);
                     }
                     targets.signatures.insert(
                         *target,
@@ -337,6 +367,14 @@ impl CallableRegistry {
                     .flatten()
                     .ok_or_else(|| "a default-argument entry without its function".to_string())?;
                 self.dependency_defaults.insert(identity.clone(), entry);
+            }
+            if let Some(&entry) = ir.dispatch_entries.get(&function) {
+                let entry = functions
+                    .get(entry as usize)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| "a dispatching entry without its function".to_string())?;
+                self.dependency_dispatches.insert(identity.clone(), entry);
             }
             let index = emitted
                 .ok_or_else(|| "an inline-only function exported as Wasm code".to_string())?;
@@ -431,6 +469,12 @@ impl FileCallTargets {
     /// The default entry of the dependency declaration `target`, when its module published one.
     pub(super) fn external_default(&self, target: ExternalCallableId) -> Option<u32> {
         self.external_defaults.get(&target).copied()
+    }
+
+    /// The entry an ordinary call to the overridable dependency member `target` goes through,
+    /// which dispatches on its receiver.
+    pub(super) fn external_dispatch(&self, target: ExternalCallableId) -> Option<u32> {
+        self.external_dispatches.get(&target).copied()
     }
 
     pub(super) fn signature(
@@ -883,6 +927,7 @@ mod tests {
         crate::backend::default_arguments::realize(
             &mut caller,
             &mut crate::backend::CheckedBackendCallables::default(),
+            |_| false,
         );
         let calls = registry
             .file_calls(&caller, &CheckedBackendCallables::default(), &mut wasm)
@@ -918,6 +963,7 @@ mod tests {
         crate::backend::default_arguments::realize(
             &mut declaration,
             &mut crate::backend::CheckedBackendCallables::default(),
+            |_| false,
         );
         let entry = declaration.default_entries[&function];
         let functions = registry

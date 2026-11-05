@@ -85,7 +85,7 @@ type OverrideSlot = ((String, Vec<Ty>), Vec<CollectedDeclaration>);
 struct SamCaptureSpecialization<'a> {
     logical: &'a GSigBinds,
     capture_read: &'a GSigBinds,
-    occurrence_bounds: &'a crate::fx_hash::HashMap<String, Ty>,
+    occurrence_bounds: &'a crate::types::TyParamBindings,
 }
 
 pub(crate) fn semantic_sam_signature(
@@ -114,7 +114,12 @@ pub(crate) fn semantic_sam_signature(
         // `Any?`. Keep that distinction only as provenance; `out` and `*` have no such divergence.
         let capture_read_bindings = logical_bindings
             .iter()
-            .map(|(name, argument)| (name.clone(), contravariant_capture_read(*argument)))
+            .map(|(name, argument)| {
+                (
+                    crate::types::TyParamName::from(name),
+                    contravariant_capture_read(*argument),
+                )
+            })
             .collect::<GSigBinds>();
         for argument in logical_bindings.values_mut() {
             // A SAM method receives/returns values, never use-site projection syntax. Composed
@@ -366,9 +371,9 @@ fn collect_member(
     let mut occurrence_bounds = specialization.occurrence_bounds.clone();
     if let Some(signature) = &member.generic_sig {
         for formal in &signature.formals {
-            logical.remove(formal);
-            capture_read.remove(formal);
-            occurrence_bounds.remove(formal);
+            logical.remove(formal.as_str());
+            capture_read.remove(formal.as_str());
+            occurrence_bounds.remove(formal.as_str());
         }
     }
     let declared_params = member
@@ -431,7 +436,7 @@ fn contravariant_capture_read(mut argument: Ty) -> Ty {
 
 fn sam_substitute(
     declared: Ty,
-    occurrence_bounds: &crate::fx_hash::HashMap<String, Ty>,
+    occurrence_bounds: &crate::types::TyParamBindings,
     bindings: &GSigBinds,
 ) -> Ty {
     let platform_inner = match declared.kind() {
@@ -439,7 +444,7 @@ fn sam_substitute(
         _ => None,
     };
     let explicit_nullable = platform_inner.and_then(|inner| match inner.kind() {
-        TyKind::TyParam(name, _) => bindings
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => bindings
             .get(name.as_str())
             .copied()
             .filter(|binding| matches!(binding.kind(), TyKind::Nullable(_))),

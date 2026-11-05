@@ -23,6 +23,8 @@ mod infix_newline_operand_e2e;
 mod inline_only_converted_lambda_line_e2e;
 #[path = "../inline_operand_binding_line_e2e.rs"]
 mod inline_operand_binding_line_e2e;
+#[path = "../lambda_result_conversion_line_e2e.rs"]
+mod lambda_result_conversion_line_e2e;
 #[path = "../multiline_receiver_access_line_e2e.rs"]
 mod multiline_receiver_access_line_e2e;
 #[path = "../newline_method_chain_e2e.rs"]
@@ -41,6 +43,10 @@ mod receiver_type_line_break_e2e;
 mod reordered_argument_line_e2e;
 #[path = "../safe_call_inline_null_path_line_e2e.rs"]
 mod safe_call_inline_null_path_line_e2e;
+#[path = "../safe_call_lambda_result_conversion_e2e.rs"]
+mod safe_call_lambda_result_conversion_e2e;
+#[path = "../serializable_default_own_lines_e2e.rs"]
+mod serializable_default_own_lines_e2e;
 #[path = "../suspend_call_start_line_e2e.rs"]
 mod suspend_call_start_line_e2e;
 #[path = "../type_annotation_newline_e2e.rs"]

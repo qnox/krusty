@@ -4,8 +4,8 @@
 
 use super::metadata_policy::{annotation_impl_carries_nullability, finish_local_synthetic_class};
 use super::{
-    arrays_param_desc, constructor_defaults, emit_return, finish_code, jvm_declared_ty, load,
-    new_writer, slot_words, EmitEnv, EmitOptions,
+    constructor_defaults, emit_return, finish_code, jvm_declared_ty, load, new_writer, slot_words,
+    EmitEnv, EmitOptions,
 };
 use crate::ir::IrFile;
 use crate::jvm::classfile::{ClassWriter, CodeBuilder};
@@ -678,5 +678,17 @@ fn finish_annotation_tostring(
     // The member ACCESSORS carry none, even the reference-typed ones — measured, not assumed.
     if let Some(annotation) = return_annotation {
         cw.set_method_nullability("toString", "()Ljava/lang/String;", Some(annotation), &[]);
+    }
+}
+
+/// `Arrays.equals`/`Arrays.hashCode`/`Arrays.toString` parameter descriptor for an array member: a
+/// primitive specialized array has its own overload (`[I`), a reference `Array<T>` uses
+/// `[Ljava/lang/Object;` (array covariance lets a `String[]`/`Enum[]` flow in). Keyed off the array
+/// KIND (its class), not the element — `Array<Int>` is a reference `Integer[]`, not `[I`.
+fn arrays_param_desc(array: Ty) -> String {
+    if array.is_reference_array() {
+        "[Ljava/lang/Object;".to_string()
+    } else {
+        type_descriptor(array)
     }
 }

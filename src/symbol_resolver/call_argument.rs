@@ -95,7 +95,7 @@ impl CallArgKind {
         if self.adapts_integer_literal_to(concrete) {
             return concrete;
         }
-        if let TyKind::TyParam(_, bound) = parameter.non_null().kind() {
+        if let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = parameter.non_null().kind() {
             if self.adapts_integer_literal_to(bound) {
                 return bound;
             }
@@ -222,26 +222,7 @@ impl CallArgKind {
         else {
             return false;
         };
-        // A provisional that still mentions a type parameter is not determined: `"OK" to
-        // emptySet()` reads as `Pair<String, B>` because its own argument supplied nothing for
-        // `B`. Only the enclosing expectation can finish it, so it is not evidence about this
-        // call — which is what letting it through regressed.
-        if provisional.mentions_ty_param() {
-            return false;
-        }
-        generic_sig
-            .formals
-            .iter()
-            .filter(|formal| {
-                crate::types::ty_mentions_param(generic_sig.ret, std::slice::from_ref(*formal))
-            })
-            .any(|formal| {
-                generic_sig.receiver.is_some_and(|receiver| {
-                    crate::types::ty_mentions_param(receiver, std::slice::from_ref(formal))
-                }) || generic_sig.params.iter().any(|parameter| {
-                    crate::types::ty_mentions_param(*parameter, std::slice::from_ref(formal))
-                })
-            })
+        nested_result_is_input_constrained(*provisional, generic_sig)
     }
 
     /// Whether this argument has a final semantic type that may constrain a call's declaration
@@ -291,14 +272,24 @@ impl CallArgKind {
     }
 
     pub(super) fn binds_result_to(&self, src: &dyn SymbolSource, parameter: Ty) -> bool {
-        let Self::ExpectedTypeCallable { generic_sig, .. } = self else {
+        let Self::ExpectedTypeCallable {
+            provisional,
+            generic_sig,
+        } = self
+        else {
             return false;
         };
+        // An input-constrained result (`id(x)`, `listOf(value)`) carries lower bounds from the
+        // nested call's own arguments, read back from its provisional type. The parameter may
+        // widen such a binding (`mutableListOf(1)` as `MutableList<Number>`) but never narrow it:
+        // `id(x)` with `x: String?` cannot become a `String`, so that candidate is inapplicable.
+        let admits = |actual: Ty, bound: Ty| {
+            actual == bound || semantic_arg_assignable(src, &bound, &actual)
+        };
         let infer = |signature: &GenericSig| {
-            infer_generic_return_bindings(signature, parameter, |actual, bound| {
-                actual == bound || semantic_arg_assignable(src, &bound, &actual)
+            infer_generic_return_bindings(signature, parameter, admits).is_some_and(|bindings| {
+                expected_result_keeps_call_evidence(*provisional, generic_sig, parameter, &bindings)
             })
-            .is_some()
         };
         if infer(generic_sig) {
             return true;
@@ -345,6 +336,74 @@ impl CallArgKind {
     }
 }
 
+/// Whether a nested generic call's RESULT is fixed by its own inputs (a formal in its return type
+/// that its receiver or a parameter also mentions) rather than only by what an enclosing
+/// expectation supplies. `provisional` is the call's type checked without an expectation.
+///
+/// `xs.map { B(it) }` qualifies: `R` appears in the transform parameter, so the provisional
+/// `List<B>` is real evidence about the argument and not a placeholder. `ArrayList()` and
+/// `emptySet()` do not: their result variables have no input to come from, so their provisional
+/// reads as the declared bound (`ArrayList<Any>`) or stays free (`Set<T>`), and treating either
+/// as evidence discards the element type the expectation would have supplied.
+pub(crate) fn nested_result_is_input_constrained(
+    provisional: Ty,
+    generic_sig: &GenericSig,
+) -> bool {
+    // A provisional that still mentions a type parameter is not determined: `"OK" to
+    // emptySet()` reads as `Pair<String, B>` because its own argument supplied nothing for
+    // `B`. Only the enclosing expectation can finish it, so it is not evidence about this
+    // call — which is what letting it through regressed.
+    if provisional.mentions_ty_param() {
+        return false;
+    }
+    generic_sig
+        .formals
+        .iter()
+        .filter(|formal| {
+            crate::types::ty_mentions_param(generic_sig.ret, std::slice::from_ref(*formal))
+        })
+        .any(|formal| {
+            generic_sig.receiver.is_some_and(|receiver| {
+                crate::types::ty_mentions_param(receiver, std::slice::from_ref(formal))
+            }) || generic_sig.params.iter().any(|parameter| {
+                crate::types::ty_mentions_param(*parameter, std::slice::from_ref(formal))
+            })
+        })
+}
+
+/// Whether binding a nested call's result to an enclosing expectation keeps the nullability the
+/// call itself established.
+///
+/// A declared nullable result (`fun <R> f(c: Column<R>): Column<R>?`) stays nullable under every
+/// binding, so a non-null expectation cannot accept it. An input-constrained result also keeps a
+/// nullable lower bound its own arguments put on a result formal, read back from the call's
+/// expectation-free `provisional` type: `id(x)` with `x: String?` cannot become a `String`, so a
+/// `String` parameter does not accept it. Only nullability is read back. A provisional's classifier
+/// may still be a placeholder when the call's own inputs are contextual (`forward(produce())`),
+/// and the expectation may widen a binding anyway (`mutableListOf(1)` as `MutableList<Number>`).
+pub(crate) fn expected_result_keeps_call_evidence(
+    provisional: Ty,
+    generic_sig: &GenericSig,
+    expected: Ty,
+    expected_bindings: &super::GSigBinds,
+) -> bool {
+    let admits_null = |ty: Ty| ty.admits_null() || ty.upper_bound_admits_null();
+    if generic_sig.ret.is_nullable() && !admits_null(expected) {
+        return false;
+    }
+    if !nested_result_is_input_constrained(provisional, generic_sig) {
+        return true;
+    }
+    let mut input_bindings = super::GSigBinds::default();
+    super::unify_inferred_ty(generic_sig.ret, provisional, &mut input_bindings);
+    input_bindings.iter().all(|(formal, input)| {
+        !input.admits_null()
+            || expected_bindings
+                .get(formal)
+                .is_none_or(|expected| admits_null(*expected))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,7 +413,7 @@ mod tests {
         CallArgKind::ExpectedTypeCallable {
             provisional,
             generic_sig: std::sync::Arc::new(GenericSig {
-                formals: vec!["T".to_owned()],
+                formals: vec![crate::types::TyParamName::new("T")],
                 formal_bounds: vec![Vec::new()],
                 receiver: None,
                 params,

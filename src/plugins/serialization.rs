@@ -1695,7 +1695,7 @@ mod tests {
             params: params.clone(),
             ret: Ty::Unit,
             generic_sig: Some(crate::libraries::GenericSig {
-                formals: vec!["T".to_owned()],
+                formals: vec![crate::types::TyParamName::new("T")],
                 formal_bounds: vec![Vec::new()],
                 receiver: Some(builder),
                 params,
