@@ -812,7 +812,7 @@ impl super::Emitter<'_> {
                         }
                     }
                     crate::ir::IrIntrinsic::ArrayGet => {
-                        self.emit_array_get(dispatch_receiver.unwrap(), args[0], code)
+                        self.emit_array_get(e, dispatch_receiver.unwrap(), args[0], code)
                     }
                     crate::ir::IrIntrinsic::ArraySet => {
                         self.emit_array_set(dispatch_receiver.unwrap(), args[0], args[1], code)

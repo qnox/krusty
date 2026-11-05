@@ -22,7 +22,13 @@ pub(super) fn reference_array_scalar_adapter(element: Ty) -> Option<Ty> {
 }
 
 impl Emitter<'_> {
-    pub(super) fn emit_array_get(&mut self, array: u32, index: u32, code: &mut CodeBuilder) {
+    pub(super) fn emit_array_get(
+        &mut self,
+        load: u32,
+        array: u32,
+        index: u32,
+        code: &mut CodeBuilder,
+    ) {
         let element = self.array_elem(array);
         let reference_array = self.value_ty(array).is_reference_array();
         if self.must_spill_across(index) {
@@ -33,7 +39,9 @@ impl Emitter<'_> {
         }
         let (operation, words) = array_load_op(element, reference_array);
         code.array_load(operation, words);
-        if let Some(primitive) = reference_array
+        // Unbox only where the load's own value is the primitive carrier. A nullable element
+        // (`Array<UInt?>`, `Array<Int?>`) stays its box or `null`.
+        if let Some(primitive) = (reference_array && !self.value_ty(load).is_reference())
             .then(|| reference_array_scalar_adapter(element))
             .flatten()
         {
@@ -64,7 +72,9 @@ impl Emitter<'_> {
             self.emit_value(index, code);
             self.emit_value(value, code);
         }
-        if let Some(primitive) = reference_array
+        // Box only a value that arrives as its primitive carrier. A nullable element value
+        // (`Array<UInt?>`, `Array<Int?>`) already arrives as its box or `null`.
+        if let Some(primitive) = (reference_array && !self.value_ty(value).is_reference())
             .then(|| reference_array_scalar_adapter(element))
             .flatten()
         {

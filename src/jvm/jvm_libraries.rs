@@ -45,6 +45,7 @@ mod provider_normalization_tests;
 mod raw_types;
 use provider_normalization::normalize_tail;
 mod signature_parser;
+mod source_module_headers;
 use signature_parser::parse_formals;
 mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
@@ -4310,59 +4311,18 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         Some("JVM")
     }
 
+    /// kotlinc's JVM `FirArrayOfNullableNothingExpressionChecker`: a JVM array needs a runtime
+    /// element class, and `Nothing?` has none.
+    fn array_of_nullable_nothing_error(&self) -> Option<&'static str> {
+        Some("'Array<Nothing?>' is not supported on the JVM.")
+    }
+
     fn install_source_module_headers(
         &self,
         sources: &[crate::libraries::PlatformSourceHeaderInput<'_>],
         source_classifiers: &[(TypeName, crate::types::Visibility)],
     ) -> Result<(), crate::libraries::SourceHeaderError> {
-        let java = sources
-            .iter()
-            .map(|source| {
-                (
-                    source.source,
-                    source.file_stem.map_or_else(
-                        || format!("Source{}.java", source.source),
-                        |stem| format!("{stem}.java"),
-                    ),
-                    source.text.to_string(),
-                )
-            })
-            .collect::<Vec<_>>();
-        if java.is_empty() {
-            return Ok(());
-        }
-        if self.source_headers.borrow().is_some() {
-            return Err(crate::libraries::SourceHeaderError {
-                source: java[0].0,
-                message: "JVM source-module headers were installed more than once".into(),
-            });
-        }
-        let source_classifiers = source_classifiers
-            .iter()
-            .copied()
-            .collect::<crate::fx_hash::HashMap<_, _>>();
-        let world = super::java_stub::SourceModuleHeaderWorld {
-            source_classifiers: &source_classifiers,
-            classpath: &self.cp,
-        };
-        let java_blocks = java
-            .iter()
-            .map(|(_, name, source)| (name.clone(), source.clone()))
-            .collect::<Vec<_>>();
-        let Some(headers) = super::java_stub::stub_classes(
-            &java_blocks,
-            super::java_stub::StubMode::Strict,
-            &world,
-        ) else {
-            return Err(crate::libraries::SourceHeaderError {
-                source: java[0].0,
-                message:
-                    "cannot resolve Java source declaration headers against this source module"
-                        .into(),
-            });
-        };
-        *self.source_headers.borrow_mut() = Some(self.cp.push_stub_overlay(headers));
-        Ok(())
+        self.install_java_source_headers(sources, source_classifiers)
     }
 
     fn is_optional_expectation(&self, classifier: TypeName) -> bool {
