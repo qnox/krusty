@@ -3,16 +3,41 @@
 
 use super::*;
 
+/// Builder-inference frames that completed, and what each contextual function argument was
+/// completed with.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(in crate::resolve::streaming_signature_bridge) struct CompletedFrames {
+    /// Completed frames not yet consumed by a function literal of their declaration.
+    pending: HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>,
+    /// The builder solution each function argument was completed with, by the argument's source
+    /// file and span. A postponed-call variable that the body checker recorded for those same
+    /// arguments resolves through this solution, and through nothing else.
+    by_argument: HashMap<(u32, crate::diag::Span), crate::symbol_resolver::GSigBinds>,
+}
+
+/// The builder-inference constraint stores of one signature evaluation.
+#[derive(Default)]
+pub(in crate::resolve::streaming_signature_bridge) struct ScopedConstraintFrames {
+    /// Each owner's stack of frame inputs: the declared types whose parameters the frame solves.
+    pub(in crate::resolve::streaming_signature_bridge) inputs:
+        RefCell<HashMap<crate::fir::DeclarationId, Vec<Vec<Ty>>>>,
+    /// Each owner's stack of open frames and the bindings each has collected so far.
+    pub(in crate::resolve::streaming_signature_bridge) active:
+        RefCell<HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>>,
+    completed: RefCell<CompletedFrames>,
+    checkpoints: RefCell<Vec<ScopedConstraintCheckpoint>>,
+}
+
 /// Constraint stores whose mutations belong to one provisional postponed-argument evaluation.
-pub(in crate::resolve::streaming_signature_bridge) struct ScopedConstraintCheckpoint {
+struct ScopedConstraintCheckpoint {
     active: HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>,
-    completed: HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>,
+    completed: CompletedFrames,
 }
 
 impl ScopedConstraintCheckpoint {
     fn capture(
         active: &HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>,
-        completed: &HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>,
+        completed: &CompletedFrames,
     ) -> Self {
         Self {
             active: active.clone(),
@@ -23,7 +48,7 @@ impl ScopedConstraintCheckpoint {
     fn restore(
         self,
         active: &mut HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>,
-        completed: &mut HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>,
+        completed: &mut CompletedFrames,
     ) {
         *active = self.active;
         *completed = self.completed;
@@ -31,18 +56,77 @@ impl ScopedConstraintCheckpoint {
 }
 
 impl ProductionSignatureSemantics<'_> {
+    /// Consume the frames completed for `function`'s declaration as this literal's solution, and
+    /// keep that solution for the argument.
+    pub(super) fn complete_contextual_function(
+        &self,
+        function: crate::fir::ContextualFunctionSite,
+    ) -> crate::symbol_resolver::GSigBinds {
+        let mut completed = self.scoped_frames.completed.borrow_mut();
+        let bindings = completed
+            .pending
+            .remove(&function.declaration)
+            .unwrap_or_default();
+        if let (false, Some(crate::fir::Origin::Source { file, span })) = (
+            bindings.is_empty(),
+            self.headers.signature_origins.get(function.argument),
+        ) {
+            completed
+                .by_argument
+                .insert((file.raw(), span), bindings.clone());
+        }
+        bindings
+    }
+
+    /// The solution signature inference reached for the postponed call that owns `variable`.
+    /// `None` when the variable is not a postponed-call variable, or no function argument the body
+    /// checker analysed under it was completed here.
+    pub(in crate::resolve::streaming_signature_bridge) fn completed_postponed_variable(
+        &self,
+        variable: crate::types::TyParamName,
+    ) -> Option<Ty> {
+        let origin = crate::types::postponed_variable_origin(variable)?;
+        let completed = self.scoped_frames.completed.borrow();
+        origin.arguments.iter().find_map(|argument| {
+            completed
+                .by_argument
+                .get(&(origin.file, *argument))?
+                .get(&origin.formal)
+                .copied()
+        })
+    }
+
+    /// `ty` with every postponed-call variable replaced by its call's completed solution, or `None`
+    /// while one of them has none. A declaration a builder lambda published before its call was
+    /// solved (a retained capture) is typed by this, never by a variable or its bound.
+    pub(in crate::resolve::streaming_signature_bridge) fn complete_postponed_variables(
+        &self,
+        ty: Ty,
+    ) -> Option<Ty> {
+        let unsolved = std::cell::Cell::new(false);
+        let completed = crate::types::ty_map_symbols(ty, &|symbol, bound| match symbol.kind() {
+            crate::types::TyKind::Var(variable, _) => self
+                .completed_postponed_variable(variable)
+                .unwrap_or_else(|| {
+                    unsolved.set(true);
+                    symbol
+                }),
+            _ => symbol.with_symbol_bound(bound),
+        });
+        (!unsolved.get()).then_some(completed)
+    }
+
     fn begin_scoped_constraint_transaction(&self) {
         let checkpoint = ScopedConstraintCheckpoint::capture(
-            &self.scoped_constraints.borrow(),
-            &self.completed_scoped_constraints.borrow(),
+            &self.scoped_frames.active.borrow(),
+            &self.scoped_frames.completed.borrow(),
         );
-        self.scoped_constraint_checkpoints
-            .borrow_mut()
-            .push(checkpoint);
+        self.scoped_frames.checkpoints.borrow_mut().push(checkpoint);
     }
 
     fn commit_scoped_constraint_transaction(&self) {
-        self.scoped_constraint_checkpoints
+        self.scoped_frames
+            .checkpoints
             .borrow_mut()
             .pop()
             .expect("a committed postponed-argument transaction must have a checkpoint");
@@ -50,13 +134,14 @@ impl ProductionSignatureSemantics<'_> {
 
     fn rollback_scoped_constraint_transaction(&self) {
         let checkpoint = self
-            .scoped_constraint_checkpoints
+            .scoped_frames
+            .checkpoints
             .borrow_mut()
             .pop()
             .expect("a rolled-back postponed-argument transaction must have a checkpoint");
         checkpoint.restore(
-            &mut self.scoped_constraints.borrow_mut(),
-            &mut self.completed_scoped_constraints.borrow_mut(),
+            &mut self.scoped_frames.active.borrow_mut(),
+            &mut self.scoped_frames.completed.borrow_mut(),
         );
     }
 
@@ -64,8 +149,8 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         declaration: crate::fir::DeclarationId,
     ) -> Option<(crate::fir::DeclarationId, usize)> {
-        let constraints = self.scoped_constraints.borrow();
-        let inputs = self.scoped_constraint_inputs.borrow();
+        let constraints = self.scoped_frames.active.borrow();
+        let inputs = self.scoped_frames.inputs.borrow();
         let mut current = Some(declaration);
         while let Some(declaration) = current {
             if let (Some(constraint_stack), Some(input_stack)) =
@@ -123,12 +208,14 @@ impl ProductionSignatureSemantics<'_> {
         declaration: crate::fir::DeclarationId,
         inputs: Vec<Ty>,
     ) {
-        self.scoped_constraint_inputs
+        self.scoped_frames
+            .inputs
             .borrow_mut()
             .entry(declaration)
             .or_default()
             .push(inputs);
-        self.scoped_constraints
+        self.scoped_frames
+            .active
             .borrow_mut()
             .entry(declaration)
             .or_default()
@@ -142,7 +229,7 @@ impl ProductionSignatureSemantics<'_> {
             semantic_ancestors.push(current);
             ancestor = self.declaration_semantic_parent(current);
         }
-        let mut inputs = self.scoped_constraint_inputs.borrow_mut();
+        let mut inputs = self.scoped_frames.inputs.borrow_mut();
         let remove_inputs = inputs.get_mut(&declaration).is_some_and(|stack| {
             stack.pop();
             stack.is_empty()
@@ -153,7 +240,7 @@ impl ProductionSignatureSemantics<'_> {
         drop(inputs);
 
         let completed = {
-            let mut all = self.scoped_constraints.borrow_mut();
+            let mut all = self.scoped_frames.active.borrow_mut();
             let (completed, remove) = all
                 .get_mut(&declaration)
                 .map(|stack| (stack.pop(), stack.is_empty()))
@@ -166,7 +253,7 @@ impl ProductionSignatureSemantics<'_> {
         let Some(completed) = completed else {
             return;
         };
-        let mut all = self.scoped_constraints.borrow_mut();
+        let mut all = self.scoped_frames.active.borrow_mut();
         let active_parent = all
             .get(&declaration)
             .and_then(|stack| stack.last())
@@ -183,14 +270,14 @@ impl ProductionSignatureSemantics<'_> {
         {
             Self::merge_scoped_constraints(parent, completed.clone());
             drop(all);
-            let mut finished = self.completed_scoped_constraints.borrow_mut();
-            let target = finished.entry(declaration).or_default();
+            let mut finished = self.scoped_frames.completed.borrow_mut();
+            let target = finished.pending.entry(declaration).or_default();
             Self::merge_scoped_constraints(target, completed);
             return;
         }
         drop(all);
-        let mut finished = self.completed_scoped_constraints.borrow_mut();
-        let target = finished.entry(declaration).or_default();
+        let mut finished = self.scoped_frames.completed.borrow_mut();
+        let target = finished.pending.entry(declaration).or_default();
         Self::merge_scoped_constraints(target, completed);
     }
 
@@ -224,7 +311,8 @@ impl ProductionSignatureSemantics<'_> {
             return;
         };
         let active_formals = self
-            .scoped_constraint_inputs
+            .scoped_frames
+            .inputs
             .borrow()
             .get(&constraint_owner)
             .and_then(|stack| stack.get(constraint_index))
@@ -239,7 +327,7 @@ impl ProductionSignatureSemantics<'_> {
         if active_formals.is_empty() {
             return;
         }
-        let mut all = self.scoped_constraints.borrow_mut();
+        let mut all = self.scoped_frames.active.borrow_mut();
         let Some(active) = all
             .get_mut(&constraint_owner)
             .and_then(|stack| stack.get_mut(constraint_index))
@@ -321,7 +409,7 @@ mod tests {
         parent_constraints.insert("T".into(), Ty::String);
         let mut active =
             crate::fx_hash::HashMap::from_iter([(parent, vec![parent_constraints.clone()])]);
-        let completed = crate::fx_hash::HashMap::default();
+        let completed = CompletedFrames::default();
         let active_before = active.clone();
         let completed_before = completed.clone();
         let checkpoint = ScopedConstraintCheckpoint::capture(&active, &completed);
@@ -333,7 +421,12 @@ mod tests {
             .unwrap()
             .insert("Leaked".into(), Ty::Int);
         let mut completed_after_failure = completed;
-        completed_after_failure.insert(child, parent_constraints);
+        completed_after_failure
+            .pending
+            .insert(child, parent_constraints.clone());
+        completed_after_failure
+            .by_argument
+            .insert((0, crate::diag::Span::new(4, 9)), parent_constraints);
 
         checkpoint.restore(&mut active, &mut completed_after_failure);
 
@@ -345,7 +438,7 @@ mod tests {
     fn a_failed_value_flow_probe_does_not_bind_the_selected_builder_candidate() {
         let builder = crate::fir::DeclarationId::from_raw(1);
         let mut active = crate::fx_hash::HashMap::from_iter([(builder, vec![Default::default()])]);
-        let mut completed = crate::fx_hash::HashMap::default();
+        let mut completed = CompletedFrames::default();
         let checkpoint = ScopedConstraintCheckpoint::capture(&active, &completed);
 
         // A rejected postponed candidate can evaluate a typed local or invoked function value
@@ -375,6 +468,6 @@ mod tests {
                 )])],
             )])
         );
-        assert!(completed.is_empty());
+        assert_eq!(completed, CompletedFrames::default());
     }
 }

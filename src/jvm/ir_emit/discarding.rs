@@ -188,7 +188,7 @@ impl Emitter<'_> {
                 // duplicate to discard (`aload; invokestatic checkNotNull`).
                 IrExpr::NotNullAssert {
                     operand,
-                    check: crate::ir::NullCheck::Unnamed,
+                    check: crate::ir::NullCheck::Unnamed { .. },
                 } => {
                     self.emit_value(*operand, code);
                     let check = self.cw.methodref(

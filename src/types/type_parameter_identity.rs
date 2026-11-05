@@ -9,6 +9,19 @@ use super::intern;
 static TYPE_PARAMETER_SOURCES: OnceLock<Mutex<HashMap<&'static str, &'static str>>> =
     OnceLock::new();
 static NEXT_METADATA_TYPE_PARAMETER: AtomicU64 = AtomicU64::new(0);
+static POSTPONED_VARIABLE_ORIGINS: OnceLock<Mutex<HashMap<&'static str, PostponedVariableOrigin>>> =
+    OnceLock::new();
+
+/// Which formal of the called declaration a postponed-call inference variable stands for, and the
+/// function arguments of its call that were analysed under it (by source span). A declaration those
+/// arguments published before the call was solved (a retained capture) completes its type from the
+/// solution signature inference reached for exactly these arguments.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PostponedVariableOrigin {
+    pub(crate) formal: super::TyParamName,
+    pub(crate) file: u32,
+    pub(crate) arguments: Vec<crate::diag::Span>,
+}
 
 /// Allocate an opaque identity for a type parameter owned by a dependency declaration. The
 /// provider retains the identity beside the exact declaration key it decoded; only the source
@@ -69,19 +82,48 @@ pub(crate) fn postponed_call_type_variable(
     compilation: u64,
     file: u32,
     expression: u32,
+    argument: crate::diag::Span,
     declared: &str,
 ) -> &'static str {
     let declared = intern(declared);
     let fresh = intern(&format!(
         "\0postponed-call:{compilation}:{file}:{expression}:{declared}"
     ));
-    let mut sources = TYPE_PARAMETER_SOURCES
+    {
+        let mut sources = TYPE_PARAMETER_SOURCES
+            .get_or_init(|| Mutex::new(HashMap::default()))
+            .lock()
+            .unwrap();
+        let source = sources.get(declared).copied().unwrap_or(declared);
+        sources.insert(fresh, source);
+    }
+    let mut origins = POSTPONED_VARIABLE_ORIGINS
         .get_or_init(|| Mutex::new(HashMap::default()))
         .lock()
         .unwrap();
-    let source = sources.get(declared).copied().unwrap_or(declared);
-    sources.insert(fresh, source);
+    let origin = origins
+        .entry(fresh)
+        .or_insert_with(|| PostponedVariableOrigin {
+            formal: super::TyParamName::new(declared),
+            file,
+            arguments: Vec::new(),
+        });
+    if !origin.arguments.contains(&argument) {
+        origin.arguments.push(argument);
+    }
     fresh
+}
+
+/// The call and formal behind a postponed-call inference variable; `None` for every other identity.
+pub(crate) fn postponed_variable_origin(
+    variable: super::TyParamName,
+) -> Option<PostponedVariableOrigin> {
+    POSTPONED_VARIABLE_ORIGINS
+        .get()?
+        .lock()
+        .unwrap()
+        .get(variable.as_str())
+        .cloned()
 }
 
 /// A constructor-declared type parameter that hides a class type parameter of the same spelling.
@@ -167,8 +209,10 @@ pub(crate) fn type_parameter_source_name(name: &str) -> &str {
 mod tests {
     use super::{
         constructor_type_parameter, declaration_type_parameter, postponed_call_type_variable,
-        type_parameter_source_name,
+        postponed_variable_origin, type_parameter_source_name, PostponedVariableOrigin,
     };
+    use crate::diag::Span;
+    use crate::types::TyParamName;
 
     #[test]
     fn source_spelling_is_not_parsed_from_the_semantic_identity() {
@@ -198,14 +242,31 @@ mod tests {
     #[test]
     fn nested_postponed_calls_own_distinct_variables() {
         let declared = declaration_type_parameter(23, 1, 17, 0, "T");
-        let outer = postponed_call_type_variable(23, 1, 40, declared);
-        let same_outer = postponed_call_type_variable(23, 1, 40, declared);
-        let inner = postponed_call_type_variable(23, 1, 55, declared);
+        let outer_block = Span::new(30, 60);
+        let outer_trailing = Span::new(62, 90);
+        let inner_block = Span::new(40, 50);
+        let outer = postponed_call_type_variable(23, 1, 40, outer_block, declared);
+        let same_outer = postponed_call_type_variable(23, 1, 40, outer_trailing, declared);
+        let inner = postponed_call_type_variable(23, 1, 55, inner_block, declared);
 
         assert_eq!(outer, same_outer);
         assert_ne!(outer, inner);
         assert_ne!(outer, declared);
         assert_eq!(type_parameter_source_name(outer), "T");
         assert_eq!(type_parameter_source_name(inner), "T");
+        let origin = |variable| postponed_variable_origin(TyParamName::new(variable));
+        assert_eq!(
+            origin(outer),
+            Some(PostponedVariableOrigin {
+                formal: TyParamName::new(declared),
+                file: 1,
+                arguments: vec![outer_block, outer_trailing],
+            })
+        );
+        assert_eq!(
+            origin(inner).map(|origin| origin.arguments),
+            Some(vec![inner_block])
+        );
+        assert_eq!(origin(declared), None);
     }
 }
