@@ -71,6 +71,8 @@ pub(super) enum CaptureTypeKnowledge {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnonymousObjectCapture {
+    /// Declared entry member, distinct from an ordinary lexical capture field.
+    pub(super) enum_entry_storage: Option<super::enum_entry_properties::EnumEntryStorage>,
     pub name: String,
     pub ty: Ty,
     /// The enclosing mutable local is represented by one shared cell rather than copied by value.
@@ -234,6 +236,7 @@ impl Checker<'_> {
 
 #[derive(Clone)]
 pub(super) struct AnonymousCaptureCandidate {
+    pub(super) enum_entry_storage: Option<super::enum_entry_properties::EnumEntryStorage>,
     pub(super) name: String,
     pub(super) ty: Ty,
     pub(super) shared_cell: bool,
@@ -418,6 +421,7 @@ impl Checker<'_> {
                 let receiver_capture = self
                     .implicit_receiver_capture_id(receiver.class_receiver, receiver.receiver_role);
                 let capture = AnonymousObjectCapture {
+                    enum_entry_storage: None,
                     name: if matches!(
                         source,
                         AnonymousObjectCaptureSource::EnclosingInstance { .. }
@@ -864,6 +868,7 @@ mod receiver_remap_tests {
         depth: u32,
     ) -> AnonymousObjectCapture {
         AnonymousObjectCapture {
+            enum_entry_storage: None,
             name: "captured".into(),
             ty: Ty::obj("CaptureToken"),
             shared_cell: false,
@@ -1276,6 +1281,7 @@ pub(super) fn record_anonymous_construction_captures(
             }
         })
         .map(|(_, candidate)| AnonymousObjectCapture {
+            enum_entry_storage: candidate.enum_entry_storage,
             name: candidate.name.clone(),
             ty: candidate.ty,
             shared_cell: candidate.shared_cell,

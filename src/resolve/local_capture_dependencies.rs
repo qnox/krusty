@@ -121,7 +121,8 @@ impl Checker<'_> {
                 Some(dependency) => capture.capture_dependency == Some(dependency) || same_source,
                 None => capture.capture_dependency.is_none() && same_source,
             };
-            same_semantic_source.then_some(index)
+            (same_semantic_source && capture.enum_entry_storage == candidate.enum_entry_storage)
+                .then_some(index)
         });
         if let Some(existing) = existing {
             captures[existing].shared_cell |= candidate.shared_cell;
@@ -219,6 +220,7 @@ impl Checker<'_> {
                     captures,
                     capture_bindings,
                     AnonymousObjectCapture {
+                        enum_entry_storage: binding.enum_entry_storage(),
                         name: required.name.clone(),
                         ty: binding.ty,
                         shared_cell: required.shared_cell,

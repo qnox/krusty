@@ -58,3 +58,33 @@ fn assert_complete_abi_and_metadata(classes: &common::ClassSets) {
     assert_eq!(actual_abi, expected_abi, "complete class ABI");
     assert_eq!(actual, expected, "complete class metadata");
 }
+
+#[test]
+fn enum_entry_property_receivers_keep_their_owner_across_spilled_writes() {
+    let source = include_str!("box_regressions/enumEntryPropertyReceiverWrites.kt");
+    common::expect_box_same_as_kotlinc(source, "enumEntryPropertyReceiverWrites");
+    assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
+        "enumEntryPropertyReceiverWrites.kt",
+        source,
+    )]));
+}
+
+#[test]
+fn an_enum_entry_property_keeps_its_owner_through_an_anonymous_inner_class() {
+    let source = include_str!("box_regressions/deepInnerClassInEnumEntryClass2.kt");
+    common::expect_box_same_as_kotlinc(source, "deepInnerClassInEnumEntryClass2");
+    assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
+        "deepInnerClassInEnumEntryClass2.kt",
+        source,
+    )]));
+}
+
+#[test]
+fn an_enum_entry_capture_calls_its_declared_custom_setter() {
+    let source = include_str!("box_regressions/enumEntryPropertyCustomSetter.kt");
+    common::expect_box_same_as_kotlinc(source, "enumEntryPropertyCustomSetter");
+    assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
+        "enumEntryPropertyCustomSetter.kt",
+        source,
+    )]));
+}

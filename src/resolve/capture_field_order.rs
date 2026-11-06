@@ -72,7 +72,9 @@ pub(super) fn reconcile(
 }
 
 fn same_capture(capture: &AnonymousObjectCapture, exact: &AnonymousObjectCapture) -> bool {
-    capture.name == exact.name && capture.source == exact.source
+    capture.name == exact.name
+        && capture.source == exact.source
+        && capture.enum_entry_storage == exact.enum_entry_storage
 }
 
 /// A capture keeps its established cell sharing, and its established type while the revisit knows

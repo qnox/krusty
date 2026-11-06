@@ -462,6 +462,7 @@ impl Checker<'_> {
             return;
         };
         captures.values.push(AnonymousObjectCapture {
+            enum_entry_storage: local.enum_entry_storage(),
             ty: local.ty,
             shared_cell: CapturedBinding {
                 delegated: local.delegate_storage_ty.is_some(),
@@ -872,6 +873,7 @@ impl Checker<'_> {
         if needs_outer {
             match enclosing_instance {
                 Some(outer) => result.values.push(AnonymousObjectCapture {
+                    enum_entry_storage: None,
                     name: "this$0".to_string(),
                     ty: outer,
                     shared_cell: false,
@@ -906,6 +908,7 @@ impl Checker<'_> {
             implicit_receiver_capture
         {
             result.values.push(AnonymousObjectCapture {
+                enum_entry_storage: None,
                 name: "this$receiver".to_string(),
                 ty: receiver,
                 shared_cell: false,
@@ -949,6 +952,7 @@ impl Checker<'_> {
                 }
             };
             result.values.push(AnonymousObjectCapture {
+                enum_entry_storage: local.enum_entry_storage(),
                 // Smart-cast state is a fact about this control-flow point, not the type of a
                 // mutable cell captured by a separately checked classifier body.
                 ty: if local.is_var {

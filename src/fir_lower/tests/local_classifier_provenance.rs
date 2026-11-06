@@ -123,7 +123,7 @@ fn enum_entry_initialization_retains_the_selected_entry_owner() {
     use crate::ir::IrClassDeclarationContext as Context;
 
     let ir = lower_single_source(
-        include_str!("../../../tests/fixtures/capture_storage/deepInnerClassInEnumEntryClass2.kt"),
+        include_str!("../../../tests/box_regressions/deepInnerClassInEnumEntryClass2.kt"),
         "DeepEnumEntryContext",
     );
     let entry = ir.classes.iter().find(|class| class.is_enum_entry).unwrap();

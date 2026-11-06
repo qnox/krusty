@@ -1,4 +1,5 @@
 mod anonymous_capture_demand;
+mod enum_entry_properties;
 
 use super::test_support::{checked_function_body, root_expression};
 use super::*;

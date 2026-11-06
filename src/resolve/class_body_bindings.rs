@@ -2,7 +2,7 @@
 //! initializers see and the storage of values a local class captures.
 
 use super::{AnonymousObjectCaptureSource, Checker, CheckerScope};
-use crate::ast::{DeclId, PropParam};
+use crate::ast::{Decl, DeclId, PropParam};
 use crate::types::Ty;
 
 impl Checker<'_> {
@@ -53,6 +53,7 @@ impl Checker<'_> {
             .enumerate()
             .find(|(_, capture)| {
                 capture.name == name
+                    && capture.enum_entry_storage.is_none()
                     && matches!(
                         capture.source,
                         AnonymousObjectCaptureSource::LexicalValue
@@ -87,6 +88,17 @@ impl Checker<'_> {
             .into_iter()
             .enumerate()
         {
+            if capture.enum_entry_storage.is_some() {
+                if !self.declare_captured_enum_property(scope, &capture) {
+                    if let Decl::Class(class) = self.file.decl(declaration) {
+                        self.diags.error(
+                            class.span,
+                            "selected enum-entry property has no declaring receiver",
+                        );
+                    }
+                }
+                continue;
+            }
             if matches!(
                 capture.source,
                 AnonymousObjectCaptureSource::LexicalValue
