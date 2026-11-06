@@ -1159,9 +1159,15 @@ jobs:
           echo "KRUSTY_RUNTIME_CC=$clang" >> "$GITHUB_ENV"
       - name: build
         shell: bash
+        env:
+          CARGO_TERM_VERBOSE: 'true'
         run: |
+          set -euo pipefail
           rustc --version --verbose
           cargo --version
+          node scripts/release-build-progress.cjs &
+          progress_pid=$!
+          trap 'kill "$progress_pid" 2>/dev/null || true; wait "$progress_pid" 2>/dev/null || true' EXIT
           time just build-release "${{ matrix.target.triple }}"
       - name: upload release build timings
         if: always()
