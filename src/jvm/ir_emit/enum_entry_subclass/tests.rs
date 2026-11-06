@@ -60,6 +60,8 @@ fn entry_fields_and_accessors_use_their_declared_types_and_source_positions() {
     subclass.methods = vec![getter, setter, middle];
     ir.add_class(subclass);
 
+    crate::metadata::class_declarations::record_all(&mut ir);
+
     let run = EmitRun::default();
     let classes = emit_for_test(&ir, "EnumScheduleFixture", &run).expect("emitted enum classes");
     let bytes = &classes
