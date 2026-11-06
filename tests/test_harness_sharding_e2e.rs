@@ -750,10 +750,10 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
             .count()
             == 2
             && workflow.matches("        target: [jvm]\n").count() == 1
-            && workflow.matches("        target: [native, wasm]\n").count() == 1
+            && workflow.matches("        target: [native, wasm-js, wasm-wasi]\n").count() == 1
             && workflow.matches("steps: &conformance-steps").count() == 1
             && workflow.matches("steps: *conformance-steps").count() == 1,
-        "each exact Kotlin version must expose JVM, Native and Wasm rows from one shared inventory"
+        "each exact Kotlin version must expose JVM, Native and both Wasm rows from one shared inventory"
     );
     let box_run = workflow[matrix..]
         .find("just conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
