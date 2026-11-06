@@ -85,7 +85,7 @@ eligible() {
   released=$(remote_ref "$released_ref") || return 2
   if [ -n "$released" ] && ! git merge-base --is-ancestor "$released" "$tip"; then
     echo "release-publisher: $branch at $tip no longer descends from released $released" >&2
-    return 1
+    return 2
   fi
 }
 

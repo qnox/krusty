@@ -1101,10 +1101,8 @@ jobs:
             "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$kotlin/kotlin-stdlib-$kotlin.jar"
           scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
 
-  # Build the release binaries per OS/arch only after coverage proves that this master commit is
-  # still the publishable tip. Superseded master runs keep all validation but do not occupy six
-  # runners with artifacts the monotonic publisher will reject. Cap the surviving matrix so release
-  # packaging cannot starve pull-request gates.
+  # Every covered master commit builds its own immutable release artifacts, even after master
+  # advances. Cap each matrix at two runners so release packaging shares capacity with PR gates.
   build-release:
     needs: [ci]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'

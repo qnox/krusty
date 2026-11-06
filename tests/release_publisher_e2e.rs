@@ -210,38 +210,47 @@ fn every_validated_master_ancestor_publishes_even_after_a_newer_release() {
 }
 
 #[test]
-fn rewritten_and_offbranch_commits_cannot_publish_or_promote() {
-    let remote = Remote::new("rewritten");
+fn a_commit_removed_from_master_cannot_publish_or_promote() {
+    let remote = Remote::new("offbranch");
+    let first = remote.push_commit("first");
+    let second = remote.push_commit("second");
+    remote.git(&["reset", "-q", "--hard", &first]);
+    remote.git(&["push", "-q", "--force", "origin", "HEAD:refs/heads/master"]);
+    let message = format!("release-publisher: {second} is not on master at {first}\n");
+    for (command, stdout) in [
+        ("check", "publish=false\n"),
+        ("check-promotion", "promote=false\n"),
+    ] {
+        let output = remote.publisher(&second, &[command], &[]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert_eq!(text(output.stdout), stdout);
+        assert_eq!(text(output.stderr), message);
+    }
+    let record = remote.publisher(&second, &["record"], &[]);
+    assert_eq!(record.status.code(), Some(1), "{record:?}");
+    assert_eq!(text(record.stderr), message);
+    assert_eq!(remote.remote_ref(RELEASED_REF), None);
+}
+
+#[test]
+fn inconsistent_released_lineage_fails_without_suppressing_the_release_job() {
+    let remote = Remote::new("rewritten-lineage");
     let first = remote.push_commit("first");
     let second = remote.push_commit("second");
     let record = remote.publisher(&second, &["record"], &[]);
     assert_eq!(record.status.code(), Some(0), "{record:?}");
     remote.git(&["reset", "-q", "--hard", &first]);
     remote.git(&["push", "-q", "--force", "origin", "HEAD:refs/heads/master"]);
-    for (sha, message) in [
-        (
-            first.as_str(),
+    for command in ["check", "check-promotion", "record"] {
+        let output = remote.publisher(&first, &[command], &[]);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert_eq!(output.stdout, b"");
+        assert_eq!(
+            text(output.stderr),
             format!(
                 "release-publisher: master at {first} no longer descends from released {second}\n"
-            ),
-        ),
-        (
-            second.as_str(),
-            format!("release-publisher: {second} is not on master at {first}\n"),
-        ),
-    ] {
-        for (command, stdout) in [
-            ("check", "publish=false\n"),
-            ("check-promotion", "promote=false\n"),
-        ] {
-            let output = remote.publisher(sha, &[command], &[]);
-            assert_eq!(output.status.code(), Some(0), "{output:?}");
-            assert_eq!(text(output.stdout), stdout);
-            assert_eq!(text(output.stderr), message);
-        }
-        let record = remote.publisher(sha, &["record"], &[]);
-        assert_eq!(record.status.code(), Some(1), "{record:?}");
-        assert_eq!(text(record.stderr), message);
+            )
+        );
     }
     assert_eq!(
         remote.remote_ref(RELEASED_REF).as_deref(),
