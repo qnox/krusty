@@ -932,7 +932,7 @@ fn a_checked_empty_local_super_environment_is_an_explicit_empty_projection() {
         .0
         .iter()
         .flat_map(|(_, body)| {
-            (0..body.statement_count()).filter_map(|raw| {
+            (0..body.statement_count()).filter_map(move |raw| {
                 let FirStatementKind::ConstructorDelegation(call) =
                     &body.statement(FirStatementId::from_raw(raw as u32))?.kind
                 else {
