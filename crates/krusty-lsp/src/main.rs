@@ -1089,7 +1089,7 @@ struct WorkerHost {
     jdk_warning_shown: bool,
     /// Set when the source inventory was cut short — an unreadable root or the retention
     /// ceiling — so the shortfall is reported rather than looking like a fully indexed workspace.
-    truncated_inventory: bool,
+    scan_incomplete_inventory: bool,
     /// One model generation's URI inventory. Both priority tiers derive from this snapshot; walking
     /// every source root once for the neighbourhood and again for the sweep doubled cold indexing
     /// work, while rebuilding it after every keystroke could block the interactive engine thread.
@@ -1167,7 +1167,7 @@ impl WorkerHost {
             clock: Instant::now(),
             root: None,
             jdk_warning_shown: false,
-            truncated_inventory: false,
+            scan_incomplete_inventory: false,
             workspace_inventory: None,
             project_sources: ProjectSources::default(),
             index_project_sources: ProjectSources::default(),
@@ -1213,7 +1213,7 @@ impl WorkerHost {
             Some(reporter) => reporter,
             None => &mut ignore,
         };
-        let (sources, mut truncated) = krusty_lsp::project::workspace_sources(model, progress);
+        let (sources, scan_incomplete) = krusty_lsp::project::workspace_sources(model, progress);
         if let Some(reporter) = reporter.as_mut() {
             reporter(krusty_lsp::ScanProgress::Finished {
                 files: sources.len() as u64,
@@ -1221,24 +1221,11 @@ impl WorkerHost {
             });
         }
         self.scan_reporter = reporter;
-        let mut retained_bytes = 0usize;
-        let mut uris = Vec::new();
-        for path in sources {
-            let Some(uri) = krusty_lsp::uri::path_to_file_uri(&path) else {
-                continue;
-            };
-            let uri_bytes = krusty_lsp::workspace_index_uri_bytes(&uri);
-            if uris.len() >= krusty_lsp::MAX_WORKSPACE_INDEX_FILES
-                || uri_bytes
-                    > krusty_lsp::MAX_WORKSPACE_INDEX_URI_BYTES.saturating_sub(retained_bytes)
-            {
-                truncated = true;
-                break;
-            }
-            retained_bytes = retained_bytes.saturating_add(uri_bytes);
-            uris.push(uri);
-        }
-        self.truncated_inventory |= truncated;
+        let uris = sources
+            .iter()
+            .filter_map(|path| krusty_lsp::uri::path_to_file_uri(path))
+            .collect::<Vec<_>>();
+        self.scan_incomplete_inventory |= scan_incomplete;
         self.workspace_inventory = Some(uris);
     }
 
@@ -1254,7 +1241,7 @@ impl WorkerHost {
                 self.index_project_sources.invalidate();
                 self.analysis_cache.clear();
                 self.workspace_inventory = None;
-                self.truncated_inventory = false;
+                self.scan_incomplete_inventory = false;
                 let (classpath, jdk_home) = Self::launch_from(sync, &self.options, &self.runner);
                 let language =
                     match sync.project_language_settings(self.options.language_arguments()) {
@@ -1472,8 +1459,8 @@ impl krusty_lsp::Analysis for WorkerHost {
         self.workspace_inventory.clone().unwrap_or_default()
     }
 
-    fn workspace_index_incomplete(&self) -> bool {
-        self.truncated_inventory
+    fn workspace_scan_incomplete(&self) -> bool {
+        self.scan_incomplete_inventory
     }
 
     fn set_scan_reporter(&mut self, reporter: krusty_lsp::ScanReporter) {
@@ -1916,7 +1903,7 @@ impl krusty_lsp::Analysis for WorkerHost {
         self.index_project_sources.invalidate();
         self.analysis_cache.clear();
         self.workspace_inventory = None;
-        self.truncated_inventory = false;
+        self.scan_incomplete_inventory = false;
         // A root change can change both a module configuration and the workspace-relative heading.
         // Do not reuse a retained payload or rendered path until the replacement analysis pass has
         // established both under the new root.
