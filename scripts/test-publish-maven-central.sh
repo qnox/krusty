@@ -186,6 +186,18 @@ echo true > "$fixture/published-dev.krustythecompiler.gradle.plugin"
 run_case partial 1 '' 'only one of the implementation (false) and marker (true) of 1.2.3 is on Maven Central'
 check 'partial: builds' "$(count "$fixture/builds")" 0
 
+# An invalid source cannot leave an upload that the publisher is unable to record.
+reset
+echo 0 > "$fixture/uploads"
+echo PUBLISHING > "$fixture/states-dep-1"
+invalid_source=$(git -C "$tree" rev-parse --verify --end-of-options 'missing-publication-source^{commit}' 2>&1 || true)
+case_env=(RELEASE_SHA=missing-publication-source)
+run_case 'invalid publication source' 128 '' "$invalid_source"
+check 'invalid publication source: builds' "$(count "$fixture/builds")" 0
+check 'invalid publication source: uploads' "$(cat "$fixture/uploads")" 0
+check 'invalid publication source: recorded' "$(recorded)" none
+case_env=()
+
 # A first run: the upload is recorded, followed through validation, and accepted.
 reset
 echo 0 > "$fixture/uploads"
@@ -303,4 +315,4 @@ if [[ $failures -ne 0 ]]; then
   echo "$failures Maven Central publishing check(s) failed" >&2
   exit 1
 fi
-echo "Maven Central publishing: 16 cases passed"
+echo "Maven Central publishing: 17 cases passed"

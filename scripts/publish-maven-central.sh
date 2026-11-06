@@ -100,11 +100,15 @@ read_record() {
   fi
 }
 
-record_deployment() {
-  local commit source_commit author_name author_email
+resolve_source_identity() {
+  local source_commit
   source_commit=$(git -C "$repo" rev-parse --verify --end-of-options "${RELEASE_SHA:-${GITHUB_SHA:-HEAD}}^{commit}")
   author_name=$(git -C "$repo" show -s --format=%an "$source_commit")
   author_email=$(git -C "$repo" show -s --format=%ae "$source_commit")
+}
+
+record_deployment() {
+  local commit
   commit=$(GIT_AUTHOR_NAME="$author_name" GIT_AUTHOR_EMAIL="$author_email" \
     GIT_COMMITTER_NAME="$author_name" GIT_COMMITTER_EMAIL="$author_email" \
     git -C "$repo" commit-tree "$(git -C "$repo" hash-object -t tree /dev/null)" \
@@ -156,6 +160,8 @@ if [[ -n $deployment ]]; then
   fi
 fi
 if [[ -z $deployment ]]; then
+  # Validate provenance before a build or an irreversible Portal upload.
+  resolve_source_identity
   deployment=$(upload)
   record_deployment "$deployment"
   echo "uploaded deployment $deployment"
