@@ -118,7 +118,8 @@ impl Remote {
             .args(args)
             .current_dir(self.root.join("work"))
             .env("RELEASE_SHA", sha)
-            .env("RELEASE_LOCK_POLL", "0");
+            .env("RELEASE_LOCK_POLL", "0")
+            .env("RELEASE_LOCK_WAIT", "0");
         for (key, value) in env {
             command.env(key, value);
         }
