@@ -1,50 +1,46 @@
 #!/usr/bin/env bash
-# Serialize master's release publication and keep it monotonic. Master CI runs overlap, so two
-# release jobs can publish at once and an older commit can publish after a newer one. A GitHub
-# concurrency group would serialize them, but it keeps one pending job and cancels the one it
-# displaces, which cancels that whole CI run.
+# Every validated commit still on master's history publishes its immutable version. A per-commit
+# lock serializes retries without blocking other releases during Gradle publishing. A separate,
+# short promotion lock protects GitHub latest, badges, and the monotonic released ref.
 #
-# The lock is a ref on the remote, created only if absent (a push with an empty lease is an atomic
-# compare-and-swap on the server). Under the lock, a commit publishes only if it is still the tip
-# of master and descends from the last published commit, which is recorded in a second ref once
-# the release is out. A lock older than the TTL belongs to a job that can no longer be running (the
-# release job's timeout is shorter) and is taken over.
+#   release-publisher.sh acquire | release LOCK       per-commit publication lock
+#   release-publisher.sh check                        publish=true for master ancestors
+#   release-publisher.sh bind-tag TAG                 immutable tag bound to RELEASE_SHA
+#   release-publisher.sh acquire-latest | release-latest LOCK
+#   release-publisher.sh check-promotion               promote=true unless a newer release won
+#   release-publisher.sh record                       advance the released ref with a lease
 #
-# Availability, not correctness: a lock orphaned by a killed job is taken over only once the TTL
-# (30 minutes) has passed, which outlasts the acquisition wait (15 minutes), so a release job that
-# meets a fresh orphan fails and publishing resumes with the next master run or a re-run after the
-# TTL. A job that waits the full 15 minutes has 10 minutes of its 25-minute timeout left to publish.
-# Neither case can publish an older commit over a newer one.
-#
-#   scripts/release-publisher.sh acquire           take the lock; prints the lock commit
-#   scripts/release-publisher.sh check             prints publish=true|false for $GITHUB_OUTPUT
-#   scripts/release-publisher.sh record            record the commit as the last published one
-#   scripts/release-publisher.sh release <lock>    drop the lock if it is still ours
-#
-# Environment: RELEASE_SHA (default $GITHUB_SHA), RELEASE_REMOTE (origin), RELEASE_BRANCH
-# (master), RELEASE_LOCK_TTL seconds (1800), RELEASE_LOCK_WAIT seconds (900),
-# RELEASE_LOCK_POLL seconds (10).
+# Environment: RELEASE_SHA (GITHUB_SHA), RELEASE_REMOTE (origin), RELEASE_BRANCH (master),
+# RELEASE_LOCK_TTL seconds (1800), RELEASE_LOCK_WAIT seconds (900), RELEASE_LOCK_POLL seconds (10).
 set -euo pipefail
+shopt -s inherit_errexit
 
 remote=${RELEASE_REMOTE:-origin}
 branch=${RELEASE_BRANCH:-master}
 sha=${RELEASE_SHA:-${GITHUB_SHA:-}}
-lock_ref=refs/krusty/release-lock
+lock_ref=refs/krusty/release-commits/$sha
+promotion_lock_ref=refs/krusty/release-lock
 released_ref=refs/krusty/released
 ttl=${RELEASE_LOCK_TTL:-1800}
 wait_limit=${RELEASE_LOCK_WAIT:-900}
 poll=${RELEASE_LOCK_POLL:-10}
 
 usage() {
-  sed -n '19,26p' "$0" >&2
+  echo "usage: $0 acquire|release LOCK|check|bind-tag TAG|acquire-latest|release-latest LOCK|check-promotion|record" >&2
   exit 2
 }
 
-# Prints the commit a remote ref names, or nothing when the ref does not exist.
+# Missing is distinct from an unreadable remote: only an actual absent ref returns empty.
 remote_ref() {
-  if git fetch --quiet --no-tags "$remote" "+$1:refs/release-publisher/fetched" 2>/dev/null; then
-    git rev-parse refs/release-publisher/fetched
-  fi
+  local listed=0
+  git ls-remote --exit-code "$remote" "$1" >/dev/null 2>&1 || listed=$?
+  case $listed in
+    0) ;;
+    2) return ;;
+    *) echo "release-publisher: cannot read $1 from $remote" >&2; return 1 ;;
+  esac
+  git fetch --quiet --no-tags "$remote" "+$1:refs/release-publisher/fetched" || return 1
+  git rev-parse 'refs/release-publisher/fetched^{commit}'
 }
 
 acquire() {
@@ -52,7 +48,8 @@ acquire() {
   lock=$(GIT_AUTHOR_NAME=github-actions GIT_AUTHOR_EMAIL=github-actions@users.noreply.github.com \
     GIT_COMMITTER_NAME=github-actions GIT_COMMITTER_EMAIL=github-actions@users.noreply.github.com \
     git commit-tree "$(git hash-object -t tree /dev/null)" \
-    -m "release lock for $sha (run ${GITHUB_RUN_ID:-local})")
+    -m "release lock for $sha (run ${GITHUB_RUN_ID:-local})" \
+    -m "publication lease $(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')")
   deadline=$(($(date +%s) + wait_limit))
   while :; do
     if git push --quiet --force-with-lease="$lock_ref:" "$remote" "$lock:$lock_ref" 2>/dev/null; then
@@ -78,26 +75,68 @@ acquire() {
   done
 }
 
-check() {
+eligible() {
   local tip released
-  tip=$(remote_ref "refs/heads/$branch")
-  if [ "$tip" != "$sha" ]; then
-    echo "release-publisher: $branch is at ${tip:-nothing}, not $sha; a newer run publishes" >&2
-    echo "publish=false"
-    return
+  tip=$(remote_ref "refs/heads/$branch") || return 2
+  if [ -z "$tip" ] || ! git merge-base --is-ancestor "$sha" "$tip"; then
+    echo "release-publisher: $sha is not on $branch at ${tip:-nothing}" >&2
+    return 1
   fi
-  released=$(remote_ref "$released_ref")
+  released=$(remote_ref "$released_ref") || return 2
+  if [ -n "$released" ] && ! git merge-base --is-ancestor "$released" "$tip"; then
+    echo "release-publisher: $branch at $tip no longer descends from released $released" >&2
+    return 1
+  fi
+}
+
+check() {
+  local status=0
+  eligible || status=$?
+  case $status in
+    0) echo "publish=true" ;;
+    1) echo "publish=false" ;;
+    *) return "$status" ;;
+  esac
+}
+
+check_promotion() {
+  local released
+  local status=0
+  eligible || status=$?
+  case $status in
+    0) ;;
+    1) echo "promote=false"; return ;;
+    *) return "$status" ;;
+  esac
+  released=$(remote_ref "$released_ref") || return 2
   if [ -n "$released" ] && ! git merge-base --is-ancestor "$released" "$sha"; then
-    echo "release-publisher: $released was published and $sha does not descend from it" >&2
-    echo "publish=false"
+    echo "promote=false"
     return
   fi
-  echo "publish=true"
+  echo "promote=true"
+}
+
+bind_tag() {
+  local tag_ref=refs/tags/$1 existing
+  git check-ref-format "$tag_ref"
+  eligible || return $?
+  existing=$(remote_ref "$tag_ref") || return 2
+  if [ -z "$existing" ]; then
+    if git push --quiet --force-with-lease="$tag_ref:" "$remote" "$sha:$tag_ref" 2>/dev/null; then
+      return
+    fi
+    existing=$(remote_ref "$tag_ref") || return 2
+  fi
+  if [ "$existing" != "$sha" ]; then
+    echo "release-publisher: $tag_ref belongs to ${existing:-nothing}, not $sha" >&2
+    return 1
+  fi
 }
 
 record() {
   local released
-  released=$(remote_ref "$released_ref")
+  eligible || return $?
+  released=$(remote_ref "$released_ref") || return 2
   if [ -n "$released" ] && ! git merge-base --is-ancestor "$released" "$sha"; then
     echo "release-publisher: refusing to record $sha over newer $released" >&2
     exit 1
@@ -111,14 +150,28 @@ release() {
   fi
 }
 
-[ "$#" -ge 1 ] || usage
+[ "$#" -ge 1 ] && [[ $sha =~ ^[0-9a-f]{40}$ ]] || usage
 case $1 in
   acquire | check | record)
-    [ "$#" -eq 1 ] && [ -n "$sha" ] || usage
+    [ "$#" -eq 1 ] || usage
     "$1"
     ;;
-  release)
+  acquire-latest)
+    [ "$#" -eq 1 ] || usage
+    lock_ref=$promotion_lock_ref
+    acquire
+    ;;
+  check-promotion)
+    [ "$#" -eq 1 ] || usage
+    check_promotion
+    ;;
+  bind-tag)
     [ "$#" -eq 2 ] || usage
+    bind_tag "$2"
+    ;;
+  release | release-latest)
+    [ "$#" -eq 2 ] || usage
+    if [ "$1" = release-latest ]; then lock_ref=$promotion_lock_ref; fi
     release "$2"
     ;;
   *) usage ;;
