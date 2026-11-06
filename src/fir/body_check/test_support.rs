@@ -58,6 +58,19 @@ pub(super) fn singleton_extension_source() -> Box<dyn SemanticPlatform> {
     })
 }
 
+pub(super) fn root_external_function_source() -> Box<dyn SemanticPlatform> {
+    let mut callable =
+        crate::libraries::LibraryCallable::library("", "read", vec![Ty::Int], Ty::Int, Ty::Int, "");
+    callable.external_identity = Some(crate::fir::ExternalCallableId::from_raw(703));
+    Box::new(SingletonExtensionSource {
+        callable: crate::libraries::FunctionInfo::plain(
+            crate::libraries::FnKind::TopLevel,
+            None,
+            callable,
+        ),
+    })
+}
+
 pub(super) fn checked_function_body(
     source: &str,
     function_name: &str,

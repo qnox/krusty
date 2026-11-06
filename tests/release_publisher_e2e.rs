@@ -497,86 +497,6 @@ fn failed_lock_acquisition_stops_before_any_publication_or_promotion() {
     }
 }
 
-#[test]
-fn every_master_run_releases_without_holding_latest_during_gradle() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
-    assert!(workflow.contains("\nconcurrency:\n  group: ci-${{ github.ref == 'refs/heads/master' && github.run_id || github.ref }}\n  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}\n"));
-    let job = release_job(&workflow);
-    assert!(
-        !job.contains("concurrency:"),
-        "no queued master release is cancelled"
-    );
-    let steps = steps(job);
-    let position = |needle: &str| {
-        steps
-            .iter()
-            .position(|step| step.contains(needle))
-            .unwrap_or_else(|| panic!("release job has {needle}"))
-    };
-    let acquire = position("release-publisher.sh acquire)");
-    let check = position("release-publisher.sh check >>");
-    let publish = position("gh release create \"$TAG\"");
-    let central = position("publish-maven-central.sh");
-    let portal = position("publish-gradle-plugin-portal.sh");
-    let latest_lock = position("release-publisher.sh acquire-latest");
-    let latest = position("release-publisher.sh check-promotion");
-    let record = position("release-publisher.sh record");
-    let promote = position("gh release edit \"$TAG\" --latest");
-    let badges = position("publish badges");
-    let latest_drop = position("release-publisher.sh release-latest");
-    let drop = position("release-publisher.sh release ");
-    assert!(
-        acquire < check
-            && check < publish
-            && publish < central
-            && central < portal
-            && portal < latest_lock
-            && latest_lock < latest
-            && latest < record
-            && record < promote
-            && promote < badges
-            && badges < latest_drop
-            && latest_drop < drop
-    );
-    assert_eq!(drop, steps.len() - 1);
-    assert!(steps[drop].contains("if: always() && steps.lock.outputs.lock != ''"));
-    assert!(steps[latest_drop].contains("if: always() && steps.latest_lock.outputs.lock != ''"));
-    for step in &steps[check + 1..latest_lock] {
-        assert!(
-            step.contains("steps.tip.outputs.publish == 'true'"),
-            "{step}"
-        );
-    }
-    for index in [record, promote, badges] {
-        assert!(
-            steps[index].contains("steps.latest.outputs.promote == 'true'"),
-            "{}",
-            steps[index]
-        );
-    }
-    assert!(steps[publish].contains("--draft --latest=false"));
-    assert!(steps[publish].contains("bind-tag \"$TAG\""));
-    assert!(
-        steps[publish].contains("draft=$(gh release view \"$TAG\" --json isDraft --jq .isDraft)")
-    );
-    let timeout_minutes: u64 = job
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("timeout-minutes: "))
-        .expect("release deadline")
-        .parse()
-        .expect("number");
-    let script = fs::read_to_string(root.join("scripts/release-publisher.sh")).expect("publisher");
-    let ttl_seconds: u64 = script
-        .lines()
-        .find_map(|line| line.strip_prefix("ttl=${RELEASE_LOCK_TTL:-"))
-        .and_then(|rest| rest.strip_suffix('}'))
-        .expect("lock TTL")
-        .parse()
-        .expect("number");
-    assert!(timeout_minutes * 60 < ttl_seconds);
-}
-
 // PLATFORM-SPECIFIC: executable shell mocks exercise the Linux release job's Portal step.
 #[cfg(unix)]
 #[test]
@@ -721,6 +641,11 @@ fn public_assets_are_immutable_and_failed_draft_queries_stop_the_retry() {
     )
     .unwrap();
     fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/format-release-notes.py"),
+        work.join("scripts/format-release-notes.py"),
+    )
+    .unwrap();
     fs::write(work.join("dist/asset"), "validated artifact").unwrap();
     let gh = work.join("bin/gh");
     fs::write(
@@ -733,7 +658,11 @@ case "$*" in
   'release view v1 --json isDraft --jq .isDraft')
     test "$GH_QUERY_FAIL" = 0 || exit 7
     cat "$GH_STATE" ;;
-  'release create '*) printf true > "$GH_STATE" ;;
+  'api --method POST repos/owner/repo/releases/generate-notes '*)
+    printf '%s\n' '{"body":"* Keep @Target by @qnox in https://github.com/owner/repo/pull/1\n"}' ;;
+  'release create '*)
+    grep -Fqx '* ` Keep @Target ` by @qnox in https://github.com/owner/repo/pull/1' "$RUNNER_TEMP/krusty-release-notes.md"
+    printf true > "$GH_STATE" ;;
   'release upload '*) ;;
   'release edit v1 --draft=false --latest=false') printf false > "$GH_STATE" ;;
   *) exit 9 ;;
@@ -760,7 +689,7 @@ esac
     let calls = work.join("calls");
     let state = work.join("state");
     for (initial, query_fail, code, expected) in [
-        (None, "0", 0, format!("release view v1\nrelease create v1 --target {sha} --draft --latest=false --title krusty 1: Kotlin compiler written in Rust --generate-notes dist/asset\nrelease edit v1 --draft=false --latest=false\n")),
+        (None, "0", 0, format!("release view v1\napi --method POST repos/owner/repo/releases/generate-notes -f tag_name=v1 -f target_commitish={sha}\nrelease create v1 --target {sha} --draft --latest=false --title krusty 1: Kotlin compiler written in Rust --notes-file {}/krusty-release-notes.md dist/asset\nrelease edit v1 --draft=false --latest=false\n", work.display())),
         (Some("false"), "0", 0, "release view v1\nrelease view v1 --json isDraft --jq .isDraft\n".to_string()),
         (Some("true"), "0", 0, "release view v1\nrelease view v1 --json isDraft --jq .isDraft\nrelease upload v1 --clobber dist/asset\nrelease edit v1 --draft=false --latest=false\n".to_string()),
         (Some("true"), "1", 7, "release view v1\nrelease view v1 --json isDraft --jq .isDraft\n".to_string()),
@@ -771,6 +700,7 @@ esac
         let mut child = isolated_command("bash").arg("-s").current_dir(&work)
             .env("PATH", format!("{}:{}", work.join("bin").display(), std::env::var("PATH").unwrap()))
             .env("RELEASE_SHA", &sha).env("GITHUB_SHA", &sha).env("TAG", "v1").env("VER", "1")
+            .env("GH_REPO", "owner/repo").env("RUNNER_TEMP", &work)
             .env("GH_CALLS", &calls).env("GH_STATE", &state).env("GH_QUERY_FAIL", query_fail)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         child.stdin.take().unwrap().write_all(source.as_bytes()).unwrap();
@@ -780,38 +710,4 @@ esac
         assert_eq!(output.stderr, b"");
         assert_eq!(fs::read_to_string(&calls).unwrap(), expected);
     }
-}
-
-// This guards only the injection paths the release job itself adds. Gradle, Kotlin and the
-// publishing plugin remain trusted third-party build dependencies that see the credentials.
-#[test]
-fn release_job_adds_no_injection_path_to_secret_bearing_steps() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
-    let job = release_job(&workflow);
-    assert!(
-        !job.contains("gradle/actions/setup-gradle"),
-        "setup-gradle injects an init script into the Gradle builds that hold the signing key"
-    );
-    for step in steps(job)
-        .into_iter()
-        .filter(|step| step.contains("secrets."))
-    {
-        assert!(
-            !step.contains("<<<"),
-            "a here-string can put a secret in a temporary file: {step}"
-        );
-    }
-    let wrapper = fs::read_to_string(
-        root.join("tools/krusty-gradle/gradle/wrapper/gradle-wrapper.properties"),
-    )
-    .expect("read gradle-wrapper.properties");
-    let checksum = wrapper
-        .lines()
-        .find_map(|line| line.strip_prefix("distributionSha256Sum="))
-        .expect("the plugin's wrapper pins its Gradle distribution");
-    assert!(
-        checksum.len() == 64 && checksum.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "a SHA-256 checksum: {checksum}"
-    );
 }

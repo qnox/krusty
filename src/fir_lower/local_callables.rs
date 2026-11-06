@@ -271,7 +271,6 @@ impl BodyLowering<'_> {
             &lowered,
         )?;
         let declared = self.ir.functions[realization.function as usize].ret;
-        self.ir.call_declared_ret.insert(call, declared);
         Ok((call, declared))
     }
 
@@ -400,11 +399,16 @@ impl BodyLowering<'_> {
                     .ok_or_else(|| FirLoweringFailure::MissingLocalCallable(target.clone()))?,
             )
         };
-        Ok(self.ir.add_expr(IrExpr::Call {
+        let call = self.ir.add_expr(IrExpr::Call {
             callee: Box::new(callee),
             dispatch_receiver: None,
             args,
-        }))
+        });
+        // Ordinary calls and callable-reference adapters share this materializer. Both retain
+        // the lifted declaration's result before a checked use applies its own conversion.
+        let declared = self.ir.functions[realization.function as usize].ret;
+        self.ir.call_declared_ret.insert(call, declared);
+        Ok(call)
     }
 
     pub(super) fn checked_lambda(

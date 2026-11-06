@@ -199,3 +199,56 @@ fn anonymous_delegate_operands_follow_the_enclosing_construction_lifetime() {
     }
     assert_eq!((constructor_reads, stored_reads), (1, 1));
 }
+
+#[test]
+fn initializer_function_value_reads_its_constructor_capture() {
+    let (index, bodies) = checked_streamed_bodies(
+        "fun create(read: String.() -> Int): Any = object { val result = \"word\".read() }",
+    );
+    let creators = bodies
+        .iter()
+        .filter(|body| {
+            index.declaration_name(DeclarationId::from_raw(body.owner().raw())) == Some("create")
+        })
+        .collect::<Vec<_>>();
+    let [creator] = creators.as_slice() else {
+        panic!("one constructor call body expected")
+    };
+    let objects = (0..creator.expression_count())
+        .filter_map(
+            |raw| match &creator.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::AnonymousObject(object) => Some(object),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [object] = objects.as_slice() else {
+        panic!("one anonymous constructor expected")
+    };
+    let [capture] = object.captures.as_ref() else {
+        panic!("one function-value capture expected")
+    };
+    assert!(!capture.stored);
+    assert_eq!(
+        capture.source,
+        FirLocalClassCaptureSource::Value(creator.parameters()[0].value)
+    );
+    let reads = bodies
+        .iter()
+        .flat_map(|body| {
+            (0..body.expression_count()).filter_map(move |raw| {
+                let FirExprKind::ConstructorCaptureRead {
+                    owner, field, site, ..
+                } = &body.expr(FirExprId::from_raw(raw as u32))?.kind
+                else {
+                    return None;
+                };
+                (*owner == object.declaration).then_some((*field, *site))
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reads,
+        [(0, crate::fir::FirConstructorCaptureSite::Parameter)]
+    );
+}

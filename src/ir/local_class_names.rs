@@ -569,7 +569,7 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
         IrExpr::Checked(operation) => checked_operation(operation, names),
         IrExpr::CallableReference(reference) => {
             match &mut reference.target {
-                IrCallableReferenceTarget::Constructor { classifier }
+                IrCallableReferenceTarget::Constructor { classifier, .. }
                 | IrCallableReferenceTarget::Classifier { classifier, .. } => {
                     name(classifier, names)
                 }
