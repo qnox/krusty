@@ -168,8 +168,7 @@ impl BodyFirChecker<'_> {
                     ));
                 }
             }
-            ReceiverFnValueOrigin::ClassStorage(field)
-            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
+            ReceiverFnValueOrigin::ClassStorage(field) => {
                 let kind = self.direct_class_storage_read_kind(field, function_ty, origin_id)?;
                 self.body.add_expr(FirExpr {
                     origin: origin_id,
@@ -178,6 +177,7 @@ impl BodyFirChecker<'_> {
                 })
             }
             ReceiverFnValueOrigin::DispatchProperty { .. }
+            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
             | ReceiverFnValueOrigin::TopLevelProperty => {
                 self.expression(property_callee.ok_or_else(|| {
                     self.failure(

@@ -406,6 +406,24 @@ impl Checker<'_> {
         live.next().is_none().then_some(selected)
     }
 
+    pub(super) fn publish_enum_entry_storage_callee(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        storage: EnumEntryStorage,
+    ) -> bool {
+        let Some(selected) = self.declared_enum_property_input(scope, storage) else {
+            return false;
+        };
+        self.publish_enum_entry_property_read(
+            scope,
+            expression,
+            storage.owner,
+            storage.property,
+            selected.receiver,
+        )
+    }
+
     /// Entry initialization reads its own storage. A nested class's read of that same binding
     /// must keep the declared member and selected entry instance even after value captures retire.
     pub(super) fn publish_enum_entry_storage_read(

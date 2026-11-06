@@ -19108,18 +19108,16 @@ impl<'a> Checker<'a> {
                     {
                         continue;
                     }
-                    let Ok(Some(selection)) =
-                        self.select_property_read(scope, implicit_receiver.ty, &fname)
-                    else {
-                        continue;
+                    let receiver_ty = match self.record_implicit_callable_property_read(
+                        scope,
+                        callee,
+                        &fname,
+                        implicit_receiver,
+                    ) {
+                        Ok(Some(ty)) => ty,
+                        Ok(None) => continue,
+                        Err(()) => return Ty::Error,
                     };
-                    let receiver_ty = selection.ty();
-                    if !self.value_type_claims_call(scope, receiver_ty) {
-                        continue;
-                    }
-                    let receiver_ty = self.record_property_read(scope, Some(callee), selection);
-                    self.set(callee, receiver_ty);
-                    self.mark_implicit_receiver_selection(callee, implicit_receiver);
                     if let Some(ret) = self.record_invoke_or_report(
                         scope,
                         CallArgs {

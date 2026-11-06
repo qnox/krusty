@@ -84,3 +84,43 @@ fn the_whole_custom_setter_program_keeps_an_ordinary_property_write() {
     }
     assert_eq!(writes, [true]);
 }
+
+#[test]
+fn the_whole_function_property_program_publishes_its_selected_entry_reads() {
+    let (index, bodies) = checked_streamed_bodies(include_str!(
+        "../../../../tests/box_regressions/enumEntryReceiverFunctionProperty.kt"
+    ));
+    let classifier = index
+        .classifier_declaration(crate::types::type_name("EntryFunctionValue"))
+        .expect("enum declaration");
+    let entry = index
+        .owned_declaration(classifier, DeclarationKind::EnumEntry, 0)
+        .expect("selected entry");
+    let selected = (0..3)
+        .map(|sibling| {
+            let declaration = index
+                .owned_declaration(entry, DeclarationKind::Property, sibling)
+                .expect("selected callable property declaration");
+            index
+                .property_for_declaration(declaration)
+                .expect("selected property")
+        })
+        .collect::<Vec<_>>();
+    let mut reads = vec![0; selected.len()];
+    for body in &bodies {
+        for raw in 0..body.expression_count() {
+            if let FirExprKind::PropertyRead {
+                target: FirPropertyTarget::Module { property, .. },
+                dispatch_receiver,
+                ..
+            } = &body.expr(FirExprId::from_raw(raw as u32)).unwrap().kind
+            {
+                if let Some(slot) = selected.iter().position(|selected| selected == property) {
+                    assert!(dispatch_receiver.is_some(), "selected entry receiver");
+                    reads[slot] += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(reads, [2, 1, 1]);
+}

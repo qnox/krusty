@@ -357,9 +357,31 @@ impl Checker<'_> {
                 self.mark_implicit_receiver_selection(*callee, receiver);
                 Some(*callee)
             }
-            ReceiverFnValueOrigin::Local
-            | ReceiverFnValueOrigin::ClassStorage(_)
-            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. } => None,
+            ReceiverFnValueOrigin::EnumEntryPropertyStorage {
+                owner,
+                field,
+                declaration,
+            } => {
+                let Expr::Call { callee, .. } = self.file.expr(call) else {
+                    return None;
+                };
+                if !self.publish_enum_entry_storage_callee(
+                    scope,
+                    *callee,
+                    EnumEntryStorage {
+                        owner,
+                        property: EnumEntryProperty {
+                            owner: declaration,
+                            sibling: field,
+                        },
+                    },
+                ) {
+                    return None;
+                }
+                self.set(*callee, Ty::from(TyKind::Fun(signature)));
+                Some(*callee)
+            }
+            ReceiverFnValueOrigin::Local | ReceiverFnValueOrigin::ClassStorage(_) => None,
         };
         self.expect_call_args(scope, params, false, args, arg_tys);
         if let Some(context_args) = context_args {
