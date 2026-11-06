@@ -170,7 +170,8 @@ impl BodyFirChecker<'_> {
             }
             ReceiverFnValueOrigin::ClassStorage(field)
             | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
-                let kind = self.direct_class_storage_read_kind(field, function_ty, origin_id)?;
+                let binding = self.direct_class_capture_binding(field, function_ty)?;
+                let kind = self.capture_read_kind(expression, binding)?;
                 self.body.add_expr(FirExpr {
                     origin: origin_id,
                     ty: function_ty,
