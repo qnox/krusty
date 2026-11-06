@@ -29,7 +29,7 @@ impl Parser<'_> {
             }
             // Kotlin permits newlines between the annotation and its type. A semicolon is not
             // such whitespace and remains for the ordinary type parser to reject.
-            while self.at(TokenKind::Newline) && !self.at_semicolon() {
+            while self.at(TokenKind::Semicolon) && !self.at_semicolon() {
                 self.bump();
             }
         }
