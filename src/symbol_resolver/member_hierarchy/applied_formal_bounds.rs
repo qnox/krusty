@@ -2,7 +2,7 @@
 
 use crate::fx_hash::HashMap;
 use crate::libraries::GenericSig;
-use crate::types::{ty_mentions_param, ty_with_transitive_param_bounds, Ty};
+use crate::types::{ty_mentions_param, ty_with_transitive_param_bounds, Ty, TyParamName};
 
 /// Refresh the applied member's own bound graph after the receiver substitution, returning every
 /// formal whose bound it changed with its refreshed primary bound. kotlinc's fake override
@@ -15,14 +15,14 @@ use crate::types::{ty_mentions_param, ty_with_transitive_param_bounds, Ty};
 pub(super) fn refreshed_formal_bounds(
     signature: &mut GenericSig,
     declared_bounds: &[Ty],
-) -> HashMap<String, Ty> {
+) -> HashMap<TyParamName, Ty> {
     let mut affected = signature
         .formals
         .iter()
         .zip(declared_bounds)
         .enumerate()
         .filter(|(ordinal, (_, declared))| signature.primary_formal_bound(*ordinal) != **declared)
-        .map(|(_, (formal, _))| formal.clone())
+        .map(|(_, (formal, _))| *formal)
         .collect::<Vec<_>>();
     if affected.is_empty() {
         return HashMap::default();
@@ -38,7 +38,7 @@ pub(super) fn refreshed_formal_bounds(
                         .iter()
                         .any(|bound| ty_mentions_param(*bound, &affected))
             })
-            .map(|(formal, _)| formal.clone())
+            .map(|(formal, _)| *formal)
             .collect::<Vec<_>>();
         if dependents.is_empty() {
             break;
@@ -50,7 +50,7 @@ pub(super) fn refreshed_formal_bounds(
         .iter()
         .enumerate()
         .filter(|(_, formal)| affected.contains(formal))
-        .map(|(ordinal, formal)| (formal.clone(), signature.primary_formal_bound(ordinal)))
+        .map(|(ordinal, formal)| (*formal, signature.primary_formal_bound(ordinal)))
         .collect::<HashMap<_, _>>();
     for (formal, bounds) in signature.formals.iter().zip(&mut signature.formal_bounds) {
         if affected.contains(formal) {
@@ -64,7 +64,7 @@ pub(super) fn refreshed_formal_bounds(
         .iter()
         .enumerate()
         .filter(|(_, formal)| affected.contains(formal))
-        .map(|(ordinal, formal)| (formal.clone(), signature.primary_formal_bound(ordinal)))
+        .map(|(ordinal, formal)| (*formal, signature.primary_formal_bound(ordinal)))
         .collect()
 }
 
@@ -74,7 +74,7 @@ mod tests {
 
     fn signature(formals: &[&str], formal_bounds: Vec<Vec<Ty>>) -> GenericSig {
         GenericSig {
-            formals: formals.iter().map(|formal| formal.to_string()).collect(),
+            formals: TyParamName::all(formals),
             formal_bounds,
             receiver: None,
             params: Vec::new(),
@@ -98,7 +98,10 @@ mod tests {
         let refreshed_t = Ty::ty_param("T", string);
         assert_eq!(
             refreshed,
-            HashMap::from_iter([("T".to_string(), string), ("U".to_string(), refreshed_t),])
+            HashMap::from_iter([
+                (TyParamName::new("T"), string),
+                (TyParamName::new("U"), refreshed_t),
+            ])
         );
         assert_eq!(applied.formal_bounds, vec![vec![string], vec![refreshed_t]]);
         assert_eq!(
@@ -131,7 +134,10 @@ mod tests {
         );
         assert_eq!(
             refreshed,
-            HashMap::from_iter([("T".to_string(), string), ("S".to_string(), refreshed_s)])
+            HashMap::from_iter([
+                (TyParamName::new("T"), string),
+                (TyParamName::new("S"), refreshed_s)
+            ])
         );
     }
 }
