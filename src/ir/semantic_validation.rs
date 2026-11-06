@@ -223,6 +223,7 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
         IrCheckedOperation::ConstructorDelegation {
             target,
             outer_parameter,
+            capture_arguments,
             arguments,
             substitutions,
             ..
@@ -230,6 +231,9 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
             validate_constructor_target(target)?;
             if let Some(outer) = outer_parameter {
                 reject("constructor outer parameter", *outer)?;
+            }
+            for (_, ty) in capture_arguments.iter().flatten() {
+                reject("constructor capture parameter", *ty)?;
             }
             for argument in arguments {
                 validate_argument(argument)?;

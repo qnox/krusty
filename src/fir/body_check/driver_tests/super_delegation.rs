@@ -832,3 +832,88 @@ fn nested_anonymous_super_lambda_captures_its_callers_receiver() {
         "the lambda reads its lexical B capture, never anonymous constructor-prefix/storage"
     );
 }
+
+#[test]
+fn local_super_capture_projection_reads_the_child_constructor_parameter() {
+    let source =
+        include_str!("../../../../tests/box_regressions/localSuperclassCaptureProjection.kt");
+    let mut diagnostics = DiagSink::new();
+    let mut analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(source).with_file_stem("LocalSuperclassCaptureProjection")],
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let streamed = analysis.streamed.take().expect("finalized source headers");
+    let source_id = SourceFileId::from_raw(0);
+    let ordinary = streamed.ordinary_body_work(&analysis.files[0], source_id);
+    let (mut index, mut inline_bodies, _defaults, mut sources) = streamed.module.into_parts();
+    let info = analysis.types[0].as_ref().expect("checked source");
+    crate::resolve::publish_checked_local_signatures(
+        &analysis.files[0],
+        source_id,
+        &analysis.symbols,
+        info,
+        &mut index,
+    )
+    .expect("local constructor signatures");
+    let mut session = BodyCheckSession::default();
+    let mut sink = RecordingSink::default();
+    for work in ordinary {
+        check_and_dispatch_bound_body_in_session(
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: source_id,
+                index: &index,
+            },
+            work,
+            sources.origins_mut(),
+            &mut inline_bodies,
+            &mut sink,
+            &mut session,
+        )
+        .expect("whole source must become checked FIR");
+    }
+    let mut projections = Vec::new();
+    for (body_owner, body) in &sink.0 {
+        for raw in 0..body.statement_count() {
+            let Some(FirStatement {
+                kind: FirStatementKind::ConstructorDelegation(call),
+                ..
+            }) = body.statement(FirStatementId::from_raw(raw as u32))
+            else {
+                continue;
+            };
+            let Some(captures) = call.external_capture_arguments.as_deref() else {
+                continue;
+            };
+            let [capture] = captures else {
+                panic!("one selected superclass capture")
+            };
+            assert!(!capture.shared_cell_holder);
+            let child = index
+                .declaration_anchor(DeclarationId::from_raw(body_owner.raw()))
+                .and_then(|anchor| anchor.owner)
+                .expect("child classifier");
+            let value = body.expr(capture.value).expect("checked capture operand");
+            assert_eq!(value.ty.get(), Ty::String);
+            assert_eq!(
+                value.kind,
+                FirExprKind::ConstructorCaptureRead {
+                    owner: child,
+                    field: 0,
+                    shared_cell: false,
+                    site: crate::fir::FirConstructorCaptureSite::Parameter,
+                }
+            );
+            projections.push(child);
+        }
+    }
+    assert_eq!(
+        projections.len(),
+        1,
+        "only Child's super call projects a capture"
+    );
+}
