@@ -56,6 +56,7 @@ impl CoreRegistry {
         callable: &LibraryCallable,
         kind: ExternalCallableKind,
         declaration_owner: Option<SemanticCallableOwner>,
+        declares_parameter_defaults: bool,
     ) -> ExternalCallableId {
         let key = CoreCallableKey {
             owner: callable.owner,
@@ -90,6 +91,7 @@ impl CoreRegistry {
             klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            declares_parameter_defaults,
         });
         self.callable_ids.insert(key, identity);
         identity
@@ -151,11 +153,11 @@ fn register_property(
 ) {
     let kind = property_kind(property.kind);
     let owner = Some(declaration_owner);
-    let getter = registry.callable(&property.getter, kind, owner);
+    let getter = registry.callable(&property.getter, kind, owner, false);
     property.getter.external_identity = Some(getter);
     property.getter.declaration_owner = owner;
     let setter = property.setter.as_mut().map(|setter| {
-        let identity = registry.callable(setter, kind, owner);
+        let identity = registry.callable(setter, kind, owner, false);
         setter.external_identity = Some(identity);
         setter.declaration_owner = owner;
         identity
@@ -180,7 +182,12 @@ fn register_callables(
     let (mut functions, mut properties) = callables.into_parts();
     for function in &mut functions.overloads {
         let owner = Some(declaration_owner);
-        let identity = registry.callable(&function.callable, callable_kind(function.kind), owner);
+        let identity = registry.callable(
+            &function.callable,
+            callable_kind(function.kind),
+            owner,
+            function.call_sig.param_defaults.contains(&true),
+        );
         function.callable.external_identity = Some(identity);
         function.callable.declaration_owner = owner;
     }
@@ -220,4 +227,48 @@ pub(super) fn external_property(
     identity: ExternalPropertyId,
 ) -> Option<ExternalPropertyRealization> {
     registry().properties.get(identity.raw() as usize).cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_callable_realization_retains_its_declarations_parameter_defaults() {
+        for (defaults, declares_default) in [
+            (vec![false, false], false),
+            (vec![true, false], true),
+            (vec![false, true], true),
+        ] {
+            let mut registry = CoreRegistry::default();
+            let mut function = super::super::FunctionInfo::plain(
+                FnKind::TopLevel,
+                None,
+                LibraryCallable::library(
+                    "example/Library",
+                    "value",
+                    vec![Ty::Int, Ty::Int],
+                    Ty::Int,
+                    Ty::Int,
+                    "(II)I",
+                ),
+            );
+            function.call_sig.param_defaults = defaults.into();
+            let declarations = register_callables(
+                &mut registry,
+                Callables::Functions(super::super::FunctionSet {
+                    overloads: vec![function],
+                }),
+                SemanticCallableOwner::Package(crate::types::type_name("example")),
+            );
+            let identity = declarations.functions()[0]
+                .callable
+                .external_identity
+                .unwrap();
+            assert_eq!(
+                registry.callables[identity.raw() as usize].declares_parameter_defaults,
+                declares_default
+            );
+        }
+    }
 }
