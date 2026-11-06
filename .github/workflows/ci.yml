@@ -1185,7 +1185,8 @@ jobs:
   release:
     needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
-    runs-on: [self-hosted, helper-1c-1gb]
+    # Publication runs Gradle to build and sign Maven Central and Plugin Portal artifacts.
+    runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
     timeout-minutes: 25
     permissions:
