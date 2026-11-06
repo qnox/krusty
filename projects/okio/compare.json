@@ -11,102 +11,132 @@
  "identical": 12,
  "cost": {
   "kotlinc": {
-   "wall_seconds": 79.0,
-   "cpu_seconds": 251.7,
+   "wall_seconds": 101.6,
+   "cpu_seconds": 326.6,
    "peak_rss_mb": {
-    "total": 4339,
-    "gradle": 2185,
-    "kotlin_daemon": 2153,
+    "total": 4270,
+    "gradle": 2144,
+    "kotlin_daemon": 2128,
     "krusty": 0,
     "other": 0
    },
-   "compile_seconds": 26.5,
-   "built_compile_seconds": 1.7
+   "compile_seconds": 32.4,
+   "built_compile_seconds": 2.2
   },
   "krusty": {
-   "wall_seconds": 84.1,
-   "cpu_seconds": 267.7,
+   "wall_seconds": 106.9,
+   "cpu_seconds": 343.4,
    "peak_rss_mb": {
-    "total": 4220,
-    "gradle": 2273,
-    "kotlin_daemon": 1955,
-    "krusty": 136,
+    "total": 4095,
+    "gradle": 2276,
+    "kotlin_daemon": 1822,
+    "krusty": 130,
     "other": 0
    },
-   "compile_seconds": 22.9,
-   "built_compile_seconds": 0.7
+   "compile_seconds": 28.9,
+   "built_compile_seconds": 0.8
   }
  },
  "hotspots": {
-  "samples": 108,
+  "samples": 122,
   "functions": [
    {
-    "function": "mi_theap_malloc_zero_aligned_at",
-    "self": 7,
-    "total": 16
-   },
-   {
     "function": "[libc.so.6]",
-    "self": 4,
-    "total": 107
-   },
-   {
-    "function": "do_syscall_64",
-    "self": 4,
-    "total": 13
-   },
-   {
-    "function": "x64_sys_call",
-    "self": 4,
-    "total": 12
-   },
-   {
-    "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::alloc",
-    "self": 3,
-    "total": 22
+    "self": 6,
+    "total": 115
    },
    {
     "function": "mi_free",
-    "self": 3,
-    "total": 8
-   },
-   {
-    "function": "mi_free_block_local",
-    "self": 3,
-    "total": 4
+    "self": 5,
+    "total": 12
    },
    {
     "function": "zlib_rs::inflate::inflate_fast_help_avx2",
-    "self": 3,
+    "self": 5,
+    "total": 6
+   },
+   {
+    "function": "mi_malloc_aligned",
+    "self": 4,
+    "total": 22
+   },
+   {
+    "function": "mi_theap_malloc_zero_aligned_at",
+    "self": 4,
+    "total": 17
+   },
+   {
+    "function": "kernel_init_pages",
+    "self": 4,
     "total": 4
    },
    {
-    "function": "<krusty::name_tree::Table>::probe",
+    "function": "<krusty::jvm::classpath::Classpath>::jar_pkg_members_name",
     "self": 3,
-    "total": 3
+    "total": 12
+   },
+   {
+    "function": "krusty::jvm::classpath::jimage_catalog::cached_jimage_index",
+    "self": 3,
+    "total": 5
+   },
+   {
+    "function": "__rustc::__rust_alloc",
+    "self": 2,
+    "total": 27
+   },
+   {
+    "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::alloc",
+    "self": 2,
+    "total": 25
    },
    {
     "function": "mi_theap_malloc_aligned_at",
     "self": 2,
-    "total": 19
+    "total": 18
    },
    {
-    "function": "<krusty::name_tree::NameTree>::child_or_insert",
+    "function": "<zlib_rs::inflate::State>::dispatch",
+    "self": 2,
+    "total": 11
+   },
+   {
+    "function": "do_syscall_64",
+    "self": 2,
+    "total": 11
+   },
+   {
+    "function": "[ld-linux-x86-64.so.2]",
     "self": 2,
     "total": 6
    },
    {
-    "function": "vfs_read",
+    "function": "_mi_page_malloc_zero",
+    "self": 2,
+    "total": 5
+   },
+   {
+    "function": "_mi_theap_get_free_small_page",
     "self": 2,
     "total": 4
    },
    {
-    "function": "_mi_is_power_of_two",
+    "function": "<ahash::random_state::RandomState>::from_keys",
     "self": 2,
     "total": 2
    },
    {
-    "function": "ext4_llseek",
+    "function": "<krusty::name_tree::NameTree>::child_or_insert",
+    "self": 2,
+    "total": 2
+   },
+   {
+    "function": "_mi_page_map_index",
+    "self": 2,
+    "total": 2
+   },
+   {
+    "function": "_mi_wsize_from_size",
     "self": 2,
     "total": 2
    },
@@ -116,67 +146,97 @@
     "total": 2
    },
    {
-    "function": "mi_block_set_nextx",
+    "function": "zlib_rs::inflate::inftrees::inflate_table",
     "self": 2,
     "total": 2
    },
    {
-    "function": "<krusty::resolve::Checker>::check_method",
+    "function": "mi_theap_malloc_aligned",
     "self": 1,
-    "total": 20
+    "total": 19
    },
    {
-    "function": "mi_malloc_aligned",
-    "self": 1,
-    "total": 20
-   },
-   {
-    "function": "<krusty::symbol_source::CachedCompositeSource as krusty::symbol_source::SymbolSource>::symbols",
+    "function": "<alloc::vec::Vec<alloc::rc::Rc<krusty::libraries::ResolvedSymbols>> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::rc::Rc<krusty::libraries::ResolvedSymbols>, core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<krusty::types::TypeName>, krusty::symbol_resolver::scope_level_callables::symbols_at_scope_level::{closure#0}>>>::from_iter",
     "self": 1,
     "total": 13
    },
    {
     "function": "__rustc::__rust_dealloc",
     "self": 1,
-    "total": 8
+    "total": 12
    },
    {
-    "function": "llseek",
+    "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::dealloc",
     "self": 1,
-    "total": 8
+    "total": 11
    },
    {
-    "function": "<alloc::string::String as core::clone::Clone>::clone",
+    "function": "<krusty::jvm::classpath::Classpath>::package_tree",
+    "self": 1,
+    "total": 9
+   },
+   {
+    "function": "<zlib_rs::inflate::State>::len_and_friends",
+    "self": 1,
+    "total": 7
+   },
+   {
+    "function": "_mi_theap_realloc_zero",
+    "self": 1,
+    "total": 7
+   },
+   {
+    "function": "__x64_sys_read",
     "self": 1,
     "total": 5
    },
    {
-    "function": "krusty::resolve::receiver_tower::declared_receivers",
+    "function": "_mi_ptr_page",
     "self": 1,
     "total": 5
    },
    {
-    "function": "mi_theap_malloc_zero_no_guarded",
-    "self": 1,
-    "total": 5
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty::types::Ty> as alloc::vec::spec_from_iter::SpecFromIter<krusty::types::Ty, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<krusty::metadata::decode::type_shape::ParsedTypeArgument>, krusty::jvm::metadata::decode_metadata_type::{closure#0}>, core::option::Option<core::convert::Infallible>>>>::from_iter",
+    "function": "ksys_read",
     "self": 1,
     "total": 4
    },
    {
-    "function": "krusty::symbol_resolver::hierarchy_projection::direct_supertypes",
+    "function": "mi_block_set_nextx",
+    "self": 1,
+    "total": 4
+   },
+   {
+    "function": "<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>",
     "self": 1,
     "total": 3
    },
    {
-    "function": "<ahash::random_state::RandomState>::from_keys::{closure#0}",
+    "function": "<alloc::vec::Vec<&str> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<&str, core::str::iter::Split<char>>>::from_iter",
+    "self": 1,
+    "total": 3
+   },
+   {
+    "function": "_mi_unchecked_ptr_page",
+    "self": 1,
+    "total": 3
+   },
+   {
+    "function": "mi_block_next",
+    "self": 1,
+    "total": 3
+   },
+   {
+    "function": "<alloc::boxed::Box<krusty::ir::callee::Callee> as core::clone::Clone>::clone",
     "self": 1,
     "total": 2
    },
    {
-    "function": "<alloc::string::String as core::fmt::Write>::write_str",
+    "function": "<zip::datetime::DateTime>::try_from_msdos",
+    "self": 1,
+    "total": 2
+   },
+   {
+    "function": "atime_needs_update",
     "self": 1,
     "total": 2
    },
@@ -186,22 +246,12 @@
     "total": 2
    },
    {
-    "function": "mi_page_free_list_extend",
+    "function": "mi_free_block_local",
     "self": 1,
     "total": 2
    },
    {
-    "function": "mi_theap_umalloc",
-    "self": 1,
-    "total": 2
-   },
-   {
-    "function": "<ahash::fallback_hash::AHasher as core::clone::Clone>::clone",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "<ahash::random_state::DefaultRandomSource as ahash::random_state::RandomSource>::gen_hasher_seed",
+    "function": "<ahash::random_state::RandomState as core::hash::BuildHasher>::hash_one::<&krusty::jvm::classpath::external_identities::ExternalCallableKey>",
     "self": 1,
     "total": 1
    },
@@ -211,82 +261,47 @@
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<&str> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<&str, core::str::iter::Split<char>>>::from_iter",
+    "function": "<alloc::vec::Vec<krusty::ir::enums::EnumSwitchRegistration> as core::clone::Clone>::clone",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<(u64, u32)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(u64, u32), core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::enumerate::Enumerate<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<alloc::sync::Arc<[krusty::jvm::metadata::function::MetaFn]>>, core::slice::iter::Iter<krusty::jvm::metadata::function::MetaFn>, <krusty::jvm::classpath::Classpath>::class_meta_name::{closure#0}>>, <krusty::jvm::classpath::Classpath>::class_meta_name::{closure#1}>, <krusty::jvm::classpath::Classpath>::class_meta_name::{closure#2}>>>::from_iter",
+    "function": "<alloc::vec::into_iter::IntoIter<krusty::jvm::method_node::nodes::LabelId> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::map::map_fold<krusty::jvm::method_node::nodes::LabelId, usize,",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<(usize, krusty::types::Ty)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(usize, krusty::types::Ty), core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<krusty::ast::ExprId>>, <krusty::resolve::Checker>::contextualize_constructor_arrays::{closure#0}>>>::from_iter",
+    "function": "<core::alloc::layout::Layout>::from_size_alignment_unchecked",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<krusty::jvm::metadata::value_parameter::MetaValueParam> as alloc::vec::spec_from_iter::SpecFromIter<krusty::jvm::metadata::value_parameter::MetaValueParam, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::map::Map<core::iter::adapters::chain::Chain<core::iter::adapters::map::Map<core::slice::iter::Iter<alloc::vec::Vec<u8>>, krusty::jvm::metadata::decode_functions::{closure#9}>, core::iter::adapters::map::Map<core::slice::iter::Iter<u64>, krusty::jvm::metadata::decode_functions::{closure#10}>>, krusty::jvm::metadata::decode_functions::{closure#11}>, krusty::jvm::metadata::decode_functions::{closure#12}>, core::option::Option<core::convert::Infallible>>>>::from_iter",
+    "function": "<core::ops::range::RangeInclusive<u8> as core::ops::range::RangeBounds<u8>>::contains::<u8>",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<u32> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<u32, core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::diag::Span>, krusty::parser::debug_lines::attach::{closure#4}>>>::from_iter",
+    "function": "<core::str::lossy::Utf8Chunks as core::iter::traits::iterator::Iterator>::next",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<core::alloc::layout::Layout>::align",
+    "function": "<hashbrown::map::HashMap<krusty::name_tree::NameId,",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<hashbrown::map::HashMap<(krusty::language_version::LanguageVersion, krusty::symbol_source::SymbolNamespace), krusty::lru::LruCache<alloc::string::String, alloc::rc::Rc<krusty::libraries::ResolvedSymbols>>, ahash::random_state::RandomState>>::get_mut::<(krusty::language_version::LanguageVersion, krusty::symbol_source::SymbolNamespace)>",
+    "function": "<krusty::ast::Expr as core::clone::Clone>::clone",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<hashbrown::raw::RawTable<(alloc::string::String, usize)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, usize, std::hash::random::RandomState>::{closure#0}>",
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries as krusty::libraries::SemanticPlatform>::inherited_accessor_properties",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<hashbrown::raw::RawTable<(krusty::types::thin_handles::TyParamName,",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "<hashbrown::raw::RawTableInner>::drop_elements::<(krusty::fir::identities::DeclarationId, krusty::fir::signature::classifier_headers::ResolvedClassifierHeader)>",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "<krusty::jvm::classfile::ClassWriter>::referenced_member_descriptors",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "<krusty::jvm::classpath::Classpath>::mapped_builtin_realization",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "<krusty::jvm::metadata::realization_facts::Realizations>::stamp_functions",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "<krusty::lru::LruCache<(krusty::types::TypeName, alloc::string::String, alloc::string::String), core::option::Option<krusty::jvm::classreader::MethodCode>>>::insert",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "<krusty::metadata::decode::wire::Pb>::varint",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "<krusty::resolve::scope::Scope<krusty::resolve::ScopeBinding>>::visit_bindings::<<krusty::resolve::Checker>::visible_flow_value::{closure#0}>",
+    "function": "<krusty::metadata::decode::klib::Cursor>::varint::<&str>",
     "self": 1,
     "total": 1
    },
@@ -296,529 +311,634 @@
     "total": 1
    },
    {
-    "function": "<krusty::types::interning::ShardedInterner<[krusty::types::Ty]>>::intern_ref_with::<krusty::types::intern_tys::{closure#0}>",
+    "function": "<krusty::types::Ty>::mentions_marker",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<u16 as core::convert::TryInto<u8>>::try_into",
+    "function": "<krusty::types::Ty>::obj_internal",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<zlib_rs::inflate::writer::Writer>::extend_from_window_with_features::<1>",
+    "function": "<std::collections::hash::map::HashMap<krusty::types::thin_handles::TyParamName, krusty::types::Ty, ahash::random_state::RandomState> as core::iter::traits::collect::FromIterator<(krusty::types::thin_handles::TyParamName, krusty::types::Ty)>>::from_iter::<core::iter::adapters::zip::Zip<core::iter::adapters::map::Map<core::slice::iter::Iter<alloc::string::String>, <krusty::types::thin_handles::TyParamName as core::convert::From<&alloc::string::String>>::from>, core::iter::adapters::copied::Copied<core::slice::iter::Iter<krusty::types::Ty>>>>",
     "self": 1,
     "total": 1
    },
    {
-    "function": "_copy_to_iter",
+    "function": "<std::path::Path as core::hash::Hash>::hash::<ahash::fallback_hash::AHasher>",
     "self": 1,
     "total": 1
    },
    {
-    "function": "_mi_theap_get_free_small_page",
+    "function": "<zlib_rs::inflate::State>::new",
     "self": 1,
     "total": 1
    },
    {
-    "function": "_mi_unchecked_ptr_page",
+    "function": "<zlib_rs::weak_slice::WeakSliceMut<u8>>::len",
     "self": 1,
     "total": 1
    },
    {
-    "function": "atime_needs_update",
+    "function": "__task_pid_nr_ns",
     "self": 1,
     "total": 1
    },
    {
-    "function": "copy_mc_enhanced_fast_string",
+    "function": "_mi_memid_none",
     "self": 1,
     "total": 1
    },
    {
-    "function": "core::intrinsics::rotate_left::<u64>",
+    "function": "_mi_page_map_at",
     "self": 1,
     "total": 1
    },
    {
-    "function": "core::ptr::drop_glue::<alloc::vec::Vec<krusty::jvm::metadata::string_table::Rec>>",
+    "function": "_mi_theap_heap",
     "self": 1,
     "total": 1
    },
    {
-    "function": "core::ptr::drop_glue::<alloc::vec::Vec<krusty::resolve::abstract_obligations::SemanticBoundSet>>",
+    "function": "_raw_spin_unlock_irqrestore",
     "self": 1,
     "total": 1
    },
    {
-    "function": "core::slice::memchr::memchr_aligned",
+    "function": "blk_cgroup_congested",
     "self": 1,
     "total": 1
    },
    {
-    "function": "crc32fast::specialized::pclmulqdq::reduce128",
+    "function": "change_pte_range",
     "self": 1,
     "total": 1
    },
    {
-    "function": "krusty::jvm::bytecode::instruction_len",
+    "function": "core::ptr::drop_glue::<alloc::vec::Vec<krusty::metadata::protobuf::Pb>>",
     "self": 1,
     "total": 1
    },
    {
-    "function": "krusty::jvm::classpath::inline_plan_cache::fingerprint",
+    "function": "core::ptr::drop_glue::<core::option::Option<(alloc::vec::Vec<alloc::string::String>, alloc::vec::Vec<alloc::vec::Vec<krusty::types::Ty>>, alloc::vec::Vec<krusty::types::Ty>)>>",
     "self": 1,
     "total": 1
    },
    {
-    "function": "krusty::jvm::jvm_libraries::desc_to_ty",
+    "function": "core::ptr::drop_glue::<krusty::libraries::LibraryCallable>",
     "self": 1,
     "total": 1
    },
    {
-    "function": "lock_vma_under_rcu",
+    "function": "core::slice::raw::from_raw_parts_mut::<core::mem::maybe_uninit::MaybeUninit<u8>>",
     "self": 1,
     "total": 1
    },
    {
-    "function": "mb_find_extent",
+    "function": "core::str::converts::from_utf8",
     "self": 1,
     "total": 1
    },
    {
-    "function": "mi_page_free_quick_collect",
+    "function": "current_time",
     "self": 1,
     "total": 1
    },
    {
-    "function": "mi_page_queue_remove",
+    "function": "do_statx",
     "self": 1,
     "total": 1
    },
    {
-    "function": "mi_page_usable_block_size",
+    "function": "fdget_pos",
     "self": 1,
     "total": 1
    },
    {
-    "function": "mi_stat_update",
+    "function": "krusty::jvm::jvm_libraries::return_types::java_collection_return_lower_bound",
     "self": 1,
     "total": 1
    },
    {
-    "function": "putname",
+    "function": "krusty::jvm::metadata::decode_metadata_type::{closure#8}",
     "self": 1,
     "total": 1
    },
    {
-    "function": "stacker::grow::<core::result::Result<krusty::fir::signature::resolved_types::ResolvedTy, krusty::fir::identities::DiagnosticId>, <krusty::fir::signature::evaluate::ResolverBackedSignatureEvaluator<_> as krusty::fir::signature::SignatureConstraintEvaluator>::evaluate::evaluate_expression<krusty::resolve::streaming_signature_bridge::ProductionSignatureSemantics>::{closure#0}>::{closure#0}",
+    "function": "krusty::libraries::call_sig::vec_for_arity::<alloc::string::String>",
     "self": 1,
     "total": 1
    },
    {
-    "function": "trace_syscall_enter",
+    "function": "krusty::metadata::decode::type_shape::parse_type_node",
     "self": 1,
     "total": 1
    },
    {
-    "function": "__libc_start_main",
-    "self": 0,
-    "total": 107
+    "function": "mi_page_xthread_id",
+    "self": 1,
+    "total": 1
    },
    {
-    "function": "_start",
-    "self": 0,
-    "total": 107
+    "function": "percpu_counter_add_batch",
+    "self": 1,
+    "total": 1
+   },
+   {
+    "function": "vm_normal_page",
+    "self": 1,
+    "total": 1
    },
    {
     "function": "<fn() as core::ops::function::FnOnce<()>>::call_once",
     "self": 0,
-    "total": 106
+    "total": 115
+   },
+   {
+    "function": "__libc_start_main",
+    "self": 0,
+    "total": 115
+   },
+   {
+    "function": "_start",
+    "self": 0,
+    "total": 115
    },
    {
     "function": "krusty::main",
     "self": 0,
-    "total": 106
+    "total": 115
    },
    {
     "function": "main",
     "self": 0,
-    "total": 106
+    "total": 115
    },
    {
     "function": "std::rt::lang_start::<()>",
     "self": 0,
-    "total": 106
+    "total": 115
    },
    {
     "function": "std::rt::lang_start::<()>::{closure#0}",
     "self": 0,
-    "total": 106
+    "total": 115
    },
    {
     "function": "std::rt::lang_start_internal",
     "self": 0,
-    "total": 106
+    "total": 115
    },
    {
     "function": "std::sys::backtrace::__rust_begin_short_backtrace::<fn(),",
     "self": 0,
-    "total": 106
+    "total": 115
    },
    {
     "function": "krusty::compile",
     "self": 0,
-    "total": 91
-   },
-   {
-    "function": "<core::panic::unwind_safe::AssertUnwindSafe<&mut dyn core::ops::function::FnMut<(), Output =",
-    "self": 0,
-    "total": 54
-   },
-   {
-    "function": "__rust_try",
-    "self": 0,
-    "total": 54
-   },
-   {
-    "function": "psm::on_stack::<core::option::Option<alloc::boxed::Box<dyn core::any::Any + core::marker::Send>>, stacker::_grow::{closure#0}>",
-    "self": 0,
-    "total": 54
-   },
-   {
-    "function": "psm::on_stack::with_on_stack::<core::option::Option<alloc::boxed::Box<dyn core::any::Any + core::marker::Send>>, stacker::_grow::{closure#0}>",
-    "self": 0,
-    "total": 54
-   },
-   {
-    "function": "rust_psm_on_stack",
-    "self": 0,
-    "total": 54
-   },
-   {
-    "function": "stacker::_grow",
-    "self": 0,
-    "total": 54
-   },
-   {
-    "function": "stacker::_grow::{closure#0}",
-    "self": 0,
-    "total": 54
-   },
-   {
-    "function": "std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<&mut dyn core::ops::function::FnMut<(), Output =",
-    "self": 0,
-    "total": 54
-   },
-   {
-    "function": "std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<&mut dyn core::ops::function::FnMut<(), Output =",
-    "self": 0,
-    "total": 54
+    "total": 101
    },
    {
     "function": "<&mut dyn core::ops::function::FnMut<(), Output =",
     "self": 0,
-    "total": 53
+    "total": 64
+   },
+   {
+    "function": "<core::panic::unwind_safe::AssertUnwindSafe<&mut dyn core::ops::function::FnMut<(), Output =",
+    "self": 0,
+    "total": 64
+   },
+   {
+    "function": "__rust_try",
+    "self": 0,
+    "total": 64
+   },
+   {
+    "function": "psm::on_stack::<core::option::Option<alloc::boxed::Box<dyn core::any::Any + core::marker::Send>>, stacker::_grow::{closure#0}>",
+    "self": 0,
+    "total": 64
+   },
+   {
+    "function": "psm::on_stack::with_on_stack::<core::option::Option<alloc::boxed::Box<dyn core::any::Any + core::marker::Send>>, stacker::_grow::{closure#0}>",
+    "self": 0,
+    "total": 64
+   },
+   {
+    "function": "rust_psm_on_stack",
+    "self": 0,
+    "total": 64
+   },
+   {
+    "function": "stacker::_grow",
+    "self": 0,
+    "total": 64
+   },
+   {
+    "function": "stacker::_grow::{closure#0}",
+    "self": 0,
+    "total": 64
+   },
+   {
+    "function": "std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<&mut dyn core::ops::function::FnMut<(), Output =",
+    "self": 0,
+    "total": 64
+   },
+   {
+    "function": "std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<&mut dyn core::ops::function::FnMut<(), Output =",
+    "self": 0,
+    "total": 64
    },
    {
     "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::symbols",
     "self": 0,
-    "total": 46
-   },
-   {
-    "function": "krusty::frontend::analyze_source_set_impl::<krusty::frontend::analyze_source_set_streaming_with_module<krusty::frontend::PlatformProvider>::{closure#0}>",
-    "self": 0,
-    "total": 38
-   },
-   {
-    "function": "krusty::frontend::analyze_source_set_streaming_with_module::<krusty::frontend::PlatformProvider>",
-    "self": 0,
-    "total": 38
+    "total": 52
    },
    {
     "function": "krusty::compiler::emit_analyzed_into::<krusty::jvm::backend::JvmBackend, krusty::frontend::StreamingSourceSetAnalysis>",
     "self": 0,
-    "total": 34
+    "total": 47
    },
    {
     "function": "krusty::compiler::emit_analyzed_to::<krusty::jvm::backend::JvmBackend, krusty::frontend::StreamingSourceSetAnalysis>",
     "self": 0,
-    "total": 34
+    "total": 47
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::read_entry_class",
+    "function": "krusty::frontend::analyze_source_set_impl::<krusty::frontend::analyze_source_set_streaming_with_module<krusty::frontend::PlatformProvider>::{closure#0}>",
     "self": 0,
-    "total": 30
+    "total": 37
    },
    {
-    "function": "<krusty::symbol_source::CompositeSource as krusty::symbol_source::SymbolSource>::symbols",
+    "function": "krusty::frontend::analyze_source_set_streaming_with_module::<krusty::frontend::PlatformProvider>",
     "self": 0,
-    "total": 26
-   },
-   {
-    "function": "<krusty::jvm::classpath::Classpath>::complete_entry_class",
-    "self": 0,
-    "total": 25
-   },
-   {
-    "function": "<krusty::jvm::classpath::Classpath>::entry_package_types",
-    "self": 0,
-    "total": 25
-   },
-   {
-    "function": "<krusty::jvm::classpath::Classpath>::package_alias_identity",
-    "self": 0,
-    "total": 25
-   },
-   {
-    "function": "<krusty::jvm::classpath::Classpath>::package_alias_index",
-    "self": 0,
-    "total": 25
+    "total": 37
    },
    {
     "function": "<krusty::resolve::Checker>::check_class",
     "self": 0,
-    "total": 25
-   },
-   {
-    "function": "krusty::jvm::classpath::metadata_indexes::complete_entry_package_types::<<krusty::jvm::classpath::Classpath>::entry_package_types::{closure#0}>",
-    "self": 0,
-    "total": 25
+    "total": 36
    },
    {
     "function": "<krusty::frontend::ReparseSource>::visit_declaration_units::<krusty::compiler::emit_analyzed_into<krusty::jvm::backend::JvmBackend, krusty::frontend::StreamingSourceSetAnalysis>::{closure#5}>",
     "self": 0,
-    "total": 24
+    "total": 35
    },
    {
     "function": "<krusty::frontend::ReparseSource>::visit_declaration_units::<krusty::compiler::emit_analyzed_into<krusty::jvm::backend::JvmBackend, krusty::frontend::StreamingSourceSetAnalysis>::{closure#5}>::{closure#0}",
     "self": 0,
-    "total": 24
+    "total": 35
    },
    {
     "function": "<krusty::parser::Parser>::parse_file_with_declaration_sink::<krusty::parser::declaration_stream::visit_declaration_units_with_features<<krusty::frontend::ReparseSource>::visit_declaration_units<krusty::compiler::emit_analyzed_into<krusty::jvm::backend::JvmBackend, krusty::frontend::StreamingSourceSetAnalysis>::{closure#5}>::{closure#0}>::{closure#0}::{closure#0}>",
     "self": 0,
-    "total": 24
+    "total": 35
+   },
+   {
+    "function": "<krusty::symbol_source::CompositeSource as krusty::symbol_source::SymbolSource>::symbols",
+    "self": 0,
+    "total": 35
    },
    {
     "function": "krusty::compiler::consume_body_group",
     "self": 0,
-    "total": 24
+    "total": 35
    },
    {
     "function": "krusty::compiler::emit_analyzed_into::<krusty::jvm::backend::JvmBackend, krusty::frontend::StreamingSourceSetAnalysis>::{closure#5}",
     "self": 0,
-    "total": 24
-   },
-   {
-    "function": "krusty::jvm::classreader::parse_class",
-    "self": 0,
-    "total": 24
+    "total": 35
    },
    {
     "function": "krusty::parser::declaration_stream::visit_declaration_units_with_features::<<krusty::frontend::ReparseSource>::visit_declaration_units<krusty::compiler::emit_analyzed_into<krusty::jvm::backend::JvmBackend, krusty::frontend::StreamingSourceSetAnalysis>::{closure#5}>::{closure#0}>",
     "self": 0,
-    "total": 24
+    "total": 35
    },
    {
     "function": "krusty::parser::declaration_stream::visit_declaration_units_with_features::<<krusty::frontend::ReparseSource>::visit_declaration_units<krusty::compiler::emit_analyzed_into<krusty::jvm::backend::JvmBackend, krusty::frontend::StreamingSourceSetAnalysis>::{closure#5}>::{closure#0}>::{closure#0}",
     "self": 0,
-    "total": 24
+    "total": 35
    },
    {
     "function": "krusty::parser::declaration_stream::visit_declaration_units_with_features::<<krusty::frontend::ReparseSource>::visit_declaration_units<krusty::compiler::emit_analyzed_into<krusty::jvm::backend::JvmBackend, krusty::frontend::StreamingSourceSetAnalysis>::{closure#5}>::{closure#0}>::{closure#0}::{closure#0}",
     "self": 0,
-    "total": 24
+    "total": 35
    },
    {
     "function": "krusty::wide_stack::on_wide_stack::<(), krusty::parser::declaration_stream::visit_declaration_units_with_features<<krusty::frontend::ReparseSource>::visit_declaration_units<krusty::compiler::emit_analyzed_into<krusty::jvm::backend::JvmBackend, krusty::frontend::StreamingSourceSetAnalysis>::{closure#5}>::{closure#0}>::{closure#0}>",
     "self": 0,
-    "total": 24
+    "total": 35
    },
    {
     "function": "stacker::grow::<(), krusty::parser::declaration_stream::visit_declaration_units_with_features<<krusty::frontend::ReparseSource>::visit_declaration_units<krusty::compiler::emit_analyzed_into<krusty::jvm::backend::JvmBackend, krusty::frontend::StreamingSourceSetAnalysis>::{closure#5}>::{closure#0}>::{closure#0}>",
     "self": 0,
-    "total": 24
+    "total": 35
    },
    {
     "function": "stacker::grow::<(), krusty::parser::declaration_stream::visit_declaration_units_with_features<<krusty::frontend::ReparseSource>::visit_declaration_units<krusty::compiler::emit_analyzed_into<krusty::jvm::backend::JvmBackend, krusty::frontend::StreamingSourceSetAnalysis>::{closure#5}>::{closure#0}>::{closure#0}>::{closure#0}",
     "self": 0,
-    "total": 24
+    "total": 35
    },
    {
     "function": "krusty::compiler::check_body_group",
     "self": 0,
-    "total": 23
+    "total": 34
    },
    {
     "function": "krusty::resolve::check_file_at_impl_mode_with_index::<krusty::resolve::PassTwoSymbols>",
     "self": 0,
-    "total": 23
+    "total": 34
    },
    {
     "function": "krusty::wide_stack::on_wide_stack::<krusty::resolve::TypeInfo, krusty::resolve::check_selected_declarations_in_pass_two::{closure#0}>",
     "self": 0,
-    "total": 23
+    "total": 34
    },
    {
-    "function": "__rustc::__rust_alloc",
+    "function": "<krusty::resolve::Checker>::check_method",
     "self": 0,
-    "total": 22
+    "total": 31
    },
    {
     "function": "<krusty::resolve::Checker>::check_method_in_capture_plan",
     "self": 0,
-    "total": 20
-   },
-   {
-    "function": "<zip::read::zip_archive::ZipArchive<std::fs::File>>::with_config",
-    "self": 0,
-    "total": 20
-   },
-   {
-    "function": "krusty::archive::open_file",
-    "self": 0,
-    "total": 20
+    "total": 31
    },
    {
     "function": "<krusty::resolve::Checker>::expr_inner",
     "self": 0,
-    "total": 19
+    "total": 30
    },
    {
     "function": "<krusty::resolve::Checker>::expr_with_context",
     "self": 0,
-    "total": 19
-   },
-   {
-    "function": "krusty::resolve::signature_collection::collect_signatures_with_cp_headers_and_local_contexts",
-    "self": 0,
-    "total": 19
-   },
-   {
-    "function": "krusty::resolve::signature_collection::collection::collect_signatures_with_cp_impl",
-    "self": 0,
-    "total": 19
-   },
-   {
-    "function": "mi_theap_malloc_aligned",
-    "self": 0,
-    "total": 19
-   },
-   {
-    "function": "stacker::grow::<krusty::resolve::SymbolTable, krusty::resolve::signature_collection::collect_signatures_with_cp_headers_and_local_contexts::{closure#0}>",
-    "self": 0,
-    "total": 19
-   },
-   {
-    "function": "stacker::grow::<krusty::resolve::SymbolTable, krusty::resolve::signature_collection::collect_signatures_with_cp_headers_and_local_contexts::{closure#0}>::{closure#0}",
-    "self": 0,
-    "total": 19
-   },
-   {
-    "function": "<krusty::resolve::signature_collection::type_universe::BootstrapSymbolSource as krusty::symbol_source::SymbolSource>::symbols",
-    "self": 0,
-    "total": 18
-   },
-   {
-    "function": "krusty::resolve::signature_collection::type_universe::source_type_universe",
-    "self": 0,
-    "total": 18
-   },
-   {
-    "function": "<krusty::resolve::Checker>::check_fun_body",
-    "self": 0,
-    "total": 17
+    "total": 30
    },
    {
     "function": "<krusty::resolve::Checker>::expr_inner_block_in_scope",
     "self": 0,
-    "total": 17
+    "total": 29
    },
    {
-    "function": "entry_SYSCALL_64_after_hwframe",
+    "function": "<krusty::resolve::Checker>::check_fun_body",
     "self": 0,
-    "total": 17
-   },
-   {
-    "function": "krusty::jvm::metadata::decode_metadata_within",
-    "self": 0,
-    "total": 17
-   },
-   {
-    "function": "krusty::resolve::classifier_from_imports::<krusty::resolve::signature_collection::type_universe::BootstrapSymbolSource>",
-    "self": 0,
-    "total": 17
-   },
-   {
-    "function": "krusty::symbol_resolver::classifier_scope::classifier_candidates_at_import_level::<krusty::resolve::signature_collection::type_universe::BootstrapSymbolSource>",
-    "self": 0,
-    "total": 17
+    "total": 28
    },
    {
     "function": "<krusty::resolve::Checker>::check_call",
     "self": 0,
+    "total": 26
+   },
+   {
+    "function": "<krusty::resolve::Checker>::stmt_inner",
+    "self": 0,
+    "total": 23
+   },
+   {
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::top_level_overloads",
+    "self": 0,
+    "total": 21
+   },
+   {
+    "function": "<krusty::symbol_source::CachedCompositeSource as krusty::symbol_source::SymbolSource>::symbols",
+    "self": 0,
+    "total": 20
+   },
+   {
+    "function": "krusty::resolve::signature_collection::collect_signatures_with_cp_headers_and_local_contexts",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "krusty::resolve::signature_collection::collection::collect_signatures_with_cp_impl",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "stacker::grow::<krusty::resolve::SymbolTable, krusty::resolve::signature_collection::collect_signatures_with_cp_headers_and_local_contexts::{closure#0}>",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "stacker::grow::<krusty::resolve::SymbolTable, krusty::resolve::signature_collection::collect_signatures_with_cp_headers_and_local_contexts::{closure#0}>::{closure#0}",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<krusty::jvm::classpath::Classpath>::read_entry_class",
+    "self": 0,
+    "total": 16
+   },
+   {
+    "function": "<krusty::resolve::signature_collection::type_universe::BootstrapSymbolSource as krusty::symbol_source::SymbolSource>::symbols",
+    "self": 0,
+    "total": 16
+   },
+   {
+    "function": "<krusty::symbol_resolver::SymbolResolver>::receiver_callable_inventory",
+    "self": 0,
+    "total": 16
+   },
+   {
+    "function": "krusty::resolve::signature_collection::type_universe::source_type_universe",
+    "self": 0,
+    "total": 16
+   },
+   {
+    "function": "<krusty::resolve::Checker>::stable_receiver_callables",
+    "self": 0,
     "total": 15
    },
    {
-    "function": "krusty::jvm::metadata::decode_functions",
+    "function": "<krusty::symbol_resolver::SymbolResolver>::receiver_callables",
     "self": 0,
     "total": 15
    },
    {
     "function": "krusty::run_refusals",
     "self": 0,
-    "total": 15
+    "total": 14
    },
    {
-    "function": "<krusty::resolve::Checker>::stmt_inner",
+    "function": "<krusty::jvm::classpath::Classpath>::complete_entry_class",
     "self": 0,
-    "total": 14
+    "total": 13
+   },
+   {
+    "function": "<krusty::jvm::classpath::Classpath>::entry_package_types",
+    "self": 0,
+    "total": 13
+   },
+   {
+    "function": "<krusty::jvm::classpath::Classpath>::jar_entry_read",
+    "self": 0,
+    "total": 13
+   },
+   {
+    "function": "<krusty::jvm::classpath::Classpath>::package_alias_identity",
+    "self": 0,
+    "total": 13
+   },
+   {
+    "function": "<krusty::jvm::classpath::Classpath>::package_alias_index",
+    "self": 0,
+    "total": 13
+   },
+   {
+    "function": "<std::sys::sync::once::futex::Once>::call",
+    "self": 0,
+    "total": 13
+   },
+   {
+    "function": "<zip::compression::LazyDecompressor<alloc::io::buffered::bufreader::BufReader<zip::read::readers::CryptoReader<std::fs::File>>> as alloc::io::read::Read>::read",
+    "self": 0,
+    "total": 13
+   },
+   {
+    "function": "alloc::io::read::default_read_to_end::<core::io::util::Take<&mut zip::compression::LazyDecompressor<alloc::io::buffered::bufreader::BufReader<zip::read::readers::CryptoReader<std::fs::File>>>>>",
+    "self": 0,
+    "total": 13
+   },
+   {
+    "function": "krusty::jvm::classpath::metadata_indexes::complete_entry_package_types::<<krusty::jvm::classpath::Classpath>::entry_package_types::{closure#0}>",
+    "self": 0,
+    "total": 13
    },
    {
     "function": "krusty::resolve::actualization_names::actualization_type_bindings",
     "self": 0,
-    "total": 14
+    "total": 13
    },
    {
-    "function": "<krusty::symbol_resolver::SymbolResolver>::qualified_type_classifier_binding_in_scope",
+    "function": "krusty::resolve::classifier_from_imports::<krusty::resolve::signature_collection::type_universe::BootstrapSymbolSource>",
     "self": 0,
     "total": 13
    },
    {
-    "function": "krusty::resolve::actualization_names::bind_type",
+    "function": "krusty::symbol_resolver::classifier_scope::classifier_candidates_at_import_level::<krusty::resolve::signature_collection::type_universe::BootstrapSymbolSource>",
     "self": 0,
     "total": 13
    },
    {
-    "function": "<alloc::vec::Vec<(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>), core::iter::adapters::map::Map<core::iter::adapters::map::Map<core::iter::adapters::chain::Chain<core::slice::iter::Iter<alloc::string::String>, core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<krusty::plugins::cli::CompilerPluginSpec>, core::slice::iter::Iter<alloc::string::String>, <krusty::plugins::cli::PluginConfig>::all_plugin_jars::{closure#0}>>, <alloc::string::String>::as_str>, <krusty::plugins::registry::PluginRegistry>::resolve::{closure#0}>>>::from_iter",
+    "function": "krusty::symbol_resolver::scope_level_callables::declaration_levels_in_function_scope",
+    "self": 0,
+    "total": 13
+   },
+   {
+    "function": "<core::io::util::Take<&mut zip::compression::LazyDecompressor<alloc::io::buffered::bufreader::BufReader<zip::read::readers::CryptoReader<std::fs::File>>>> as alloc::io::read::Read>::read_buf",
     "self": 0,
     "total": 12
    },
    {
-    "function": "<krusty::plugins::registry::PluginRegistry>::resolve",
+    "function": "<flate2::ffi::zlib_rs::Inflate as flate2::ffi::InflateBackend>::decompress",
     "self": 0,
     "total": 12
    },
    {
-    "function": "<krusty_cli::cli::Options>::resolve_plugins",
+    "function": "<flate2::mem::Decompress as flate2::zio::Ops>::run",
     "self": 0,
     "total": 12
    },
    {
-    "function": "krusty::plugins::registry::declared_registrars",
+    "function": "<flate2::mem::Decompress>::decompress",
+    "self": 0,
+    "total": 12
+   },
+   {
+    "function": "<krusty::jvm::backend::JvmBackend as krusty::backend::Backend>::lower_ir_file",
+    "self": 0,
+    "total": 12
+   },
+   {
+    "function": "<krusty::jvm::classpath::Classpath>::functions_in_scope",
     "self": 0,
     "total": 12
    },
    {
     "function": "<krusty::jvm::classpath::Classpath>::validate_builtins",
     "self": 0,
-    "total": 11
+    "total": 12
+   },
+   {
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::classifier_record",
+    "self": 0,
+    "total": 12
    },
    {
     "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::new",
     "self": 0,
+    "total": 12
+   },
+   {
+    "function": "<krusty::symbol_resolver::SymbolResolver>::qualified_type_classifier_binding_in_scope",
+    "self": 0,
+    "total": 12
+   },
+   {
+    "function": "<zlib_rs::stable::Inflate>::decompress",
+    "self": 0,
+    "total": 12
+   },
+   {
+    "function": "krusty::resolve::actualization_names::bind_type",
+    "self": 0,
+    "total": 12
+   },
+   {
+    "function": "zlib_rs::inflate::inflate",
+    "self": 0,
+    "total": 12
+   },
+   {
+    "function": "<alloc::boxed::Box<zip::crc32::Crc32Reader<zip::compression::LazyDecompressor<alloc::io::buffered::bufreader::BufReader<zip::read::readers::CryptoReader<std::fs::File>>>>> as alloc::io::read::Read>::read_to_end",
+    "self": 0,
     "total": 11
+   },
+   {
+    "function": "<krusty::jvm::backend::JvmBackend>::emit_streamed_ir",
+    "self": 0,
+    "total": 11
+   },
+   {
+    "function": "<zip::read::zip_archive::ZipArchive<std::fs::File>>::with_config",
+    "self": 0,
+    "total": 11
+   },
+   {
+    "function": "entry_SYSCALL_64_after_hwframe",
+    "self": 0,
+    "total": 11
+   },
+   {
+    "function": "krusty::archive::open_file",
+    "self": 0,
+    "total": 11
+   },
+   {
+    "function": "<alloc::raw_vec::RawVecInner>::finish_grow",
+    "self": 0,
+    "total": 10
+   },
+   {
+    "function": "<alloc::vec::Vec<(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>), core::iter::adapters::map::Map<core::iter::adapters::map::Map<core::iter::adapters::chain::Chain<core::slice::iter::Iter<alloc::string::String>, core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<krusty::plugins::cli::CompilerPluginSpec>, core::slice::iter::Iter<alloc::string::String>, <krusty::plugins::cli::PluginConfig>::all_plugin_jars::{closure#0}>>, <alloc::string::String>::as_str>, <krusty::plugins::registry::PluginRegistry>::resolve::{closure#0}>>>::from_iter",
+    "self": 0,
+    "total": 10
+   },
+   {
+    "function": "<krusty::plugins::registry::PluginRegistry>::resolve",
+    "self": 0,
+    "total": 10
+   },
+   {
+    "function": "<krusty_cli::cli::Options>::resolve_plugins",
+    "self": 0,
+    "total": 10
+   },
+   {
+    "function": "krusty::plugins::registry::declared_registrars",
+    "self": 0,
+    "total": 10
    },
    {
     "function": "krusty::symbol_resolver::classifier_scope::scoped_classifier_candidates_at_scope_level::<krusty::symbol_resolver::source_view::ResolverSource>",
@@ -826,17 +946,22 @@
     "total": 10
    },
    {
-    "function": "<krusty::jvm::backend::JvmBackend as krusty::backend::Backend>::lower_ir_file",
+    "function": "krusty::jvm::ir_emit::bytecode_inline_call::compiled_module_classes::write_class",
     "self": 0,
     "total": 9
    },
    {
-    "function": "<krusty::jvm::backend::JvmBackend>::emit_streamed_ir",
+    "function": "krusty::jvm::ir_emit::emit_all_with_class_meta_impl",
     "self": 0,
     "total": 9
    },
    {
-    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::top_level_overloads",
+    "function": "krusty::jvm::ir_emit::emit_class",
+    "self": 0,
+    "total": 9
+   },
+   {
+    "function": "krusty::jvm::ir_emit::emit_pass",
     "self": 0,
     "total": 9
    },
@@ -846,137 +971,202 @@
     "total": 9
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::jar_entry_read",
-    "self": 0,
-    "total": 8
-   },
-   {
-    "function": "<krusty::jvm::classpath::Classpath>::package_tree",
-    "self": 0,
-    "total": 8
-   },
-   {
-    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::classifier_record",
-    "self": 0,
-    "total": 8
-   },
-   {
-    "function": "<krusty::symbol_resolver::SymbolResolver>::receiver_callable_inventory",
-    "self": 0,
-    "total": 8
-   },
-   {
-    "function": "<std::fs::File as alloc::io::read::Read>::read",
-    "self": 0,
-    "total": 8
-   },
-   {
-    "function": "alloc::io::read::default_read_exact::<std::fs::File>",
-    "self": 0,
-    "total": 8
-   },
-   {
-    "function": "krusty::jvm::ir_emit::bytecode_inline_call::compiled_module_classes::write_class",
-    "self": 0,
-    "total": 8
-   },
-   {
-    "function": "krusty::jvm::ir_emit::emit_all_with_class_meta_impl",
-    "self": 0,
-    "total": 8
-   },
-   {
-    "function": "krusty::jvm::ir_emit::emit_class",
-    "self": 0,
-    "total": 8
-   },
-   {
-    "function": "krusty::jvm::ir_emit::emit_pass",
-    "self": 0,
-    "total": 8
-   },
-   {
     "function": "krusty::wide_stack::on_wide_stack::<core::option::Option<alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)>>, krusty::jvm::ir_emit::emit_all_with_class_meta::{closure#0}>",
     "self": 0,
-    "total": 8
-   },
-   {
-    "function": "read",
-    "self": 0,
-    "total": 8
+    "total": 9
    },
    {
     "function": "stacker::grow::<core::option::Option<alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)>>, krusty::jvm::ir_emit::emit_all_with_class_meta::{closure#0}>::{closure#0}",
     "self": 0,
+    "total": 9
+   },
+   {
+    "function": "x64_sys_call",
+    "self": 0,
     "total": 8
    },
    {
-    "function": "<alloc::raw_vec::RawVecInner>::finish_grow",
+    "function": "<alloc::string::String as core::clone::Clone>::clone",
     "self": 0,
     "total": 7
    },
    {
-    "function": "<alloc::vec::Vec<alloc::rc::Rc<krusty::libraries::ResolvedSymbols>> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::rc::Rc<krusty::libraries::ResolvedSymbols>, core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<krusty::types::TypeName>, krusty::symbol_resolver::scope_level_callables::symbols_at_scope_level::{closure#0}>>>::from_iter",
-    "self": 0,
-    "total": 7
-   },
-   {
-    "function": "<krusty::resolve::Checker>::stable_receiver_callables",
-    "self": 0,
-    "total": 7
-   },
-   {
-    "function": "<krusty::symbol_resolver::SymbolResolver>::receiver_callables",
-    "self": 0,
-    "total": 7
-   },
-   {
-    "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::dealloc",
-    "self": 0,
-    "total": 7
-   },
-   {
-    "function": "krusty::jvm::metadata::decode_metadata_type",
-    "self": 0,
-    "total": 7
-   },
-   {
-    "function": "krusty::symbol_resolver::scope_level_callables::declaration_levels_in_function_scope",
+    "function": "<krusty::jvm::classpath::Classpath>::entry_packages",
     "self": 0,
     "total": 7
    },
    {
     "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::build_library_type",
     "self": 0,
-    "total": 6
+    "total": 7
    },
    {
-    "function": "krusty_cli::cli::parse::<alloc::vec::Vec<alloc::string::String>>",
+    "function": "<krusty::resolve::Checker>::check_receiver_before_arguments",
+    "self": 0,
+    "total": 7
+   },
+   {
+    "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::realloc",
+    "self": 0,
+    "total": 7
+   },
+   {
+    "function": "<std::fs::File as alloc::io::read::Read>::read",
+    "self": 0,
+    "total": 7
+   },
+   {
+    "function": "__rustc::__rust_realloc",
+    "self": 0,
+    "total": 7
+   },
+   {
+    "function": "alloc::io::read::default_read_exact::<std::fs::File>",
+    "self": 0,
+    "total": 7
+   },
+   {
+    "function": "asm_exc_page_fault",
+    "self": 0,
+    "total": 7
+   },
+   {
+    "function": "do_user_addr_fault",
+    "self": 0,
+    "total": 7
+   },
+   {
+    "function": "exc_page_fault",
+    "self": 0,
+    "total": 7
+   },
+   {
+    "function": "mi_realloc_aligned",
+    "self": 0,
+    "total": 7
+   },
+   {
+    "function": "mi_theap_realloc_aligned",
+    "self": 0,
+    "total": 7
+   },
+   {
+    "function": "mi_theap_realloc_zero_aligned",
+    "self": 0,
+    "total": 7
+   },
+   {
+    "function": "read",
+    "self": 0,
+    "total": 7
+   },
+   {
+    "function": "<krusty::jvm::bytecode_passes::pipeline::Run>::step",
     "self": 0,
     "total": 6
    },
    {
-    "function": "krusty_cli::cli::read::<alloc::vec::Vec<alloc::string::String>>",
+    "function": "<krusty::jvm::classfile::ClassWriter>::optimized",
     "self": 0,
     "total": 6
    },
    {
-    "function": "<alloc::boxed::Box<zip::crc32::Crc32Reader<zip::compression::Decompressor<alloc::io::buffered::bufreader::BufReader<zip::read::readers::CryptoReader<std::fs::File>>>>> as alloc::io::read::Read>::read_to_end",
+    "function": "<krusty::jvm::classfile::ClassWriter>::rewrite_interning",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "<krusty::jvm::classfile::ClassWriter>::rewritten_with",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "<krusty::jvm::classpath::Classpath>::class_members",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::classifier_record::{closure#3}",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "<krusty::jvm::metadata::lazy_members::PackedMembers>::decode",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<krusty::jvm::metadata::lazy_members::KotlinMembers, krusty::jvm::metadata::MetadataDecodeError>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<krusty::jvm::metadata::lazy_members::KotlinMembers, krusty::jvm::metadata::MetadataDecodeError>>>::get_or_init<<krusty::jvm::metadata::lazy_members::LazyMembers>::decode::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "<std::sync::once_lock::OnceLock<core::result::Result<krusty::jvm::metadata::lazy_members::KotlinMembers, krusty::jvm::metadata::MetadataDecodeError>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<krusty::jvm::metadata::lazy_members::KotlinMembers, krusty::jvm::metadata::MetadataDecodeError>>>::get_or_init<<krusty::jvm::metadata::lazy_members::LazyMembers>::decode::{closure#0}>::{closure#0}, !>",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "__handle_mm_fault",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "_mi_malloc_generic",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "handle_mm_fault",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "krusty::jvm::bytecode_passes::pipeline::optimize",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "krusty::jvm::classreader::parse_class",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "krusty::jvm::ir_emit::emit_method_inner",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "krusty::jvm::ir_emit::emit_placed_method",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "krusty::jvm::ir_emit::emit_scheduled_member",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "krusty::jvm::metadata::decode_functions",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "zlib_rs::inflate::inflate_fast_help",
+    "self": 0,
+    "total": 6
+   },
+   {
+    "function": "<krusty::jvm::classfile::ClassWriter>::add_method_sig",
     "self": 0,
     "total": 5
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::entry_packages",
+    "function": "<krusty::jvm::classpath::Classpath>::class_meta_name",
     "self": 0,
     "total": 5
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::find_name",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "<krusty::jvm::classpath::Classpath>::jar_pkg_members_name",
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::declared_callables_for",
     "self": 0,
     "total": 5
    },
@@ -986,42 +1176,27 @@
     "total": 5
    },
    {
-    "function": "<krusty::resolve::Checker>::check_receiver_before_arguments",
+    "function": "<krusty::symbol_resolver::source_view::ResolverSource as krusty::symbol_source::SymbolSource>::classifier",
     "self": 0,
     "total": 5
    },
    {
-    "function": "<std::sys::sync::once::futex::Once>::call",
+    "function": "<zip::format::blocks::ZipCentralEntryBlock as zip::format::blocks::FixedSizeBlock>::parse::<std::fs::File>",
     "self": 0,
     "total": 5
    },
    {
-    "function": "_mi_malloc_generic",
+    "function": "_mi_arenas_page_alloc",
     "self": 0,
     "total": 5
    },
    {
-    "function": "krusty::jvm::classpath::candidate_union::functions_in_scope",
+    "function": "krusty::jvm::metadata::decode_metadata_type",
     "self": 0,
     "total": 5
    },
    {
-    "function": "krusty::jvm::ir_emit::emit_method_inner",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "krusty::jvm::ir_emit::emit_placed_method",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "krusty::jvm::ir_emit::emit_scheduled_member",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "krusty::jvm::metadata::string_table::resolve_class_name",
+    "function": "mi_arenas_page_regular_alloc",
     "self": 0,
     "total": 5
    },
@@ -1036,67 +1211,82 @@
     "total": 5
    },
    {
-    "function": "mi_theap_malloc_zero_aligned_at_generic",
+    "function": "mi_page_fresh",
     "self": 0,
     "total": 5
    },
    {
-    "function": "<alloc::vec::into_iter::IntoIter<krusty::metadata::decode::type_shape::ParsedTypeArgument> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::map::map_try_fold<krusty::metadata::decode::type_shape::ParsedTypeArgument, core::option::Option<krusty::types::Ty>,",
+    "function": "mi_page_fresh_alloc",
+    "self": 0,
+    "total": 5
+   },
+   {
+    "function": "mi_page_queue_find_free_ex",
+    "self": 0,
+    "total": 5
+   },
+   {
+    "function": "<alloc::raw_vec::RawVecInner>::try_allocate_in",
     "self": 0,
     "total": 4
    },
    {
-    "function": "<flate2::ffi::zlib_rs::Inflate as flate2::ffi::InflateBackend>::decompress",
+    "function": "<alloc::vec::Vec<(u32, krusty::types::Ty, &krusty::libraries::FunctionInfo)> as alloc::vec::spec_from_iter::SpecFromIter<(u32, krusty::types::Ty, &krusty::libraries::FunctionInfo), core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<&krusty::libraries::FunctionInfo>, krusty::symbol_resolver::ranked_extension_candidates<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<alloc::rc::Rc<krusty::libraries::ResolvedSymbols>>, core::slice::iter::Iter<krusty::libraries::FunctionInfo>, krusty::symbol_resolver::scope_level_callables::level_functions::{closure#0}>>::{closure#1}>>>::from_iter",
     "self": 0,
     "total": 4
    },
    {
-    "function": "<flate2::mem::Decompress as flate2::zio::Ops>::run",
+    "function": "<krusty::jvm::classpath::Classpath>::find_name",
     "self": 0,
     "total": 4
    },
    {
-    "function": "<flate2::mem::Decompress>::decompress",
+    "function": "<krusty::jvm::classpath::Classpath>::method_code_name",
     "self": 0,
     "total": 4
    },
    {
-    "function": "<krusty::resolve::Checker>::actual_this_narrow",
+    "function": "<krusty::jvm::classpath::Classpath>::method_code_through_parts",
     "self": 0,
     "total": 4
    },
    {
-    "function": "<krusty::symbol_source::CachedCompositeSource as krusty::symbol_source::SymbolSource>::classifier",
+    "function": "<krusty::jvm::classpath::Classpath>::own_method_code",
     "self": 0,
     "total": 4
    },
    {
-    "function": "<zip::compression::Decompressor<alloc::io::buffered::bufreader::BufReader<zip::read::readers::CryptoReader<std::fs::File>>> as alloc::io::read::Read>::read",
+    "function": "<krusty::jvm::classpath::Classpath>::try_selected_builtins_file_for_package",
     "self": 0,
     "total": 4
    },
    {
-    "function": "<zlib_rs::inflate::State>::dispatch",
+    "function": "<krusty::jvm::classpath::Classpath>::try_selected_builtins_file_for_package::{closure#2}",
     "self": 0,
     "total": 4
    },
    {
-    "function": "<zlib_rs::inflate::State>::len_and_friends",
+    "function": "<krusty::resolve::Checker>::check_call::{closure#149}",
     "self": 0,
     "total": 4
    },
    {
-    "function": "<zlib_rs::stable::Inflate>::decompress",
+    "function": "<krusty::resolve::Checker>::expr_inner_binary",
     "self": 0,
     "total": 4
    },
    {
-    "function": "__rustc::__rust_realloc",
+    "function": "<krusty::resolve::Checker>::receiver_function_value",
     "self": 0,
     "total": 4
    },
    {
-    "function": "__x64_sys_read",
+    "function": "<krusty::symbol_resolver::receiver_mro::ReceiverMro>::match_receiver",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "__alloc_frozen_pages_noprof",
     "self": 0,
     "total": 4
    },
@@ -1106,362 +1296,262 @@
     "total": 4
    },
    {
-    "function": "alloc::io::read::default_read_to_end::<core::io::util::Take<&mut zip::compression::Decompressor<alloc::io::buffered::bufreader::BufReader<zip::read::readers::CryptoReader<std::fs::File>>>>>",
+    "function": "alloc_pages_mpol",
     "self": 0,
     "total": 4
    },
    {
-    "function": "flate2::zio::read::<alloc::io::buffered::bufreader::BufReader<zip::read::readers::CryptoReader<std::fs::File>>, flate2::mem::Decompress>",
+    "function": "get_page_from_freelist",
     "self": 0,
     "total": 4
-   },
-   {
-    "function": "ksys_read",
-    "self": 0,
-    "total": 4
-   },
-   {
-    "function": "mi_page_queue_find_free_ex",
-    "self": 0,
-    "total": 4
-   },
-   {
-    "function": "mi_theap_malloc_zero_aligned_at_overalloc",
-    "self": 0,
-    "total": 4
-   },
-   {
-    "function": "zip::read::read_variable_length_byte_field::<std::fs::File>",
-    "self": 0,
-    "total": 4
-   },
-   {
-    "function": "zlib_rs::inflate::inflate",
-    "self": 0,
-    "total": 4
-   },
-   {
-    "function": "zlib_rs::inflate::inflate_fast_help",
-    "self": 0,
-    "total": 4
-   },
-   {
-    "function": "<&mut <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0} as core::ops::function::FnMut<(krusty::kotlin_version::KotlinVersion,)>>::call_mut",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<&mut krusty_cli::cli::classpath_entry_problems::{closure#0} as core::ops::function::FnMut<(&std::path::PathBuf,)>>::call_mut",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog> as core::iter::traits::collect::FromIterator<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>::from_iter::<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<alloc::raw_vec::RawVecInner>::try_allocate_in",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as alloc::vec::spec_from_iter::SpecFromIter<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>>::from_iter",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>>::from_iter",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as core::iter::traits::collect::FromIterator<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>::from_iter::<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty_cli::cli::ClasspathEntryProblem> as alloc::vec::spec_from_iter::SpecFromIter<krusty_cli::cli::ClasspathEntryProblem, core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}>>>::from_iter",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty_cli::cli::ClasspathEntryProblem> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty_cli::cli::ClasspathEntryProblem, core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}>>>::from_iter",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty_cli::cli::ClasspathEntryProblem> as core::iter::traits::collect::FromIterator<krusty_cli::cli::ClasspathEntryProblem>>::from_iter::<core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}>>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<alloc::vec::into_iter::IntoIter<(alloc::boxed::Box<[u8]>, zip::types::ZipFileData)> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::traits::iterator::Iterator::for_each::call<(alloc::boxed::Box<[u8]>, zip::types::ZipFileData), <zip::read::zip_archive::SharedBuilder>::build::{closure#0}>::{closure#0}>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<alloc::vec::into_iter::IntoIter<(alloc::boxed::Box<[u8]>, zip::types::ZipFileData)> as core::iter::traits::iterator::Iterator>::for_each::<<zip::read::zip_archive::SharedBuilder>::build::{closure#0}>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion> as core::iter::traits::iterator::Iterator>::find_map::<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), &mut <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::find_map::check<krusty::kotlin_version::KotlinVersion,",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::collect::<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::next",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<krusty_cli::cli::ClasspathEntryProblem>>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}> as core::iter::traits::iterator::Iterator>::next",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<core::slice::iter::Iter<std::path::PathBuf> as core::iter::traits::iterator::Iterator>::find_map::<krusty_cli::cli::ClasspathEntryProblem, &mut krusty_cli::cli::classpath_entry_problems::{closure#0}>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::features::LangFeatures>::for_release",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::jvm::classfile::ClassWriter>::add_method_sig",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::jvm::classfile::ClassWriter>::rewrite_interning",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::jvm::classfile::ClassWriter>::rewritten_with",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::jvm::classpath::Classpath>::method_code_name",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::jvm::classpath::Classpath>::try_selected_builtins_file_for_package",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::jvm::classpath::Classpath>::try_selected_builtins_file_for_package::{closure#2}",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::classifier_record::{closure#3}",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::language_settings::LanguageSettings>::for_release",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::name_tree::NameTree>::insert_from",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::resolve::Checker>::check_call::{closure#150}",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::resolve::Checker>::declare_scoped_property_with_mutability",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::symbol_resolver::source_view::ResolverSource as krusty::symbol_source::SymbolSource>::classifier",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty_cli::cli::Options as core::default::Default>::default",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::parse",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::realloc",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init::<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init::<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_try_init::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<zip::read::zip_archive::SharedBuilder>::build",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<zip::read::zip_archive::SharedBuilder>::build::{closure#0}",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "_mi_theap_realloc_zero",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "core::iter::traits::iterator::Iterator::find_map::check::<krusty::kotlin_version::KotlinVersion,",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "core::iter::traits::iterator::Iterator::for_each::call::<(alloc::boxed::Box<[u8]>, zip::types::ZipFileData), <zip::read::zip_archive::SharedBuilder>::build::{closure#0}>::{closure#0}",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "krusty::jvm::classpath::jimage_catalog::cached_jimage_index",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "krusty::jvm::classpath::merge_package_tree_part",
-    "self": 0,
-    "total": 3
    },
    {
     "function": "krusty::jvm::classreader::parse_constant_pool",
     "self": 0,
-    "total": 3
+    "total": 4
    },
    {
-    "function": "krusty::symbol_resolver::classifier_scope::explicit_classifier_candidates::<krusty::symbol_resolver::source_view::ResolverSource>",
+    "function": "krusty::resolve::receiver_tower::declared_receivers",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "krusty::symbol_resolver::callable_shapes::declared_function_type",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "krusty::symbol_resolver::ranked_extension_candidates::<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<alloc::rc::Rc<krusty::libraries::ResolvedSymbols>>, core::slice::iter::Iter<krusty::libraries::FunctionInfo>, krusty::symbol_resolver::scope_level_callables::level_functions::{closure#0}>>",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "krusty_cli::cli::parse::<alloc::vec::Vec<alloc::string::String>>",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "krusty_cli::cli::read::<alloc::vec::Vec<alloc::string::String>>",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "mi_block_set_next",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "mi_theap_malloc_zero_aligned_at_generic",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "mi_theap_malloc_zero_no_guarded",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "mi_validate_ptr_page",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "post_alloc_hook",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "vma_alloc_folio_noprof",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "<alloc::vec::Vec<krusty::jvm::metadata::member_names::FunctionName> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::jvm::metadata::member_names::FunctionName, core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<alloc::sync::Arc<krusty::jvm::classreader::ClassInfo>>, &alloc::vec::Vec<krusty::jvm::metadata::member_names::FunctionName>, <krusty::jvm::classpath::Classpath>::facade_function_names::{closure#0}>, <krusty::jvm::classpath::Classpath>::facade_function_names::{closure#1}>>>>::from_iter",
     "self": 0,
     "total": 3
    },
    {
-    "function": "krusty::symbol_resolver::hierarchy_projection::applied_hierarchy",
+    "function": "<alloc::vec::Vec<krusty::types::Ty> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::types::Ty, core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<krusty::ast::ExprId>>, <krusty::resolve::Checker>::check_call::{closure#53}::{closure#0}>>>::from_iter",
     "self": 0,
     "total": 3
    },
    {
-    "function": "krusty_cli::cli::classpath_entry_problems",
+    "function": "<alloc::vec::Vec<krusty::types::TypeName> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::types::TypeName, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::flatten::FlatMap<alloc::vec::into_iter::IntoIter<krusty::types::TypeName>, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<(krusty::types::TypeName, krusty::types::Ty, usize)>, krusty::resolve::receiver_tower::declared_receivers::{closure#6}::{closure#0}>, krusty::resolve::receiver_tower::declared_receivers::{closure#6}>, krusty::resolve::receiver_tower::declared_receivers::{closure#7}>>>::from_iter",
     "self": 0,
     "total": 3
    },
    {
-    "function": "krusty_cli::cli::classpath_entry_problems::{closure#0}",
+    "function": "<core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<alloc::sync::Arc<krusty::jvm::classreader::ClassInfo>>, &alloc::vec::Vec<krusty::jvm::metadata::member_names::FunctionName>, <krusty::jvm::classpath::Classpath>::facade_function_names::{closure#0}>, <krusty::jvm::classpath::Classpath>::facade_function_names::{closure#1}>> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 3
    },
    {
-    "function": "mi_realloc_aligned",
+    "function": "<core::iter::adapters::filter_map::FilterMap<core::iter::adapters::flatten::FlatMap<alloc::vec::into_iter::IntoIter<krusty::types::TypeName>, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<(krusty::types::TypeName, krusty::types::Ty, usize)>, krusty::resolve::receiver_tower::declared_receivers::{closure#6}::{closure#0}>, krusty::resolve::receiver_tower::declared_receivers::{closure#6}>, krusty::resolve::receiver_tower::declared_receivers::{closure#7}> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 3
    },
    {
-    "function": "mi_theap_realloc_aligned",
+    "function": "<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<krusty::ast::ExprId>>, <krusty::resolve::Checker>::check_call::{closure#53}::{closure#0}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::traits::iterator::Iterator::for_each::call<krusty::types::Ty, <alloc::vec::Vec<krusty::types::Ty>>::extend_trusted<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<krusty::ast::ExprId>>, <krusty::resolve::Checker>::check_call::{closure#53}::{closure#0}>>::{closure#0}>::{closure#0}>",
     "self": 0,
     "total": 3
    },
    {
-    "function": "mi_theap_realloc_zero_aligned",
+    "function": "<krusty::jvm::classpath::Classpath>::package_member_names",
     "self": 0,
     "total": 3
    },
    {
-    "function": "<&mut krusty::jvm::metadata::since_kotlin::annotation_names::{closure#0} as core::ops::function::FnMut<(&alloc::vec::Vec<u8>,)>>::call_mut",
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::register_external_callable",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::register_external_classifier_declarations",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<krusty::jvm::metadata::lazy_members::PackedMembers>::with_ctx::<core::result::Result<krusty::jvm::metadata::member_names::PackageMemberNames, krusty::jvm::metadata::MetadataDecodeError>, krusty::jvm::metadata::member_names::package_member_names>",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<krusty::libraries::LibraryCallable as core::clone::Clone>::clone",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<krusty::resolve::Checker>::check_lambda_with_implicit_receivers_and_return_labeled_now",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<krusty::resolve::Checker>::if_branch_ty",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<krusty::resolve::Checker>::scoped_properties",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<krusty::symbol_source::CachedCompositeSource as krusty::symbol_source::SymbolSource>::classifier",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<krusty::jvm::metadata::member_names::PackageMemberNames, krusty::jvm::metadata::MetadataDecodeError>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<krusty::jvm::metadata::member_names::PackageMemberNames, krusty::jvm::metadata::MetadataDecodeError>>>::get_or_init<<krusty::jvm::metadata::lazy_members::LazyMembers>::package_member_names::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<std::sync::once_lock::OnceLock<core::result::Result<krusty::jvm::metadata::member_names::PackageMemberNames, krusty::jvm::metadata::MetadataDecodeError>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<krusty::jvm::metadata::member_names::PackageMemberNames, krusty::jvm::metadata::MetadataDecodeError>>>::get_or_init<<krusty::jvm::metadata::lazy_members::LazyMembers>::package_member_names::{closure#0}>::{closure#0}, !>",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "__do_huge_pmd_anonymous_page",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "_mi_page_init",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "do_huge_pmd_anonymous_page",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "handle_pte_fault",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "krusty::jvm::metadata::builtin_bridge::parse_package_fragment_checked",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "krusty::jvm::metadata::gsig_from_kotlin_class",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "krusty::jvm::metadata::member_names::package_member_names",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "krusty::metadata::semantic::klib::parse",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "krusty::metadata::semantic::klib::semantic_function",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "krusty::resolve::qualifiers::classifier_path_with_binding_identity::<krusty::resolve::signature_collection::type_universe::BootstrapSymbolSource>",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "krusty::resolve::qualifiers::walk_qualifier_with_binding_identity::<krusty::resolve::signature_collection::type_universe::BootstrapSymbolSource>",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "krusty::symbol_resolver::member_hierarchy::declared_callables",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "krusty::symbol_resolver::member_hierarchy::members_in_hierarchy_for",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "krusty::symbol_resolver::member_specialization::specialize_member_type_with_unbound",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "mi_page_extend_free",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "mi_page_free_list_extend",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "mi_theap_malloc_zero_aligned_at_overalloc",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "vma_alloc_anon_folio_pmd",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<&mut <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0} as core::ops::function::FnMut<(krusty::kotlin_version::KotlinVersion,)>>::call_mut",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<ahash::random_state::RandomState>::from_keys",
+    "function": "<&mut krusty_cli::cli::classpath_entry_problems::{closure#0} as core::ops::function::FnMut<(&std::path::PathBuf,)>>::call_mut",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<alloc::boxed::Box<zip::crc32::Crc32Reader<zip::compression::LazyDecompressor<alloc::io::buffered::bufreader::BufReader<zip::read::readers::CryptoReader<std::fs::File>>>>> as alloc::io::read::Read>::read_to_string",
     "self": 0,
     "total": 2
    },
@@ -1471,12 +1561,47 @@
     "total": 2
    },
    {
-    "function": "<alloc::raw_vec::RawVec<alloc::boxed::Box<dyn for<'a> core::ops::function::FnOnce<(&'a mut krusty::jvm::bytecode_passes::insn_list::EditableMethod,), Output =",
+    "function": "<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog> as core::iter::traits::collect::FromIterator<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>::from_iter::<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<alloc::rc::Rc<krusty::jvm::classpath::Classpath> as core::ops::drop::Drop>::drop",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<alloc::rc::Rc<krusty::jvm::classpath::Classpath>>::drop_slow",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<alloc::string::String as core::fmt::Write>::write_str",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<alloc::vec::Vec<(alloc::string::String, krusty::libraries::Callables)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(alloc::string::String, krusty::libraries::Callables), core::iter::adapters::map::Map<std::collections::hash::set::Iter<&alloc::string::String>, <krusty::resolve::Checker>::unimplemented_abstract_members::{closure#7}>>>::from_iter",
     "self": 0,
     "total": 2
    },
    {
     "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable)> as alloc::vec::spec_from_iter::SpecFromIter<(krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable), core::iter::adapters::map::Map<core::slice::iter::Iter<(krusty::kotlin_version::KotlinVersion, &str)>, <krusty::features::table::FeatureTable>::for_version::{closure#0}::{closure#0}>>>::from_iter",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as alloc::vec::spec_from_iter::SpecFromIter<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>>::from_iter",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>>::from_iter",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as core::iter::traits::collect::FromIterator<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>::from_iter::<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>",
     "self": 0,
     "total": 2
    },
@@ -1496,27 +1621,27 @@
     "total": 2
    },
    {
-    "function": "<alloc::vec::Vec<krusty::jvm::metadata::value_parameter::MetaValueParam> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::jvm::metadata::value_parameter::MetaValueParam, core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::metadata::decode::parameter_shape::ParsedValueParam>, krusty::jvm::metadata::decode_functions::{closure#5}>>>::from_iter",
+    "function": "<alloc::vec::Vec<krusty::jvm::metadata::value_parameter::MetaValueParam> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::jvm::metadata::value_parameter::MetaValueParam, core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::metadata::decode::parameter_shape::ParsedValueParam>, krusty::jvm::metadata::decode_functions::{closure#2}>>>::from_iter",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<alloc::vec::Vec<krusty::types::TypeName> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::types::TypeName, core::iter::adapters::filter_map::FilterMap<core::iter::adapters::flatten::FlatMap<alloc::vec::into_iter::IntoIter<krusty::types::TypeName>, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<(krusty::types::TypeName, krusty::types::Ty, usize)>, krusty::resolve::receiver_tower::declared_receivers::{closure#6}::{closure#0}>, krusty::resolve::receiver_tower::declared_receivers::{closure#6}>, krusty::resolve::receiver_tower::declared_receivers::{closure#7}>>>::from_iter",
+    "function": "<alloc::vec::Vec<krusty::types::Ty> as alloc::vec::spec_from_iter::SpecFromIter<krusty::types::Ty, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::metadata::decode::parameter_shape::ParsedValueParam>, krusty::jvm::metadata::build_generic_sig::{closure#1}>, core::option::Option<core::convert::Infallible>>>>::from_iter",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<alloc::vec::Vec<krusty::types::TypeName> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::types::TypeName, core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<alloc::vec::Vec<u8>>, krusty::jvm::metadata::since_kotlin::annotation_names::{closure#0}>>>::from_iter",
+    "function": "<alloc::vec::Vec<krusty_cli::cli::ClasspathEntryProblem> as alloc::vec::spec_from_iter::SpecFromIter<krusty_cli::cli::ClasspathEntryProblem, core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}>>>::from_iter",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<alloc::vec::Vec<krusty_cli::cli::ClasspathEntryProblem> as alloc::vec::spec_extend::SpecExtend<krusty_cli::cli::ClasspathEntryProblem, core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}>>>::spec_extend",
+    "function": "<alloc::vec::Vec<krusty_cli::cli::ClasspathEntryProblem> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty_cli::cli::ClasspathEntryProblem, core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}>>>::from_iter",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<alloc::vec::Vec<krusty_cli::cli::ClasspathEntryProblem>>::extend_desugared::<core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}>>",
+    "function": "<alloc::vec::Vec<krusty_cli::cli::ClasspathEntryProblem> as core::iter::traits::collect::FromIterator<krusty_cli::cli::ClasspathEntryProblem>>::from_iter::<core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}>>",
     "self": 0,
     "total": 2
    },
@@ -1546,12 +1671,62 @@
     "total": 2
    },
    {
+    "function": "<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion> as core::iter::traits::iterator::Iterator>::find_map::<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), &mut <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::find_map::check<krusty::kotlin_version::KotlinVersion,",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<alloc::vec::into_iter::IntoIter<krusty::types::Ty> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::map::map_try_fold<krusty::types::Ty, alloc::vec::Vec<(krusty::types::Ty, u32)>,",
+    "self": 0,
+    "total": 2
+   },
+   {
     "function": "<alloc::vec::into_iter::IntoIter<krusty::types::TypeName> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::map::map_try_fold<krusty::types::TypeName, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<(krusty::types::TypeName, krusty::types::Ty, usize)>, krusty::resolve::receiver_tower::declared_receivers::{closure#6}::{closure#0}>,",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<core::iter::adapters::filter_map::FilterMap<core::iter::adapters::flatten::FlatMap<alloc::vec::into_iter::IntoIter<krusty::types::TypeName>, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<(krusty::types::TypeName, krusty::types::Ty, usize)>, krusty::resolve::receiver_tower::declared_receivers::{closure#6}::{closure#0}>, krusty::resolve::receiver_tower::declared_receivers::{closure#6}>, krusty::resolve::receiver_tower::declared_receivers::{closure#7}> as core::iter::traits::iterator::Iterator>::next",
+    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::next",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::map::map_try_fold<&str, core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>,",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::collect::<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::next",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<krusty_cli::cli::ClasspathEntryProblem>>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 2
    },
@@ -1566,7 +1741,17 @@
     "total": 2
    },
    {
+    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>>",
+    "self": 0,
+    "total": 2
+   },
+   {
     "function": "<core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::ast::ExprId>, <krusty::resolve::Checker>::check_call::{closure#38}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::traits::iterator::Iterator::for_each::call<core::option::Option<krusty::types::Ty>, <alloc::vec::Vec<core::option::Option<krusty::types::Ty>>>::extend_trusted<core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::ast::ExprId>, <krusty::resolve::Checker>::check_call::{closure#38}>>::{closure#0}>::{closure#0}>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::metadata::decode::parameter_shape::ParsedValueParam>, krusty::jvm::metadata::build_generic_sig::{closure#1}> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::metadata::decode::parameter_shape::ParsedValueParam>, krusty::jvm::metadata::build_generic_sig::{closure#1}>, core::option::Option<core::convert::Infallible>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty::types::Ty, core::ops::control_flow::ControlFlow<krusty::types::Ty>, core::ops::control_flow::ControlFlow<krusty::types::Ty>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty::types::Ty>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<krusty::types::Ty>>>",
     "self": 0,
     "total": 2
    },
@@ -1581,22 +1766,27 @@
     "total": 2
    },
    {
-    "function": "<indexmap::map::IndexMap<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>>::hash::<alloc::boxed::Box<[u8]>>",
+    "function": "<core::slice::iter::Iter<std::path::PathBuf> as core::iter::traits::iterator::Iterator>::find_map::<krusty_cli::cli::ClasspathEntryProblem, &mut krusty_cli::cli::classpath_entry_problems::{closure#0}>",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<indexmap::map::IndexMap<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>>::insert",
+    "function": "<core::str::iter::Lines as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::filter::filter_try_fold<&str,",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<indexmap::map::IndexMap<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>>::insert_full",
+    "function": "<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>",
     "self": 0,
     "total": 2
    },
    {
     "function": "<krusty::diag::DiagSink>::with_authoritative_ranges::<krusty::resolve::TypeInfo, krusty::frontend::inline_preparation::check_default_source::{closure#12}>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::features::LangFeatures>::for_release",
     "self": 0,
     "total": 2
    },
@@ -1616,27 +1806,72 @@
     "total": 2
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::facade_statics",
+    "function": "<krusty::ir::IrExpr as core::clone::Clone>::clone",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::method_code_through_parts",
+    "function": "<krusty::jvm::bytecode_passes::temporaries::adjacency::Body>::take",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::own_method_code",
+    "function": "<krusty::jvm::classfile::ClassWriter>::finish_with_coroutines",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<krusty::jvm::jvm_libraries::JvmLibraries as krusty::symbol_source::SymbolSource>::classifier",
+    "function": "<krusty::jvm::classfile::ClassWriter>::write",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::declared_callables_for",
+    "function": "<krusty::jvm::classpath::Classpath>::declaring_classes",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::jvm::classpath::Classpath>::intern_external_callable",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::jvm::classreader::ClassBodies>::parse",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::jvm::ir_emit::EmitRun>::finish_class",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::jvm::ir_emit::Emitter>::emit_node",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::jvm::ir_emit::Emitter>::emit_open_block",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::jvm::ir_emit::Emitter>::emit_statement_block",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::jvm::java_stub::Resolver>::emit",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries as krusty::libraries::SemanticPlatform>::install_source_module_headers",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::facade_package_callables",
     "self": 0,
     "total": 2
    },
@@ -1646,47 +1881,122 @@
     "total": 2
    },
    {
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::register_external_callables",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::language_settings::LanguageSettings>::for_release",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::libraries::FunctionInfo as core::clone::Clone>::clone",
+    "self": 0,
+    "total": 2
+   },
+   {
     "function": "<krusty::name_tree::NameTree>::get",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<krusty::resolve::Checker>::call_lambda_shaping",
+    "function": "<krusty::resolve::Checker>::access_context_class_names",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<krusty::resolve::Checker>::provider_member_lambda_expectations",
+    "function": "<krusty::resolve::Checker>::actual_this_narrow",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<krusty::resolve::Checker>::receiver_function_value",
+    "function": "<krusty::resolve::Checker>::check_class_abstract_members",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<krusty::resolve::Checker>::scoped_properties",
+    "function": "<krusty::resolve::Checker>::check_getter_body",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<krusty::resolve::Checker>::try_in_place_assignment",
+    "function": "<krusty::resolve::Checker>::declare_scoped_property_with_mutability",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<krusty::resolve::Checker>::try_in_place_assignment_operands",
+    "function": "<krusty::resolve::Checker>::joined_branch_result",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<krusty::symbol_resolver::SymbolResolver>::select_symbol",
+    "function": "<krusty::resolve::Checker>::lexical_source_class_names",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::boxed::Box<[u8]>>",
+    "function": "<krusty::resolve::Checker>::member_extension_function",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::resolve::Checker>::operator_expression_call_ret",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::resolve::Checker>::resolver",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::resolve::Checker>::scoped_properties::collect",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::resolve::Checker>::select_callable_candidate",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::resolve::Checker>::select_operator",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::resolve::Checker>::select_top_level_property",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty::symbol_resolver::SymbolResolver>::select_receiver_function_with_applied_receiver_tracking",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty_cli::cli::Options as core::default::Default>::default",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::parse",
     "self": 0,
     "total": 2
    },
@@ -1696,22 +2006,42 @@
     "total": 2
    },
    {
+    "function": "<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}",
+    "self": 0,
+    "total": 2
+   },
+   {
     "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable>>>::get_or_init<<krusty::features::table::FeatureTable>::for_version::{closure#0}>::{closure#0}, !>",
     "self": 0,
     "total": 2
    },
    {
-    "function": "[ld-linux-x86-64.so.2]",
+    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init::<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>",
     "self": 0,
     "total": 2
    },
    {
-    "function": "__x64_sys_lseek",
+    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init::<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}",
     "self": 0,
     "total": 2
    },
    {
-    "function": "_mi_page_malloc_zero",
+    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_try_init::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}",
     "self": 0,
     "total": 2
    },
@@ -1721,12 +2051,17 @@
     "total": 2
    },
    {
-    "function": "asm_exc_page_fault",
+    "function": "core::fmt::write",
     "self": 0,
     "total": 2
    },
    {
-    "function": "core::fmt::write",
+    "function": "core::iter::adapters::filter::filter_try_fold::<&str,",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "core::iter::adapters::map::map_try_fold::<&str, core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>,",
     "self": 0,
     "total": 2
    },
@@ -1741,17 +2076,27 @@
     "total": 2
    },
    {
-    "function": "core::ptr::drop_glue::<krusty::kt_string::KtString>",
+    "function": "core::iter::traits::iterator::Iterator::find_map::check::<krusty::kotlin_version::KotlinVersion,",
     "self": 0,
     "total": 2
    },
    {
-    "function": "do_user_addr_fault",
+    "function": "core::ptr::drop_glue::<alloc::rc::Rc<krusty::jvm::classpath::Classpath>>",
     "self": 0,
     "total": 2
    },
    {
-    "function": "exc_page_fault",
+    "function": "core::ptr::drop_glue::<krusty::jvm::backend::JvmBackend>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "core::ptr::drop_glue::<krusty::jvm::classpath::Classpath>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "do_fault",
     "self": 0,
     "total": 2
    },
@@ -1766,6 +2111,11 @@
     "total": 2
    },
    {
+    "function": "folio_prealloc",
+    "self": 0,
+    "total": 2
+   },
+   {
     "function": "generic_file_read_iter",
     "self": 0,
     "total": 2
@@ -1776,7 +2126,17 @@
     "total": 2
    },
    {
-    "function": "krusty::jvm::classpath::call_metadata::for_callable",
+    "function": "krusty::jvm::bytecode_passes::dead_code::liveness",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "krusty::jvm::bytecode_passes::redundant_null_checks::run_round",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "krusty::jvm::bytecode_passes::temporaries::eliminate",
     "self": 0,
     "total": 2
    },
@@ -1786,17 +2146,27 @@
     "total": 2
    },
    {
-    "function": "krusty::jvm::ir_emit::class_metadata::build_class_metadata",
+    "function": "krusty::jvm::java_stub::stub_classes",
     "self": 0,
     "total": 2
    },
    {
-    "function": "krusty::jvm::jvm_libraries::classifier_facts::class_implements_name",
+    "function": "krusty::jvm::metadata::class_identity::metadata_classifier_name",
     "self": 0,
     "total": 2
    },
    {
-    "function": "krusty::jvm::metadata::type_parameter_context",
+    "function": "krusty::jvm::metadata::decode_functions::{closure#2}",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "krusty::metadata::semantic::klib::annotation_applications",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "krusty::metadata::semantic::klib::annotation_identity",
     "self": 0,
     "total": 2
    },
@@ -1806,17 +2176,62 @@
     "total": 2
    },
    {
-    "function": "krusty::symbol_resolver::member_hierarchy::members_in_hierarchy_for",
+    "function": "krusty::symbol_resolver::classifier_scope::explicit_classifier_candidates::<krusty::symbol_resolver::source_view::ResolverSource>",
     "self": 0,
     "total": 2
    },
    {
-    "function": "krusty::symbol_resolver::member_specialization::specialize_member_type_with_unbound",
+    "function": "krusty::symbol_resolver::generic_inference::call_constraints::collect_call_inference_constraints",
     "self": 0,
     "total": 2
    },
    {
-    "function": "krusty::symbol_resolver::ranked_extension_candidates::<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<alloc::rc::Rc<krusty::libraries::ResolvedSymbols>>, core::slice::iter::Iter<krusty::libraries::FunctionInfo>, krusty::symbol_resolver::scope_level_callables::level_functions::{closure#0}>>",
+    "function": "krusty::symbol_resolver::generic_inference::call_constraints::infer_generic_call_constraints_with_receiver_from_symbols::<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(usize, krusty::types::Ty, bool)>>>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "krusty::symbol_resolver::hierarchy_projection::applied_hierarchy",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "krusty::symbol_resolver::hierarchy_projection::direct_supertypes",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "krusty::symbol_resolver::hierarchy_projection::receiver_hierarchy",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "krusty::symbol_resolver::hierarchy_projection::supertype_with_classifier",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "krusty::symbol_resolver::member_hierarchy::specialize_declared_callables",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "krusty::symbol_resolver::overload_selection::generic_function_call_admits",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "krusty::symbol_resolver::overload_selection::select_among_overloads",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "krusty::symbol_resolver::overload_selection::select_overload_tracking_with_functions",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "krusty::symbol_resolver::overload_selection::select_receiver_overload_from_functions_tracking",
     "self": 0,
     "total": 2
    },
@@ -1831,17 +2246,22 @@
     "total": 2
    },
    {
-    "function": "mi_block_next",
+    "function": "krusty_cli::cli::classpath_entry_problems",
     "self": 0,
     "total": 2
    },
    {
-    "function": "mi_block_set_next",
+    "function": "krusty_cli::cli::classpath_entry_problems::{closure#0}",
     "self": 0,
     "total": 2
    },
    {
-    "function": "mi_page_extend_free",
+    "function": "mi_arenas_page_alloc_fresh",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "mi_theap_umalloc",
     "self": 0,
     "total": 2
    },
@@ -1851,12 +2271,27 @@
     "total": 2
    },
    {
-    "function": "<&mut krusty::java_source::existing_candidates<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<krusty::java_source::JavaImport>, krusty::java_source::resolve_internal_name_with_depth::{closure#5}>, krusty::java_source::resolve_internal_name_with_depth::{closure#6}>>::{closure#0} as core::ops::function::FnMut<(alloc::string::String,)>>::call_mut",
+    "function": "touch_atime",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "vfs_read",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "zip::read::central_header_to_zip_file_inner::<std::fs::File>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<&mut krusty::symbol_resolver::member_hierarchy::inherited_declarations::{closure#0} as core::ops::function::FnMut<(&&krusty::libraries::FunctionInfo,)>>::call_mut",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<&mut krusty::jvm::metadata::type_parameter_context::{closure#1}::{closure#0} as core::ops::function::FnMut<(&alloc::vec::Vec<u8>,)>>::call_mut",
+    "function": "<&mut krusty::symbol_resolver::overload_selection::generic_function_call_admits::{closure#0} as core::ops::function::FnMut<((usize,",
     "self": 0,
     "total": 1
    },
@@ -1866,12 +2301,17 @@
     "total": 1
    },
    {
+    "function": "<ahash::random_state::RandomState as core::hash::BuildHasher>::hash_one::<&(krusty::jvm::classpath::EntryKey, krusty::types::TypeName)>",
+    "self": 0,
+    "total": 1
+   },
+   {
     "function": "<alloc::alloc::Global as core::alloc::Allocator>::allocate",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::alloc::Global as core::alloc::Allocator>::grow",
+    "function": "<alloc::alloc::Global as core::alloc::Allocator>::deallocate",
     "self": 0,
     "total": 1
    },
@@ -1881,27 +2321,57 @@
     "total": 1
    },
    {
-    "function": "<alloc::alloc::Global>::grow_impl_runtime",
+    "function": "<alloc::collections::vec_deque::VecDeque<(krusty::types::Ty, u32)> as alloc::collections::vec_deque::spec_extend::SpecExtend<(krusty::types::Ty, u32), core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<krusty::types::Ty>, <krusty::symbol_resolver::SymbolResolver>::select_classifier_member_property::{closure#15}>>>::spec_extend",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::boxed::Box<krusty::resolve::ImplicitPropertyWriteTarget> as core::clone::Clone>::clone",
+    "function": "<alloc::raw_vec::RawVec<(alloc::string::String, krusty::libraries::dependency_body_contract::DependencyBodyProviderSnapshot)>>::grow_one",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::collections::btree::map::BTreeMap<u64, alloc::collections::btree::set_val::SetValZST>>::insert",
+    "function": "<alloc::raw_vec::RawVec<(usize, krusty::metadata::klib_ir::tree::KlibIrFunctionId, krusty::metadata::klib_ir::symbols::KlibIrSignature)>>::grow_one",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::raw_vec::RawVec<(krusty::fir::signature_extract::condition_facts::CompactCompletion, std::collections::hash::map::HashMap<krusty::fir::signature_extract::condition_facts::CompactBindingIdentity, krusty::fir::signature_extract::condition_facts::CompactBooleanValue, ahash::random_state::RandomState>)>>::grow_one",
+    "function": "<alloc::raw_vec::RawVec<alloc::boxed::Box<dyn for<'a> core::ops::function::FnOnce<(&'a mut krusty::jvm::bytecode_passes::insn_list::EditableMethod,), Output =",
     "self": 0,
     "total": 1
    },
    {
     "function": "<alloc::raw_vec::RawVec<alloc::vec::Vec<(alloc::string::String, alloc::string::String, krusty::types::Ty, alloc::vec::Vec<krusty::types::Ty>)>>>::grow_one",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<alloc::raw_vec::RawVec<krusty::jvm::ir_emit::backend_temporaries::TemporaryLease>>::grow_one",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<alloc::raw_vec::RawVec<krusty::libraries::LibraryMember>>::grow_one",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<alloc::raw_vec::RawVec<krusty::resolve::signature_collection::top_level_overload_conflicts::registration::TopLevelFunctionConflictDecl>>::grow_one",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<alloc::raw_vec::RawVec<u8> as core::ops::drop::Drop>::drop",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<alloc::raw_vec::RawVec<usize>>::grow_one",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<alloc::raw_vec::RawVecInner>::deallocate",
     "self": 0,
     "total": 1
    },
@@ -1916,16 +2386,6 @@
     "total": 1
    },
    {
-    "function": "<alloc::rc::Rc<krusty::jvm::classpath::Classpath> as core::ops::drop::Drop>::drop",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<alloc::rc::Rc<krusty::jvm::classpath::Classpath>>::drop_slow",
-    "self": 0,
-    "total": 1
-   },
-   {
     "function": "<alloc::rc::Rc<krusty::libraries::ResolvedSymbols>>::drop_slow",
     "self": 0,
     "total": 1
@@ -1936,7 +2396,17 @@
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<(alloc::string::String, krusty::libraries::Callables)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(alloc::string::String, krusty::libraries::Callables), core::iter::adapters::map::Map<std::collections::hash::set::Iter<&alloc::string::String>, <krusty::resolve::Checker>::unimplemented_abstract_members::{closure#7}>>>::from_iter",
+    "function": "<alloc::vec::Vec<&krusty::libraries::FunctionInfo> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<&krusty::libraries::FunctionInfo, core::iter::adapters::filter::Filter<core::slice::iter::Iter<krusty::libraries::FunctionInfo>, krusty::symbol_resolver::member_hierarchy::inherited_declarations::{closure#0}>>>::from_iter",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<alloc::vec::Vec<&str> as alloc::vec::spec_from_iter::SpecFromIter<&str, core::str::iter::Split<char>>>::from_iter",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<alloc::vec::Vec<&str> as core::iter::traits::collect::FromIterator<&str>>::from_iter::<core::str::iter::Split<char>>",
     "self": 0,
     "total": 1
    },
@@ -1946,7 +2416,7 @@
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<(alloc::string::String, krusty::types::annotation_values::AnnotationValue)> as core::clone::Clone>::clone",
+    "function": "<alloc::vec::Vec<(krusty::fir::identities::DeclarationId, alloc::vec::Vec<krusty::fir::overrides::ResolvedPropertyOverride>, alloc::vec::Vec<krusty::fir::overrides::ResolvedFunctionOverride>)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(krusty::fir::identities::DeclarationId, alloc::vec::Vec<krusty::fir::overrides::ResolvedPropertyOverride>, alloc::vec::Vec<krusty::fir::overrides::ResolvedFunctionOverride>), core::iter::adapters::chain::Chain<core::iter::adapters::map::Map<core::iter::adapters::filter_map::FilterMap<std::collections::hash::map::Values<krusty::types::TypeName, krusty::resolve::ClassSig>, krusty::resolve::override_plans::publish_override_plans::{closure#0}>, krusty::resolve::override_plans::publish_override_plans::{closure#1}>, alloc::vec::into_iter::IntoIter<(krusty::fir::identities::DeclarationId, alloc::vec::Vec<krusty::fir::overrides::ResolvedPropertyOverride>, alloc::vec::Vec<krusty::fir::overrides::ResolvedFunctionOverride>)>>>>::from_iter",
     "self": 0,
     "total": 1
    },
@@ -1961,12 +2431,12 @@
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<(u32, krusty::types::Ty, &krusty::libraries::FunctionInfo)> as alloc::vec::spec_from_iter::SpecFromIter<(u32, krusty::types::Ty, &krusty::libraries::FunctionInfo), core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<&krusty::libraries::FunctionInfo>, krusty::symbol_resolver::ranked_extension_candidates<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<alloc::rc::Rc<krusty::libraries::ResolvedSymbols>>, core::slice::iter::Iter<krusty::libraries::FunctionInfo>, krusty::symbol_resolver::scope_level_callables::level_functions::{closure#0}>>::{closure#1}>>>::from_iter",
+    "function": "<alloc::vec::Vec<(usize, krusty::types::Ty, bool)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(usize, krusty::types::Ty, bool), core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::iter::adapters::zip::Zip<core::slice::iter::Iter<krusty::types::Ty>, core::slice::iter::Iter<krusty::symbol_resolver::call_argument::CallArgKind>>>, krusty::symbol_resolver::overload_selection::generic_function_call_admits::{closure#0}>>>::from_iter",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<alloc::vec::Vec<krusty::types::Ty>>>::extend_trusted::<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<&krusty::metadata::decode::parameter_shape::ParsedTypeParam>, krusty::jvm::metadata::type_parameter_context::{closure#1}>>",
+    "function": "<alloc::vec::Vec<alloc::sync::Arc<krusty::jvm::classreader::ClassInfo>> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::sync::Arc<krusty::jvm::classreader::ClassInfo>, core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<alloc::string::String>, <krusty::jvm::classpath::Classpath>::declaring_classes::{closure#0}>>>::from_iter",
     "self": 0,
     "total": 1
    },
@@ -1976,132 +2446,57 @@
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<krusty::fir::identities::FirStatementId> as alloc::vec::spec_from_iter::SpecFromIter<krusty::fir::identities::FirStatementId, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<krusty::ast::StmtId>, <krusty::fir::body_check::BodyFirChecker>::block_in_current_scope::{closure#0}>, <krusty::fir::body_check::BodyFirChecker>::block_in_current_scope::{closure#1}>, core::result::Result<core::convert::Infallible, krusty::fir::body_check::failure::BodyCheckFailure>>>>::from_iter",
+    "function": "<alloc::vec::Vec<core::option::Option<krusty::types::Ty>> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<core::option::Option<krusty::types::Ty>, core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::ast::ExprId>, <krusty::resolve::Checker>::ext_arg_tys::{closure#0}>>>::from_iter",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<krusty::java_source::ResolvedJavaName> as alloc::vec::spec_from_iter::SpecFromIter<krusty::java_source::ResolvedJavaName, core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<alloc::string::String>, krusty::java_source::existing_candidates<alloc::vec::Vec<alloc::string::String>>::{closure#0}>>>::from_iter",
+    "function": "<alloc::vec::Vec<krusty::libraries::FunctionInfo> as core::clone::Clone>::clone",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<krusty::jvm::classreader::C> as core::ops::drop::Drop>::drop",
+    "function": "<alloc::vec::Vec<krusty::libraries::LibraryMember>>::retain::<<krusty::jvm::jvm_libraries::JvmLibraries>::build_library_type::{closure#68}>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<krusty::libraries::LibraryMember> as alloc::vec::spec_from_iter::SpecFromIter<krusty::libraries::LibraryMember, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<(&str, &str, &str, bool)>, <krusty::jvm::jvm_libraries::JvmLibraries>::normalize_iteration_traversal::{closure#0}>, core::option::Option<core::convert::Infallible>>>>::from_iter",
+    "function": "<alloc::vec::Vec<krusty::libraries::PropertyInfo> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::libraries::PropertyInfo, core::iter::adapters::flatten::FlatMap<alloc::vec::into_iter::IntoIter<(krusty::types::TypeName, u32)>, alloc::vec::Vec<krusty::libraries::PropertyInfo>, <krusty::symbol_resolver::SymbolResolver>::static_scope_associated_properties::{closure#0}>>>::from_iter",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<krusty::metadata::class_builder::jvm::JvmFunctionSignature> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::metadata::class_builder::jvm::JvmFunctionSignature, core::iter::adapters::map::Map<core::iter::adapters::zip::Zip<core::slice::iter::Iter<krusty::metadata::class_declarations::FunctionOrigin>, core::slice::iter::Iter<krusty::metadata::class_builder::declarations::FnMeta>>, <krusty::jvm::ir_emit::class_metadata::JvmClassRealization>::signatures::{closure#4}>>>::from_iter",
+    "function": "<alloc::vec::Vec<krusty_cli::cli::ClasspathEntryProblem> as alloc::vec::spec_extend::SpecExtend<krusty_cli::cli::ClasspathEntryProblem, core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}>>>::spec_extend",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<krusty::resolve::scope::Flow> as core::clone::Clone>::clone",
+    "function": "<alloc::vec::Vec<krusty_cli::cli::ClasspathEntryProblem>>::extend_desugared::<core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<std::path::PathBuf>, krusty_cli::cli::classpath_entry_problems::{closure#0}>>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<krusty::resolve::scope::FlowSnapshot> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::resolve::scope::FlowSnapshot, core::iter::adapters::map::Map<core::slice::iter::Iter<&krusty::resolve::control_flow_join::LocalFlowExit>, <krusty::resolve::Checker>::publish_joined_local_flow::{closure#1}>>>::from_iter",
+    "function": "<alloc::vec::Vec<usize>>::extend_trusted::<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<krusty::jvm::method_node::nodes::LabelId>, krusty::jvm::bytecode_passes::dead_code::liveness::{closure#1}>>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<krusty::types::ResolvedAnnotation> as core::clone::Clone>::clone",
+    "function": "<alloc::vec::into_iter::IntoIter<krusty::types::TypeName> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::any::check<krusty::types::TypeName, <krusty::jvm::jvm_libraries::JvmLibraries>::withhold_hidden_declarations::{closure#2}::{closure#0}>::{closure#0}, core::ops::control_flow::ControlFlow<()>>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<krusty::types::Ty> as alloc::vec::spec_from_iter::SpecFromIter<krusty::types::Ty, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::metadata::decode::parameter_shape::ParsedValueParam>, krusty::jvm::metadata::build_generic_sig::{closure#1}>, core::option::Option<core::convert::Infallible>>>>::from_iter",
+    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::{closure#0}",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<krusty::types::Ty> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::types::Ty, core::iter::adapters::chain::Chain<core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<alloc::vec::Vec<u8>>, krusty::jvm::metadata::type_parameter_context::{closure#1}::{closure#0}>, core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<u64>, krusty::jvm::metadata::type_parameter_context::{closure#1}::{closure#1}>>>>::from_iter",
+    "function": "<core::iter::adapters::chain::Chain<core::iter::adapters::map::Map<core::iter::adapters::filter_map::FilterMap<std::collections::hash::map::Values<krusty::types::TypeName, krusty::resolve::ClassSig>, krusty::resolve::override_plans::publish_override_plans::{closure#0}>, krusty::resolve::override_plans::publish_override_plans::{closure#1}>, alloc::vec::into_iter::IntoIter<(krusty::fir::identities::DeclarationId, alloc::vec::Vec<krusty::fir::overrides::ResolvedPropertyOverride>, alloc::vec::Vec<krusty::fir::overrides::ResolvedFunctionOverride>)>> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<krusty::types::Ty> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::types::Ty, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<&str>, krusty::jvm::jvm_libraries::declared_desc_to_ty>>>::from_iter",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty::types::Ty> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::types::Ty, core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<krusty::ast::ExprId>>, <krusty::resolve::Checker>::check_call::{closure#53}::{closure#0}>>>::from_iter",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty::types::Ty> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::types::Ty, core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::ast::type_refs::TypeRef>, <krusty::resolve::Checker>::check_member_extension_function_call_mode::{closure#1}>>>::from_iter",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty::types::Ty> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty::types::Ty, core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::types::Ty>, <krusty::jvm::jvm_libraries::JvmLibraries>::java_raw_occurrences::{closure#0}>>>::from_iter",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::reserve",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<alloc::vec::into_iter::IntoIter<&krusty::metadata::decode::parameter_shape::ParsedTypeParam> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::map::map_fold<&krusty::metadata::decode::parameter_shape::ParsedTypeParam, alloc::vec::Vec<krusty::types::Ty>,",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<alloc::vec::into_iter::IntoIter<&str> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::map::map_fold<&str, krusty::types::Ty,",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::finish",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::next",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<core::iter::adapters::enumerate::Enumerate<_> as core::iter::traits::iterator::Iterator>::try_fold::enumerate::<&krusty::jvm::metadata::value_parameter::MetaValueParam,",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::map::map_try_fold<&str, core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>,",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<krusty::ast::ExprId>>, <krusty::resolve::Checker>::check_call::{closure#53}::{closure#0}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::traits::iterator::Iterator::for_each::call<krusty::types::Ty, <alloc::vec::Vec<krusty::types::Ty>>::extend_trusted<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<krusty::ast::ExprId>>, <krusty::resolve::Checker>::check_call::{closure#53}::{closure#0}>>::{closure#0}>::{closure#0}>",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<krusty::ast::StmtId>, <krusty::fir::body_check::BodyFirChecker>::block_in_current_scope::{closure#0}>, <krusty::fir::body_check::BodyFirChecker>::block_in_current_scope::{closure#1}> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<krusty::ast::StmtId>, <krusty::fir::body_check::BodyFirChecker>::block_in_current_scope::{closure#0}>, <krusty::fir::body_check::BodyFirChecker>::block_in_current_scope::{closure#1}>, core::result::Result<core::convert::Infallible, krusty::fir::body_check::failure::BodyCheckFailure>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty::fir::identities::FirStatementId, core::ops::control_flow::ControlFlow<krusty::fir::identities::FirStatementId>, core::ops::control_flow::ControlFlow<krusty::fir::identities::FirStatementId>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty::fir::identities::FirStatementId>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<krusty::fir::identities::FirStatementId>>>",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>>",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter_map::FilterMap<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<core::iter::adapters::take_while::TakeWhile<core::slice::iter::Iter<(u64, u32)>, <krusty::jvm::classpath::ClassMeta>::fns_named::{closure#1}>, <krusty::jvm::classpath::ClassMeta>::fns_named::{closure#2}>, <krusty::jvm::classpath::ClassMeta>::fns_named::{closure#3}>, krusty::jvm::classpath::metadata_alignment::aligned_meta_index::{closure#0}>, core::iter::traits::iterator::Iterator::max_by_key::key<(usize, usize, bool, u32),",
+    "function": "<core::iter::adapters::flatten::FlatMap<alloc::vec::into_iter::IntoIter<(krusty::types::TypeName, u32)>, alloc::vec::Vec<krusty::libraries::PropertyInfo>, <krusty::symbol_resolver::SymbolResolver>::static_scope_associated_properties::{closure#0}> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 1
    },
@@ -2111,27 +2506,47 @@
     "total": 1
    },
    {
-    "function": "<core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::metadata::decode::parameter_shape::ParsedValueParam>, krusty::jvm::metadata::build_generic_sig::{closure#1}> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::metadata::decode::parameter_shape::ParsedValueParam>, krusty::jvm::metadata::build_generic_sig::{closure#1}>, core::option::Option<core::convert::Infallible>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty::types::Ty, core::ops::control_flow::ControlFlow<krusty::types::Ty>, core::ops::control_flow::ControlFlow<krusty::types::Ty>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty::types::Ty>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<krusty::types::Ty>>>",
+    "function": "<core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::ast::ExprId>, <krusty::resolve::Checker>::ext_arg_tys::{closure#0}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::traits::iterator::Iterator::for_each::call<core::option::Option<krusty::types::Ty>, <alloc::vec::Vec<core::option::Option<krusty::types::Ty>>>::extend_trusted<core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::ast::ExprId>, <krusty::resolve::Checker>::ext_arg_tys::{closure#0}>>::{closure#0}>::{closure#0}>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<core::str::iter::Lines as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::filter::filter_try_fold<&str,",
+    "function": "<core::ops::range::RangeInclusive<u8>>::contains::<u8>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<crc32fast::Hasher>::update",
+    "function": "<core::option::Option<krusty::resolve::CallableCandidateSelection>>::or_else::<<krusty::resolve::Checker>::check_call::{closure#173}>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<crc32fast::specialized::pclmulqdq::State>::update",
+    "function": "<core::str::iter::Split<char> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<&str>>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<hashbrown::map::HashMap<alloc::string::String, usize, std::hash::random::RandomState>>::insert",
+    "function": "<flate2::ffi::zlib_rs::Inflate as flate2::ffi::InflateBackend>::make",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<flate2::mem::Decompress>::new",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<hashbrown::map::HashMap<alloc::string::String, alloc::vec::Vec<krusty::name_tree::NameId>, ahash::random_state::RandomState>>::rustc_entry",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<hashbrown::map::HashMap<krusty::jvm::classpath::external_identities::ExternalCallableKey, krusty::fir::identities::ExternalCallableId, ahash::random_state::RandomState>>::insert",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<hashbrown::map::HashMap<krusty::resolve::scope::NarrowPath, krusty::resolve::scope::PathNarrowing, ahash::random_state::RandomState>>::insert",
     "self": 0,
     "total": 1
    },
@@ -2141,32 +2556,17 @@
     "total": 1
    },
    {
-    "function": "<hashbrown::map::HashMap<krusty::types::thin_handles::TyParamName,",
-    "self": 0,
-    "total": 1
-   },
-   {
     "function": "<hashbrown::raw::RawTable<(alloc::string::String,",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<hashbrown::raw::RawTable<(alloc::string::String, krusty::libraries::Callables)> as core::ops::drop::Drop>::drop",
+    "function": "<hashbrown::raw::RawTable<(krusty::jvm::classpath::external_identities::ExternalCallableKey, krusty::fir::identities::ExternalCallableId)>>::reserve_rehash::<hashbrown::map::make_hasher<krusty::jvm::classpath::external_identities::ExternalCallableKey, krusty::fir::identities::ExternalCallableId, ahash::random_state::RandomState>::{closure#0}>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<hashbrown::raw::RawTable<(alloc::string::String, usize)>>::find_or_find_insert_index::<hashbrown::map::equivalent_key<alloc::string::String, alloc::string::String, usize>::{closure#0}, hashbrown::map::make_hasher<alloc::string::String, usize, std::hash::random::RandomState>::{closure#0}>",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<hashbrown::raw::RawTable<(alloc::string::String, usize)>>::reserve::<hashbrown::map::make_hasher<alloc::string::String, usize, std::hash::random::RandomState>::{closure#0}>",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<hashbrown::raw::RawTable<(krusty::fir::identities::DeclarationId, krusty::fir::signature::classifier_headers::ResolvedClassifierHeader)> as core::ops::drop::Drop>::drop",
+    "function": "<hashbrown::raw::RawTable<(krusty::resolve::scope::NarrowPath, krusty::resolve::scope::PathNarrowing)>>::reserve_rehash::<hashbrown::map::make_hasher<krusty::resolve::scope::NarrowPath, krusty::resolve::scope::PathNarrowing, ahash::random_state::RandomState>::{closure#0}>",
     "self": 0,
     "total": 1
    },
@@ -2176,7 +2576,17 @@
     "total": 1
    },
    {
-    "function": "<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>",
+    "function": "<hashbrown::raw::RawTable<(krusty::types::TypeName, alloc::vec::Vec<krusty::jvm::metadata::member_names::FunctionName>)> as core::ops::drop::Drop>::drop",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<hashbrown::raw::RawTableInner>::drop_elements::<(alloc::string::String,",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<hashbrown::raw::RawTableInner>::drop_inner_table::<(alloc::string::String,",
     "self": 0,
     "total": 1
    },
@@ -2186,47 +2596,12 @@
     "total": 1
    },
    {
-    "function": "<krusty::backend::module_facts::CheckedBackendClassifiers as krusty::types::ClassifierFactSource>::classifier_value_property",
+    "function": "<krusty::backend::module_facts::CheckedBackendClassifiers as krusty::types::ClassifierFactSource>::classifier_role",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::fir::body_check::BodyFirChecker>::block",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::fir::body_check::BodyFirChecker>::block_in_current_scope",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::fir::body_check::BodyFirChecker>::conditional",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::fir::body_check::BodyFirChecker>::expression",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::fir::body_check::BodyFirChecker>::expression_inner",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::fir::body_check::BodyFirChecker>::source_property_write",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::fir::body_check::BodyFirChecker>::statement",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::fir::signature::SignatureSolver>::finalize_recovering::<krusty::fir::signature::evaluate::ResolverBackedSignatureEvaluator<krusty::resolve::streaming_signature_bridge::ProductionSignatureSemantics>>",
+    "function": "<krusty::fir::signature::evaluate::ResolverBackedSignatureEvaluator<_> as krusty::fir::signature::SignatureConstraintEvaluator>::evaluate::evaluate_call::<krusty::resolve::streaming_signature_bridge::ProductionSignatureSemantics>",
     "self": 0,
     "total": 1
    },
@@ -2241,72 +2616,67 @@
     "total": 1
    },
    {
-    "function": "<krusty::jvm::bytecode_passes::analysis::frame::Frame<krusty::jvm::inliner::functional_arguments::ArgumentValue>>::execute::<krusty::jvm::inliner::functional_arguments::FunctionalArgumentInterpreter>",
+    "function": "<krusty::ir::IrFile>::publish_classifier_roles",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::classfile::ClassWriter>::finished_node",
+    "function": "<krusty::jvm::bytecode_passes::dead_code::Liveness>::of",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::classfile::ClassWriter>::optimized",
+    "function": "<krusty::jvm::bytecode_passes::insn_list::InsnList>::ensure_order",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::classfile::ClassWriter>::resolve_inner_classes",
+    "function": "<krusty::jvm::bytecode_passes::insn_list::InsnList>::ids",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::cached_symbols",
+    "function": "<krusty::jvm::bytecode_passes::insn_list::InsnList>::new",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::class_meta_name",
+    "function": "<krusty::jvm::classfile::ClassWriter>::compute_frames",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::jar_pkg_members_name::{closure#1}",
+    "function": "<krusty::jvm::classfile::ClassWriter>::compute_frames_from",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::jimage_bytes",
+    "function": "<krusty::jvm::classfile::ClassWriter>::fieldref",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::mapped_builtin_members_name",
+    "function": "<krusty::jvm::classpath::Classpath>::external_callable",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::memoize_inline_plan",
+    "function": "<krusty::jvm::classpath::Classpath>::facade_declares_function",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::classpath::Classpath>::type_alias_target_name",
+    "function": "<krusty::jvm::ir_emit::Emitter>::emit_consumed_operand",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::classpath::inline_plan_cache::PlanMemo>::insert",
+    "function": "<krusty::jvm::ir_emit::Emitter>::emit_descriptor_virtual_operands",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::classreader::ClassBodies>::parse",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::jvm::inliner::functional_arguments::FunctionalArgumentInterpreter as krusty::jvm::bytecode_passes::analysis::frame::Interpreter>::nary_operation",
+    "function": "<krusty::jvm::ir_emit::Emitter>::emit_discarding",
     "self": 0,
     "total": 1
    },
@@ -2316,17 +2686,7 @@
     "total": 1
    },
    {
-    "function": "<krusty::jvm::ir_emit::Emitter>::emit_inlined_call",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::jvm::ir_emit::Emitter>::emit_node",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::jvm::ir_emit::Emitter>::emit_open_block",
+    "function": "<krusty::jvm::ir_emit::Emitter>::emit_initializer_statements",
     "self": 0,
     "total": 1
    },
@@ -2336,47 +2696,22 @@
     "total": 1
    },
    {
-    "function": "<krusty::jvm::ir_emit::Emitter>::emit_statement_block",
+    "function": "<krusty::jvm::ir_emit::Emitter>::emit_value_expression",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::ir_emit::Emitter>::inline_call_with_body",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::jvm::ir_emit::Emitter>::inline_classpath_lambda_call",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::jvm::ir_emit::Emitter>::try_inline_static_as",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::jvm::ir_emit::Emitter>::try_splice_static_inline",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::jvm::ir_emit::class_metadata::JvmClassRealization>::declared_function",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::jvm::ir_emit::class_metadata::JvmClassRealization>::function",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::jvm::java_stub::Resolver>::emit",
+    "function": "<krusty::jvm::ir_emit::Emitter>::with_copied_private_access::<<krusty::jvm::ir_emit::Emitter>::emit_value::{closure#0}>",
     "self": 0,
     "total": 1
    },
    {
     "function": "<krusty::jvm::java_stub::Resolver>::erased_desc",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<krusty::jvm::java_stub::Resolver>::erased_parameters",
     "self": 0,
     "total": 1
    },
@@ -2391,7 +2726,7 @@
     "total": 1
    },
    {
-    "function": "<krusty::jvm::jvm_libraries::JvmLibraries as krusty::libraries::SemanticPlatform>::install_source_module_headers",
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries as krusty::symbol_source::SymbolSource>::classifier",
     "self": 0,
     "total": 1
    },
@@ -2401,12 +2736,7 @@
     "total": 1
    },
    {
-    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::java_raw_occurrences",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::mapped_collection_members",
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::member_class_formal_bounds",
     "self": 0,
     "total": 1
    },
@@ -2416,12 +2746,22 @@
     "total": 1
    },
    {
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::member_receiver_bindings_name",
+    "self": 0,
+    "total": 1
+   },
+   {
     "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::metadata_value_class_underlying",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::normalize_iteration_traversal",
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::semanticize_jvm_generic_sig",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::semanticize_jvm_type",
     "self": 0,
     "total": 1
    },
@@ -2431,62 +2771,67 @@
     "total": 1
    },
    {
-    "function": "<krusty::jvm::jvm_libraries::JvmLibraries>::top_level_static_field",
+    "function": "<krusty::jvm::source_map::DependencyMap>::parse",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::libraries::LibraryCallable as core::clone::Clone>::clone",
+    "function": "<krusty::libraries::FunctionInfo as <[_]>::to_vec_in::ConvertVec>::to_vec::<alloc::alloc::Global>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::libraries::LibraryMember>::new",
+    "function": "<krusty::libraries::FunctionInfo>::classifier_member",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::access_context_class_names",
+    "function": "<krusty::libraries::FunctionInfo>::plain",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::add_classifier_requirements",
+    "function": "<krusty::libraries::inline_body::InlineBodyPlan as core::clone::Clone>::clone",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::add_type_requirements",
+    "function": "<krusty::metadata::decode::klib::Cursor>::skip",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::check_access_missing_supertypes",
+    "function": "<krusty::resolve::Checker>::apply_condition_exclusions",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::check_class_abstract_members",
+    "function": "<krusty::resolve::Checker>::apply_narrowing_unchecked",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::check_expression_getter",
+    "function": "<krusty::resolve::Checker>::apply_narrowings",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::check_expression_missing_supertypes",
+    "function": "<krusty::resolve::Checker>::check_array_builtin",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::check_lambda_with_implicit_receivers_and_return_labeled_now",
+    "function": "<krusty::resolve::Checker>::check_classifier_value_call",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::check_type_reference_opt_in",
+    "function": "<krusty::resolve::Checker>::check_loop_body",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<krusty::resolve::Checker>::check_member_extension_function_call_mode",
     "self": 0,
     "total": 1
    },
@@ -2496,52 +2841,32 @@
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::expect_call_arg_labeled",
+    "function": "<krusty::resolve::Checker>::condition_exclusions",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::expect_indexed_operator_params",
+    "function": "<krusty::resolve::Checker>::ext_arg_tys",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::expr_inner_index",
+    "function": "<krusty::resolve::Checker>::member_extension_function_with_receivers",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::expr_inner_name",
+    "function": "<krusty::resolve::Checker>::member_extension_operator_call",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::if_branch_ty",
+    "function": "<krusty::resolve::Checker>::member_receiver_type_bindings",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::joined_branch_result",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::resolve::Checker>::lexical_source_class_names",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::resolve::Checker>::publish_joined_local_flow",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::resolve::Checker>::record_extension_selection",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::resolve::Checker>::record_library_constructor",
+    "function": "<krusty::resolve::Checker>::nominal_intersection_property_receiver",
     "self": 0,
     "total": 1
    },
@@ -2551,22 +2876,12 @@
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::report_missing_supertypes",
+    "function": "<krusty::resolve::Checker>::reset_body_mutations",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::resolved_explicit_type_args",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::resolve::Checker>::resolver",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::resolve::Checker>::scoped_properties::collect",
+    "function": "<krusty::resolve::Checker>::select_binary_operator_expression",
     "self": 0,
     "total": 1
    },
@@ -2576,17 +2891,7 @@
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::select_top_level_property",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::resolve::Checker>::selected_operator_params",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::resolve::Checker>::stable_path_ty",
+    "function": "<krusty::resolve::Checker>::select_static_scope_property",
     "self": 0,
     "total": 1
    },
@@ -2596,32 +2901,32 @@
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::try_member_read",
+    "function": "<krusty::resolve::streaming_signature_bridge::ProductionSignatureSemantics as krusty::fir::signature::SignatureSemantics>::select_call",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::type_ref_ty",
+    "function": "<krusty::resolve::streaming_signature_bridge::ProductionSignatureSemantics>::receiver_member_level_with_context_status_and_constraints",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::Checker>::visible_flow_value",
+    "function": "<krusty::symbol_resolver::SymbolResolver>::associated_properties_of",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::StmtLowering as core::clone::Clone>::clone",
+    "function": "<krusty::symbol_resolver::SymbolResolver>::select_classifier_member_property",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::resolve::scope::Scope<krusty::resolve::ScopeBinding>>::implicit_receiver_values",
+    "function": "<krusty::symbol_resolver::SymbolResolver>::select_member_property_applicable_where::<<krusty::resolve::Checker>::select_property_read::{closure#0}>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::symbol_resolver::SymbolResolver>::select_extension_property_for_access",
+    "function": "<krusty::symbol_resolver::SymbolResolver>::select_receiver_function_with_params_tracking",
     "self": 0,
     "total": 1
    },
@@ -2631,27 +2936,17 @@
     "total": 1
    },
    {
-    "function": "<krusty::symbol_resolver::receiver_mro::ReceiverMro>::match_receiver",
+    "function": "<krusty::symbol_resolver::call_argument::CallArgKind>::inference_type",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::symbol_resolver::receiver_mro::ReceiverMro>::new",
+    "function": "<krusty::symbol_source::CompositeSource as krusty::symbol_source::SymbolSource>::classifier",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::types::ResolvedAnnotation as core::clone::Clone>::clone",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::types::Ty>::canonical_semantic",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<krusty::types::thin_handles::TyList>::new",
+    "function": "<krusty::types::TypeName as core::convert::From<alloc::string::String>>::from",
     "self": 0,
     "total": 1
    },
@@ -2661,137 +2956,162 @@
     "total": 1
    },
    {
-    "function": "<krusty_cli::staged_output::StagedOutput>::commit",
+    "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::alloc_zeroed",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<std::collections::hash::map::HashMap<alloc::string::String, krusty::types::Ty, ahash::random_state::RandomState> as core::iter::traits::collect::FromIterator<(alloc::string::String, krusty::types::Ty)>>::from_iter::<core::iter::adapters::filter_map::FilterMap<std::collections::hash::map::IntoIter<alloc::string::String, alloc::vec::Vec<krusty::types::Ty>>, krusty::symbol_resolver::generic_inference::bound_relations::resolve_bound_violating_bindings<&[krusty::types::Ty]>::{closure#3}>>",
+    "function": "<std::path::Path>::is_dir",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<std::collections::hash::map::HashMap<alloc::string::String, usize>>::insert",
+    "function": "<std::thread::local::LocalKey<core::cell::RefCell<core::option::Option<std::collections::hash::map::HashMap<krusty::types::Ty, alloc::boxed::Box<[krusty::types::Ty]>, ahash::random_state::RandomState>>>>>::with::<krusty::symbol_resolver::hierarchy_projection::projection_cache_get::{closure#0}, core::option::Option<alloc::vec::Vec<krusty::types::Ty>>>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<std::collections::hash::map::HashMap<u64, alloc::string::String, ahash::random_state::RandomState> as core::iter::traits::collect::FromIterator<(u64, alloc::string::String)>>::from_iter::<core::iter::adapters::cloned::Cloned<core::slice::iter::Iter<(u64, alloc::string::String)>>>",
+    "function": "<zip::datetime::DateTime>::from_date_and_time",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<std::fs::DirBuilder>::_create",
+    "function": "<zip::format::blocks::ZipLocalEntryBlock as zip::format::blocks::FixedSizeBlock>::parse::<std::fs::File>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<std::fs::DirBuilder>::create::<&std::path::Path>",
+    "function": "<zip::read::zip_archive::ZipArchive<std::fs::File>>::by_index_with_options",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<std::fs::OpenOptions>::_open",
+    "function": "<zip::read::zip_archive::ZipArchive<std::fs::File>>::by_name_with_optional_password",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<std::hash::random::DefaultHasher as core::hash::Hasher>::finish",
+    "function": "<zip::types::ZipFileData>::find_content::<std::fs::File>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<std::sys::fs::unix::File>::open_c",
+    "function": "<zlib_rs::inflate::InflateStream>::new",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<str as alloc::string::SpecToString>::spec_to_string",
+    "function": "<zlib_rs::inflate::window::Window>::extend",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<str as alloc::string::ToString>::to_string",
+    "function": "<zlib_rs::inflate::window::Window>::size",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<u8 as <[_]>::to_vec_in::ConvertVec>::to_vec::<alloc::alloc::Global>",
+    "function": "<zlib_rs::inflate::writer::Writer>::push",
     "self": 0,
     "total": 1
    },
    {
-    "function": "__handle_mm_fault",
+    "function": "<zlib_rs::stable::Inflate>::new",
     "self": 0,
     "total": 1
    },
    {
-    "function": "__mi_stat_increase",
+    "function": "<zlib_rs::weak_slice::WeakSliceMut<core::mem::maybe_uninit::MaybeUninit<u8>>>::as_mut_slice",
     "self": 0,
     "total": 1
    },
    {
-    "function": "__wp_page_copy_user",
+    "function": "__folio_throttle_swaprate",
     "self": 0,
     "total": 1
    },
    {
-    "function": "__x64_sys_mkdir",
+    "function": "__mmap_region",
     "self": 0,
     "total": 1
    },
    {
-    "function": "__x64_sys_openat",
+    "function": "__perf_event_header__init_id",
     "self": 0,
     "total": 1
    },
    {
-    "function": "_mi_arenas_page_alloc",
+    "function": "__rustc::__rust_alloc_zeroed",
     "self": 0,
     "total": 1
    },
    {
-    "function": "_mi_auto_process_done",
+    "function": "__vm_munmap",
     "self": 0,
     "total": 1
    },
    {
-    "function": "_mi_page_free_collect",
+    "function": "__x64_sys_execve",
     "self": 0,
     "total": 1
    },
    {
-    "function": "_mi_ptr_page",
+    "function": "__x64_sys_mprotect",
     "self": 0,
     "total": 1
    },
    {
-    "function": "copy_page_to_iter",
+    "function": "__x64_sys_munmap",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::iter::adapters::filter::filter_try_fold::<&str,",
+    "function": "__x64_sys_statx",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::iter::adapters::map::map_try_fold::<&str, core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>,",
+    "function": "_mi_page_map_register",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::iter::adapters::try_process::<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<(&str, &str, &str, bool)>, <krusty::jvm::jvm_libraries::JvmLibraries>::normalize_iteration_traversal::{closure#0}>, krusty::libraries::LibraryMember, core::option::Option<core::convert::Infallible>, <core::option::Option<alloc::vec::Vec<krusty::libraries::LibraryMember>> as core::iter::traits::collect::FromIterator<core::option::Option<krusty::libraries::LibraryMember>>>::from_iter<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<(&str, &str, &str, bool)>, <krusty::jvm::jvm_libraries::JvmLibraries>::normalize_iteration_traversal::{closure#0}>>::{closure#0}, alloc::vec::Vec<krusty::libraries::LibraryMember>>",
+    "function": "alloc::io::read::default_read_to_end::small_probe_read::<core::io::util::Take<&mut zip::compression::LazyDecompressor<alloc::io::buffered::bufreader::BufReader<zip::read::readers::CryptoReader<std::fs::File>>>>>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::iter::adapters::map::Map<core::iter::adapters::chain::Chain<core::iter::adapters::map::Map<core::slice::iter::Iter<alloc::vec::Vec<u8>>, krusty::jvm::metadata::decode_functions::{closure#9}>, core::iter::adapters::map::Map<core::slice::iter::Iter<u64>, krusty::jvm::metadata::decode_functions::{closure#10}>>, krusty::jvm::metadata::decode_functions::{closure#11}>, krusty::jvm::metadata::decode_functions::{closure#12}>, krusty::jvm::metadata::value_parameter::MetaValueParam, core::option::Option<core::convert::Infallible>, <core::option::Option<alloc::vec::Vec<krusty::jvm::metadata::value_parameter::MetaValueParam>> as core::iter::traits::collect::FromIterator<core::option::Option<krusty::jvm::metadata::value_parameter::MetaValueParam>>>::from_iter<core::iter::adapters::map::Map<core::iter::adapters::map::Map<core::iter::adapters::chain::Chain<core::iter::adapters::map::Map<core::slice::iter::Iter<alloc::vec::Vec<u8>>, krusty::jvm::metadata::decode_functions::{closure#9}>, core::iter::adapters::map::Map<core::slice::iter::Iter<u64>, krusty::jvm::metadata::decode_functions::{closure#10}>>, krusty::jvm::metadata::decode_functions::{closure#11}>, krusty::jvm::metadata::decode_functions::{closure#12}>>::{closure#0}, alloc::vec::Vec<krusty::jvm::metadata::value_parameter::MetaValueParam>>",
+    "function": "alloc::str::join_generic_copy::<str, u8, &str>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::metadata::decode::parameter_shape::ParsedValueParam>, krusty::jvm::metadata::build_generic_sig::{closure#1}>, krusty::types::Ty, core::option::Option<core::convert::Infallible>, <core::option::Option<alloc::vec::Vec<krusty::types::Ty>> as core::iter::traits::collect::FromIterator<core::option::Option<krusty::types::Ty>>>::from_iter<core::iter::adapters::map::Map<core::slice::iter::Iter<krusty::metadata::decode::parameter_shape::ParsedValueParam>, krusty::jvm::metadata::build_generic_sig::{closure#1}>>::{closure#0}, alloc::vec::Vec<krusty::types::Ty>>",
+    "function": "bprm_execve",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "bprm_execve.part.0",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "change_pmd_range.isra.0",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "change_protection",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "change_protection_range",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "change_pud_range",
     "self": 0,
     "total": 1
    },
@@ -2801,32 +3121,62 @@
     "total": 1
    },
    {
-    "function": "core::ptr::drop_glue::<alloc::rc::Rc<krusty::jvm::classpath::Classpath>>",
+    "function": "core::ptr::drop_glue::<(alloc::string::String,",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::ptr::drop_glue::<alloc::vec::Vec<krusty::jvm::classreader::C>>",
+    "function": "core::ptr::drop_glue::<(krusty::language_version::LanguageVersion, krusty::lru::LruCache<krusty::types::TypeName, core::option::Option<alloc::sync::Arc<krusty::libraries::LibraryType>>>)>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::ptr::drop_glue::<hashbrown::map::HashMap<krusty::fir::identities::DeclarationId, krusty::fir::signature::classifier_headers::ResolvedClassifierHeader, ahash::random_state::RandomState>>",
+    "function": "core::ptr::drop_glue::<[(alloc::string::String, krusty::types::annotation_values::AnnotationValue)]>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::ptr::drop_glue::<hashbrown::raw::RawTable<(krusty::fir::identities::DeclarationId, krusty::fir::signature::classifier_headers::ResolvedClassifierHeader)>>",
+    "function": "core::ptr::drop_glue::<alloc::raw_vec::RawVec<u8>>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::ptr::drop_glue::<krusty::fir::signature::ResolvedModuleIndex>",
+    "function": "core::ptr::drop_glue::<alloc::string::String>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::ptr::drop_glue::<krusty::jvm::backend::JvmBackend>",
+    "function": "core::ptr::drop_glue::<alloc::vec::Vec<u8>>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "core::ptr::drop_glue::<hashbrown::map::HashMap<alloc::string::String,",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "core::ptr::drop_glue::<hashbrown::raw::RawTable<(alloc::string::String,",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "core::ptr::drop_glue::<hashbrown::set::HashSet<alloc::string::String, ahash::random_state::RandomState>>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "core::ptr::drop_glue::<krusty::features::LangFeatures>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "core::ptr::drop_glue::<krusty::jvm::bytecode_passes::redundant_null_checks::rewrite::Rewrite>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "core::ptr::drop_glue::<krusty::jvm::metadata::ParsedFunction>",
     "self": 0,
     "total": 1
    },
@@ -2836,7 +3186,7 @@
     "total": 1
    },
    {
-    "function": "core::ptr::drop_glue::<krusty::jvm::method_node::nodes::MethodNode>",
+    "function": "core::ptr::drop_glue::<krusty::language_settings::LanguageSettings>",
     "self": 0,
     "total": 1
    },
@@ -2856,127 +3206,117 @@
     "total": 1
    },
    {
+    "function": "core::ptr::drop_glue::<krusty::libraries::LibraryMember>",
+    "self": 0,
+    "total": 1
+   },
+   {
     "function": "core::ptr::drop_glue::<krusty::libraries::LibraryType>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::ptr::drop_glue::<krusty::libraries::ResolvedSymbols>",
+    "function": "core::ptr::drop_glue::<krusty::resolve::ExprLowering>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::ptr::drop_glue::<std::collections::hash::map::HashMap<krusty::fir::identities::DeclarationId, krusty::fir::signature::classifier_headers::ResolvedClassifierHeader, ahash::random_state::RandomState>>",
+    "function": "core::ptr::drop_glue::<krusty::resolve::TypeInfo>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "crc32fast::specialized::pclmulqdq::calculate",
+    "function": "core::ptr::drop_glue::<krusty::types::ResolvedAnnotation>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "do_wp_page",
+    "function": "core::ptr::drop_glue::<krusty::types::annotation_values::AnnotationValue>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ext4_append",
+    "function": "core::ptr::drop_glue::<krusty_cli::cli::Options>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ext4_bread",
+    "function": "core::ptr::drop_glue::<std::collections::hash::set::HashSet<alloc::string::String, ahash::random_state::RandomState>>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ext4_ext_map_blocks",
+    "function": "do_execveat_common.isra.0",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ext4_getblk",
+    "function": "do_mmap",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ext4_init_new_dir",
+    "function": "do_mprotect_pkey",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ext4_map_blocks",
+    "function": "do_vmi_align_munmap",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ext4_map_create_blocks",
+    "function": "do_vmi_munmap",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ext4_mb_complex_scan_group",
+    "function": "downgrade_write",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ext4_mb_new_blocks",
+    "function": "elf_load",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ext4_mb_regular_allocator",
+    "function": "exec_binprm",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ext4_mb_scan_group",
+    "function": "execve",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ext4_mb_scan_groups_xa_range",
+    "function": "krusty::assignable::applied_supertype",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ext4_mkdir",
+    "function": "krusty::assignable::obj_assignable",
     "self": 0,
     "total": 1
    },
    {
-    "function": "filename_mkdirat",
+    "function": "krusty::backend::counted_loops::realize",
     "self": 0,
     "total": 1
    },
    {
-    "function": "handle_mm_fault",
+    "function": "krusty::backend::module_facts::visit_default_realization::<krusty::backend::module_facts::validate_classifier::{closure#0}>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "handle_pte_fault",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::fir::body_check::check_body_unit_with_parameters_and_defaults",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::fir::body_check::driver::check_and_dispatch_body_in_session_with_source::<krusty::compiler::DeferredCheckedBodies>",
+    "function": "krusty::backend::module_facts::visit_member::<krusty::backend::module_facts::validate_classifier::{closure#0}>",
     "self": 0,
     "total": 1
    },
    {
     "function": "krusty::fir::signature::resolve_signature::<krusty::fir::signature::evaluate::ResolverBackedSignatureEvaluator<krusty::resolve::streaming_signature_bridge::ProductionSignatureSemantics>>",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::frontend::parse_source_kind",
     "self": 0,
     "total": 1
    },
@@ -2991,47 +3331,27 @@
     "total": 1
    },
    {
-    "function": "krusty::jvm::bytecode_passes::analysis::fast_analyzer::analyze_with::<krusty::jvm::inliner::functional_arguments::FunctionalArgumentInterpreter, krusty::jvm::bytecode_passes::analysis::fast_analyzer::PlainFrames>",
+    "function": "krusty::jvm::bytecode_passes::dead_code::eliminate",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::bytecode_passes::pipeline::optimize",
+    "function": "krusty::jvm::bytecode_passes::dead_code::live_instructions",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::bytecode_passes::redundant_null_checks::eliminate",
+    "function": "krusty::jvm::bytecode_passes::redundant_checkcasts::eliminate",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::bytecode_passes::redundant_null_checks::run_round",
+    "function": "krusty::jvm::classpath::call_metadata::for_callable",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::classpath::descriptor_parts",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::jvm::classpath::metadata_alignment::aligned_meta_index",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::jvm::classpath::metadata_alignment::meta_callable_aligns",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::jvm::classpath::value_class_erasure::metadata_primary_bound",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::jvm::classpath::value_class_erasure::metadata_value_class_bound_carrier",
+    "function": "krusty::jvm::classpath::merge_package_tree_part",
     "self": 0,
     "total": 1
    },
@@ -3041,72 +3361,37 @@
     "total": 1
    },
    {
-    "function": "krusty::jvm::classreader::parse_class::{closure#1}",
+    "function": "krusty::jvm::classreader::read_class_attributes",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::classreader::read_annotation_value",
+    "function": "krusty::jvm::enum_when_mappings::lower",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::classreader::read_class_annotations",
+    "function": "krusty::jvm::inline::disassemble",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::classreader::read_class_attrs",
+    "function": "krusty::jvm::jvm_libraries::generic_signatures::class_formal_bounds",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::classreader::read_resolved_annotation",
+    "function": "krusty::jvm::jvm_libraries::generic_signatures::parse_class_gsig",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::inliner::functional_arguments::mark_places",
+    "function": "krusty::jvm::jvm_libraries::signature_parser::parse_formals_with::<krusty::jvm::jvm_libraries::signature_parser::ordinary_application>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::inliner::inline",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::jvm::ir_emit::emit_enum_class",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::jvm::java_nullability_qualifiers::descriptor_nullability_qualifier",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::jvm::java_stub::stub_classes",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::jvm::metadata::builtin_bridge::parse_package_fragment_checked",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::jvm::metadata::class_identity::metadata_classifier_name",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::jvm::metadata::decode_functions::{closure#5}",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::jvm::metadata::decode_metadata_type::{closure#6}",
+    "function": "krusty::jvm::jvm_libraries::signature_parser::parse_type_with::<krusty::jvm::jvm_libraries::signature_parser::ordinary_application>",
     "self": 0,
     "total": 1
    },
@@ -3116,97 +3401,67 @@
     "total": 1
    },
    {
-    "function": "krusty::jvm::metadata::gsig_from_kotlin_class",
+    "function": "krusty::jvm::metadata::member_names::function_jvm_name",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::metadata_method_signatures::map_type_default",
+    "function": "krusty::jvm::metadata::parse_function",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::metadata_method_signatures::requires_function_signature::<core::iter::adapters::map::Map<core::iter::adapters::skip::Skip<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<(alloc::string::String, krusty::types::Ty)>>>, <krusty::jvm::ir_emit::class_metadata::JvmClassRealization>::declared_function::{closure#0}>>",
+    "function": "krusty::jvm::metadata::string_table::resolve_string",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::names::method_descriptor",
+    "function": "krusty::metadata::semantic::klib::message_bodies",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::names::parse_method_descriptor",
+    "function": "krusty::metadata::semantic::klib::semantic_qname",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::value_classes::declaration_inventory::merge_referenced",
+    "function": "krusty::metadata::semantic::resolve_qname",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::jvm::value_classes::declaration_inventory::record_referenced",
+    "function": "krusty::resolve::loop_flow::collect_all_reassigned",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::libraries::physical_parameter_plan::parameter_plan",
+    "function": "krusty::resolve::member_extension_declarations::at_receiver",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::metadata::class_builder::jvm::build_class",
+    "function": "krusty::resolve::member_extension_function_shapes_in",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::metadata::class_builder::schema::class_message",
+    "function": "krusty::resolve::member_extension_function_with",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::metadata::class_builder::schema::class_message::{closure#5}",
+    "function": "krusty::resolve::override_plans::function_override_plans",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::metadata::decode::klib::decode_package_fragment",
+    "function": "krusty::resolve::override_plans::publish_inherited_interface_function_plans",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::metadata::decode::klib::validate_message",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::metadata::decode::type_shape::parse_type_node",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::metadata::type_encoder::encode_type_with_parameter",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::parser::debug_lines::attach",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::parser::parse_with_features_and_script",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::resolve::missing_dependency_supertypes::missing_inherited_supertypes::<alloc::vec::Vec<krusty::types::TypeName>>",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::resolve::qualifiers::classifier_path_with_binding_identity::<krusty::resolve::signature_collection::type_universe::BootstrapSymbolSource>",
+    "function": "krusty::resolve::override_plans::publish_override_plans",
     "self": 0,
     "total": 1
    },
@@ -3216,12 +3471,7 @@
     "total": 1
    },
    {
-    "function": "krusty::resolve::qualifiers::walk_qualifier_with_binding_identity::<krusty::resolve::signature_collection::type_universe::BootstrapSymbolSource>",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "krusty::resolve::signature_collection::compact_source_projection::normalize_referenced_library_annotations",
+    "function": "krusty::resolve::signature_collection::supertype_cycles::supertype_graph",
     "self": 0,
     "total": 1
    },
@@ -3231,159 +3481,344 @@
     "total": 1
    },
    {
-    "function": "krusty::symbol_resolver::callable_shapes::declared_function_type",
+    "function": "krusty::symbol_resolver::argument_compatibility::resolution_subtype",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::symbol_resolver::generic_inference::bound_relations::resolve_bound_violating_bindings::<&[krusty::types::Ty]>",
+    "function": "krusty::symbol_resolver::generic_inference::infer_generic_call_bindings_from_symbols::<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(usize, krusty::types::Ty, bool)>>>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::symbol_resolver::generic_inference::merge_call_argument_bindings::<&[krusty::types::Ty]>",
+    "function": "krusty::symbol_resolver::member_hierarchy::declared_member_callables",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::symbol_resolver::member_hierarchy::declared_callables",
+    "function": "krusty::symbol_resolver::member_hierarchy::declared_member_declarations",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::symbol_resolver::member_hierarchy::specialize_declared_callables",
+    "function": "krusty::symbol_resolver::member_hierarchy::inherited_declarations",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::symbol_resolver::member_specialization::specialize_fixed_member_receiver",
+    "function": "krusty::symbol_resolver::member_hierarchy::normalize_inherited_member_functions_with_family",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::symbol_resolver::member_specialization::specialize_inline_collection_transform",
+    "function": "krusty::symbol_resolver::sam::semantic_sam_signature",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::symbol_resolver::overload_selection::logical_call_params",
+    "function": "load_elf_binary",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::symbol_resolver::overload_selection::select_among_overloads",
+    "function": "lock_mm_and_find_vma",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::symbol_resolver::overload_selection::select_overload_tracking_with_functions",
+    "function": "mi_page_map_set_range",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty::wide_stack::on_wide_stack::<core::result::Result<krusty::fir::identities::FirExprId, krusty::fir::body_check::failure::BodyCheckFailure>, <krusty::fir::body_check::BodyFirChecker>::expression::{closure#0}>",
+    "function": "mi_page_map_set_range_prim",
     "self": 0,
     "total": 1
    },
    {
-    "function": "krusty_cli::staged_output::publish_tree",
+    "function": "mi_theap_is_initialized",
     "self": 0,
     "total": 1
    },
    {
-    "function": "ksys_lseek",
+    "function": "mi_theap_zalloc_aligned",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_arenas_page_alloc_fresh",
+    "function": "mi_theap_zalloc_aligned_at",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_arenas_page_regular_alloc",
+    "function": "mi_zalloc_aligned",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_page_fresh",
+    "function": "mmap_region",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_page_fresh_alloc",
+    "function": "mprotect_fixup",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_page_queue_move_to_front",
+    "function": "perf_event_mmap",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_process_detach",
+    "function": "perf_event_mmap_event",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_process_done",
+    "function": "perf_event_mmap_output",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_theap_collect",
+    "function": "perf_iterate_sb.constprop.0",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_theap_collect_ex",
+    "function": "stacker::grow::<core::result::Result<krusty::fir::signature::resolved_types::ResolvedTy, krusty::fir::identities::DiagnosticId>, <krusty::fir::signature::evaluate::ResolverBackedSignatureEvaluator<_> as krusty::fir::signature::SignatureConstraintEvaluator>::evaluate::evaluate_expression<krusty::resolve::streaming_signature_bridge::ProductionSignatureSemantics>::{closure#0}>::{closure#0}",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_theap_page_collect",
+    "function": "statx",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_theap_visit_pages",
+    "function": "std::sys::fs::metadata",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_validate_ptr_page",
+    "function": "try_to_wake_up",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mkdir",
+    "function": "unmap_page_range",
     "self": 0,
     "total": 1
    },
    {
-    "function": "open64",
+    "function": "unmap_region",
     "self": 0,
     "total": 1
    },
    {
-    "function": "std::fs::create_dir_all::<&std::path::Path>",
+    "function": "unmap_single_vma",
     "self": 0,
     "total": 1
    },
    {
-    "function": "touch_atime",
+    "function": "unmap_vmas",
     "self": 0,
     "total": 1
    },
    {
-    "function": "vfs_mkdir",
+    "function": "vm_mmap",
     "self": 0,
     "total": 1
    },
    {
-    "function": "wp_page_copy",
+    "function": "vm_mmap_pgoff",
     "self": 0,
     "total": 1
+   },
+   {
+    "function": "vms_complete_munmap_vmas",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "wake_up_q",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "zap_pmd_range.isra.0",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "zap_present_ptes.constprop.0",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "zap_pte_range",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "zip::read::read_variable_length_byte_field::<std::fs::File>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "zlib_rs::inflate::init",
+    "self": 0,
+    "total": 1
+   }
+  ]
+ },
+ "tests": {
+  "exit": {
+   "kotlinc": 1,
+   "krusty": 1
+  },
+  "unavailable": null,
+  "total": {
+   "tasks": 5,
+   "passed_kotlinc": 19,
+   "passed": 0,
+   "failed": 0,
+   "skipped": 0,
+   "not_run": 19
+  },
+  "krusty_classes": {
+   "tasks": 0,
+   "passed_kotlinc": 0,
+   "passed": 0,
+   "failed": 0,
+   "skipped": 0,
+   "not_run": 0
+  },
+  "tasks": [
+   {
+    "task": ":okio:jvmTest",
+    "compilations": [
+     ":okio-fakefilesystem:compileKotlinJvm",
+     ":okio-testing-support:compileKotlinJvm",
+     ":okio:compileKotlinJvm",
+     ":okio:compileTestKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 0,
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":okio-fakefilesystem:jvmTest",
+    "compilations": [
+     ":okio-fakefilesystem:compileKotlinJvm",
+     ":okio-fakefilesystem:compileTestKotlinJvm",
+     ":okio:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 0,
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":okio-testing-support:jvmTest",
+    "compilations": [
+     ":okio-fakefilesystem:compileKotlinJvm",
+     ":okio-testing-support:compileKotlinJvm",
+     ":okio-testing-support:compileTestKotlinJvm",
+     ":okio:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 0,
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":samples:jvmTest",
+    "compilations": [
+     ":okio-fakefilesystem:compileKotlinJvm",
+     ":okio-testing-support:compileKotlinJvm",
+     ":okio:compileKotlinJvm",
+     ":samples:compileKotlinJvm",
+     ":samples:compileTestKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 19,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 19,
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 19
+    },
+    "not_passing": [
+     "okio.samples.ChannelsTest.testAppend()[jvm]",
+     "okio.samples.ChannelsTest.testReadChannel()[jvm]",
+     "okio.samples.ChannelsTest.testReadChannelFully()[jvm]",
+     "okio.samples.ChannelsTest.testReadWriteFile()[jvm]",
+     "okio.samples.ChannelsTest.testWriteChannel()[jvm]",
+     "okio.samples.SourceMarkerTest.closeThenMark()[jvm]",
+     "okio.samples.SourceMarkerTest.closeThenRead()[jvm]",
+     "okio.samples.SourceMarkerTest.closeThenReset()[jvm]",
+     "okio.samples.SourceMarkerTest.exceedLimitTest()[jvm]",
+     "okio.samples.SourceMarkerTest.mark0()[jvm]"
+    ]
+   },
+   {
+    "task": ":okio:jvm:jmh:test",
+    "compilations": [
+     ":okio:compileKotlinJvm",
+     ":okio:jvm:jmh:compileKotlin",
+     ":okio:jvm:jmh:compileTestKotlin"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 0,
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
    }
   ]
  },
@@ -3399,8 +3834,8 @@
    "only_kotlinc": 0,
    "only_krusty": 0,
    "seconds": {
-    "kotlinc": 1.74,
-    "krusty": 0.71
+    "kotlinc": 2.2,
+    "krusty": 0.85
    }
   },
   {
@@ -3414,8 +3849,8 @@
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 4.15,
-    "krusty": 3.83
+    "kotlinc": 4.25,
+    "krusty": 5.18
    }
   },
   {
@@ -3429,8 +3864,8 @@
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 16.73,
-    "krusty": 17.79
+    "kotlinc": 21.37,
+    "krusty": 22.23
    }
   },
   {
@@ -3444,8 +3879,8 @@
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 0.91,
-    "krusty": 0.46
+    "kotlinc": 1.03,
+    "krusty": 0.55
    }
   },
   {
@@ -3459,8 +3894,8 @@
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 1.88,
-    "krusty": 0.12
+    "kotlinc": 2.15,
+    "krusty": 0.1
    }
   },
   {
@@ -3474,7 +3909,7 @@
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 1.1,
+    "kotlinc": 1.42,
     "krusty": 0.03
    }
   }
@@ -3507,9 +3942,15 @@
   }
  ],
  "measured": {
-  "date": "2026-11-04",
-  "commit": "e075f8fee183242ad26a53f396f76939713fa6a8",
-  "run": "https://github.com/qnox/krusty/actions/runs/41795013119"
+  "date": "2026-11-06",
+  "commit": "10c4d324fab5020c8bb084601654b5c2ae57829c",
+  "run": "https://github.com/qnox/krusty/actions/runs/42186809621"
+ },
+ "source": {
+  "url": "https://github.com/lysine-dev/okio",
+  "commit": "e84aa17bac2b31e688c8be4f61557779032f7a7c",
+  "patch": "scripts/oss-corpus/patches/okio.patch",
+  "kotlin_pin": "gradle/libs.versions.toml:kotlin"
  },
  "flame_graph": "krusty-flamegraph.svg"
 }

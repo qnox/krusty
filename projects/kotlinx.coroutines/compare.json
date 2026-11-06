@@ -11,172 +11,197 @@
  "identical": 0,
  "cost": {
   "kotlinc": {
-   "wall_seconds": 119.6,
-   "cpu_seconds": 393.6,
+   "wall_seconds": 156.0,
+   "cpu_seconds": 511.8,
    "peak_rss_mb": {
-    "total": 4902,
-    "gradle": 1696,
-    "kotlin_daemon": 3213,
+    "total": 4928,
+    "gradle": 1802,
+    "kotlin_daemon": 3128,
     "krusty": 0,
-    "other": 27
+    "other": 26
    },
-   "compile_seconds": 145.3,
+   "compile_seconds": 188.2,
    "built_compile_seconds": 0
   },
   "krusty": {
-   "wall_seconds": 124.3,
-   "cpu_seconds": 412.2,
+   "wall_seconds": 162.8,
+   "cpu_seconds": 533.0,
    "peak_rss_mb": {
-    "total": 5946,
-    "gradle": 2142,
-    "kotlin_daemon": 3817,
-    "krusty": 32,
-    "other": 32
+    "total": 5258,
+    "gradle": 1990,
+    "kotlin_daemon": 3272,
+    "krusty": 25,
+    "other": 28
    },
-   "compile_seconds": 144.8,
+   "compile_seconds": 186.9,
    "built_compile_seconds": 0
   }
  },
  "hotspots": {
-  "samples": 62,
+  "samples": 59,
   "functions": [
    {
     "function": "[libc.so.6]",
     "self": 6,
-    "total": 57
+    "total": 46
    },
    {
     "function": "do_syscall_64",
-    "self": 6,
-    "total": 23
+    "self": 3,
+    "total": 17
    },
    {
-    "function": "x64_sys_call",
-    "self": 5,
-    "total": 19
-   },
-   {
-    "function": "kernel_init_pages",
-    "self": 4,
-    "total": 4
-   },
-   {
-    "function": "<zip::read::zip_archive::ZipArchive<std::fs::File>>::with_config",
+    "function": "[ld-linux-x86-64.so.2]",
     "self": 2,
-    "total": 31
+    "total": 14
    },
    {
-    "function": "__x64_sys_lseek",
+    "function": "mi_free",
     "self": 2,
-    "total": 4
+    "total": 3
    },
    {
-    "function": "_copy_to_iter",
+    "function": "filemap_get_pages",
     "self": 2,
     "total": 2
    },
    {
-    "function": "zip::read::read_variable_length_byte_field::<std::fs::File>",
+    "function": "<zip::read::zip_archive::ZipArchive<std::fs::File>>::with_config",
+    "self": 1,
+    "total": 19
+   },
+   {
+    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::parse",
+    "self": 1,
+    "total": 17
+   },
+   {
+    "function": "ksys_read",
     "self": 1,
     "total": 9
    },
    {
-    "function": "<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row",
+    "function": "do_fault",
     "self": 1,
-    "total": 6
+    "total": 7
    },
    {
     "function": "vfs_read",
     "self": 1,
+    "total": 7
+   },
+   {
+    "function": "<alloc::vec::Vec<&str>>::extend_desugared::<core::str::iter::Split<char>>",
+    "self": 1,
     "total": 6
    },
    {
-    "function": "get_page_from_freelist",
+    "function": "<alloc::raw_vec::RawVecInner>::grow_amortized",
     "self": 1,
     "total": 5
    },
    {
-    "function": "ext4_file_read_iter",
+    "function": "filemap_read",
     "self": 1,
     "total": 4
+   },
+   {
+    "function": "alloc_pages_mpol",
+    "self": 1,
+    "total": 3
    },
    {
     "function": "mi_theap_malloc_zero_aligned_at",
     "self": 1,
-    "total": 4
+    "total": 3
    },
    {
-    "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::alloc_zeroed",
+    "function": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write_str",
     "self": 1,
     "total": 2
    },
    {
-    "function": "next_uptodate_folio",
+    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Split<char>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#1}> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::FeatureToggle>>",
     "self": 1,
     "total": 2
    },
    {
-    "function": "<alloc::raw_vec::RawVecInner>::with_capacity_in",
+    "function": "<core::str::iter::Lines as core::iter::traits::iterator::Iterator>::next",
+    "self": 1,
+    "total": 2
+   },
+   {
+    "function": "<core::str::pattern::CharSearcher as core::str::pattern::Searcher>::next_match",
+    "self": 1,
+    "total": 2
+   },
+   {
+    "function": "<krusty::features::table::LanguageFeature>::parse_row",
+    "self": 1,
+    "total": 2
+   },
+   {
+    "function": "filemap_map_pages",
+    "self": 1,
+    "total": 2
+   },
+   {
+    "function": "folio_add_lru_vma",
+    "self": 1,
+    "total": 2
+   },
+   {
+    "function": "get_page_from_freelist",
+    "self": 1,
+    "total": 2
+   },
+   {
+    "function": "lruvec_stat_mod_folio",
+    "self": 1,
+    "total": 2
+   },
+   {
+    "function": "<core::hash::sip::Sip13Rounds as core::hash::sip::Sip>::d_rounds",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<alloc::string::String> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::string::String, core::iter::adapters::skip::Skip<std::env::Args>>>::from_iter",
+    "function": "<core::str::LinesMap as core::ops::function::Fn<(&str,)>>::call",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<core::hash::sip::Sip13Rounds as core::hash::sip::Sip>::c_rounds",
+    "function": "<hashbrown::map::HashMap<alloc::string::String,",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<core::result::Result<&str, core::io::error::Error> as core::ops::try_trait::Try>::branch",
+    "function": "__f_unlock_pos",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<std::fs::File as core::io::seek::Seek>::seek",
+    "function": "__folio_batch_add_and_move",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<str>::split::<char>",
+    "function": "_mi_memcpy",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<str>::starts_with::<char>",
+    "function": "_mi_unchecked_ptr_page",
     "self": 1,
     "total": 1
    },
    {
-    "function": "<usize as core::cmp::Ord>::min",
+    "function": "apparmor_file_permission",
     "self": 1,
     "total": 1
    },
    {
-    "function": "__kmalloc_cache_noprof",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "_mi_page_map_index",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "atime_needs_update",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "begin_current_label_crit_section",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "core::intrinsics::rotate_left::<u64>",
+    "function": "core::hash::sip::u8to64_le",
     "self": 1,
     "total": 1
    },
@@ -186,27 +211,42 @@
     "total": 1
    },
    {
+    "function": "core::str::converts::from_utf8",
+    "self": 1,
+    "total": 1
+   },
+   {
+    "function": "count_memcg_events",
+    "self": 1,
+    "total": 1
+   },
+   {
+    "function": "current_time",
+    "self": 1,
+    "total": 1
+   },
+   {
     "function": "fdget_pos",
     "self": 1,
     "total": 1
    },
    {
-    "function": "finish_task_switch.isra.0",
+    "function": "flush_tlb_mm_range",
     "self": 1,
     "total": 1
    },
    {
-    "function": "free_unref_folios",
+    "function": "generic_permission",
     "self": 1,
     "total": 1
    },
    {
-    "function": "mas_walk",
+    "function": "kernel_init_pages",
     "self": 1,
     "total": 1
    },
    {
-    "function": "mi_block_nextx",
+    "function": "mas_next_node",
     "self": 1,
     "total": 1
    },
@@ -216,12 +256,22 @@
     "total": 1
    },
    {
-    "function": "mutex_lock",
+    "function": "mi_rep_stosb",
     "self": 1,
     "total": 1
    },
    {
-    "function": "set_pte_range",
+    "function": "mod_memcg_lruvec_state",
+    "self": 1,
+    "total": 1
+   },
+   {
+    "function": "next_uptodate_folio",
+    "self": 1,
+    "total": 1
+   },
+   {
+    "function": "pte_offset_map_lock",
     "self": 1,
     "total": 1
    },
@@ -231,417 +281,412 @@
     "total": 1
    },
    {
-    "function": "userfaultfd_remove",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "vma_interval_tree_insert",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "vma_interval_tree_remove",
-    "self": 1,
-    "total": 1
-   },
-   {
-    "function": "xas_load",
+    "function": "unlink_anon_vmas",
     "self": 1,
     "total": 1
    },
    {
     "function": "__libc_start_main",
     "self": 0,
-    "total": 56
+    "total": 45
    },
    {
     "function": "_start",
     "self": 0,
-    "total": 56
+    "total": 45
    },
    {
     "function": "main",
     "self": 0,
-    "total": 56
+    "total": 45
    },
    {
     "function": "std::rt::lang_start::<()>",
     "self": 0,
-    "total": 56
+    "total": 45
    },
    {
     "function": "std::rt::lang_start_internal",
     "self": 0,
-    "total": 56
+    "total": 45
    },
    {
     "function": "<fn() as core::ops::function::FnOnce<()>>::call_once",
     "self": 0,
-    "total": 55
+    "total": 43
    },
    {
     "function": "krusty::main",
     "self": 0,
-    "total": 55
-   },
-   {
-    "function": "std::rt::lang_start::<()>::{closure#0}",
-    "self": 0,
-    "total": 55
-   },
-   {
-    "function": "std::sys::backtrace::__rust_begin_short_backtrace::<fn(),",
-    "self": 0,
-    "total": 55
+    "total": 43
    },
    {
     "function": "krusty::run_refusals",
     "self": 0,
-    "total": 54
+    "total": 43
    },
    {
-    "function": "<krusty::plugins::registry::PluginRegistry>::resolve",
+    "function": "std::rt::lang_start::<()>::{closure#0}",
     "self": 0,
-    "total": 34
+    "total": 43
    },
    {
-    "function": "<krusty_cli::cli::Options>::resolve_plugins",
+    "function": "std::sys::backtrace::__rust_begin_short_backtrace::<fn(),",
     "self": 0,
-    "total": 34
-   },
-   {
-    "function": "krusty::refusals",
-    "self": 0,
-    "total": 34
-   },
-   {
-    "function": "<alloc::vec::Vec<(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>), core::iter::adapters::map::Map<core::iter::adapters::map::Map<core::iter::adapters::chain::Chain<core::slice::iter::Iter<alloc::string::String>, core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<krusty::plugins::cli::CompilerPluginSpec>, core::slice::iter::Iter<alloc::string::String>, <krusty::plugins::cli::PluginConfig>::all_plugin_jars::{closure#0}>>, <alloc::string::String>::as_str>, <krusty::plugins::registry::PluginRegistry>::resolve::{closure#0}>>>::from_iter",
-    "self": 0,
-    "total": 33
-   },
-   {
-    "function": "krusty::plugins::registry::declared_registrars",
-    "self": 0,
-    "total": 33
-   },
-   {
-    "function": "krusty::archive::open_file",
-    "self": 0,
-    "total": 32
-   },
-   {
-    "function": "entry_SYSCALL_64_after_hwframe",
-    "self": 0,
-    "total": 27
+    "total": 43
    },
    {
     "function": "krusty_cli::cli::parse::<alloc::vec::Vec<alloc::string::String>>",
     "self": 0,
-    "total": 18
+    "total": 22
    },
    {
     "function": "krusty_cli::cli::read::<alloc::vec::Vec<alloc::string::String>>",
     "self": 0,
-    "total": 18
+    "total": 22
+   },
+   {
+    "function": "<krusty_cli::cli::Options>::resolve_plugins",
+    "self": 0,
+    "total": 21
+   },
+   {
+    "function": "krusty::refusals",
+    "self": 0,
+    "total": 21
+   },
+   {
+    "function": "<alloc::vec::Vec<(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>), core::iter::adapters::map::Map<core::iter::adapters::map::Map<core::iter::adapters::chain::Chain<core::slice::iter::Iter<alloc::string::String>, core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<krusty::plugins::cli::CompilerPluginSpec>, core::slice::iter::Iter<alloc::string::String>, <krusty::plugins::cli::PluginConfig>::all_plugin_jars::{closure#0}>>, <alloc::string::String>::as_str>, <krusty::plugins::registry::PluginRegistry>::resolve::{closure#0}>>>::from_iter",
+    "self": 0,
+    "total": 20
+   },
+   {
+    "function": "<krusty::plugins::registry::PluginRegistry>::resolve",
+    "self": 0,
+    "total": 20
    },
    {
     "function": "<std::sys::sync::once::futex::Once>::call",
+    "self": 0,
+    "total": 20
+   },
+   {
+    "function": "krusty::plugins::registry::declared_registrars",
+    "self": 0,
+    "total": 20
+   },
+   {
+    "function": "krusty::archive::open_file",
+    "self": 0,
+    "total": 19
+   },
+   {
+    "function": "<&mut <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0} as core::ops::function::FnMut<(krusty::kotlin_version::KotlinVersion,)>>::call_mut",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog> as core::iter::traits::collect::FromIterator<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>::from_iter::<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as alloc::vec::spec_from_iter::SpecFromIter<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>>::from_iter",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>>::from_iter",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as core::iter::traits::collect::FromIterator<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>::from_iter::<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion> as core::iter::traits::iterator::Iterator>::find_map::<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), &mut <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::find_map::check<krusty::kotlin_version::KotlinVersion,",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::collect::<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::next",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}>",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init::<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init::<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_try_init::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "core::iter::traits::iterator::Iterator::find_map::check::<krusty::kotlin_version::KotlinVersion,",
+    "self": 0,
+    "total": 17
+   },
+   {
+    "function": "entry_SYSCALL_64_after_hwframe",
     "self": 0,
     "total": 17
    },
    {
     "function": "<std::fs::File as alloc::io::read::Read>::read",
     "self": 0,
-    "total": 14
+    "total": 15
    },
    {
     "function": "alloc::io::read::default_read_exact::<std::fs::File>",
     "self": 0,
-    "total": 14
+    "total": 15
    },
    {
     "function": "read",
     "self": 0,
-    "total": 14
+    "total": 15
    },
    {
-    "function": "<&mut <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0} as core::ops::function::FnMut<(krusty::kotlin_version::KotlinVersion,)>>::call_mut",
+    "function": "x64_sys_call",
     "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog> as core::iter::traits::collect::FromIterator<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>::from_iter::<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as alloc::vec::spec_from_iter::SpecFromIter<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>>::from_iter",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>>::from_iter",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as core::iter::traits::collect::FromIterator<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>::from_iter::<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion> as core::iter::traits::iterator::Iterator>::find_map::<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), &mut <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::find_map::check<krusty::kotlin_version::KotlinVersion,",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::collect::<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::next",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<krusty_cli::kotlinc_arguments::catalog::Catalog>::parse",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}>",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init::<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init::<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_try_init::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog>>>::get_or_init<<krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}",
-    "self": 0,
-    "total": 12
-   },
-   {
-    "function": "core::iter::traits::iterator::Iterator::find_map::check::<krusty::kotlin_version::KotlinVersion,",
-    "self": 0,
-    "total": 12
+    "total": 13
    },
    {
     "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec> as alloc::vec::spec_from_iter::SpecFromIter<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter",
     "self": 0,
-    "total": 9
+    "total": 12
    },
    {
     "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter",
     "self": 0,
-    "total": 9
+    "total": 12
    },
    {
     "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec> as core::iter::traits::collect::FromIterator<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::from_iter::<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>",
     "self": 0,
-    "total": 9
+    "total": 12
    },
    {
     "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row> as core::iter::traits::iterator::Iterator>::collect::<core::result::Result<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, alloc::string::String>>",
     "self": 0,
-    "total": 9
+    "total": 12
    },
    {
     "function": "<core::result::Result<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>>>::from_iter::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>>",
     "self": 0,
-    "total": 9
+    "total": 12
    },
    {
     "function": "<core::result::Result<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>>>::from_iter::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>>::{closure#0}",
     "self": 0,
-    "total": 9
+    "total": 12
    },
    {
     "function": "asm_exc_page_fault",
     "self": 0,
-    "total": 9
+    "total": 12
    },
    {
     "function": "core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::result::Result<core::convert::Infallible, alloc::string::String>, <core::result::Result<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>>>::from_iter<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>>::{closure#0}, alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>",
     "self": 0,
-    "total": 9
+    "total": 12
    },
    {
     "function": "do_user_addr_fault",
     "self": 0,
-    "total": 9
+    "total": 12
    },
    {
     "function": "exc_page_fault",
     "self": 0,
-    "total": 9
+    "total": 12
    },
    {
-    "function": "llseek",
+    "function": "handle_mm_fault",
+    "self": 0,
+    "total": 12
+   },
+   {
+    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec> as alloc::vec::spec_extend::SpecExtend<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::spec_extend",
+    "self": 0,
+    "total": 11
+   },
+   {
+    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::extend_desugared::<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>",
+    "self": 0,
+    "total": 11
+   },
+   {
+    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::next",
+    "self": 0,
+    "total": 11
+   },
+   {
+    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>",
+    "self": 0,
+    "total": 11
+   },
+   {
+    "function": "<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::map::map_try_fold<&str, core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>,",
+    "self": 0,
+    "total": 11
+   },
+   {
+    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>>",
+    "self": 0,
+    "total": 11
+   },
+   {
+    "function": "<core::str::iter::Lines as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::filter::filter_try_fold<&str,",
+    "self": 0,
+    "total": 11
+   },
+   {
+    "function": "__handle_mm_fault",
+    "self": 0,
+    "total": 11
+   },
+   {
+    "function": "__x64_sys_read",
+    "self": 0,
+    "total": 10
+   },
+   {
+    "function": "core::iter::adapters::filter::filter_try_fold::<&str,",
+    "self": 0,
+    "total": 10
+   },
+   {
+    "function": "core::iter::adapters::map::map_try_fold::<&str, core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>,",
+    "self": 0,
+    "total": 10
+   },
+   {
+    "function": "<<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row as core::ops::function::FnMut<(&str,)>>::call_mut",
     "self": 0,
     "total": 9
    },
    {
     "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as alloc::vec::spec_extend::SpecExtend<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>>::spec_extend",
     "self": 0,
-    "total": 8
+    "total": 9
    },
    {
     "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>::extend_desugared::<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>",
     "self": 0,
-    "total": 8
+    "total": 9
    },
    {
-    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec> as alloc::vec::spec_extend::SpecExtend<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::spec_extend",
+    "function": "<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row",
     "self": 0,
-    "total": 8
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::extend_desugared::<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>",
-    "self": 0,
-    "total": 8
-   },
-   {
-    "function": "[ld-linux-x86-64.so.2]",
-    "self": 0,
-    "total": 8
-   },
-   {
-    "function": "__handle_mm_fault",
-    "self": 0,
-    "total": 8
-   },
-   {
-    "function": "handle_mm_fault",
-    "self": 0,
-    "total": 8
-   },
-   {
-    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::next",
-    "self": 0,
-    "total": 7
-   },
-   {
-    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>",
-    "self": 0,
-    "total": 7
-   },
-   {
-    "function": "<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::map::map_try_fold<&str, core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>,",
-    "self": 0,
-    "total": 7
-   },
-   {
-    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>>",
-    "self": 0,
-    "total": 7
-   },
-   {
-    "function": "<core::str::iter::Lines as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::filter::filter_try_fold<&str,",
-    "self": 0,
-    "total": 7
-   },
-   {
-    "function": "core::iter::adapters::filter::filter_try_fold::<&str,",
-    "self": 0,
-    "total": 7
-   },
-   {
-    "function": "<<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row as core::ops::function::FnMut<(&str,)>>::call_mut",
-    "self": 0,
-    "total": 6
-   },
-   {
-    "function": "__x64_sys_read",
-    "self": 0,
-    "total": 6
-   },
-   {
-    "function": "core::iter::adapters::map::map_try_fold::<&str, core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>,",
-    "self": 0,
-    "total": 6
+    "total": 9
    },
    {
     "function": "handle_pte_fault",
     "self": 0,
-    "total": 6
+    "total": 9
    },
    {
-    "function": "ksys_read",
+    "function": "<zip::format::blocks::ZipCentralEntryBlock as zip::format::blocks::FixedSizeBlock>::parse::<std::fs::File>",
+    "self": 0,
+    "total": 8
+   },
+   {
+    "function": "zip::read::central_header_to_zip_file_inner::<std::fs::File>",
+    "self": 0,
+    "total": 8
+   },
+   {
+    "function": "zip::read::read_variable_length_byte_field::<std::fs::File>",
+    "self": 0,
+    "total": 8
+   },
+   {
+    "function": "<alloc::vec::Vec<&str> as alloc::vec::spec_extend::SpecExtend<&str, core::str::iter::Split<char>>>::spec_extend",
     "self": 0,
     "total": 6
    },
    {
-    "function": "<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable> as core::iter::traits::collect::FromIterator<(krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable)>>::from_iter::<core::iter::adapters::map::Map<core::slice::iter::Iter<(krusty::kotlin_version::KotlinVersion, &str)>, <krusty::features::table::FeatureTable>::for_version::{closure#0}::{closure#0}>>",
+    "function": "<alloc::vec::Vec<&str> as alloc::vec::spec_from_iter::SpecFromIter<&str, core::str::iter::Split<char>>>::from_iter",
     "self": 0,
-    "total": 5
+    "total": 6
    },
    {
-    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable)> as alloc::vec::spec_from_iter::SpecFromIter<(krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable), core::iter::adapters::map::Map<core::slice::iter::Iter<(krusty::kotlin_version::KotlinVersion, &str)>, <krusty::features::table::FeatureTable>::for_version::{closure#0}::{closure#0}>>>::from_iter",
+    "function": "<alloc::vec::Vec<&str> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<&str, core::str::iter::Split<char>>>::from_iter",
     "self": 0,
-    "total": 5
+    "total": 6
    },
    {
-    "function": "<krusty::features::LangFeatures>::for_release",
+    "function": "<alloc::vec::Vec<&str> as core::iter::traits::collect::FromIterator<&str>>::from_iter::<core::str::iter::Split<char>>",
     "self": 0,
-    "total": 5
+    "total": 6
    },
    {
-    "function": "<krusty::features::table::FeatureTable>::for_version",
+    "function": "<core::str::iter::Split<char> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<&str>>",
     "self": 0,
-    "total": 5
+    "total": 6
    },
    {
-    "function": "<krusty::features::table::FeatureTable>::parse",
+    "function": "<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>",
     "self": 0,
     "total": 5
    },
@@ -651,107 +696,102 @@
     "total": 5
    },
    {
-    "function": "<krusty_cli::cli::Options as core::default::Default>::default",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable>>>::initialize<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable>>>::get_or_init<<krusty::features::table::FeatureTable>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable>>>::get_or_init<<krusty::features::table::FeatureTable>::for_version::{closure#0}>::{closure#0}, !>",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "__alloc_frozen_pages_noprof",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "alloc_pages_mpol",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty::features::table::FeatureTable>::parse::{closure#0}>, <krusty::features::table::LanguageFeature>::parse_row>, krusty::features::table::LanguageFeature, core::result::Result<core::convert::Infallible, alloc::string::String>, <core::result::Result<alloc::vec::Vec<krusty::features::table::LanguageFeature>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<krusty::features::table::LanguageFeature, alloc::string::String>>>::from_iter<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty::features::table::FeatureTable>::parse::{closure#0}>, <krusty::features::table::LanguageFeature>::parse_row>>::{closure#0}, alloc::vec::Vec<krusty::features::table::LanguageFeature>>",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "vma_alloc_folio_noprof",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "<alloc::vec::Vec<&str> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<&str, core::str::iter::Split<char>>>::from_iter",
+    "function": "<alloc::alloc::Global as core::alloc::Allocator>::grow",
     "self": 0,
     "total": 4
    },
    {
-    "function": "<alloc::vec::Vec<krusty::features::table::LanguageFeature> as alloc::vec::spec_from_iter::SpecFromIter<krusty::features::table::LanguageFeature, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty::features::table::FeatureTable>::parse::{closure#0}>, <krusty::features::table::LanguageFeature>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter",
+    "function": "<alloc::alloc::Global>::grow_impl_runtime",
     "self": 0,
     "total": 4
-   },
-   {
-    "function": "do_fault",
-    "self": 0,
-    "total": 4
-   },
-   {
-    "function": "post_alloc_hook",
-    "self": 0,
-    "total": 4
-   },
-   {
-    "function": "<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>",
-    "self": 0,
-    "total": 3
    },
    {
     "function": "<alloc::raw_vec::RawVecInner>::finish_grow",
     "self": 0,
-    "total": 3
+    "total": 4
    },
    {
-    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty::features::table::FeatureTable>::parse::{closure#0}>, <krusty::features::table::LanguageFeature>::parse_row> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty::features::table::FeatureTable>::parse::{closure#0}>, <krusty::features::table::LanguageFeature>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty::features::table::LanguageFeature, core::ops::control_flow::ControlFlow<krusty::features::table::LanguageFeature>, core::ops::control_flow::ControlFlow<krusty::features::table::LanguageFeature>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty::features::table::LanguageFeature>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<krusty::features::table::LanguageFeature>>>",
+    "function": "<alloc::vec::Vec<&str>>::reserve",
     "self": 0,
-    "total": 3
+    "total": 4
    },
    {
     "function": "<hashbrown::map::HashMap<alloc::string::String, usize, std::hash::random::RandomState>>::insert",
     "self": 0,
-    "total": 3
+    "total": 4
    },
    {
-    "function": "<hashbrown::raw::RawTable<(alloc::string::String, usize)>>::find_or_find_insert_index::<hashbrown::map::equivalent_key<alloc::string::String, alloc::string::String, usize>::{closure#0}, hashbrown::map::make_hasher<alloc::string::String, usize, std::hash::random::RandomState>::{closure#0}>",
+    "function": "<krusty::features::LangFeatures>::for_release",
     "self": 0,
-    "total": 3
+    "total": 4
    },
    {
-    "function": "<hashbrown::raw::RawTable<(alloc::string::String, usize)>>::reserve::<hashbrown::map::make_hasher<alloc::string::String, usize, std::hash::random::RandomState>::{closure#0}>",
+    "function": "<krusty_cli::cli::Options as core::default::Default>::default",
     "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<hashbrown::raw::RawTable<(alloc::string::String, usize)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, usize, std::hash::random::RandomState>::{closure#0}>",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<krusty::features::table::LanguageFeature>::parse_row",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::alloc",
-    "self": 0,
-    "total": 3
+    "total": 4
    },
    {
     "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::realloc",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "__rustc::__rust_realloc",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "_mi_theap_realloc_zero",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "ext4_file_read_iter",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "generic_file_read_iter",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "mi_realloc_aligned",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "mi_theap_realloc_aligned",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "mi_theap_realloc_zero_aligned",
+    "self": 0,
+    "total": 4
+   },
+   {
+    "function": "<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable> as core::iter::traits::collect::FromIterator<(krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable)>>::from_iter::<core::iter::adapters::map::Map<core::slice::iter::Iter<(krusty::kotlin_version::KotlinVersion, &str)>, <krusty::features::table::FeatureTable>::for_version::{closure#0}::{closure#0}>>",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable)> as alloc::vec::spec_from_iter::SpecFromIter<(krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable), core::iter::adapters::map::Map<core::slice::iter::Iter<(krusty::kotlin_version::KotlinVersion, &str)>, <krusty::features::table::FeatureTable>::for_version::{closure#0}::{closure#0}>>>::from_iter",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<alloc::vec::Vec<krusty::features::table::LanguageFeature> as alloc::vec::spec_from_iter::SpecFromIter<krusty::features::table::LanguageFeature, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty::features::table::FeatureTable>::parse::{closure#0}>, <krusty::features::table::LanguageFeature>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<krusty::features::table::FeatureTable>::for_version",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<krusty::features::table::FeatureTable>::parse",
     "self": 0,
     "total": 3
    },
@@ -761,87 +801,27 @@
     "total": 3
    },
    {
-    "function": "__rustc::__rust_alloc",
+    "function": "<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>",
     "self": 0,
     "total": 3
    },
    {
-    "function": "__rustc::__rust_realloc",
+    "function": "<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable>>>::initialize<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable>>>::get_or_init<<krusty::features::table::FeatureTable>::for_version::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}",
     "self": 0,
     "total": 3
    },
    {
-    "function": "_mi_malloc_generic",
+    "function": "<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable>>>::get_or_init<<krusty::features::table::FeatureTable>::for_version::{closure#0}>::{closure#0}, !>",
     "self": 0,
     "total": 3
    },
    {
-    "function": "_mi_theap_malloc_zero",
+    "function": "core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty::features::table::FeatureTable>::parse::{closure#0}>, <krusty::features::table::LanguageFeature>::parse_row>, krusty::features::table::LanguageFeature, core::result::Result<core::convert::Infallible, alloc::string::String>, <core::result::Result<alloc::vec::Vec<krusty::features::table::LanguageFeature>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<krusty::features::table::LanguageFeature, alloc::string::String>>>::from_iter<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty::features::table::FeatureTable>::parse::{closure#0}>, <krusty::features::table::LanguageFeature>::parse_row>>::{closure#0}, alloc::vec::Vec<krusty::features::table::LanguageFeature>>",
     "self": 0,
     "total": 3
    },
    {
-    "function": "_mi_theap_realloc_zero",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "do_read_fault",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "filemap_map_pages",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "filemap_read",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "generic_file_read_iter",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "mi_malloc_aligned",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "mi_realloc_aligned",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "mi_theap_malloc_aligned",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "mi_theap_malloc_aligned_at",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "mi_theap_malloc_zero_aligned_at_generic",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "mi_theap_malloc_zero_no_guarded",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "mi_theap_realloc_aligned",
-    "self": 0,
-    "total": 3
-   },
-   {
-    "function": "mi_theap_realloc_zero_aligned",
+    "function": "vma_alloc_folio_noprof",
     "self": 0,
     "total": 3
    },
@@ -856,32 +836,22 @@
     "total": 2
    },
    {
-    "function": "<alloc::vec::Vec<&str> as alloc::vec::spec_from_iter::SpecFromIter<&str, core::str::iter::Split<char>>>::from_iter",
+    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty::features::table::FeatureTable>::parse::{closure#0}>, <krusty::features::table::LanguageFeature>::parse_row> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty::features::table::FeatureTable>::parse::{closure#0}>, <krusty::features::table::LanguageFeature>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty::features::table::LanguageFeature, core::ops::control_flow::ControlFlow<krusty::features::table::LanguageFeature>, core::ops::control_flow::ControlFlow<krusty::features::table::LanguageFeature>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty::features::table::LanguageFeature>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<krusty::features::table::LanguageFeature>>>",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<alloc::vec::Vec<&str> as core::iter::traits::collect::FromIterator<&str>>::from_iter::<core::str::iter::Split<char>>",
+    "function": "<core::str::iter::Split<char> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write",
+    "function": "<core::str::iter::SplitInternal<char>>::next",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write_str",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "<core::str::iter::Split<char> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<&str>>",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "<hashbrown::raw::RawTable<(alloc::string::String, usize)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, usize, std::hash::random::RandomState>::{closure#0}>::{closure#0}",
+    "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::alloc",
     "self": 0,
     "total": 2
    },
@@ -891,277 +861,92 @@
     "total": 2
    },
    {
-    "function": "<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>",
+    "function": "__alloc_frozen_pages_noprof",
     "self": 0,
     "total": 2
    },
    {
-    "function": "[krusty]",
+    "function": "__rustc::__rust_alloc",
     "self": 0,
     "total": 2
    },
    {
-    "function": "__madvise",
+    "function": "do_read_fault",
     "self": 0,
     "total": 2
    },
    {
-    "function": "__mmap_region",
+    "function": "do_wp_page",
     "self": 0,
     "total": 2
    },
    {
-    "function": "__rustc::__rust_alloc_zeroed",
+    "function": "finish_fault",
     "self": 0,
     "total": 2
    },
    {
-    "function": "__split_vma",
+    "function": "mi_malloc_aligned",
     "self": 0,
     "total": 2
    },
    {
-    "function": "__x64_sys_madvise",
+    "function": "mi_theap_malloc_aligned",
     "self": 0,
     "total": 2
    },
    {
-    "function": "__x64_sys_mmap",
+    "function": "mi_theap_malloc_aligned_at",
     "self": 0,
     "total": 2
    },
    {
-    "function": "_dl_catch_exception",
+    "function": "unmap_region",
     "self": 0,
     "total": 2
    },
    {
-    "function": "_mi_arenas_collect",
+    "function": "wp_page_copy",
     "self": 0,
     "total": 2
    },
    {
-    "function": "_mi_arenas_page_alloc",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "_mi_auto_process_done",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "_mi_bitmap_forall_setc_ranges",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "_mi_bitmap_forall_setc_rangesn",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "_mi_os_purge_ex",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "_mi_prim_decommit",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "copy_page_to_iter",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "do_madvise",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "do_mmap",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "hashbrown::map::make_hasher::<alloc::string::String, usize, std::hash::random::RandomState>::{closure#0}",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "krusty_cli::kotlinc_arguments::catalog::toggles",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "ksys_lseek",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "ksys_mmap_pgoff",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_arena_purge",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_arena_try_purge",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_arena_try_purge_range",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_arena_try_purge_visitor",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_arenas_page_regular_alloc",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_arenas_try_purge",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_find_free_page",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_find_page",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_os_decommit_ex",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_page_fresh",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_page_fresh_alloc",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_page_queue_find_free_ex",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_process_detach",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_process_done",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_theap_collect",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_theap_collect_ex",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mi_theap_malloc_zero_aligned_at_overalloc",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "mmap_region",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "vm_mmap_pgoff",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "vma_alloc_anon_folio_pmd",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "vma_prepare",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "vms_gather_munmap_vmas",
-    "self": 0,
-    "total": 2
-   },
-   {
-    "function": "<&[u8] as zip::cp437::FromCp437>::from_cp437",
+    "function": "<&mut krusty_cli::cli::plugin_jar_problems::{closure#1} as core::ops::function::FnMut<(&&alloc::string::String,)>>::call_mut",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::alloc::Global as core::alloc::Allocator>::allocate",
+    "function": "<<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<alloc::string::String>, krusty_cli::cli::plugin_jar_problems::{closure#1}>, krusty_cli::cli::plugin_jar_problems::{closure#2}> as core::iter::traits::iterator::Iterator>::next as core::ops::function::FnOnce<(&mut core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<alloc::string::String>, krusty_cli::cli::plugin_jar_problems::{closure#1}>, krusty_cli::cli::plugin_jar_problems::{closure#2}>,)>>::call_once",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::alloc::Global as core::alloc::Allocator>::grow",
+    "function": "<alloc::alloc::Global as core::alloc::Allocator>::deallocate",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::alloc::Global>::alloc_impl_runtime",
+    "function": "<alloc::raw_vec::RawVec<&str> as core::ops::drop::Drop>::drop",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::alloc::Global>::grow_impl_runtime",
+    "function": "<alloc::raw_vec::RawVecInner>::deallocate",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::raw_vec::RawVecInner>::grow_amortized",
+    "function": "<alloc::vec::Vec<alloc::string::String> as alloc::vec::spec_from_iter::SpecFromIter<alloc::string::String, core::iter::adapters::chain::Chain<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<alloc::string::String>, krusty_cli::cli::plugin_jar_problems::{closure#1}>, krusty_cli::cli::plugin_jar_problems::{closure#2}>, core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<krusty::plugins::cli::CompilerPluginSpec>, krusty_cli::cli::plugin_jar_problems::{closure#3}>, krusty_cli::cli::plugin_jar_problems::{closure#4}>>>>::from_iter",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<&str> as alloc::vec::spec_extend::SpecExtend<&str, core::str::iter::Split<char>>>::spec_extend",
+    "function": "<alloc::vec::Vec<alloc::string::String> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::string::String, core::iter::adapters::chain::Chain<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<alloc::string::String>, krusty_cli::cli::plugin_jar_problems::{closure#1}>, krusty_cli::cli::plugin_jar_problems::{closure#2}>, core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<krusty::plugins::cli::CompilerPluginSpec>, krusty_cli::cli::plugin_jar_problems::{closure#3}>, krusty_cli::cli::plugin_jar_problems::{closure#4}>>>>::from_iter",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<&str>>::extend_desugared::<core::str::iter::Split<char>>",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<alloc::vec::Vec<alloc::string::String> as alloc::vec::spec_from_iter::SpecFromIter<alloc::string::String, core::iter::adapters::skip::Skip<std::env::Args>>>::from_iter",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<alloc::vec::Vec<alloc::string::String> as core::iter::traits::collect::FromIterator<alloc::string::String>>::from_iter::<core::iter::adapters::skip::Skip<std::env::Args>>",
+    "function": "<alloc::vec::Vec<alloc::string::String> as core::iter::traits::collect::FromIterator<alloc::string::String>>::from_iter::<core::iter::adapters::chain::Chain<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<alloc::string::String>, krusty_cli::cli::plugin_jar_problems::{closure#1}>, krusty_cli::cli::plugin_jar_problems::{closure#2}>, core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<krusty::plugins::cli::CompilerPluginSpec>, krusty_cli::cli::plugin_jar_problems::{closure#3}>, krusty_cli::cli::plugin_jar_problems::{closure#4}>>>",
     "self": 0,
     "total": 1
    },
@@ -1171,12 +956,17 @@
     "total": 1
    },
    {
-    "function": "<alloc::vec::into_iter::IntoIter<(alloc::boxed::Box<[u8]>, zip::types::ZipFileData)> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::traits::iterator::Iterator::for_each::call<(alloc::boxed::Box<[u8]>, zip::types::ZipFileData), <zip::read::zip_archive::SharedBuilder>::build::{closure#0}>::{closure#0}>",
+    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::FeatureToggle> as alloc::vec::spec_from_iter::SpecFromIter<krusty_cli::kotlinc_arguments::catalog::FeatureToggle, core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Split<char>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#1}>>>::from_iter",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<alloc::vec::into_iter::IntoIter<(alloc::boxed::Box<[u8]>, zip::types::ZipFileData)> as core::iter::traits::iterator::Iterator>::for_each::<<zip::read::zip_archive::SharedBuilder>::build::{closure#0}>",
+    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::FeatureToggle> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty_cli::kotlinc_arguments::catalog::FeatureToggle, core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Split<char>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#1}>>>::from_iter",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::FeatureToggle> as core::iter::traits::collect::FromIterator<krusty_cli::kotlinc_arguments::catalog::FeatureToggle>>::from_iter::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Split<char>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#1}>>",
     "self": 0,
     "total": 1
    },
@@ -1186,62 +976,82 @@
     "total": 1
    },
    {
-    "function": "<core::iter::adapters::chain::Chain<core::iter::adapters::cloned::Cloned<core::iter::adapters::filter::Filter<core::slice::iter::Iter<krusty::plugins::cli::PluginOption>, <krusty::plugins::cli::PluginConfig>::options_for::{closure#0}>>, core::iter::adapters::map::Map<core::iter::adapters::flatten::FlatMap<core::iter::adapters::filter::Filter<core::slice::iter::Iter<krusty::plugins::cli::CompilerPluginSpec>, <krusty::plugins::cli::PluginConfig>::options_for::{closure#1}>, core::slice::iter::Iter<(alloc::string::String, alloc::string::String)>, <krusty::plugins::cli::PluginConfig>::options_for::{closure#2}>, <krusty::plugins::cli::PluginConfig>::options_for::{closure#3}>> as core::iter::traits::iterator::Iterator>::next",
+    "function": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<core::iter::adapters::skip::Skip<std::env::Args> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<alloc::string::String>>",
+    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::{closure#0}",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<core::str::iter::Split<char> as core::iter::traits::iterator::Iterator>::next",
+    "function": "<core::iter::adapters::chain::Chain<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<alloc::string::String>, krusty_cli::cli::plugin_jar_problems::{closure#1}>, krusty_cli::cli::plugin_jar_problems::{closure#2}>, core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<krusty::plugins::cli::CompilerPluginSpec>, krusty_cli::cli::plugin_jar_problems::{closure#3}>, krusty_cli::cli::plugin_jar_problems::{closure#4}>> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<alloc::string::String>>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<core::str::iter::SplitInternal<char>>::next",
+    "function": "<core::iter::adapters::chain::Chain<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<alloc::string::String>, krusty_cli::cli::plugin_jar_problems::{closure#1}>, krusty_cli::cli::plugin_jar_problems::{closure#2}>, core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<krusty::plugins::cli::CompilerPluginSpec>, krusty_cli::cli::plugin_jar_problems::{closure#3}>, krusty_cli::cli::plugin_jar_problems::{closure#4}>> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<core::str::pattern::CharSearcher as core::str::pattern::Searcher>::next_match",
+    "function": "<core::iter::adapters::filter::Filter<core::slice::iter::Iter<alloc::string::String>, krusty_cli::cli::plugin_jar_problems::{closure#1}> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<flate2::ffi::zlib_rs::Inflate as flate2::ffi::InflateBackend>::make",
+    "function": "<core::iter::adapters::filter::Filter<core::str::iter::Split<char>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<flate2::mem::Decompress>::new",
+    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<alloc::string::String>, krusty_cli::cli::plugin_jar_problems::{closure#1}>, krusty_cli::cli::plugin_jar_problems::{closure#2}> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>",
+    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Split<char>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#1}> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<hashbrown::raw::RawTableInner>::new_uninitialized::<alloc::alloc::Global>",
+    "function": "<core::iter::adapters::map::Map<core::str::iter::SplitInclusive<char>, core::str::LinesMap> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<indexmap::map::IndexMap<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>>::hash::<alloc::boxed::Box<[u8]>>",
+    "function": "<core::slice::iter::Iter<alloc::string::String> as core::iter::traits::iterator::Iterator>::find::<&mut krusty_cli::cli::plugin_jar_problems::{closure#1}>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<indexmap::map::IndexMap<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>>::insert",
+    "function": "<core::str::LinesMap as core::ops::function::FnMut<(&str,)>>::call_mut",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<indexmap::map::IndexMap<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>>::insert_full",
+    "function": "<core::str::iter::Split<char> as core::iter::traits::iterator::Iterator>::find::<&mut krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<core::str::iter::Split<char> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::find::check<&str, &mut krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>::{closure#0}, core::ops::control_flow::ControlFlow<&str>>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::alloc_zeroed",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::dealloc",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<once_cell::race::once_box::OnceBox<alloc::boxed::Box<dyn ahash::random_state::RandomSource + core::marker::Send + core::marker::Sync>>>::init::<<once_cell::race::once_box::OnceBox<_>>::get_or_init::Void, <once_cell::race::once_box::OnceBox<alloc::boxed::Box<dyn ahash::random_state::RandomSource + core::marker::Send + core::marker::Sync>>>::get_or_init<ahash::random_state::get_src::{closure#0}>::{closure#0}>",
     "self": 0,
     "total": 1
    },
@@ -1251,42 +1061,7 @@
     "total": 1
    },
    {
-    "function": "<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::boxed::Box<[u8]>>",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<str>::strip_prefix::<char>",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<zip::compression::Decompressor<alloc::io::buffered::bufreader::BufReader<zip::read::readers::CryptoReader<std::fs::File>>>>::new",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<zip::read::zip_archive::SharedBuilder>::build",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<zip::read::zip_archive::SharedBuilder>::build::{closure#0}",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<zip::read::zip_archive::ZipArchive<std::fs::File>>::by_index_with_options",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<zlib_rs::inflate::InflateStream>::new",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<zlib_rs::stable::Inflate>::new",
+    "function": "<std::path::Path>::exists",
     "self": 0,
     "total": 1
    },
@@ -1296,17 +1071,82 @@
     "total": 1
    },
    {
-    "function": "__schedule",
+    "function": "__folio_mod_stat",
     "self": 0,
     "total": 1
    },
    {
-    "function": "__tlb_batch_free_encoded_pages",
+    "function": "__getdelim",
     "self": 0,
     "total": 1
    },
    {
-    "function": "__x64_sys_mprotect",
+    "function": "__mmap_region",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "__read_nocancel",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "__rustc::__rust_alloc_zeroed",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "__rustc::__rust_dealloc",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "__vm_munmap",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "__x64_sys_mmap",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "__x64_sys_munmap",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "__x64_sys_statx",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "_dl_catch_exception",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "_mi_arenas_page_alloc",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "_mi_malloc_generic",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "_mi_memset",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "_mi_memset_aligned",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "_mi_memzero_aligned",
     "self": 0,
     "total": 1
    },
@@ -1326,7 +1166,7 @@
     "total": 1
    },
    {
-    "function": "_mi_unchecked_ptr_page",
+    "function": "_mi_theap_malloc_zero",
     "self": 0,
     "total": 1
    },
@@ -1336,17 +1176,22 @@
     "total": 1
    },
    {
-    "function": "asm_sysvec_hyperv_stimer0",
+    "function": "atime_needs_update",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::iter::traits::iterator::Iterator::for_each::call::<(alloc::boxed::Box<[u8]>, zip::types::ZipFileData), <zip::read::zip_archive::SharedBuilder>::build::{closure#0}>::{closure#0}",
+    "function": "core::iter::adapters::chain::and_then_or_clear::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<alloc::string::String>, krusty_cli::cli::plugin_jar_problems::{closure#1}>, krusty_cli::cli::plugin_jar_problems::{closure#2}>, alloc::string::String, <core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<alloc::string::String>, krusty_cli::cli::plugin_jar_problems::{closure#1}>, krusty_cli::cli::plugin_jar_problems::{closure#2}> as core::iter::traits::iterator::Iterator>::next>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "core::slice::memchr::memchr_aligned",
+    "function": "core::ptr::drop_glue::<alloc::raw_vec::RawVec<&str>>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "core::ptr::drop_glue::<alloc::vec::Vec<&str>>",
     "self": 0,
     "total": 1
    },
@@ -1361,17 +1206,37 @@
     "total": 1
    },
    {
-    "function": "do_huge_pmd_wp_page",
+    "function": "do_mmap",
     "self": 0,
     "total": 1
    },
    {
-    "function": "do_mprotect_pkey",
+    "function": "do_statx",
     "self": 0,
     "total": 1
    },
    {
-    "function": "do_wp_page",
+    "function": "do_vmi_align_munmap",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "do_vmi_munmap",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "filename_lookup",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "folio_add_lru",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "folio_add_new_anon_rmap",
     "self": 0,
     "total": 1
    },
@@ -1381,67 +1246,82 @@
     "total": 1
    },
    {
-    "function": "folios_put_refs",
+    "function": "folio_remove_rmap_ptes",
     "self": 0,
     "total": 1
    },
    {
-    "function": "free_pages_and_swap_cache",
+    "function": "free_pgtables",
     "self": 0,
     "total": 1
    },
    {
-    "function": "irqentry_exit",
+    "function": "inode_permission",
     "self": 0,
     "total": 1
    },
    {
-    "function": "lock_vma_under_rcu",
+    "function": "krusty_cli::cli::arguments::finish_language_settings",
     "self": 0,
     "total": 1
    },
    {
-    "function": "madvise_do_behavior",
+    "function": "krusty_cli::cli::plugin_jar_problems",
     "self": 0,
     "total": 1
    },
    {
-    "function": "madvise_vma_behavior",
+    "function": "krusty_cli::cli::plugin_jar_problems::{closure#0}",
     "self": 0,
     "total": 1
    },
    {
-    "function": "madvise_walk_vmas",
+    "function": "krusty_cli::cli::plugin_jar_problems::{closure#1}",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_arena_initialize",
+    "function": "krusty_cli::kotlinc_arguments::catalog::toggles",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_arena_reserve",
+    "function": "ksys_mmap_pgoff",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_arenas_page_alloc_fresh",
+    "function": "link_path_walk",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_arenas_page_alloc_fresh_area",
+    "function": "lock_next_vma",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_arenas_try_alloc",
+    "function": "m_next",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_block_next",
+    "function": "mas_find",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mas_next_slot",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "may_lookup",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_arenas_page_regular_alloc",
     "self": 0,
     "total": 1
    },
@@ -1456,12 +1336,12 @@
     "total": 1
    },
    {
-    "function": "mi_free",
+    "function": "mi_find_free_page",
     "self": 0,
     "total": 1
    },
    {
-    "function": "mi_manage_os_memory_ex2",
+    "function": "mi_find_page",
     "self": 0,
     "total": 1
    },
@@ -1476,7 +1356,27 @@
     "total": 1
    },
    {
-    "function": "mi_reserve_os_memory_ex2",
+    "function": "mi_page_fresh",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_page_fresh_alloc",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_page_queue_find_free_ex",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_theap_malloc_zero_aligned_at_generic",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_theap_malloc_zero_no_guarded",
     "self": 0,
     "total": 1
    },
@@ -1501,17 +1401,32 @@
     "total": 1
    },
    {
-    "function": "mprotect_fixup",
+    "function": "mmap_region",
     "self": 0,
     "total": 1
    },
    {
-    "function": "perf_event_mmap",
+    "function": "path_lookupat",
     "self": 0,
     "total": 1
    },
    {
-    "function": "perf_event_mmap_event",
+    "function": "post_alloc_hook",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "proc_get_vma.isra.0",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "ptep_clear_flush",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "pthread_getattr_np",
     "self": 0,
     "total": 1
    },
@@ -1521,12 +1436,37 @@
     "total": 1
    },
    {
-    "function": "schedule",
+    "function": "security_file_permission",
     "self": 0,
     "total": 1
    },
    {
-    "function": "security_file_permission",
+    "function": "seq_read",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "seq_read_iter",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "set_pte_range",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "statx",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "std::fs::metadata::<&std::path::Path>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "std::sys::fs::metadata",
     "self": 0,
     "total": 1
    },
@@ -1536,34 +1476,647 @@
     "total": 1
    },
    {
-    "function": "sysvec_hyperv_stimer0",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "tlb_finish_mmu",
-    "self": 0,
-    "total": 1
-   },
-   {
     "function": "touch_atime",
     "self": 0,
     "total": 1
    },
    {
-    "function": "wp_page_copy",
+    "function": "unmap_page_range",
     "self": 0,
     "total": 1
    },
    {
-    "function": "xas_find",
+    "function": "unmap_single_vma",
     "self": 0,
     "total": 1
    },
    {
-    "function": "zlib_rs::inflate::init",
+    "function": "unmap_vmas",
     "self": 0,
     "total": 1
+   },
+   {
+    "function": "vfs_statx",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "vm_mmap_pgoff",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "vma_alloc_anon_folio_pmd",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "vms_complete_munmap_vmas",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "zap_pmd_range.isra.0",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "zap_present_ptes.constprop.0",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "zap_pte_range",
+    "self": 0,
+    "total": 1
+   }
+  ]
+ },
+ "tests": {
+  "exit": {
+   "kotlinc": 0,
+   "krusty": 0
+  },
+  "unavailable": null,
+  "total": {
+   "tasks": 24,
+   "passed_kotlinc": 3424,
+   "passed": 3424,
+   "failed": 0,
+   "skipped": 0,
+   "not_run": 0
+  },
+  "krusty_classes": {
+   "tasks": 0,
+   "passed_kotlinc": 0,
+   "passed": 0,
+   "failed": 0,
+   "skipped": 0,
+   "not_run": 0
+  },
+  "tasks": [
+   {
+    "task": ":android-unit-tests:test",
+    "compilations": [
+     ":android-unit-tests:compileKotlin",
+     ":android-unit-tests:compileTestKotlin",
+     ":kotlinx-coroutines-android:compileKotlin",
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-test:compileKotlinJvm",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 12,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 12,
+     "passed": 12,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":benchmarks:test",
+    "compilations": [
+     ":benchmarks:compileKotlin",
+     ":benchmarks:compileTestKotlin",
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-debug:compileKotlin",
+     ":kotlinx-coroutines-reactive:compileKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 0,
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-android:test",
+    "compilations": [
+     ":kotlinx-coroutines-android:compileKotlin",
+     ":kotlinx-coroutines-android:compileTestKotlin",
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 32,
+     "failed": 0,
+     "skipped": 1
+    },
+    "krusty": {
+     "passed_kotlinc": 32,
+     "passed": 32,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-core:jvmLincheckTest",
+    "compilations": [
+     ":android-unit-tests:compileKotlin",
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-core:compileTestKotlinJvm",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 30,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 30,
+     "passed": 30,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-core:jvmLincheckTestAdditional",
+    "compilations": [
+     ":android-unit-tests:compileKotlin",
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-core:compileTestKotlinJvm",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 8,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 8,
+     "passed": 8,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-core:jvmStressTest",
+    "compilations": [
+     ":android-unit-tests:compileKotlin",
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-core:compileTestKotlinJvm",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 181,
+     "failed": 0,
+     "skipped": 2
+    },
+    "krusty": {
+     "passed_kotlinc": 181,
+     "passed": 181,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-core:jvmTest",
+    "compilations": [
+     ":android-unit-tests:compileKotlin",
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-core:compileTestKotlinJvm",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 2184,
+     "failed": 0,
+     "skipped": 7
+    },
+    "krusty": {
+     "passed_kotlinc": 2184,
+     "passed": 2184,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-debug:test",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-debug:compileKotlin",
+     ":kotlinx-coroutines-debug:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 66,
+     "failed": 0,
+     "skipped": 3
+    },
+    "krusty": {
+     "passed_kotlinc": 66,
+     "passed": 66,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-guava:test",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-guava:compileKotlin",
+     ":kotlinx-coroutines-guava:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 59,
+     "failed": 0,
+     "skipped": 2
+    },
+    "krusty": {
+     "passed_kotlinc": 59,
+     "passed": 59,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-javafx:test",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-javafx:compileKotlin",
+     ":kotlinx-coroutines-javafx:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 21,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 21,
+     "passed": 21,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-jdk8:test",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-jdk8:compileKotlin",
+     ":kotlinx-coroutines-jdk8:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 0,
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-jdk9:test",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-jdk9:compileKotlin",
+     ":kotlinx-coroutines-jdk9:compileTestKotlin",
+     ":kotlinx-coroutines-reactive:compileKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 59,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 59,
+     "passed": 59,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-play-services:test",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-play-services:compileKotlin",
+     ":kotlinx-coroutines-play-services:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 26,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 26,
+     "passed": 26,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-reactive:test",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-reactive:compileKotlin",
+     ":kotlinx-coroutines-reactive:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 97,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 97,
+     "passed": 97,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-reactive:testNG",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-reactive:compileKotlin",
+     ":kotlinx-coroutines-reactive:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 30,
+     "failed": 0,
+     "skipped": 8
+    },
+    "krusty": {
+     "passed_kotlinc": 30,
+     "passed": 30,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-reactor:test",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-reactive:compileKotlin",
+     ":kotlinx-coroutines-reactor:compileKotlin",
+     ":kotlinx-coroutines-reactor:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 80,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 80,
+     "passed": 80,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-rx2:test",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-reactive:compileKotlin",
+     ":kotlinx-coroutines-rx2:compileKotlin",
+     ":kotlinx-coroutines-rx2:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 214,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 214,
+     "passed": 214,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-rx2:testNG",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-reactive:compileKotlin",
+     ":kotlinx-coroutines-rx2:compileKotlin",
+     ":kotlinx-coroutines-rx2:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 0,
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-rx3:test",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-reactive:compileKotlin",
+     ":kotlinx-coroutines-rx3:compileKotlin",
+     ":kotlinx-coroutines-rx3:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 214,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 214,
+     "passed": 214,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-rx3:testNG",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-reactive:compileKotlin",
+     ":kotlinx-coroutines-rx3:compileKotlin",
+     ":kotlinx-coroutines-rx3:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 0,
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-slf4j:test",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-slf4j:compileKotlin",
+     ":kotlinx-coroutines-slf4j:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 10,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 10,
+     "passed": 10,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-swing:test",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-jdk8:compileKotlin",
+     ":kotlinx-coroutines-swing:compileKotlin",
+     ":kotlinx-coroutines-swing:compileTestKotlin",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 17,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 17,
+     "passed": 17,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":kotlinx-coroutines-test:jvmTest",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":kotlinx-coroutines-debug:compileKotlin",
+     ":kotlinx-coroutines-test:compileKotlinJvm",
+     ":kotlinx-coroutines-test:compileTestKotlinJvm",
+     ":test-utils:compileKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 84,
+     "failed": 0,
+     "skipped": 2
+    },
+    "krusty": {
+     "passed_kotlinc": 84,
+     "passed": 84,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
+   },
+   {
+    "task": ":test-utils:jvmTest",
+    "compilations": [
+     ":kotlinx-coroutines-core:compileKotlinJvm",
+     ":test-utils:compileKotlinJvm",
+     ":test-utils:compileTestKotlinJvm"
+    ],
+    "krusty_classes": false,
+    "kotlinc": {
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0
+    },
+    "krusty": {
+     "passed_kotlinc": 0,
+     "passed": 0,
+     "failed": 0,
+     "skipped": 0,
+     "not_run": 0
+    },
+    "not_passing": []
    }
   ]
  },
@@ -1572,510 +2125,510 @@
    "task": ":android-unit-tests:compileKotlin",
    "dir": "ui/kotlinx-coroutines-android/android-unit-tests/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 3,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 0.81,
-    "krusty": 0.93
+    "kotlinc": 1.09,
+    "krusty": 1.21
    }
   },
   {
    "task": ":android-unit-tests:compileTestKotlin",
    "dir": "ui/kotlinx-coroutines-android/android-unit-tests/build/classes/kotlin/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 12,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 1.85,
-    "krusty": 1.63
+    "kotlinc": 2.1,
+    "krusty": 1.8
    }
   },
   {
    "task": ":benchmarks:compileJmhKotlin",
    "dir": "benchmarks/build/classes/kotlin/jmh",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 311,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 7.23,
-    "krusty": 7.44
+    "kotlinc": 9.01,
+    "krusty": 8.32
    }
   },
   {
    "task": ":benchmarks:compileKotlin",
    "dir": "benchmarks/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 1,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 0.9,
-    "krusty": 1.01
+    "kotlinc": 1.55,
+    "krusty": 1.09
    }
   },
   {
    "task": ":kotlinx-coroutines-android:compileKotlin",
    "dir": "ui/kotlinx-coroutines-android/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 6,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 1.55,
-    "krusty": 1.5
+    "kotlinc": 1.81,
+    "krusty": 1.84
    }
   },
   {
    "task": ":kotlinx-coroutines-android:compileTestKotlin",
    "dir": "ui/kotlinx-coroutines-android/build/classes/kotlin/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 35,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 3.21,
-    "krusty": 2.68
+    "kotlinc": 3.81,
+    "krusty": 3.2
    }
   },
   {
    "task": ":kotlinx-coroutines-core:compileBenchmarkKotlinJvm",
    "dir": "kotlinx-coroutines-core/build/classes/kotlin/jvm/benchmark",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 67,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 2.49,
-    "krusty": 2.33
+    "kotlinc": 3.11,
+    "krusty": 3.04
    }
   },
   {
    "task": ":kotlinx-coroutines-core:compileKotlinJvm",
    "dir": "kotlinx-coroutines-core/build/classes/kotlin/jvm/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 850,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 23.66,
-    "krusty": 24.26
+    "kotlinc": 31.17,
+    "krusty": 32.33
    }
   },
   {
    "task": ":kotlinx-coroutines-core:compileTestKotlinJvm",
    "dir": "kotlinx-coroutines-core/build/classes/kotlin/jvm/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 5815,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 36.94,
-    "krusty": 36.47
+    "kotlinc": 49.45,
+    "krusty": 49.05
    }
   },
   {
    "task": ":kotlinx-coroutines-debug:compileKotlin",
    "dir": "kotlinx-coroutines-debug/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 19,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 3.09,
-    "krusty": 2.79
+    "kotlinc": 3.61,
+    "krusty": 3.6
    }
   },
   {
    "task": ":kotlinx-coroutines-debug:compileTestKotlin",
    "dir": "kotlinx-coroutines-debug/build/classes/kotlin/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 258,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 5.64,
-    "krusty": 5.46
+    "kotlinc": 6.55,
+    "krusty": 5.99
    }
   },
   {
    "task": ":kotlinx-coroutines-guava:compileKotlin",
    "dir": "integration/kotlinx-coroutines-guava/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 8,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 2.0,
-    "krusty": 1.24
+    "kotlinc": 1.65,
+    "krusty": 2.01
    }
   },
   {
    "task": ":kotlinx-coroutines-guava:compileTestKotlin",
    "dir": "integration/kotlinx-coroutines-guava/build/classes/kotlin/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 110,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 2.63,
-    "krusty": 3.01
+    "kotlinc": 3.62,
+    "krusty": 3.87
    }
   },
   {
    "task": ":kotlinx-coroutines-javafx:compileKotlin",
    "dir": "ui/kotlinx-coroutines-javafx/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 9,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 1.44,
-    "krusty": 0.94
+    "kotlinc": 1.66,
+    "krusty": 1.43
    }
   },
   {
    "task": ":kotlinx-coroutines-javafx:compileTestKotlin",
    "dir": "ui/kotlinx-coroutines-javafx/build/classes/kotlin/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 73,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 2.96,
-    "krusty": 2.69
+    "kotlinc": 3.7,
+    "krusty": 3.65
    }
   },
   {
    "task": ":kotlinx-coroutines-jdk9:compileKotlin",
    "dir": "reactive/kotlinx-coroutines-jdk9/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 4,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 0.81,
-    "krusty": 1.16
+    "kotlinc": 1.09,
+    "krusty": 1.2
    }
   },
   {
    "task": ":kotlinx-coroutines-jdk9:compileTestKotlin",
    "dir": "reactive/kotlinx-coroutines-jdk9/build/classes/kotlin/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 108,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 2.73,
-    "krusty": 2.6
+    "kotlinc": 3.73,
+    "krusty": 3.69
    }
   },
   {
    "task": ":kotlinx-coroutines-play-services:compileKotlin",
    "dir": "integration/kotlinx-coroutines-play-services/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 5,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 1.42,
-    "krusty": 1.13
+    "kotlinc": 1.06,
+    "krusty": 1.65
    }
   },
   {
    "task": ":kotlinx-coroutines-play-services:compileTestKotlin",
    "dir": "integration/kotlinx-coroutines-play-services/build/classes/kotlin/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 47,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 1.2,
-    "krusty": 2.09
+    "kotlinc": 2.06,
+    "krusty": 2.7
    }
   },
   {
    "task": ":kotlinx-coroutines-reactive:compileKotlin",
    "dir": "reactive/kotlinx-coroutines-reactive/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 37,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 2.83,
-    "krusty": 2.96
+    "kotlinc": 3.46,
+    "krusty": 3.74
    }
   },
   {
    "task": ":kotlinx-coroutines-reactive:compileTestKotlin",
    "dir": "reactive/kotlinx-coroutines-reactive/build/classes/kotlin/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 192,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 4.24,
-    "krusty": 4.25
+    "kotlinc": 5.18,
+    "krusty": 5.35
    }
   },
   {
    "task": ":kotlinx-coroutines-reactor:compileKotlin",
    "dir": "reactive/kotlinx-coroutines-reactor/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 22,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 1.75,
-    "krusty": 1.63
+    "kotlinc": 2.37,
+    "krusty": 2.25
    }
   },
   {
    "task": ":kotlinx-coroutines-reactor:compileTestKotlin",
    "dir": "reactive/kotlinx-coroutines-reactor/build/classes/kotlin/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 156,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 3.48,
-    "krusty": 3.61
+    "kotlinc": 5.61,
+    "krusty": 4.51
    }
   },
   {
    "task": ":kotlinx-coroutines-rx2:compileKotlin",
    "dir": "reactive/kotlinx-coroutines-rx2/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 49,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 1.92,
-    "krusty": 2.14
+    "kotlinc": 3.27,
+    "krusty": 2.9
    }
   },
   {
    "task": ":kotlinx-coroutines-rx2:compileTestKotlin",
    "dir": "reactive/kotlinx-coroutines-rx2/build/classes/kotlin/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 380,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 5.52,
-    "krusty": 5.84
+    "kotlinc": 8.3,
+    "krusty": 8.78
    }
   },
   {
    "task": ":kotlinx-coroutines-rx3:compileKotlin",
    "dir": "reactive/kotlinx-coroutines-rx3/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 48,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 2.27,
-    "krusty": 2.13
+    "kotlinc": 2.71,
+    "krusty": 2.97
    }
   },
   {
    "task": ":kotlinx-coroutines-rx3:compileTestKotlin",
    "dir": "reactive/kotlinx-coroutines-rx3/build/classes/kotlin/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 458,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 5.92,
-    "krusty": 6.33
+    "kotlinc": 7.58,
+    "krusty": 7.42
    }
   },
   {
    "task": ":kotlinx-coroutines-slf4j:compileKotlin",
    "dir": "integration/kotlinx-coroutines-slf4j/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 3,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 0.67,
-    "krusty": 0.88
+    "kotlinc": 0.64,
+    "krusty": 0.96
    }
   },
   {
    "task": ":kotlinx-coroutines-slf4j:compileTestKotlin",
    "dir": "integration/kotlinx-coroutines-slf4j/build/classes/kotlin/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 21,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 1.09,
-    "krusty": 1.07
+    "kotlinc": 1.13,
+    "krusty": 1.26
    }
   },
   {
    "task": ":kotlinx-coroutines-swing:compileKotlin",
    "dir": "ui/kotlinx-coroutines-swing/build/classes/kotlin/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 5,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 1.01,
-    "krusty": 0.86
+    "kotlinc": 1.15,
+    "krusty": 1.3
    }
   },
   {
    "task": ":kotlinx-coroutines-swing:compileTestKotlin",
    "dir": "ui/kotlinx-coroutines-swing/build/classes/kotlin/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 3,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 1.03,
-    "krusty": 1.06
+    "kotlinc": 0.86,
+    "krusty": 1.18
    }
   },
   {
    "task": ":kotlinx-coroutines-test:compileKotlinJvm",
    "dir": "kotlinx-coroutines-test/build/classes/kotlin/jvm/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 52,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 3.92,
-    "krusty": 3.68
+    "kotlinc": 4.13,
+    "krusty": 4.42
    }
   },
   {
    "task": ":kotlinx-coroutines-test:compileTestKotlinJvm",
    "dir": "kotlinx-coroutines-test/build/classes/kotlin/jvm/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 221,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 3.0,
-    "krusty": 2.79
+    "kotlinc": 3.35,
+    "krusty": 3.44
    }
   },
   {
    "task": ":test-utils:compileKotlinJvm",
    "dir": "test-utils/build/classes/kotlin/jvm/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xno-receiver-assertions'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.21/eacf2b4b31dbc28ccf237f2da7bc66491f91792a/kotlin-atomicfu-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 94,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 4.07,
-    "krusty": 4.17
+    "kotlinc": 6.67,
+    "krusty": 4.77
    }
   }
  ],
@@ -2102,9 +2655,15 @@
   }
  ],
  "measured": {
-  "date": "2026-11-04",
-  "commit": "e075f8fee183242ad26a53f396f76939713fa6a8",
-  "run": "https://github.com/qnox/krusty/actions/runs/41795013119"
+  "date": "2026-11-06",
+  "commit": "10c4d324fab5020c8bb084601654b5c2ae57829c",
+  "run": "https://github.com/qnox/krusty/actions/runs/42186809621"
+ },
+ "source": {
+  "url": "https://github.com/Kotlin/kotlinx.coroutines",
+  "commit": "7e0d1b3e9ca83652427ae00dda7d1673f058a743",
+  "patch": "scripts/oss-corpus/patches/kotlinx.coroutines.patch",
+  "kotlin_pin": "gradle.properties:kotlin_version"
  },
  "flame_graph": "krusty-flamegraph.svg"
 }
