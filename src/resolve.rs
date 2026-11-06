@@ -123,6 +123,10 @@ mod conditional_branch;
 mod constant_evaluation;
 mod constructor_arguments;
 mod constructor_commitment;
+pub(crate) use constructor_commitment::ConstructorCaptureSource;
+pub use constructor_commitment::{
+    ConstructorCapturePlan, ConstructorCaptureProjection, ResolvedAnnotationConstruction,
+};
 mod context_argument_selection;
 mod context_capture;
 mod context_receiver_priority;
@@ -7682,16 +7686,6 @@ impl ResolvedCall {
 }
 
 #[derive(Clone, Debug)]
-pub struct ResolvedAnnotationConstruction {
-    /// Annotation members in declaration/constructor order. Providers normalize Kotlin and Java
-    /// declarations into this same semantic shape before constructor selection.
-    pub members: Vec<(String, Ty)>,
-    /// File-independent declaration defaults, parallel to `members`. These are declaration values,
-    /// not evaluated call operands; checked FIR converts them into its compact retained form.
-    pub defaults: Vec<Option<CtorDefaultValue>>,
-}
-
-#[derive(Clone, Debug)]
 pub enum ResolvedConstructor {
     Source {
         owner: TypeName,
@@ -7811,6 +7805,7 @@ impl ResolvedCtorDelegationTarget {
 #[derive(Clone, Debug)]
 pub struct ResolvedCtorDelegation {
     pub target: ResolvedCtorDelegationTarget,
+    pub(crate) capture_plan: Option<constructor_commitment::ConstructorCapturePlan>,
     /// Exact lexical receiver selected for an `inner` superclass constructor. `this(...)` and an
     /// ordinary superclass constructor leave this unset.
     pub outer_receiver: Option<ImplicitReceiverSelection>,
@@ -8576,6 +8571,7 @@ pub enum CallableReferenceTarget {
 
 #[derive(Clone, Debug)]
 pub enum ExprLowering {
+    ConstructorCaptures(Box<constructor_commitment::ConstructorCapturePlan>),
     /// Explicit call syntax for a compiler-known primitive unary convention. Resolution has already
     /// selected the built-in operation; checked FIR consumes this decision without reinterpreting
     /// the callable spelling or synthesizing a declaration lookup.
@@ -13181,6 +13177,7 @@ impl<'a> Checker<'a> {
             declaration_params.clone(),
         );
         self.commit_constructor(
+            scope,
             call,
             ResolvedConstructor::Source {
                 owner: class.internal_name(),
@@ -40958,8 +40955,15 @@ impl<'a> Checker<'a> {
                 default_masks[index / 32] |= (1u32 << (index % 32)) as i32;
             }
         }
+        let capture_plan = match &candidate.target {
+            ResolvedCtorDelegationTarget::Super { owner, .. } => {
+                self.selected_constructor_capture_plan(scope, *owner)
+            }
+            _ => None,
+        };
         Some(ResolvedCtorDelegation {
             target: candidate.target.clone(),
+            capture_plan,
             outer_receiver,
             context_args: contextual.context_sources.into_iter().flatten().collect(),
             argument_slots,

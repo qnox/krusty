@@ -6,7 +6,7 @@ use crate::ast::DeclId;
 use crate::fir::FirAnonymousSuperArgument;
 use crate::resolve::{AnonymousObjectCaptureSource, AnonymousObjectReceiverSource};
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum ConstructorCaptureOperand {
     Class(ClassCaptureBinding),
     Local(LocalBinding),
@@ -14,32 +14,33 @@ enum ConstructorCaptureOperand {
         enclosing_depth: u32,
         binding: LocalBinding,
     },
-    ImplicitReceiver {
-        receiver_depth: u32,
-    },
-}
-
-enum RequiredConstructorCapture {
-    Value(String, ClassCaptureBinding),
-    Delegate(String, ClassCaptureBinding),
-    Receiver(ClassCaptureBinding),
+    ImplicitReceiver(crate::resolve::ImplicitReceiverSelection),
 }
 
 /// The storage receiver for an outer-class capture: the receiver expression plus the capture path
 /// that remains to be walked from it.
 type StorageReceiver = Result<Option<(FirExprId, Box<[DeclarationId]>)>, BodyCheckFailure>;
 
-impl RequiredConstructorCapture {
-    fn binding(&self) -> ClassCaptureBinding {
-        match self {
-            Self::Value(_, binding) | Self::Delegate(_, binding) | Self::Receiver(binding) => {
-                *binding
-            }
-        }
-    }
-}
-
 impl BodyFirChecker<'_> {
+    pub(super) fn binding_source_at_shadow_depth(
+        &self,
+        name: &str,
+        shadow_depth: usize,
+    ) -> Option<(Option<u32>, LocalBinding)> {
+        let mut seen = crate::fx_hash::HashSet::default();
+        self.scopes
+            .iter()
+            .rev()
+            .filter_map(|scope| scope.get(name).copied().map(|binding| (None, binding)))
+            .chain(
+                self.outer_values
+                    .shadowed(name)
+                    .map(|(depth, binding)| (Some(*depth), *binding)),
+            )
+            .filter(|(depth, binding)| seen.insert((*depth, binding.value)))
+            .nth(shadow_depth)
+    }
+
     /// A construction-site super forward cannot use the anonymous constructor's capture field.
     pub(super) fn active_class_storage_read(
         &self,
@@ -148,6 +149,8 @@ impl BodyFirChecker<'_> {
         &mut self,
         constructor: DeclarationId,
         origin: OriginId,
+        span: Span,
+        plan: Option<&crate::resolve::ConstructorCapturePlan>,
     ) -> Result<Option<Box<[FirConstructorCaptureArgument]>>, BodyCheckFailure> {
         let Some(classifier) = self.index.enclosing_classifier(constructor) else {
             return Ok(None);
@@ -155,121 +158,197 @@ impl BodyFirChecker<'_> {
         if self.body.owns_class_body_context(classifier.declaration) {
             return Ok(None);
         }
-        let Some(context) = self
+        if !self
+            .index
+            .declaration_header(classifier.declaration)
+            .is_some_and(|header| header.flags.has(DeclarationFlags::LOCAL_CLASS))
+        {
+            return Ok(None);
+        }
+        let context = self
             .session
             .class_bodies
             .get(&classifier.declaration)
             .cloned()
-        else {
-            return Ok(None);
-        };
+            .ok_or_else(|| {
+                self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+            })?;
+        let plan = plan.ok_or_else(|| {
+            self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+        })?;
         let value_captures = if context.capture_values.is_empty() {
             context.values.into_iter().collect::<Vec<_>>()
         } else {
             context.capture_values
         };
-        let mut required = value_captures
-            .into_iter()
-            .map(|(name, binding)| RequiredConstructorCapture::Value(name, binding))
-            .chain(
-                context
-                    .delegates
-                    .into_iter()
-                    .filter_map(|(name, delegate)| {
-                        let DelegateStorage::ClassField(binding) = delegate.storage else {
-                            return None;
-                        };
-                        Some(RequiredConstructorCapture::Delegate(name, binding))
-                    }),
-            )
-            .chain(
-                context
-                    .receivers
-                    .into_iter()
-                    .map(RequiredConstructorCapture::Receiver),
-            )
-            .collect::<Vec<_>>();
-        // The canonical binding precedes its proven lookup views in each physical slot.
-        required.sort_by_key(|capture| capture.binding().field);
+        let mut required =
+            value_captures
+                .into_iter()
+                .map(|(_, binding)| binding)
+                .chain(context.delegates.into_values().filter_map(
+                    |delegate| match delegate.storage {
+                        DelegateStorage::ClassField(binding) => Some(binding),
+                        _ => None,
+                    },
+                ))
+                .chain(context.receivers)
+                .collect::<Vec<_>>();
+        required.sort_by_key(|capture| capture.field);
         for pair in required.windows(2) {
-            let left = pair[0].binding();
-            let right = pair[1].binding();
-            if left.owner == right.owner && left.field == right.field && !left.same_storage(right) {
-                return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
+            if pair[0].owner == pair[1].owner
+                && pair[0].field == pair[1].field
+                && !pair[0].same_storage(pair[1])
+            {
+                return Err(self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape));
             }
         }
-        required.dedup_by(|left, right| left.binding().same_storage(right.binding()));
+        required.dedup_by(|left, right| left.same_storage(*right));
+        use crate::resolve::{ConstructorCapturePlan as Plan, ConstructorCaptureSource as Source};
+        let operands = match plan {
+            Plan::OwnStorage(owner) => {
+                if *owner != classifier.classifier
+                    || self.current_storage_owner() != Some(classifier.declaration)
+                {
+                    return Err(
+                        self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    );
+                }
+                required
+                    .iter()
+                    .map(|required| {
+                        let identity = required.capture_identity.ok_or_else(|| {
+                            self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                        })?;
+                        self.class_capture_binding(identity)
+                            .map(ConstructorCaptureOperand::Class)
+                            .ok_or_else(|| {
+                                self.failure(
+                                    Some(span),
+                                    BodyCheckFailureKind::MissingStableCallTarget,
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+            Plan::Selected(projected) => {
+                if projected.len() != required.len() {
+                    return Err(
+                        self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    );
+                }
+                required
+                    .iter()
+                    .map(|required| {
+                        let identity = required.capture_identity.ok_or_else(|| {
+                            self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                        })?;
+                        let mut selected = projected
+                            .iter()
+                            .filter(|projection| projection.required == identity);
+                        let projection = selected
+                            .next()
+                            .filter(|_| selected.next().is_none())
+                            .ok_or_else(|| {
+                                self.failure(
+                                    Some(span),
+                                    BodyCheckFailureKind::MissingStableCallTarget,
+                                )
+                            })?;
+                        match &projection.source {
+                            Source::Captured => self
+                                .class_capture_binding(identity)
+                                .map(ConstructorCaptureOperand::Class)
+                                .ok_or_else(|| {
+                                    self.failure(
+                                        Some(span),
+                                        BodyCheckFailureKind::MissingStableCallTarget,
+                                    )
+                                }),
+                            Source::ClassStorage(storage) => self
+                                .selected_class_capture_binding(*storage, span)
+                                .map(ConstructorCaptureOperand::Class),
+                            Source::EnumEntryProperty { ordinal } => self
+                                .enum_entry_storage_binding(*ordinal, required.ty, span)
+                                .map(ConstructorCaptureOperand::Class),
+                            Source::Receiver(receiver) => Ok(
+                                ConstructorCaptureOperand::ImplicitReceiver(receiver.clone()),
+                            ),
+                            Source::Lexical {
+                                name,
+                                shadow_depth,
+                                delegated: false,
+                            } => {
+                                let (depth, binding) = self
+                                    .binding_source_at_shadow_depth(name, *shadow_depth as usize)
+                                    .ok_or_else(|| {
+                                        self.failure(
+                                            Some(span),
+                                            BodyCheckFailureKind::MissingStableCallTarget,
+                                        )
+                                    })?;
+                                Ok(match depth {
+                                    None => ConstructorCaptureOperand::Local(binding),
+                                    Some(enclosing_depth) => ConstructorCaptureOperand::Captured {
+                                        enclosing_depth,
+                                        binding,
+                                    },
+                                })
+                            }
+                            Source::Lexical {
+                                name,
+                                shadow_depth,
+                                delegated: true,
+                            } => {
+                                let (depth, delegate) = self
+                                    .delegate_scopes
+                                    .iter()
+                                    .rev()
+                                    .filter_map(|scope| {
+                                        scope.get(name).cloned().map(|binding| (None, binding))
+                                    })
+                                    .chain(
+                                        self.outer_delegates
+                                            .get(name)
+                                            .cloned()
+                                            .map(|(depth, binding)| (Some(depth), binding)),
+                                    )
+                                    .nth(*shadow_depth as usize)
+                                    .ok_or_else(|| {
+                                        self.failure(
+                                            Some(span),
+                                            BodyCheckFailureKind::MissingStableCallTarget,
+                                        )
+                                    })?;
+                                Ok(match delegate.storage {
+                                    DelegateStorage::ClassField(binding) => {
+                                        ConstructorCaptureOperand::Class(binding)
+                                    }
+                                    DelegateStorage::Local(binding) => match depth {
+                                        None => ConstructorCaptureOperand::Local(binding),
+                                        Some(enclosing_depth) => {
+                                            ConstructorCaptureOperand::Captured {
+                                                enclosing_depth,
+                                                binding,
+                                            }
+                                        }
+                                    },
+                                })
+                            }
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+        };
         if required.is_empty() {
             return Ok(None);
-        }
-
-        let operands = required
-            .iter()
-            .map(|required| {
-                let binding = required.binding();
-                let class = match binding.capture_identity {
-                    Some(identity) => self.class_capture_binding(identity),
-                    None => self
-                        .class_capture_values
-                        .iter()
-                        .map(|(_, binding)| *binding)
-                        .chain(self.class_receivers.iter().copied())
-                        .find(|available| {
-                            available.owner == binding.owner && available.field == binding.field
-                        }),
-                }
-                .map(ConstructorCaptureOperand::Class);
-                class.or_else(|| match required {
-                    RequiredConstructorCapture::Value(name, _) => self
-                        .local_binding(name)
-                        .map(ConstructorCaptureOperand::Local)
-                        .or_else(|| {
-                            self.outer_values.get(name).copied().map(
-                                |(enclosing_depth, binding)| ConstructorCaptureOperand::Captured {
-                                    enclosing_depth,
-                                    binding,
-                                },
-                            )
-                        }),
-                    RequiredConstructorCapture::Delegate(name, _) => self
-                        .local_delegate(name)
-                        .and_then(|delegate| delegate.storage.local())
-                        .map(ConstructorCaptureOperand::Local)
-                        .or_else(|| {
-                            self.outer_delegates.get(name).and_then(
-                                |(enclosing_depth, delegate)| {
-                                    delegate.storage.local().map(|binding| {
-                                        ConstructorCaptureOperand::Captured {
-                                            enclosing_depth: *enclosing_depth,
-                                            binding,
-                                        }
-                                    })
-                                },
-                            )
-                        }),
-                    RequiredConstructorCapture::Receiver(binding) => binding
-                        .semantic_receiver_depth
-                        .and_then(|depth| depth.checked_sub(1))
-                        .map(
-                            |receiver_depth| ConstructorCaptureOperand::ImplicitReceiver {
-                                receiver_depth,
-                            },
-                        ),
-                })
-            })
-            .collect::<Vec<_>>();
-        if operands.iter().any(Option::is_none) {
-            return Err(self.failure(None, BodyCheckFailureKind::MissingStableCallTarget));
         }
 
         required
             .into_iter()
             .zip(operands)
             .map(|(required, operand)| {
-                let required = required.binding();
-                let operand = operand.expect("complete checked capture operand set");
-                let available = match operand {
-                    ConstructorCaptureOperand::Class(binding) => binding,
+                let available = match &operand {
+                    ConstructorCaptureOperand::Class(binding) => *binding,
                     ConstructorCaptureOperand::Local(binding)
                     | ConstructorCaptureOperand::Captured { binding, .. } => ClassCaptureBinding {
                         owner: required.owner,
@@ -283,7 +362,7 @@ impl BodyFirChecker<'_> {
                         capture_identity: required.capture_identity,
                         lexical_binding: required.lexical_binding,
                     },
-                    ConstructorCaptureOperand::ImplicitReceiver { .. } => required,
+                    ConstructorCaptureOperand::ImplicitReceiver(_) => required,
                 };
                 if available.ty != required.ty
                     || available.shared_cell != required.shared_cell
@@ -324,22 +403,13 @@ impl BodyFirChecker<'_> {
                             required.shared_cell,
                         )
                     }
-                    ConstructorCaptureOperand::ImplicitReceiver { receiver_depth } => {
+                    ConstructorCaptureOperand::ImplicitReceiver(selection) => {
+                        if selection.ty != required.ty.get() {
+                            return Err(self
+                                .failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape));
+                        }
                         let receiver = self
-                            .materialize_implicit_receiver(
-                                origin,
-                                None,
-                                &crate::resolve::ImplicitReceiverSelection {
-                                    ty: required.ty.get(),
-                                    current: receiver_depth == 0,
-                                    receiver_depth: receiver_depth as usize,
-                                    classifier: None,
-                                    context_binding: None,
-                                    singleton: None,
-                                    context_parameter: false,
-                                    construction_sites: Vec::new(),
-                                },
-                            )?
+                            .materialize_implicit_receiver(origin, Some(span), &selection)?
                             .ok_or_else(|| {
                                 self.failure(None, BodyCheckFailureKind::MissingStableCallTarget)
                             })?;

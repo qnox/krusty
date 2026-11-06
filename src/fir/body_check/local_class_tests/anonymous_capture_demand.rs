@@ -302,6 +302,46 @@ fn constructor_capture_families_project_one_canonical_field_through_shadowed_cal
         }
     }
     let a_owner = a_owner.expect("declared subclass");
+    let super_operands = bodies
+        .iter()
+        .filter(|body| {
+            index
+                .declaration_anchor(DeclarationId::from_raw(body.owner().raw()))
+                .and_then(|anchor| anchor.owner)
+                == Some(a_owner)
+        })
+        .flat_map(|body| {
+            (0..body.statement_count()).filter_map(move |raw| {
+                let FirStatementKind::ConstructorDelegation(call) =
+                    &body.statement(FirStatementId::from_raw(raw as u32))?.kind
+                else {
+                    return None;
+                };
+                call.external_capture_arguments
+                    .as_deref()
+                    .map(|arguments| (body, arguments))
+            })
+        })
+        .collect::<Vec<_>>();
+    let [(constructor, arguments)] = super_operands.as_slice() else {
+        panic!("one explicit superclass projection: {super_operands:?}")
+    };
+    let [argument] = *arguments else {
+        panic!("one superclass operand")
+    };
+    assert!(!argument.shared_cell_holder);
+    assert_eq!(
+        constructor
+            .expr(argument.value)
+            .expect("before-super capture operand")
+            .kind,
+        FirExprKind::ConstructorCaptureRead {
+            owner: a_owner,
+            field: 0,
+            shared_cell: false,
+            site: crate::fir::FirConstructorCaptureSite::Parameter
+        }
+    );
     let own = selected("own");
     let reads = (0..own.expression_count())
         .filter_map(
@@ -335,5 +375,124 @@ fn constructor_capture_families_project_one_canonical_field_through_shadowed_cal
             matches!(body.expr(argument.value).expect("selected operand").kind,
             FirExprKind::ClassStorageRead { owner, field: 0 } if owner == a_owner)
         );
+    }
+}
+
+#[test]
+fn a_missing_or_ambiguous_constructor_source_never_recovers_a_shadowing_parameter() {
+    let source =
+        include_str!("../../../../tests/box_regressions/captureStorageConstructorFamilies.kt");
+    for missing_plan in [true, false] {
+        let inputs =
+            [crate::source::SourceInput::kotlin(source).with_file_stem("FirCaptureProjection")];
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let mut analysis = crate::frontend::analyze_source_set_with_features(
+            &inputs,
+            crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
+            &crate::features::LangFeatures::new(),
+            &mut diagnostics,
+        );
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        if missing_plan {
+            let info = analysis.types[0].as_mut().expect("checked source");
+            let before = info.expr_lowers.len();
+            info.expr_lowers.retain(|_, lowering| {
+                !matches!(
+                    lowering,
+                    crate::resolve::ExprLowering::ConstructorCaptures(_)
+                )
+            });
+            assert!(
+                info.expr_lowers.len() < before,
+                "actual committed source plans removed"
+            );
+        }
+        let streamed = analysis.streamed.take().expect("finalized source headers");
+        let source_id = SourceFileId::from_raw(0);
+        let ordinary = streamed.ordinary_body_work(&analysis.files[0], source_id);
+        let (mut index, mut inline_bodies, _defaults, mut sources) = streamed.module.into_parts();
+        let info = analysis.types[0].as_ref().expect("checked source");
+        crate::resolve::publish_checked_local_signatures(
+            &analysis.files[0],
+            source_id,
+            &analysis.symbols,
+            info,
+            &mut index,
+        )
+        .expect("final local declarations");
+        let a_owner = (0..index.declaration_count())
+            .map(|raw| DeclarationId::from_raw(raw as u32))
+            .find(|declaration| {
+                index.classifier_header(*declaration).is_some()
+                    && index.declaration_name(*declaration) == Some("A")
+            })
+            .expect("actual subclass declaration");
+        let mut session = BodyCheckSession::default();
+        let mut sink = StreamedBodySink::default();
+        let mut rejected = Vec::new();
+        let mut poisoned = false;
+        for work in ordinary {
+            let name = index.declaration_name(DeclarationId::from_raw(work.owner.raw()));
+            let requested = matches!(name, Some("requestedB" | "requestedC"));
+            let original = if requested && !missing_plan {
+                let context = session
+                    .class_bodies
+                    .get_mut(&a_owner)
+                    .expect("completed real capture environment");
+                let original = context.clone();
+                assert!(!context.capture_values.is_empty());
+                let conflicts = context
+                    .capture_values
+                    .iter()
+                    .map(|(name, binding)| {
+                        (
+                            name.clone(),
+                            ClassCaptureBinding {
+                                field: u32::MAX,
+                                ..*binding
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                context.capture_values.extend(conflicts);
+                poisoned = true;
+                Some(original)
+            } else {
+                None
+            };
+            let result = super::super::driver::check_and_dispatch_bound_body_in_session(
+                crate::fir::BodyCheckUnit {
+                    file: &analysis.files[0],
+                    info,
+                    source: source_id,
+                    index: &index,
+                },
+                work,
+                sources.origins_mut(),
+                &mut inline_bodies,
+                &mut sink,
+                &mut session,
+            );
+            if let Some(original) = original {
+                session.class_bodies.insert(a_owner, original);
+            }
+            if requested {
+                assert!(
+                    matches!(
+                        result,
+                        Err(CheckedBodyDriverFailure::Check(BodyCheckFailure {
+                            kind: BodyCheckFailureKind::MissingStableCallTarget,
+                            ..
+                        }))
+                    ),
+                    "{name:?}: {result:?}"
+                );
+                rejected.push(name.expect("named selected body"));
+            } else {
+                result.expect("all unrelated complete bodies retain their real sources");
+            }
+        }
+        assert_eq!(rejected, ["requestedB", "requestedC"]);
+        assert_eq!(poisoned, !missing_plan);
     }
 }

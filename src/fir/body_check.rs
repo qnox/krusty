@@ -1112,23 +1112,6 @@ impl BodyFirChecker<'_> {
             .find_map(|scope| scope.get(name).copied())
     }
 
-    fn binding_source_at_shadow_depth(
-        &self,
-        name: &str,
-        shadow_depth: usize,
-    ) -> Option<(Option<u32>, LocalBinding)> {
-        self.scopes
-            .iter()
-            .rev()
-            .filter_map(|scope| scope.get(name).copied().map(|binding| (None, binding)))
-            .chain(
-                self.outer_values
-                    .shadowed(name)
-                    .map(|(depth, binding)| (Some(*depth), *binding)),
-            )
-            .nth(shadow_depth)
-    }
-
     fn selected_operator(&self, expression: ExprId, name: &str) -> bool {
         self.info.resolved_operator_call(expression, name).is_some()
     }
@@ -1257,7 +1240,8 @@ impl BodyFirChecker<'_> {
                     Some(self.info.semantic_ty(expression))
                 }
                 Some(
-                    ExprLowering::BuiltinUnaryCall { .. }
+                    ExprLowering::ConstructorCaptures(_)
+                    | ExprLowering::BuiltinUnaryCall { .. }
                     | ExprLowering::RuntimeTypeTest { .. }
                     | ExprLowering::ExtensionFunctionBinding { .. }
                     | ExprLowering::PluginExpression(_)

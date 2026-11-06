@@ -484,6 +484,136 @@ impl Checker<'_> {
             })
     }
 
+    /// Commit sources while the selected declaration and its lexical binding tower are alive.
+    pub(super) fn selected_constructor_capture_plan(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        owner: TypeName,
+    ) -> Option<super::constructor_commitment::ConstructorCapturePlan> {
+        use super::constructor_commitment::{
+            ConstructorCapturePlan as Plan, ConstructorCaptureProjection,
+            ConstructorCaptureSource as Source,
+        };
+        let declaration = self.file.local_class_decls.values().copied().find(|&declaration| {
+            matches!(self.file.decl(declaration), Decl::Class(class) if self.active_classifier_internal(declaration, class) == Some(owner))
+        })?;
+        if self
+            .implicit_receivers(scope)
+            .into_iter()
+            .find(|receiver| receiver.class_receiver)
+            .and_then(|receiver| receiver.receiver_role)
+            == Some(ReceiverDeclarationRole::EnclosingClass(owner))
+        {
+            return Some(Plan::OwnStorage(owner));
+        }
+        let captures = self
+            .discovered_local_class_captures
+            .get(&declaration)
+            .cloned()?;
+        let mut projected = Vec::with_capacity(captures.len());
+        for capture in captures {
+            let Some(required) = capture.logical_identity(owner) else {
+                self.diags.error(
+                    crate::diag::Span::new(0, 0),
+                    "constructor capture has no selected logical identity",
+                );
+                return None;
+            };
+            let source = if let Some(identity) = capture.lexical_binding {
+                let Some((binding, _)) =
+                    self.lexical_binding_by_identity(scope, &capture.name, identity)
+                else {
+                    self.diags.error(
+                        crate::diag::Span::new(0, 0),
+                        "constructor capture has no selected lexical source",
+                    );
+                    return None;
+                };
+                match binding.origin {
+                    ReceiverFnValueOrigin::ClassStorage(storage) => Source::ClassStorage(storage),
+                    ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
+                        Source::EnumEntryProperty { ordinal: field }
+                    }
+                    ReceiverFnValueOrigin::Local => {
+                        let mut crossed_class = false;
+                        for rung in scope.ancestors() {
+                            if rung
+                                .own_binding(&capture.name, Ns::Value)
+                                .and_then(|binding| binding.value())
+                                .is_some_and(|binding| {
+                                    binding.lexical_capture_identity == Some(identity)
+                                })
+                            {
+                                break;
+                            }
+                            crossed_class |= matches!(rung.kind(), scope::ScopeKind::Class { .. });
+                        }
+                        if crossed_class {
+                            projected.push(ConstructorCaptureProjection {
+                                required,
+                                source: Source::Captured,
+                            });
+                            continue;
+                        }
+                        let delegated = binding.delegate_storage_ty.is_some();
+                        let mut seen = HashSet::default();
+                        let shadow_depth = scope
+                            .ancestors()
+                            .filter_map(|rung| {
+                                rung.own_binding(&capture.name, Ns::Value)
+                                    .and_then(|binding| binding.value())
+                            })
+                            .filter(|binding| {
+                                matches!(binding.origin, ReceiverFnValueOrigin::Local)
+                                    && binding.delegate_storage_ty.is_some() == delegated
+                            })
+                            .filter(|binding| {
+                                binding
+                                    .lexical_capture_identity
+                                    .is_some_and(|identity| seen.insert(identity))
+                            })
+                            .position(|binding| binding.lexical_capture_identity == Some(identity))
+                            .and_then(|depth| u32::try_from(depth).ok());
+                        let Some(shadow_depth) = shadow_depth else {
+                            return None;
+                        };
+                        Source::Lexical {
+                            name: capture.name.clone(),
+                            shadow_depth,
+                            delegated,
+                        }
+                    }
+                    _ => return None,
+                }
+            } else {
+                match capture.source {
+                    AnonymousObjectCaptureSource::ClassStorage(storage) => {
+                        Source::ClassStorage(storage)
+                    }
+                    AnonymousObjectCaptureSource::EnumEntryPropertyStorage { field, .. } => {
+                        Source::EnumEntryProperty { ordinal: field }
+                    }
+                    AnonymousObjectCaptureSource::EnclosingInstance { .. }
+                    | AnonymousObjectCaptureSource::ImplicitReceiver { .. } => {
+                        let role = capture.receiver_role?;
+                        let mut receivers = self
+                            .implicit_receivers(scope)
+                            .into_iter()
+                            .filter(|receiver| receiver.receiver_role == Some(role));
+                        let selected = receivers.next()?;
+                        if receivers.next().is_some() {
+                            return None;
+                        }
+                        Source::Receiver(self.implicit_receiver_selection(selected))
+                    }
+                    AnonymousObjectCaptureSource::LexicalValue => return None,
+                }
+            };
+            projected.push(ConstructorCaptureProjection { required, source });
+        }
+        Some(Plan::Selected(projected.into_boxed_slice()))
+    }
+
     fn local_classifier_captures_of(
         &self,
         owner: TypeName,

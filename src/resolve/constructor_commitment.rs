@@ -6,7 +6,7 @@ use crate::symbol_resolver::GSigBinds;
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 
-use super::{Checker, ClassSig, ResolvedConstructor};
+use super::{Checker, ClassSig, CtorDefaultValue, ResolvedConstructor};
 
 /// The declaration-owned generic shape shared by every selected constructor origin. Selection
 /// normalizes source and provider declarations here; later publication consumes this record without
@@ -39,6 +39,47 @@ impl ConstructorDeclarationShape {
             parameters: member.constructor_declaration_params().to_vec(),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedAnnotationConstruction {
+    /// Annotation members in declaration/constructor order. Providers normalize Kotlin and Java
+    /// declarations into this same semantic shape before constructor selection.
+    pub members: Vec<(String, Ty)>,
+    /// File-independent declaration defaults, parallel to `members`. These are declaration values,
+    /// not evaluated call operands; checked FIR converts them into its compact retained form.
+    pub defaults: Vec<Option<CtorDefaultValue>>,
+}
+
+/// Positive source commitment for the hidden operands of one selected local constructor.
+#[derive(Clone, Debug)]
+pub enum ConstructorCapturePlan {
+    /// A call to this same local classifier reads its own finalized capture environment.
+    OwnStorage(TypeName),
+    Selected(Box<[ConstructorCaptureProjection]>),
+}
+
+#[derive(Clone, Debug)]
+pub struct ConstructorCaptureProjection {
+    pub(crate) required: crate::fir::ClassCaptureIdentity,
+    pub(crate) source: ConstructorCaptureSource,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ConstructorCaptureSource {
+    /// A selected lexical value beyond the current class boundary must cross its checked capture.
+    Captured,
+    ClassStorage(super::ClassStorageSource),
+    EnumEntryProperty {
+        ordinal: u32,
+    },
+    /// The resolver selected this exact same-named binding in its lexical namespace.
+    Lexical {
+        name: String,
+        shadow_depth: u32,
+        delegated: bool,
+    },
+    Receiver(super::ImplicitReceiverSelection),
 }
 
 /// Complete the argument-owned bindings of a dependency constructor before its expected result is
@@ -160,6 +201,12 @@ impl Checker<'_> {
 
     pub(super) fn discard_constructor_commitment(&mut self, call: ExprId) {
         self.resolved_constructors.remove(&call);
+        if matches!(
+            self.expr_lowers.get(&call),
+            Some(super::ExprLowering::ConstructorCaptures(_))
+        ) {
+            self.expr_lowers.remove(&call);
+        }
         self.discard_constructor_declaration_shape(call);
     }
 
@@ -168,11 +215,24 @@ impl Checker<'_> {
     /// that probe is not an alternative target and must not cross the checked boundary.
     pub(super) fn commit_constructor(
         &mut self,
+        scope: &super::CheckerScope<'_>,
         call: ExprId,
         target: ResolvedConstructor,
         declaration: ConstructorDeclarationShape,
     ) {
         self.resolved_calls.remove(&call);
+        if matches!(
+            self.expr_lowers.get(&call),
+            Some(super::ExprLowering::ConstructorCaptures(_))
+        ) {
+            self.expr_lowers.remove(&call);
+        }
+        if let Some(plan) = self.selected_constructor_capture_plan(scope, target.owner()) {
+            self.expr_lowers.insert(
+                call,
+                super::ExprLowering::ConstructorCaptures(Box::new(plan)),
+            );
+        }
         self.record_constructor_declaration_shape(call, declaration);
         self.resolved_constructors.insert(call, target);
     }
