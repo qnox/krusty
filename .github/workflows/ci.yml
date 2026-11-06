@@ -1108,13 +1108,12 @@ jobs:
           scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
 
   # Every covered master commit builds its own immutable release artifacts, even after master
-  # advances. Cap each matrix at two runners so release packaging shares capacity with PR gates.
+  # advances. All six platforms can build concurrently on their hosted runners.
   build-release:
     needs: [ci]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
         target:
           - { triple: x86_64-unknown-linux-gnu,  os: ubuntu-latest }
@@ -1161,7 +1160,17 @@ jobs:
           echo "KRUSTY_RUNTIME_CC=$clang" >> "$GITHUB_ENV"
       - name: build
         shell: bash
-        run: just build-release "${{ matrix.target.triple }}"
+        run: |
+          rustc --version --verbose
+          cargo --version
+          time just build-release "${{ matrix.target.triple }}"
+      - name: upload release build timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-build-timings-${{ matrix.target.triple }}
+          path: target/cargo-timings/
+          if-no-files-found: warn
       - name: package compiler
         id: compiler_pkg
         shell: bash
@@ -1344,6 +1353,9 @@ jobs:
           fi
           echo "signing key: ${id:-none}"
           echo "id=$id" >> "$GITHUB_OUTPUT"
+      - name: make the public signing subkey retrievable for Maven Central
+        if: steps.tip.outputs.publish == 'true'
+        run: scripts/publish-release-signing-key.sh "${{ steps.v.outputs.ver }}" dist
       # Maven Central goes first: it skips a version it already has, so a rerun after a failed
       # Plugin Portal upload does not trip over Central's immutable versions.
       - name: publish the Gradle plugin to Maven Central

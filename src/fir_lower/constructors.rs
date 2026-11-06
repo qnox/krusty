@@ -544,6 +544,7 @@ pub(super) fn finalize_constructors(
             target,
             outer_parameter,
             outer_receiver,
+            capture_arguments,
             arguments,
             substitutions: _,
         } = *checked_op
@@ -561,49 +562,54 @@ pub(super) fn finalize_constructors(
         // destinations retained for the target are the declaration's own parameters. A module
         // declaration's signature is both; a dependency's generic constructor keeps `T` apart
         // from the specialized `Money` it was selected with.
-        let (owner, parameters, declared_parameters, target, external_target) = match target {
-            IrCheckedConstructorTarget::Module(callable) => {
-                let callable = index
-                    .callable(callable)
-                    .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
-                let signature = index
-                    .signature(callable.declaration)
-                    .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
-                let classifier = index
-                    .enclosing_classifier(callable.declaration)
-                    .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
-                let target = module_constructor_target(index, callable.declaration)
-                    .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
-                let parameters = signature
-                    .parameters
-                    .iter()
-                    .map(|parameter| parameter.get())
-                    .collect::<Vec<_>>();
-                (
-                    classifier.classifier,
-                    parameters.clone(),
-                    parameters,
-                    target,
-                    None,
-                )
-            }
-            // A dependency's constructor that checking selected is callable from here: it is not
-            // private, and a sealed class's subclasses all live in its own module.
-            IrCheckedConstructorTarget::External {
-                declaration,
-                classifier,
-                parameters,
-                declared_parameters,
-            } => (
-                classifier,
-                parameters,
-                declared_parameters,
-                IrConstructorTarget::UNRESTRICTED_PRIMARY,
-                Some(crate::ir::IrExternalConstructorTarget::unresolved(
+        let (owner, parameters, declared_parameters, target, external_target, capture_owner) =
+            match target {
+                IrCheckedConstructorTarget::Module(callable) => {
+                    let callable = index
+                        .callable(callable)
+                        .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+                    let signature = index
+                        .signature(callable.declaration)
+                        .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+                    let classifier = index
+                        .enclosing_classifier(callable.declaration)
+                        .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
+                    let target = module_constructor_target(index, callable.declaration)
+                        .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+                    let parameters = signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.get())
+                        .collect::<Vec<_>>();
+                    (
+                        classifier.classifier,
+                        parameters.clone(),
+                        parameters,
+                        target,
+                        None,
+                        ir.checked_classifier_classes
+                            .get(&classifier.declaration)
+                            .copied(),
+                    )
+                }
+                // A dependency's constructor that checking selected is callable from here: it is not
+                // private, and a sealed class's subclasses all live in its own module.
+                IrCheckedConstructorTarget::External {
                     declaration,
-                )),
-            ),
-        };
+                    classifier,
+                    parameters,
+                    declared_parameters,
+                } => (
+                    classifier,
+                    parameters,
+                    declared_parameters,
+                    IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                    Some(crate::ir::IrExternalConstructorTarget::unresolved(
+                        declaration,
+                    )),
+                    None,
+                ),
+            };
         // kotlinc builds an omitted default's placeholder at the delegating call's offsets.
         let delegation_line = if constructor.ordinal == 0 {
             ir.classes[constructor.class as usize].primary_delegation_line()
@@ -625,6 +631,18 @@ pub(super) fn finalize_constructors(
             arguments.insert(0, outer_receiver);
             parameters.insert(0, outer_parameter);
         }
+        let capture_shift = project_delegation_captures(
+            ir,
+            &constructor,
+            capture_owner,
+            capture_arguments,
+            &mut arguments,
+            &mut parameters,
+            declaration,
+        )?;
+        let prefix_shift = outer_shift
+            .checked_add(capture_shift)
+            .ok_or(FirFileLoweringFailure::ValueIdentityOverflow)?;
         if constructor.ordinal == 0 {
             let class = &mut ir.classes[constructor.class as usize];
             if owner == class.fq_name {
@@ -664,7 +682,7 @@ pub(super) fn finalize_constructors(
                 let class_index = constructor.class as usize;
                 for (slot, (parameter, shells)) in forwards {
                     let index = slot
-                        .checked_add(outer_shift)
+                        .checked_add(prefix_shift)
                         .ok_or(FirFileLoweringFailure::ValueIdentityOverflow)?
                         as usize;
                     let current = *ir.classes[class_index]
@@ -719,6 +737,96 @@ pub(super) fn finalize_constructors(
     }
     push_no_arg_constructors(index, ir);
     Ok(())
+}
+
+/// Apply the selected capture operands before ordinary constructor arguments. A complete explicit
+/// prefix leaves no missing arity for legacy generated-IR closure-identity inference to fill.
+fn project_delegation_captures(
+    ir: &mut IrFile,
+    constructor: &IrCheckedConstructorBody,
+    owner: Option<crate::ir::ClassId>,
+    captures: Option<Vec<(crate::ir::ExprId, crate::types::Ty)>>,
+    arguments: &mut Vec<crate::ir::ExprId>,
+    parameters: &mut Vec<crate::types::Ty>,
+    declaration: DeclarationId,
+) -> Result<u32, FirFileLoweringFailure> {
+    let Some(captures) = captures else {
+        return Ok(0);
+    };
+    let shared = checked_delegation_capture_prefix(ir, owner, &captures, declaration)?;
+    let count =
+        u32::try_from(captures.len()).map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
+    for (parameter, element) in shared {
+        if constructor.ordinal == 0 {
+            ir.shared_super_capture_parameters
+                .insert((constructor.class, parameter), element);
+        } else {
+            ir.shared_secondary_super_capture_parameters.insert(
+                (constructor.class, constructor.ordinal - 1, parameter),
+                element,
+            );
+        }
+    }
+    arguments.splice(0..0, captures.iter().map(|(value, _)| *value));
+    parameters.splice(0..0, captures.iter().map(|(_, ty)| *ty));
+    Ok(count)
+}
+
+/// Validate a checked local-superclass capture projection against that declaration's actual prefix.
+/// The operands already name constructor parameters or other checked sources; no closure-identity
+/// inference is allowed to repair an explicit projection with a missing or incompatible operand.
+fn checked_delegation_capture_prefix(
+    ir: &IrFile,
+    owner: Option<crate::ir::ClassId>,
+    captures: &[(crate::ir::ExprId, crate::types::Ty)],
+    declaration: DeclarationId,
+) -> Result<Vec<(u32, crate::types::Ty)>, FirFileLoweringFailure> {
+    let owner = owner.ok_or(FirFileLoweringFailure::UnsupportedCallableOwner(
+        declaration,
+    ))?;
+    let class = &ir.classes[owner as usize];
+    let prefix = class
+        .ctor_args
+        .get(..class.constructor_prefix_count as usize)
+        .ok_or(FirFileLoweringFailure::UnsupportedCallableOwner(
+            declaration,
+        ))?;
+    let count = prefix
+        .iter()
+        .take_while(|argument| argument.provenance == crate::ir::IrCtorParameterProvenance::Capture)
+        .count();
+    if count != captures.len()
+        || prefix[count..]
+            .iter()
+            .any(|argument| argument.provenance == crate::ir::IrCtorParameterProvenance::Capture)
+    {
+        return Err(FirFileLoweringFailure::InvalidSuperclassCapturePrefix {
+            class: owner,
+            expected: u32::try_from(count)
+                .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?,
+            actual: u32::try_from(captures.len())
+                .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?,
+        });
+    }
+    let mut shared = Vec::new();
+    for (parameter, (argument, &(value, ty))) in prefix.iter().zip(captures).enumerate() {
+        if ir.exprs.get(value as usize).is_none() || argument.ty != ty {
+            return Err(FirFileLoweringFailure::UnsupportedCallableOwner(
+                declaration,
+            ));
+        }
+        if let Some(element) = argument
+            .field_index
+            .and_then(|field| ir.shared_class_capture_fields.get(&(owner, field)).copied())
+        {
+            shared.push((
+                u32::try_from(parameter)
+                    .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?,
+                element,
+            ));
+        }
+    }
+    Ok(shared)
 }
 
 /// The message of the `@Deprecated(level = HIDDEN)` kotlinc puts on the no-arg constructor.
