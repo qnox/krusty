@@ -182,7 +182,7 @@ mod tests {
             CaptureFieldRemap {
                 owner: middle,
                 fields: &[None],
-                original: &[original.clone()]
+                original: std::slice::from_ref(&original)
             },
             &mut captures,
         ));
