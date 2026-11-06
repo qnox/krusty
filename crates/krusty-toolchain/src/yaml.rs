@@ -223,9 +223,20 @@ fn refuse(span: ParserSpan, message: impl Into<String>) -> YamlError {
 }
 
 /// What precedes a node's content: its `&anchor` and `!tag`, in source order.
-struct Properties {
+#[derive(Debug, PartialEq, Eq)]
+struct SourceProperties {
     anchor: Option<Position>,
     tag: Option<Position>,
+    content: Position,
+}
+
+impl SourceProperties {
+    fn span(&self, span: ParserSpan) -> Span {
+        Span {
+            start: self.content,
+            ..Span::from_parser(span)
+        }
+    }
 }
 
 impl Builder<'_> {
@@ -252,13 +263,13 @@ impl Builder<'_> {
                             value: String::new(),
                             style: Style::Plain,
                         },
-                        span,
+                        Span::from_parser(span),
                         None,
                     )?;
                     self.attach(id)?;
                 }
                 Event::Scalar(value, style, anchor, tag) => {
-                    let tag = self.properties(
+                    let properties = self.properties(
                         anchor,
                         tag.map(|tag| format!("{}{}", tag.handle, tag.suffix)),
                         span,
@@ -272,7 +283,7 @@ impl Builder<'_> {
                     };
                     let spelling = match style {
                         Style::SingleQuoted | Style::DoubleQuoted => {
-                            Some(self.between_quotes(Span::from_parser(span)))
+                            Some(self.between_quotes(properties.span(span)))
                         }
                         _ => None,
                     };
@@ -281,29 +292,37 @@ impl Builder<'_> {
                             value: value.into_owned(),
                             style,
                         },
-                        span,
-                        tag,
+                        properties.span(span),
+                        properties.tag,
                     )?;
                     self.nodes[id.0 as usize].spelling = spelling;
                     self.attach(id)?;
                 }
                 Event::SequenceStart(anchor, tag) => {
-                    let tag = self.properties(
+                    let properties = self.properties(
                         anchor,
                         tag.map(|tag| format!("{}{}", tag.handle, tag.suffix)),
                         span,
                     );
-                    let id = self.push(NodeKind::Sequence(Vec::new()), span, tag)?;
-                    self.open(Open::Sequence(id, Vec::new()), span)?;
+                    let id = self.push(
+                        NodeKind::Sequence(Vec::new()),
+                        properties.span(span),
+                        properties.tag,
+                    )?;
+                    self.open(Open::Sequence(id, Vec::new()), properties.span(span))?;
                 }
                 Event::MappingStart(anchor, tag) => {
-                    let tag = self.properties(
+                    let properties = self.properties(
                         anchor,
                         tag.map(|tag| format!("{}{}", tag.handle, tag.suffix)),
                         span,
                     );
-                    let id = self.push(NodeKind::Mapping(Vec::new()), span, tag)?;
-                    self.open(Open::Mapping(id, Vec::new(), None), span)?;
+                    let id = self.push(
+                        NodeKind::Mapping(Vec::new()),
+                        properties.span(span),
+                        properties.tag,
+                    )?;
+                    self.open(Open::Mapping(id, Vec::new(), None), properties.span(span))?;
                 }
                 Event::SequenceEnd | Event::MappingEnd => self.close(span)?,
             }
@@ -317,69 +336,152 @@ impl Builder<'_> {
         })
     }
 
-    /// Report a node's anchor and `!!` tag, and return where the tag the reader should see is. The parser's
-    /// events carry neither property's position, so both are found by reading back from the
-    /// node's content over whitespace and the property tokens themselves.
+    /// Keep lexical property positions separate from content. Parser 0.2 events start at the
+    /// content token; 0.3 events include its preceding properties. Both refer to the same source.
     fn properties(
         &mut self,
         anchor: usize,
         tag: Option<String>,
         span: ParserSpan,
-    ) -> Option<Position> {
-        if anchor == 0 && tag.is_none() {
-            return None;
-        }
-        let found = self.find_properties(Span::from_parser(span).start);
+    ) -> SourceProperties {
+        let span = Span::from_parser(span);
+        let mut found = self.find_properties(span, anchor != 0, tag.is_some());
         if anchor != 0 {
-            let at = found.anchor.unwrap_or(Span::from_parser(span).start);
             self.problems.push(YamlError {
-                position: at,
+                position: found.anchor.unwrap_or(span.start),
                 message: ANCHORS.to_string(),
             });
         }
-        let tag = tag?;
-        let at = found.tag.unwrap_or(Span::from_parser(span).start);
-        if tag.starts_with("!!") || tag.starts_with("tag:yaml.org,2002:") {
-            self.problems.push(YamlError {
-                position: at,
-                message: SECONDARY_TAG.to_string(),
-            });
-            return None;
+        if let Some(tag) = tag {
+            let at = found.tag.unwrap_or(span.start);
+            if tag.starts_with("!!") || tag.starts_with("tag:yaml.org,2002:") {
+                self.problems.push(YamlError {
+                    position: at,
+                    message: SECONDARY_TAG.to_string(),
+                });
+                found.tag = None;
+            } else {
+                found.tag = Some(at);
+            }
         }
-        Some(at)
+        found
     }
 
-    /// The `&` and `!` property tokens immediately before `content`.
-    fn find_properties(&self, content: Position) -> Properties {
-        let mut found = Properties {
+    /// Locate only properties authenticated by the parser, without interpreting their names or
+    /// scalar contents. This annotates accepted YAML; syntax and property validity belong upstream.
+    fn find_properties(&self, span: Span, anchor: bool, tag: bool) -> SourceProperties {
+        let mut found = SourceProperties {
             anchor: None,
             tag: None,
+            content: span.start,
         };
-        let mut line = content.line;
-        let mut column = content.column; // 1-based; scanning the characters before it
-        for _ in 0..2 {
-            // Skip whitespace (and line breaks) backwards.
+        if !anchor && !tag {
+            return found;
+        }
+        let blank = |c: char| matches!(c, ' ' | '\t');
+        let flow = |c: char| matches!(c, ',' | '[' | ']' | '{' | '}');
+        let mut source = self
+            .lines
+            .iter()
+            .enumerate()
+            .skip(span.start.line - 1)
+            .take(span.end.line - span.start.line + 1)
+            .flat_map(|(line, text)| {
+                text.chars()
+                    .chain(std::iter::once('\n'))
+                    .enumerate()
+                    .map(move |(column, c)| {
+                        (
+                            Position {
+                                line: line + 1,
+                                column: column + 1,
+                            },
+                            c,
+                        )
+                    })
+            })
+            .skip_while(|(at, _)| *at < span.start)
+            .take_while(|(at, _)| *at < span.end)
+            .peekable();
+        let prefix = source
+            .peek()
+            .is_some_and(|(_, c)| (*c == '&' && anchor) || (*c == '!' && tag));
+        if prefix {
+            // The span includes properties. Traverse their validated lexical boundaries, never
+            // searching for a quote inside a tag URI or an anchor name.
+            loop {
+                while source.peek().is_some_and(|(_, c)| blank(*c) || *c == '\n') {
+                    source.next();
+                }
+                if source.peek().is_some_and(|(_, c)| *c == '#') {
+                    for (_, c) in source.by_ref() {
+                        if c == '\n' {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                let Some(&(at, indicator)) = source.peek() else {
+                    found.content = span.end;
+                    break;
+                };
+                match indicator {
+                    '&' if anchor && found.anchor.is_none() => found.anchor = Some(at),
+                    '!' if tag && found.tag.is_none() => found.tag = Some(at),
+                    _ => {
+                        found.content = at;
+                        break;
+                    }
+                }
+                source.next();
+                let verbatim = indicator == '!' && source.peek().is_some_and(|(_, c)| *c == '<');
+                if verbatim {
+                    // A verbatim tag can contain flow indicators and apostrophes.
+                    for (_, c) in source.by_ref() {
+                        if c == '>' {
+                            break;
+                        }
+                    }
+                } else {
+                    while source
+                        .peek()
+                        .is_some_and(|(_, c)| !blank(*c) && *c != '\n' && !flow(*c))
+                    {
+                        source.next();
+                    }
+                }
+            }
+            return found;
+        }
+        // Older events start at content. Read the same property tokens immediately before it,
+        // excluding separation comments, while preserving character-based source coordinates.
+        let mut line = span.start.line;
+        let mut column = span.start.column;
+        for _ in 0..usize::from(anchor) + usize::from(tag) {
             loop {
                 let characters: Vec<char> = self
                     .lines
-                    .get(line.wrapping_sub(1))
+                    .get(line - 1)
                     .map(|text| text.chars().collect())
                     .unwrap_or_default();
-                let before = &characters[..(column - 1).min(characters.len())];
-                match before.iter().rposition(|c| !c.is_whitespace()) {
+                let before = &characters[..column.saturating_sub(1).min(characters.len())];
+                let comment = before.iter().enumerate().find_map(|(i, &c)| {
+                    (c == '#' && (i == 0 || blank(before[i - 1]))).then_some(i)
+                });
+                let before = &before[..comment.unwrap_or(before.len())];
+                match before.iter().rposition(|&c| !blank(c)) {
                     Some(last) => {
-                        // The token ends at `last`; find its start.
                         let start = before[..=last]
                             .iter()
-                            .rposition(|c| c.is_whitespace())
-                            .map_or(0, |space| space + 1);
-                        let token_position = Position {
+                            .rposition(|&c| blank(c))
+                            .map_or(0, |i| i + 1);
+                        let at = Position {
                             line,
                             column: start + 1,
                         };
                         match before[start] {
-                            '&' if found.anchor.is_none() => found.anchor = Some(token_position),
-                            '!' if found.tag.is_none() => found.tag = Some(token_position),
+                            '&' if anchor && found.anchor.is_none() => found.anchor = Some(at),
+                            '!' if tag && found.tag.is_none() => found.tag = Some(at),
                             _ => return found,
                         }
                         column = start + 1;
@@ -430,21 +532,20 @@ impl Builder<'_> {
     fn push(
         &mut self,
         kind: NodeKind,
-        span: ParserSpan,
+        mut span: Span,
         tag: Option<Position>,
     ) -> Result<NodeId, YamlError> {
         if self.nodes.len() >= self.limits.nodes {
-            return Err(refuse(
-                span,
-                format!(
+            return Err(YamlError {
+                position: span.start,
+                message: format!(
                     "krusty-toolchain reads build files of at most {} YAML nodes",
                     self.limits.nodes
                 ),
-            ));
+            });
         }
         let id = NodeId(self.nodes.len() as u32);
         // A tagged node starts at its tag, as the toolchain places it.
-        let mut span = Span::from_parser(span);
         if let Some(tag) = tag {
             span.start = tag;
         }
@@ -457,15 +558,15 @@ impl Builder<'_> {
         Ok(id)
     }
 
-    fn open(&mut self, collection: Open, span: ParserSpan) -> Result<(), YamlError> {
+    fn open(&mut self, collection: Open, span: Span) -> Result<(), YamlError> {
         if self.open.len() >= self.limits.depth {
-            return Err(refuse(
-                span,
-                format!(
+            return Err(YamlError {
+                position: span.start,
+                message: format!(
                     "krusty-toolchain reads build files nested at most {} collections deep",
                     self.limits.depth
                 ),
-            ));
+            });
         }
         self.open.push(collection);
         Ok(())
@@ -611,6 +712,103 @@ mod tests {
             .map(|&(key, value)| (document.spelling(key), document.spelling(value)))
             .collect();
         assert_eq!(spellings, [(r#"q\"\u00e9"#, "it''s"), ("plain", "a\n  b")]);
+    }
+
+    #[test]
+    fn property_tokens_are_outside_quoted_spelling_and_keep_their_own_positions() {
+        let at = |line, column| Position { line, column };
+        for (text, spelling, tag, problems) in [
+            (
+                "!<tag:example.org,2026:a'b> 'it''s'\n",
+                "it''s",
+                at(1, 1),
+                vec![],
+            ),
+            (
+                "&a\"quote !t 'it''s'\n",
+                "it''s",
+                at(1, 10),
+                vec!["1:1: YAML anchors/aliases are not supported in Kotlin project files"],
+            ),
+            (
+                "!t &a'quote \"é\\u00e9\"\n",
+                "é\\u00e9",
+                at(1, 1),
+                vec!["1:4: YAML anchors/aliases are not supported in Kotlin project files"],
+            ),
+            (
+                "&α # anchor\n!<tag:example.org,2026:t> # tag\n\"a\n  b\"\n",
+                "a\n  b",
+                at(2, 1),
+                vec!["1:1: YAML anchors/aliases are not supported in Kotlin project files"],
+            ),
+            (
+                "!t # tag\n  &é # anchor\n  'a\n    b'\n",
+                "a\n    b",
+                at(1, 1),
+                vec!["2:3: YAML anchors/aliases are not supported in Kotlin project files"],
+            ),
+        ] {
+            let parsed = parse(text).unwrap();
+            assert_eq!(
+                parsed
+                    .problems
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                problems,
+                "{text:?}"
+            );
+            let id = parsed.document.root().unwrap();
+            assert_eq!(parsed.document.spelling(id), spelling, "{text:?}");
+            assert_eq!(parsed.document.tag(id), Some(tag), "{text:?}");
+            assert_eq!(parsed.document.node(id).span.start, tag, "{text:?}");
+        }
+        assert_eq!(
+            problems("&a !!str 'value'\n"),
+            [
+                "1:1: YAML anchors/aliases are not supported in Kotlin project files",
+                "1:4: Secondary (`!!`) YAML type tags are not supported in Kotlin project files",
+            ]
+        );
+    }
+
+    #[test]
+    fn old_content_spans_and_new_property_spans_describe_the_same_quoted_source() {
+        // These are the external parser 0.2 and 0.3 span conventions for this whole input.
+        let at = |line, column| Position { line, column };
+        let text = "plain: !t \"a\n  b\"\n";
+        let builder = Builder {
+            lines: text.lines().collect(),
+            limits: Limits::DEFAULT,
+            nodes: Vec::new(),
+            open: Vec::new(),
+            root: None,
+            documents: 0,
+            problems: Vec::new(),
+        };
+        for start in [at(1, 11), at(1, 8)] {
+            let span = Span {
+                start,
+                end: at(2, 5),
+            };
+            let properties = builder.find_properties(span, false, true);
+            assert_eq!(
+                properties,
+                SourceProperties {
+                    anchor: None,
+                    tag: Some(at(1, 8)),
+                    content: at(1, 11)
+                }
+            );
+            assert_eq!(
+                builder.between_quotes(Span {
+                    start: properties.content,
+                    ..span
+                }),
+                "a\n  b"
+            );
+        }
     }
 
     #[test]
