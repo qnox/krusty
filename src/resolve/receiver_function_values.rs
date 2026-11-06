@@ -363,11 +363,7 @@ impl Checker<'_> {
                     .select_property_read(scope, receiver.ty, name)
                     .ok()
                     .flatten()?;
-                let property_ty = self.record_property_read(
-                    scope,
-                    Some(ReceiverFunctionPropertyCallee::Expression(*callee)),
-                    selection,
-                );
+                let property_ty = self.record_property_read(scope, Some(*callee), selection);
                 self.set(*callee, property_ty);
                 self.mark_implicit_receiver_selection(*callee, receiver);
                 Some(ReceiverFunctionPropertyCallee::Expression(*callee))
