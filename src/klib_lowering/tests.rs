@@ -15,6 +15,7 @@ mod constructor_contracts;
 mod control_forms;
 mod demo_package;
 mod elvis_blocks;
+mod for_loop_bindings;
 mod inline_templates;
 mod parameter_defaults;
 mod primitive_calls;
