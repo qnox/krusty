@@ -62,7 +62,11 @@ impl BodyFirChecker<'_> {
         let Some(classifier) = self.index.enclosing_classifier(constructor) else {
             return Ok(None);
         };
-        if self.body.owns_class_body_context(classifier.declaration) {
+        if !self
+            .index
+            .owns_local_capture_environment(classifier.declaration)
+            || self.body.owns_class_body_context(classifier.declaration)
+        {
             return Ok(None);
         }
         let Some(context) = self
@@ -1354,32 +1358,26 @@ impl BodyFirChecker<'_> {
                 stored: true,
             });
         }
-        if !context.values.is_empty()
-            || !context.delegates.is_empty()
-            || !context.callables.is_empty()
-            || !context.receivers.is_empty()
-            || context.enclosing_property.is_some()
-        {
-            crate::trace_compiler!(
-                "fir",
-                "record class capture context declaration={declaration:?} values={} delegates={} callables={} receivers={}",
-                context.values.len(),
-                context.delegates.len(),
-                context.callables.len(),
-                context.receivers.len(),
-            );
-            // This is part of the checked FIR fragment's closure semantics. If the surrounding
-            // body is inline or a default expression, it survives only as payload of that retained
-            // body. The session copy serves sibling body callbacks in the current pass and is
-            // always transient.
-            self.body
-                .record_class_body_context(declaration, context.clone());
-            self.session
-                .class_bodies
-                .entry(declaration)
-                .or_default()
-                .merge(context);
-        }
+        // Retain a positive checked-empty environment too: absence means unavailable, not zero.
+        crate::trace_compiler!(
+            "fir",
+            "record class capture context declaration={declaration:?} values={} delegates={} callables={} receivers={}",
+            context.values.len(),
+            context.delegates.len(),
+            context.callables.len(),
+            context.receivers.len(),
+        );
+        // This is part of the checked FIR fragment's closure semantics. If the surrounding
+        // body is inline or a default expression, it survives only as payload of that retained
+        // body. The session copy serves sibling body callbacks in the current pass and is
+        // always transient.
+        self.body
+            .record_class_body_context(declaration, context.clone());
+        self.session
+            .class_bodies
+            .entry(declaration)
+            .or_default()
+            .merge(context);
         Ok(checked.into_boxed_slice())
     }
 

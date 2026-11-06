@@ -1183,10 +1183,45 @@ fn add_constructor_delegation(
             })
             .transpose()?
             .flatten();
-        Ok::<_, BodyCheckFailure>((arguments, outer_receiver))
+        let external_capture_arguments = match (&resolved.target, &target) {
+            (
+                ResolvedCtorDelegationTarget::Super { .. },
+                FirConstructorTarget::Module { declaration, .. },
+            ) => {
+                let declaration = checker
+                    .index
+                    .callable(*declaration)
+                    .ok_or_else(|| {
+                        checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    })?
+                    .declaration;
+                let owner = checker
+                    .index
+                    .enclosing_classifier(declaration)
+                    .ok_or_else(|| {
+                        checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    })?
+                    .declaration;
+                if checker.index.owns_local_capture_environment(owner) {
+                    if !checker.session.class_bodies.contains_key(&owner) {
+                        return Err(checker
+                            .failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget));
+                    }
+                    Some(
+                        checker
+                            .external_constructor_capture_arguments(declaration, origin)?
+                            .unwrap_or_default(),
+                    )
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        Ok::<_, BodyCheckFailure>((arguments, outer_receiver, external_capture_arguments))
     })();
     checker.constructor_prefix_capture_access = previous_capture_access;
-    let (checked_arguments, outer_receiver) = checked_sources?;
+    let (checked_arguments, outer_receiver, external_capture_arguments) = checked_sources?;
     if resolved.outer_receiver.is_some() != outer_receiver.is_some() {
         return Err(checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget));
     }
@@ -1214,7 +1249,7 @@ fn add_constructor_delegation(
             })?,
             outer_parameter,
             outer_receiver,
-            external_capture_arguments: None,
+            external_capture_arguments,
             parameter_types: checker
                 .published_parameter_types(Some(span), resolved.target.params())?,
             arguments: checked_arguments,
