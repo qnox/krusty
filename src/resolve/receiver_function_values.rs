@@ -315,7 +315,31 @@ impl Checker<'_> {
                 Some(*callee)
             }
             ReceiverFnValueOrigin::DispatchProperty {
-                receiver_identity, ..
+                owner,
+                receiver_identity,
+                declared_ty,
+                enum_entry_property: Some(property),
+                ..
+            } => {
+                let Expr::Call { callee, .. } = self.file.expr(call) else {
+                    return None;
+                };
+                if !self.publish_enum_entry_property_read(
+                    scope,
+                    *callee,
+                    owner,
+                    property,
+                    receiver_identity,
+                ) {
+                    return None;
+                }
+                self.set(*callee, declared_ty);
+                Some(*callee)
+            }
+            ReceiverFnValueOrigin::DispatchProperty {
+                receiver_identity,
+                enum_entry_property: None,
+                ..
             } => {
                 let Expr::Call { callee, .. } = self.file.expr(call) else {
                     return None;
