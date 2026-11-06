@@ -506,9 +506,9 @@ fn preview_lanes_and_release_carry_all_target_reports_distinctly() {
             && lane.contains("target: [jvm]")
             && lane.contains("steps: &conformance-steps")
             && !lane.contains("build-klib-test-bins")
-            && klib_lane.contains("target: [native, wasm]")
+            && klib_lane.contains("target: [native, wasm-js, wasm-wasi]")
             && klib_lane.contains("steps: *conformance-steps"),
-        "every version exposes JVM, Native and Wasm rows from one shared step inventory: {lane}\n{klib_lane}"
+        "every version exposes JVM, Native and both Wasm rows from one shared step inventory: {lane}\n{klib_lane}"
     );
     assert_eq!(
         workflow.matches("        target: [jvm]\n").count(),
@@ -516,9 +516,11 @@ fn preview_lanes_and_release_carry_all_target_reports_distinctly() {
         "the early report lane owns exactly the JVM rows"
     );
     assert_eq!(
-        workflow.matches("        target: [native, wasm]\n").count(),
+        workflow
+            .matches("        target: [native, wasm-js, wasm-wasi]\n")
+            .count(),
         1,
-        "the KLIB-dependent report lane owns exactly the Native and Wasm rows"
+        "the KLIB-dependent report lane owns exactly Native and both Wasm rows"
     );
     assert!(
         lane.contains(
@@ -619,4 +621,59 @@ fn readme_and_site_show_all_badges_with_distinct_endpoints() {
             "the site shows the {endpoint} badge as {alt:?}"
         );
     }
+}
+
+#[test]
+fn wasm_corpus_matrix_runs_each_platform_and_preserves_its_failure() {
+    let workflow =
+        fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read workflow");
+    let shared = workflow_job(&workflow, "conformance");
+    let step = shared
+        .split_once("      - name: run wasm box conformance")
+        .expect("shared Wasm corpus step")
+        .1
+        .split("\n      - ")
+        .next()
+        .unwrap();
+    let body: String = step
+        .split_once("        run: |\n")
+        .expect("Wasm corpus shell")
+        .1
+        .lines()
+        .map(|line| line.strip_prefix("          ").expect("shell indentation"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let temp = scratch_dir("independent-wasm-matrix");
+    fs::write(temp.join("conformance-bin"), "").expect("write dummy binary");
+    for lane in ["wasm-js", "wasm-wasi"] {
+        for failed_lane in ["none", "wasm-js", "wasm-wasi"] {
+            let body = body
+                .replace("${{ matrix.target }}", lane)
+                .replace("${{ matrix.version }}", "selected-version");
+            let script = format!(
+                "just() {{ printf '%s\\n' \"$*\"; [ \"$2\" != \"$FAILED_LANE\" ] || return 37; }}\n{body}\n"
+            );
+            let output = Command::new("bash")
+                .args(["-c", &script])
+                .current_dir(&temp)
+                .env("FAILED_LANE", failed_lane)
+                .output()
+                .expect("run exact selected workflow shell");
+            assert_eq!(
+                output.status.code(),
+                Some(if lane == failed_lane { 37 } else { 0 }),
+                "selected {lane}, failed {failed_lane}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!(
+                    "wasm-conformance-run {lane} {}/conformance-bin selected-version\n",
+                    temp.display()
+                ),
+                "each matrix row runs exactly its platform, even when the other platform fails"
+            );
+        }
+    }
+    fs::remove_dir_all(temp).expect("remove matrix fixture");
 }

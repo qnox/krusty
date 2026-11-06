@@ -184,16 +184,16 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     assert!(
         klib_conformance.contains(
             "    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins]\n"
-        ) && klib_conformance.contains("        target: [native, wasm]\n")
+        ) && klib_conformance.contains("        target: [native, wasm-js, wasm-wasi]\n")
             && klib_conformance.contains("      fail-fast: false\n")
             && klib_conformance.contains(
                 "        version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}\n"
             )
             && klib_conformance.contains(
-                r#"    runs-on: ${{ (matrix.target == 'native' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}"#
+"    runs-on: ubuntu-latest\n"
             )
             && klib_conformance.contains("    steps: *conformance-steps\n"),
-        "Native uses hosted capacity and Wasm retains its fork-safe route, with the same versions, dependencies and shared inventory: {klib_conformance}"
+        "Native and both independent Wasm rows use hosted capacity, with the same versions, dependencies and shared inventory: {klib_conformance}"
     );
     assert_eq!(
         workflow.matches("        target: [jvm]\n").count(),
@@ -201,9 +201,11 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
         "the early matrix owns exactly the JVM rows"
     );
     assert_eq!(
-        workflow.matches("        target: [native, wasm]\n").count(),
+        workflow
+            .matches("        target: [native, wasm-js, wasm-wasi]\n")
+            .count(),
         1,
-        "the focused-KLIB-dependent matrix owns exactly the Native and Wasm rows"
+        "the focused-KLIB-dependent matrix owns exactly Native and both Wasm rows"
     );
     let conformance_build = job(&workflow, "build-conformance-bin");
     assert!(
@@ -301,7 +303,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     }
     assert!(
         conformance.contains(
-            "if: matrix.target == 'wasm' || (matrix.target == 'native' && matrix.version != needs.build-tool-bins.outputs.max)"
+            "if: startsWith(matrix.target, 'wasm-') || (matrix.target == 'native' && matrix.version != needs.build-tool-bins.outputs.max)"
         ) && conformance.contains(
             "klib_libraries::tests::implementation_coverage:: --nocapture"
         ),
