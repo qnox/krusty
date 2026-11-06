@@ -59,6 +59,7 @@ release-tests:
     bash scripts/test-signing-key-id.sh
     bash scripts/test-sign-release-checksums.sh
     bash scripts/test-publish-release-signing-key.sh
+    python3 scripts/test-package-release-badges.py
     bash scripts/test-publish-maven-central.sh
     bash scripts/test-check-gradle-wrappers.sh
 
