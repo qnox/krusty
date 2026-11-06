@@ -160,6 +160,11 @@ impl super::Checker<'_> {
         provisional: bool,
         forwarded: &super::receiver_uses::ReceiverUseSites,
     ) -> bool {
+        let original = self
+            .discovered_anonymous_captures
+            .get(&declaration)
+            .cloned()
+            .unwrap_or_default();
         let fields = super::anonymous_object_capture::record_anonymous_construction_captures(
             self.file,
             construction,
@@ -187,7 +192,10 @@ impl super::Checker<'_> {
             &self.anonymous_lexical_scope,
             &self.discovered_anonymous_super_forwards,
             &self.resolved_primary_ctor_delegations,
-            &fields,
+            super::anonymous_capture_remap::CaptureFieldRemap {
+                fields: &fields,
+                original: &original,
+            },
             &mut self.discovered_anonymous_captures,
         ) {
             return false;

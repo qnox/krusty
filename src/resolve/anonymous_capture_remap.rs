@@ -8,13 +8,18 @@ use super::{
 use crate::ast::{DeclId, ExprId, File};
 use crate::fx_hash::{HashMap, HashSet};
 
+pub(super) struct CaptureFieldRemap<'a> {
+    pub(super) fields: &'a [Option<u32>],
+    pub(super) original: &'a [AnonymousObjectCapture],
+}
+
 pub(super) fn remap_owned_anonymous_class_storage_captures(
     file: &File,
     owner: DeclId,
     lexical_scope: &AnonymousLexicalClassScope,
     checked_forwards: &HashMap<DeclId, Vec<ExprId>>,
     delegations: &HashMap<DeclId, ResolvedCtorDelegation>,
-    fields: &[Option<u32>],
+    remap: CaptureFieldRemap<'_>,
     captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
 ) -> bool {
     let direct_children = |owner| {
@@ -40,43 +45,71 @@ pub(super) fn remap_owned_anonymous_class_storage_captures(
             .collect::<HashSet<_>>()
     };
     // A forwarded operand executes beside the enclosing construction, not in its syntactic
-    // classifier. Follow only the checked forwarding edges, applying the actual owner's field
-    // permutation once even when several anonymous constructors intervene.
+    // classifier. Its selected operand must be rebased through that construction's original
+    // capture source. Other operands keep the finalized owner's field, including those forwarded
+    // through several anonymous constructors. Follow only their checked forwarding edges.
     let outside_owner = forwarded_children(owner);
     let mut pending = direct_children(owner)
         .into_iter()
-        .filter(|child| !outside_owner.contains(child))
+        .map(|child| (child, outside_owner.contains(&child)))
         .collect::<Vec<_>>();
-    let mut owned = Vec::new();
+    let mut selected = Vec::new();
     let mut seen = HashSet::default();
-    while let Some(child) = pending.pop() {
+    while let Some((child, outside_owner)) = pending.pop() {
         if child == owner || !seen.insert(child) {
             return false;
         }
-        pending.extend(forwarded_children(child));
-        owned.push(child);
+        pending.extend(
+            forwarded_children(child)
+                .into_iter()
+                .map(|child| (child, outside_owner)),
+        );
+        selected.push((child, outside_owner));
     }
-    // Validate the complete handoff before changing any descendant's selected storage source.
-    if !owned
-        .iter()
-        .filter_map(|declaration| captures.get(declaration))
-        .flatten()
-        .all(|capture| match capture.source {
-            AnonymousObjectCaptureSource::ClassStorage { field } => {
-                fields.get(field as usize).is_some_and(Option::is_some)
+    // Validate both coordinate changes before changing any descendant's selected source.
+    for &(declaration, outside_owner) in &selected {
+        let Some(captures) = captures.get(&declaration) else {
+            continue;
+        };
+        for capture in captures {
+            let AnonymousObjectCaptureSource::ClassStorage { field } = capture.source else {
+                continue;
+            };
+            let valid = if outside_owner {
+                remap
+                    .original
+                    .get(field as usize)
+                    .is_some_and(|original| capture.receiver_role == original.receiver_role)
+            } else {
+                remap
+                    .fields
+                    .get(field as usize)
+                    .is_some_and(Option::is_some)
+            };
+            if !valid {
+                return false;
             }
-            _ => true,
-        })
-    {
-        return false;
+        }
     }
-    for declaration in owned {
+    for (declaration, outside_owner) in selected {
         let Some(captures) = captures.get_mut(&declaration) else {
             continue;
         };
         for capture in captures {
-            if let AnonymousObjectCaptureSource::ClassStorage { field } = &mut capture.source {
-                *field = fields[*field as usize].expect("validated owner storage permutation");
+            let AnonymousObjectCaptureSource::ClassStorage { field } = capture.source else {
+                continue;
+            };
+            if outside_owner {
+                let original = &remap.original[field as usize];
+                capture.source = original.source;
+                capture.lexical_binding = original.lexical_binding;
+                capture.lexical_shadow_depth = original.lexical_shadow_depth;
+                capture.capture_dependency = original.capture_dependency;
+            } else {
+                capture.source = AnonymousObjectCaptureSource::ClassStorage {
+                    field: remap.fields[field as usize]
+                        .expect("validated owner storage permutation"),
+                };
             }
         }
     }
