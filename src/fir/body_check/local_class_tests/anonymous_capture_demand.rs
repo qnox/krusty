@@ -1,6 +1,76 @@
 use super::*;
 
 #[test]
+fn forwarded_nested_object_reads_the_actual_enclosing_capture_owner() {
+    let source =
+        include_str!("../../../../tests/box_regressions/captureStorageForwardedNestedObject.kt");
+    let (index, bodies) = checked_streamed_bodies(source);
+    let selected = |name| {
+        bodies
+            .iter()
+            .filter(|body| {
+                index.declaration_name(DeclarationId::from_raw(body.owner().raw())) == Some(name)
+            })
+            .collect::<Vec<_>>()
+    };
+    let makers = selected("make");
+    let [maker] = makers.as_slice() else {
+        panic!("one enclosing construction body expected")
+    };
+    let outer = (0..maker.expression_count())
+        .filter_map(
+            |raw| match &maker.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::AnonymousObject(object) => Some(object),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [outer] = outer.as_slice() else {
+        panic!("one enclosing anonymous object expected")
+    };
+    let [capture] = outer.captures.as_ref() else {
+        panic!("one lexical capture expected")
+    };
+    assert!(
+        capture.stored,
+        "the later member invocation needs the enclosing field"
+    );
+    assert_eq!(
+        capture.source,
+        FirLocalClassCaptureSource::Value(maker.parameters()[0].value)
+    );
+    let readers = selected("read");
+    let [reader] = readers.as_slice() else {
+        panic!("one later member body expected")
+    };
+    let nested = (0..reader.expression_count())
+        .filter_map(
+            |raw| match &reader.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::AnonymousObject(object) => Some(object),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(nested.len(), 2);
+    let captures = nested
+        .iter()
+        .flat_map(|object| object.captures.iter())
+        .collect::<Vec<_>>();
+    let [capture] = captures.as_slice() else {
+        panic!("only the callback stores the forwarded value")
+    };
+    assert!(capture.stored);
+    assert_eq!(
+        capture.source,
+        FirLocalClassCaptureSource::ClassStorage {
+            owner: outer.declaration,
+            enclosing_depth: 0,
+            field: 0,
+        }
+    );
+}
+
+#[test]
 fn anonymous_initializer_capture_uses_its_constructor_parameter_without_storage() {
     let (body, _) = checked_function_body(
         "fun create(value: Int): Any = object { val value: Int = value }",
@@ -128,74 +198,4 @@ fn anonymous_delegate_operands_follow_the_enclosing_construction_lifetime() {
         }
     }
     assert_eq!((constructor_reads, stored_reads), (1, 1));
-}
-
-#[test]
-fn forwarded_nested_object_reads_the_actual_enclosing_capture_owner() {
-    let source =
-        include_str!("../../../../tests/box_regressions/captureStorageForwardedNestedObject.kt");
-    let (index, bodies) = checked_streamed_bodies(source);
-    let selected = |name| {
-        bodies
-            .iter()
-            .filter(|body| {
-                index.declaration_name(DeclarationId::from_raw(body.owner().raw())) == Some(name)
-            })
-            .collect::<Vec<_>>()
-    };
-    let makers = selected("make");
-    let [maker] = makers.as_slice() else {
-        panic!("one enclosing construction body expected")
-    };
-    let outer = (0..maker.expression_count())
-        .filter_map(
-            |raw| match &maker.expr(FirExprId::from_raw(raw as u32))?.kind {
-                FirExprKind::AnonymousObject(object) => Some(object),
-                _ => None,
-            },
-        )
-        .collect::<Vec<_>>();
-    let [outer] = outer.as_slice() else {
-        panic!("one enclosing anonymous object expected")
-    };
-    let [capture] = outer.captures.as_ref() else {
-        panic!("one lexical capture expected")
-    };
-    assert!(
-        capture.stored,
-        "the later member invocation needs the enclosing field"
-    );
-    assert_eq!(
-        capture.source,
-        FirLocalClassCaptureSource::Value(maker.parameters()[0].value)
-    );
-    let readers = selected("read");
-    let [reader] = readers.as_slice() else {
-        panic!("one later member body expected")
-    };
-    let nested = (0..reader.expression_count())
-        .filter_map(
-            |raw| match &reader.expr(FirExprId::from_raw(raw as u32))?.kind {
-                FirExprKind::AnonymousObject(object) => Some(object),
-                _ => None,
-            },
-        )
-        .collect::<Vec<_>>();
-    assert_eq!(nested.len(), 2);
-    let captures = nested
-        .iter()
-        .flat_map(|object| object.captures.iter())
-        .collect::<Vec<_>>();
-    let [capture] = captures.as_slice() else {
-        panic!("only the callback stores the forwarded value")
-    };
-    assert!(capture.stored);
-    assert_eq!(
-        capture.source,
-        FirLocalClassCaptureSource::ClassStorage {
-            owner: outer.declaration,
-            enclosing_depth: 0,
-            field: 0,
-        }
-    );
 }
