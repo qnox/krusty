@@ -1,9 +1,16 @@
+var functionGetterCalls = 0
+
 enum class EntryFunctionValue {
     X {
         val suffix: String.() -> String = { this + "K" }
-        val plain: () -> String = { "O" }
+        val plain: () -> String
+            get() {
+                functionGetterCalls += 1
+                return { "O" }
+            }
         val optional: (() -> String)? = { "K" }
         val initialized: String = "O".suffix()
+        val initializedPlain: String = plain()
         val reader = object {
             fun result(): String {
                 val extended = "O".suffix()
@@ -13,7 +20,11 @@ enum class EntryFunctionValue {
                     else extended + ordinary + safe
             }
         }
-        override fun result(): String = if (initialized == "OK") reader.result() else initialized
+        override fun result(): String {
+            val answer = reader.result()
+            return if (initialized == "OK" && initializedPlain == "O" && functionGetterCalls == 2)
+                answer else initialized + initializedPlain + functionGetterCalls
+        }
     };
     abstract fun result(): String
 }

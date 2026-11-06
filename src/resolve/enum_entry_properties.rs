@@ -449,31 +449,7 @@ impl Checker<'_> {
         else {
             return false;
         };
-        if self
-            .enum_property_read_receiver(scope, owner, property, selected.receiver)
-            .is_none()
-        {
-            return false;
-        }
-        if scope.innermost_class_receiver_identity() == Some(selected.receiver) {
-            self.expr_lowers
-                .insert(expression, ExprLowering::ClassStorageRead { field });
-            self.read_flow_roots
-                .insert(expression, scope::PathRoot::Value(local.flow_identity));
-            self.anonymous_super_read_provenance.insert(
-                expression,
-                AnonymousSuperReadProvenance::LexicalBinding(local.flow_identity),
-            );
-            true
-        } else {
-            self.publish_enum_entry_property_read(
-                scope,
-                expression,
-                owner,
-                property,
-                selected.receiver,
-            )
-        }
+        self.publish_enum_entry_property_read(scope, expression, owner, property, selected.receiver)
     }
 
     pub(super) fn publish_enum_entry_property_read(
