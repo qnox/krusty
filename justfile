@@ -55,6 +55,7 @@ versioning-tests:
 # Maven Central upload, against a stand-in Gradle build and Central Portal, and the Gradle wrapper
 # check it depends on, against stand-in published checksums.
 release-tests:
+    node --test scripts/test-release-build-progress.cjs
     python3 scripts/test-format-release-notes.py
     bash scripts/test-signing-key-id.sh
     bash scripts/test-sign-release-checksums.sh
