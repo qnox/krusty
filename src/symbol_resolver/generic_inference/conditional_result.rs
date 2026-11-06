@@ -5,6 +5,22 @@ use super::{
     GenericSig, SymbolSource, Ty,
 };
 
+/// Whether `signature` has a formal only its result names. A call to it without explicit type
+/// arguments leaves that formal open (`emptyMap()`), so a conditional sibling may fix it.
+pub(crate) fn has_result_only_formal(signature: &GenericSig) -> bool {
+    signature.formals.iter().any(|formal| {
+        let formal = std::slice::from_ref(formal);
+        crate::types::ty_mentions_param(signature.ret, formal)
+            && signature
+                .receiver
+                .is_none_or(|receiver| !crate::types::ty_mentions_param(receiver, formal))
+            && signature
+                .params
+                .iter()
+                .all(|parameter| !crate::types::ty_mentions_param(*parameter, formal))
+    })
+}
+
 /// An expectation that instantiates `signature`'s return-only formals from a conditional sibling.
 ///
 /// The returned type is what the call is rechecked against. It is not the conditional's own join.
