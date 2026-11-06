@@ -331,7 +331,11 @@ impl Checker<'_> {
                     property,
                     receiver_identity,
                 ) {
-                    return None;
+                    self.diags.error(
+                        self.span(*callee),
+                        "selected enum-entry property has no declaring receiver",
+                    );
+                    return Some(Ty::Error);
                 }
                 self.set(*callee, declared_ty);
                 Some(*callee)
@@ -376,7 +380,11 @@ impl Checker<'_> {
                         },
                     },
                 ) {
-                    return None;
+                    self.diags.error(
+                        self.span(*callee),
+                        "selected enum-entry property has no declaring receiver",
+                    );
+                    return Some(Ty::Error);
                 }
                 self.set(*callee, Ty::from(TyKind::Fun(signature)));
                 Some(*callee)
