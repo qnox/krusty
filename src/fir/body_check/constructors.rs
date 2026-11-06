@@ -1212,13 +1212,7 @@ fn add_constructor_delegation(
                         checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
                     })?
                     .declaration;
-                if checker
-                    .index
-                    .declaration_header(owner)
-                    .is_some_and(|header| {
-                        header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-                    })
-                {
+                if checker.index.owns_local_capture_environment(owner) {
                     if !checker.session.class_bodies.contains_key(&owner) {
                         return Err(checker
                             .failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget));

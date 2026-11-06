@@ -950,3 +950,49 @@ fn a_checked_empty_local_super_environment_is_an_explicit_empty_projection() {
         "the selected local superclass was checked and captures nothing"
     );
 }
+
+#[test]
+fn a_local_class_member_super_uses_its_enclosing_instance_without_a_separate_capture_plan() {
+    let source =
+        include_str!("../../../../tests/box_regressions/localInnerSuperclassProjection.kt");
+    let (index, sink) = checked_local_super_projection_bodies(source);
+    let mut members = Vec::new();
+    for (_, body) in &sink.0 {
+        for raw in 0..body.statement_count() {
+            let Some(FirStatement {
+                kind: FirStatementKind::ConstructorDelegation(call),
+                ..
+            }) = body.statement(FirStatementId::from_raw(raw as u32))
+            else {
+                continue;
+            };
+            let FirConstructorTarget::Module { declaration, .. } = &call.target else {
+                continue;
+            };
+            let constructor = index.callable(*declaration).expect("selected constructor");
+            let classifier = index
+                .enclosing_classifier(constructor.declaration)
+                .expect("selected member classifier");
+            let header = index
+                .declaration_header(classifier.declaration)
+                .expect("complete member header");
+            if !header.flags.has(DeclarationFlags::CLASSIFIER_MEMBER) {
+                continue;
+            }
+            assert!(header.flags.has(DeclarationFlags::LOCAL_CLASS));
+            assert!(header.flags.has(DeclarationFlags::INNER));
+            assert!(!index.owns_local_capture_environment(classifier.declaration));
+            assert!(call.external_capture_arguments.is_none());
+            let outer = call.outer_receiver.expect("checked enclosing instance");
+            assert!(matches!(
+                body.expr(outer.value).expect("outer capture read").kind,
+                FirExprKind::ConstructorCaptureRead {
+                    site: crate::fir::FirConstructorCaptureSite::Parameter,
+                    ..
+                }
+            ));
+            members.push(classifier.declaration);
+        }
+    }
+    assert_eq!(members.len(), 1, "one declared inner-member superclass");
+}
