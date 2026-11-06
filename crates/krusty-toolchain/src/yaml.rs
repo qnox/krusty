@@ -222,7 +222,13 @@ fn refuse(span: ParserSpan, message: impl Into<String>) -> YamlError {
     }
 }
 
-/// What precedes a node's content: its `&anchor` and `!tag`, in source order.
+/// The legacy content-start annotation reader's property positions.
+struct Properties {
+    anchor: Option<Position>,
+    tag: Option<Position>,
+}
+
+/// Property positions and content coordinates for the parser's accepted node.
 #[derive(Debug, PartialEq, Eq)]
 struct SourceProperties {
     anchor: Option<Position>,
@@ -353,6 +359,7 @@ impl Builder<'_> {
             });
         }
         if let Some(tag) = tag {
+            // Prefix spans were checked above. This is only the preexisting legacy fallback.
             let at = found.tag.unwrap_or(span.start);
             if tag.starts_with("!!") || tag.starts_with("tag:yaml.org,2002:") {
                 self.problems.push(YamlError {
@@ -451,37 +458,52 @@ impl Builder<'_> {
                     }
                 }
             }
+            assert!(
+                found.anchor.is_some() == anchor && found.tag.is_some() == tag,
+                "a property-inclusive parser span contains its authenticated properties"
+            );
             return found;
         }
-        // Older events start at content. Read the same property tokens immediately before it,
-        // excluding separation comments, while preserving character-based source coordinates.
-        let mut line = span.start.line;
-        let mut column = span.start.column;
-        for _ in 0..usize::from(anchor) + usize::from(tag) {
+        // Preserve the old content-start reader, including its existing comment-position
+        // limitation. New prefix-span navigation must not reinterpret preceding scalar contents.
+        let preceding = self.preceding_properties(span.start);
+        SourceProperties {
+            anchor: preceding.anchor.filter(|_| anchor),
+            tag: preceding.tag.filter(|_| tag),
+            content: span.start,
+        }
+    }
+
+    fn preceding_properties(&self, content: Position) -> Properties {
+        let mut found = Properties {
+            anchor: None,
+            tag: None,
+        };
+        let mut line = content.line;
+        let mut column = content.column; // 1-based; scanning the characters before it
+        for _ in 0..2 {
+            // Skip whitespace (and line breaks) backwards.
             loop {
                 let characters: Vec<char> = self
                     .lines
-                    .get(line - 1)
+                    .get(line.wrapping_sub(1))
                     .map(|text| text.chars().collect())
                     .unwrap_or_default();
-                let before = &characters[..column.saturating_sub(1).min(characters.len())];
-                let comment = before.iter().enumerate().find_map(|(i, &c)| {
-                    (c == '#' && (i == 0 || blank(before[i - 1]))).then_some(i)
-                });
-                let before = &before[..comment.unwrap_or(before.len())];
-                match before.iter().rposition(|&c| !blank(c)) {
+                let before = &characters[..(column - 1).min(characters.len())];
+                match before.iter().rposition(|c| !c.is_whitespace()) {
                     Some(last) => {
+                        // The token ends at `last`; find its start.
                         let start = before[..=last]
                             .iter()
-                            .rposition(|&c| blank(c))
-                            .map_or(0, |i| i + 1);
-                        let at = Position {
+                            .rposition(|c| c.is_whitespace())
+                            .map_or(0, |space| space + 1);
+                        let token_position = Position {
                             line,
                             column: start + 1,
                         };
                         match before[start] {
-                            '&' if anchor && found.anchor.is_none() => found.anchor = Some(at),
-                            '!' if tag && found.tag.is_none() => found.tag = Some(at),
+                            '&' if found.anchor.is_none() => found.anchor = Some(token_position),
+                            '!' if found.tag.is_none() => found.tag = Some(token_position),
                             _ => return found,
                         }
                         column = start + 1;
@@ -736,18 +758,6 @@ mod tests {
                 at(1, 1),
                 vec!["1:4: YAML anchors/aliases are not supported in Kotlin project files"],
             ),
-            (
-                "&α # anchor\n!<tag:example.org,2026:t> # tag\n\"a\n  b\"\n",
-                "a\n  b",
-                at(2, 1),
-                vec!["1:1: YAML anchors/aliases are not supported in Kotlin project files"],
-            ),
-            (
-                "!t # tag\n  &é # anchor\n  'a\n    b'\n",
-                "a\n    b",
-                at(1, 1),
-                vec!["2:3: YAML anchors/aliases are not supported in Kotlin project files"],
-            ),
         ] {
             let parsed = parse(text).unwrap();
             assert_eq!(
@@ -771,6 +781,104 @@ mod tests {
                 "1:4: Secondary (`!!`) YAML type tags are not supported in Kotlin project files",
             ]
         );
+    }
+
+    #[test]
+    fn a_hash_in_a_quoted_key_does_not_change_the_following_property_positions() {
+        let parsed = parse("\"key # text\": !t \"value\"\n").unwrap();
+        assert_eq!(parsed.problems, []);
+        let document = parsed.document;
+        let NodeKind::Mapping(entries) = &document.node(document.root().unwrap()).kind else {
+            panic!("a mapping");
+        };
+        assert_eq!(entries.len(), 1);
+        let (key, value) = entries[0];
+        assert_eq!(document.spelling(key), "key # text");
+        assert_eq!(document.spelling(value), "value");
+        assert_eq!(
+            document.tag(value),
+            Some(Position {
+                line: 1,
+                column: 15
+            })
+        );
+        assert_eq!(
+            document.node(value).span,
+            Span {
+                start: Position {
+                    line: 1,
+                    column: 15
+                },
+                end: Position {
+                    line: 1,
+                    column: 25
+                }
+            }
+        );
+        assert_eq!(
+            problems("\"key # text\": &a !!str \"value\"\n"),
+            [
+                "1:15: YAML anchors/aliases are not supported in Kotlin project files",
+                "1:18: Secondary (`!!`) YAML type tags are not supported in Kotlin project files",
+            ]
+        );
+    }
+
+    #[test]
+    fn comments_keep_raw_spelling_and_new_prefix_spans_keep_property_coordinates() {
+        let at = |line, column| Position { line, column };
+        // Exact coordinates below describe 0.3's property-inclusive spans. The legacy 0.2
+        // comment-position limitation is unchanged; whole raw spelling is checked in either case.
+        for (text, spelling, anchor, tag, content, end) in [
+            (
+                "&α # anchor\n!<tag:example.org,2026:t> # tag\n\"a\n  b\"\n",
+                "a\n  b",
+                at(1, 1),
+                at(2, 1),
+                at(3, 1),
+                at(4, 5),
+            ),
+            (
+                "!t # tag\n  &é # anchor\n  'a\n    b'\n",
+                "a\n    b",
+                at(2, 3),
+                at(1, 1),
+                at(3, 3),
+                at(4, 7),
+            ),
+        ] {
+            let document = parse(text).unwrap().document;
+            assert_eq!(document.spelling(document.root().unwrap()), spelling);
+            let builder = Builder {
+                lines: text.lines().collect(),
+                limits: Limits::DEFAULT,
+                nodes: Vec::new(),
+                open: Vec::new(),
+                root: None,
+                documents: 0,
+                problems: Vec::new(),
+            };
+            let span = Span {
+                start: at(1, 1),
+                end,
+            };
+            let properties = builder.find_properties(span, true, true);
+            assert_eq!(
+                properties,
+                SourceProperties {
+                    anchor: Some(anchor),
+                    tag: Some(tag),
+                    content
+                }
+            );
+            assert_eq!(
+                builder.between_quotes(Span {
+                    start: content,
+                    end
+                }),
+                spelling
+            );
+        }
     }
 
     #[test]
