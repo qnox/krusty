@@ -185,11 +185,9 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
             )
             && conformance.contains("        target: [jvm]\n")
             && conformance.contains("    steps: &conformance-steps\n")
-            && conformance.contains(
-                r#"    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}"#
-            )
+            && conformance.contains("    runs-on: ubuntu-latest\n")
             && !conformance.contains("build-klib-test-bins"),
-        "JVM conformance must start without waiting for the focused KLIB binaries: {conformance}"
+        "JVM conformance must use hosted capacity and start without waiting for the focused KLIB binaries: {conformance}"
     );
     assert!(
         klib_conformance.contains(
