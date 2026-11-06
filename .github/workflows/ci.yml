@@ -1193,7 +1193,10 @@ jobs:
       # this lock; slow immutable package publication cannot hold the global latest/badge lock.
       - name: take the commit publication lock
         id: lock
-        run: echo "lock=$(scripts/release-publisher.sh acquire)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          lock=$(scripts/release-publisher.sh acquire)
+          echo "lock=$lock" >> "$GITHUB_OUTPUT"
       - name: publish this validated master commit
         id: tip
         run: scripts/release-publisher.sh check >> "$GITHUB_OUTPUT"
@@ -1284,10 +1287,15 @@ jobs:
           mapfile -t assets < <(find dist -type f | sort)
           test "${#assets[@]}" -gt 0
           if gh release view "$TAG" >/dev/null 2>&1; then
-            if [[ $(gh release view "$TAG" --json isDraft --jq .isDraft) == true ]]; then
-              gh release upload "$TAG" --clobber "${assets[@]}"
-              gh release edit "$TAG" --draft=false --latest=false
-            fi
+            draft=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+            case $draft in
+              true)
+                gh release upload "$TAG" --clobber "${assets[@]}"
+                gh release edit "$TAG" --draft=false --latest=false
+                ;;
+              false) ;;
+              *) echo "cannot determine draft state of $TAG" >&2; exit 1 ;;
+            esac
           else
             gh release create "$TAG" --target "$GITHUB_SHA" --draft --latest=false \
               --title "krusty $VER: Kotlin compiler written in Rust" --generate-notes "${assets[@]}"
@@ -1392,7 +1400,10 @@ jobs:
       - name: take the latest promotion lock
         if: steps.tip.outputs.publish == 'true'
         id: latest_lock
-        run: echo "lock=$(scripts/release-publisher.sh acquire-latest)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          lock=$(scripts/release-publisher.sh acquire-latest)
+          echo "lock=$lock" >> "$GITHUB_OUTPUT"
       - name: select monotonic latest promotion
         if: steps.tip.outputs.publish == 'true'
         id: latest

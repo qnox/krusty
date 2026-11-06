@@ -338,6 +338,7 @@ fn a_held_lock_blocks_another_publisher_until_it_is_dropped() {
 fn a_lock_older_than_its_ttl_is_taken_over_and_its_holder_leaves_it() {
     let remote = Remote::new("stale");
     let first = remote.push_commit("first");
+    let lock_ref = publication_lock(&first);
     let stale = remote.acquire(&first);
 
     let takeover = remote.publisher(&first, &["acquire"], &[("RELEASE_LOCK_TTL", "-1")]);
@@ -413,6 +414,65 @@ fn steps(job: &str) -> Vec<&str> {
     job.split("\n      - ").skip(1).collect()
 }
 
+// PLATFORM-SPECIFIC: execute the Linux release job's checked shell lock acquisitions.
+#[cfg(unix)]
+#[test]
+fn failed_lock_acquisition_stops_before_any_publication_or_promotion() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    let remote = Remote::new("failed-lock");
+    let work = remote.root.join("work");
+    fs::create_dir(work.join("scripts")).unwrap();
+    let publisher = work.join("scripts/release-publisher.sh");
+    fs::write(&publisher, "#!/usr/bin/env bash\nexit 9\n").unwrap();
+    fs::set_permissions(publisher, fs::Permissions::from_mode(0o755)).unwrap();
+    let workflow =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"))
+            .unwrap();
+    let steps = steps(release_job(&workflow));
+    for command in ["acquire)", "acquire-latest)"] {
+        let step = steps
+            .iter()
+            .find(|step| step.contains(&format!("release-publisher.sh {command}")))
+            .unwrap();
+        let source = step
+            .split_once("run: |\n")
+            .unwrap()
+            .1
+            .lines()
+            .map_while(|line| line.strip_prefix("          "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output_file = work.join("outputs");
+        let continued = work.join("continued");
+        let _ = fs::remove_file(&output_file);
+        let _ = fs::remove_file(&continued);
+        let mut child = isolated_command("bash")
+            .arg("-s")
+            .current_dir(&work)
+            .env("GITHUB_OUTPUT", &output_file)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = format!("{source}\nprintf continued > continued\n");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(9), "{output:?}");
+        assert_eq!(output.stdout, b"");
+        assert_eq!(output.stderr, b"");
+        assert!(!output_file.exists());
+        assert!(!continued.exists());
+    }
+}
+
 #[test]
 fn every_master_run_releases_without_holding_latest_during_gradle() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -473,8 +533,9 @@ fn every_master_run_releases_without_holding_latest_during_gradle() {
     }
     assert!(steps[publish].contains("--draft --latest=false"));
     assert!(steps[publish].contains("bind-tag \"$TAG\""));
-    assert!(steps[publish]
-        .contains("if [[ $(gh release view \"$TAG\" --json isDraft --jq .isDraft) == true ]]"));
+    assert!(
+        steps[publish].contains("draft=$(gh release view \"$TAG\" --json isDraft --jq .isDraft)")
+    );
     let timeout_minutes: u64 = job
         .lines()
         .find_map(|line| line.trim().strip_prefix("timeout-minutes: "))
@@ -492,23 +553,40 @@ fn every_master_run_releases_without_holding_latest_during_gradle() {
     assert!(timeout_minutes * 60 < ttl_seconds);
 }
 
+// PLATFORM-SPECIFIC: executable shell mocks exercise the Linux release job's Portal step.
+#[cfg(unix)]
 #[test]
-fn portal_retry_requires_the_exact_public_marker_or_a_real_404() {
+fn portal_retry_requires_portal_owned_artifacts_not_a_central_proxy_hit() {
     use std::os::unix::fs::PermissionsExt;
     let remote = Remote::new("portal-retry");
     let root = remote.root.join("portal");
-    fs::create_dir_all(root.join("scripts")).unwrap();
-    fs::create_dir_all(root.join("tools/krusty-gradle")).unwrap();
-    fs::create_dir_all(root.join("bin")).unwrap();
+    for name in ["scripts", "tools/krusty-gradle", "bin"] {
+        fs::create_dir_all(root.join(name)).unwrap();
+    }
     fs::copy(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/publish-gradle-plugin-portal.sh"),
         root.join("scripts/publish-gradle-plugin-portal.sh"),
     )
     .unwrap();
-    fs::write(root.join("bin/curl"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > \"$PORTAL_REQUEST\"\nprintf '%s' \"$PORTAL_STATUS\"\nexit \"$PORTAL_CURL_EXIT\"\n").unwrap();
+    fs::write(root.join("bin/curl"), r#"#!/usr/bin/env bash
+set -euo pipefail
+url=${!#}
+printf '%s\n' "$url" >> "$PORTAL_REQUEST"
+for arg in "$@"; do test "$arg" != --location || exit 99; done
+if [[ $url == https://plugins-artifacts.gradle.org/* ]]; then
+  printf '%s' "$PORTAL_ARTIFACT_STATUS"
+else
+  while [[ $# -gt 0 ]]; do
+    if [[ $1 == --dump-header ]]; then printf 'HTTP/1.1 %s\r\nlOcAtIoN: %s\r\n\r\n' "$PORTAL_STATUS" "$PORTAL_LOCATION" > "$2"; fi
+    shift
+  done
+  printf '%s' "$PORTAL_STATUS"
+fi
+exit "$PORTAL_CURL_EXIT"
+"#).unwrap();
     fs::write(
         root.join("tools/krusty-gradle/gradlew"),
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > \"$PORTAL_UPLOAD\"\n",
+        "#!/usr/bin/env bash\nprintf '%s\n' \"$*\" > \"$PORTAL_UPLOAD\"\n",
     )
     .unwrap();
     for path in [
@@ -517,15 +595,51 @@ fn portal_retry_requires_the_exact_public_marker_or_a_real_404() {
     ] {
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    for (status, curl_exit, exit, uploads) in [
-        ("200", "0", 0, false),
-        ("404", "0", 0, true),
-        ("401", "0", 1, false),
-        ("500", "0", 1, false),
-        ("000", "7", 7, false),
+    let marker = "https://plugins.gradle.org/m2/dev/krustythecompiler/dev.krustythecompiler.gradle.plugin/2.4.21-build.123/dev.krustythecompiler.gradle.plugin-2.4.21-build.123.pom";
+    let owned = "https://plugins-artifacts.gradle.org/marker.pom";
+    for (status, location, artifact, curl_exit, code, uploads, visits_owned) in [
+        ("303", owned, "200", "0", 0, false, true),
+        // Central already has this marker; a 200 there must never suppress Portal publication.
+        (
+            "303",
+            "https://repo.maven.apache.org/maven2/marker.pom",
+            "200",
+            "0",
+            0,
+            true,
+            false,
+        ),
+        ("404", "", "200", "0", 0, true, false),
+        ("303", owned, "404", "0", 0, true, true),
+        ("303", owned, "500", "0", 1, false, true),
+        (
+            "303",
+            "https://plugins-artifacts.gradle.org.evil/marker.pom",
+            "200",
+            "0",
+            1,
+            false,
+            false,
+        ),
+        (
+            "303",
+            "https://plugins-artifacts.gradle.org@evil/marker.pom",
+            "200",
+            "0",
+            1,
+            false,
+            false,
+        ),
+        ("303", "https://plugins-artifacts.gradle.org:443/marker.pom", "200", "0", 1, false, false),
+        ("303", "https://plugins-artifacts.gradle.org/a\r\nLocation: https://repo.maven.apache.org/maven2/b", "200", "0", 1, false, false),
+        ("200", "", "200", "0", 1, false, false),
+        ("401", "", "200", "0", 1, false, false),
+        ("000", "", "200", "7", 7, false, false),
     ] {
         let upload = root.join("uploaded");
+        let request = root.join("request");
         let _ = fs::remove_file(&upload);
+        let _ = fs::remove_file(&request);
         let output = isolated_command("bash")
             .arg(root.join("scripts/publish-gradle-plugin-portal.sh"))
             .arg("2.4.21-build.123")
@@ -538,17 +652,109 @@ fn portal_retry_requires_the_exact_public_marker_or_a_real_404() {
                 ),
             )
             .env("PORTAL_STATUS", status)
+            .env("PORTAL_LOCATION", location)
+            .env("PORTAL_ARTIFACT_STATUS", artifact)
             .env("PORTAL_CURL_EXIT", curl_exit)
-            .env("PORTAL_REQUEST", root.join("request"))
+            .env("PORTAL_REQUEST", &request)
             .env("PORTAL_UPLOAD", &upload)
             .output()
             .unwrap();
-        assert_eq!(output.status.code(), Some(exit), "{output:?}");
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{status} {location}: {output:?}"
+        );
         assert_eq!(upload.exists(), uploads);
-        assert_eq!(fs::read_to_string(root.join("request")).unwrap(), "--silent --show-error --location --connect-timeout 10 --max-time 60 --output /dev/null --write-out %{http_code} https://plugins.gradle.org/m2/dev/krustythecompiler/dev.krustythecompiler.gradle.plugin/2.4.21-build.123/dev.krustythecompiler.gradle.plugin-2.4.21-build.123.pom\n");
+        let expected = if visits_owned {
+            format!("{marker}\n{owned}\n")
+        } else {
+            format!("{marker}\n")
+        };
+        assert_eq!(fs::read_to_string(&request).unwrap(), expected);
         if uploads {
             assert_eq!(fs::read_to_string(upload).unwrap(), format!("--no-daemon -p {}/tools/krusty-gradle -PkrustyPluginVersion=2.4.21-build.123 publishPlugins\n", root.display()));
         }
+    }
+}
+
+// PLATFORM-SPECIFIC: execute the Linux release step with a local Git remote and shell CLI mock.
+#[cfg(unix)]
+#[test]
+fn public_assets_are_immutable_and_failed_draft_queries_stop_the_retry() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    let remote = Remote::new("github-retry");
+    let sha = remote.push_commit("first");
+    let work = remote.root.join("work");
+    for name in ["scripts", "dist", "bin"] {
+        fs::create_dir(work.join(name)).unwrap();
+    }
+    let script = work.join("scripts/release-publisher.sh");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/release-publisher.sh"),
+        &script,
+    )
+    .unwrap();
+    fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(work.join("dist/asset"), "validated artifact").unwrap();
+    let gh = work.join("bin/gh");
+    fs::write(
+        &gh,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$GH_CALLS"
+case "$*" in
+  'release view v1') test -f "$GH_STATE" ;;
+  'release view v1 --json isDraft --jq .isDraft')
+    test "$GH_QUERY_FAIL" = 0 || exit 7
+    cat "$GH_STATE" ;;
+  'release create '*) printf true > "$GH_STATE" ;;
+  'release upload '*) ;;
+  'release edit v1 --draft=false --latest=false') printf false > "$GH_STATE" ;;
+  *) exit 9 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    let workflow =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"))
+            .unwrap();
+    let publish = steps(release_job(&workflow))
+        .into_iter()
+        .find(|step| step.contains("gh release create"))
+        .unwrap();
+    let source = publish
+        .split_once("run: |\n")
+        .unwrap()
+        .1
+        .lines()
+        .map_while(|line| line.strip_prefix("          "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let calls = work.join("calls");
+    let state = work.join("state");
+    for (initial, query_fail, code, expected) in [
+        (None, "0", 0, format!("release view v1\nrelease create v1 --target {sha} --draft --latest=false --title krusty 1: Kotlin compiler written in Rust --generate-notes dist/asset\nrelease edit v1 --draft=false --latest=false\n")),
+        (Some("false"), "0", 0, "release view v1\nrelease view v1 --json isDraft --jq .isDraft\n".to_string()),
+        (Some("true"), "0", 0, "release view v1\nrelease view v1 --json isDraft --jq .isDraft\nrelease upload v1 --clobber dist/asset\nrelease edit v1 --draft=false --latest=false\n".to_string()),
+        (Some("true"), "1", 7, "release view v1\nrelease view v1 --json isDraft --jq .isDraft\n".to_string()),
+    ] {
+        let _ = fs::remove_file(&calls);
+        let _ = fs::remove_file(&state);
+        if let Some(initial) = initial { fs::write(&state, initial).unwrap(); }
+        let mut child = isolated_command("bash").arg("-s").current_dir(&work)
+            .env("PATH", format!("{}:{}", work.join("bin").display(), std::env::var("PATH").unwrap()))
+            .env("RELEASE_SHA", &sha).env("GITHUB_SHA", &sha).env("TAG", "v1").env("VER", "1")
+            .env("GH_CALLS", &calls).env("GH_STATE", &state).env("GH_QUERY_FAIL", query_fail)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(source.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(code), "{output:?}");
+        assert_eq!(output.stdout, b"");
+        assert_eq!(output.stderr, b"");
+        assert_eq!(fs::read_to_string(&calls).unwrap(), expected);
     }
 }
 
