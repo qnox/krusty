@@ -185,6 +185,9 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
             )
             && conformance.contains("        target: [jvm]\n")
             && conformance.contains("    steps: &conformance-steps\n")
+            && conformance.contains(
+                r#"    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}"#
+            )
             && !conformance.contains("build-klib-test-bins"),
         "JVM conformance must start without waiting for the focused KLIB binaries: {conformance}"
     );
@@ -192,8 +195,15 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
         klib_conformance.contains(
             "    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins]\n"
         ) && klib_conformance.contains("        target: [native, wasm]\n")
+            && klib_conformance.contains("      fail-fast: false\n")
+            && klib_conformance.contains(
+                "        version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}\n"
+            )
+            && klib_conformance.contains(
+                r#"    runs-on: ${{ (matrix.target == 'native' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}"#
+            )
             && klib_conformance.contains("    steps: *conformance-steps\n"),
-        "Native and Wasm wait for focused KLIB binaries while reusing the shared inventory: {klib_conformance}"
+        "Native uses hosted capacity and Wasm retains its fork-safe route, with the same versions, dependencies and shared inventory: {klib_conformance}"
     );
     assert_eq!(
         workflow.matches("        target: [jvm]\n").count(),
