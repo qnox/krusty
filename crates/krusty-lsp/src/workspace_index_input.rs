@@ -1,4 +1,5 @@
-//! Workspace files admitted to one background index chunk.
+//! Workspace files admitted to one background index chunk, and the ceilings on the inventory of
+//! files awaiting one.
 //!
 //! URI conversion stays in `uri`. This module owns the read budget: a file whose metadata already
 //! exceeds the remaining budget is skipped before its contents are allocated, and the length is
@@ -6,6 +7,24 @@
 //! size.
 
 use crate::uri::file_uri_to_path;
+
+/// Global ceiling on one model generation's cached source inventory.
+pub const MAX_WORKSPACE_INDEX_FILES: usize = 200_000;
+/// Budgeted bytes for one URI record (payload plus `String` header). Monorepos such as
+/// intellij-community average ~150-byte file URIs; 256 leaves room for deeper trees so the file
+/// count, not the byte budget, is the ceiling a real workspace reaches first.
+const WORKSPACE_INDEX_URI_RECORD_BUDGET: usize = 256;
+/// URI payload and record bytes retained by the producer's cached source inventory. Derived from
+/// the file ceiling: a fixed byte cap smaller than `files x average URI` silently truncated large
+/// workspaces long before the advertised file limit.
+pub const MAX_WORKSPACE_INDEX_URI_BYTES: usize =
+    MAX_WORKSPACE_INDEX_FILES * WORKSPACE_INDEX_URI_RECORD_BUDGET;
+
+/// One owned URI's payload plus its `String` record. Queue layers multiply this by the number of
+/// representations they retain, keeping producer and consumer accounting on the same unit.
+pub fn workspace_index_uri_bytes(uri: &str) -> usize {
+    uri.len().saturating_add(std::mem::size_of::<String>())
+}
 
 /// Bytes one index chunk may read. A count of files is not a memory bound.
 pub const MAX_INDEX_CHUNK_BYTES: usize = 8 * 1024 * 1024;

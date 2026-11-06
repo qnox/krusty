@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use super::super::{
     workspace_index_uri_bytes, DependencyCandidate, DependencySymbolIndex, IndexedFile,
     LocatedDependency, MaterializedDefinition, WorkspaceSymbolIndex, MAX_WORKSPACE_INDEX_FILES,
+    MAX_WORKSPACE_INDEX_URI_BYTES,
 };
 pub use super::analyzed_document::AnalysisBatch;
 use super::implementation::{
@@ -33,13 +34,13 @@ const MAX_INDEX_CHUNK_FILES: usize = 32;
 const MAX_QUEUED_INDEX_FILES: usize = MAX_WORKSPACE_INDEX_FILES;
 /// Companion byte ceiling. A count alone is not a memory bound: deeply nested workspaces produce
 /// long URIs, and promotion can retain three copies across both priority chunks and the map.
-const MAX_QUEUED_INDEX_BYTES: usize = 32 * 1024 * 1024;
+const MAX_QUEUED_INDEX_BYTES: usize = MAX_WORKSPACE_INDEX_URI_BYTES * 3;
 /// Symbol chunks are a parse each, not a worker round trip, so a larger chunk still returns to the
 /// command loop quickly enough for an interactive request to overtake it.
 const MAX_SYMBOL_INDEX_CHUNK_FILES: usize = 128;
 /// Byte ceiling on URIs awaiting symbol indexing. Each admitted URI owns two strings until its
 /// chunk is taken: the chunk entry and the dedup key. Symbol chunks are never promoted.
-const MAX_QUEUED_SYMBOL_INDEX_BYTES: usize = 16 * 1024 * 1024;
+const MAX_QUEUED_SYMBOL_INDEX_BYTES: usize = MAX_WORKSPACE_INDEX_URI_BYTES * 2;
 /// Symbol chunks run ahead of the diagnostic sweep, but handing a chunk out releases its URIs, so
 /// a watcher can enqueue that file again while the chunk is in flight. One such chunk may run
 /// while a sweep chunk is already waiting. The next dequeue serves the sweep. The re-enqueued URI
@@ -2224,8 +2225,9 @@ mod tests {
     #[test]
     fn a_symbol_queue_overflow_is_reported_as_its_own_limit() {
         let mut state = CommandState::default();
-        let uris = (0..(MAX_QUEUED_SYMBOL_INDEX_BYTES / 64 + 8))
-            .map(|index| format!("file:///w/{}/Symbols{index}.kt", "d".repeat(48)))
+        // Long URIs reach the byte ceiling before the file ceiling without allocating millions.
+        let uris = (0..(MAX_QUEUED_SYMBOL_INDEX_BYTES / 2048 + 8))
+            .map(|index| format!("file:///w/{}/Symbols{index}.kt", "d".repeat(1024)))
             .collect::<Vec<_>>();
         state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
             generation: 0,
@@ -2793,8 +2795,11 @@ mod tests {
     #[test]
     fn the_index_queue_stops_growing_at_its_byte_bound() {
         let mut state = CommandState::default();
-        let long = "x".repeat(4096);
-        let uris: Vec<String> = (0..4096)
+        // Long URIs reach the byte ceiling well before the file ceiling.
+        let long = "x".repeat(16 * 1024);
+        let count = MAX_QUEUED_INDEX_BYTES / (3 * long.len()) + 8;
+        assert!(count < MAX_QUEUED_INDEX_FILES);
+        let uris: Vec<String> = (0..count)
             .map(|index| format!("file:///w/{long}{index}.kt"))
             .collect();
         state.enqueue(EngineCommand::Index(IndexJob {
