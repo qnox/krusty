@@ -1,8 +1,19 @@
 var functionGetterCalls = 0
+var receiverFunctionGetterCalls = 0
+var receiverEvaluations = 0
+
+fun selectedNullableReceiver(value: String?): String? {
+    receiverEvaluations += 1
+    return value
+}
 
 enum class EntryFunctionValue {
     X {
-        val suffix: String.() -> String = { this + "K" }
+        val suffix: String.() -> String
+            get() {
+                receiverFunctionGetterCalls += 1
+                return { this + "K" }
+            }
         val plain: () -> String
             get() {
                 functionGetterCalls += 1
@@ -16,13 +27,17 @@ enum class EntryFunctionValue {
                 val extended = "O".suffix()
                 val ordinary = plain()
                 val safe = optional?.invoke()
-                return if (extended == "OK" && ordinary == "O" && safe == "K") "OK"
-                    else extended + ordinary + safe
+                val safeReceiver = selectedNullableReceiver("O")?.suffix()
+                val nullReceiver = selectedNullableReceiver(null)?.suffix()
+                return if (extended == "OK" && ordinary == "O" && safe == "K" &&
+                    safeReceiver == "OK" && nullReceiver == null) "OK"
+                    else extended + ordinary + safe + safeReceiver + nullReceiver
             }
         }
         override fun result(): String {
             val answer = reader.result()
-            return if (initialized == "OK" && initializedPlain == "O" && functionGetterCalls == 2)
+            return if (initialized == "OK" && initializedPlain == "O" && functionGetterCalls == 2 &&
+                receiverFunctionGetterCalls == 3 && receiverEvaluations == 2)
                 answer else initialized + initializedPlain + functionGetterCalls
         }
     };

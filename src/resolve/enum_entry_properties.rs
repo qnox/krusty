@@ -406,22 +406,31 @@ impl Checker<'_> {
         live.next().is_none().then_some(selected)
     }
 
-    pub(super) fn publish_enum_entry_storage_callee(
+    pub(super) fn select_enum_entry_callable_callee(
         &mut self,
         scope: &CheckerScope<'_>,
         expression: ExprId,
         storage: EnumEntryStorage,
-    ) -> bool {
-        let Some(selected) = self.declared_enum_property_input(scope, storage) else {
-            return false;
+        receiver_identity: Option<(usize, usize)>,
+        declared_ty: Ty,
+    ) -> Option<ReceiverFunctionPropertyCallee> {
+        let receiver_identity = match receiver_identity {
+            Some(identity) => identity,
+            None => self.declared_enum_property_input(scope, storage)?.receiver,
         };
-        self.publish_enum_entry_property_read(
+        let selected = self.enum_property_read_receiver(
             scope,
-            expression,
             storage.owner,
             storage.property,
-            selected.receiver,
-        )
+            receiver_identity,
+        )?;
+        let receiver = self.implicit_receiver_selection(selected);
+        self.mark_extension_receiver_used(expression, selected);
+        Some(ReceiverFunctionPropertyCallee::EnumEntry {
+            property: storage.property,
+            declared_ty,
+            receiver: Box::new(receiver),
+        })
     }
 
     /// Entry initialization reads its own storage. A nested class's read of that same binding

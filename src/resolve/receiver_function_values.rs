@@ -26,6 +26,17 @@ pub(super) struct ReceiverFunctionParts {
     pub(super) values: &'static [Ty],
 }
 
+/// A selected property operand, including safe calls without a parser callee expression.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReceiverFunctionPropertyCallee {
+    Expression(ExprId),
+    EnumEntry {
+        property: EnumEntryProperty,
+        declared_ty: Ty,
+        receiver: Box<ImplicitReceiverSelection>,
+    },
+}
+
 impl Checker<'_> {
     pub(super) fn receiver_function_value(
         &self,
@@ -312,7 +323,7 @@ impl Checker<'_> {
                 self.set(*callee, access.property.ty);
                 self.expr_lowers
                     .insert(*callee, ExprLowering::TopLevelPropertyGet(access));
-                Some(*callee)
+                Some(ReceiverFunctionPropertyCallee::Expression(*callee))
             }
             ReceiverFnValueOrigin::DispatchProperty {
                 owner,
@@ -320,26 +331,22 @@ impl Checker<'_> {
                 declared_ty,
                 enum_entry_property: Some(property),
                 ..
-            } => {
-                let Expr::Call { callee, .. } = self.file.expr(call) else {
-                    return None;
-                };
-                if !self.publish_enum_entry_property_read(
-                    scope,
-                    *callee,
-                    owner,
-                    property,
-                    receiver_identity,
-                ) {
+            } => match self.select_enum_entry_callable_callee(
+                scope,
+                call,
+                EnumEntryStorage { owner, property },
+                Some(receiver_identity),
+                declared_ty,
+            ) {
+                Some(callee) => Some(callee),
+                None => {
                     self.diags.error(
-                        self.span(*callee),
+                        self.call_callee_name_span(call),
                         "selected enum-entry property has no declaring receiver",
                     );
                     return Some(Ty::Error);
                 }
-                self.set(*callee, declared_ty);
-                Some(*callee)
-            }
+            },
             ReceiverFnValueOrigin::DispatchProperty {
                 receiver_identity,
                 enum_entry_property: None,
@@ -356,39 +363,41 @@ impl Checker<'_> {
                     .select_property_read(scope, receiver.ty, name)
                     .ok()
                     .flatten()?;
-                let property_ty = self.record_property_read(scope, Some(*callee), selection);
+                let property_ty = self.record_property_read(
+                    scope,
+                    Some(ReceiverFunctionPropertyCallee::Expression(*callee)),
+                    selection,
+                );
                 self.set(*callee, property_ty);
                 self.mark_implicit_receiver_selection(*callee, receiver);
-                Some(*callee)
+                Some(ReceiverFunctionPropertyCallee::Expression(*callee))
             }
             ReceiverFnValueOrigin::EnumEntryPropertyStorage {
                 owner,
                 field,
                 declaration,
-            } => {
-                let Expr::Call { callee, .. } = self.file.expr(call) else {
-                    return None;
-                };
-                if !self.publish_enum_entry_storage_callee(
-                    scope,
-                    *callee,
-                    EnumEntryStorage {
-                        owner,
-                        property: EnumEntryProperty {
-                            owner: declaration,
-                            sibling: field,
-                        },
+            } => match self.select_enum_entry_callable_callee(
+                scope,
+                call,
+                EnumEntryStorage {
+                    owner,
+                    property: EnumEntryProperty {
+                        owner: declaration,
+                        sibling: field,
                     },
-                ) {
+                },
+                None,
+                Ty::from(TyKind::Fun(signature)),
+            ) {
+                Some(callee) => Some(callee),
+                None => {
                     self.diags.error(
-                        self.span(*callee),
+                        self.call_callee_name_span(call),
                         "selected enum-entry property has no declaring receiver",
                     );
                     return Some(Ty::Error);
                 }
-                self.set(*callee, Ty::from(TyKind::Fun(signature)));
-                Some(*callee)
-            }
+            },
             ReceiverFnValueOrigin::Local | ReceiverFnValueOrigin::ClassStorage(_) => None,
         };
         self.expect_call_args(scope, params, false, args, arg_tys);

@@ -122,5 +122,5 @@ fn the_whole_function_property_program_publishes_its_selected_entry_reads() {
             }
         }
     }
-    assert_eq!(reads, [2, 2, 1]);
+    assert_eq!(reads, [4, 2, 1]);
 }

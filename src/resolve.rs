@@ -265,6 +265,7 @@ mod receiver_flow;
 use receiver_flow::CompletedFlow;
 mod receiver_function_values;
 use receiver_function_values::ImplicitReceiverFunctionInvoke;
+pub use receiver_function_values::ReceiverFunctionPropertyCallee;
 mod package_qualifier_forms;
 mod package_qualifier_type_arguments;
 mod receiver_tower;
@@ -8867,10 +8868,8 @@ pub enum ExprLowering {
         context_count: usize,
         ret: Ty,
         origin: ReceiverFnValueOrigin,
-        /// Parser-local expression carrying the selected property read when the function value
-        /// comes from a property. The active checked-body adapter consumes this coordinate and the
-        /// stable property decision attached to it; neither survives in FIR.
-        property_callee: Option<ExprId>,
+        /// The authenticated property operand; safe calls need no fabricated parser callee.
+        property_callee: Option<ReceiverFunctionPropertyCallee>,
         implicit_receiver: Option<Ty>,
         suspend: bool,
     },
