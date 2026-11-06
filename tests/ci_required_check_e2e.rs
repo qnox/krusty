@@ -155,18 +155,10 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     let coverage = ci
         .find("run: just coverage-gate\n")
         .expect("the coverage job runs its gate");
-    let release_candidate = ci
-        .find("- name: select the current master release candidate\n")
-        .expect("coverage selects a release candidate");
+    assert!(coverage > 0);
     assert!(
-        coverage < release_candidate
-            && ci.contains(
-                "release_candidate: ${{ steps.release_candidate.outputs.publish }}\n"
-            )
-            && ci.contains(
-                "if: github.event_name == 'push' && github.ref == 'refs/heads/master'\n        id: release_candidate\n        run: scripts/release-publisher.sh check >> \"$GITHUB_OUTPUT\"\n"
-            ),
-        "release packaging must use the publisher's current-tip check only after successful coverage: {ci}"
+        !ci.contains("release_candidate"),
+        "coverage does not discard superseded master commits"
     );
     assert!(
         lint.contains("run: just lint\n")
@@ -329,24 +321,24 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     assert!(
         release_build.contains("    needs: [ci]\n")
             && release_build.contains(
-                "    if: github.ref == 'refs/heads/master' && needs.ci.outputs.release_candidate == 'true'\n"
+                "    if: github.event_name == 'push' && github.ref == 'refs/heads/master'\n"
             )
             && release_build.contains("      max-parallel: 2\n"),
-        "only the current covered master commit may occupy at most two release runners: {release_build}"
+        "every covered master commit may occupy at most two release runners: {release_build}"
     );
     let release = job(&workflow, "release");
     assert!(
         release.contains(
             "    needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]\n"
         ) && release.contains("run: scripts/release-publisher.sh check >> \"$GITHUB_OUTPUT\"\n"),
-        "master release keeps its broader prerequisites and rechecks under the publisher lock: {release}"
+        "master release keeps its broader prerequisites and checks ancestry under its commit lock: {release}"
     );
     assert_eq!(
         workflow
             .matches("scripts/release-publisher.sh check >> \"$GITHUB_OUTPUT\"")
             .count(),
-        2,
-        "coverage filters stale packaging early and release independently rechecks before publishing"
+        1,
+        "every covered master commit packages; release checks current history before publication"
     );
 }
 
