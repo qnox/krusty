@@ -1280,6 +1280,27 @@ jobs:
       - name: package Bazel module
         if: steps.tip.outputs.publish == 'true'
         run: scripts/package-bazel-module.sh "${{ steps.v.outputs.ver }}" dist
+      # The validated max-version reports travel with each immutable release.
+      - name: download max-version pct
+        if: steps.tip.outputs.publish == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pct-${{ needs.build-tool-bins.outputs.max }}
+      - name: download max-version JVM byte equality
+        if: steps.tip.outputs.publish == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: jvm-byte-equality-${{ needs.build-tool-bins.outputs.max }}
+      - name: download max-version Native conformance
+        if: steps.tip.outputs.publish == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: native-pct-${{ needs.build-tool-bins.outputs.max }}
+      - name: package release badge data
+        if: steps.tip.outputs.publish == 'true'
+        env:
+          MAX_VERSION: ${{ needs.build-tool-bins.outputs.max }}
+        run: bash scripts/package-release-badges.sh "$MAX_VERSION" . dist
       # SLSA build provenance for every published file, so `gh attestation verify <file> -R qnox/krusty`
       # ties it to this workflow run and commit.
       - name: attest build provenance
@@ -1402,24 +1423,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run pages.yml --ref master
-      # Badges: the max version's JVM case/byte reports and Native case report, each published to
-      # its own gist file.
-      - name: download max-version pct
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: pct-${{ needs.build-tool-bins.outputs.max }}
-      - name: download max-version JVM byte equality
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: jvm-byte-equality-${{ needs.build-tool-bins.outputs.max }}
-      - name: download max-version Native conformance
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: native-pct-${{ needs.build-tool-bins.outputs.max }}
-      # The global lock is held only while promoting latest, badges and the released ref.
+      # The global lock is held only while promoting latest and the released ref.
       - name: take the latest promotion lock
         if: steps.tip.outputs.publish == 'true'
         id: latest_lock
@@ -1443,25 +1447,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.v.outputs.tag }}
         run: gh release edit "$TAG" --latest
-      # One gist update with every badge's shields.io endpoint JSON, through the gh CLI.
-      - name: publish badges → gist
-        if: ${{ steps.latest.outputs.promote == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.GIST_TOKEN }}
-          GIST_ID: ${{ vars.CONFORMANCE_GIST_ID }}
-          MAX_VERSION: ${{ needs.build-tool-bins.outputs.max }}
-        run: |
-          set -euo pipefail
-          conformance=$(bash scripts/conformance-badge.sh json conformance pct.txt "$MAX_VERSION")
-          bytes=$(bash scripts/conformance-badge.sh json jvm-byte-equality jvm-byte-equality.txt "$MAX_VERSION")
-          native=$(bash scripts/conformance-badge.sh json native-conformance native-pct.txt "$MAX_VERSION")
-          kotlin=$(jq -cn --arg v "$MAX_VERSION" '{schemaVersion: 1, label: "Kotlin", message: $v, color: "blue"}')
-          jq -n --arg c "$conformance" --arg b "$bytes" --arg n "$native" --arg k "$kotlin" '{files: {
-            "krusty-conformance.json": {content: $c},
-            "krusty-jvm-byte-equality.json": {content: $b},
-            "krusty-native-conformance.json": {content: $n},
-            "krusty-kotlin.json": {content: $k}}}' |
-            gh api --method PATCH "gists/$GIST_ID" --input - >/dev/null
       - name: drop the latest promotion lock
         if: always() && steps.latest_lock.outputs.lock != ''
         run: scripts/release-publisher.sh release-latest "${{ steps.latest_lock.outputs.lock }}"
