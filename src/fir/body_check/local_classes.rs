@@ -62,7 +62,11 @@ impl BodyFirChecker<'_> {
         let Some(classifier) = self.index.enclosing_classifier(constructor) else {
             return Ok(None);
         };
-        if self.body.owns_class_body_context(classifier.declaration) {
+        if !self
+            .index
+            .owns_local_capture_environment(classifier.declaration)
+            || self.body.owns_class_body_context(classifier.declaration)
+        {
             return Ok(None);
         }
         let Some(context) = self
