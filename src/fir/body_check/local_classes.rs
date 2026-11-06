@@ -124,7 +124,7 @@ impl BodyFirChecker<'_> {
         let owner = self.selected_enum_entry_storage_owner(field, Some(span))?;
         match self.selected_storage_capture_binding(owner, field, span)? {
             Some(binding) => Ok(binding),
-            None => self.class_capture_binding(owner, field, ty),
+            None => self.declared_class_storage_binding(owner, field, ty),
         }
     }
 
@@ -137,7 +137,7 @@ impl BodyFirChecker<'_> {
         let owner = self.selected_storage_owner(storage, Some(span))?;
         match self.selected_storage_capture_binding(owner, storage.field, span)? {
             Some(binding) => Ok(binding),
-            None => self.class_capture_binding(owner, storage.field, ty),
+            None => self.declared_class_storage_binding(owner, storage.field, ty),
         }
     }
 
@@ -693,10 +693,10 @@ impl BodyFirChecker<'_> {
         let owner = self
             .current_storage_owner()
             .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingStableCallTarget))?;
-        self.class_capture_binding(owner, field, ty)
+        self.declared_class_storage_binding(owner, field, ty)
     }
 
-    fn class_capture_binding(
+    fn declared_class_storage_binding(
         &self,
         owner: DeclarationId,
         field: u32,
