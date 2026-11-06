@@ -30,7 +30,8 @@ pub(crate) struct ClassCaptureBinding {
 /// captured that rung. Label spelling is not part of either coordinate.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ClassCaptureIdentity {
-    /// The original lexical value, independent of the prefix position that currently stores it.
+    /// A capture-transport family anchored by its first capturer and original lexical binding.
+    /// It is not a global lexical-variable ID or a physical field position.
     Value {
         owner: TypeName,
         binding: u32,

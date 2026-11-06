@@ -9,7 +9,8 @@
 //! body being checked again. This table crosses the retained-inline boundary and no pending
 //! semantic type may reach checked FIR.
 //!
-//! Field ordinals are identities, not the physical layout. Once a local class's body has been
+//! Provisional field ordinals belong only to this layout algorithm; captured source uses retain
+//! their semantic identities across permutations. Field ordinals are not the physical layout. Once a local class's body has been
 //! checked, its lexical-value captures also get kotlinc's first-use order, computed from the
 //! storage identities that body recorded. The order is a recorded fact the JVM backend applies;
 //! every earlier phase keeps field order. The same walk decides which captures need storage.
@@ -72,14 +73,17 @@ pub(super) fn reconcile(
 }
 
 fn same_capture(capture: &AnonymousObjectCapture, exact: &AnonymousObjectCapture) -> bool {
-    capture.name == exact.name
-        && match (capture.source, exact.source) {
-            (
-                AnonymousObjectCaptureSource::ClassStorage(left),
-                AnonymousObjectCaptureSource::ClassStorage(right),
-            ) => left.identity == right.identity,
-            (left, right) => left == right && capture.lexical_binding == exact.lexical_binding,
+    match (capture.source, exact.source) {
+        (
+            AnonymousObjectCaptureSource::ClassStorage(left),
+            AnonymousObjectCaptureSource::ClassStorage(right),
+        ) => left.identity == right.identity,
+        (left, right) => {
+            capture.name == exact.name
+                && left == right
+                && capture.lexical_binding == exact.lexical_binding
         }
+    }
 }
 
 /// A capture keeps its established cell sharing, and its established type while the revisit knows
@@ -87,7 +91,8 @@ fn same_capture(capture: &AnonymousObjectCapture, exact: &AnonymousObjectCapture
 /// call's solution completes), and both know less than a determined type.
 fn keep_established_facts(capture: &mut AnonymousObjectCapture, exact: &AnonymousObjectCapture) {
     capture.shared_cell |= exact.shared_cell;
-    capture.capture_dependency = capture.capture_dependency.or(exact.capture_dependency);
+    // Demand discovered during a revisit cannot retag an already published capture family.
+    capture.capture_dependency = exact.capture_dependency;
     if exact.type_knowledge() > capture.type_knowledge() {
         capture.ty = exact.ty;
         capture.storage_ty = exact.storage_ty;
@@ -1075,7 +1080,7 @@ impl<'w, 'c> FirstUses<'w, 'c> {
             .captures
             .iter()
             .enumerate()
-            .filter(|(_, capture)| capture.logical_identity(owner) == Some(identity));
+            .filter(|(_, capture)| capture.represents_identity(owner, identity));
         let (field, _) = selected.next()?;
         selected
             .next()
@@ -1091,9 +1096,10 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                 if self.owner == Owner::Class
                     && self.read_namespace == CaptureReadNamespace::ConstructionStorage =>
             {
+                let owner = self.classifier?;
                 let mut selected = self.captures.iter().enumerate().filter(|(_, capture)| {
                     capture.receiver.is_none()
-                        && matches!(capture.source, AnonymousObjectCaptureSource::ClassStorage(selected) if selected.identity == source.identity)
+                        && capture.represents_identity(owner, source.identity)
                 });
                 let (field, _) = selected.next()?;
                 if selected.next().is_some() {

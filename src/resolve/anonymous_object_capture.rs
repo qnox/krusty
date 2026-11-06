@@ -117,13 +117,23 @@ pub struct AnonymousObjectCapture {
 }
 
 impl AnonymousObjectCapture {
-    /// The selected runtime value survives provisional prefix permutations and recapture.
+    /// The captured transport family is anchored once; its selected source may be a different
+    /// class's storage when the resolver proved a lexical forward mapping.
     pub(crate) fn logical_identity(
         &self,
         first_owner: crate::types::TypeName,
     ) -> Option<crate::fir::ClassCaptureIdentity> {
+        self.capture_dependency
+            .or_else(|| self.source_identity(first_owner))
+    }
+
+    /// The logical identity of the exact operand from which this capture is initialized.
+    pub(crate) fn source_identity(
+        &self,
+        first_owner: crate::types::TypeName,
+    ) -> Option<crate::fir::ClassCaptureIdentity> {
         use crate::fir::ClassCaptureIdentity;
-        let selected = match self.source {
+        match self.source {
             AnonymousObjectCaptureSource::ClassStorage(storage) => Some(storage.identity),
             AnonymousObjectCaptureSource::EnumEntryPropertyStorage { owner, field } => {
                 Some(ClassCaptureIdentity::DeclaredProperty {
@@ -145,17 +155,29 @@ impl AnonymousObjectCapture {
                             binding,
                         }),
                 }),
-        };
-        match (self.capture_dependency, selected) {
-            (Some(prior), Some(selected))
-                if !matches!(self.source, AnonymousObjectCaptureSource::LexicalValue)
-                    && prior != selected =>
-            {
-                None
-            }
-            (Some(prior), _) => Some(prior),
-            (None, selected) => selected,
         }
+    }
+
+    /// Both identities are proven views of this one realized capture, not additional storage.
+    pub(crate) fn represents_identity(
+        &self,
+        owner: crate::types::TypeName,
+        identity: crate::fir::ClassCaptureIdentity,
+    ) -> bool {
+        self.logical_identity(owner) == Some(identity)
+            || self.source_identity(owner) == Some(identity)
+    }
+
+    /// Preserve the required transport identity before projecting its resolved source operand.
+    pub(super) fn forwarded_from(
+        mut self,
+        first_owner: crate::types::TypeName,
+        source: AnonymousObjectCaptureSource,
+    ) -> Option<Self> {
+        let wanted = self.logical_identity(first_owner)?;
+        self.source = source;
+        self.capture_dependency = Some(wanted);
+        Some(self)
     }
 
     pub fn stored_ty(&self) -> Ty {

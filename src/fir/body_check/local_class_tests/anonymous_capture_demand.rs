@@ -252,3 +252,88 @@ fn initializer_function_value_reads_its_constructor_capture() {
         [(0, crate::fir::FirConstructorCaptureSite::Parameter)]
     );
 }
+
+#[test]
+fn constructor_capture_families_project_one_canonical_field_through_shadowed_calls() {
+    let source =
+        include_str!("../../../../tests/box_regressions/captureStorageConstructorFamilies.kt");
+    let (index, bodies) = checked_streamed_bodies(source);
+    let selected = |name| {
+        let mut selected = bodies.iter().filter(|body| {
+            index.declaration_name(DeclarationId::from_raw(body.owner().raw())) == Some(name)
+        });
+        let body = selected.next().expect("one selected member body");
+        assert!(selected.next().is_none());
+        body
+    };
+    let check = selected("check");
+    let captures = (0..check.statement_count())
+        .filter_map(
+            |raw| match &check.statement(FirStatementId::from_raw(raw as u32))?.kind {
+                FirStatementKind::LocalDeclaration {
+                    declaration,
+                    captures,
+                    ..
+                } => Some((*declaration, captures)),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(captures.len(), 3);
+    let mut identities = Vec::new();
+    let mut a_owner = None;
+    for (declaration, captures) in captures {
+        let [capture] = captures.as_ref() else {
+            panic!("each classifier stores exactly one resolved value: {captures:?}")
+        };
+        assert!(capture.stored);
+        assert!(!capture.shared_cell);
+        assert_eq!(capture.ty.get(), Ty::String);
+        assert_eq!(
+            capture.source,
+            FirLocalClassCaptureSource::Value(check.parameters()[0].value)
+        );
+        let identity = capture.capture_identity.expect("canonical capture family");
+        assert!(matches!(identity, ClassCaptureIdentity::Value { .. }));
+        assert!(!identities.contains(&identity));
+        identities.push(identity);
+        if index.declaration_name(declaration) == Some("A") {
+            a_owner = Some(declaration);
+        }
+    }
+    let a_owner = a_owner.expect("declared subclass");
+    let own = selected("own");
+    let reads = (0..own.expression_count())
+        .filter_map(
+            |raw| match &own.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::ClassStorageRead { owner, field } => Some((*owner, *field)),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(reads, [(a_owner, 0)]);
+    for method in ["requestedB", "requestedC"] {
+        let body = selected(method);
+        let calls = (0..body.expression_count())
+            .filter_map(|raw| {
+                let FirExprKind::ConstructorCall(call) =
+                    &body.expr(FirExprId::from_raw(raw as u32))?.kind
+                else {
+                    return None;
+                };
+                call.external_capture_arguments.as_deref()
+            })
+            .collect::<Vec<_>>();
+        let [arguments] = calls.as_slice() else {
+            panic!("one separately streamed constructor call: {calls:?}")
+        };
+        let [argument] = *arguments else {
+            panic!("one projected capture operand: {arguments:?}")
+        };
+        assert!(!argument.shared_cell_holder);
+        assert!(
+            matches!(body.expr(argument.value).expect("selected operand").kind,
+            FirExprKind::ClassStorageRead { owner, field: 0 } if owner == a_owner)
+        );
+    }
+}

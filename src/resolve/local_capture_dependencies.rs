@@ -112,7 +112,13 @@ impl Checker<'_> {
                     if capture.source != AnonymousObjectCaptureSource::LexicalValue
                         && candidate.source != AnonymousObjectCaptureSource::LexicalValue =>
                 {
-                    capture.source == candidate.source
+                    match (capture.source, candidate.source) {
+                        (
+                            AnonymousObjectCaptureSource::ClassStorage(left),
+                            AnonymousObjectCaptureSource::ClassStorage(right),
+                        ) => left.identity == right.identity,
+                        (left, right) => left == right,
+                    }
                 }
                 _ => false,
             };
@@ -124,9 +130,8 @@ impl Checker<'_> {
         });
         if let Some(existing) = existing {
             captures[existing].shared_cell |= candidate.shared_cell;
-            captures[existing].capture_dependency = captures[existing]
-                .capture_dependency
-                .or(candidate.capture_dependency);
+            // Demand aggregation cannot retag storage already selected by the class's own body.
+            // Each constructor edge retains its required family and projects its actual operand.
             if captures[existing].receiver_role.is_none() && candidate.receiver_role.is_some() {
                 captures[existing].receiver_capture = candidate.receiver_capture;
                 captures[existing].receiver_role = candidate.receiver_role;
@@ -358,8 +363,10 @@ impl Checker<'_> {
                                 if let Some(existing) = {
                                     let mut selected =
                                         captures.iter().enumerate().filter(|(_, capture)| {
-                                            capture.logical_identity(storage.owner)
-                                                == Some(storage.identity)
+                                            capture.represents_identity(
+                                                storage.owner,
+                                                storage.identity,
+                                            )
                                         });
                                     let index = selected.next().map(|(index, _)| index);
                                     let unique = selected.next().is_none();
@@ -386,8 +393,7 @@ impl Checker<'_> {
                         if let Some(existing) = {
                             let mut selected =
                                 captures.iter().enumerate().filter(|(_, capture)| {
-                                    capture.logical_identity(storage.owner)
-                                        == Some(storage.identity)
+                                    capture.represents_identity(storage.owner, storage.identity)
                                 });
                             let index = selected.next().map(|(index, _)| index);
                             let unique = selected.next().is_none();
@@ -414,16 +420,14 @@ impl Checker<'_> {
                     required.source
                 }
             };
-            required.source = source;
             required.lexical_shadow_depth = lexical_shadow_depth;
-            let Some(identity) = required.logical_identity(owner) else {
+            let Some(required) = required.forwarded_from(owner, source) else {
                 self.diags.error(
                     crate::diag::Span::new(0, 0),
                     "required capture has no selected logical identity",
                 );
                 return;
             };
-            required.capture_dependency = Some(identity);
             Self::merge_or_push_local_dependency_capture(
                 captures,
                 capture_bindings,

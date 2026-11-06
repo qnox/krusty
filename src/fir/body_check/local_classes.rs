@@ -1251,7 +1251,12 @@ impl BodyFirChecker<'_> {
                         .hoist_anonymous_super_argument
                         .then_some(capture.semantic_receiver)
                         .flatten();
-                    if hoisted_receiver.is_none() {
+                    if hoisted_receiver.is_none()
+                        && matches!(
+                            source,
+                            AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. }
+                        )
+                    {
                         if let Some(identity) = capture.capture_dependency {
                             let Some(binding) = source_binding else {
                                 return Err(self.failure(
@@ -1441,6 +1446,29 @@ impl BodyFirChecker<'_> {
                 .filter(|binding| binding.owner == declaration && binding.field == field)
             {
                 binding.enclosing_instance_owner = instance_owner;
+            }
+            // A resolved forward may transport family B from operand family A. The field is one
+            // physical binding; retain both proven identity views for old and newly checked uses.
+            if let Some(alias) = capture
+                .source_identity(capture_owner)
+                .filter(|alias| Some(*alias) != capture_identity)
+            {
+                let binding = context
+                    .capture_values
+                    .iter()
+                    .map(|(_, binding)| *binding)
+                    .chain(context.receivers.iter().copied())
+                    .find(|binding| binding.owner == declaration && binding.field == field)
+                    .ok_or_else(|| {
+                        self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    })?;
+                context.capture_values.push((
+                    capture.name.clone(),
+                    ClassCaptureBinding {
+                        capture_identity: Some(alias),
+                        ..binding
+                    },
+                ));
             }
             checked.push(FirLocalClassCapture {
                 origin,

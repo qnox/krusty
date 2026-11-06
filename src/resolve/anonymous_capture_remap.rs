@@ -76,7 +76,7 @@ fn original_field(
     identity: crate::fir::ClassCaptureIdentity,
 ) -> Option<usize> {
     let mut fields = remap.original.iter().enumerate().filter(|(_, original)| {
-        original.logical_identity(remap.owner) == Some(identity)
+        original.represents_identity(remap.owner, identity)
             && capture.receiver_role == original.receiver_role
     });
     let (field, _) = fields.next()?;
@@ -272,5 +272,49 @@ mod tests {
         );
         capture.receiver_role = None;
         assert_eq!(capture.logical_identity(owner), None);
+    }
+
+    #[test]
+    fn a_required_transport_family_keeps_the_selected_operand_family_distinct() {
+        let required_owner = type_name("RequiredCaptureFamily");
+        let actual_owner = type_name("ActualStorageOwner");
+        let mut required = selected_value(ClassStorageSource {
+            owner: actual_owner,
+            identity: crate::fir::ClassCaptureIdentity::Value {
+                owner: actual_owner,
+                binding: 7,
+            },
+        });
+        required.source = AnonymousObjectCaptureSource::LexicalValue;
+        let wanted = required
+            .logical_identity(required_owner)
+            .expect("required lexical capture");
+        let actual = ClassStorageSource {
+            owner: actual_owner,
+            identity: crate::fir::ClassCaptureIdentity::Value {
+                owner: actual_owner,
+                binding: 7,
+            },
+        };
+        let projected = required
+            .forwarded_from(
+                required_owner,
+                AnonymousObjectCaptureSource::ClassStorage(actual),
+            )
+            .expect("selected forward mapping");
+        assert_ne!(wanted, actual.identity);
+        assert_eq!(projected.capture_dependency, Some(wanted));
+        assert_eq!(
+            projected.logical_identity(type_name("ReceivingClass")),
+            Some(wanted)
+        );
+        assert_eq!(
+            projected.source_identity(type_name("ReceivingClass")),
+            Some(actual.identity)
+        );
+        assert_eq!(
+            projected.source,
+            AnonymousObjectCaptureSource::ClassStorage(actual)
+        );
     }
 }
