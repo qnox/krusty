@@ -250,6 +250,7 @@ fn run_backend_passes_after_plugins(
     )
     .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
+    crate::jvm::platform_visible_constructors::realize(ir);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
     // declaration that has no class-file form. Before the value-class pass, which renames a marker
     // together with its mangled getter.
