@@ -1532,6 +1532,8 @@ mod metadata_return_value_status_e2e;
 #[path = "metadata_synthetic_classes_e2e.rs"]
 mod metadata_synthetic_classes_e2e;
 mod metadata_type_modules;
+#[path = "nullable_function_field_signature_e2e.rs"]
+mod nullable_function_field_signature_e2e;
 metadata_type_modules::declare!();
 #[path = "e2e/line_breaks.rs"]
 mod line_breaks;
