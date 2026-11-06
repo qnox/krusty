@@ -1240,7 +1240,10 @@ pub fn run(lane: &dyn Lane) {
                 traced.push((file.clone(), reason.clone()));
                 *declined.entry(reason).or_default() += 1;
             }
-            Outcome::Harness(reason) => *harness_reasons.entry(reason).or_default() += 1,
+            Outcome::Harness(reason) => {
+                traced.push((file.clone(), reason.clone()));
+                *harness_reasons.entry(reason).or_default() += 1;
+            }
             Outcome::NotApplicable(reason) => *not_applicable.entry(reason).or_default() += 1,
             Outcome::Failed(reason) => {
                 let expected = baseline
@@ -1301,6 +1304,16 @@ pub fn run(lane: &dyn Lane) {
         for (file, reason) in &traced {
             if reason.contains(&pattern) {
                 eprintln!("  traced {}: {reason}", file.display());
+            }
+        }
+    }
+
+    // A changed non-pass needs its case-specific cause, not only the ranked totals. Keep this
+    // separate from `failed`: the ratchet already records the mismatch and owns its accounting.
+    if let Some(baseline) = baseline.as_ref().filter(|_| !bless) {
+        for (file, reason) in &traced {
+            if !baseline.failures.contains(&relative(file)) {
+                eprintln!("  unexpected non-pass {}: {reason}", file.display());
             }
         }
     }

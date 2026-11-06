@@ -51,8 +51,8 @@ jobs:
   # Lint and coverage are independent merge gates. Give each its own runner so the clean Clippy
   # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
-  # Heavy builds (the coverage build in ci, the binary producers and build-release) run on
-  # GitHub-hosted runners. Every other job runs on a self-hosted runner with one size label
+  # Heavy builds (the coverage build in ci, the binary producers and build-release) and Native
+  # conformance run on GitHub-hosted runners. Other jobs use a self-hosted runner with one size label
   # (rust-4c-8gb, helper-1c-1gb). Fork PRs run on ubuntu-latest: self-hosted runners never take
   # fork PR jobs.
   lint:
@@ -432,7 +432,9 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [jvm]
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    # Cold reflective box cases share the fixed per-case execution deadline. Hosted capacity
+    # keeps JVM conformance independent of the heterogeneous self-hosted build fleet.
+    runs-on: ubuntu-latest
     steps: &conformance-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
@@ -761,7 +763,9 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [native, wasm]
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    # Native corpus rows use hosted capacity; Wasm keeps its existing self-hosted route.
+    # Fork pull requests continue to use hosted runners for both targets.
+    runs-on: ${{ (matrix.target == 'native' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps: *conformance-steps
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
@@ -1181,7 +1185,8 @@ jobs:
   release:
     needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
-    runs-on: [self-hosted, helper-1c-1gb]
+    # Publication runs Gradle to build and sign Maven Central and Plugin Portal artifacts.
+    runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
     timeout-minutes: 25
     permissions:

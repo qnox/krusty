@@ -3783,7 +3783,7 @@ struct JarPackages {
     names: std::sync::Arc<NameTree>,
     /// slashed package name ID (`kotlin/collections`, `""` for the default package) → its facts.
     packages: HashMap<NameId, PkgEntry>,
-    /// Exact internal class names declared by this entry.
+    /// Exact internal class names declared by this entry, sorted by id ([`Self::add_class`]).
     classes: Vec<NameId>,
     /// Every file-facade class this entry catalogs, across all packages — the membership test that
     /// stays correct when `@JvmPackageName` puts a facade outside the package it declares.
@@ -3804,6 +3804,25 @@ impl JarPackages {
 
     fn entry(&self, pkg: &str) -> Option<&PkgEntry> {
         self.names.get(pkg).and_then(|id| self.packages.get(&id))
+    }
+
+    /// Record a class this entry declares, keeping [`Self::classes`] sorted and unique.
+    fn add_class(&mut self, class: NameId) {
+        match self.classes.last() {
+            Some(last) if last.0 >= class.0 => {
+                if let Err(at) = self.classes.binary_search_by_key(&class.0, |known| known.0) {
+                    self.classes.insert(at, class);
+                }
+            }
+            _ => self.classes.push(class),
+        }
+    }
+
+    /// Whether this entry declares the class `class` (an id in [`Self::names`]).
+    fn declares_class(&self, class: NameId) -> bool {
+        self.classes
+            .binary_search_by_key(&class.0, |known| known.0)
+            .is_ok()
     }
 
     fn entry_name(&self, pkg: TypeName) -> Option<&PkgEntry> {
@@ -3861,23 +3880,13 @@ pub struct PackageTree {
     /// by segment must still be able to answer "`java` is a package". Ancestors are folded in once at
     /// compose time rather than re-derived per query.
     package_prefixes: crate::fx_hash::HashSet<NameId>,
-    /// Exact class owners, sorted by name and classpath order.
-    classes: Vec<(NameId, JarId)>,
+    /// Each composed entry's own catalog, by entry id. A class is looked up in the catalogs of the
+    /// entries that declare its package, so composing never interns a class name.
+    parts: Vec<Option<std::sync::Arc<JarPackages>>>,
     incomplete_entries: Vec<JarId>,
 }
 
 impl PackageTree {
-    /// Every class the classpath declares, as its slashed internal name and the jar that owns it.
-    ///
-    /// Sorted by name id and classpath order. WITHIN one name that is the shadowing order — the
-    /// first entry to declare it wins resolution and iteration preserves that; the order of
-    /// DISTINCT names is name-id (insertion) order, which a base+delta compose is free to permute.
-    pub fn classes(&self) -> impl Iterator<Item = (String, JarId)> + '_ {
-        self.classes
-            .iter()
-            .map(|(name, jar)| (self.names.render(*name), *jar))
-    }
-
     /// The node for a slashed package path (`""` = this root), or `None` if no jar declares it. The
     /// resolution seam (wired in a later rollout step); exercised now by the compose unit tests.
     fn node_for(&self, pkg: &str) -> Option<&PackageNode> {
@@ -3901,63 +3910,8 @@ impl PackageTree {
             })
     }
 
-    fn jars_for_class(&self, internal: &str) -> Vec<JarId> {
-        let Some(class) = self.names.get(internal) else {
-            return Vec::new();
-        };
-        self.jars_for_class_id(class)
-    }
-
-    fn jars_for_class_name(&self, internal: TypeName) -> Vec<JarId> {
-        let Some(class) = crate::types::existing_type_name_in(&self.names, internal) else {
-            return Vec::new();
-        };
-        self.jars_for_class_id(class)
-    }
-
     pub(super) fn catalog_complete(&self) -> bool {
         self.incomplete_entries.is_empty()
-    }
-
-    /// Whether `package` directly declares a class whose final path segment is `class_segment`.
-    /// The segment is the class file's last component (`CollectionsKt`, `Map$Entry`), not a source
-    /// nested name, and a miss does not intern it into the global type-name tree.
-    pub(super) fn contains_exact_class(&self, package: TypeName, class_segment: &str) -> bool {
-        let Some(parent) = crate::types::existing_type_name_in(&self.names, package) else {
-            return false;
-        };
-        let Some(class) = self.names.existing_child_of(parent, class_segment) else {
-            return false;
-        };
-        self.first_jar_for_id(class).is_some()
-    }
-
-    /// Whether `owner`'s flattened JVM nested class (`Owner$Companion`,
-    /// `Outer$Inner$Companion`) is declared. The owner class file itself need not be present. Both
-    /// probes stay inside the catalog's name tree, so a miss neither formats nor interns a candidate.
-    pub(super) fn contains_nested_class(&self, owner: TypeName, nested: &str) -> bool {
-        let Some(package) = crate::types::existing_type_name_in(&self.names, owner.namespace())
-        else {
-            return false;
-        };
-        let Some(class) = self
-            .names
-            .existing_nested_under(package, owner.segment_ref(), nested)
-        else {
-            return false;
-        };
-        self.first_jar_for_id(class).is_some()
-    }
-
-    fn jars_for_class_id(&self, class: NameId) -> Vec<JarId> {
-        let start = self
-            .classes
-            .partition_point(|&(candidate, _)| candidate.0 < class.0);
-        self.classes[start..]
-            .iter()
-            .take_while(|&&(candidate, _)| candidate == class)
-            .map(|&(_, jar)| jar)
-            .collect()
     }
 
     /// Total package count in the table. For memory reporting.
@@ -3975,7 +3929,7 @@ fn record_pkg_entry_name(name: &str, jp: &mut JarPackages) {
     };
     if let Some(internal) = name.strip_suffix(".class") {
         let class = jp.names.insert(internal);
-        jp.classes.push(class);
+        jp.add_class(class);
         jp.entry_mut(&pkg_of(name)).has_classes = true;
     } else if name.ends_with(".kotlin_builtins") {
         jp.entry_mut(&pkg_of(name)).has_builtins = true;
@@ -4008,10 +3962,7 @@ fn build_jar_packages(entry: &Entry) -> JarPackages {
                     continue;
                 };
                 let class = jp.names.insert_from(&index.names, internal);
-                jp.classes.push(class);
-                if package == NameTree::ROOT {
-                    continue;
-                }
+                jp.add_class(class);
                 let package = jp.names.insert_from(&index.names, package);
                 jp.packages.entry(package).or_default().has_classes = true;
             }
@@ -4105,10 +4056,18 @@ fn compose_package_tree(parts: &[std::sync::Arc<JarPackages>]) -> PackageTree {
 /// package node's `jars` order IS the shadowing order lookups walk. When a part is merged out of
 /// position order (the base+delta path below), the touched vectors are re-sorted so the result is
 /// indistinguishable from a single in-order compose.
-fn merge_package_tree_part(tree: &mut PackageTree, jar_id: JarId, jp: &JarPackages) {
+fn merge_package_tree_part(
+    tree: &mut PackageTree,
+    jar_id: JarId,
+    jp: &std::sync::Arc<JarPackages>,
+) {
     if !jp.complete {
         tree.incomplete_entries.push(jar_id);
     }
+    if tree.parts.len() <= jar_id {
+        tree.parts.resize(jar_id + 1, None);
+    }
+    tree.parts[jar_id] = Some(jp.clone());
     for (&pkg_id, entry) in &jp.packages {
         let pkg = tree.names.insert_from(&jp.names, pkg_id);
         let node = tree.packages.entry(pkg).or_default();
@@ -4144,18 +4103,11 @@ fn merge_package_tree_part(tree: &mut PackageTree, jar_id: JarId, jp: &JarPackag
             ancestor = parent;
         }
     }
-    for &class_id in &jp.classes {
-        let class = tree.names.insert_from(&jp.names, class_id);
-        tree.classes.push((class, jar_id));
-    }
 }
 
 /// Order-normalize a composed tree after the last part: exactly the tail of the original one-shot
 /// compose, plus `incomplete_entries` ordering (the one-shot loop produced it ascending for free).
 fn finish_package_tree(tree: &mut PackageTree) {
-    tree.classes
-        .sort_unstable_by_key(|&(class, jar)| (class.0, jar));
-    tree.classes.dedup();
     tree.incomplete_entries.sort_unstable();
 }
 
@@ -5647,7 +5599,7 @@ mod fq_tests {
             }
             for c in classes {
                 let id = jp.names.insert(c);
-                jp.classes.push(id);
+                jp.add_class(id);
             }
             std::sync::Arc::new(jp)
         };
@@ -5655,13 +5607,13 @@ mod fq_tests {
         // the harness order [jars…, dep dir, jimage]. `shared/Dup` is declared by 0 and 1 so the
         // shadowing pair order is observable; dir1 is incomplete so that flag's path is covered.
         let jar0 = mk(
-            &["kotlin/collections"],
+            &["kotlin/collections", "shared"],
             &["kotlin/collections/CollectionsKt", "shared/Dup"],
             true,
             &[],
         );
         let dir1 = mk(
-            &["mod", "kotlin/collections"],
+            &["mod", "kotlin/collections", "shared"],
             &["mod/AKt", "shared/Dup"],
             false,
             // Builtins on the DIR too: merging id 1 into a node whose builtins list already holds
@@ -5811,6 +5763,9 @@ mod fq_tests {
 
         let tree = compose_package_tree(&[std::sync::Arc::new(first), std::sync::Arc::new(second)]);
 
+        // Only packages are composed; each class stays in its entry's own catalog.
+        assert!(tree.names.get("shared").is_some());
+        assert!(tree.names.get("shared/One").is_none());
         assert_eq!(tree.jars_for_class("shared/One"), vec![0]);
         assert_eq!(tree.jars_for_class("shared/Two"), vec![1]);
         assert_eq!(tree.jars_for_class("shared/Duplicate"), vec![0, 1]);

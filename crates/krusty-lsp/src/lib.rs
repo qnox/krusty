@@ -17,6 +17,9 @@ mod worker;
 mod worker_lifecycle;
 mod worker_resident;
 pub mod workspace_index_input;
+pub use workspace_index_input::{
+    workspace_index_uri_bytes, MAX_WORKSPACE_INDEX_FILES, MAX_WORKSPACE_INDEX_URI_BYTES,
+};
 
 pub use analysis::*;
 pub use compiler_analysis::LibraryRef;

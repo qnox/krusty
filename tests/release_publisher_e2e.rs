@@ -176,6 +176,29 @@ fn the_tip_publishes_records_itself_and_drops_the_lock() {
 }
 
 #[test]
+fn the_lock_uses_the_source_author_instead_of_the_checkout_or_caller_identity() {
+    let remote = Remote::new("source-identity");
+    let output = isolated_command("git")
+        .args(["commit", "-q", "--allow-empty", "-m", "publication source"])
+        .current_dir(remote.root.join("work"))
+        .env("GIT_AUTHOR_NAME", "Source Author")
+        .env("GIT_AUTHOR_EMAIL", "source@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Source Integrator")
+        .env("GIT_COMMITTER_EMAIL", "integrator@example.invalid")
+        .output()
+        .expect("commit the publication source");
+    assert!(output.status.success(), "{output:?}");
+    let source = remote.git(&["rev-parse", "HEAD"]);
+    remote.push_commit("unrelated checkout");
+
+    let lock = remote.acquire(&source);
+    assert_eq!(
+        remote.git(&["show", "-s", "--format=%an <%ae> / %cn <%ce>", &lock]),
+        "Source Author <source@example.invalid> / Source Author <source@example.invalid>"
+    );
+}
+
+#[test]
 fn a_commit_master_has_moved_past_does_not_publish() {
     let remote = Remote::new("superseded");
     let first = remote.push_commit("first");
