@@ -124,9 +124,7 @@ mod constant_evaluation;
 mod constructor_arguments;
 mod constructor_commitment;
 pub(crate) use constructor_commitment::ConstructorCaptureSource;
-pub use constructor_commitment::{
-    ConstructorCapturePlan, ConstructorCaptureProjection, ResolvedAnnotationConstruction,
-};
+pub use constructor_commitment::{ConstructorCapturePlan, ResolvedAnnotationConstruction};
 mod context_argument_selection;
 mod context_capture;
 mod context_receiver_priority;

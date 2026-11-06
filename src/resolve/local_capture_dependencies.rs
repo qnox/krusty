@@ -486,7 +486,7 @@ impl Checker<'_> {
 
     /// Commit sources while the selected declaration and its lexical binding tower are alive.
     pub(super) fn selected_constructor_capture_plan(
-        &mut self,
+        &self,
         scope: &CheckerScope<'_>,
         owner: TypeName,
     ) -> Option<super::constructor_commitment::ConstructorCapturePlan> {
@@ -513,23 +513,10 @@ impl Checker<'_> {
         };
         let mut projected = Vec::with_capacity(captures.len());
         for capture in captures {
-            let Some(required) = capture.logical_identity(owner) else {
-                self.diags.error(
-                    crate::diag::Span::new(0, 0),
-                    "constructor capture has no selected logical identity",
-                );
-                return None;
-            };
+            let required = capture.logical_identity(owner)?;
             let source = if let Some(identity) = capture.lexical_binding {
-                let Some((binding, _)) =
-                    self.lexical_binding_by_identity(scope, &capture.name, identity)
-                else {
-                    self.diags.error(
-                        crate::diag::Span::new(0, 0),
-                        "constructor capture has no selected lexical source",
-                    );
-                    return None;
-                };
+                let (binding, _) =
+                    self.lexical_binding_by_identity(scope, &capture.name, identity)?;
                 match binding.origin {
                     ReceiverFnValueOrigin::ClassStorage(storage) => Source::ClassStorage(storage),
                     ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field } => {

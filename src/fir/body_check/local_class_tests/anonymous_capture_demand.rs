@@ -540,3 +540,121 @@ fn missing_ambiguous_and_malformed_constructor_sources_never_recover_a_shadowing
         assert_eq!(poisoned, !missing_plan);
     }
 }
+
+#[test]
+fn a_local_constructor_in_a_lambda_captures_the_method_parameter_beside_outer_storage() {
+    let source =
+        include_str!("../../../../tests/box_regressions/captureStorageLocalShadowConstructor.kt");
+    let (index, bodies) = checked_streamed_bodies(source);
+    let selected = |name| {
+        let mut selected = bodies.iter().filter(|body| {
+            index.declaration_name(DeclarationId::from_raw(body.owner().raw())) == Some(name)
+        });
+        let body = selected.next().expect("one selected body");
+        assert!(selected.next().is_none());
+        body
+    };
+    let outer = selected("captureLocal");
+    let declarations = (0..outer.statement_count())
+        .filter_map(|raw| {
+            let FirStatementKind::LocalDeclaration {
+                declaration,
+                captures,
+                ..
+            } = &outer.statement(FirStatementId::from_raw(raw as u32))?.kind
+            else {
+                return None;
+            };
+            Some((*declaration, captures))
+        })
+        .collect::<Vec<_>>();
+    let [(a, captures)] = declarations.as_slice() else {
+        panic!("one outer-capturing class")
+    };
+    let [capture] = captures.as_ref() else {
+        panic!("one outer value field")
+    };
+    assert!(capture.stored);
+    assert_eq!(
+        capture.source,
+        FirLocalClassCaptureSource::Value(outer.parameters()[0].value)
+    );
+    let own = selected("own");
+    let reads = (0..own.expression_count())
+        .filter_map(
+            |raw| match &own.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::ClassStorageRead { owner, field } => Some((*owner, *field)),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(reads, [(*a, 0)]);
+    let local = selected("local");
+    assert_ne!(local.owner(), outer.owner());
+    let parameter = local.parameters()[0].value;
+    let declarations = (0..local.statement_count())
+        .filter_map(|raw| {
+            let FirStatementKind::LocalDeclaration {
+                declaration,
+                captures,
+                ..
+            } = &local.statement(FirStatementId::from_raw(raw as u32))?.kind
+            else {
+                return None;
+            };
+            Some((*declaration, captures))
+        })
+        .collect::<Vec<_>>();
+    let [(b, captures)] = declarations.as_slice() else {
+        panic!("one method-local class")
+    };
+    assert_ne!(a, b);
+    let [capture] = captures.as_ref() else {
+        panic!("one method-parameter capture")
+    };
+    assert!(capture.stored);
+    assert!(!capture.shared_cell);
+    assert_eq!(capture.source, FirLocalClassCaptureSource::Value(parameter));
+    let lambdas = (0..local.expression_count())
+        .filter_map(
+            |raw| match &local.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::Lambda { body, .. } => Some(body),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [lambda] = lambdas.as_slice() else {
+        panic!("one constructor-producing lambda")
+    };
+    let [capture] = lambda.captures() else {
+        panic!("one selected outer parameter")
+    };
+    assert_eq!(capture.enclosing_depth, 0);
+    assert_eq!(capture.source, FirCaptureSource::Value(parameter));
+    assert_eq!(capture.ty.get(), Ty::String);
+    assert!(!capture.shared_cell);
+    let calls = (0..lambda.expression_count())
+        .filter_map(|raw| {
+            let FirExprKind::ConstructorCall(call) =
+                &lambda.expr(FirExprId::from_raw(raw as u32))?.kind
+            else {
+                return None;
+            };
+            call.external_capture_arguments.as_deref()
+        })
+        .collect::<Vec<_>>();
+    let [arguments] = calls.as_slice() else {
+        panic!("one local-class construction")
+    };
+    let [argument] = *arguments else {
+        panic!("one explicit lexical operand")
+    };
+    assert!(!argument.shared_cell_holder);
+    assert_eq!(
+        lambda.expr(argument.value).expect("committed source").kind,
+        FirExprKind::CapturedValueRead {
+            enclosing_depth: 0,
+            source: parameter
+        }
+    );
+}

@@ -169,13 +169,6 @@ impl BodyFirChecker<'_> {
         {
             return Ok(None);
         }
-        if !self
-            .index
-            .declaration_header(classifier.declaration)
-            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS))
-        {
-            return Ok(None);
-        }
         let context = self
             .session
             .class_bodies
