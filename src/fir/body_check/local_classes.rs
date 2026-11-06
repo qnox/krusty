@@ -48,21 +48,27 @@ impl BodyFirChecker<'_> {
         if self.hoist_anonymous_super_argument {
             return Ok(None);
         }
+        let selected = match self.info.expr_lowers.get(&expression) {
+            Some(
+                selected @ (ExprLowering::ClassStorageRead(_)
+                | ExprLowering::EnumEntryStorageRead { .. }),
+            ) => selected,
+            _ => return Ok(None),
+        };
         let span = self
             .file
             .expr_span(expression)
             .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
-        let binding = match self.info.expr_lowers.get(&expression) {
-            Some(ExprLowering::ClassStorageRead(storage)) => self.selected_class_capture_binding(
+        let binding = match selected {
+            ExprLowering::ClassStorageRead(storage) => self.selected_class_capture_binding(
                 *storage,
                 self.expression_type(expression)?,
                 span,
             )?,
-            Some(ExprLowering::EnumEntryStorageRead { field, .. }) => {
-                let owner = self.selected_enum_entry_storage_owner(*field, Some(span))?;
-                self.class_capture_binding(owner, *field, self.expression_type(expression)?)?
+            ExprLowering::EnumEntryStorageRead { field, .. } => {
+                self.enum_entry_storage_binding(*field, self.expression_type(expression)?, span)?
             }
-            _ => return Ok(None),
+            _ => unreachable!("matched storage lowering"),
         };
         Ok(Some(binding))
     }
@@ -82,23 +88,44 @@ impl BodyFirChecker<'_> {
         field: u32,
         span: Option<Span>,
     ) -> Result<DeclarationId, BodyCheckFailure> {
-        let owner = self
-            .current_storage_owner()
-            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
         let property = self
+            .enum_entry_property(field)
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
+        let declaration = self
             .index
-            .owned_declaration(owner, DeclarationKind::Property, field)
-            .and_then(|declaration| self.index.property_for_declaration(declaration));
+            .property_declaration(property)
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
+        let owner = self
+            .index
+            .declaration_anchor(declaration)
+            .and_then(|anchor| anchor.owner)
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
         if self
             .index
             .declaration_anchor(owner)
             .map(|anchor| anchor.kind)
             != Some(DeclarationKind::EnumEntry)
-            || property.is_none()
+            || self
+                .index
+                .owned_declaration(owner, DeclarationKind::Property, field)
+                != Some(declaration)
         {
             return Err(self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget));
         }
         Ok(owner)
+    }
+
+    pub(super) fn enum_entry_storage_binding(
+        &self,
+        field: u32,
+        ty: ResolvedTy,
+        span: Span,
+    ) -> Result<ClassCaptureBinding, BodyCheckFailure> {
+        let owner = self.selected_enum_entry_storage_owner(field, Some(span))?;
+        match self.selected_storage_capture_binding(owner, field, span)? {
+            Some(binding) => Ok(binding),
+            None => self.class_capture_binding(owner, field, ty),
+        }
     }
 
     pub(super) fn selected_class_capture_binding(
@@ -669,7 +696,7 @@ impl BodyFirChecker<'_> {
         self.class_capture_binding(owner, field, ty)
     }
 
-    pub(super) fn class_capture_binding(
+    fn class_capture_binding(
         &self,
         owner: DeclarationId,
         field: u32,

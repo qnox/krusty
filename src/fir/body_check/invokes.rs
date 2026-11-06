@@ -179,8 +179,7 @@ impl BodyFirChecker<'_> {
                         self.selected_class_capture_binding(storage, function_ty, span)?
                     }
                     ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
-                        let owner = self.selected_enum_entry_storage_owner(field, Some(span))?;
-                        self.class_capture_binding(owner, field, function_ty)?
+                        self.enum_entry_storage_binding(field, function_ty, span)?
                     }
                     _ => unreachable!("matched storage origin"),
                 };
