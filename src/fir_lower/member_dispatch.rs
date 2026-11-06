@@ -1,4 +1,4 @@
-//! The classifier a member call's dispatch receiver statically has.
+//! Declared-owner applications and static classes of selected dispatch receivers.
 
 use super::BodyLowering;
 use crate::fir::{FirConversionKind, FirReceiver};
@@ -40,15 +40,20 @@ impl BodyLowering<'_> {
             .property(property)
             .ok_or(super::FirLoweringFailure::MissingProperty(property))?
             .declaration;
-        let owner = self
+        let anchor = self
             .index
             .declaration_anchor(declaration)
-            .and_then(|anchor| anchor.owner)
-            .filter(|owner| {
-                self.index
-                    .declaration_anchor(*owner)
-                    .is_some_and(|anchor| anchor.kind == crate::fir::DeclarationKind::EnumEntry)
-            });
+            .ok_or(super::FirLoweringFailure::MissingProperty(property))?;
+        let owner = match anchor.owner {
+            Some(owner) => {
+                let owner_anchor = self
+                    .index
+                    .declaration_anchor(owner)
+                    .ok_or(super::FirLoweringFailure::MissingProperty(property))?;
+                (owner_anchor.kind == crate::fir::DeclarationKind::EnumEntry).then_some(owner)
+            }
+            None => None,
+        };
         let dispatch_class = self.dispatch_class(receiver);
         let receiver = self.receiver(receiver)?;
         match owner {
