@@ -1,19 +1,11 @@
 //! Field order of a local or anonymous class's captures across repeated checks of its body.
 //!
 //! Postponed generic-lambda checking may revisit the same construction while one receiver type is
-//! temporarily `Pending`. A provisional revisit must neither replace the exact symbolic type
-//! recorded by the earlier check nor renumber an established capture field: descendant
-//! constructions can already carry one of these ordinals as their resolved `ClassStorage` source.
-//! The final check takes the order it selected (kotlinc's first-use order) and returns the field
-//! permutation, so direct descendants update their exact storage coordinates instead of the class
-//! body being checked again. This table crosses the retained-inline boundary and no pending
+//! temporarily `Pending`. Reconcile provisional capture inventories without replacing established
+//! symbolic types or logical capture families. Only this layout algorithm interprets provisional
+//! ordinals; recorded uses identify the selected logical value across reorder and forwarding.
+//! The final check records kotlinc's first-use order and which captures need storage. No pending
 //! semantic type may reach checked FIR.
-//!
-//! Provisional field ordinals belong only to this layout algorithm; captured source uses retain
-//! their semantic identities across permutations. Field ordinals are not the physical layout. Once a local class's body has been
-//! checked, its lexical-value captures also get kotlinc's first-use order, computed from the
-//! storage identities that body recorded. The order is a recorded fact the JVM backend applies;
-//! every earlier phase keeps field order. The same walk decides which captures need storage.
 
 use super::context_capture::context_argument_sites;
 use super::scope::PathRoot;
@@ -93,6 +85,7 @@ fn keep_established_facts(capture: &mut AnonymousObjectCapture, exact: &Anonymou
     capture.shared_cell |= exact.shared_cell;
     // Demand discovered during a revisit cannot retag an already published capture family.
     capture.capture_dependency = exact.capture_dependency;
+    capture.retain_constructor_projections(&exact.constructor_projections);
     if exact.type_knowledge() > capture.type_knowledge() {
         capture.ty = exact.ty;
         capture.storage_ty = exact.storage_ty;

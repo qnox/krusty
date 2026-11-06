@@ -8603,8 +8603,8 @@ pub enum ExprLowering {
     /// it does not inspect source names, annotations, or plugin ABI.
     PluginExpression(Box<crate::plugins::PluginExpressionPlan>),
     /// A bare value read whose storage is a compiler-generated field on the current class (a local
-    /// class capture or an enum-entry body property). The checker records the exact field slot so
-    /// lowering performs no member lookup.
+    /// class capture). The checker records the exact logical value and scope owner; checked FIR
+    /// projects its finalized capture binding without repeating member selection.
     ClassStorageRead(ClassStorageSource),
     EnumEntryStorageRead {
         owner: TypeName,

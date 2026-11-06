@@ -17,12 +17,21 @@ pub(crate) struct ClassCaptureBinding {
     pub(crate) receiver_source: Option<ClassReceiverCaptureSource>,
     pub(crate) enclosing_instance_owner: Option<crate::fir::EnclosingInstanceOwner>,
     /// Original logical closure value this field forwards. Its identity survives prefix reorder;
-    /// a transitive recapture preserves the upstream
-    /// identity so independently streamed members never join closure operands by source spelling.
+    /// independently streamed members never join closure operands by source spelling.
     pub(crate) capture_identity: Option<ClassCaptureIdentity>,
     /// Lexical identity of the captured value's binding, which a local function the class calls
     /// maps its capture by: two same-named fields are told apart by it, never by spelling.
     pub(crate) lexical_binding: Option<u32>,
+}
+
+impl ClassCaptureBinding {
+    /// Identity views can name the same operand only when its complete storage and lifetime agree.
+    pub(crate) fn same_storage(self, other: Self) -> bool {
+        self == Self {
+            capture_identity: self.capture_identity,
+            ..other
+        }
+    }
 }
 
 /// Semantic closure coordinate. A lexical capture keeps its first capturer and lexical binding.

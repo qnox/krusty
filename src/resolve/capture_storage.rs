@@ -480,6 +480,7 @@ impl Checker<'_> {
             lexical_shadow_depth: 0,
             lexical_binding: local.lexical_capture_identity,
             capture_dependency: None,
+            constructor_projections: Vec::new(),
             receiver_capture: None,
             receiver_role: None,
         });
@@ -892,6 +893,7 @@ impl Checker<'_> {
                     lexical_shadow_depth: 0,
                     lexical_binding: None,
                     capture_dependency: None,
+                    constructor_projections: Vec::new(),
                     receiver_capture: None,
                     receiver_role: enclosing_instance_role,
                 }),
@@ -928,6 +930,7 @@ impl Checker<'_> {
                 lexical_shadow_depth: 0,
                 lexical_binding: None,
                 capture_dependency: None,
+                constructor_projections: Vec::new(),
                 receiver_capture,
                 receiver_role,
             });
@@ -975,6 +978,7 @@ impl Checker<'_> {
                 lexical_shadow_depth: 0,
                 lexical_binding: local.lexical_capture_identity,
                 capture_dependency: None,
+                constructor_projections: Vec::new(),
                 receiver_capture: None,
                 receiver_role: None,
             });

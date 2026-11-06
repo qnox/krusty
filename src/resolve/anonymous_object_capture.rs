@@ -104,9 +104,12 @@ pub struct AnonymousObjectCapture {
     /// and the context value it hides) are two captures with distinct identities. Absent for a
     /// receiver, and for a value that is not a function-local binding.
     pub(crate) lexical_binding: Option<u32>,
-    /// Semantic closure field forwarded by this capture. Direct captures leave this absent and
-    /// establish their own identity when checked; transitive captures preserve the upstream field.
+    /// Required constructor-transport family retained by a transitive capture. Its selected
+    /// operand can belong to another family; direct captures establish their own identity.
     pub(crate) capture_dependency: Option<crate::fir::ClassCaptureIdentity>,
+    /// Constructor requirements proven to read this same resolved lexical value. They are lookup
+    /// views of this one capture, not additional fields or changes to its canonical family.
+    pub(crate) constructor_projections: Vec<crate::fir::ClassCaptureIdentity>,
     /// Stable identity of the implicit-receiver rung this capture holds. Absent for lexical values
     /// and for an enclosing class instance. Two classifiers that capture the same rung share it;
     /// the callable or lambda label is not this identity.
@@ -166,6 +169,17 @@ impl AnonymousObjectCapture {
     ) -> bool {
         self.logical_identity(owner) == Some(identity)
             || self.source_identity(owner) == Some(identity)
+    }
+
+    pub(super) fn retain_constructor_projections(
+        &mut self,
+        projections: &[crate::fir::ClassCaptureIdentity],
+    ) {
+        for &projection in projections {
+            if !self.constructor_projections.contains(&projection) {
+                self.constructor_projections.push(projection);
+            }
+        }
     }
 
     /// Preserve the required transport identity before projecting its resolved source operand.
@@ -534,6 +548,7 @@ impl Checker<'_> {
                     lexical_shadow_depth: 0,
                     lexical_binding: None,
                     capture_dependency: None,
+                    constructor_projections: Vec::new(),
                     receiver_capture,
                     receiver_role: receiver.receiver_role,
                 };
@@ -584,6 +599,7 @@ fn merge_local_receiver_capture(
         .iter_mut()
         .find(|existing| existing.source == candidate.source)
     {
+        existing.retain_constructor_projections(&candidate.constructor_projections);
         if existing.receiver_role.is_none() && candidate.receiver_role.is_some() {
             existing.receiver_capture = candidate.receiver_capture;
             existing.receiver_role = candidate.receiver_role;
@@ -924,6 +940,7 @@ fn refreshed_local_receiver_capture(
         }
     }
     current.capture_dependency = prior.capture_dependency;
+    current.retain_constructor_projections(&prior.constructor_projections);
     current
 }
 
@@ -956,6 +973,7 @@ mod receiver_remap_tests {
             lexical_shadow_depth: 0,
             lexical_binding: None,
             capture_dependency: None,
+            constructor_projections: Vec::new(),
             receiver_capture: Some(identity),
             receiver_role: Some(role),
         }
@@ -1361,6 +1379,7 @@ pub(super) fn record_anonymous_construction_captures(
             lexical_shadow_depth: 0,
             lexical_binding: candidate.lexical_binding,
             capture_dependency: None,
+            constructor_projections: Vec::new(),
             receiver_capture: candidate.receiver_capture,
             receiver_role: candidate.receiver_role,
         })

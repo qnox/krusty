@@ -130,6 +130,7 @@ impl Checker<'_> {
         });
         if let Some(existing) = existing {
             captures[existing].shared_cell |= candidate.shared_cell;
+            captures[existing].retain_constructor_projections(&candidate.constructor_projections);
             // Demand aggregation cannot retag storage already selected by the class's own body.
             // Each constructor edge retains its required family and projects its actual operand.
             if captures[existing].receiver_role.is_none() && candidate.receiver_role.is_some() {
@@ -234,6 +235,7 @@ impl Checker<'_> {
                         lexical_shadow_depth,
                         lexical_binding: required_identity,
                         capture_dependency: None,
+                        constructor_projections: Vec::new(),
                         receiver_capture: None,
                         receiver_role: None,
                     },
@@ -346,6 +348,13 @@ impl Checker<'_> {
             if declaration == current_declaration {
                 continue;
             }
+            let Some(wanted) = required.logical_identity(owner) else {
+                self.diags.error(
+                    crate::diag::Span::new(0, 0),
+                    "required capture has no selected logical identity",
+                );
+                return;
+            };
             let mut lexical_shadow_depth = required.lexical_shadow_depth;
             let source = match required.source {
                 AnonymousObjectCaptureSource::LexicalValue => {
@@ -356,6 +365,9 @@ impl Checker<'_> {
                         continue;
                     };
                     lexical_shadow_depth = shadow_depth;
+                    if !required.constructor_projections.contains(&wanted) {
+                        required.constructor_projections.push(wanted);
+                    }
                     match binding.origin {
                         ReceiverFnValueOrigin::Local => AnonymousObjectCaptureSource::LexicalValue,
                         ReceiverFnValueOrigin::ClassStorage(storage) => {
@@ -375,6 +387,9 @@ impl Checker<'_> {
                                         .and_then(|index| captures.get_mut(index))
                                 } {
                                     existing.shared_cell |= required.shared_cell;
+                                    existing.retain_constructor_projections(
+                                        &required.constructor_projections,
+                                    );
                                     continue;
                                 }
                             }
@@ -402,6 +417,8 @@ impl Checker<'_> {
                                 .and_then(|index| captures.get_mut(index))
                         } {
                             existing.shared_cell |= required.shared_cell;
+                            existing
+                                .retain_constructor_projections(&required.constructor_projections);
                             continue;
                         }
                     }
@@ -551,5 +568,89 @@ impl Checker<'_> {
                         )
                     })
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn capture(owner: TypeName) -> AnonymousObjectCapture {
+        AnonymousObjectCapture {
+            name: "value".into(),
+            ty: Ty::String,
+            shared_cell: false,
+            storage_ty: None,
+            source: AnonymousObjectCaptureSource::ClassStorage(ClassStorageSource {
+                owner,
+                identity: crate::fir::ClassCaptureIdentity::Value { owner, binding: 7 },
+            }),
+            receiver_label: None,
+            receiver: None,
+            semantic_receiver: None,
+            lexical_shadow_depth: 0,
+            lexical_binding: Some(7),
+            capture_dependency: None,
+            constructor_projections: Vec::new(),
+            receiver_capture: None,
+            receiver_role: None,
+        }
+    }
+
+    #[test]
+    fn resolved_constructor_demands_share_storage_without_retagging_its_body_identity() {
+        let a = type_name("PhysicalCaptureA");
+        let mut captures = vec![capture(a)];
+        let mut bindings = vec![Some(7)];
+        let canonical = captures[0].logical_identity(a);
+        let mut wanted = Vec::new();
+        for owner in [type_name("ConstructorB"), type_name("ConstructorC")] {
+            let identity = crate::fir::ClassCaptureIdentity::Value { owner, binding: 7 };
+            let mut demand = capture(a);
+            demand.capture_dependency = Some(identity);
+            demand.constructor_projections.push(identity);
+            // This binding was selected in the same bounded scope, before this aggregation step.
+            Checker::merge_or_push_local_dependency_capture(
+                &mut captures,
+                &mut bindings,
+                demand,
+                Some(7),
+            );
+            wanted.push(identity);
+        }
+        let [actual] = captures.as_slice() else {
+            panic!("one physical capture")
+        };
+        assert_eq!(bindings, [Some(7)]);
+        assert_eq!(actual.logical_identity(a), canonical);
+        assert_eq!(actual.constructor_projections, wanted);
+        assert_eq!(actual.source, capture(a).source);
+        let (revisited, fields) =
+            super::super::capture_field_order::reconcile(Some(&captures), vec![capture(a)], false);
+        assert_eq!(fields, [Some(0)]);
+        assert_eq!(revisited[0].logical_identity(a), canonical);
+        assert_eq!(revisited[0].constructor_projections, wanted);
+    }
+
+    #[test]
+    fn equal_raw_binding_numbers_from_other_storage_families_do_not_prove_a_projection() {
+        let a = type_name("PhysicalCaptureA");
+        let other = type_name("UnrelatedCaptureOwner");
+        let mut captures = vec![capture(a)];
+        let mut bindings = vec![None];
+        Checker::merge_or_push_local_dependency_capture(
+            &mut captures,
+            &mut bindings,
+            capture(other),
+            None,
+        );
+        assert_eq!(captures.len(), 2);
+        assert_ne!(
+            captures[0].logical_identity(a),
+            captures[1].logical_identity(other)
+        );
+        assert!(captures
+            .iter()
+            .all(|capture| capture.constructor_projections.is_empty()));
     }
 }

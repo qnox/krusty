@@ -189,21 +189,16 @@ impl BodyFirChecker<'_> {
                     .map(RequiredConstructorCapture::Receiver),
             )
             .collect::<Vec<_>>();
-        required.sort_unstable_by_key(|capture| capture.binding().field);
+        // The canonical binding precedes its proven lookup views in each physical slot.
+        required.sort_by_key(|capture| capture.binding().field);
         for pair in required.windows(2) {
             let left = pair[0].binding();
             let right = pair[1].binding();
-            if left.owner == right.owner
-                && left.field == right.field
-                && (left.ty != right.ty || left.shared_cell != right.shared_cell)
-            {
+            if left.owner == right.owner && left.field == right.field && !left.same_storage(right) {
                 return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
             }
         }
-        required.dedup_by_key(|capture| {
-            let binding = capture.binding();
-            (binding.owner, binding.field)
-        });
+        required.dedup_by(|left, right| left.binding().same_storage(right.binding()));
         if required.is_empty() {
             return Ok(None);
         }
@@ -212,44 +207,18 @@ impl BodyFirChecker<'_> {
             .iter()
             .map(|required| {
                 let binding = required.binding();
-                let class = self
-                    .class_capture_values
-                    .iter()
-                    .map(|(_, binding)| *binding)
-                    .chain(self.class_values.values().copied())
-                    .chain(self.class_delegates.values().filter_map(|delegate| {
-                        if let DelegateStorage::ClassField(binding) = delegate.storage {
-                            Some(binding)
-                        } else {
-                            None
-                        }
-                    }))
-                    .chain(self.class_receivers.iter().copied())
-                    .find(|available| {
-                        (available.owner == binding.owner && available.field == binding.field)
-                            || binding.capture_identity.is_some()
-                                && available.capture_identity == binding.capture_identity
-                    })
-                    .or_else(|| match required {
-                        RequiredConstructorCapture::Value(name, _) => {
-                            self.class_values.get(name).copied()
-                        }
-                        RequiredConstructorCapture::Delegate(name, _) => self
-                            .class_delegates
-                            .get(name)
-                            .and_then(|delegate| match delegate.storage {
-                                DelegateStorage::ClassField(binding) => Some(binding),
-                                DelegateStorage::Local(_) => None,
-                            }),
-                        RequiredConstructorCapture::Receiver(required) => {
-                            self.class_receivers.iter().copied().find(|available| {
-                                available.semantic_receiver_depth
-                                    == required.semantic_receiver_depth
-                                    && available.ty == required.ty
-                            })
-                        }
-                    })
-                    .map(ConstructorCaptureOperand::Class);
+                let class = match binding.capture_identity {
+                    Some(identity) => self.class_capture_binding(identity),
+                    None => self
+                        .class_capture_values
+                        .iter()
+                        .map(|(_, binding)| *binding)
+                        .chain(self.class_receivers.iter().copied())
+                        .find(|available| {
+                            available.owner == binding.owner && available.field == binding.field
+                        }),
+                }
+                .map(ConstructorCaptureOperand::Class);
                 class.or_else(|| match required {
                     RequiredConstructorCapture::Value(name, _) => self
                         .local_binding(name)
@@ -1447,12 +1416,15 @@ impl BodyFirChecker<'_> {
             {
                 binding.enclosing_instance_owner = instance_owner;
             }
-            // A resolved forward may transport family B from operand family A. The field is one
-            // physical binding; retain both proven identity views for old and newly checked uses.
-            if let Some(alias) = capture
-                .source_identity(capture_owner)
-                .filter(|alias| Some(*alias) != capture_identity)
-            {
+            // A resolved forward and each constructor demand retain lookup views of this same
+            // physical operand. Never change the canonical capture or introduce another ABI slot.
+            let mut views = capture.constructor_projections.clone();
+            if let Some(source) = capture.source_identity(capture_owner) {
+                if !views.contains(&source) {
+                    views.push(source);
+                }
+            }
+            if views.iter().any(|view| Some(*view) != capture_identity) {
                 let binding = context
                     .capture_values
                     .iter()
@@ -1462,13 +1434,18 @@ impl BodyFirChecker<'_> {
                     .ok_or_else(|| {
                         self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
                     })?;
-                context.capture_values.push((
-                    capture.name.clone(),
-                    ClassCaptureBinding {
-                        capture_identity: Some(alias),
-                        ..binding
-                    },
-                ));
+                for view in views
+                    .into_iter()
+                    .filter(|view| Some(*view) != capture_identity)
+                {
+                    context.capture_values.push((
+                        capture.name.clone(),
+                        ClassCaptureBinding {
+                            capture_identity: Some(view),
+                            ..binding
+                        },
+                    ));
+                }
             }
             checked.push(FirLocalClassCapture {
                 origin,

@@ -156,6 +156,7 @@ mod tests {
             lexical_shadow_depth: 0,
             lexical_binding: Some(7),
             capture_dependency: None,
+            constructor_projections: Vec::new(),
             receiver_capture: None,
             receiver_role: None,
         }
@@ -248,6 +249,34 @@ mod tests {
             recaptured.logical_identity(type_name("LaterRecapturer")),
             Some(first)
         );
+    }
+
+    #[test]
+    fn a_new_constructor_demand_does_not_retag_an_established_body_capture() {
+        let owner = type_name("CanonicalBodyCapture");
+        let original = selected_value(ClassStorageSource {
+            owner,
+            identity: crate::fir::ClassCaptureIdentity::Value { owner, binding: 7 },
+        });
+        let mut revisit = original.clone();
+        revisit.capture_dependency = Some(crate::fir::ClassCaptureIdentity::Value {
+            owner: type_name("RequestedConstructorCapture"),
+            binding: 7,
+        });
+        let (selected, fields) = super::super::capture_field_order::reconcile(
+            Some(std::slice::from_ref(&original)),
+            vec![revisit],
+            false,
+        );
+        let [selected] = selected.as_slice() else {
+            panic!("one canonical physical capture")
+        };
+        assert_eq!(fields, [Some(0)]);
+        assert_eq!(
+            selected.logical_identity(owner),
+            original.logical_identity(owner)
+        );
+        assert_eq!(selected.capture_dependency, original.capture_dependency);
     }
 
     #[test]
