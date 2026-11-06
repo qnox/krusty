@@ -485,6 +485,167 @@ fn an_unresolved_type_in_one_java_source_keeps_the_module_java_headers() {
     );
 }
 
+/// Every `file:line:column: severity: message` line, errors and warnings, in emission order.
+fn reported_diagnostics(output: &str) -> Vec<(String, usize, usize, String, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (location, severity, message) =
+                ["error", "warning"].iter().find_map(|severity| {
+                    let (location, message) = line.split_once(&format!(": {severity}: "))?;
+                    Some((location, *severity, message))
+                })?;
+            let mut fields = location.rsplitn(3, ':');
+            let column = fields.next()?.parse().ok()?;
+            let line = fields.next()?.parse().ok()?;
+            let file = std::path::Path::new(fields.next()?)
+                .file_name()?
+                .to_str()?
+                .to_string();
+            Some((
+                file,
+                line,
+                column,
+                severity.to_string(),
+                message.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// Java sources whose declarations name `Absent`, which nothing provides. kotlinc's Java model keeps
+/// the unresolved type under its written name, so each Kotlin use of a declaration naming it reports
+/// the missing class, and a healthy member of the same class does not.
+const UNRESOLVED_JAVA_SOURCES: [(&str, &str); 3] = [
+    (
+        "p/Partial.java",
+        "package p;\nimport missing.dependency.Absent;\npublic class Partial {\n    \
+         public static String name() { return \"K\"; }\n    \
+         public static Absent absent() { return null; }\n    \
+         public static void take(Absent value) {}\n    \
+         public static <T extends Absent> T bounded() { return null; }\n    \
+         public static java.util.List<Absent> list() { return null; }\n    \
+         public static Absent FIELD = null;\n}\n",
+    ),
+    (
+        "p/Derived.java",
+        "package p;\nimport missing.dependency.Absent;\npublic class Derived extends Absent {\n    \
+         public static String ok() { return \"O\"; }\n}\n",
+    ),
+    (
+        "p/Healthy.java",
+        "package p;\npublic class Healthy { public static String ok() { return \"O\"; } }\n",
+    ),
+];
+
+const UNRESOLVED_JAVA_USES: &str = "package p\n\n\
+     fun healthy() = Healthy.ok() + Partial.name()\n\
+     fun returned() = Partial.absent()\n\
+     fun parameter() = Partial.take(null)\n\
+     fun bound() { Partial.bounded<Nothing>() }\n\
+     fun argument() = Partial.list()\n\
+     fun field() = Partial.FIELD\n\
+     fun through() = Derived.ok()\n\
+     fun constructed() = Derived()\n\
+     class Inheriting : Derived()\n";
+
+/// A Kotlin use of a Java source declaration that names an unresolved type reports exactly what
+/// kotlinc reports: the missing class at a return, parameter, type argument or field type, nothing
+/// at a type-parameter bound, and the missing supertype through and below a class that inherits it.
+/// Healthy members of the same classes stay usable. Constructing the inheriting class is kotlinc's
+/// eager supertype check, a warning the reference compile does not report beside these errors.
+#[test]
+fn uses_of_unresolved_java_source_types_report_kotlincs_diagnostics() {
+    let mut sources = UNRESOLVED_JAVA_SOURCES.to_vec();
+    sources.push(("Main.kt", UNRESOLVED_JAVA_USES));
+    let result = common::compiler_diagnostics(&sources, &[common::stdlib_jar()]);
+    let missing = "cannot access class 'Absent'. Check your module classpath for missing or \
+                   conflicting dependencies.";
+    let supertype = |of: &str| {
+        format!(
+            "cannot access 'Absent' which is a supertype of '{of}'. Check your module classpath \
+             for missing or conflicting dependencies."
+        )
+    };
+    let expected = [
+        ("Main.kt", 4, 26, "error", missing.to_string()),
+        ("Main.kt", 5, 27, "error", missing.to_string()),
+        ("Main.kt", 7, 26, "error", missing.to_string()),
+        ("Main.kt", 8, 23, "error", missing.to_string()),
+        ("Main.kt", 9, 25, "error", supertype("p.Derived")),
+        ("Main.kt", 11, 1, "error", supertype("p.Inheriting")),
+    ]
+    .map(|(file, line, column, severity, message)| {
+        (
+            file.to_string(),
+            line,
+            column,
+            severity.to_string(),
+            message,
+        )
+    })
+    .to_vec();
+    let mut krusty = reported_diagnostics(&result.krusty_stderr);
+    krusty.extend(reported_diagnostics(&result.krusty_stdout));
+    assert_eq!(reported_diagnostics(&result.reference_stderr), expected);
+    assert_eq!(krusty, expected);
+}
+
+/// The same uses through class files compiled against a dependency that is absent: kotlinc names
+/// the missing class by its full name here, because the class file records it.
+#[test]
+fn uses_of_classfile_signatures_naming_an_absent_class_report_kotlincs_diagnostics() {
+    let mut java = UNRESOLVED_JAVA_SOURCES
+        .iter()
+        .map(|(path, text)| (path.to_string(), text.to_string()))
+        .collect::<Vec<_>>();
+    java.push((
+        "missing/dependency/Absent.java".to_string(),
+        "package missing.dependency;\npublic class Absent {}\n".to_string(),
+    ));
+    let Some((classes, _)) = common::javac_compile(&java, &[]) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    std::fs::remove_file(classes.join("missing/dependency/Absent.class"))
+        .expect("javac emitted the dependency class");
+    let result = common::compiler_diagnostics(
+        &[("Main.kt", UNRESOLVED_JAVA_USES)],
+        &[common::stdlib_jar(), classes.clone()],
+    );
+    cleanup(&classes);
+    let missing = "cannot access class 'missing.dependency.Absent'. Check your module classpath \
+                   for missing or conflicting dependencies.";
+    let supertype = |of: &str| {
+        format!(
+            "cannot access 'missing.dependency.Absent' which is a supertype of '{of}'. Check \
+             your module classpath for missing or conflicting dependencies."
+        )
+    };
+    let expected = [
+        ("Main.kt", 4, 26, "error", missing.to_string()),
+        ("Main.kt", 5, 27, "error", missing.to_string()),
+        ("Main.kt", 7, 26, "error", missing.to_string()),
+        ("Main.kt", 8, 23, "error", missing.to_string()),
+        ("Main.kt", 9, 25, "error", supertype("p.Derived")),
+        ("Main.kt", 11, 1, "error", supertype("p.Inheriting")),
+    ]
+    .map(|(file, line, column, severity, message)| {
+        (
+            file.to_string(),
+            line,
+            column,
+            severity.to_string(),
+            message,
+        )
+    })
+    .to_vec();
+    let mut krusty = reported_diagnostics(&result.krusty_stderr);
+    krusty.extend(reported_diagnostics(&result.krusty_stdout));
+    assert_eq!(reported_diagnostics(&result.reference_stderr), expected);
+    assert_eq!(krusty, expected);
+}
+
 #[test]
 fn kotlin_covariant_supertype_is_invariant_in_a_java_class_header() {
     let kotlin = r#"

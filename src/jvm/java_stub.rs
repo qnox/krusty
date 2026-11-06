@@ -39,9 +39,15 @@ pub use member_types::{
 };
 use member_types::{MemberTypeLookup, MemberTypes};
 
+/// What a stub does with a type its source names but no classpath entry or source declares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StubMode {
+    /// Reject the whole source set.
     Strict,
+    /// Keep the declaration, and keep the unresolved type under its written name, as kotlinc's Java
+    /// model does: `Absent` (even when imported from `missing.dependency`) names the class
+    /// `Absent`, which the classpath lacks, so a Kotlin use of it reports the missing class rather
+    /// than meeting a fabricated `Object`.
     Lenient,
 }
 
@@ -49,6 +55,11 @@ impl StubMode {
     fn is_lenient(self) -> bool {
         self == Self::Lenient
     }
+}
+
+/// The internal name of a type reference nothing declares: its written spelling.
+fn unresolved_internal(name: &str) -> String {
+    name.replace('.', "/")
 }
 
 /// Generate stub classes for Java sources.
@@ -345,6 +356,13 @@ impl Resolver<'_> {
             .map(|resolved| resolved.internal)
     }
 
+    /// The internal name a type reference carries in a stub: the declaration it resolves to, or, in
+    /// lenient mode, the written name of a type nothing declares (see [`StubMode::Lenient`]).
+    fn type_internal(&self, name: &str) -> Option<String> {
+        self.internal_of(name)
+            .or_else(|| self.mode.is_lenient().then(|| unresolved_internal(name)))
+    }
+
     fn internal_of_with_depth(&self, name: &str) -> Option<ResolvedJavaName> {
         let mut segments = name.split('.');
         let head = segments.next()?;
@@ -489,15 +507,9 @@ impl Resolver<'_> {
                 }
             }
         } else {
-            match self.internal_of(&t.name) {
-                Some(i) => {
-                    s.push('L');
-                    s.push_str(&i);
-                    s.push(';');
-                }
-                None if self.mode.is_lenient() => s.push_str("Ljava/lang/Object;"),
-                None => return None,
-            }
+            s.push('L');
+            s.push_str(&self.type_internal(&t.name)?);
+            s.push(';');
             for a in t.arguments() {
                 self.resolves(a, tparams)?;
             }
@@ -511,9 +523,7 @@ impl Resolver<'_> {
         if primitive_desc(&t.name).is_some() || tparams.contains(&t.name) {
             return Some(());
         }
-        if self.internal_of(&t.name).is_none() && !self.mode.is_lenient() {
-            return None;
-        }
+        self.type_internal(&t.name)?;
         for a in t.arguments() {
             self.resolves(a, tparams)?;
         }
@@ -564,14 +574,22 @@ impl Resolver<'_> {
         // qualifiers; segments after it are member classifiers and use `.` (not `$`) in the JVMS
         // generic Signature grammar. Resolve every prefix so strict mode still rejects an unknown
         // member in the chain.
-        let classifier_start = (0..t.segments.len()).find(|end| {
+        let Some(classifier_start) = (0..t.segments.len()).find(|end| {
             let prefix = t.segments[..=*end]
                 .iter()
                 .map(|segment| segment.name.as_str())
                 .collect::<Vec<_>>()
                 .join(".");
             self.internal_of(&prefix).is_some()
-        })?;
+        }) else {
+            // Nothing declares any prefix: the whole written name is one unresolved classifier.
+            let last = t.segments.last()?;
+            s.push('L');
+            s.push_str(&self.type_internal(&t.name)?);
+            self.append_type_arguments(&mut s, &last.args, tparams)?;
+            s.push(';');
+            return Some(s);
+        };
         let root_name = t.segments[..=classifier_start]
             .iter()
             .map(|segment| segment.name.as_str())
@@ -594,14 +612,6 @@ impl Resolver<'_> {
         }
         s.push(';');
         Some(s)
-    }
-
-    fn internal_or_object(&self, name: &str) -> Option<String> {
-        match self.internal_of(name) {
-            Some(i) => Some(i),
-            None if self.mode.is_lenient() => Some("java/lang/Object".to_string()),
-            None => None,
-        }
     }
 
     /// `<E:Bound;F:Ljava/lang/Object;>` — the type-parameter block of a `Signature` attribute.
@@ -656,7 +666,7 @@ impl Resolver<'_> {
             "java/lang/Record".to_string()
         } else {
             match &d.superclass {
-                Some(t) => self.internal_or_object(&t.name)?,
+                Some(t) => self.type_internal(&t.name)?,
                 None => "java/lang/Object".to_string(),
             }
         };
@@ -676,11 +686,7 @@ impl Resolver<'_> {
             });
         }
         for i in &d.interfaces {
-            match self.internal_of(&i.name) {
-                Some(internal) => w.add_interface(&internal),
-                None if self.mode.is_lenient() => {}
-                None => return None,
-            }
+            w.add_interface(&self.type_internal(&i.name)?);
         }
         if is_annotation {
             w.add_interface("java/lang/annotation/Annotation");
@@ -1541,22 +1547,43 @@ mod tests {
         assert!(ci.method("names", "()[Ljava/lang/String;").is_some());
     }
 
+    /// An unresolved type keeps its written name in every position, as kotlinc's Java model does,
+    /// even when an import names a package for it: the stub then refers to a class the classpath
+    /// lacks instead of a fabricated `Object`, and a generic member keeps its type parameter.
     #[test]
-    fn lenient_erases_unresolvable_type_to_object_without_aborting() {
+    fn lenient_keeps_an_unresolved_type_under_its_written_name() {
         let sources = vec![(
-            "T.java".to_string(),
-            "public class J { public Missing f() { return null; } }".to_string(),
+            "J.java".to_string(),
+            "package p; import missing.dependency.Absent; \
+             public class J { \
+             public Absent ret() { return null; } \
+             public void take(Absent value) {} \
+             public java.util.List<Absent> list() { return null; } \
+             public <T extends Absent> T bounded() { return null; } \
+             public qualified.Missing qualified() { return null; } }"
+                .to_string(),
         )];
         let out = stub_classes(&sources, StubMode::Lenient, &|c: &str| {
-            c == "java/lang/Object"
+            matches!(c, "java/lang/Object" | "java/util/List")
         })
-        .expect("lenient emits despite unresolvable Missing");
+        .expect("lenient emits despite unresolvable types");
         let ci = crate::jvm::classreader::parse_class(&out[0].1).expect("parse");
-        assert!(ci.method("f", "()Ljava/lang/Object;").is_some());
+        assert!(ci.method("ret", "()LAbsent;").is_some());
+        assert!(ci.method("take", "(LAbsent;)V").is_some());
+        assert!(ci.method("qualified", "()Lqualified/Missing;").is_some());
+        let list = ci.method("list", "()Ljava/util/List;").expect("list");
+        assert_eq!(
+            list.signature.as_deref(),
+            Some("()Ljava/util/List<LAbsent;>;")
+        );
+        let bounded = ci.method("bounded", "()LAbsent;").expect("bounded");
+        assert_eq!(bounded.signature.as_deref(), Some("<T:LAbsent;>()TT;"));
     }
 
+    /// A file the header parser cannot read publishes nothing, without withdrawing other files; an
+    /// unresolved supertype stays in the header under its written name.
     #[test]
-    fn lenient_mode_isolates_malformed_files_and_unresolved_interfaces() {
+    fn lenient_mode_isolates_malformed_files_and_keeps_unresolved_interfaces() {
         let sources = vec![
             (
                 "Broken.java".to_string(),
@@ -1574,7 +1601,13 @@ mod tests {
         assert_eq!(out.len(), 1);
         let ci = parse_class(&out[0].1).expect("Good");
         assert_eq!(ci.this_class.render(), "Good");
-        assert!(ci.interfaces.is_empty());
+        assert_eq!(
+            ci.interfaces
+                .iter()
+                .map(|interface| interface.render())
+                .collect::<Vec<_>>(),
+            ["Missing"]
+        );
     }
 
     #[test]
