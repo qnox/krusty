@@ -724,13 +724,11 @@ companionBlocksAndExtensions/lateinit.kt
 compatibility/privateCompanionObject.kt
 compileKotlinAgainstKotlin/adaptedSuspendFunctionReference.kt
 compileKotlinAgainstKotlin/clashingFakeOverrideSignatures.kt
-compileKotlinAgainstKotlin/classInObject.kt
 compileKotlinAgainstKotlin/companionObjectInEnum.kt
 compileKotlinAgainstKotlin/companionObjectMember.kt
 compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
-compileKotlinAgainstKotlin/doublyNestedClass.kt
 compileKotlinAgainstKotlin/enum.kt
 compileKotlinAgainstKotlin/genericSetter.kt
 compileKotlinAgainstKotlin/inlineClasses/callDeserializedPropertyOnInlineClassType.kt
@@ -752,7 +750,6 @@ compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 compileKotlinAgainstKotlin/inlineClasses/suspendFunWithDefaultMangling.kt
 compileKotlinAgainstKotlin/innerClassConstructor.kt
 compileKotlinAgainstKotlin/interfaceDelegationAndBridgesProcessing.kt
-compileKotlinAgainstKotlin/internalSetterOverridden.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superCall.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superCallFromInterface.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superCallFromInterface2.kt
@@ -772,12 +769,9 @@ compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleProp.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simplePropWithHierarchy.kt
 compileKotlinAgainstKotlin/kt14012.kt
 compileKotlinAgainstKotlin/kt21775.kt
-compileKotlinAgainstKotlin/nestedClass.kt
-compileKotlinAgainstKotlin/nestedClassAsBound.kt
 compileKotlinAgainstKotlin/nestedClassInAnnotationArgument.kt
 compileKotlinAgainstKotlin/nestedEnum.kt
 compileKotlinAgainstKotlin/nestedFunctionTypeAliasExpansion.kt
-compileKotlinAgainstKotlin/nestedObject.kt
 compileKotlinAgainstKotlin/privateSuperType.kt
 compileKotlinAgainstKotlin/privateSuperType2.kt
 compileKotlinAgainstKotlin/privateSuperTypeDefaults.kt
@@ -3563,8 +3557,6 @@ multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflict.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
 multiplatform/k2/hmpp/expectActualChainExtra3-3.kt
-multiplatform/k2/hmpp/expectActualExtensions2-3.kt
-multiplatform/k2/hmpp/expectActualExtensions3-3.kt
 multiplatform/k2/hmpp/expectActualGeneric2-2.kt
 multiplatform/k2/hmpp/expectActualGeneric3-3.kt
 multiplatform/k2/hmpp/expectActualGenericTwoLibs.kt
@@ -5111,7 +5103,6 @@ typeMapping/nullableNothing.kt
 typealias/abbreviationWithCapturedType.kt
 typealias/deserializedAbbreviationWithRedundantArgument.kt
 typealias/enumEntryQualifier.kt
-typealias/importNestedTypealiasFromAnotherModule.kt
 typealias/incorrectTypeOfTypealiasForSuspendFTMM.kt
 typealias/incorrectTypeOfTypealiasForSuspendFunctionalType.kt
 typealias/innerClassTypeAliasConstructor.kt
