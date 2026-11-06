@@ -10,12 +10,14 @@ console.error(`release build: ${os.platform()} ${os.arch()}, ${os.cpus().length}
 function report() {
   console.error(`release build: ${new Date().toISOString()}, elapsed ${Math.round((Date.now() - started) / 1000)}s, free RAM ${mib(os.freemem())}/${mib(os.totalmem())} MiB`);
   try {
-    const options = { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] };
+    const options = { encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'] };
     if (os.platform() === 'win32') {
       console.error('release build: process CPU is cumulative seconds; working set is MiB');
-      console.error(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-        'Get-Process -Name cargo,rustc,link,lld-link,clang,clang-cl -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,CPU,@{Name="WorkingSetMiB";Expression={[math]::Round($_.WorkingSet64 / 1MB)}} | Format-Table -AutoSize | Out-String'
-      ], options).trim());
+      const command = "$ErrorActionPreference = 'Stop'; Get-Process | Where-Object { $_.ProcessName -in @('cargo','rustc','link','lld-link','clang','clang-cl') } | Select-Object Id,ProcessName,CPU,@{Name='WorkingSetMiB';Expression={[math]::Round($_.WorkingSet64 / 1MB)}} | Format-Table -AutoSize | Out-String";
+      const processes = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive',
+        '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')
+      ], options).trim();
+      console.error(processes || 'release build: no compiler or linker processes present');
     } else {
       const processes = execFileSync('ps', ['-A', '-o', 'pid=,ppid=,%cpu=,rss=,etime=,comm='], options);
       console.error('release build: PID PPID CPU% RSS_KiB ELAPSED PROCESS');
@@ -27,6 +29,8 @@ function report() {
     }
   } catch (error) {
     console.error(`release build: resource snapshot unavailable (${error.code || error.status || error.name})`);
+    const detail = error.stderr?.toString().trim();
+    if (detail) console.error(detail.slice(0, 2000));
   }
 }
 
