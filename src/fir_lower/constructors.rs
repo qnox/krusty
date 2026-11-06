@@ -844,22 +844,10 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
                 optional_expectation: false,
             },
         };
-        let java_deprecated = crate::ir::RetainedAnnotation {
-            retention: crate::types::AnnotationRetention::Runtime,
-            annotation: crate::ir::AppliedAnnotation {
-                written_order: None,
-                internal: crate::types::type_name("java/lang/Deprecated"),
-                values: Vec::new(),
-            },
-            facts: crate::types::AnnotationSemanticFacts::default(),
-        };
         ir.classes[class as usize]
             .secondary_ctors
             .push(crate::ir::IrSecondaryCtor {
-                annotations: crate::ir::DeclarationAnnotations::new(vec![
-                    deprecated,
-                    java_deprecated,
-                ]),
+                annotations: crate::ir::DeclarationAnnotations::new(vec![deprecated]),
                 source_order,
                 lines: crate::ir::IrSecondaryCtorLines::default(),
                 prefix_params: Vec::new(),
@@ -885,6 +873,7 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
                     default_masks: Vec::new(),
                 },
                 synthetic: false,
+                platform_visible: true,
                 vc_params: false,
                 param_checks: Vec::new(),
             });
@@ -1010,6 +999,7 @@ fn push_secondary_constructor(
             body: constructor.body,
             delegate,
             synthetic: false,
+            platform_visible: false,
             vc_params: false,
             param_checks: Vec::new(),
         });
