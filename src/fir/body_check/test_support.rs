@@ -378,6 +378,39 @@ fn try_checked_source_set_function_body_rewriting(
         .collect::<Vec<_>>();
     let mut session = BodyCheckSession::default();
     session.install_active_source(active);
+    // Member bodies consume the exact capture environments published by earlier executable
+    // declarations. Enter those bodies through the ordinary source-ordered driver, just as
+    // production does, before checking the requested body with its focused root/signature.
+    struct PrecedingBodySink;
+    impl CheckedBodySink for PrecedingBodySink {
+        fn accept_finalized(&mut self, _: BodyOwnerId, _: FirBody) {}
+    }
+    if let Some(position) = prepared
+        .ordinary
+        .iter()
+        .position(|work| work.declaration == declaration)
+    {
+        for work in prepared.ordinary[..position].iter().copied() {
+            match super::driver::check_and_dispatch_active_body_in_session(
+                BodyCheckUnit {
+                    file,
+                    info: &prepared.info,
+                    source,
+                    index,
+                },
+                active,
+                work,
+                prepared.sources.origins_mut(),
+                &mut prepared.inline_bodies,
+                &mut PrecedingBodySink,
+                &mut session,
+            ) {
+                Ok(()) => {}
+                Err(CheckedBodyDriverFailure::Check(error)) => return Err(error),
+                Err(error) => panic!("preceding ordinary body setup: {error:?}"),
+            }
+        }
+    }
     let body = check_body_unit_with_parameters_and_defaults(
         BodyCheckUnit {
             file,

@@ -70,6 +70,14 @@ fn same_capture(capture: &AnonymousObjectCapture, exact: &AnonymousObjectCapture
             AnonymousObjectCaptureSource::ClassStorage(left),
             AnonymousObjectCaptureSource::ClassStorage(right),
         ) => left.identity == right.identity,
+        (
+            AnonymousObjectCaptureSource::ImplicitReceiver { .. },
+            AnonymousObjectCaptureSource::ImplicitReceiver { .. },
+        )
+        | (
+            AnonymousObjectCaptureSource::EnclosingInstance { .. },
+            AnonymousObjectCaptureSource::EnclosingInstance { .. },
+        ) => capture.same_direct_receiver(exact),
         (left, right) => {
             capture.name == exact.name
                 && left == right
@@ -94,17 +102,25 @@ fn keep_established_facts(capture: &mut AnonymousObjectCapture, exact: &Anonymou
 
 /// Put a local class's used receiver captures in the order its body first used them, as kotlinc
 /// does, keeping every other capture in its field. `used` pairs each receiver's first-use position
-/// with its capture source.
+/// with its declaration role. A reconstructed operand coordinate is not a receiver identity.
 pub(super) fn order_receivers_by_first_use(
     captures: &mut [AnonymousObjectCapture],
     bindings: &mut [Option<u32>],
-    mut used: Vec<(usize, AnonymousObjectCaptureSource)>,
+    mut used: Vec<(usize, super::ReceiverDeclarationRole)>,
 ) {
     used.sort_by_key(|(first_use, _)| *first_use);
     let fields = captures
         .iter()
         .enumerate()
-        .filter(|(_, capture)| used.iter().any(|(_, source)| *source == capture.source))
+        .filter(|(_, capture)| {
+            matches!(
+                capture.source,
+                AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+                    | AnonymousObjectCaptureSource::EnclosingInstance { .. }
+            ) && used
+                .iter()
+                .any(|(_, role)| Some(*role) == capture.receiver_role)
+        })
         .map(|(field, _)| field)
         .collect::<Vec<_>>();
     let mut ordered = fields
@@ -113,7 +129,7 @@ pub(super) fn order_receivers_by_first_use(
         .collect::<Vec<_>>();
     ordered.sort_by_key(|(capture, _)| {
         used.iter()
-            .position(|(_, source)| *source == capture.source)
+            .position(|(_, role)| Some(*role) == capture.receiver_role)
     });
     for (field, (capture, binding)) in fields.into_iter().zip(ordered) {
         captures[field] = capture;

@@ -549,85 +549,75 @@ fn nested_anonymous_super_lambda_captures_its_callers_receiver() {
                           object : C(object : X({ value = 3 }) {}) {}\n\
                       }\n\
                   }\n";
-    let mut diagnostics = DiagSink::new();
-    let mut analysis = crate::frontend::analyze_source_set_with_features(
-        &[SourceInput::kotlin(source).with_file_stem("NestedAnonymousReceiver")],
-        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+    let inputs = [SourceInput::kotlin(source).with_file_stem("NestedAnonymousReceiver")];
+    let mut prepared = super::super::test_support::prepare_fir_source(
+        &inputs,
+        0,
+        Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        &mut diagnostics,
     );
-    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-
-    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
-    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
-    let (mut index, mut inline_bodies, _default_arguments, mut sources) =
-        streamed.module.into_parts();
-    let info = analysis.types[0].as_ref().expect("checked source");
-    crate::resolve::publish_checked_local_signatures(
-        &analysis.files[0],
-        SourceFileId::from_raw(0),
-        &analysis.symbols,
-        info,
-        &mut index,
-    )
-    .expect("checked local signatures must publish before FIR body checking");
-    let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
-    for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
-            crate::fir::BodyCheckUnit {
-                file: &analysis.files[0],
-                info,
-                source: SourceFileId::from_raw(0),
-                index: &index,
-            },
-            work,
-            sources.origins_mut(),
-            &mut inline_bodies,
-            &mut sink,
-            &mut session,
-        )
+    prepared
+        .check_all_bodies(&mut sink)
         .expect("nested anonymous-class bodies must become checked FIR");
-    }
+    let index = &prepared.index;
 
-    let (dispatch_captures, forwarded_storage_captures) = sink
+    // The whole reference emits no hidden B parameter or field in either anonymous class.
+    // Both superclass arguments remain expressions in B.update; the lambda alone captures B.
+    let objects = sink
         .0
         .iter()
         .flat_map(|(_, body)| {
-            (0..body.expression_count()).filter_map(|raw| {
-                let expression = body.expr(FirExprId::from_raw(raw as u32))?;
-                let FirExprKind::AnonymousObject(object) = &expression.kind else {
+            (0..body.expression_count()).filter_map(move |raw| {
+                let FirExprKind::AnonymousObject(object) =
+                    &body.expr(FirExprId::from_raw(raw as u32))?.kind
+                else {
                     return None;
                 };
-                Some(
-                    object
-                        .captures
-                        .iter()
-                        .fold((0usize, 0usize), |counts, capture| match &capture.source {
-                            FirLocalClassCaptureSource::DispatchReceiver => {
-                                (counts.0 + 1, counts.1)
-                            }
-                            FirLocalClassCaptureSource::ClassStorage { .. }
-                            | FirLocalClassCaptureSource::ConstructorCapture { .. }
-                            | FirLocalClassCaptureSource::CapturedClassStorage { .. } => {
-                                (counts.0, counts.1 + 1)
-                            }
-                            FirLocalClassCaptureSource::Value(_)
-                            | FirLocalClassCaptureSource::Captured { .. }
-                            | FirLocalClassCaptureSource::EnclosingReceiver { .. }
-                            | FirLocalClassCaptureSource::CapturedImplicitReceiver { .. }
-                            | FirLocalClassCaptureSource::ImplicitReceiver { .. } => counts,
-                        }),
-                )
+                Some((body, object))
             })
         })
-        .fold((0usize, 0usize), |total, counts| {
-            (total.0 + counts.0, total.1 + counts.1)
-        });
+        .collect::<Vec<_>>();
     assert_eq!(
-        [dispatch_captures, forwarded_storage_captures],
-        [1, 0],
-        "a forwarded super argument executes in B.update and must rematerialize the live receiver instead of reading the enclosing anonymous object's storage"
+        objects.len(),
+        2,
+        "the complete pair of anonymous constructions"
+    );
+    for (_, object) in &objects {
+        assert!(
+            object.captures.is_empty(),
+            "no anonymous storage: {object:?}"
+        );
+        assert!(object.delegate_arguments.is_empty());
+    }
+    let (outer_body, outer) = objects
+        .iter()
+        .find(|(_, object)| {
+            index
+                .classifier_identity(object.declaration)
+                .and_then(|classifier| index.recorded_direct_supertypes(classifier))
+                == Some(vec![crate::types::type_name("C")])
+        })
+        .expect("the selected C subclass");
+    let [outer_argument] = outer.super_arguments.as_ref() else {
+        panic!("one forwarded C argument: {:?}", outer.super_arguments)
+    };
+    assert_eq!(
+        (outer_argument.slot, outer_argument.type_operator_shells),
+        (0, 0)
+    );
+    let FirExprKind::AnonymousObject(inner) = &outer_body
+        .expr(outer_argument.value)
+        .expect("forwarded X construction")
+        .kind
+    else {
+        panic!("C receives the checked X construction")
+    };
+    assert_eq!(
+        index
+            .classifier_identity(inner.declaration)
+            .and_then(|classifier| index.recorded_direct_supertypes(classifier)),
+        Some(vec![crate::types::type_name("X")])
     );
 
     let receiver_type = crate::types::type_name("B");
@@ -666,6 +656,10 @@ fn nested_anonymous_super_lambda_captures_its_callers_receiver() {
         .collect::<Vec<_>>();
     assert_eq!(forwarded.len(), 1, "one forwarded superclass lambda");
     let (object, argument, lambda) = forwarded[0];
+    assert_eq!(
+        object.declaration, inner.declaration,
+        "X forwards this lambda"
+    );
     let classifier = index
         .classifier_identity(object.declaration)
         .expect("anonymous classifier");

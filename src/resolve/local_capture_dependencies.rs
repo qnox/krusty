@@ -124,8 +124,9 @@ impl Checker<'_> {
     ) {
         let existing = captures.iter().enumerate().find_map(|(index, capture)| {
             // The same semantic source is one capture, whether or not a dependency asked for it.
-            // Lexical values require their resolved binding identity; receiver/storage captures
-            // carry their exact coordinate in `source`. Spelling is never part of this join.
+            // Lexical values require their resolved binding identity; receivers retain their
+            // declaration role, and storage carries its logical source key. Coordinates and
+            // spelling are never identities in this join.
             let same_source = match (capture_bindings[index], binding) {
                 (Some(existing), Some(candidate)) => existing == candidate,
                 (None, None)
@@ -137,6 +138,14 @@ impl Checker<'_> {
                             AnonymousObjectCaptureSource::ClassStorage(left),
                             AnonymousObjectCaptureSource::ClassStorage(right),
                         ) => left.identity == right.identity,
+                        (
+                            AnonymousObjectCaptureSource::ImplicitReceiver { .. },
+                            AnonymousObjectCaptureSource::ImplicitReceiver { .. },
+                        )
+                        | (
+                            AnonymousObjectCaptureSource::EnclosingInstance { .. },
+                            AnonymousObjectCaptureSource::EnclosingInstance { .. },
+                        ) => capture.same_direct_receiver(&candidate),
                         (left, right) => left == right,
                     }
                 }
@@ -445,16 +454,61 @@ impl Checker<'_> {
                     required.source
                 }
                 AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. } => required.source,
-                AnonymousObjectCaptureSource::EnclosingInstance { current, depth }
-                | AnonymousObjectCaptureSource::ImplicitReceiver { current, depth } => {
-                    if !receivers.iter().any(|receiver| {
-                        receiver.current == current
-                            && receiver.receiver_depth == depth as usize
-                            && receiver.ty == required.ty
-                    }) {
+                AnonymousObjectCaptureSource::EnclosingInstance { .. }
+                | AnonymousObjectCaptureSource::ImplicitReceiver { .. } => {
+                    let Some(role) = required.receiver_role else {
+                        self.diags.error(
+                            crate::diag::Span::new(0, 0),
+                            "required receiver capture has no declaration role",
+                        );
+                        return;
+                    };
+                    let mut selected = receivers
+                        .iter()
+                        .filter(|receiver| receiver.receiver_role == Some(role));
+                    let Some(receiver) = selected.next() else {
+                        // A receiver introduced inside the selected call's lambda is supplied there,
+                        // not captured into the classifier surrounding that lambda.
+                        continue;
+                    };
+                    if selected.next().is_some() {
+                        self.diags.error(
+                            crate::diag::Span::new(0, 0),
+                            "required receiver capture has ambiguous declaration roles",
+                        );
+                        return;
+                    }
+                    if receiver.ty != required.ty {
                         continue;
                     }
-                    required.source
+                    let depth = u32::try_from(receiver.receiver_depth)
+                        .expect("too many implicit receiver rungs");
+                    let source = if receiver.class_receiver {
+                        AnonymousObjectCaptureSource::EnclosingInstance {
+                            current: receiver.current,
+                            depth,
+                        }
+                    } else {
+                        AnonymousObjectCaptureSource::ImplicitReceiver {
+                            current: receiver.current,
+                            depth,
+                        }
+                    };
+                    required.semantic_receiver = Some(if receiver.class_receiver {
+                        AnonymousObjectReceiverSource::EnclosingInstance {
+                            current: receiver.current,
+                            depth,
+                        }
+                    } else {
+                        AnonymousObjectReceiverSource::ImplicitReceiver {
+                            current: receiver.current,
+                            depth,
+                        }
+                    });
+                    if !required.constructor_projections.contains(&wanted) {
+                        required.constructor_projections.push(wanted);
+                    }
+                    source
                 }
             };
             required.lexical_shadow_depth = lexical_shadow_depth;
@@ -801,5 +855,114 @@ mod tests {
         assert!(captures
             .iter()
             .all(|capture| capture.constructor_projections.is_empty()));
+    }
+
+    fn receiver(identity: u32, declaration: u32, depth: u32) -> AnonymousObjectCapture {
+        let mut capture = capture(type_name("ReceiverCaptureHost"));
+        capture.lexical_binding = None;
+        capture.source = AnonymousObjectCaptureSource::ImplicitReceiver {
+            current: depth == 0,
+            depth,
+        };
+        capture.semantic_receiver = Some(AnonymousObjectReceiverSource::ImplicitReceiver {
+            current: depth == 0,
+            depth,
+        });
+        capture.receiver_capture = Some(identity);
+        capture.receiver_role = Some(ReceiverDeclarationRole::Extension(crate::diag::Span {
+            lo: declaration,
+            hi: declaration + 1,
+        }));
+        capture
+    }
+
+    #[test]
+    fn constructor_only_receiver_demand_survives_without_retagging_its_physical_capture() {
+        let original = receiver(0, 10, 0);
+        let mut captures = vec![original.clone()];
+        let mut bindings = vec![None];
+        let wanted = crate::fir::ClassCaptureIdentity::Receiver(0);
+        let mut required = original.clone();
+        required.capture_dependency = Some(wanted);
+        required.constructor_projections.push(wanted);
+        Checker::merge_or_push_local_dependency_capture(
+            &mut captures,
+            &mut bindings,
+            required,
+            None,
+        );
+        assert_eq!(captures.len(), 1);
+        assert_eq!(captures[0].capture_dependency, None);
+        assert_eq!(captures[0].constructor_projections, [wanted]);
+        super::super::anonymous_object_capture::drop_unused_implicit_receivers(
+            &mut captures,
+            &mut bindings,
+            &[],
+        );
+        assert_eq!(bindings, [None]);
+        assert_eq!(captures[0].source, original.source);
+        assert_eq!(captures[0].receiver_capture, original.receiver_capture);
+        let mut shifted = receiver(0, 10, 2);
+        shifted.constructor_projections = captures[0].constructor_projections.clone();
+        let (revisited, fields) = super::super::capture_field_order::reconcile(
+            Some(&captures),
+            vec![shifted.clone()],
+            false,
+        );
+        assert_eq!(fields, [Some(0)]);
+        assert_eq!(revisited, [shifted]);
+
+        let mut unused = vec![original];
+        let mut unused_bindings = vec![None];
+        super::super::anonymous_object_capture::drop_unused_implicit_receivers(
+            &mut unused,
+            &mut unused_bindings,
+            &[],
+        );
+        assert!(unused.is_empty());
+        assert!(unused_bindings.is_empty());
+    }
+
+    #[test]
+    fn equal_receiver_coordinates_never_merge_distinct_declaration_roles() {
+        let mut captures = vec![receiver(0, 10, 0)];
+        let mut bindings = vec![None];
+        let mut required = receiver(1, 20, 0);
+        required.capture_dependency = Some(crate::fir::ClassCaptureIdentity::Receiver(1));
+        Checker::merge_or_push_local_dependency_capture(
+            &mut captures,
+            &mut bindings,
+            required.clone(),
+            None,
+        );
+        assert_eq!(captures, [receiver(0, 10, 0), required]);
+        assert_eq!(bindings, [None, None]);
+    }
+
+    #[test]
+    fn enclosing_instance_roles_remain_distinct_without_closure_ids() {
+        let mut enclosing = receiver(0, 10, 0);
+        enclosing.receiver_capture = None;
+        enclosing.receiver_role = Some(ReceiverDeclarationRole::EnclosingClass(type_name("Outer")));
+        enclosing.source = AnonymousObjectCaptureSource::EnclosingInstance {
+            current: true,
+            depth: 0,
+        };
+        let mut shifted = enclosing.clone();
+        shifted.source = AnonymousObjectCaptureSource::EnclosingInstance {
+            current: false,
+            depth: 2,
+        };
+        let mut other = enclosing.clone();
+        other.receiver_role = Some(ReceiverDeclarationRole::EnclosingClass(type_name("Other")));
+        assert!(shifted.same_direct_receiver(&enclosing));
+        assert!(!other.same_direct_receiver(&enclosing));
+        let (revisited, fields) = super::super::capture_field_order::reconcile(
+            Some(&[enclosing]),
+            vec![other.clone(), shifted.clone()],
+            false,
+        );
+        assert_eq!(fields, [Some(1)]);
+        assert_eq!(revisited, [other, shifted]);
     }
 }

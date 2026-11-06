@@ -455,8 +455,9 @@ fn missing_ambiguous_and_malformed_constructor_sources_never_recover_a_shadowing
             let name = index.declaration_name(DeclarationId::from_raw(work.owner.raw()));
             let requested = matches!(name, Some("requestedB" | "requestedC"));
             let poisoned_owner = if malformed_plan && requested {
-                let range = index
-                    .declaration_range(work.declaration)
+                let range = prepared
+                    .active
+                    .span(&prepared.file, work.declaration)
                     .expect("selected method source range");
                 let selected = info
                     .resolved_constructors

@@ -120,6 +120,23 @@ pub struct AnonymousObjectCapture {
 }
 
 impl AnonymousObjectCapture {
+    /// Direct receiver operands correlate by their declaration role across reconstructed towers.
+    /// Their current/depth coordinates belong only to this visit's construction site.
+    pub(super) fn same_direct_receiver(&self, other: &Self) -> bool {
+        matches!(
+            (self.source, other.source),
+            (
+                AnonymousObjectCaptureSource::ImplicitReceiver { .. },
+                AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+            ) | (
+                AnonymousObjectCaptureSource::EnclosingInstance { .. },
+                AnonymousObjectCaptureSource::EnclosingInstance { .. }
+            )
+        ) && self.receiver_role.is_some()
+            && self.receiver_role == other.receiver_role
+            && self.receiver_capture == other.receiver_capture
+    }
+
     /// The captured transport family is anchored once; its selected source may be a different
     /// class's storage when the resolver proved a lexical forward mapping.
     pub(crate) fn logical_identity(
@@ -245,8 +262,8 @@ pub enum AnonymousObjectCaptureSource {
         depth: u32,
     },
     /// A receiver introduced by an enclosing extension/receiver-function/context rung. The
-    /// coordinate is relative to the construction body's checked receiver tower; it is semantic
-    /// identity and must not be reconstructed from the capture field spelling.
+    /// coordinate is relative to the construction body's checked receiver tower. The recorded
+    /// declaration role owns its identity across visits; the field spelling proves neither.
     ImplicitReceiver {
         current: bool,
         depth: u32,
@@ -597,16 +614,9 @@ fn merge_local_receiver_capture(
 ) {
     if let Some(existing) = captures
         .iter_mut()
-        .find(|existing| existing.source == candidate.source)
+        .find(|existing| existing.same_direct_receiver(&candidate))
     {
         existing.retain_constructor_projections(&candidate.constructor_projections);
-        if existing.receiver_role.is_none() && candidate.receiver_role.is_some() {
-            existing.receiver_capture = candidate.receiver_capture;
-            existing.receiver_role = candidate.receiver_role;
-        } else if candidate.receiver_role.is_some() {
-            assert_eq!(existing.receiver_capture, candidate.receiver_capture);
-            assert_eq!(existing.receiver_role, candidate.receiver_role);
-        }
         return;
     }
     captures.push(candidate);
@@ -661,7 +671,7 @@ impl Checker<'_> {
             merge_local_receiver_capture(captures, bindings, current.clone());
             let selected = captures
                 .iter_mut()
-                .find(|capture| capture.source == prior.source)
+                .find(|capture| capture.same_direct_receiver(prior))
                 .expect("the refreshed receiver was installed");
             *selected = current;
         }
@@ -701,7 +711,13 @@ impl Checker<'_> {
             else {
                 continue;
             };
-            used_receivers.push((first_use, observed.capture.source));
+            used_receivers.push((
+                first_use,
+                observed
+                    .capture
+                    .receiver_role
+                    .expect("a selected receiver has declaration provenance"),
+            ));
             merge_local_receiver_capture(captures, bindings, observed.capture.clone());
         }
         // An inner class is not entered as its own local-class statement, so it never publishes
@@ -729,14 +745,18 @@ impl Checker<'_> {
                     AnonymousObjectCaptureSource::ImplicitReceiver { .. }
                         | AnonymousObjectCaptureSource::EnclosingInstance { .. }
                 )
-                .then_some(capture.source)
+                .then(|| {
+                    capture
+                        .receiver_role
+                        .expect("a proven receiver has declaration provenance")
+                })
             })
             .enumerate()
             .collect::<Vec<_>>();
         used_receivers.sort_by_key(|(position, _)| *position);
-        for (_, source) in used_receivers {
-            if !proven_uses.iter().any(|(_, proven)| *proven == source) {
-                proven_uses.push((proven_uses.len(), source));
+        for (_, role) in used_receivers {
+            if !proven_uses.iter().any(|(_, proven)| *proven == role) {
+                proven_uses.push((proven_uses.len(), role));
             }
         }
         let used_receivers = proven_uses;
@@ -1185,7 +1205,7 @@ mod receiver_remap_tests {
 pub(super) fn drop_unused_implicit_receivers(
     captures: &mut Vec<AnonymousObjectCapture>,
     bindings: &mut Vec<Option<u32>>,
-    used: &[(usize, AnonymousObjectCaptureSource)],
+    used: &[(usize, super::ReceiverDeclarationRole)],
 ) {
     let mut kept_captures = Vec::with_capacity(captures.len());
     let mut kept_bindings = Vec::with_capacity(bindings.len());
@@ -1194,7 +1214,10 @@ pub(super) fn drop_unused_implicit_receivers(
             capture.source,
             AnonymousObjectCaptureSource::ImplicitReceiver { .. }
         ) && capture.capture_dependency.is_none()
-            && !used.iter().any(|(_, source)| *source == capture.source);
+            && capture.constructor_projections.is_empty()
+            && !used
+                .iter()
+                .any(|(_, role)| Some(*role) == capture.receiver_role);
         if unused_receiver {
             continue;
         }
