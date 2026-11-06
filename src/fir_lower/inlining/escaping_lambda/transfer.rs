@@ -1252,8 +1252,8 @@ fn splice_captured_lambda_invocation(
         stmts: Vec::new(),
         value: Some(frame),
     };
-    if let Some(end) = ir.expr_end_lines.get(&lambda).copied() {
-        ir.expr_end_lines.insert(invocation, end);
+    if let Some(end) = ir.end_line(lambda) {
+        ir.set_end_line(invocation, end);
     }
     ir.suspend_calls.remove(&invocation);
     ir.suspend_call_overridden_results.remove(&invocation);
@@ -1592,9 +1592,8 @@ fn function_mentions_anonymous_class(ir: &crate::ir::IrFile, function: u32) -> b
         || ir.exprs.iter().enumerate().any(|(index, expr)| {
             matches!(expr, IrExpr::Lambda { impl_fn, .. } if *impl_fn == function)
                 && ir
-                    .logical_types
-                    .get(&(index as u32))
-                    .is_some_and(|ty| type_mentions_anonymous_class(ir, *ty))
+                    .logical_type(index as u32)
+                    .is_some_and(|ty| type_mentions_anonymous_class(ir, ty))
         })
 }
 
@@ -1626,7 +1625,12 @@ fn type_mentions_anonymous_class(ir: &crate::ir::IrFile, ty: Ty) -> bool {
         TyKind::Intersection(parts) => parts
             .iter()
             .any(|part| type_mentions_anonymous_class(ir, *part)),
-        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => false,
+        TyKind::Unit
+        | TyKind::Null
+        | TyKind::Nothing
+        | TyKind::Error
+        | TyKind::Pending
+        | TyKind::Var(..) => false,
     }
 }
 

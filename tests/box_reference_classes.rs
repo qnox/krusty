@@ -59,13 +59,27 @@ pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, S
         BoxJdk::Full { root: Some(&jdk) },
         krusty::conformance::COROUTINE_HELPERS,
     )?;
-    // Keep the qualified inventory for comparisons; execution uses the runner's classpath names.
-    let classes = reference
+    let units = plan_units(src, stem, krusty::conformance::COROUTINE_HELPERS)?;
+    let entry = units
+        .last()
+        .ok_or_else(|| format!("{stem}: reference graph has no final module"))?;
+    let entry_classes = reference
+        .module(&entry.module)
+        .ok_or_else(|| format!("{stem}: reference final module emitted no classes"))?;
+    let entry_classes = entry_classes
+        .iter()
+        .map(|(name, bytes)| (name.clone(), bytes.clone()))
+        .collect::<Vec<_>>();
+    let box_class = common::find_box_class(&entry_classes)
+        .ok_or_else(|| format!("{stem}: reference final module emitted no box()"))?;
+    // Keep every module-qualified artifact for comparisons. Execution gives the final module's
+    // own classes precedence over a same-named dependency class, including its selected box owner.
+    let mut runtime = reference
         .qualified()
         .map(|((_, name), bytes)| (name.to_owned(), bytes.to_vec()))
-        .collect::<Vec<_>>();
-    let box_class = common::find_box_class(&classes)
-        .ok_or_else(|| format!("{stem}: reference compiler emitted no box()"))?;
+        .collect::<BTreeMap<_, _>>();
+    runtime.extend(entry_classes);
+    let classes = runtime.into_iter().collect::<Vec<_>>();
     let answer = common::run_box(&classes, &box_class, &classpath);
     if answer.as_deref() != Some("OK") {
         return Err(format!(
@@ -531,31 +545,17 @@ impl ReferenceCacheInputs<'_> {
     }
 }
 
-/// kotlinc "test-only" language features: the compiler rejects `-XXLanguage:+<feature>` for these
-/// from the command line unless the `kotlinc.test.allow.testonly.language.features` JVM property is
-/// set, exactly as kotlinc's own test runner enables them. A corpus case that opts one in through
-/// `// LANGUAGE:` must reference-compile with that property, not be dropped from the population.
-const TEST_ONLY_LANGUAGE_FEATURES: &[&str] = &["ImplicitSignedToUnsignedIntegerConversion"];
-
 /// The JVM properties the reference compiler server runs under for these units: the
 /// `kotlinc.test.allow.testonly.language.features` property when a unit's arguments enable a
 /// test-only feature, which the persistent server applies on its own property-keyed pool rather
 /// than passing to the compiler. Every other directive is an argument of the unit
 /// ([`unit_compiler_configuration`]), shared with krusty's own compile of the case.
 fn reference_jvm_properties(units: &[PlannedUnit]) -> Vec<String> {
-    let enables_test_only_feature = units
-        .iter()
-        .flat_map(|unit| &unit.arguments)
-        .any(|argument| {
-            argument
-                .strip_prefix("-XXLanguage:+")
-                .is_some_and(|feature| TEST_ONLY_LANGUAGE_FEATURES.contains(&feature))
-        });
-    if enables_test_only_feature {
-        vec!["-Dkotlinc.test.allow.testonly.language.features=true".to_string()]
-    } else {
-        Vec::new()
-    }
+    krusty::conformance::reference_jvm_properties(
+        units
+            .iter()
+            .flat_map(|unit| unit.arguments.iter().map(String::as_str)),
+    )
 }
 
 /// One reference compilation unit of a case, in build order: its module identity, sources, the
@@ -1017,6 +1017,21 @@ mod tests {
     }
 
     #[test]
+    fn the_owned_jvm_oracle_runs_the_final_module_box_instead_of_a_library_box() {
+        let source = include_str!("box_regressions/multimodule/packagedFinalModuleBox.kt");
+        let reference = checked_box(source, "PackagedFinalModuleOracle")
+            .expect("the complete module graph must run its final box as OK");
+        assert!(reference
+            .module("library")
+            .expect("retain the library's complete class inventory")
+            .contains_key("packageentry/library/LibraryKt"));
+        assert!(reference
+            .module("main")
+            .expect("retain the final module's complete class inventory")
+            .contains_key("packageentry/when/MainKt"));
+    }
+
+    #[test]
     fn owned_jvm_oracle_prepares_raw_portable_value_class_source() {
         if !kotlinc_available() {
             return;
@@ -1434,6 +1449,55 @@ mod tests {
         assert_eq!(
             properties("// LANGUAGE: +ContextParameters\nfun box() = \"OK\"\n"),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn reference_test_only_properties_cover_each_declared_feature_state() {
+        let table = krusty::features::FeatureTable::for_version(krusty::kotlin_version::target())
+            .expect("the configured release has a feature table");
+        let features = table
+            .features()
+            .iter()
+            .filter(|feature| feature.test_only)
+            .collect::<Vec<_>>();
+        assert!(!features.is_empty());
+        for feature in features {
+            for state in [
+                format!("+{}", feature.name),
+                format!("-{}", feature.name),
+                format!("+{},-{}", feature.name, feature.name),
+            ] {
+                let source = format!("// LANGUAGE: {state}\nfun box() = \"OK\"\n");
+                let units = plan_units(&source, "box", NO_HELPERS).expect("a supported shape");
+                assert_eq!(
+                    reference_jvm_properties(&units),
+                    ["-Dkotlinc.test.allow.testonly.language.features=true"],
+                    "{state}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reference_test_only_property_reaches_the_direct_acceptance_oracle() {
+        let table = krusty::features::FeatureTable::for_version(krusty::kotlin_version::target())
+            .expect("the configured release has a feature table");
+        let feature = table
+            .features()
+            .iter()
+            .find(|feature| feature.test_only)
+            .expect("a declared test-only feature");
+        let source = format!("// LANGUAGE: +{}\nfun box() = \"OK\"\n", feature.name);
+        assert_eq!(
+            krusty::conformance::reference_jvm_acceptance(
+                &source,
+                "box",
+                &[common::stdlib_jar()],
+                BoxJdk::Full { root: None },
+                NO_HELPERS,
+            ),
+            krusty::conformance::ReferenceJvmAcceptance::Accepted,
         );
     }
 

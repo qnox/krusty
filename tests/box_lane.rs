@@ -1015,18 +1015,22 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
         if let Err(error) = super::box_reference_classes::checked_box(&source, stem) {
             return Outcome::Harness(format!("required JVM oracle: {error}"));
         }
-        if lane.platform() == box_ratchet::Platform::Native && source.contains("// MODULE:") {
-            let answer =
-                super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source);
-            if answer.as_deref() != Some("OK") {
-                return Outcome::Harness(format!(
-                    "required Native oracle must return OK, got {answer:?}"
-                ));
-            }
-        }
     }
+    // A case outside the lane has no lane oracle: kotlinc-native cannot compile a JVM-only module.
     if let Some(reason) = lane.not_applicable(&source) {
         return Outcome::NotApplicable(reason);
+    }
+    if super::box_inventory::owned(file)
+        && lane.platform() == box_ratchet::Platform::Native
+        && source.contains("// MODULE:")
+    {
+        let answer =
+            super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source);
+        if answer.as_deref() != Some("OK") {
+            return Outcome::Harness(format!(
+                "required Native oracle must return OK, got {answer:?}"
+            ));
+        }
     }
     if let Some(reason) = lane.harness_limitation(&source) {
         return Outcome::Harness(reason.to_string());
@@ -1236,7 +1240,10 @@ pub fn run(lane: &dyn Lane) {
                 traced.push((file.clone(), reason.clone()));
                 *declined.entry(reason).or_default() += 1;
             }
-            Outcome::Harness(reason) => *harness_reasons.entry(reason).or_default() += 1,
+            Outcome::Harness(reason) => {
+                traced.push((file.clone(), reason.clone()));
+                *harness_reasons.entry(reason).or_default() += 1;
+            }
             Outcome::NotApplicable(reason) => *not_applicable.entry(reason).or_default() += 1,
             Outcome::Failed(reason) => {
                 let expected = baseline
@@ -1297,6 +1304,16 @@ pub fn run(lane: &dyn Lane) {
         for (file, reason) in &traced {
             if reason.contains(&pattern) {
                 eprintln!("  traced {}: {reason}", file.display());
+            }
+        }
+    }
+
+    // A changed non-pass needs its case-specific cause, not only the ranked totals. Keep this
+    // separate from `failed`: the ratchet already records the mismatch and owns its accounting.
+    if let Some(baseline) = baseline.as_ref().filter(|_| !bless) {
+        for (file, reason) in &traced {
+            if !baseline.failures.contains(&relative(file)) {
+                eprintln!("  unexpected non-pass {}: {reason}", file.display());
             }
         }
     }

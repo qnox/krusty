@@ -10,10 +10,10 @@ while IFS= read -r variable; do
   unset "$variable"
 done < <(git rev-parse --local-env-vars)
 
-export GIT_AUTHOR_NAME='Anton Efimchuk'
-export GIT_AUTHOR_EMAIL='anton.efimchuk@gmail.com'
-export GIT_COMMITTER_NAME='Anton Efimchuk'
-export GIT_COMMITTER_EMAIL='anton.efimchuk@gmail.com'
+export GIT_AUTHOR_NAME='Fixture Caller'
+export GIT_AUTHOR_EMAIL='caller@example.invalid'
+export GIT_COMMITTER_NAME='Fixture Caller'
+export GIT_COMMITTER_EMAIL='caller@example.invalid'
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 fixture=$(mktemp -d)
@@ -26,6 +26,13 @@ git init -q "$tree"
 git -C "$tree" remote add origin "$fixture/remote.git"
 # Some Git configurations negotiate pushes, which a fresh bare remote answers with a warning.
 git -C "$tree" config push.negotiate false
+GIT_AUTHOR_NAME='Source Author' GIT_AUTHOR_EMAIL=source@example.invalid \
+  GIT_COMMITTER_NAME='Source Integrator' GIT_COMMITTER_EMAIL=integrator@example.invalid \
+  git -C "$tree" commit --allow-empty -qm 'Publication source'
+# The checkout and inherited environment must not replace the selected release author.
+source_commit=$(git -C "$tree" rev-parse HEAD)
+git -C "$tree" commit --allow-empty -qm 'Unrelated checkout'
+export RELEASE_SHA=$source_commit
 ref=refs/krusty/central/1.2.3
 
 # gradlew publishes the implementation and marker poms (and the implementation jar), signed unless
@@ -179,6 +186,18 @@ echo true > "$fixture/published-dev.krustythecompiler.gradle.plugin"
 run_case partial 1 '' 'only one of the implementation (false) and marker (true) of 1.2.3 is on Maven Central'
 check 'partial: builds' "$(count "$fixture/builds")" 0
 
+# An invalid source cannot leave an upload that the publisher is unable to record.
+reset
+echo 0 > "$fixture/uploads"
+echo PUBLISHING > "$fixture/states-dep-1"
+invalid_source=$(git -C "$tree" rev-parse --verify --end-of-options 'missing-publication-source^{commit}' 2>&1 || true)
+case_env=(RELEASE_SHA=missing-publication-source)
+run_case 'invalid publication source' 128 '' "$invalid_source"
+check 'invalid publication source: builds' "$(count "$fixture/builds")" 0
+check 'invalid publication source: uploads' "$(cat "$fixture/uploads")" 0
+check 'invalid publication source: recorded' "$(recorded)" none
+case_env=()
+
 # A first run: the upload is recorded, followed through validation, and accepted.
 reset
 echo 0 > "$fixture/uploads"
@@ -188,7 +207,7 @@ check 'accepted: builds' "$(cat "$fixture/builds")" "$gradle_tasks"
 check 'accepted: Portal token kept from the build' "$(count "$fixture/gradle-env")" 0
 check 'accepted: recorded' "$(recorded)" 'central deployment dep-1 of krusty-gradle-plugin 1.2.3'
 check 'accepted: record identity' "$(git -C "$fixture/remote.git" log -1 --format='%an <%ae> / %cn <%ce>' "$ref")" \
-  'Anton Efimchuk <anton.efimchuk@gmail.com> / Anton Efimchuk <anton.efimchuk@gmail.com>'
+  'Source Author <source@example.invalid> / Source Author <source@example.invalid>'
 check 'accepted: clock' "$(cat "$fixture/clock")" 1010
 check 'accepted: upload' "$(grep -c -- '--max-time 120 .* -F bundle=@.*/upload?name=krusty-gradle-plugin-1.2.3&publishingType=AUTOMATIC$' "$fixture/curl.log")" 1
 check 'accepted: every request has a deadline' "$(grep -vc -- '--connect-timeout 10 --max-time ' "$fixture/curl.log")" 0
@@ -296,4 +315,4 @@ if [[ $failures -ne 0 ]]; then
   echo "$failures Maven Central publishing check(s) failed" >&2
   exit 1
 fi
-echo "Maven Central publishing: 16 cases passed"
+echo "Maven Central publishing: 17 cases passed"

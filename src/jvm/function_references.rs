@@ -487,17 +487,16 @@ fn realize_adapter_reference(
     let mut constructor_arguments = reference.captures;
     constructor_arguments.extend(reference.bound_receiver);
     // The constructor's declared parameters say that a value-class receiver is bound as its box.
-    let mut declared_parameters = None;
     let carrier = match constructor_arguments.as_slice() {
         arguments if !arguments.is_empty() => {
             let mut constructor_parameters = capture_types;
             if bound {
                 constructor_parameters.push(Ty::obj("kotlin/Any"));
             }
-            declared_parameters = Some(constructor_parameters.clone().into_boxed_slice());
             IrExpr::New {
                 internal,
                 args: arguments.to_vec(),
+                declared_params: Some(constructor_parameters.clone().into_boxed_slice()),
                 ctor_params: Some(constructor_parameters),
                 ctor_desc: None,
                 external_target: None,
@@ -512,10 +511,7 @@ fn realize_adapter_reference(
         },
         _ => unreachable!("empty and non-empty capture shapes are exhaustive"),
     };
-    let carrier = install_carrier(ir, expression, carrier, internal);
-    if let Some(parameters) = declared_parameters {
-        ir.construction_declared_params.insert(carrier, parameters);
-    }
+    install_carrier(ir, expression, carrier, internal);
     Ok(())
 }
 
@@ -531,7 +527,7 @@ fn install_carrier(
 ) -> ExprId {
     ir.exprs[expression] = carrier;
     let carrier = ExprId::try_from(expression).expect("an expression id fits its index");
-    ir.logical_types.insert(carrier, Ty::obj_name(class));
+    ir.set_logical_type(carrier, Ty::obj_name(class));
     carrier
 }
 
@@ -681,7 +677,7 @@ fn realize_own_invoke(
     // operands begin: at each parameter or captured value read, or at a constructed object's
     // `new`. Every other node enters it only at its dispatch, so a bound receiver's read stays
     // ahead of the line.
-    if let Some(line) = ir.expr_source_lines.get(&(expression as u32)).copied() {
+    if let Some(line) = ir.source_line(expression as u32) {
         // The bridge maps its whole body to the same line.
         ir.fn_decl_lines.insert(adapter, line);
         let parameter_count = function_type.params.len() as u32;
@@ -693,9 +689,9 @@ fn realize_own_invoke(
                 _ => false,
             };
             if marks {
-                ir.expr_source_lines.insert(current, line);
+                ir.set_source_line(current, line);
             } else {
-                ir.expr_source_lines.remove(&current);
+                ir.take_source_line(current);
                 ir.mark_dispatch_line(current, line);
             }
         }
@@ -963,6 +959,7 @@ mod tests {
                 crate::ir::IrValueCapture {
                     declaration: crate::ir::IrCapturedDeclaration::Parameter,
                     capturer: crate::ir::IrCapturingCallable::LocalFunction,
+                    crossinline_parameter: None,
                 },
             )];
             identities.extend(

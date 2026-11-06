@@ -97,6 +97,51 @@ pub(super) fn authenticate<'a, 'b>(
     })
 }
 
+/// The raw header of `identity`, a private member of `class` that no provider records. Only
+/// members of its class call a private member, so the calling member's authenticated class is
+/// the authority: the callee must be a direct member of that exact class header (a getter in its
+/// own property's getter slot), its receiver must name that exact class, and it must be private.
+pub(super) fn authenticate_private_member<'a, 'b>(
+    class: &'a KlibBodyClassContract,
+    identity: &crate::libraries::KlibDependencyCallable,
+    bodies: &'b KlibDeclarationBodies,
+) -> Result<ClassMemberHeader<'a, 'b>, KlibBodyDeclineReason> {
+    if class.module != identity.module
+        || class.signature.member_id().is_some()
+        || classifier_name(&class.signature)? != class.classifier
+    {
+        return Err(mismatch(
+            "the calling class identity disagrees with its private member",
+        ));
+    }
+    let member = bodies
+        .class_member_header(identity, &class.signature)
+        .map_err(mismatch)?
+        .ok_or_else(|| mismatch("a private member is not a direct member of its calling class"))?;
+    if member.class.base.symbol.kind != KlibIrSymbolKind::Class {
+        return Err(mismatch(
+            "the serialized class header has a non-class symbol",
+        ));
+    }
+    if crate::metadata::semantic::declaration_visibility(member.function.base.flags)
+        != crate::types::Visibility::Private
+    {
+        return Err(mismatch(
+            "a class member without a provider record is not private",
+        ));
+    }
+    authenticate_receiver(class, member.arena, member.function)?;
+    let (types, formals) = bind_class_parameters(&class.parameters, member.arena, member.class)?;
+    Ok(ClassMemberHeader {
+        contract: class,
+        arena: member.arena,
+        function: member.function,
+        class: member.class,
+        types,
+        formals,
+    })
+}
+
 fn bind_class_parameters(
     parameters: &KlibBodyClassParameters,
     arena: &KlibIrArena,

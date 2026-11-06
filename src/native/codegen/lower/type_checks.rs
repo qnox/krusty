@@ -209,19 +209,20 @@ impl<'a> FileLowering<'a> {
                     .and_then(|internal| self.function_type_descriptor(internal))
                     .expect("just matched")
             }
-            // `kotlin.collections.List`. The runtime builds two kinds and a check names neither,
-            // so both name a marker and that is what this compares against. Only where THIS FILE
-            // implements no list of its own: a class of the program standing behind the type would
-            // wear no marker, and answering `false` for one is a wrong answer rather than a
-            // decline. That file keeps declining, exactly as it did before.
+            // A read-only collection interface (`List`, `Collection`, `Iterable`, ...). The
+            // runtime's collections are of kinds a check names none of, so each wears the
+            // interface's marker, as a class of the program implementing it does (its descriptor
+            // flattens the markers of its dependency interfaces), and that is what this compares
+            // against.
             _ if target
                 .obj_internal()
-                .is_some_and(|internal| self.is_list_check_type(internal))
-                && !self.implements_collection_shape(
-                    super::super::super::intrinsics::CollectionShape::Iterable,
-                ) =>
+                .and_then(|internal| self.collection_check_descriptor(internal))
+                .is_some() =>
             {
-                "kt_type_list_interface"
+                target
+                    .obj_internal()
+                    .and_then(|internal| self.collection_check_descriptor(internal))
+                    .expect("just matched")
             }
             // One of Kotlin's REFLECTION types, asked about the same way a function type is: the
             // reference object's own type is one of a kind, so the markers are what it shares with
@@ -834,10 +835,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             };
         }
         // `HashMap()` / `HashSet()` and their linked spellings, the runtime's growable tables.
-        // Declared in no file either, for the reason the list above is not. Only the EMPTY form is
-        // realized: the capacity overloads are hints with nothing observable depending on them but
-        // arrive with a load factor beside them, and a copy constructor takes a collection whose
-        // walk would have to be the map's own — both decline with what they were passed in sight.
+        // Declared in no file either, for the reason the list above is not. The empty form and the
+        // initial-capacity one are realized: the capacity is a hint, but a negative one throws as
+        // Kotlin's does. The load-factor overload and a copy constructor, which takes a collection
+        // whose walk would have to be the map's own, decline with what they were passed in sight.
         if let Some(kind) = self
             .file
             .standard_collection_implementation(internal)
@@ -847,8 +848,22 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 super::classifier_shapes::StandardCollectionImplementation::List => None,
             })
         {
-            return match args {
-                [] => self.runtime_call(&format!("kt_{kind}_new"), &[], any(), &[]),
+            return match (args, selected) {
+                ([], _) => self.runtime_call(&format!("kt_{kind}_new"), &[], any(), &[]),
+                ([argument], Some([only])) if *only == Ty::Int => {
+                    let Some(capacity) = self.coerce(*argument, Ty::Int)? else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call(
+                        &format!("kt_hash_{kind}_with_capacity"),
+                        &[Ty::Int],
+                        any(),
+                        &[capacity],
+                    )
+                }
                 _ => Err(declined!("this constructor of `{name}`")),
             };
         }

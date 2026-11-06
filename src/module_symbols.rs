@@ -218,7 +218,7 @@ impl<'a> ModuleSymbols<'a> {
         let mut constructors = Vec::new();
         let constructor_generic_signature = |params: Vec<Ty>| {
             (!c.type_params.is_empty()).then(|| GenericSig {
-                formals: c.type_params.clone(),
+                formals: crate::types::TyParamName::all(&c.type_params),
                 formal_bounds: c
                     .type_param_bounds
                     .iter()
@@ -571,6 +571,7 @@ impl<'a> ModuleSymbols<'a> {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         };
@@ -889,7 +890,7 @@ impl<'a> ModuleSymbols<'a> {
                 associated_classifier: None,
                 associated_access_owner: None,
                 companion_associated: false,
-                formals: declaration.type_params().to_vec(),
+                formals: crate::types::TyParamName::all(declaration.type_params()),
                 ty: declaration.ret(),
                 context_count: declaration.context_params().len(),
                 context_param_names: declaration.context_param_names().to_vec(),
@@ -1025,7 +1026,6 @@ fn fn_info(
         external_identity: None,
         external_default_provider: None,
         external_property_identity: None,
-        compiler_core_declaration: None,
         declaration_owner: None,
         owner,
         name: name.to_string(),
@@ -1160,7 +1160,6 @@ fn source_callable(
         annotations: Vec::new(),
         external_default_provider: None,
         external_property_identity: None,
-        compiler_core_declaration: None,
         declaration_owner: None,
         owner,
         reflection_name: Some(name.clone()),
@@ -1565,7 +1564,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 associated_classifier: None,
                 associated_access_owner: None,
                 companion_associated: false,
-                formals: property.formals.clone(),
+                formals: crate::types::TyParamName::all(&property.formals),
                 ty: read_ty,
                 context_count: property.context_params.len(),
                 context_param_names: property.context_param_names.clone(),
@@ -1662,7 +1661,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     associated_access_owner: associated_classifier
                         .filter(|_| property.is_companion_block_member),
                     companion_associated: associated_classifier.is_some(),
-                    formals: property.formals.clone(),
+                    formals: crate::types::TyParamName::all(&property.formals),
                     ty: property.ty,
                     context_count: property.context_params.len(),
                     context_param_names: Vec::new(),

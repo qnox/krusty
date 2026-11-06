@@ -20,11 +20,46 @@ fun box(): String {
 "#;
 
 #[test]
+fn official_receiver_captures_preserve_values_and_once_only_inputs() {
+    let library = include_str!("fixtures/klib_closure_frames/ReceiverCapture.kt");
+    let consumer = include_str!("fixtures/klib_closure_frames/ReceiverCaptureConsumer.kt");
+    assert_official_dependency_closures(
+        library,
+        consumer,
+        "SerializedReceiverCapture",
+        DependencyConsumer::Native,
+    );
+}
+
+#[test]
 fn official_dependency_closures_preserve_nested_values_and_once_only_operands() {
     assert_official_dependency_closures(
         LIBRARY,
         CONSUMER,
         "SerializedClosure",
+        DependencyConsumer::Native,
+    );
+}
+
+#[test]
+fn dependency_top_level_callable_references_keep_declaration_identity_and_invocation() {
+    let library = include_str!("fixtures/klib_closure_frames/TopLevelReferences.kt");
+    let consumer = include_str!("fixtures/klib_closure_frames/TopLevelReferenceConsumer.kt");
+    let dependency = common::kotlinc_lib_out(&[("Library.kt", library)])
+        .expect("reference compiler required for callable-reference oracle");
+    let packaged_consumer = format!("package fixture\n{consumer}");
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[("Consumer.kt", &packaged_consumer)],
+            "fixture.ConsumerKt",
+            &[dependency],
+        ),
+        "OK"
+    );
+    assert_official_dependency_closures(
+        library,
+        consumer,
+        "SerializedTopLevelReference",
         DependencyConsumer::Native,
     );
 }
@@ -400,7 +435,7 @@ fn assert_official_dependency_closures(
     if matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
         assert_eq!(
             diags.diags.iter().map(|diag| (
-                diag.file, diag.span, diag.editor_span, diag.severity, diag.warning_name,
+                diag.file, diag.span, diag.editor_span, diag.severity, diag.name,
                 diag.kind, diag.identity, diag.msg.as_str(),
             )).collect::<Vec<_>>(),
             vec![(

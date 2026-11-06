@@ -23,11 +23,40 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
+  # Asks the runner controller where this run's jobs should run (infragnite/route-runner). In shadow
+  # mode the answer is only logged and recorded beside where each job really ran; every job keeps
+  # its own runs-on. No job waits for this one. Fork PRs get no OIDC token and do not ask.
+  route:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: just
+      # The same value build-tool-bins publishes as its matrix output.
+      - name: select supported Kotlin versions
+        id: versions
+        run: echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
+      - uses: infragnite/route-runner@2c24bcc9fe2f764ea321e285faeffda8e50f89ea # v1
+        with:
+          workflow: .github/workflows/ci.yml
+          asking: route
+          outputs: build-tool-bins.matrix=${{ steps.versions.outputs.matrix }}
+
   # Lint and coverage are independent merge gates. Give each its own runner so the clean Clippy
   # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
+  # Heavy builds (the coverage build in ci, the binary producers and build-release) and Native
+  # conformance run on GitHub-hosted runners. Other jobs use a self-hosted runner with one size label
+  # (rust-4c-8gb, helper-1c-1gb). Fork PRs run on ubuntu-latest: self-hosted runners never take
+  # fork PR jobs.
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,36 +83,63 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
+      # `java -version`.
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
       - name: lint
         run: just lint
-      # The ignored tests start real compiler-plugin and KSP hosts from their pinned toolchains
-      # on the runner's JDK. The toolchains and compiled adapters stay in krusty's cache.
-      - name: cache plugin host runtime
+
+  # krusty-plugin-host is outside the default members and the coverage packages, so its own
+  # compiler-independent tests run here. Compiler-dependent plugin integrations run in `ci`.
+  plugin-host:
+    # GitHub-hosted: these tests ran out of memory on the 8 GB self-hosted runners, and GitHub's
+    # Linux runners (16 GB) had free slots.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      # The host tests start real compiler-plugin hosts from their pinned toolchains on the
+      # runner's JDK. The toolchains and compiled adapters stay in krusty's cache.
+      - &plugin-host-runtime-cache
+        name: cache plugin host runtime
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/krusty/plugin-host
           key: plugin-host-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
-      # Outside the default members and the coverage packages, so no other job runs its tests.
       - name: plugin host tests
-        run: cargo test -p krusty-plugin-host -- --include-ignored
+        run: cargo test --profile gate -p krusty-plugin-host -- --include-ignored
 
   ci:
     runs-on: ubuntu-latest
-    outputs:
-      # Release packaging waits for coverage, then starts only while this master commit is still the
-      # publishable tip. The release job repeats the check while holding the publisher lock.
-      release_candidate: ${{ steps.release_candidate.outputs.publish }}
     env:
       # Coverage mappings are compiler-version dependent. Keep the committed baseline and the
       # instrumenting compiler on the same immutable nightly.
       KRUSTY_COVERAGE_TOOLCHAIN: nightly-2026-09-05
+      # The instrumented build compiles krusty's lib and test targets side by side, and every
+      # extra job token also lets rustc run more LLVM threads. Four jobs fit in 16 GB, which is
+      # what GitHub's four-core runners use; eight do not.
+      CARGO_BUILD_JOBS: "4"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      # Self-hosted runners have no preinstalled rustup.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
       - name: install coverage tooling
         run: rustup toolchain install "$KRUSTY_COVERAGE_TOOLCHAIN" --profile minimal --component llvm-tools-preview
       # Prebuilt binary: `cargo install cargo-llvm-cov` compiled it from source on every run
@@ -175,10 +231,16 @@ jobs:
       - name: install cross-architecture runners
         # The POSIX drivers compile against each target's own glibc headers, so the layer's
         # hand-copied numbers and layouts are checked against the target's, not the host's.
+        # Self-hosted runners ship these preinstalled and have no sudo.
         run: |
+          if [ -x /usr/bin/qemu-aarch64 ] && [ -x /usr/bin/qemu-riscv64 ] && [ -x /usr/bin/ld.lld ] &&
+            [ -d /usr/aarch64-linux-gnu/include ] && [ -d /usr/riscv64-linux-gnu/include ]; then
+            exit 0
+          fi
           sudo apt-get update
           sudo apt-get install -y qemu-user lld libc6-dev-arm64-cross libc6-dev-riscv64-cross
       - name: coverage gate
+        id: coverage
         env:
           # The e2e suite is one process. An instrumented run is about seventeen minutes; thirty
           # minutes leaves room for a slow runner and still fails a hung binary.
@@ -210,10 +272,28 @@ jobs:
         with:
           path: target/cache/kotlin-toolchain-oracle
           key: kotlin-toolchain-oracle-${{ github.sha }}
-      - name: select the current master release candidate
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        id: release_candidate
-        run: scripts/release-publisher.sh check >> "$GITHUB_OUTPUT"
+      # Reuse coverage's exact compiler e2e executable for its ignored plugin/KSP controls.
+      # This pass runs after the coverage report and does not change its measured workload.
+      - *plugin-host-runtime-cache
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: compiler plugin integration tests
+        env:
+          E2E_BINARY: ${{ steps.coverage.outputs.compiler_e2e_binary }}
+          RUST_MIN_STACK: "134217728"
+          LLVM_PROFILE_FILE: ${{ runner.temp }}/plugin-host-compiler-%p-%m.profraw
+        run: |
+          set -euo pipefail
+          source scripts/test-gate-defaults.sh
+          source scripts/test-deadline.sh
+          test -n "$E2E_BINARY" && test -x "$E2E_BINARY"
+          ignored_tests="$("$E2E_BINARY" plugin_host_compiler_e2e:: --ignored --list --format=terse)"
+          printf '%s\n' "$ignored_tests"
+          grep -q ': test$' <<< "$ignored_tests"
+          echo "plugin host compiler tests: $E2E_BINARY plugin_host_compiler_e2e:: --include-ignored --test-threads=1 (timeout=${KRUSTY_E2E_TIMEOUT_SECONDS}s)"
+          run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$E2E_BINARY" plugin_host_compiler_e2e:: --include-ignored --test-threads=1
 
   # Each artifact family has one producer. They run on separate hosted runners so the conformance
   # matrix waits for the slowest required build instead of serializing every unrelated target graph
@@ -226,6 +306,12 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
+      # `java -version`.
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
@@ -254,6 +340,12 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
+      # `java -version`.
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
       - name: build focused KLIB test binaries
         run: |
           set -euo pipefail
@@ -285,6 +377,12 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
+      # `java -version`.
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
@@ -326,6 +424,8 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [jvm]
+    # Cold reflective box cases share the fixed per-case execution deadline. Hosted capacity
+    # keeps JVM conformance independent of the heterogeneous self-hosted build fleet.
     runs-on: ubuntu-latest
     steps: &conformance-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -455,8 +555,8 @@ jobs:
       # key also hashes the inventory owner, shared case planning, reference server/Javac driver and
       # content-identity implementation. A producer or layout change therefore starts a fresh cache
       # instead of replaying inventories built by code that a hit would otherwise never execute.
+      # Owned Native/Wasm cases require these same JVM oracle inventories.
       - name: restore kotlinc box references (${{ matrix.version }})
-        if: matrix.target == 'jvm'
         id: box-references
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -655,7 +755,9 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [native, wasm]
-    runs-on: ubuntu-latest
+    # Native corpus rows use hosted capacity; Wasm keeps its existing self-hosted route.
+    # Fork pull requests continue to use hosted runners for both targets.
+    runs-on: ${{ (matrix.target == 'native' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps: *conformance-steps
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
@@ -665,14 +767,15 @@ jobs:
   # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, maven, build-tools, bazel]
+    needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, maven, build-tools, bazel]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "helper-1c-1gb"]') }}
     steps:
       - name: require every merge gate to succeed
         env:
           CI_RESULT: ${{ needs.ci.result }}
           LINT_RESULT: ${{ needs.lint.result }}
+          PLUGIN_HOST_RESULT: ${{ needs.plugin-host.result }}
           CONFORMANCE_RESULT: ${{ needs.conformance.result }}
           KLIB_CONFORMANCE_RESULT: ${{ needs.conformance-klib.result }}
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
@@ -683,6 +786,7 @@ jobs:
         run: |
           echo "ci: $CI_RESULT"
           echo "lint: $LINT_RESULT"
+          echo "plugin-host: $PLUGIN_HOST_RESULT"
           echo "conformance: $CONFORMANCE_RESULT"
           echo "KLIB conformance: $KLIB_CONFORMANCE_RESULT"
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
@@ -692,6 +796,7 @@ jobs:
           echo "bazel: $BAZEL_RESULT"
           if [ "$CI_RESULT" != success ] \
             || [ "$LINT_RESULT" != success ] \
+            || [ "$PLUGIN_HOST_RESULT" != success ] \
             || [ "$CONFORMANCE_RESULT" != success ] \
             || [ "$KLIB_CONFORMANCE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
@@ -699,13 +804,15 @@ jobs:
             || [ "$MAVEN_RESULT" != success ] \
             || [ "$BUILD_TOOLS_RESULT" != success ] \
             || [ "$BAZEL_RESULT" != success ]; then
-            echo "lint, coverage, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed" >&2
+            echo "lint, plugin host tests, coverage, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed" >&2
             exit 1
           fi
 
   # Build the release bytes once. The compatibility matrix below consumes this Maven repository;
   # it never rebuilds the plugin from the checkout.
   build-gradle-plugin:
+    # GitHub-hosted: a one- or two-minute producer that the gradle matrix waits for; in the
+    # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -744,7 +851,7 @@ jobs:
       fail-fast: false
       matrix:
         kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -791,7 +898,7 @@ jobs:
           - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true }
           - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true }
           - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false }
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -803,6 +910,17 @@ jobs:
         with:
           distribution: zulu
           java-version: '17'
+      - name: select Android integration requirements
+        id: android
+        run: |
+          if printf '9.6.0\n%s\n' "${{ matrix.gradle }}" | sort -V -C; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: provision the Android integration SDK
+        if: steps.android.outputs.enabled == 'true'
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: 'platforms;android-36'
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:
           gradle-version: ${{ matrix.gradle }}
@@ -852,9 +970,8 @@ jobs:
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"
           fi
-          # The fixture's Android Gradle plugin (9.4) needs Gradle 9.6 or newer; the runner image
-          # provides ANDROID_HOME.
-          if printf '9.6.0\n%s\n' "${{ matrix.gradle }}" | sort -V -C; then
+          # The SDK setup uses the same Gradle compatibility decision as the test inventory.
+          if [ "${{ steps.android.outputs.enabled }}" = true ]; then
             tests="$tests android_variants_compile_through_krusty"
           fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
@@ -863,6 +980,8 @@ jobs:
   # Build the Maven plugin's release bytes once: a portable local Maven repository the release
   # publishes and the job below consumes.
   build-maven-plugin:
+    # GitHub-hosted: a one- or two-minute producer that the maven matrix waits for; in the
+    # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -877,6 +996,9 @@ jobs:
           java-version: '17'
           cache: maven
           cache-dependency-path: tools/krusty-maven/pom.xml
+      - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
+        with:
+          maven-version: '3.9.11'
       - name: build portable local-Maven distribution
         run: |
           set -euo pipefail
@@ -895,7 +1017,7 @@ jobs:
   # kotlin-maven-plugin builds, with the shared krusty binary.
   maven:
     needs: [build-tool-bins, build-maven-plugin]
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -909,6 +1031,9 @@ jobs:
           java-version: '17'
           cache: maven
           cache-dependency-path: tools/krusty-maven/pom.xml
+      - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
+        with:
+          maven-version: '3.9.11'
       - uses: actions/download-artifact@v8
         with:
           name: tool-bins
@@ -939,7 +1064,7 @@ jobs:
       fail-fast: false
       matrix:
         bazel: [8.4.2, 9.3.1]
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -950,6 +1075,21 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
+      # The smoke test generates the registry with the site's Node.js script; the self-hosted image
+      # has no Node.js.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      # ubuntu-latest has Bazelisk installed as `bazel`; the self-hosted image installs it as
+      # `bazelisk`.
+      - name: put bazelisk on PATH as bazel
+        run: |
+          set -euo pipefail
+          if ! command -v bazel >/dev/null; then
+            mkdir -p "$RUNNER_TEMP/bin"
+            ln -s "$(command -v bazelisk)" "$RUNNER_TEMP/bin/bazel"
+            echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          fi
       - name: build the packaged Bazel module with Bazel ${{ matrix.bazel }}
         env:
           USE_BAZEL_VERSION: ${{ matrix.bazel }}
@@ -961,13 +1101,11 @@ jobs:
             "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$kotlin/kotlin-stdlib-$kotlin.jar"
           scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
 
-  # Build the release binaries per OS/arch only after coverage proves that this master commit is
-  # still the publishable tip. Superseded master runs keep all validation but do not occupy six
-  # runners with artifacts the monotonic publisher will reject. Cap the surviving matrix so release
-  # packaging cannot starve pull-request gates.
+  # Every covered master commit builds its own immutable release artifacts, even after master
+  # advances. Cap each matrix at two runners so release packaging shares capacity with PR gates.
   build-release:
     needs: [ci]
-    if: github.ref == 'refs/heads/master' && needs.ci.outputs.release_candidate == 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -1035,10 +1173,11 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
+    needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
+    # Publication runs Gradle to build and sign Maven Central and Plugin Portal artifacts.
     runs-on: ubuntu-latest
-    # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
+    # Shorter than either lock's TTL; only dead jobs' locks may be taken over.
     timeout-minutes: 25
     permissions:
       contents: write
@@ -1051,15 +1190,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      # Master runs overlap, so two release jobs can run at once and an older commit can reach
-      # this job after a newer one. A concurrency group would cancel a queued release, and with it
-      # the whole run, so publishing takes a lock held in a ref instead. Under it, only the tip of
-      # master that descends from the last published commit publishes: the release, the
-      # latest-release marker and the badges never move backwards.
-      - name: take the release lock
+      # Every validated master ancestor publishes. Only retries of this exact commit wait on
+      # this lock; slow immutable package publication cannot hold the global latest/badge lock.
+      - name: take the commit publication lock
         id: lock
-        run: echo "lock=$(scripts/release-publisher.sh acquire)" >> "$GITHUB_OUTPUT"
-      - name: publish only the newest master commit
+        run: |
+          set -euo pipefail
+          lock=$(scripts/release-publisher.sh acquire)
+          echo "lock=$lock" >> "$GITHUB_OUTPUT"
+      - name: publish this validated master commit
         id: tip
         run: scripts/release-publisher.sh check >> "$GITHUB_OUTPUT"
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
@@ -1134,9 +1273,8 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/**
-      # The gh CLI on the runner, not a third-party action holding this job's contents:write token.
-      # A rerun after a later step failed finds the release already published and re-uploads its
-      # assets instead.
+      # A tag is immutably bound before publication, including retries after a rewritten history.
+      # Drafts may resume incomplete uploads; a public release's assets are never replaced.
       - name: publish
         if: steps.tip.outputs.publish == 'true'
         env:
@@ -1146,18 +1284,26 @@ jobs:
           VER: ${{ steps.v.outputs.ver }}
         run: |
           set -euo pipefail
+          scripts/release-publisher.sh bind-tag "$TAG"
           mapfile -t assets < <(find dist -type f | sort)
           test "${#assets[@]}" -gt 0
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" --clobber "${assets[@]}"
+            draft=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+            case $draft in
+              true)
+                gh release upload "$TAG" --clobber "${assets[@]}"
+                gh release edit "$TAG" --draft=false --latest=false
+                ;;
+              false) ;;
+              *) echo "cannot determine draft state of $TAG" >&2; exit 1 ;;
+            esac
           else
-            # The titles of the pull requests merged since the previous release, each linked.
-            gh release create "$TAG" --target "$GITHUB_SHA" \
+            gh release create "$TAG" --target "$GITHUB_SHA" --draft --latest=false \
               --title "krusty $VER: Kotlin compiler written in Rust" --generate-notes "${assets[@]}"
+            gh release edit "$TAG" --draft=false --latest=false
           fi
-      # The Gradle Plugin Portal gets every published release under the same version. A Portal
-      # version is immutable, and the release lock above already publishes each version once. It
-      # runs before the commit is recorded, so a failed upload leaves the release to a rerun.
+      # Each exact version keeps its existing Maven Central deployment journal. The Plugin Portal
+      # also checks its immutable marker before retrying a previously successful upload.
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         if: steps.tip.outputs.publish == 'true'
         with:
@@ -1227,17 +1373,13 @@ jobs:
             echo "SIGNING_KEY is not set; refusing to publish an unsigned plugin" >&2
             exit 1
           fi
-          tools/krusty-gradle/gradlew --no-daemon -p tools/krusty-gradle \
-            -PkrustyPluginVersion="${{ steps.v.outputs.ver }}" publishPlugins
+          scripts/publish-gradle-plugin-portal.sh "${{ steps.v.outputs.ver }}"
       # Rebuild the site, whose Bazel registry is generated from the releases, so it lists this one.
       - name: refresh the Bazel registry
         if: steps.tip.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run pages.yml --ref master
-      - name: record the published commit
-        if: steps.tip.outputs.publish == 'true'
-        run: scripts/release-publisher.sh record
       # Badges: the max version's JVM case/byte reports and Native case report, each published to
       # its own gist file.
       - name: download max-version pct
@@ -1255,9 +1397,33 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: native-pct-${{ needs.build-tool-bins.outputs.max }}
+      # The global lock is held only while promoting latest, badges and the released ref.
+      - name: take the latest promotion lock
+        if: steps.tip.outputs.publish == 'true'
+        id: latest_lock
+        run: |
+          set -euo pipefail
+          lock=$(scripts/release-publisher.sh acquire-latest)
+          echo "lock=$lock" >> "$GITHUB_OUTPUT"
+      - name: select monotonic latest promotion
+        if: steps.tip.outputs.publish == 'true'
+        id: latest
+        run: scripts/release-publisher.sh check-promotion >> "$GITHUB_OUTPUT"
+      # Advance the monotonic guard before external updates. If a later update fails, this same
+      # SHA may retry; an older publisher can never overwrite it after the lock is released.
+      - name: record the promoted commit
+        if: steps.latest.outputs.promote == 'true'
+        run: scripts/release-publisher.sh record
+      - name: promote the GitHub release
+        if: steps.latest.outputs.promote == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: gh release edit "$TAG" --latest
       # One gist update with every badge's shields.io endpoint JSON, through the gh CLI.
       - name: publish badges → gist
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
+        if: ${{ steps.latest.outputs.promote == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         env:
           GH_TOKEN: ${{ secrets.GIST_TOKEN }}
           GIST_ID: ${{ vars.CONFORMANCE_GIST_ID }}
@@ -1274,6 +1440,9 @@ jobs:
             "krusty-native-conformance.json": {content: $n},
             "krusty-kotlin.json": {content: $k}}}' |
             gh api --method PATCH "gists/$GIST_ID" --input - >/dev/null
+      - name: drop the latest promotion lock
+        if: always() && steps.latest_lock.outputs.lock != ''
+        run: scripts/release-publisher.sh release-latest "${{ steps.latest_lock.outputs.lock }}"
       - name: drop the release lock
         if: always() && steps.lock.outputs.lock != ''
         run: scripts/release-publisher.sh release "${{ steps.lock.outputs.lock }}"

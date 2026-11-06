@@ -64,6 +64,7 @@ impl Emitter<'_> {
                 annotation_construction:
                     crate::jvm::annotation_constructions::construction_interface(self.ir, receiver),
                 semantic_role: self.ir.semantic_call_roles.get(&expression).copied(),
+                declaration_owner: None,
             },
         ) {
             Ok((owner, interface)) => Some((owner.render(), interface)),

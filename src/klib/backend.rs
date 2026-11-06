@@ -17,8 +17,8 @@ use crate::ir::{IrClass, IrFile};
 use crate::metadata::class_declarations::{ClassTailOptions, FunctionOrigin, PropertyOrigin};
 use crate::metadata::declaration_records;
 use crate::metadata::id_signature::{
-    package_function_signature, package_property_accessor_signature, MetadataAccessor,
-    MetadataClass, MetadataContainer,
+    constructor_signature, package_function_signature, package_property_accessor_signature,
+    MetadataAccessor, MetadataClass, MetadataContainer,
 };
 use crate::metadata::klib_fragment::{
     package_fragment_with_inner_classifiers, KlibClass, KlibFileMembers,
@@ -633,7 +633,18 @@ fn record_class_function_exports(
                             declaration.name
                         )
                     })?;
-                Some(crate::types::Ty::obj_name(receiver))
+                if receiver != source.fq_name_id() {
+                    return Err(format!(
+                        "class function {} lost its declared receiver signature",
+                        declaration.name
+                    ));
+                }
+                Some(ir.declared_class_self_type(receiver).ok_or_else(|| {
+                    format!(
+                        "class function {} lost its declared receiver application",
+                        declaration.name
+                    )
+                })?)
             };
             // The current prepared writer can serialize a non-generic dispatch classifier exactly.
             // A generic owner also needs its class parameters remapped into the synthetic prepared
@@ -666,6 +677,7 @@ fn record_class_function_exports(
                 exports.record_member_receiver(function, receiver);
             }
         }
+        record_constructor_exports(ir, module_name, source, (record, class), container, exports)?;
         if source.is_interface {
             record_interface_property_exports(
                 ir,
@@ -676,6 +688,90 @@ fn record_class_function_exports(
                 exports,
             )?;
         }
+    }
+    Ok(())
+}
+
+/// Record the identity of every constructor of `source` another module may call, and an object
+/// declaration another module may read as a value.
+///
+/// The decoded class lists the primary constructor first when the record publishes one, then the
+/// published secondary constructors in record order; `secondary_ordinals` joins each back to its
+/// IR declaration. Only an ordinary class whose object this file lays out is constructible from
+/// another module through an entry: an annotation is instantiated from its declaration instead,
+/// and a generic class would also need its type parameters on the entry, which the target-side
+/// entry does not declare yet. Neither publishes a constructor.
+fn record_constructor_exports(
+    ir: &IrFile,
+    module_name: &str,
+    source: &IrClass,
+    (record, class): (
+        &crate::metadata::class_declarations::ClassDeclarationRecord,
+        &crate::metadata::semantic::KotlinClass,
+    ),
+    container: MetadataContainer<'_>,
+    exports: &mut DependencyExportSignatures,
+) -> Result<(), String> {
+    let declarations = usize::from(record.emit_primary_ctor) + record.secondary_ordinals.len();
+    if class.constructors.len() != declarations {
+        return Err(format!(
+            "class {} changed constructor declaration order ({} decoded, {declarations} recorded)",
+            source.fq_name(),
+            class.constructors.len(),
+        ));
+    }
+    if (source.is_object || source.is_companion)
+        && class.visibility != crate::types::Visibility::Private
+    {
+        let id = ir
+            .class_id_by_name(source.fq_name_id())
+            .ok_or_else(|| format!("object {} has no IR identity", source.fq_name()))?;
+        exports.record_singleton(id);
+    }
+    if source.is_interface
+        || source.is_abstract
+        || source.is_sealed
+        || source.is_object
+        || source.is_companion
+        || source.is_enum
+        || source.is_value
+        || source.is_inner_class
+        || source.is_annotation
+        || !source.type_params.is_empty()
+        || !source.captured_type_params.is_empty()
+    {
+        return Ok(());
+    }
+    let primary = record
+        .emit_primary_ctor
+        .then_some(None)
+        .filter(|_| source.has_primary_ctor);
+    let secondaries = record
+        .secondary_ordinals
+        .iter()
+        .map(|&ordinal| Some(ordinal));
+    let skipped = usize::from(record.emit_primary_ctor && !source.has_primary_ctor);
+    for (declaration, secondary) in class
+        .constructors
+        .iter()
+        .skip(skipped)
+        .zip(primary.into_iter().chain(secondaries))
+    {
+        if declaration.visibility == crate::types::Visibility::Private {
+            continue;
+        }
+        let signature = constructor_signature(container, declaration)
+            .map_err(|error| format!("{}.<init>: {error}", source.fq_name()))?;
+        let class = ir
+            .class_id_by_name(source.fq_name_id())
+            .ok_or_else(|| format!("class {} has no IR identity", source.fq_name()))?;
+        exports.record_constructor(
+            crate::backend::ExportedConstructor { class, secondary },
+            crate::libraries::KlibDependencyCallable {
+                module: module_name.to_owned(),
+                declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
+            },
+        );
     }
     Ok(())
 }

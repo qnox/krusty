@@ -1297,7 +1297,7 @@ fn materialize_member_property(
             });
             ir.property_initializer_stores.insert(store);
             // kotlinc's initializer store sits at its initializer expression, not the declaration.
-            if let Some(&line) = ir.expr_source_lines.get(&initializer) {
+            if let Some(line) = ir.source_line(initializer) {
                 ir.expr_lines.insert(store, line);
             }
             initialization.entry(class_id).or_default().push((
@@ -1594,9 +1594,7 @@ pub(super) fn add_accessor_function(ir: &mut IrFile, input: AccessorFunctionInpu
     // A getter returns at the line its value is stated on: after an inlined call there, the return
     // marks that line again, as kotlinc's does. An expression body's recorded exit (its end line)
     // takes precedence, as a function's does.
-    let line = returns_value
-        .then(|| ir.expr_source_lines.get(&value).copied())
-        .flatten();
+    let line = returns_value.then(|| ir.source_line(value)).flatten();
     let crosses_boundary = match result {
         AccessorResult::Delegated(checked) => returns_value && checked != ret,
         AccessorResult::AsDeclared => false,
@@ -1612,7 +1610,7 @@ pub(super) fn add_accessor_function(ir: &mut IrFile, input: AccessorFunctionInpu
     };
     let returned = ir.add_expr(IrExpr::Return(returns_value.then_some(value)));
     if let Some(line) = line {
-        ir.expr_source_lines.insert(returned, line);
+        ir.set_source_line(returned, line);
     }
     if let Some(exit) = ir.accessor_body_exit(value) {
         ir.mark_unit_body_exit(returned, exit);
@@ -1885,14 +1883,28 @@ fn merge_class_initialization(
             .push((initializer.initialization_order, initializer.body));
     }
     for (class_id, mut steps) in initialization {
+        let mut primary_header = None;
         if let Some(body) = ir.classes[class_id as usize].init_body.take() {
-            steps.push((u32::MAX, body));
+            let checked_primary = ir.checked_constructor_bodies.values().any(|constructor| {
+                constructor.class == class_id
+                    && constructor.ordinal == 0
+                    && constructor.body_attached
+                    && constructor.body == Some(body)
+            });
+            if checked_primary {
+                // Checked primary bodies contain header initialization, after the selected
+                // superclass delegation was removed. They precede source property/init steps.
+                primary_header = Some(body);
+            } else {
+                // Generated bodies keep their existing position after source initializers.
+                steps.push((u32::MAX, body));
+            }
         }
         steps.sort_by_key(|(order, _)| *order);
         let initialization = ir.add_expr(IrExpr::Block {
-            stmts: steps
+            stmts: primary_header
                 .into_iter()
-                .map(|(_, expression)| expression)
+                .chain(steps.into_iter().map(|(_, expression)| expression))
                 .collect(),
             value: None,
         });
@@ -2360,12 +2372,10 @@ pub(super) fn accept_inline_accessor_template(
     }
     ir.callable_scopes.extend(lowered.root_block);
     let value = body_value(lowered.roots.into_vec(), Some(origin), ir)?;
-    let line = returns_value
-        .then(|| ir.expr_source_lines.get(&value).copied())
-        .flatten();
+    let line = returns_value.then(|| ir.source_line(value)).flatten();
     let returned = ir.add_expr(IrExpr::Return(returns_value.then_some(value)));
     if let Some(line) = line {
-        ir.expr_source_lines.insert(returned, line);
+        ir.set_source_line(returned, line);
     }
     if let Some(exit) = (!returns_value)
         .then(|| ir.accessor_body_exit(value))

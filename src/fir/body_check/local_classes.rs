@@ -1,5 +1,6 @@
 //! Checked local-class declaration and lexical-capture identities.
 
+use super::enclosing_capture_owners::CheckedClassCaptureSource;
 use super::*;
 use crate::ast::DeclId;
 use crate::fir::FirAnonymousSuperArgument;
@@ -219,12 +220,16 @@ impl BodyFirChecker<'_> {
                         enclosing_depth: 0,
                         semantic_receiver_depth: None,
                         receiver_source: None,
+                        enclosing_instance_owner: required.enclosing_instance_owner,
                         capture_identity: required.capture_identity,
                         lexical_binding: required.lexical_binding,
                     },
                     ConstructorCaptureOperand::ImplicitReceiver { .. } => required,
                 };
-                if available.ty != required.ty || available.shared_cell != required.shared_cell {
+                if available.ty != required.ty
+                    || available.shared_cell != required.shared_cell
+                    || available.enclosing_instance_owner != required.enclosing_instance_owner
+                {
                     return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
                 }
                 let (kind, shared_cell_holder) = match operand {
@@ -272,6 +277,8 @@ impl BodyFirChecker<'_> {
                                     classifier: None,
                                     context_binding: None,
                                     singleton: None,
+                                    context_parameter: false,
+                                    construction_sites: Vec::new(),
                                 },
                             )?
                             .ok_or_else(|| {
@@ -586,6 +593,18 @@ impl BodyFirChecker<'_> {
             })
     }
 
+    /// Publish a resolver-selected direct storage read with its stable owner and, inside a local
+    /// callable, the exact lifted dispatch receiver that supplies that storage.
+    pub(super) fn direct_class_storage_read_kind(
+        &mut self,
+        field: u32,
+        ty: ResolvedTy,
+        origin: OriginId,
+    ) -> Result<FirExprKind, BodyCheckFailure> {
+        let binding = self.direct_class_capture_binding(field, ty)?;
+        self.class_storage_read_kind(binding, origin)
+    }
+
     /// The binding of field `field` of the class whose storage this body reads directly.
     pub(super) fn direct_class_capture_binding(
         &self,
@@ -613,6 +632,7 @@ impl BodyFirChecker<'_> {
             enclosing_depth: 0,
             semantic_receiver_depth: None,
             receiver_source,
+            enclosing_instance_owner: None,
             capture_identity: None,
             lexical_binding: None,
         })
@@ -643,7 +663,7 @@ impl BodyFirChecker<'_> {
         origin: OriginId,
         receiver_depth: u32,
         ty: ResolvedTy,
-    ) -> Result<Option<FirLocalClassCaptureSource>, BodyCheckFailure> {
+    ) -> Result<Option<CheckedClassCaptureSource>, BodyCheckFailure> {
         if self.body.local_callable().is_none() || receiver_depth < self.owned_receiver_count {
             return Ok(None);
         }
@@ -651,6 +671,7 @@ impl BodyFirChecker<'_> {
             .enclosing_receiver_capture(receiver_depth as usize)
             .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?;
         let current = depth == 0;
+        let instance_owner = receiver.enclosing_owner();
         self.body
             .add_implicit_receiver_capture(FirImplicitReceiverCapture {
                 origin,
@@ -661,11 +682,14 @@ impl BodyFirChecker<'_> {
                 ty,
                 receiver,
             });
-        Ok(Some(FirLocalClassCaptureSource::CapturedImplicitReceiver {
-            enclosing_depth,
-            current,
-            depth,
-            path,
+        Ok(Some(CheckedClassCaptureSource {
+            instance_owner,
+            source: FirLocalClassCaptureSource::CapturedImplicitReceiver {
+                enclosing_depth,
+                current,
+                depth,
+                path,
+            },
         }))
     }
 
@@ -876,7 +900,7 @@ impl BodyFirChecker<'_> {
         semantic: AnonymousObjectReceiverSource,
         ty: ResolvedTy,
         allow_class_storage: bool,
-    ) -> Result<FirLocalClassCaptureSource, BodyCheckFailure> {
+    ) -> Result<CheckedClassCaptureSource, BodyCheckFailure> {
         let (current, depth, enclosing_instance) = match semantic {
             AnonymousObjectReceiverSource::EnclosingInstance { current, depth } => {
                 (current, depth, true)
@@ -890,25 +914,32 @@ impl BodyFirChecker<'_> {
             .flatten()
             .filter(|binding| binding.ty == ty)
         {
-            if self.reads_constructor_prefix_capture(binding.owner, binding.enclosing_depth) {
-                return Ok(FirLocalClassCaptureSource::ConstructorCapture {
-                    owner: binding.owner,
-                    field: binding.field,
-                    site: self.capture_constructor_prefix(binding, origin),
-                });
-            }
-            if let Some((receiver, path)) = self.captured_class_storage_receiver(binding, origin)? {
-                return Ok(FirLocalClassCaptureSource::CapturedClassStorage {
-                    owner: binding.owner,
-                    receiver,
-                    path,
-                    field: binding.field,
-                });
-            }
-            return Ok(FirLocalClassCaptureSource::ClassStorage {
-                owner: binding.owner,
-                enclosing_depth: binding.enclosing_depth,
-                field: binding.field,
+            let source =
+                if self.reads_constructor_prefix_capture(binding.owner, binding.enclosing_depth) {
+                    FirLocalClassCaptureSource::ConstructorCapture {
+                        owner: binding.owner,
+                        field: binding.field,
+                        site: self.capture_constructor_prefix(binding, origin),
+                    }
+                } else if let Some((receiver, path)) =
+                    self.captured_class_storage_receiver(binding, origin)?
+                {
+                    FirLocalClassCaptureSource::CapturedClassStorage {
+                        owner: binding.owner,
+                        receiver,
+                        path,
+                        field: binding.field,
+                    }
+                } else {
+                    FirLocalClassCaptureSource::ClassStorage {
+                        owner: binding.owner,
+                        enclosing_depth: binding.enclosing_depth,
+                        field: binding.field,
+                    }
+                };
+            return Ok(CheckedClassCaptureSource {
+                source,
+                instance_owner: binding.enclosing_instance_owner,
             });
         }
         if let Some(source) = self.captured_callable_receiver_source(origin, depth, ty)? {
@@ -916,7 +947,10 @@ impl BodyFirChecker<'_> {
         }
         if enclosing_instance {
             if current && depth == 0 {
-                return Ok(FirLocalClassCaptureSource::DispatchReceiver);
+                return Ok(CheckedClassCaptureSource {
+                    source: FirLocalClassCaptureSource::DispatchReceiver,
+                    instance_owner: Some(self.path_instance_owner(&[], None)?),
+                });
             }
             if let Some(path) =
                 self.enclosing_receiver_path(&crate::resolve::ImplicitReceiverSelection {
@@ -926,12 +960,23 @@ impl BodyFirChecker<'_> {
                     classifier: None,
                     context_binding: None,
                     singleton: None,
+                    context_parameter: false,
+                    construction_sites: Vec::new(),
                 })
             {
-                return Ok(FirLocalClassCaptureSource::EnclosingReceiver { path });
+                let instance_owner = Some(self.path_instance_owner(&path, None)?);
+                return Ok(CheckedClassCaptureSource {
+                    source: FirLocalClassCaptureSource::EnclosingReceiver { path },
+                    instance_owner,
+                });
             }
         }
-        Ok(FirLocalClassCaptureSource::ImplicitReceiver { current, depth })
+        Ok(CheckedClassCaptureSource {
+            source: FirLocalClassCaptureSource::ImplicitReceiver { current, depth },
+            instance_owner: self
+                .receiver_capture_at_depth(depth as usize)
+                .and_then(|receiver| receiver.enclosing_owner()),
+        })
     }
 
     fn checked_class_captures(
@@ -973,6 +1018,7 @@ impl BodyFirChecker<'_> {
             let mut ty = self.resolved_type(span, capture.ty)?;
             // A captured delegated property is its delegate's variable, named as such.
             let mut name = capture.name.clone();
+            let mut instance_owner = None;
             let source = match capture.source {
                 AnonymousObjectCaptureSource::LexicalValue => {
                     let delegate = self
@@ -1008,6 +1054,7 @@ impl BodyFirChecker<'_> {
                             enclosing_depth: 0,
                             semantic_receiver_depth: None,
                             receiver_source: None,
+                            enclosing_instance_owner: None,
                             capture_identity,
                             lexical_binding: capture.lexical_binding,
                         });
@@ -1032,6 +1079,7 @@ impl BodyFirChecker<'_> {
                                 enclosing_depth: 0,
                                 semantic_receiver_depth: None,
                                 receiver_source: None,
+                                enclosing_instance_owner: None,
                                 capture_identity,
                                 lexical_binding: capture.lexical_binding,
                             },
@@ -1066,6 +1114,7 @@ impl BodyFirChecker<'_> {
                                 enclosing_depth: 0,
                                 semantic_receiver_depth: None,
                                 receiver_source: None,
+                                enclosing_instance_owner: None,
                                 capture_identity,
                                 lexical_binding: capture.lexical_binding,
                             },
@@ -1106,13 +1155,10 @@ impl BodyFirChecker<'_> {
                     let source_owner = self.current_storage_owner().ok_or_else(|| {
                         self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
                     })?;
-                    let source_binding = self
-                        .class_capture_values
-                        .iter()
-                        .map(|(_, binding)| *binding)
-                        .find(|binding| {
-                            binding.owner == source_owner && binding.field == source_field
-                        });
+                    let source_binding =
+                        self.selected_storage_capture_binding(source_owner, source_field, span)?;
+                    instance_owner =
+                        source_binding.and_then(|binding| binding.enclosing_instance_owner);
                     let hoisted_receiver = self
                         .hoist_anonymous_super_argument
                         .then_some(capture.semantic_receiver)
@@ -1150,6 +1196,7 @@ impl BodyFirChecker<'_> {
                         enclosing_depth: 0,
                         semantic_receiver_depth,
                         receiver_source: None,
+                        enclosing_instance_owner: None,
                         capture_identity,
                         // A field forwarded from the enclosing class holds that field's binding.
                         lexical_binding: capture
@@ -1166,7 +1213,10 @@ impl BodyFirChecker<'_> {
                         );
                     }
                     if let Some(semantic) = hoisted_receiver {
-                        self.anonymous_receiver_capture_source(origin, semantic, ty, false)?
+                        let selected =
+                            self.anonymous_receiver_capture_source(origin, semantic, ty, false)?;
+                        instance_owner = selected.instance_owner;
+                        selected.source
                     } else if let Some(binding) = source_binding {
                         if self.reads_constructor_prefix_capture(
                             binding.owner,
@@ -1212,6 +1262,7 @@ impl BodyFirChecker<'_> {
                                         enclosing_depth: 0,
                                         semantic_receiver_depth: None,
                                         receiver_source: None,
+                                        enclosing_instance_owner: None,
                                         capture_identity: None,
                                         lexical_binding: None,
                                     },
@@ -1228,9 +1279,14 @@ impl BodyFirChecker<'_> {
                     }
                 }
                 AnonymousObjectCaptureSource::EnclosingInstance { current, depth } => {
-                    let semantic_receiver_depth = depth.checked_add(1).ok_or_else(|| {
-                        self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
-                    })?;
+                    let semantic_receiver_depth = capture
+                        .semantic_receiver
+                        .map(AnonymousObjectReceiverSource::depth)
+                        .unwrap_or(depth)
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
+                        })?;
                     context.receivers.push(ClassCaptureBinding {
                         owner: declaration,
                         field,
@@ -1239,20 +1295,28 @@ impl BodyFirChecker<'_> {
                         enclosing_depth: 0,
                         semantic_receiver_depth: Some(semantic_receiver_depth),
                         receiver_source: None,
+                        enclosing_instance_owner: None,
                         capture_identity,
                         lexical_binding: None,
                     });
-                    self.anonymous_receiver_capture_source(
+                    let selected = self.anonymous_receiver_capture_source(
                         origin,
                         AnonymousObjectReceiverSource::EnclosingInstance { current, depth },
                         ty,
                         true,
-                    )?
+                    )?;
+                    instance_owner = selected.instance_owner;
+                    selected.source
                 }
                 AnonymousObjectCaptureSource::ImplicitReceiver { current, depth } => {
-                    let semantic_receiver_depth = depth.checked_add(1).ok_or_else(|| {
-                        self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
-                    })?;
+                    let semantic_receiver_depth = capture
+                        .semantic_receiver
+                        .map(AnonymousObjectReceiverSource::depth)
+                        .unwrap_or(depth)
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
+                        })?;
                     context.receivers.push(ClassCaptureBinding {
                         owner: declaration,
                         field,
@@ -1261,17 +1325,36 @@ impl BodyFirChecker<'_> {
                         enclosing_depth: 0,
                         semantic_receiver_depth: Some(semantic_receiver_depth),
                         receiver_source: None,
+                        enclosing_instance_owner: None,
                         capture_identity,
                         lexical_binding: None,
                     });
-                    self.anonymous_receiver_capture_source(
+                    let selected = self.anonymous_receiver_capture_source(
                         origin,
                         AnonymousObjectReceiverSource::ImplicitReceiver { current, depth },
                         ty,
                         true,
-                    )?
+                    )?;
+                    instance_owner = selected.instance_owner;
+                    selected.source
                 }
             };
+            let receiver =
+                self.checked_capture_receiver(capture.receiver.as_ref(), instance_owner, span)?;
+            for binding in context
+                .receivers
+                .iter_mut()
+                .chain(
+                    context
+                        .capture_values
+                        .iter_mut()
+                        .map(|(_, binding)| binding),
+                )
+                .chain(context.values.values_mut())
+                .filter(|binding| binding.owner == declaration && binding.field == field)
+            {
+                binding.enclosing_instance_owner = instance_owner;
+            }
             checked.push(FirLocalClassCapture {
                 origin,
                 name: name.into_boxed_str(),
@@ -1279,7 +1362,7 @@ impl BodyFirChecker<'_> {
                 shared_cell: capture.shared_cell,
                 capture_identity,
                 source,
-                receiver: capture.receiver.clone(),
+                receiver,
                 stored: true,
             });
         }
@@ -1478,20 +1561,26 @@ impl BodyFirChecker<'_> {
             })?;
             let previous = self.hoist_anonymous_super_argument;
             self.hoist_anonymous_super_argument = true;
-            let value = if shells == 0 {
-                let expected = argument_types.get(index).copied().ok_or_else(|| {
-                    self.failure(Some(class.span), BodyCheckFailureKind::UnsupportedCallShape)
-                })?;
-                let target = crate::fir::ResolvedTy::new(expected).map_err(|error| {
-                    self.failure(
-                        self.file.expr_span(argument),
-                        BodyCheckFailureKind::UnpublishableType(error),
-                    )
-                })?;
-                self.value_at_selected_boundary(argument, target)
-            } else {
-                self.expression(core)
-            };
+            self.construction_site_receiver_frames.push(transient);
+            let value = (|| {
+                if shells == 0 {
+                    let expected = argument_types.get(index).copied().ok_or_else(|| {
+                        self.failure(Some(class.span), BodyCheckFailureKind::UnsupportedCallShape)
+                    })?;
+                    let target = crate::fir::ResolvedTy::new(expected).map_err(|error| {
+                        self.failure(
+                            self.file.expr_span(argument),
+                            BodyCheckFailureKind::UnpublishableType(error),
+                        )
+                    })?;
+                    self.value_at_selected_boundary(argument, target)
+                } else {
+                    self.expression(core)
+                }
+            })();
+            self.construction_site_receiver_frames
+                .pop()
+                .expect("anonymous super argument frame");
             self.hoist_anonymous_super_argument = previous;
             let value = value?;
             forwards.push(FirAnonymousSuperArgument {
@@ -1608,7 +1697,7 @@ impl BodyFirChecker<'_> {
             if let Some(selected_classifier) = selected_classifier {
                 return matches!(
                     capture.receiver.as_ref(),
-                    Some(FirCapturedReceiver::Enclosing { classifier })
+                    Some(FirCapturedReceiver::Enclosing { classifier, .. })
                         if *classifier == selected_classifier
                 );
             }
@@ -1637,6 +1726,7 @@ impl BodyFirChecker<'_> {
             enclosing_depth: 0,
             semantic_receiver_depth: Some(selected_depth),
             receiver_source: None,
+            enclosing_instance_owner: None,
             capture_identity: None,
             lexical_binding: None,
         };

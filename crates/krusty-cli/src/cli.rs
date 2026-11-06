@@ -29,14 +29,23 @@ use arguments::{
     apply, collect_sources, finish_jvm_target, finish_language_settings, finish_warning_policy,
     take_reference_version, unsupported, ParsedSettings,
 };
-pub use warning_policy::{WarningDisposition, WarningLevel, WarningName, WarningPolicy};
+pub use warning_policy::{WarningDisposition, WarningLevel, WarningPolicy};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CliWarning {
-    /// The diagnostic `-Xwarning-level` addresses; `None` for a warning kotlinc reports without a
-    /// name, which no level changes.
-    pub name: Option<WarningName>,
+    /// kotlinc's diagnostic name, printed under `-Xrender-internal-diagnostic-names`.
+    pub name: Option<krusty::diag::DiagnosticName>,
+    /// Whether `-Xwarning-level` addresses the warning by its name.
+    pub leveled: bool,
+    /// kotlinc's message before rendering ([`krusty::diag::render_message`]).
     pub message: String,
+}
+
+impl CliWarning {
+    /// The name `-Xwarning-level` addresses, if any.
+    pub fn level_name(&self) -> Option<krusty::diag::DiagnosticName> {
+        self.name.filter(|_| self.leveled)
+    }
 }
 
 /// A problem kotlinc reports while reading its arguments, after the syntax warnings: a
@@ -106,6 +115,8 @@ pub struct Options {
     /// an `error` level fails the invocation and `disabled` removes the diagnostic entirely.
     pub warning_policy: WarningPolicy,
     pub warnings: Vec<CliWarning>,
+    /// `-Xrender-internal-diagnostic-names`: print each named diagnostic as `[NAME] message`.
+    pub diagnostic_names: krusty::diag::DiagnosticNames,
     /// Invalid or explicitly requested-but-unemittable options. The driver reports these and exits
     /// before compilation rather than silently producing a different artifact.
     pub errors: Vec<String>,
@@ -140,6 +151,9 @@ pub struct Options {
     /// `-Xno-call-assertions`: omit the not-null assertions on platform-typed values coming back
     /// from Java. Recorded, but krusty emits no such assertions yet, so it changes no bytes today.
     pub no_call_assertions: bool,
+    /// `-Xno-receiver-assertions`: omit those assertions where the platform value is the receiver
+    /// of an extension call.
+    pub no_receiver_assertions: bool,
     /// `-jvm-target <v>`: the emitted class-file major version (kotlinc maps `1.8`→52, `9`→53, …,
     /// `25`→69). `None` keeps krusty's default (Java 8 / major 52), which runs on the test JDK.
     pub jvm_target_major: Option<u16>,
@@ -167,9 +181,8 @@ pub struct Options {
     /// `-Xstring-concat=inline`: build every string concatenation with `StringBuilder`, whatever
     /// the JVM target.
     pub inline_string_concat: bool,
-    /// kotlinc's `USE_INLINE_SCOPES_NUMBERS` configuration: name inlined locals by their inline
-    /// scope's number. The box harness sets it from its typed configuration channel; the command
-    /// line still refuses `-Xuse-inline-scopes-numbers` until every inlining path numbers scopes.
+    /// `-Xuse-inline-scopes-numbers` (kotlinc's `USE_INLINE_SCOPES_NUMBERS` configuration): name
+    /// inlined locals by their inline scope's number instead of `$iv` suffixes.
     pub inline_scopes_numbers: bool,
     /// `-opt-in=<fq name>[,<fq name>…]` (also `-opt-in <value>`, repeatable): requirement markers
     /// accepted module-wide, applied to the language settings once they are built.
@@ -208,6 +221,7 @@ impl Default for Options {
             language_feature_problems: Vec::new(),
             configuration_errors: Vec::new(),
             warning_policy: WarningPolicy::default(),
+            diagnostic_names: krusty::diag::DiagnosticNames::Hidden,
             warnings: Vec::new(),
             errors: Vec::new(),
             refusals: Vec::new(),
@@ -226,6 +240,7 @@ impl Default for Options {
             lambda_modes: LambdaModes::default(),
             no_param_assertions: false,
             no_call_assertions: false,
+            no_receiver_assertions: false,
             plugins: PluginConfig::default(),
             explicit_api: None,
             assertions: None,
@@ -402,10 +417,11 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
         .into_iter()
         .map(|(lifecycle, message)| CliWarning {
             name: Some(match lifecycle {
-                Lifecycle::Deprecated => WarningName::DeprecatedCliArg,
-                Lifecycle::Removed => WarningName::RemovedCliArg,
+                Lifecycle::Deprecated => krusty::diag::names::DEPRECATED_CLI_ARG,
+                Lifecycle::Removed => krusty::diag::names::REMOVED_CLI_ARG,
             }),
-            message: kotlinc_arguments::render(&message),
+            leveled: true,
+            message,
         })
         .collect();
     finish_warning_policy(&mut opts, &parsed);
@@ -584,6 +600,7 @@ impl Options {
             .with_inline_scopes_numbers(self.inline_scopes_numbers)
             .with_param_assertions(!self.no_param_assertions)
             .with_call_assertions(!self.no_call_assertions)
+            .with_receiver_assertions(!self.no_receiver_assertions)
             .with_annotations_in_metadata(
                 self.language_settings.features.has("AnnotationsInMetadata"),
             )
@@ -820,19 +837,33 @@ mod tests {
         }
     }
 
-    /// Both assertion flags must reach `Options`, not fall through to `ignored`: a missing match arm
+    #[test]
+    fn inline_scopes_numbers_is_read_not_refused() {
+        let parsed = parse_args(&["-Xuse-inline-scopes-numbers", "x.kt"]);
+        assert!(parsed.inline_scopes_numbers);
+        assert_eq!(parsed.ignored, Vec::<String>::new());
+        assert!(!parse_args(&["x.kt"]).inline_scopes_numbers);
+    }
+
+    /// Every assertion flag must reach `Options`, not fall through to `ignored`: a missing match arm
     /// is silent, and the build would keep emitting guards it asked to have removed.
     #[test]
     fn assertion_flags_are_read_not_ignored() {
-        let parsed = parse_args(&["-Xno-param-assertions", "-Xno-call-assertions", "x.kt"]);
+        let parsed = parse_args(&[
+            "-Xno-param-assertions",
+            "-Xno-call-assertions",
+            "-Xno-receiver-assertions",
+            "x.kt",
+        ]);
         assert!(parsed.no_param_assertions);
         assert!(parsed.no_call_assertions);
+        assert!(parsed.no_receiver_assertions);
         assert!(
             !parsed
                 .ignored
                 .iter()
                 .any(|entry| entry.contains("assertions")),
-            "neither flag may be reported as unsupported: {:?}",
+            "no assertion flag may be reported as unsupported: {:?}",
             parsed.ignored
         );
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
@@ -840,6 +871,7 @@ mod tests {
         let default = parse_args(&["x.kt"]);
         assert!(!default.no_param_assertions);
         assert!(!default.no_call_assertions);
+        assert!(!default.no_receiver_assertions);
     }
 
     /// `-Xconsistent-data-class-copy-visibility` is genuinely modeled (a `LangFeatures` toggle the
@@ -1522,8 +1554,9 @@ mod tests {
         assert_eq!(
             parse_args(&["-language-version", "2.0", "f.kt"]).warnings,
             [CliWarning {
-                name: Some(WarningName::DeprecatedLanguageVersion),
-                message: "language version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
+                name: Some(krusty::diag::names::DEPRECATED_LANGUAGE_VERSION),
+                leveled: true,
+                message: "Language version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
             }]
         );
         assert_eq!(
@@ -1537,12 +1570,14 @@ mod tests {
             .warnings,
             [
                 CliWarning {
-                    name: Some(WarningName::DeprecatedLanguageVersion),
+                    name: Some(krusty::diag::names::DEPRECATED_LANGUAGE_VERSION),
+                    leveled: true,
                     message: "API version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
                 },
                 CliWarning {
-                    name: Some(WarningName::ExperimentalLanguageVersion),
-                    message: "language version 2.5 is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.".to_owned(),
+                    name: Some(krusty::diag::names::EXPERIMENTAL_LANGUAGE_VERSION),
+                    leveled: true,
+                    message: "Language version 2.5 is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.".to_owned(),
                 },
             ]
         );
@@ -1585,14 +1620,88 @@ mod tests {
         assert_eq!(
             redundant.warnings,
             [CliWarning {
-                name: Some(WarningName::RedundantCliArg),
-                message: "the argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
+                name: Some(krusty::diag::names::REDUNDANT_CLI_ARG),
+                leveled: true,
+                message: "The argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
             }]
         );
     }
 
     /// Warning policy is keyed by stable diagnostic identity. Unknown and repeated names are
     /// rejected instead of being retained as inert strings that the compiler cannot honor.
+    /// kotlinc 2.4.21 names the `-progressive` and pre-release warnings `COMPILER_ARGUMENTS_WARNING`
+    /// and accepts a level for that name. The level reaches the `-progressive` warning (`disabled`
+    /// removes it, `error` fails with it) and not the pre-release one, which kotlinc reports before
+    /// reading the levels (measured). krusty refuses a `-progressive` build below the latest
+    /// language version, so the warning's policy is asserted here rather than end to end.
+    #[test]
+    fn compiler_arguments_warning_levels_reach_only_the_progressive_warning() {
+        for level in ["error", "warning", "disabled"] {
+            let flag = format!("-Xwarning-level=COMPILER_ARGUMENTS_WARNING:{level}");
+            let parsed = parse_args(&[&flag, "f.kt"]);
+            assert_eq!(parsed.errors, Vec::<String>::new(), "{flag}");
+        }
+        let progressive =
+            parse_args(&["-progressive", "-language-version", "2.3", "f.kt"]).warnings;
+        assert_eq!(
+            progressive,
+            [CliWarning {
+                name: Some(krusty::diag::names::COMPILER_ARGUMENTS_WARNING),
+                leveled: true,
+                message:
+                    "'-progressive' is meaningful only for the latest language version (2.4), \
+                          while this build uses 2.3\nCompiler behavior in such mode is undefined; \
+                          consider moving to the latest stable version or turning off progressive \
+                          mode."
+                        .to_string(),
+            }]
+        );
+        assert_eq!(
+            progressive[0].level_name(),
+            Some(krusty::diag::names::COMPILER_ARGUMENTS_WARNING)
+        );
+        let pre_release =
+            parse_args(&["-XXLanguage:+CompanionBlocksAndExtensions", "f.kt"]).warnings;
+        assert_eq!(
+            pre_release,
+            [CliWarning {
+                name: Some(krusty::diag::names::COMPILER_ARGUMENTS_WARNING),
+                leveled: false,
+                message: "Following manually enabled features will force generation of \
+                          pre-release binaries: CompanionBlocksAndExtensions"
+                    .to_string(),
+            }]
+        );
+        assert_eq!(pre_release[0].level_name(), None);
+    }
+
+    /// Every warning krusty reports under a kotlinc name accepts a level, as in kotlinc.
+    #[test]
+    fn every_named_warning_accepts_a_level() {
+        for name in [
+            "COMPILER_ARGUMENTS_WARNING",
+            "DEPRECATED_MODIFIER_FOR_TARGET",
+            "MISSING_DEPENDENCY_SUPERCLASS_WARNING",
+            "NO_EXPLICIT_RETURN_TYPE_IN_API_MODE_WARNING",
+            "NO_EXPLICIT_VISIBILITY_IN_API_MODE_WARNING",
+            "OPT_IN_REQUIREMENT_MARKER_IS_UNRESOLVED",
+            "OPT_IN_USAGE",
+            "REDUNDANT_ANNOTATION",
+            "UNSUPPORTED_ARRAY_OF_NOTHING_IN_CLASS_LITERAL_LHS",
+        ] {
+            let flag = format!("-Xwarning-level={name}:disabled");
+            let parsed = parse_args(&[&flag, "f.kt"]);
+            assert_eq!(parsed.errors, Vec::<String>::new(), "{flag}");
+            assert_eq!(
+                parsed
+                    .warning_policy
+                    .configured_level(krusty::diag::DiagnosticName::parse(name).unwrap()),
+                Some(WarningLevel::Disabled),
+                "{flag}"
+            );
+        }
+    }
+
     #[test]
     fn warning_level_configures_named_diagnostics() {
         for (severity, expected) in [
@@ -1607,7 +1716,7 @@ mod tests {
             assert_eq!(
                 parsed
                     .warning_policy
-                    .configured_level(WarningName::RedundantCliArg),
+                    .configured_level(krusty::diag::names::REDUNDANT_CLI_ARG),
                 Some(expected),
                 "{flag}"
             );
@@ -1626,7 +1735,7 @@ mod tests {
         assert_eq!(
             parsed
                 .warning_policy
-                .configured_level(WarningName::RedundantCliArg),
+                .configured_level(krusty::diag::names::REDUNDANT_CLI_ARG),
             Some(WarningLevel::Disabled)
         );
 
@@ -1676,7 +1785,7 @@ mod tests {
         assert_eq!(
             parsed
                 .warning_policy
-                .configured_level(WarningName::RedundantCliArg),
+                .configured_level(krusty::diag::names::REDUNDANT_CLI_ARG),
             Some(WarningLevel::Error),
             "a rejected duplicate must not mutate the first configuration"
         );
@@ -1684,26 +1793,22 @@ mod tests {
 
     #[test]
     fn warning_level_rejects_names_absent_from_the_selected_release() {
-        const NAMES: &[(&str, krusty::diag::CompilerWarningName)] = &[
+        const NAMES: &[(&str, krusty::diag::DiagnosticName)] = &[
             (
                 "DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING",
-                krusty::diag::CompilerWarningName::DeprecationErrorMigrationPeriodWarning,
+                krusty::diag::names::DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING,
             ),
             (
                 "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING",
-                krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
-            ),
-            (
-                "INAPPLICABLE_OPERATOR_MODIFIER_WARNING",
-                krusty::diag::CompilerWarningName::InapplicableOperatorModifier,
+                krusty::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING,
             ),
             (
                 "PARENTHESIZED_PACKAGE_QUALIFIER_WARNING",
-                krusty::diag::CompilerWarningName::ParenthesizedPackageQualifier,
+                krusty::diag::names::PARENTHESIZED_PACKAGE_QUALIFIER_WARNING,
             ),
             (
                 "TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING",
-                krusty::diag::CompilerWarningName::TypeArgumentsNotAllowedInPackageQualifier,
+                krusty::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING,
             ),
         ];
         for &(name, _) in NAMES {
@@ -1734,9 +1839,7 @@ mod tests {
                 ]);
                 assert_eq!(parsed.errors, Vec::<String>::new(), "{name}: {level}");
                 assert_eq!(
-                    parsed
-                        .warning_policy
-                        .configured_level(WarningName::Compiler(identity)),
+                    parsed.warning_policy.configured_level(identity),
                     Some(expected),
                     "{name}: {level}"
                 );
@@ -1751,8 +1854,9 @@ mod tests {
         assert_eq!(
             parsed.warnings,
             [CliWarning {
-                name: Some(WarningName::RedundantCliArg),
-                message: "the argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
+                name: Some(krusty::diag::names::REDUNDANT_CLI_ARG),
+                leveled: true,
+                message: "The argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
             }]
         );
     }
@@ -1765,8 +1869,9 @@ mod tests {
         assert_eq!(
             parsed.warnings,
             [CliWarning {
-                name: Some(WarningName::RedundantCliArg),
-                message: "the argument '-Xnested-type-aliases' is redundant for the current language version 2.4.".to_string(),
+                name: Some(krusty::diag::names::REDUNDANT_CLI_ARG),
+                leveled: true,
+                message: "The argument '-Xnested-type-aliases' is redundant for the current language version 2.4.".to_string(),
             }]
         );
     }

@@ -58,6 +58,7 @@ fn anonymous_owned_edges_select_exact_capture_free_and_capture_owning_substituti
         internal: name,
         args: vec![constructor_lambda],
         ctor_params: None,
+        declared_params: None,
         ctor_desc: None,
         external_target: None,
         defaults: Box::new([]),

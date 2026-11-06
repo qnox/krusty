@@ -20,10 +20,12 @@ use super::BodyLowering;
 mod converted_inline_lambda;
 mod escaping_anonymous;
 mod escaping_lambda;
+mod immediate_lambda;
 mod inline_callee;
 mod lambda_splice_contract;
 mod property_accessors;
 
+pub(super) use immediate_lambda::splice_immediate_lambda;
 pub(super) use inline_callee::InlineCallee;
 pub(super) use lambda_splice_contract::LambdaParameterBinding;
 
@@ -792,8 +794,8 @@ impl BodyLowering<'_> {
                     self.ir.exprs[copy as usize] = self.ir.expr(lambda).clone();
                     // The parameter read's end line is the callee's `block(this)`. The splice's
                     // closing `nop` belongs on the call-site lambda's `}`.
-                    if let Some(&end) = self.ir.expr_end_lines.get(&lambda) {
-                        self.ir.expr_end_lines.insert(copy, end);
+                    if let Some(end) = self.ir.end_line(lambda) {
+                        self.ir.set_end_line(copy, end);
                     }
                     // The parameter read carried the inline body's line. A callable reference is
                     // the call site's expression: the spliced invocation keeps that line, and the
@@ -801,20 +803,20 @@ impl BodyLowering<'_> {
                     if matches!(self.ir.expr(lambda), IrExpr::CallableReference(_)) {
                         // A copy that an invocation splices is marked there. A copy the body
                         // evaluates (an object capturing the reference) stays a carrier.
-                        match self.ir.expr_source_lines.get(&lambda).copied() {
+                        match self.ir.source_line(lambda) {
                             Some(line) => {
-                                self.ir.expr_source_lines.insert(copy, line);
+                                self.ir.set_source_line(copy, line);
                             }
                             None => {
-                                self.ir.expr_source_lines.remove(&copy);
+                                self.ir.take_source_line(copy);
                             }
                         }
                     }
                     substituted_inline_lambdas.insert(copy);
                     self.ir.unmark_inline_copy(copy);
                     self.ir.binding_read_stability.remove(&copy);
-                    if let Some(ty) = self.ir.logical_types.get(&lambda).copied() {
-                        self.ir.logical_types.insert(copy, ty);
+                    if let Some(ty) = self.ir.logical_type(lambda) {
+                        self.ir.set_logical_type(copy, ty);
                     }
                     continue;
                 }
@@ -933,11 +935,42 @@ impl BodyLowering<'_> {
             preflight_temporary =
                 lambda_splice_contract::preflight(self.ir, invocation, preflight_temporary)?;
         }
+        // The escaping lambdas are regenerated before the anonymous objects are copied: the object
+        // copies' classifier walk then renames inside each call-site lambda it reaches, which this
+        // expansion alone owns. Walked first, the objects would detach the lambdas' shared
+        // declaration implementations onto clones the plan never specializes, and the call-site
+        // lambda would keep the reified marker. The plan commits without declining; a malformed
+        // anonymous object below is a lowering failure, not a decline that leaves the call executable.
+        let inlined_escaping_implementations = match (module_callee, frame.source()) {
+            (Some(module_callee), Some((source_owner, callee_source))) => escaping_lambda::apply(
+                self.ir,
+                escaping_lambda_plan,
+                &bindings,
+                &reified_bindings,
+                caller_declaration,
+                self.expansion_enclosure,
+                self.in_default_argument,
+                &caller_source_name,
+                function,
+                source_owner,
+                callee_source,
+                module_callee,
+                &callee,
+            ),
+            // The plan is empty: a dependency template declares no lambda.
+            _ => Default::default(),
+        };
         // An anonymous object's methods are not children of the inlined template. Cloning only the
         // `new` reuses the declaration class, whose reified parameter is erased. This is the final
         // fallible specialization: both lambda transformations above have already been preflighted,
         // and every operation after it commits without declining the containing expansion.
         if let Some(module_callee) = module_callee {
+            // Provenance belongs to the selected argument, not to the slot staging gave it: a
+            // copied operand's temporary is a fresh slot that reads nothing.
+            let crossinline_operands = operands
+                .iter()
+                .map(|operand| operand.and_then(|operand| self.crossinline_read(operand)))
+                .collect::<Vec<_>>();
             if let Err(failure) = escaping_anonymous::specialize(
                 self.ir,
                 escaping_copies
@@ -953,6 +986,7 @@ impl BodyLowering<'_> {
                     caller_source_name: &caller_source_name,
                     inline_callee: module_callee,
                     inline_callee_source_name: &callee,
+                    crossinline_operands: &crossinline_operands,
                 },
             ) {
                 *malformed_anonymous = Some(failure);
@@ -1000,25 +1034,6 @@ impl BodyLowering<'_> {
                 self.ir.inline_only_fns.remove(&function);
             }
         }
-        let inlined_escaping_implementations = match (module_callee, frame.source()) {
-            (Some(module_callee), Some((source_owner, callee_source))) => escaping_lambda::apply(
-                self.ir,
-                escaping_lambda_plan,
-                &bindings,
-                &reified_bindings,
-                caller_declaration,
-                self.expansion_enclosure,
-                self.in_default_argument,
-                &caller_source_name,
-                function,
-                source_owner,
-                callee_source,
-                module_callee,
-                &callee,
-            ),
-            // The plan is empty: a dependency template declares no lambda.
-            _ => Default::default(),
-        };
         // Consuming a source lambda implementation is the only irreversible part of escaping
         // inline-lambda specialization. Commit it only after every transformation that can decline
         // this expansion has succeeded; otherwise the original call still needs that body.
@@ -1137,7 +1152,7 @@ impl BodyLowering<'_> {
                 let unit = self.ir.add_expr(IrExpr::UnitInstance);
                 frame.record_copy(self.ir, unit, function);
                 if let Some(line) = close_line {
-                    self.ir.expr_source_lines.insert(unit, line);
+                    self.ir.set_source_line(unit, line);
                 }
                 self.ir.retain_inline_unit_line(unit);
                 Some(unit)
@@ -1176,7 +1191,7 @@ impl BodyLowering<'_> {
             arg,
             type_operand: specialized,
         });
-        self.ir.logical_types.insert(expression, specialized);
+        self.ir.set_logical_type(expression, specialized);
         expression
     }
 
@@ -1208,7 +1223,7 @@ impl BodyLowering<'_> {
                 staged.push(value);
                 continue;
             }
-            let ty = self.ir.logical_types.get(&value).copied()?;
+            let ty = self.ir.logical_type(value)?;
             let slot = self.allocate_temporary();
             let declaration = self.ir.add_expr(IrExpr::Variable {
                 index: slot,
@@ -1223,7 +1238,7 @@ impl BodyLowering<'_> {
                     .insert(declaration);
             }
             let read = self.ir.add_expr(IrExpr::GetValue(slot));
-            self.ir.logical_types.insert(read, ty);
+            self.ir.set_logical_type(read, ty);
             staged.push(read);
         }
         if bound == 1 {
@@ -1393,7 +1408,7 @@ impl BodyLowering<'_> {
         {
             let continuation = self.ir.add_expr(IrExpr::CurrentContinuation);
             let ty = Ty::obj("kotlin/coroutines/Continuation");
-            self.ir.logical_types.insert(continuation, ty);
+            self.ir.set_logical_type(continuation, ty);
             let slot = self.allocate_temporary();
             let declaration = self.ir.add_expr(IrExpr::Variable {
                 index: slot,
@@ -1433,7 +1448,7 @@ impl BodyLowering<'_> {
         // locals first and then anchor the surrounding inline body. Non-empty bodies already
         // restore that line through their emitted effect and must not gain a duplicate boundary.
         if let Some(unit) = unit_only_body_result(self.ir, body) {
-            if let Some(line) = self.ir.expr_source_lines.get(&invocation).copied() {
+            if let Some(line) = self.ir.source_line(invocation) {
                 // With no body instruction, argument evaluation is the invocation's first
                 // physical instruction. Put that source point on the generated bindings; an
                 // enclosing inline copy maps it through the caller frame retained below.
@@ -1442,15 +1457,15 @@ impl BodyLowering<'_> {
                     self.ir.copy_inline_copy_mark(invocation, declaration);
                 }
                 self.ir.copy_inline_copy_mark(invocation, unit);
-                self.ir.expr_source_lines.insert(unit, line);
+                self.ir.set_source_line(unit, line);
                 self.ir.retain_inline_unit_line(unit);
             }
         }
         if indexed_parameters {
-            if let Some(line) = self.ir.expr_source_lines.get(&func).copied() {
+            if let Some(line) = self.ir.source_line(func) {
                 // The adapter was built as its own method and has no source position. The splice
                 // is the reference expression, so this call keeps that line.
-                self.ir.expr_source_lines.insert(body, line);
+                self.ir.set_source_line(body, line);
             }
         }
         let local_base = self.next_temporary;
@@ -1473,8 +1488,8 @@ impl BodyLowering<'_> {
         };
         // The closing `nop` is the lambda literal's last line (its `}`), which is otherwise a
         // line that already holds the call and the nop cleanup would delete.
-        if let Some(end) = self.ir.expr_end_lines.get(&func).copied() {
-            self.ir.expr_end_lines.insert(invocation, end);
+        if let Some(end) = self.ir.end_line(func) {
+            self.ir.set_end_line(invocation, end);
         }
         // The spliced body's own calls are the suspension points now, not the invocation.
         self.ir.suspend_calls.remove(&invocation);
@@ -1619,6 +1634,7 @@ pub(super) fn specialize_typed_expression(
         | IrExpr::PropertyWrite {
             ty: type_operand, ..
         }
+        | IrExpr::AbsentArgument { ty: type_operand }
         | IrExpr::RefNew {
             elem: type_operand, ..
         }
@@ -1691,6 +1707,10 @@ pub(super) fn specialize_typed_expression(
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumValueOf { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumConstant { .. }
+        | IrExpr::EnumAllocation { .. }
+        | IrExpr::EnumEntriesList { .. }
+        | IrExpr::NoSuchEnumConstant { .. }
         | IrExpr::EnumSwitchOrdinal { .. }
         | IrExpr::EnumSwitchKey { .. }
         | IrExpr::ReifiedClassMarker { .. }
@@ -1712,10 +1732,14 @@ pub(super) fn specialize_recorded_facts(
     bindings: &HashMap<String, Ty>,
     runtime: &HashMap<String, Ty>,
 ) {
+    if let Some(ty) = ir.logical_type_mut(expression) {
+        specialize_ty(ty, bindings);
+    }
+    if let Some(ty) = ir.physical_type_mut(expression) {
+        specialize_ty(ty, bindings);
+    }
     for ty in [
-        ir.logical_types.get_mut(&expression),
         ir.whens.exhaustive.get_mut(&expression),
-        ir.physical_types.get_mut(&expression),
         ir.ext_call_source_receiver.get_mut(&expression),
         ir.call_declared_ret.get_mut(&expression),
         ir.suspend_calls.get_mut(&expression),
@@ -1741,7 +1765,11 @@ pub(super) fn specialize_recorded_facts(
         };
         specialize_tys(parameters, bindings);
     }
-    if let Some(parameters) = ir.construction_declared_params.get_mut(&expression) {
+    if let IrExpr::New {
+        declared_params: Some(parameters),
+        ..
+    } = &mut ir.exprs[expression as usize]
+    {
         specialize_tys(parameters, bindings);
     }
     if let Some(substitutions) = ir.reified_call_subst.get_mut(&expression) {
@@ -1833,6 +1861,7 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::StringGet
         | IrIntrinsic::StringLength
         | IrIntrinsic::EnumName
+        | IrIntrinsic::EnumOrdinal
         | IrIntrinsic::NullableAnyToString
         | IrIntrinsic::CoroutineContext => {}
     }
@@ -1850,6 +1879,7 @@ fn specialize_callee(
         }
         Callee::CrossFile { params, ret, .. }
         | Callee::Module { params, ret, .. }
+        | Callee::ModuleDefaultEntry { params, ret, .. }
         | Callee::Super { params, ret, .. } => {
             specialize_tys(params, bindings);
             specialize_ty(ret, bindings);
@@ -2129,16 +2159,14 @@ fn produce_sole_tail_return(
         let unit = ir.add_expr(IrExpr::UnitInstance);
         ir.copy_inline_copy_mark(tail, unit);
         if let Some(line) = ir
-            .expr_source_lines
-            .get(&tail)
-            .copied()
-            .or_else(|| ir.expr_source_lines.get(&effect).copied())
+            .source_line(tail)
+            .or_else(|| ir.source_line(effect))
             .or_else(|| ir.fallthrough_return_line(tail))
-            .or_else(|| ir.expr_end_lines.get(&tail).copied())
-            .or_else(|| ir.expr_end_lines.get(&root).copied())
+            .or_else(|| ir.end_line(tail))
+            .or_else(|| ir.end_line(root))
             .or(close_line)
         {
-            ir.expr_source_lines.insert(unit, line);
+            ir.set_source_line(unit, line);
         }
         ir.retain_inline_unit_line(unit);
         produced = ir.add_expr(IrExpr::Block {
@@ -2148,17 +2176,15 @@ fn produce_sole_tail_return(
     }
     if matches!(ir.expr(produced), IrExpr::UnitInstance) {
         ir.copy_inline_copy_mark(tail, produced);
-        if !ir.expr_source_lines.contains_key(&produced) {
+        if !ir.source_line(produced).is_some() {
             if let Some(line) = ir
-                .expr_source_lines
-                .get(&tail)
-                .copied()
+                .source_line(tail)
                 .or_else(|| ir.fallthrough_return_line(tail))
-                .or_else(|| ir.expr_end_lines.get(&tail).copied())
-                .or_else(|| ir.expr_end_lines.get(&root).copied())
+                .or_else(|| ir.end_line(tail))
+                .or_else(|| ir.end_line(root))
                 .or(close_line)
             {
-                ir.expr_source_lines.insert(produced, line);
+                ir.set_source_line(produced, line);
             }
         }
         ir.retain_inline_unit_line(produced);

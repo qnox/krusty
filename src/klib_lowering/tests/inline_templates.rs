@@ -306,13 +306,13 @@ fn a_scope_function_body_is_a_generic_template_that_splices_its_lambda() {
     };
     let libraries = stdlib(&root);
     for (name, spellings, rendered) in [
-        ("let", &["T", "R"][..], "scope {scope {return@Some(0) invoke(v1!: (T) -> R, v0: T): R: Nothing}: Nothing}"),
-        ("also", &["T"][..], "scope {scope {invoke(v1!: (T) -> Unit, v0: T): Unit; return@Some(0) v0: T: Nothing}: Nothing}"),
+        ("let", &["T", "R"][..], "scope {scope {return@Some(0) invoke(v1!: (T) -> R, v0!: T): R: Nothing}: Nothing}"),
+        ("also", &["T"][..], "scope {scope {invoke(v1!: (T) -> Unit, v0!: T): Unit; return@Some(0) v0!: T: Nothing}: Nothing}"),
         (
             "takeIf",
             &["T"][..],
-            "scope {scope {return@Some(0) when[invoke(v1!: (T) -> Boolean, v0: T): Boolean -> \
-             ImplicitCoercion<T?>(v0: T), else -> Null: Null]: T?: Nothing}: Nothing}",
+            "scope {scope {return@Some(0) when[invoke(v1!: (T) -> Boolean, v0!: T): Boolean -> \
+             ImplicitCoercion<T?>(v0!: T), else -> Null: Null]: T?: Nothing}: Nothing}",
         ),
     ] {
         let selected = kotlin_function(&libraries, name);
@@ -690,5 +690,61 @@ fn a_member_of_a_generic_class_is_called_at_its_receiver_type_arguments() {
         member.declaration_owner,
         Some(crate::types::SemanticCallableOwner::Classifier(collection))
     );
+    validated(&ir);
+}
+
+#[test]
+fn a_member_of_a_generic_class_is_a_template_over_its_class_type_parameters() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let class = libraries
+        .symbols(SymbolNamespace::Package(type_name("kotlin")), "Result")
+        .classifier
+        .clone()
+        .expect("`kotlin.Result` is declared");
+    let (functions, _) = class
+        .declared_callables
+        .get("getOrNull")
+        .expect("`Result` declares `getOrNull`")
+        .clone()
+        .into_parts();
+    let [function] = functions.overloads.as_slice() else {
+        panic!("expected one `kotlin.Result.getOrNull`");
+    };
+    let selected = libraries
+        .external_callable(
+            function
+                .callable
+                .external_identity
+                .expect("a KLIB member carries its provider identity"),
+        )
+        .expect("the provider realizes its own identity");
+    let [formal] = selected
+        .klib_body_callable()
+        .and_then(|callable| callable.class_contract())
+        .expect("a member has its class contract")
+        .parameters
+        .formals[..]
+    else {
+        panic!("`Result` declares one type parameter");
+    };
+    let TyKind::TyParam(identity, _) = formal.kind() else {
+        panic!("a class formal is a type parameter");
+    };
+    let mut ir = IrFile::default();
+    let template = template(&mut ir, &libraries, &selected)
+        .unwrap_or_else(|decline| panic!("`getOrNull`: {decline}"));
+    // The copy reads the class's parameter at its erasure; a call binds it by this identity.
+    assert!(template.type_parameters.is_empty());
+    assert_eq!(
+        template.class_type_parameters,
+        vec![identity.as_str().to_owned()]
+    );
+    let function = &ir.functions[template.function as usize];
+    assert_eq!(function.dispatch_receiver, Some(type_name("kotlin/Result")));
+    assert_eq!(function.ret, Ty::nullable(formal));
+    assert!(function.body.is_some());
     validated(&ir);
 }

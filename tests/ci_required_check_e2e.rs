@@ -59,9 +59,10 @@ fn run_script(job: &str) -> String {
 }
 
 /// The aggregate's result variables, in the order its log names them.
-const RESULT_VARIABLES: [&str; 9] = [
+const RESULT_VARIABLES: [&str; 10] = [
     "CI_RESULT",
     "LINT_RESULT",
+    "PLUGIN_HOST_RESULT",
     "CONFORMANCE_RESULT",
     "KLIB_CONFORMANCE_RESULT",
     "GRADLE_PLUGIN_RESULT",
@@ -71,7 +72,7 @@ const RESULT_VARIABLES: [&str; 9] = [
     "BAZEL_RESULT",
 ];
 
-fn run_predicate(script: &str, results: [&str; 9]) -> std::process::Output {
+fn run_predicate(script: &str, results: [&str; 10]) -> std::process::Output {
     let mut child = Command::new("bash")
         .arg("-s")
         .env_clear()
@@ -101,7 +102,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     );
     assert!(
         aggregate.contains(
-            "\n    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, maven, build-tools, bazel]\n"
+            "\n    needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, maven, build-tools, bazel]\n"
         ),
         "the aggregate waits on every merge gate: {aggregate}"
     );
@@ -116,6 +117,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     assert!(
         aggregate.contains("CI_RESULT: ${{ needs.ci.result }}\n")
             && aggregate.contains("LINT_RESULT: ${{ needs.lint.result }}\n")
+            && aggregate.contains("PLUGIN_HOST_RESULT: ${{ needs.plugin-host.result }}\n")
             && aggregate.contains("CONFORMANCE_RESULT: ${{ needs.conformance.result }}\n")
             && aggregate
                 .contains("KLIB_CONFORMANCE_RESULT: ${{ needs.conformance-klib.result }}\n")
@@ -153,18 +155,10 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     let coverage = ci
         .find("run: just coverage-gate\n")
         .expect("the coverage job runs its gate");
-    let release_candidate = ci
-        .find("- name: select the current master release candidate\n")
-        .expect("coverage selects a release candidate");
+    assert!(coverage > 0);
     assert!(
-        coverage < release_candidate
-            && ci.contains(
-                "release_candidate: ${{ steps.release_candidate.outputs.publish }}\n"
-            )
-            && ci.contains(
-                "if: github.event_name == 'push' && github.ref == 'refs/heads/master'\n        id: release_candidate\n        run: scripts/release-publisher.sh check >> \"$GITHUB_OUTPUT\"\n"
-            ),
-        "release packaging must use the publisher's current-tip check only after successful coverage: {ci}"
+        !ci.contains("release_candidate"),
+        "coverage does not discard superseded master commits"
     );
     assert!(
         lint.contains("run: just lint\n")
@@ -183,15 +177,23 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
             )
             && conformance.contains("        target: [jvm]\n")
             && conformance.contains("    steps: &conformance-steps\n")
+            && conformance.contains("    runs-on: ubuntu-latest\n")
             && !conformance.contains("build-klib-test-bins"),
-        "JVM conformance must start without waiting for the focused KLIB binaries: {conformance}"
+        "JVM conformance must use hosted capacity and start without waiting for the focused KLIB binaries: {conformance}"
     );
     assert!(
         klib_conformance.contains(
             "    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins]\n"
         ) && klib_conformance.contains("        target: [native, wasm]\n")
+            && klib_conformance.contains("      fail-fast: false\n")
+            && klib_conformance.contains(
+                "        version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}\n"
+            )
+            && klib_conformance.contains(
+                r#"    runs-on: ${{ (matrix.target == 'native' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}"#
+            )
             && klib_conformance.contains("    steps: *conformance-steps\n"),
-        "Native and Wasm wait for focused KLIB binaries while reusing the shared inventory: {klib_conformance}"
+        "Native uses hosted capacity and Wasm retains its fork-safe route, with the same versions, dependencies and shared inventory: {klib_conformance}"
     );
     assert_eq!(
         workflow.matches("        target: [jvm]\n").count(),
@@ -224,11 +226,11 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
         .expect("read focused KLIB binary builder");
     assert!(
         klib_builder.contains("--profile klib-test")
-            && klib_builder.contains("--lib --test klib_e2e")
+            && klib_builder.contains("\nbuild --test klib_e2e\nbuild --lib\n")
             && klib_builder.contains("--features focused-klib-tests")
             && !klib_builder.contains("--profile gate")
             && !klib_builder.contains("--test e2e"),
-        "the focused producer must use its cheaper profile without changing its two test targets: {klib_builder}"
+        "the focused producer must use its cheaper profile and build its two test targets one after the other, so their two krusty compiles never overlap in memory: {klib_builder}"
     );
     let manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo manifest");
     assert!(
@@ -319,24 +321,24 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     assert!(
         release_build.contains("    needs: [ci]\n")
             && release_build.contains(
-                "    if: github.ref == 'refs/heads/master' && needs.ci.outputs.release_candidate == 'true'\n"
+                "    if: github.event_name == 'push' && github.ref == 'refs/heads/master'\n"
             )
             && release_build.contains("      max-parallel: 2\n"),
-        "only the current covered master commit may occupy at most two release runners: {release_build}"
+        "every covered master commit may occupy at most two release runners: {release_build}"
     );
     let release = job(&workflow, "release");
     assert!(
         release.contains(
-            "    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]\n"
+            "    needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]\n"
         ) && release.contains("run: scripts/release-publisher.sh check >> \"$GITHUB_OUTPUT\"\n"),
-        "master release keeps its broader prerequisites and rechecks under the publisher lock: {release}"
+        "master release keeps its broader prerequisites and checks ancestry under its commit lock: {release}"
     );
     assert_eq!(
         workflow
             .matches("scripts/release-publisher.sh check >> \"$GITHUB_OUTPUT\"")
             .count(),
-        2,
-        "coverage filters stale packaging early and release independently rechecks before publishing"
+        1,
+        "every covered master commit packages; release checks current history before publication"
     );
 }
 
@@ -344,8 +346,8 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
 fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     let workflow = workflow();
     let script = run_script(job(&workflow, AGGREGATE));
-    let run = |results: [&str; 9]| run_predicate(&script, results);
-    let success = ["success"; 9];
+    let run = |results: [&str; 10]| run_predicate(&script, results);
+    let success = ["success"; 10];
     let output = run(success);
     assert!(
         output.status.success(),
@@ -354,13 +356,14 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "ci: success\nlint: success\nconformance: success\nKLIB conformance: success\nbuild-gradle-plugin: success\ngradle: success\nmaven: success\nbuild-tools: success\nbazel: success\n",
+        "ci: success\nlint: success\nplugin-host: success\nconformance: success\nKLIB conformance: success\nbuild-gradle-plugin: success\ngradle: success\nmaven: success\nbuild-tools: success\nbazel: success\n",
         "the log names every dependency result"
     );
 
     let gates = [
         "ci",
         "lint",
+        "plugin-host",
         "conformance",
         "KLIB conformance",
         "build-gradle-plugin",
@@ -380,7 +383,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
             );
             assert_eq!(
                 String::from_utf8_lossy(&output.stderr),
-                "lint, coverage, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed\n",
+                "lint, plugin host tests, coverage, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed\n",
                 "{gate}={result:?}"
             );
         }

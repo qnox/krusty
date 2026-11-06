@@ -48,7 +48,7 @@ impl BodyLowering<'_> {
             branches: vec![(Some(condition), fallback), (None, present)],
         });
         self.ir.whens.elvises.insert(when, 0); // Serialized bodies supply no source line.
-        self.ir.logical_types.insert(when, ty);
+        self.ir.set_logical_type(when, ty);
         let block = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],
             value: Some(when),
@@ -124,7 +124,10 @@ impl BodyLowering<'_> {
         })
     }
 
-    fn elvis_null_test(&self, condition: KlibIrExprId) -> Lowered<(KlibIrExprId, KlibIrExprId)> {
+    pub(super) fn elvis_null_test(
+        &self,
+        condition: KlibIrExprId,
+    ) -> Lowered<(KlibIrExprId, KlibIrExprId)> {
         let condition = self.arena.expr(condition);
         let KlibIrExprKind::Call {
             access,

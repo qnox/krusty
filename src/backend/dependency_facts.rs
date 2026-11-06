@@ -19,6 +19,9 @@ use std::collections::hash_map::Entry;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
+/// A dependency classifier a target may represent itself
+/// ([`super::Backend::represents_dependency_classifier`]).
+pub type DependencyClassifier = crate::types::TypeName;
 use crate::libraries::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, GenericSig, InlineKind,
     KlibBodyCompanionReceiver, KlibDeclarationSignature, KlibDependencyCallable, MemberRealization,
@@ -101,6 +104,8 @@ pub struct BackendCallableFact {
     pub(crate) klib_body_accessor: Option<crate::libraries::KlibBodyAccessor>,
     pub(crate) klib_body_vararg_index: Option<usize>,
     pub(crate) klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
+    /// Whether a source parameter declares a default value, as the provider's declaration says.
+    pub declares_parameter_defaults: bool,
     /// Qualified identities of the annotations the provider recorded on this declaration. A
     /// compiler plugin keys its own calling convention on them (Compose's `@Composable`).
     pub annotations: Box<[TypeName]>,
@@ -324,6 +329,7 @@ mod tests {
             klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            declares_parameter_defaults: false,
             annotations: Box::new([]),
         }
     }
@@ -467,7 +473,7 @@ mod tests {
             .get_mut(&ExternalCallableId::from_raw(1))
             .unwrap()
             .generic_sig = Some(Box::new(GenericSig {
-            formals: vec!["owned-T".to_owned()],
+            formals: vec![crate::types::TyParamName::new("owned-T")],
             formal_bounds: vec![Vec::new()],
             receiver: None,
             params: Vec::new(),
@@ -547,6 +553,7 @@ mod tests {
             klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            declares_parameter_defaults: false,
             annotations: Box::new([]),
         };
         assert!(fact.matches_dependency_body_call(&[Ty::Int], None, true));
@@ -650,6 +657,17 @@ impl CheckedBackendCallables {
         expression: crate::ir::ExprId,
     ) -> Option<SingletonDispatch> {
         self.singleton_dispatches.get(&expression).copied()
+    }
+
+    /// Give each copy of a checked expression the facts frozen for the expression it copies, so
+    /// a lowering that clones a checked body after the handoff keeps its exact selections.
+    /// `clones` pairs each original with its copy.
+    pub(crate) fn extend_to_clones(&mut self, clones: &[(crate::ir::ExprId, crate::ir::ExprId)]) {
+        for &(original, copy) in clones {
+            if let Some(&dispatch) = self.singleton_dispatches.get(&original) {
+                self.singleton_dispatches.insert(copy, dispatch);
+            }
+        }
     }
 
     /// Copy the provider's facts for every dependency identity `ir` references.
@@ -811,6 +829,7 @@ impl CheckedBackendCallables {
                 let klib_body_accessor = realization.klib_body_accessor;
                 let klib_body_vararg_index = realization.klib_body_vararg_index;
                 let klib_body_parameter_defaults = realization.klib_body_parameter_defaults;
+                let declares_parameter_defaults = realization.declares_parameter_defaults;
                 let callable = realization.callable;
                 let annotations = callable.annotations.into_boxed_slice();
                 slot.insert(BackendCallableFact {
@@ -855,6 +874,7 @@ impl CheckedBackendCallables {
                     klib_body_class_contract,
                     klib_body_vararg_index,
                     klib_body_parameter_defaults,
+                    declares_parameter_defaults,
                     annotations,
                 })
             }
