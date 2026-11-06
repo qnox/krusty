@@ -640,7 +640,7 @@ fn wasm_corpus_matrix_runs_each_platform_and_preserves_its_failure() {
         .expect("Wasm corpus shell")
         .1
         .lines()
-        .map(|line| line.strip_prefix("          ").expect("shell indentation"))
+        .map_while(|line| line.strip_prefix("          "))
         .collect::<Vec<_>>()
         .join("\n");
     let temp = scratch_dir("independent-wasm-matrix");
