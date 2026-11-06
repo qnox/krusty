@@ -1261,7 +1261,8 @@ impl BodyFirChecker<'_> {
                     | ExprLowering::RuntimeTypeTest { .. }
                     | ExprLowering::ExtensionFunctionBinding { .. }
                     | ExprLowering::PluginExpression(_)
-                    | ExprLowering::ClassStorageRead { .. }
+                    | ExprLowering::ClassStorageRead(_)
+                    | ExprLowering::EnumEntryStorageRead { .. }
                     | ExprLowering::BackingFieldRead
                     | ExprLowering::ImplicitPropertyIncDec(_)
                     | ExprLowering::LateinitInitialized { .. }
@@ -1465,15 +1466,7 @@ impl BodyFirChecker<'_> {
                             target,
                             dispatch_receiver,
                         }
-                    } else if let Some(field) = self.active_class_storage_read(expression) {
-                        let binding = match self.class_values.get(name).copied() {
-                            Some(binding) => binding,
-                            None => {
-                                let field = *field;
-                                let ty = self.expression_type(expression)?;
-                                self.direct_class_capture_binding(field, ty)?
-                            }
-                        };
+                    } else if let Some(binding) = self.active_class_storage_read(expression)? {
                         self.capture_read_kind(expression, binding)?
                     } else if let Some(ExprLowering::SingletonValue(singleton)) =
                         self.info.expr_lowers.get(&expression)

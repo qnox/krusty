@@ -60,6 +60,7 @@ use anonymous_object_capture::{
 };
 pub use anonymous_object_capture::{
     AnonymousObjectCapture, AnonymousObjectCaptureSource, AnonymousObjectReceiverSource,
+    ClassStorageSource,
 };
 mod anonymous_receiver_labels;
 mod applied_hierarchy;
@@ -8578,7 +8579,9 @@ pub enum ExprLowering {
     /// Explicit call syntax for a compiler-known primitive unary convention. Resolution has already
     /// selected the built-in operation; checked FIR consumes this decision without reinterpreting
     /// the callable spelling or synthesizing a declaration lookup.
-    BuiltinUnaryCall { operation: BuiltinUnaryOperation },
+    BuiltinUnaryCall {
+        operation: BuiltinUnaryOperation,
+    },
     /// Runtime type-test plan selected from declaration facts. `target` carries any normalized
     /// callable shape, and the erased-bound equality is final; lowering never reopens a provider or
     /// reinterprets the source type reference.
@@ -8591,7 +8594,10 @@ pub enum ExprLowering {
     /// parameters, result, and suspend bit); `result` is the same shape with only the extension
     /// receiver bound. Checked FIR materializes that exact value transformation without re-inferring a
     /// function type or looking up `invoke`.
-    ExtensionFunctionBinding { target: Ty, result: Ty },
+    ExtensionFunctionBinding {
+        target: Ty,
+        result: Ty,
+    },
     /// An exact declaration selected by ordinary resolution whose expression implementation belongs
     /// to a compiler plugin. The lowerer only creates the opaque placeholder described by this plan;
     /// it does not inspect source names, annotations, or plugin ABI.
@@ -8599,11 +8605,17 @@ pub enum ExprLowering {
     /// A bare value read whose storage is a compiler-generated field on the current class (a local
     /// class capture or an enum-entry body property). The checker records the exact field slot so
     /// lowering performs no member lookup.
-    ClassStorageRead { field: u32 },
+    ClassStorageRead(ClassStorageSource),
+    EnumEntryStorageRead {
+        owner: TypeName,
+        field: u32,
+    },
     /// A property of an enum-entry anonymous subclass selected from a nested classifier. The
     /// owner-local ordinal becomes a stable `PropertyId` while checked FIR is built; the selected
     /// enclosing receiver is recorded independently in `implicit_receiver_selections`.
-    EnumEntryPropertyRead { sibling: u32 },
+    EnumEntryPropertyRead {
+        sibling: u32,
+    },
     /// The accessor soft-keyword `field`, selected only when no lexical value named `field` shadows
     /// it. Lowering consumes the selection in the current accessor or fails cleanly when the access
     /// crosses a closure/class boundary it cannot materialize.
@@ -8679,7 +8691,10 @@ pub enum ExprLowering {
     /// Both shapes are final checker decisions: `target` is the captured value's invocation shape,
     /// while `signature` is the possibly adapted callable-reference shape exposed to the caller.
     /// Later phases synthesize a forwarding closure without looking up a runtime `FunctionN` class.
-    FunctionInvokeReference { target: Ty, signature: Ty },
+    FunctionInvokeReference {
+        target: Ty,
+        signature: Ty,
+    },
     /// A source top-level reference adapted to a shorter function type.
     AdaptedRef {
         target: Box<crate::libraries::LibraryCallable>,
@@ -8712,11 +8727,16 @@ pub enum ExprLowering {
     /// A semantically selected callable whose provider has no physical handle for this backend
     /// (for example a package function declared only in `.kotlin_builtins`). Resolution is complete;
     /// lowering must decline explicitly instead of guessing a facade or re-resolving the name.
-    UnavailableCallableReference { signature: Ty, reason: &'static str },
+    UnavailableCallableReference {
+        signature: Ty,
+        reason: &'static str,
+    },
     /// Resolution completed, but the selected semantic operation needs a lowering capability the
     /// active backend does not implement. Lowering reports this reason directly and never retries
     /// name or overload resolution.
-    Unavailable { reason: &'static str },
+    Unavailable {
+        reason: &'static str,
+    },
     /// A compile-time-only expression whose semantic result is `Unit`. Contracts are represented
     /// this way when they occupy a block's trailing-expression slot; statement-position contracts
     /// use [`StmtLowering::Erased`].
@@ -8813,7 +8833,9 @@ pub enum ExprLowering {
     },
     /// A property-read `recv.name` resolved to an extension property. The complete selected property
     /// is retained for every provider; origin affects only local/cross-file/library linkage.
-    ExtensionPropertyGet { access: Box<ResolvedPropertyAccess> },
+    ExtensionPropertyGet {
+        access: Box<ResolvedPropertyAccess>,
+    },
     /// `recv.name` resolved to a MEMBER EXTENSION PROPERTY (`class C { val Int.x: T }`) — the
     /// read lowers to a call of the owner's `getX(Recv)` accessor: the dispatch receiver comes
     /// from the implicit-receiver scope (like a member extension function call), and `recv` is
@@ -8855,7 +8877,9 @@ pub enum ExprLowering {
     /// reference type name (`String::class`) — lowers to `ldc <ty>.class`. `unbound = None` is a BOUND
     /// literal on a value expression (`x::class`, `this::class`) — lowers to `expr.getClass()`. krusty
     /// models the result as `java/lang/Class` (its identity makes `==` agree with kotlinc's `KClass`).
-    ClassLiteral { unbound: Option<Ty> },
+    ClassLiteral {
+        unbound: Option<Ty>,
+    },
     /// Invocation of a receiver-function value selected after ordinary member resolution.
     ReceiverFnInvoke {
         name: String,
@@ -8902,7 +8926,7 @@ pub enum ReceiverFnValueOrigin {
     },
     /// A value stored in a compiler-generated field of the class whose body is being checked.
     /// The index is the exact IR field slot; lowering consumes it without looking up a name.
-    ClassStorage(u32),
+    ClassStorage(ClassStorageSource),
     /// A source property declared by an enum-entry anonymous subclass. The entry owner is the
     /// selected semantic storage owner and `field` is the property's stable owner-local sibling.
     /// Reads use the same physical storage operation as generated class captures, while writes
@@ -13739,15 +13763,13 @@ impl<'a> Checker<'a> {
                         return;
                     }
                     let source = match local.origin {
-                        ReceiverFnValueOrigin::ClassStorage(field)
-                        | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
-                            AnonymousObjectCaptureSource::ClassStorage { field }
+                        ReceiverFnValueOrigin::ClassStorage(storage) => {
+                            AnonymousObjectCaptureSource::ClassStorage(storage)
                         }
-                        ReceiverFnValueOrigin::Local
-                        | ReceiverFnValueOrigin::TopLevelProperty
-                        | ReceiverFnValueOrigin::DispatchProperty { .. } => {
-                            AnonymousObjectCaptureSource::LexicalValue
+                        ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field } => {
+                            AnonymousObjectCaptureSource::EnumEntryPropertyStorage { owner, field }
                         }
+                        _ => AnonymousObjectCaptureSource::LexicalValue,
                     };
                     let function_local = matches!(local.origin, ReceiverFnValueOrigin::Local);
                     let written_here = self.fn_reassigned.contains(name)
@@ -13818,9 +13840,25 @@ impl<'a> Checker<'a> {
                             .anonymous_lexical_scope
                             .owners
                             .get(&declaration)
-                            .and_then(|owner| self.anonymous_receiver_capture_fields.get(owner))
-                            .and_then(|fields| fields.get(&identity))
-                            .copied();
+                            .and_then(|owner| {
+                                self.anonymous_receiver_capture_fields
+                                    .get(owner)
+                                    .and_then(|fields| fields.get(&identity))
+                                    .map(|field| (*owner, *field))
+                            });
+                        let captured_field = match captured_field {
+                            Some((owner, field)) => {
+                                let Some(owner) = self.body_class_storage_owner(owner) else {
+                                    self.diags.error(
+                                        span,
+                                        "class storage has no checked classifier owner",
+                                    );
+                                    return None;
+                                };
+                                Some(ClassStorageSource { owner, field })
+                            }
+                            None => None,
+                        };
                         let semantic_receiver = if receiver.class_receiver {
                             AnonymousObjectReceiverSource::EnclosingInstance {
                                 current: receiver.current,
@@ -13849,7 +13887,7 @@ impl<'a> Checker<'a> {
                                     depth,
                                 },
                             },
-                            |field| AnonymousObjectCaptureSource::ClassStorage { field },
+                            AnonymousObjectCaptureSource::ClassStorage,
                         );
                         Some((
                             AnonymousCaptureCandidate {
@@ -14056,7 +14094,10 @@ impl<'a> Checker<'a> {
                             .find(|receiver| receiver.receiver_depth == depth as usize)
                             .map(|receiver| receiver.ty)
                             .unwrap_or(Ty::Error),
-                        AnonymousObjectCaptureSource::ClassStorage { .. } => capture.ty,
+                        AnonymousObjectCaptureSource::ClassStorage(_)
+                        | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. } => {
+                            capture.ty
+                        }
                         AnonymousObjectCaptureSource::LexicalValue => self
                             .lookup(scope, &capture.name)
                             .map(|local| {
@@ -39301,78 +39342,6 @@ impl<'a> Checker<'a> {
         );
     }
 
-    fn declare_scoped_property(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        property: &ScopedProperty,
-        owner_storage_visible: bool,
-    ) {
-        self.declare_scoped_property_with_mutability(
-            scope,
-            property,
-            owner_storage_visible,
-            property.is_var,
-        );
-    }
-
-    fn declare_scoped_property_with_mutability(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        property: &ScopedProperty,
-        owner_storage_visible: bool,
-        is_var: bool,
-    ) {
-        if let Some(field) = property.class_storage {
-            self.declare_class_storage(scope, &property.name, property.ty, is_var, field, false);
-            return;
-        }
-        let error_provenance = if property.ty == Ty::Error
-            && self
-                .source_member_inference_failed(property.source_member, property.stable_declaration)
-        {
-            ErrorProvenance::Diagnosed
-        } else {
-            ErrorProvenance::None
-        };
-        let storage = self.visible_owner_storage_type(scope, property, owner_storage_visible);
-        self.declare_dispatch_property_with_provenance(
-            scope,
-            &property.name,
-            DispatchPropertyBinding {
-                read_ty: storage.unwrap_or(property.ty),
-                declared_ty: property.ty,
-                error_provenance,
-                owner_storage: storage.is_some(),
-            },
-            is_var,
-            property.owner,
-            property.enum_entry_property,
-            property.dispatch_receiver_identity,
-        );
-    }
-
-    fn declare_class_storage(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        ty: Ty,
-        is_var: bool,
-        field: u32,
-        shared_cell: bool,
-    ) {
-        self.declare_with_origin(
-            scope,
-            name,
-            ty,
-            is_var,
-            ValueBindingDeclaration::ordinary(
-                ReceiverFnValueOrigin::ClassStorage(field),
-                ErrorProvenance::None,
-            )
-            .in_shared_cell(shared_cell),
-        );
-    }
-
     /// Captures visible as storage inside one local/anonymous classifier body. Capture discovery
     /// checks that body in the current lexical Pass-2 unit. Legacy whole-file analysis may consume
     /// its installed parser-keyed record; streamed checking never crosses back into that arena.
@@ -45163,7 +45132,7 @@ impl<'a> Checker<'a> {
                         if let Some(initializer) = bp.init {
                             self.finish_executable_root(initializer);
                         }
-                        let owner = current_owner.expect("enum class must have a source owner");
+                        let _ = current_owner.expect("enum class must have a source owner");
                         self.declare_enum_entry_property_storage(
                             entry_scope,
                             &bp.name,
@@ -45177,7 +45146,7 @@ impl<'a> Checker<'a> {
                             ty,
                             owner_storage_ty: None,
                             is_var: bp.is_var,
-                            owner,
+                            owner: entry_owner,
                             dispatch_receiver_identity: None,
                             class_storage: Some(field as u32),
                             enum_entry_property: Some(field as u32),
@@ -53417,11 +53386,17 @@ impl<'a> Checker<'a> {
                     // shape beside its nominal reflection type; invoking the read consumes it.
                     self.read_callable_reference_types.insert(e, function);
                 }
-                if let ReceiverFnValueOrigin::ClassStorage(field)
-                | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } = l.origin
-                {
-                    self.expr_lowers
-                        .insert(e, ExprLowering::ClassStorageRead { field });
+                let storage_read = match l.origin {
+                    ReceiverFnValueOrigin::ClassStorage(storage) => {
+                        Some(ExprLowering::ClassStorageRead(storage))
+                    }
+                    ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field } => {
+                        Some(ExprLowering::EnumEntryStorageRead { owner, field })
+                    }
+                    _ => None,
+                };
+                if let Some(read) = storage_read {
+                    self.expr_lowers.insert(e, read);
                     self.read_flow_roots
                         .insert(e, scope::PathRoot::Value(l.flow_identity));
                     self.anonymous_super_read_provenance.insert(

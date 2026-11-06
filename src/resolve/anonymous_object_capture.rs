@@ -143,12 +143,23 @@ impl AnonymousObjectCapture {
     }
 }
 
+/// Selected storage coordinates include their semantic classifier owner; a field ordinal alone
+/// cannot survive forwarding or a later finalization of another anonymous class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClassStorageSource {
+    pub(crate) owner: crate::types::TypeName,
+    pub(crate) field: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnonymousObjectCaptureSource {
     LexicalValue,
-    /// A field of the construction site's current classifier, selected by the checker. The capture
-    /// constructor reads this exact ordinal; neither FIR construction nor lowering looks the name up.
-    ClassStorage {
+    /// A field of the exact classifier selected at the construction site.
+    ClassStorage(ClassStorageSource),
+    /// A declared entry property keeps its own declaration-local field coordinate. It is never
+    /// an ordinal in an anonymous constructor's generated capture prefix.
+    EnumEntryPropertyStorage {
+        owner: crate::types::TypeName,
         field: u32,
     },
     /// Exact class-receiver rung selected at the construction site.
@@ -844,7 +855,8 @@ fn refreshed_local_receiver_capture(
             assert_eq!(current.receiver_capture, None);
         }
         AnonymousObjectCaptureSource::LexicalValue
-        | AnonymousObjectCaptureSource::ClassStorage { .. } => {
+        | AnonymousObjectCaptureSource::ClassStorage(_)
+        | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. } => {
             panic!("only receiver captures are refreshed")
         }
     }
@@ -1242,11 +1254,10 @@ pub(super) fn record_anonymous_construction_captures(
             // It has no source variable name, so lexical bound/write/use filters do not apply.
             AnonymousObjectCaptureSource::EnclosingInstance { .. }
             | AnonymousObjectCaptureSource::ImplicitReceiver { .. } => true,
-            AnonymousObjectCaptureSource::ClassStorage { .. } if candidate.receiver.is_some() => {
-                true
-            }
+            AnonymousObjectCaptureSource::ClassStorage(_) if candidate.receiver.is_some() => true,
             AnonymousObjectCaptureSource::LexicalValue
-            | AnonymousObjectCaptureSource::ClassStorage { .. } => {
+            | AnonymousObjectCaptureSource::ClassStorage(_)
+            | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. } => {
                 enclosing_value_visible_beside_member(
                     file,
                     declaration,

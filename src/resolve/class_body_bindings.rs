@@ -1,11 +1,118 @@
 //! Values a class body binds ahead of its dispatch rung: the primary-constructor parameters its
 //! initializers see and the storage of values a local class captures.
 
-use super::{AnonymousObjectCaptureSource, Checker, CheckerScope};
-use crate::ast::{DeclId, PropParam};
+use super::{
+    AnonymousObjectCaptureSource, Checker, CheckerScope, ClassStorageSource,
+    DispatchPropertyBinding, ErrorProvenance, ReceiverFnValueOrigin, ScopedProperty,
+    ValueBindingDeclaration,
+};
+use crate::ast::{Decl, DeclId, PropParam};
 use crate::types::Ty;
 
 impl Checker<'_> {
+    pub(super) fn declare_scoped_property(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        property: &ScopedProperty,
+        owner_storage_visible: bool,
+    ) {
+        self.declare_scoped_property_with_mutability(
+            scope,
+            property,
+            owner_storage_visible,
+            property.is_var,
+        );
+    }
+
+    pub(super) fn declare_scoped_property_with_mutability(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        property: &ScopedProperty,
+        owner_storage_visible: bool,
+        is_var: bool,
+    ) {
+        if let Some(field) = property.class_storage {
+            if let Some(sibling) = property.enum_entry_property {
+                self.declare_enum_entry_property_storage(
+                    scope,
+                    &property.name,
+                    property.ty,
+                    is_var,
+                    property.owner,
+                    sibling,
+                );
+                return;
+            }
+            self.declare_class_storage(
+                scope,
+                &property.name,
+                property.ty,
+                is_var,
+                ClassStorageSource {
+                    owner: property.owner,
+                    field,
+                },
+                false,
+            );
+            return;
+        }
+        let error_provenance = if property.ty == Ty::Error
+            && self
+                .source_member_inference_failed(property.source_member, property.stable_declaration)
+        {
+            ErrorProvenance::Diagnosed
+        } else {
+            ErrorProvenance::None
+        };
+        let storage = self.visible_owner_storage_type(scope, property, owner_storage_visible);
+        self.declare_dispatch_property_with_provenance(
+            scope,
+            &property.name,
+            DispatchPropertyBinding {
+                read_ty: storage.unwrap_or(property.ty),
+                declared_ty: property.ty,
+                error_provenance,
+                owner_storage: storage.is_some(),
+            },
+            is_var,
+            property.owner,
+            property.enum_entry_property,
+            property.dispatch_receiver_identity,
+        );
+    }
+
+    pub(super) fn declare_class_storage(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        ty: Ty,
+        is_var: bool,
+        storage: ClassStorageSource,
+        shared_cell: bool,
+    ) {
+        self.declare_with_origin(
+            scope,
+            name,
+            ty,
+            is_var,
+            ValueBindingDeclaration::ordinary(
+                ReceiverFnValueOrigin::ClassStorage(storage),
+                ErrorProvenance::None,
+            )
+            .in_shared_cell(shared_cell),
+        );
+    }
+
+    pub(super) fn body_class_storage_owner(
+        &self,
+        declaration: DeclId,
+    ) -> Option<crate::types::TypeName> {
+        let Decl::Class(class) = self.file.decl(declaration) else {
+            return None;
+        };
+        self.active_classifier_internal(declaration, class)
+    }
+
     pub(super) fn body_class_declaration(
         &self,
         source: Option<&crate::libraries::SourceMember>,
@@ -56,11 +163,19 @@ impl Checker<'_> {
                     && matches!(
                         capture.source,
                         AnonymousObjectCaptureSource::LexicalValue
-                            | AnonymousObjectCaptureSource::ClassStorage { .. }
+                            | AnonymousObjectCaptureSource::ClassStorage(_)
+                            | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. }
                     )
                     && capture.storage_ty.is_none()
             })
         else {
+            return;
+        };
+        let Some(owner) = self.body_class_storage_owner(declaration) else {
+            if let Decl::Class(class) = self.file.decl(declaration) {
+                self.diags
+                    .error(class.span, "class storage has no checked classifier owner");
+            }
             return;
         };
         self.declare_class_storage(
@@ -68,7 +183,10 @@ impl Checker<'_> {
             &capture.name,
             capture.ty,
             capture.shared_cell,
-            u32::try_from(field).expect("too many local-class captures"),
+            super::ClassStorageSource {
+                owner,
+                field: u32::try_from(field).expect("too many local-class captures"),
+            },
             capture.shared_cell,
         );
     }
@@ -90,15 +208,26 @@ impl Checker<'_> {
             if matches!(
                 capture.source,
                 AnonymousObjectCaptureSource::LexicalValue
-                    | AnonymousObjectCaptureSource::ClassStorage { .. }
+                    | AnonymousObjectCaptureSource::ClassStorage(_)
+                    | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. }
             ) && capture.storage_ty.is_none()
             {
+                let Some(owner) = self.body_class_storage_owner(declaration) else {
+                    if let Decl::Class(class) = self.file.decl(declaration) {
+                        self.diags
+                            .error(class.span, "class storage has no checked classifier owner");
+                    }
+                    return;
+                };
                 self.declare_class_storage(
                     scope,
                     &capture.name,
                     capture.ty,
                     capture.shared_cell,
-                    field as u32,
+                    super::ClassStorageSource {
+                        owner,
+                        field: field as u32,
+                    },
                     capture.shared_cell,
                 );
             }

@@ -938,15 +938,13 @@ impl Checker<'_> {
                 continue;
             };
             let source = match local.origin {
-                ReceiverFnValueOrigin::ClassStorage(field)
-                | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
-                    AnonymousObjectCaptureSource::ClassStorage { field }
+                ReceiverFnValueOrigin::ClassStorage(storage) => {
+                    AnonymousObjectCaptureSource::ClassStorage(storage)
                 }
-                ReceiverFnValueOrigin::Local
-                | ReceiverFnValueOrigin::DispatchProperty { .. }
-                | ReceiverFnValueOrigin::TopLevelProperty => {
-                    AnonymousObjectCaptureSource::LexicalValue
+                ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field } => {
+                    AnonymousObjectCaptureSource::EnumEntryPropertyStorage { owner, field }
                 }
+                _ => AnonymousObjectCaptureSource::LexicalValue,
             };
             result.values.push(AnonymousObjectCapture {
                 // Smart-cast state is a fact about this control-flow point, not the type of a

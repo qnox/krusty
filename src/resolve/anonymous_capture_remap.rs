@@ -9,6 +9,7 @@ use crate::ast::{DeclId, ExprId, File};
 use crate::fx_hash::{HashMap, HashSet};
 
 pub(super) struct CaptureFieldRemap<'a> {
+    pub(super) owner: crate::types::TypeName,
     pub(super) fields: &'a [Option<u32>],
     pub(super) original: &'a [AnonymousObjectCapture],
 }
@@ -66,15 +67,27 @@ pub(super) fn remap_owned_anonymous_class_storage_captures(
         );
         selected.push((child, outside_owner));
     }
+    remap_selected_sources(selected, remap, captures)
+}
+
+fn remap_selected_sources(
+    selected: Vec<(DeclId, bool)>,
+    remap: CaptureFieldRemap<'_>,
+    captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+) -> bool {
     // Validate both coordinate changes before changing any descendant's selected source.
     for &(declaration, outside_owner) in &selected {
         let Some(captures) = captures.get(&declaration) else {
             continue;
         };
         for capture in captures {
-            let AnonymousObjectCaptureSource::ClassStorage { field } = capture.source else {
+            let AnonymousObjectCaptureSource::ClassStorage(storage) = capture.source else {
                 continue;
             };
+            if storage.owner != remap.owner {
+                continue;
+            }
+            let field = storage.field;
             let valid = if outside_owner {
                 remap
                     .original
@@ -96,9 +109,13 @@ pub(super) fn remap_owned_anonymous_class_storage_captures(
             continue;
         };
         for capture in captures {
-            let AnonymousObjectCaptureSource::ClassStorage { field } = capture.source else {
+            let AnonymousObjectCaptureSource::ClassStorage(storage) = capture.source else {
                 continue;
             };
+            if storage.owner != remap.owner {
+                continue;
+            }
+            let field = storage.field;
             if outside_owner {
                 let original = &remap.original[field as usize];
                 capture.source = original.source;
@@ -106,12 +123,89 @@ pub(super) fn remap_owned_anonymous_class_storage_captures(
                 capture.lexical_shadow_depth = original.lexical_shadow_depth;
                 capture.capture_dependency = original.capture_dependency;
             } else {
-                capture.source = AnonymousObjectCaptureSource::ClassStorage {
-                    field: remap.fields[field as usize]
-                        .expect("validated owner storage permutation"),
-                };
+                capture.source =
+                    AnonymousObjectCaptureSource::ClassStorage(super::ClassStorageSource {
+                        owner: remap.owner,
+                        field: remap.fields[field as usize]
+                            .expect("validated owner storage permutation"),
+                    });
             }
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resolve::ClassStorageSource;
+    use crate::types::{type_name, Ty};
+
+    fn selected_value(source: ClassStorageSource) -> AnonymousObjectCapture {
+        AnonymousObjectCapture {
+            name: "value".into(),
+            ty: Ty::String,
+            shared_cell: false,
+            storage_ty: None,
+            source: AnonymousObjectCaptureSource::ClassStorage(source),
+            receiver_label: None,
+            receiver: None,
+            semantic_receiver: None,
+            lexical_shadow_depth: 0,
+            lexical_binding: Some(7),
+            capture_dependency: None,
+            receiver_capture: None,
+            receiver_role: None,
+        }
+    }
+
+    #[test]
+    fn a_revisited_forward_keeps_the_original_storage_owner_after_its_prefix_retires() {
+        let middle = type_name("Middle");
+        let outer = ClassStorageSource {
+            owner: type_name("Outer"),
+            field: 3,
+        };
+        let child = DeclId(12);
+        let mut original = selected_value(outer);
+        original.lexical_shadow_depth = 1;
+        let mut captures = HashMap::default();
+        captures.insert(
+            child,
+            vec![selected_value(ClassStorageSource {
+                owner: middle,
+                field: 0,
+            })],
+        );
+        assert!(remap_selected_sources(
+            vec![(child, true)],
+            CaptureFieldRemap {
+                owner: middle,
+                fields: &[None],
+                original: &[original.clone()]
+            },
+            &mut captures,
+        ));
+        // The middle's next visit no longer has the discarded prefix. The already-rebased field
+        // belongs to Outer, so it must never be indexed through Middle's empty capture inventory.
+        assert!(remap_selected_sources(
+            vec![(child, true)],
+            CaptureFieldRemap {
+                owner: middle,
+                fields: &[],
+                original: &[]
+            },
+            &mut captures,
+        ));
+        let [capture] = captures[&child].as_slice() else {
+            panic!("the forwarded construction retains its one selected operand")
+        };
+        assert_eq!(
+            capture.source,
+            AnonymousObjectCaptureSource::ClassStorage(outer)
+        );
+        assert_eq!(capture.lexical_binding, original.lexical_binding);
+        assert_eq!(capture.lexical_shadow_depth, original.lexical_shadow_depth);
+        assert_eq!(capture.capture_dependency, original.capture_dependency);
+    }
 }

@@ -41,13 +41,77 @@ impl RequiredConstructorCapture {
 
 impl BodyFirChecker<'_> {
     /// A construction-site super forward cannot use the anonymous constructor's capture field.
-    pub(super) fn active_class_storage_read(&self, expression: ExprId) -> Option<&u32> {
-        (!self.hoist_anonymous_super_argument)
-            .then(|| match self.info.expr_lowers.get(&expression) {
-                Some(ExprLowering::ClassStorageRead { field }) => Some(field),
-                _ => None,
-            })
-            .flatten()
+    pub(super) fn active_class_storage_read(
+        &self,
+        expression: ExprId,
+    ) -> Result<Option<ClassCaptureBinding>, BodyCheckFailure> {
+        if self.hoist_anonymous_super_argument {
+            return Ok(None);
+        }
+        let span = self
+            .file
+            .expr_span(expression)
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        let binding = match self.info.expr_lowers.get(&expression) {
+            Some(ExprLowering::ClassStorageRead(storage)) => self.selected_class_capture_binding(
+                *storage,
+                self.expression_type(expression)?,
+                span,
+            )?,
+            Some(ExprLowering::EnumEntryStorageRead { field, .. }) => {
+                let owner = self.selected_enum_entry_storage_owner(*field, Some(span))?;
+                self.class_capture_binding(owner, *field, self.expression_type(expression)?)?
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(binding))
+    }
+
+    pub(super) fn selected_storage_owner(
+        &self,
+        storage: crate::resolve::ClassStorageSource,
+        span: Option<Span>,
+    ) -> Result<DeclarationId, BodyCheckFailure> {
+        self.index
+            .classifier_declaration(storage.owner)
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))
+    }
+
+    pub(super) fn selected_enum_entry_storage_owner(
+        &self,
+        field: u32,
+        span: Option<Span>,
+    ) -> Result<DeclarationId, BodyCheckFailure> {
+        let owner = self
+            .current_storage_owner()
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
+        let property = self
+            .index
+            .owned_declaration(owner, DeclarationKind::Property, field)
+            .and_then(|declaration| self.index.property_for_declaration(declaration));
+        if self
+            .index
+            .declaration_anchor(owner)
+            .map(|anchor| anchor.kind)
+            != Some(DeclarationKind::EnumEntry)
+            || property.is_none()
+        {
+            return Err(self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget));
+        }
+        Ok(owner)
+    }
+
+    pub(super) fn selected_class_capture_binding(
+        &self,
+        storage: crate::resolve::ClassStorageSource,
+        ty: ResolvedTy,
+        span: Span,
+    ) -> Result<ClassCaptureBinding, BodyCheckFailure> {
+        let owner = self.selected_storage_owner(storage, Some(span))?;
+        match self.selected_storage_capture_binding(owner, storage.field, span)? {
+            Some(binding) => Ok(binding),
+            None => self.class_capture_binding(owner, storage.field, ty),
+        }
     }
 
     /// Publish the capture prefix for a local-class construction that crosses a streamed body
@@ -593,18 +657,6 @@ impl BodyFirChecker<'_> {
             })
     }
 
-    /// Publish a resolver-selected direct storage read with its stable owner and, inside a local
-    /// callable, the exact lifted dispatch receiver that supplies that storage.
-    pub(super) fn direct_class_storage_read_kind(
-        &mut self,
-        field: u32,
-        ty: ResolvedTy,
-        origin: OriginId,
-    ) -> Result<FirExprKind, BodyCheckFailure> {
-        let binding = self.direct_class_capture_binding(field, ty)?;
-        self.class_storage_read_kind(binding, origin)
-    }
-
     /// The binding of field `field` of the class whose storage this body reads directly.
     pub(super) fn direct_class_capture_binding(
         &self,
@@ -614,6 +666,15 @@ impl BodyFirChecker<'_> {
         let owner = self
             .current_storage_owner()
             .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingStableCallTarget))?;
+        self.class_capture_binding(owner, field, ty)
+    }
+
+    pub(super) fn class_capture_binding(
+        &self,
+        owner: DeclarationId,
+        field: u32,
+        ty: ResolvedTy,
+    ) -> Result<ClassCaptureBinding, BodyCheckFailure> {
         let receiver_source = if self.body.local_callable().is_some() {
             Some(
                 self.enclosing_storage_receiver_source(owner)
@@ -1149,12 +1210,21 @@ impl BodyFirChecker<'_> {
                         return Err(self.failure(Some(span), BodyCheckFailureKind::UnknownLocal));
                     }
                 }
-                AnonymousObjectCaptureSource::ClassStorage {
-                    field: source_field,
-                } => {
-                    let source_owner = self.current_storage_owner().ok_or_else(|| {
-                        self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
-                    })?;
+                source @ (AnonymousObjectCaptureSource::ClassStorage(_)
+                | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. }) => {
+                    let (source_owner, source_field) = match source {
+                        AnonymousObjectCaptureSource::ClassStorage(storage) => (
+                            self.selected_storage_owner(storage, Some(span))?,
+                            storage.field,
+                        ),
+                        AnonymousObjectCaptureSource::EnumEntryPropertyStorage {
+                            field, ..
+                        } => (
+                            self.selected_enum_entry_storage_owner(field, Some(span))?,
+                            field,
+                        ),
+                        _ => unreachable!("matched storage source"),
+                    };
                     let source_binding =
                         self.selected_storage_capture_binding(source_owner, source_field, span)?;
                     instance_owner =
@@ -1710,7 +1780,8 @@ impl BodyFirChecker<'_> {
                     depth == source_depth
                 }
                 AnonymousObjectCaptureSource::LexicalValue
-                | AnonymousObjectCaptureSource::ClassStorage { .. } => false,
+                | AnonymousObjectCaptureSource::ClassStorage(_)
+                | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. } => false,
             }
         }) else {
             return Ok(None);

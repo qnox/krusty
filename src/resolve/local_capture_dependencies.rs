@@ -333,6 +333,7 @@ impl Checker<'_> {
         capture_bindings: &mut Vec<Option<u32>>,
     ) {
         let receivers = self.implicit_receivers(scope);
+        let current_owner = self.body_class_storage_owner(current_declaration);
         for RequiredLocalClassifierCapture {
             declaration,
             owner,
@@ -356,28 +357,33 @@ impl Checker<'_> {
                     lexical_shadow_depth = shadow_depth;
                     match binding.origin {
                         ReceiverFnValueOrigin::Local => AnonymousObjectCaptureSource::LexicalValue,
-                        ReceiverFnValueOrigin::ClassStorage(field) => {
-                            if let Some(existing) = captures.get_mut(field as usize) {
-                                existing.shared_cell |= required.shared_cell;
-                                continue;
+                        ReceiverFnValueOrigin::ClassStorage(storage) => {
+                            if current_owner == Some(storage.owner) {
+                                if let Some(existing) = captures.get_mut(storage.field as usize) {
+                                    existing.shared_cell |= required.shared_cell;
+                                    continue;
+                                }
                             }
-                            AnonymousObjectCaptureSource::ClassStorage { field }
+                            AnonymousObjectCaptureSource::ClassStorage(storage)
                         }
                         ReceiverFnValueOrigin::DispatchProperty { .. }
                         | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
                         | ReceiverFnValueOrigin::TopLevelProperty => continue,
                     }
                 }
-                AnonymousObjectCaptureSource::ClassStorage { field } => {
+                AnonymousObjectCaptureSource::ClassStorage(storage) => {
                     // The nested constructor already reads this exact field from the current local
                     // classifier. Carrying it through the current classifier's own constructor
                     // would duplicate the field and reinterpret its ordinal under another owner.
-                    if let Some(existing) = captures.get_mut(field as usize) {
-                        existing.shared_cell |= required.shared_cell;
-                        continue;
+                    if current_owner == Some(storage.owner) {
+                        if let Some(existing) = captures.get_mut(storage.field as usize) {
+                            existing.shared_cell |= required.shared_cell;
+                            continue;
+                        }
                     }
                     required.source
                 }
+                AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. } => required.source,
                 AnonymousObjectCaptureSource::EnclosingInstance { current, depth }
                 | AnonymousObjectCaptureSource::ImplicitReceiver { current, depth } => {
                     if !receivers.iter().any(|receiver| {
