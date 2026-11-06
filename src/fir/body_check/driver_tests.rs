@@ -1655,19 +1655,72 @@ fn enum_entry_property_initializers_stream_with_the_entry_receiver() {
         panic!("entry property read must capture exactly its entry receiver")
     };
     assert_eq!(receiver_capture.enclosing_depth, 0);
-    assert!((0..lambda_body.expression_count()).any(|raw| {
-        let Some(FirExprKind::CapturedClassStorageRead {
-            owner, field: 0, ..
-        }) = lambda_body
-            .expr(FirExprId::from_raw(raw as u32))
-            .map(|expression| &expression.kind)
-        else {
-            return false;
-        };
-        index
-            .declaration_anchor(*owner)
-            .is_some_and(|anchor| anchor.kind == DeclarationKind::EnumEntry)
-    }));
+    let crate::fir::FirCapturedReceiver::Enclosing {
+        classifier,
+        owner: Some(entry_owner),
+    } = &receiver_capture.receiver
+    else {
+        panic!("the captured receiver must retain its declared entry owner")
+    };
+    assert_eq!(*classifier, crate::types::type_name("Test"));
+    assert_eq!(
+        entry_owner.kind,
+        crate::fir::EnclosingInstanceKind::EnumEntry
+    );
+    let selected_declaration = index
+        .owned_declaration(entry_owner.declaration, DeclarationKind::Property, 0)
+        .expect("the entry's first declared property");
+    let selected_property = index
+        .property_for_declaration(selected_declaration)
+        .expect("the entry property is finalized");
+    let reads = (0..lambda_body.expression_count())
+        .filter_map(
+            |raw| match &lambda_body.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::PropertyRead {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    substitutions,
+                } => Some((
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    substitutions,
+                )),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [(target, Some(receiver), extension, context, substitutions)] = reads.as_slice() else {
+        panic!("the whole lambda has one declared property read with its dispatch receiver")
+    };
+    assert_eq!(
+        **target,
+        crate::fir::FirPropertyTarget::of_module(selected_property)
+    );
+    assert!(extension.is_none());
+    assert!(context.is_empty());
+    assert!(substitutions.is_empty());
+    assert_eq!(receiver.conversion, None);
+    let receiver_expression = lambda_body
+        .expr(receiver.value)
+        .expect("captured entry operand");
+    assert_eq!(receiver_expression.ty, receiver_capture.ty);
+    let FirExprKind::CapturedImplicitReceiver {
+        enclosing_depth,
+        current,
+        depth,
+        path,
+    } = &receiver_expression.kind
+    else {
+        panic!("the selected property operand must read the captured entry instance")
+    };
+    assert_eq!(*enclosing_depth, receiver_capture.enclosing_depth);
+    assert_eq!(*current, receiver_capture.current);
+    assert_eq!(*depth, receiver_capture.depth);
+    assert_eq!(path, &receiver_capture.path);
 
     let base_y = (0..index.declaration_count())
         .map(|raw| DeclarationId::from_raw(raw as u32))
