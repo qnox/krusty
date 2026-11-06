@@ -797,9 +797,9 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
     for needle in [
         "- name: run box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
         "- name: run native box conformance ${{ matrix.version }}\n        if: matrix.target == 'native'",
-        "- name: run wasm box conformance ${{ matrix.version }}\n        if: matrix.target == 'wasm'",
+        "- name: run wasm box conformance ${{ matrix.version }}\n        if: startsWith(matrix.target, 'wasm-')",
         "- name: run focused Native conformance ${{ matrix.version }}\n        # Keep focused target regressions independent",
-        "- name: run focused Wasm conformance ${{ matrix.version }}\n        if: matrix.target == 'wasm'",
+        "- name: run focused Wasm conformance ${{ matrix.version }}\n        if: matrix.target == 'wasm-js'",
         "- name: run non-box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
     ] {
         assert!(
