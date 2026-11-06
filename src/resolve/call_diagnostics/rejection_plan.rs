@@ -215,12 +215,12 @@ impl Checker<'_> {
             let dominated = mapped
                 .iter()
                 .enumerate()
-                .filter_map(|(index, mapped)| {
+                .filter_map(|(index, entry)| {
                     mapped
                         .iter()
                         .any(|other| {
-                            other.specificity == mapped.specificity
-                                && other.omitted_defaults < mapped.omitted_defaults
+                            other.specificity == entry.specificity
+                                && other.omitted_defaults < entry.omitted_defaults
                         })
                         .then_some(index)
                 })
