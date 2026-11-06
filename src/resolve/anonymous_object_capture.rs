@@ -739,17 +739,17 @@ impl Checker<'_> {
         let mut proven_uses = established
             .captures
             .iter()
-            .filter_map(|capture| {
+            .filter(|capture| {
                 matches!(
                     capture.source,
                     AnonymousObjectCaptureSource::ImplicitReceiver { .. }
                         | AnonymousObjectCaptureSource::EnclosingInstance { .. }
                 )
-                .then(|| {
-                    capture
-                        .receiver_role
-                        .expect("a proven receiver has declaration provenance")
-                })
+            })
+            .map(|capture| {
+                capture
+                    .receiver_role
+                    .expect("a proven receiver has declaration provenance")
             })
             .enumerate()
             .collect::<Vec<_>>();
