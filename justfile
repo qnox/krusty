@@ -58,6 +58,7 @@ release-tests:
     python3 scripts/test-format-release-notes.py
     bash scripts/test-signing-key-id.sh
     bash scripts/test-sign-release-checksums.sh
+    bash scripts/test-publish-release-signing-key.sh
     bash scripts/test-publish-maven-central.sh
     bash scripts/test-check-gradle-wrappers.sh
 

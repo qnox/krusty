@@ -1353,6 +1353,9 @@ jobs:
           fi
           echo "signing key: ${id:-none}"
           echo "id=$id" >> "$GITHUB_OUTPUT"
+      - name: make the public signing subkey retrievable for Maven Central
+        if: steps.tip.outputs.publish == 'true'
+        run: scripts/publish-release-signing-key.sh "${{ steps.v.outputs.ver }}" dist
       # Maven Central goes first: it skips a version it already has, so a rerun after a failed
       # Plugin Portal upload does not trip over Central's immutable versions.
       - name: publish the Gradle plugin to Maven Central
