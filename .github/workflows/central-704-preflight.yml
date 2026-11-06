@@ -1,0 +1,55 @@
+name: inspect release 704 Central deployments
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Existing partial release to inspect (no publication)
+        type: choice
+        options: [v2.4.21-build.704]
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      RELEASE_TAG: v2.4.21-build.704
+      RELEASE_SOURCE: df118ba68648201b30538c1b022d1c39ebd2dc09
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: verify the read-only client
+        run: timeout 30s python3 scripts/test-central-deployment-preflight.py
+      - name: bind the existing release source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          timeout 45s git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$RELEASE_SOURCE"
+          git merge-base --is-ancestor "$RELEASE_SOURCE" HEAD
+          timeout 30s gh api "repos/$GH_REPO/releases/436350079" > "$RUNNER_TEMP/central-704-release-binding.json"
+          jq -e --arg tag "$RELEASE_TAG" '.id == 436350079 and .tag_name == $tag' "$RUNNER_TEMP/central-704-release-binding.json" >/dev/null
+      - name: inspect Central deployment inventory
+        env:
+          # This client makes only authenticated GET requests. No signing credentials are loaded.
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+        run: python3 scripts/central-deployment-preflight.py "$RUNNER_TEMP/central-704-preflight"
+      - name: retain the complete read-only evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: central-704-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/central-704-preflight/
+            ${{ runner.temp }}/central-704-release-binding.json
+          retention-days: 7
+          if-no-files-found: error

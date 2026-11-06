@@ -58,6 +58,7 @@ release-tests:
     bash scripts/test-signing-key-id.sh
     bash scripts/test-sign-release-checksums.sh
     bash scripts/test-publish-maven-central.sh
+    python3 scripts/test-central-deployment-preflight.py
     bash scripts/test-check-gradle-wrappers.sh
 
 # Run the LSP package without coverage instrumentation.
