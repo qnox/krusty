@@ -26,6 +26,26 @@ struct RequiredLocalClassifierCapture {
     lexical_binding: Option<u32>,
 }
 
+/// Only a live scoped receiver proves which class boundary separates it from this call.
+/// Reconstructed declaration-role receivers keep their existing materialization contract.
+fn live_receiver_crosses_class(scope: &CheckerScope<'_>, identity: (usize, usize)) -> Option<bool> {
+    if !scope
+        .implicit_receivers_with_declarations()
+        .iter()
+        .any(|(_, _, live, _)| *live == identity)
+    {
+        return None;
+    }
+    let mut crossed = false;
+    for rung in scope.ancestors() {
+        if rung as *const _ as usize == identity.0 {
+            return Some(crossed);
+        }
+        crossed |= matches!(rung.kind(), scope::ScopeKind::Class { .. });
+    }
+    None
+}
+
 impl Checker<'_> {
     pub(super) fn extend_selected_local_dependency_captures(
         &mut self,
@@ -596,7 +616,14 @@ impl Checker<'_> {
                         if receivers.next().is_some() {
                             return None;
                         }
-                        Source::Receiver(self.implicit_receiver_selection(selected))
+                        if live_receiver_crosses_class(scope, selected.identity) == Some(true) {
+                            // The selected constructor demand carries this same receiver identity
+                            // into the intervening classifier. FIR reads its complete binding,
+                            // including the constructor/lambda lifetime, after capture publication.
+                            Source::Captured
+                        } else {
+                            Source::Receiver(self.implicit_receiver_selection(selected))
+                        }
                     }
                     AnonymousObjectCaptureSource::LexicalValue => return None,
                 }

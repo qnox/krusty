@@ -39251,49 +39251,6 @@ impl<'a> Checker<'a> {
         );
     }
 
-    /// Captures visible as storage inside one local/anonymous classifier body. Capture discovery
-    /// checks that body in the current lexical Pass-2 unit. Legacy whole-file analysis may consume
-    /// its installed parser-keyed record; streamed checking never crosses back into that arena.
-    fn body_class_storage_captures(&self, declaration: DeclId) -> Vec<AnonymousObjectCapture> {
-        if let Some(captures) = self
-            .discovered_local_class_captures
-            .get(&declaration)
-            .or_else(|| self.discovered_anonymous_captures.get(&declaration))
-        {
-            return captures.clone();
-        }
-        let CheckerModuleSymbols::Legacy(source) = &self.module else {
-            return Vec::new();
-        };
-        source
-            .pass_one_symbols()
-            .anonymous_object_captures
-            .get(&(self.file_index, declaration))
-            .or_else(|| {
-                // Retained inline syntax is compacted before its checked FIR is detached, so its
-                // parser-local declaration numbers may differ from the capture-discovery arena.
-                // Both arenas are already bound to the same stable classifier declaration. Follow
-                // that identity back to the still-live Pass-1 capture record; no source range or
-                // spelling is used, and this path disappears with the Pass-1 AST.
-                let active = self.active_declarations?;
-                let stable = active.classifier_declaration(declaration)?;
-                let class = source
-                    .pass_one_symbols()
-                    .class_by_stable_declaration(stable)?;
-                (class.source_file == self.file_index)
-                    .then_some(class.source_decl)
-                    .flatten()
-                    .and_then(|original| {
-                        source
-                            .pass_one_symbols()
-                            .anonymous_object_captures
-                            .get(&(self.file_index, original))
-                    })
-            })
-            .cloned()
-            .unwrap_or_default()
-    }
-
     /// Recreate the labeled receiver rungs captured by a local/anonymous classifier whose body is
     /// checked independently from its lexical construction expression. Capture discovery already
     /// selected the exact receiver coordinate; this projects only its source label back into the

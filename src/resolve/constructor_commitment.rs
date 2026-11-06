@@ -67,7 +67,7 @@ pub struct ConstructorCaptureProjection {
 
 #[derive(Clone, Debug)]
 pub(crate) enum ConstructorCaptureSource {
-    /// A selected lexical value beyond the current class boundary must cross its checked capture.
+    /// A selected value or receiver beyond a class boundary crosses its exact checked capture.
     Captured,
     ClassStorage(super::ClassStorageSource),
     EnumEntryProperty {

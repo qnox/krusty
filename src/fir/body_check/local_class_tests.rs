@@ -22,45 +22,17 @@ fn checked_streamed_owned_bodies(
     source: &str,
 ) -> (ResolvedModuleIndex, Vec<(BodyOwnerId, FirBody)>) {
     let inputs = [crate::source::SourceInput::kotlin(source).with_file_stem("FirLocalCapture")];
-    let mut diagnostics = crate::diag::DiagSink::new();
-    let mut analysis = crate::frontend::analyze_source_set_with_features(
+    let mut prepared = super::test_support::prepare_fir_source(
         &inputs,
-        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
+        0,
+        Box::new(crate::libraries::EmptySymbolSource),
         &crate::features::LangFeatures::new(),
-        &mut diagnostics,
     );
-    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
-    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
-    let (mut index, mut inline_bodies, _defaults, mut sources) = streamed.module.into_parts();
-    let info = analysis.types[0].as_ref().expect("checked source");
-    crate::resolve::publish_checked_local_signatures(
-        &analysis.files[0],
-        SourceFileId::from_raw(0),
-        &analysis.symbols,
-        info,
-        &mut index,
-    )
-    .expect("local signatures must publish before FIR body checking");
-    let mut session = BodyCheckSession::default();
     let mut sink = StreamedBodySink::default();
-    for work in ordinary {
-        super::driver::check_and_dispatch_bound_body_in_session(
-            crate::fir::BodyCheckUnit {
-                file: &analysis.files[0],
-                info,
-                source: SourceFileId::from_raw(0),
-                index: &index,
-            },
-            work,
-            sources.origins_mut(),
-            &mut inline_bodies,
-            &mut sink,
-            &mut session,
-        )
+    prepared
+        .check_all_bodies(&mut sink)
         .expect("local bodies must become checked FIR");
-    }
-    (index, sink.0)
+    (prepared.index, sink.0)
 }
 
 fn production_frontend_ok(source: &str) {

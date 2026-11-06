@@ -2,14 +2,122 @@
 //! initializers see and the storage of values a local class captures.
 
 use super::{
-    AnonymousObjectCaptureSource, Checker, CheckerScope, ClassStorageSource,
-    DispatchPropertyBinding, ErrorProvenance, ReceiverFnValueOrigin, ScopedProperty,
-    ValueBindingDeclaration,
+    AnonymousObjectCapture, AnonymousObjectCaptureSource, Checker, CheckerModuleSymbols,
+    CheckerScope, ClassSig, ClassStorageSource, DispatchPropertyBinding, ErrorProvenance,
+    ReceiverFnValueOrigin, ScopedProperty, SourceFragmentMode, ValueBindingDeclaration,
 };
 use crate::ast::{Decl, DeclId, PropParam};
 use crate::types::Ty;
 
 impl Checker<'_> {
+    /// Captures selected by the current check, or by retained declaration-owned discovery.
+    /// Signature defaults export the latter into their own syntax-bound result before FIR uses it.
+    pub(super) fn body_class_storage_captures(
+        &mut self,
+        declaration: DeclId,
+    ) -> Vec<AnonymousObjectCapture> {
+        if let Some(captures) = self
+            .discovered_local_class_captures
+            .get(&declaration)
+            .or_else(|| self.discovered_anonymous_captures.get(&declaration))
+        {
+            return captures.clone();
+        }
+        if self.fragment == SourceFragmentMode::SignatureDefaults {
+            let Some(captures) = self.completed_retained_class_captures(declaration) else {
+                return Vec::new();
+            };
+            if self
+                .file
+                .anonymous_object_classes
+                .values()
+                .any(|&owner| owner == declaration)
+            {
+                self.discovered_anonymous_captures
+                    .insert(declaration, captures.clone());
+                self.finalized_anonymous_captures.insert(declaration);
+            } else if self.file.is_local_declaration(declaration) {
+                self.discovered_local_class_capture_bindings.insert(
+                    declaration,
+                    Self::local_capture_binding_identities(&captures),
+                );
+                self.discovered_local_class_captures
+                    .insert(declaration, captures.clone());
+                self.finalized_local_class_captures.insert(declaration);
+            }
+            return captures;
+        }
+        self.retained_class_storage_captures(declaration)
+    }
+
+    /// The complete Pass-1 producer owns both the selected vector and its constructor carriers.
+    /// Follow the active stable declaration across syntax compaction; absence proves nothing.
+    fn completed_retained_class_captures(
+        &self,
+        declaration: DeclId,
+    ) -> Option<Vec<AnonymousObjectCapture>> {
+        let CheckerModuleSymbols::Legacy(source) = &self.module else {
+            return None;
+        };
+        let symbols = source.pass_one_symbols();
+        let (original, class) = self.retained_class_capture_owner(declaration)?;
+        let key = (self.file_index, original);
+        if !symbols.anonymous_object_capture_discovered.contains(&key) {
+            return None;
+        }
+        let captures = symbols.anonymous_object_captures.get(&key)?;
+        let first = class.ctor_params.len().checked_sub(captures.len())?;
+        if class.ctor_param_shapes.len() != class.ctor_params.len()
+            || !class.ctor_params[first..]
+                .iter()
+                .zip(&class.ctor_param_shapes[first..])
+                .zip(captures)
+                .all(|((ty, shape), capture)| {
+                    *ty == capture.stored_ty() && *shape == (capture.stored_ty(), false)
+                })
+        {
+            return None;
+        }
+        Some(captures.clone())
+    }
+
+    fn retained_class_capture_owner(&self, declaration: DeclId) -> Option<(DeclId, &ClassSig)> {
+        let CheckerModuleSymbols::Legacy(source) = &self.module else {
+            return None;
+        };
+        let stable = self
+            .active_declarations?
+            .classifier_declaration(declaration)?;
+        let class = source
+            .pass_one_symbols()
+            .class_by_stable_declaration(stable)?;
+        (class.source_file == self.file_index).then_some((class.source_decl?, class))
+    }
+
+    fn retained_class_storage_captures(&self, declaration: DeclId) -> Vec<AnonymousObjectCapture> {
+        let CheckerModuleSymbols::Legacy(source) = &self.module else {
+            return Vec::new();
+        };
+        source
+            .pass_one_symbols()
+            .anonymous_object_captures
+            .get(&(self.file_index, declaration))
+            .or_else(|| {
+                // Retained inline syntax is compacted before its checked FIR is detached, so its
+                // parser-local declaration numbers may differ from the capture-discovery arena.
+                // Both arenas are already bound to the same stable classifier declaration. Follow
+                // that identity back to the still-live Pass-1 capture record; no source range or
+                // spelling is used, and this path disappears with the Pass-1 AST.
+                let (original, _) = self.retained_class_capture_owner(declaration)?;
+                source
+                    .pass_one_symbols()
+                    .anonymous_object_captures
+                    .get(&(self.file_index, original))
+            })
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub(super) fn declare_scoped_property(
         &mut self,
         scope: &CheckerScope<'_>,

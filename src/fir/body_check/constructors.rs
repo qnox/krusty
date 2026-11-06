@@ -1412,6 +1412,9 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
     let owner = BodyOwnerId::from_raw(work.target.raw());
     let mut checker = BodyFirChecker::new(unit, owner, span, origins, session);
     checker.constructor_prefix_capture_access = true;
+    checker
+        .bind_signature_constructor_capture_prefix(active, work.target, span)
+        .map_err(CheckedBodyDriverFailure::Check)?;
     bind_parameters_and_check_defaults(
         &mut checker,
         &parameters,
