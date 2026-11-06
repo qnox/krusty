@@ -721,6 +721,11 @@ fn public_assets_are_immutable_and_failed_draft_queries_stop_the_retry() {
     )
     .unwrap();
     fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/format-release-notes.py"),
+        work.join("scripts/format-release-notes.py"),
+    )
+    .unwrap();
     fs::write(work.join("dist/asset"), "validated artifact").unwrap();
     let gh = work.join("bin/gh");
     fs::write(
@@ -733,7 +738,11 @@ case "$*" in
   'release view v1 --json isDraft --jq .isDraft')
     test "$GH_QUERY_FAIL" = 0 || exit 7
     cat "$GH_STATE" ;;
-  'release create '*) printf true > "$GH_STATE" ;;
+  'api --method POST repos/owner/repo/releases/generate-notes '*)
+    printf '%s\n' '{"body":"* Keep @Target by @qnox in https://github.com/owner/repo/pull/1\n"}' ;;
+  'release create '*)
+    grep -Fqx '* ` Keep @Target ` by @qnox in https://github.com/owner/repo/pull/1' "$RUNNER_TEMP/krusty-release-notes.md"
+    printf true > "$GH_STATE" ;;
   'release upload '*) ;;
   'release edit v1 --draft=false --latest=false') printf false > "$GH_STATE" ;;
   *) exit 9 ;;
@@ -760,7 +769,7 @@ esac
     let calls = work.join("calls");
     let state = work.join("state");
     for (initial, query_fail, code, expected) in [
-        (None, "0", 0, format!("release view v1\nrelease create v1 --target {sha} --draft --latest=false --title krusty 1: Kotlin compiler written in Rust --generate-notes dist/asset\nrelease edit v1 --draft=false --latest=false\n")),
+        (None, "0", 0, format!("release view v1\napi --method POST repos/owner/repo/releases/generate-notes -f tag_name=v1 -f target_commitish={sha}\nrelease create v1 --target {sha} --draft --latest=false --title krusty 1: Kotlin compiler written in Rust --notes-file {}/krusty-release-notes.md dist/asset\nrelease edit v1 --draft=false --latest=false\n", work.display())),
         (Some("false"), "0", 0, "release view v1\nrelease view v1 --json isDraft --jq .isDraft\n".to_string()),
         (Some("true"), "0", 0, "release view v1\nrelease view v1 --json isDraft --jq .isDraft\nrelease upload v1 --clobber dist/asset\nrelease edit v1 --draft=false --latest=false\n".to_string()),
         (Some("true"), "1", 7, "release view v1\nrelease view v1 --json isDraft --jq .isDraft\n".to_string()),
@@ -771,6 +780,7 @@ esac
         let mut child = isolated_command("bash").arg("-s").current_dir(&work)
             .env("PATH", format!("{}:{}", work.join("bin").display(), std::env::var("PATH").unwrap()))
             .env("RELEASE_SHA", &sha).env("GITHUB_SHA", &sha).env("TAG", "v1").env("VER", "1")
+            .env("GH_REPO", "owner/repo").env("RUNNER_TEMP", &work)
             .env("GH_CALLS", &calls).env("GH_STATE", &state).env("GH_QUERY_FAIL", query_fail)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         child.stdin.take().unwrap().write_all(source.as_bytes()).unwrap();
