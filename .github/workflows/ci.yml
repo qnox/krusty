@@ -1298,8 +1298,13 @@ jobs:
               *) echo "cannot determine draft state of $TAG" >&2; exit 1 ;;
             esac
           else
+            notes_file="$RUNNER_TEMP/krusty-release-notes.md"
+            trap 'rm -f "$notes_file"' EXIT
+            gh api --method POST "repos/$GH_REPO/releases/generate-notes" \
+              -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" |
+              python3 scripts/format-release-notes.py > "$notes_file"
             gh release create "$TAG" --target "$GITHUB_SHA" --draft --latest=false \
-              --title "krusty $VER: Kotlin compiler written in Rust" --generate-notes "${assets[@]}"
+              --title "krusty $VER: Kotlin compiler written in Rust" --notes-file "$notes_file" "${assets[@]}"
             gh release edit "$TAG" --draft=false --latest=false
           fi
       # Each exact version keeps its existing Maven Central deployment journal. The Plugin Portal
