@@ -85,6 +85,18 @@ pub(super) fn module_constructor_symbol(
     Some(symbol)
 }
 
+/// Program-wide identity of a selected source constructor declaration.
+pub(super) fn constructor_reference_symbol(
+    module_name: &str,
+    declaration: crate::fir::DeclarationId,
+) -> String {
+    format!(
+        "kt_constructor_reference_{}_{}",
+        module_namespace(module_name),
+        declaration.raw()
+    )
+}
+
 /// Symbols of the entry points that box a value of a module value class and read one back, which
 /// the file declaring the class defines for every other file of the module. Named from the exact
 /// source module and class's qualified name, which both files hold, and not from anything either
