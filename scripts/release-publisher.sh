@@ -48,9 +48,12 @@ remote_ref() {
 }
 
 acquire() {
-  local lock holder age deadline
-  lock=$(GIT_AUTHOR_NAME=github-actions GIT_AUTHOR_EMAIL=github-actions@users.noreply.github.com \
-    GIT_COMMITTER_NAME=github-actions GIT_COMMITTER_EMAIL=github-actions@users.noreply.github.com \
+  local lock holder age deadline source_commit author_name author_email
+  source_commit=$(git rev-parse --verify --end-of-options "$sha^{commit}")
+  author_name=$(git show -s --format=%an "$source_commit")
+  author_email=$(git show -s --format=%ae "$source_commit")
+  lock=$(GIT_AUTHOR_NAME="$author_name" GIT_AUTHOR_EMAIL="$author_email" \
+    GIT_COMMITTER_NAME="$author_name" GIT_COMMITTER_EMAIL="$author_email" \
     git commit-tree "$(git hash-object -t tree /dev/null)" \
     -m "release lock for $sha (run ${GITHUB_RUN_ID:-local})")
   deadline=$(($(date +%s) + wait_limit))

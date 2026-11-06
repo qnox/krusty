@@ -10,10 +10,10 @@ while IFS= read -r variable; do
   unset "$variable"
 done < <(git rev-parse --local-env-vars)
 
-export GIT_AUTHOR_NAME='Anton Efimchuk'
-export GIT_AUTHOR_EMAIL='anton.efimchuk@gmail.com'
-export GIT_COMMITTER_NAME='Anton Efimchuk'
-export GIT_COMMITTER_EMAIL='anton.efimchuk@gmail.com'
+export GIT_AUTHOR_NAME='Fixture Caller'
+export GIT_AUTHOR_EMAIL='caller@example.invalid'
+export GIT_COMMITTER_NAME='Fixture Caller'
+export GIT_COMMITTER_EMAIL='caller@example.invalid'
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 fixture=$(mktemp -d)
@@ -26,6 +26,13 @@ git init -q "$tree"
 git -C "$tree" remote add origin "$fixture/remote.git"
 # Some Git configurations negotiate pushes, which a fresh bare remote answers with a warning.
 git -C "$tree" config push.negotiate false
+GIT_AUTHOR_NAME='Source Author' GIT_AUTHOR_EMAIL=source@example.invalid \
+  GIT_COMMITTER_NAME='Source Integrator' GIT_COMMITTER_EMAIL=integrator@example.invalid \
+  git -C "$tree" commit --allow-empty -qm 'Publication source'
+# The checkout and inherited environment must not replace the selected release author.
+source_commit=$(git -C "$tree" rev-parse HEAD)
+git -C "$tree" commit --allow-empty -qm 'Unrelated checkout'
+export RELEASE_SHA=$source_commit
 ref=refs/krusty/central/1.2.3
 
 # gradlew publishes the implementation and marker poms (and the implementation jar), signed unless
@@ -188,7 +195,7 @@ check 'accepted: builds' "$(cat "$fixture/builds")" "$gradle_tasks"
 check 'accepted: Portal token kept from the build' "$(count "$fixture/gradle-env")" 0
 check 'accepted: recorded' "$(recorded)" 'central deployment dep-1 of krusty-gradle-plugin 1.2.3'
 check 'accepted: record identity' "$(git -C "$fixture/remote.git" log -1 --format='%an <%ae> / %cn <%ce>' "$ref")" \
-  'Anton Efimchuk <anton.efimchuk@gmail.com> / Anton Efimchuk <anton.efimchuk@gmail.com>'
+  'Source Author <source@example.invalid> / Source Author <source@example.invalid>'
 check 'accepted: clock' "$(cat "$fixture/clock")" 1010
 check 'accepted: upload' "$(grep -c -- '--max-time 120 .* -F bundle=@.*/upload?name=krusty-gradle-plugin-1.2.3&publishingType=AUTOMATIC$' "$fixture/curl.log")" 1
 check 'accepted: every request has a deadline' "$(grep -vc -- '--connect-timeout 10 --max-time ' "$fixture/curl.log")" 0
