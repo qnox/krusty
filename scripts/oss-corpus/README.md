@@ -56,17 +56,17 @@ and the report lists the top ones across the corpus with a link to each project'
 `summarize.py` turns the per-project results into the run's report: stars, Kotlin and Java lines,
 compilations built, identical classes, the reason for every miss, the projects' tests that pass on
 krusty's classes, what both builds cost, krusty's
-hotspots, and the Gradle and compiler plugins the corpus uses. The nightly run, and a manual run
-with `publish` set, records the results on the `corpus-results` branch with `publish.py`:
-`README.md` is the scoreboard, `projects/<name>/` holds each project's latest result (a project a
-run could not measure keeps its previous one), and `history.tsv` gets one line per project per run.
+hotspots, and the Gradle and compiler plugins the corpus uses. Each `corpus-<project>` workflow
+artifact holds that project's comparison and logs. The `summary` artifact holds `summary.md` and
+`summary.json` for the results produced by this run; the job summary displays the same Markdown
+report.
 
 Setup fails fast: a failed fetch, a checkout that is not the pinned commit, a patch that does not
 apply, or a Kotlin version pin that does not match exactly one assignment (`pin.py`) stops the run
-before either build. `test_compare.py`, `test_setup.py`, `test_summarize.py`, `test_publish.py`,
-`test_measure.py`, `test_hotspots.py` and `test_testruns.py` cover the comparison, the test runs, the output inventory, the pin
-rewrite, the setup failures, the report, the results branch, the build measurement and the stack
-folding.
+before either build. `test_compare.py`, `test_setup.py`, `test_summarize.py`, `test_workflow.py`,
+`test_measure.py`, `test_hotspots.py` and `test_testruns.py` cover the comparison, the test runs,
+the output inventory, the pin rewrite, the setup failures, the report artifacts, the build
+measurement and the stack folding.
 
 `run.sh` rewrites each project's Kotlin version pin to the newest release in `kotlin-versions`.
 These projects carry a patch for that bump:

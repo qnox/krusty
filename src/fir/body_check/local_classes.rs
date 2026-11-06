@@ -277,6 +277,7 @@ impl BodyFirChecker<'_> {
                                     classifier: None,
                                     context_binding: None,
                                     singleton: None,
+                                    context_parameter: false,
                                     construction_sites: Vec::new(),
                                 },
                             )?
@@ -959,6 +960,7 @@ impl BodyFirChecker<'_> {
                     classifier: None,
                     context_binding: None,
                     singleton: None,
+                    context_parameter: false,
                     construction_sites: Vec::new(),
                 })
             {

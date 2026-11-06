@@ -51,8 +51,8 @@ jobs:
   # Lint and coverage are independent merge gates. Give each its own runner so the clean Clippy
   # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
-  # Heavy builds (the coverage build in ci, the binary producers and build-release) run on
-  # GitHub-hosted runners. Every other job runs on a self-hosted runner with one size label
+  # Heavy builds (the coverage build in ci, the binary producers and build-release) and Native
+  # conformance run on GitHub-hosted runners. Other jobs use a self-hosted runner with one size label
   # (rust-4c-8gb, helper-1c-1gb). Fork PRs run on ubuntu-latest: self-hosted runners never take
   # fork PR jobs.
   lint:
@@ -124,10 +124,6 @@ jobs:
 
   ci:
     runs-on: ubuntu-latest
-    outputs:
-      # Release packaging waits for coverage, then starts only while this master commit is still the
-      # publishable tip. The release job repeats the check while holding the publisher lock.
-      release_candidate: ${{ steps.release_candidate.outputs.publish }}
     env:
       # Coverage mappings are compiler-version dependent. Keep the committed baseline and the
       # instrumenting compiler on the same immutable nightly.
@@ -298,10 +294,6 @@ jobs:
           grep -q ': test$' <<< "$ignored_tests"
           echo "plugin host compiler tests: $E2E_BINARY plugin_host_compiler_e2e:: --include-ignored --test-threads=1 (timeout=${KRUSTY_E2E_TIMEOUT_SECONDS}s)"
           run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$E2E_BINARY" plugin_host_compiler_e2e:: --include-ignored --test-threads=1
-      - name: select the current master release candidate
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        id: release_candidate
-        run: scripts/release-publisher.sh check >> "$GITHUB_OUTPUT"
 
   # Each artifact family has one producer. They run on separate hosted runners so the conformance
   # matrix waits for the slowest required build instead of serializing every unrelated target graph
@@ -432,7 +424,9 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [jvm]
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    # Cold reflective box cases share the fixed per-case execution deadline. Hosted capacity
+    # keeps JVM conformance independent of the heterogeneous self-hosted build fleet.
+    runs-on: ubuntu-latest
     steps: &conformance-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
@@ -761,7 +755,9 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [native, wasm]
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    # Native corpus rows use hosted capacity; Wasm keeps its existing self-hosted route.
+    # Fork pull requests continue to use hosted runners for both targets.
+    runs-on: ${{ (matrix.target == 'native' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps: *conformance-steps
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
@@ -1105,13 +1101,11 @@ jobs:
             "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$kotlin/kotlin-stdlib-$kotlin.jar"
           scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
 
-  # Build the release binaries per OS/arch only after coverage proves that this master commit is
-  # still the publishable tip. Superseded master runs keep all validation but do not occupy six
-  # runners with artifacts the monotonic publisher will reject. Cap the surviving matrix so release
-  # packaging cannot starve pull-request gates.
+  # Every covered master commit builds its own immutable release artifacts, even after master
+  # advances. Cap each matrix at two runners so release packaging shares capacity with PR gates.
   build-release:
     needs: [ci]
-    if: github.ref == 'refs/heads/master' && needs.ci.outputs.release_candidate == 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -1181,8 +1175,9 @@ jobs:
   release:
     needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
-    runs-on: [self-hosted, helper-1c-1gb]
-    # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
+    # Publication runs Gradle to build and sign Maven Central and Plugin Portal artifacts.
+    runs-on: ubuntu-latest
+    # Shorter than either lock's TTL; only dead jobs' locks may be taken over.
     timeout-minutes: 25
     permissions:
       contents: write
@@ -1195,15 +1190,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      # Master runs overlap, so two release jobs can run at once and an older commit can reach
-      # this job after a newer one. A concurrency group would cancel a queued release, and with it
-      # the whole run, so publishing takes a lock held in a ref instead. Under it, only the tip of
-      # master that descends from the last published commit publishes: the release, the
-      # latest-release marker and the badges never move backwards.
-      - name: take the release lock
+      # Every validated master ancestor publishes. Only retries of this exact commit wait on
+      # this lock; slow immutable package publication cannot hold the global latest/badge lock.
+      - name: take the commit publication lock
         id: lock
-        run: echo "lock=$(scripts/release-publisher.sh acquire)" >> "$GITHUB_OUTPUT"
-      - name: publish only the newest master commit
+        run: |
+          set -euo pipefail
+          lock=$(scripts/release-publisher.sh acquire)
+          echo "lock=$lock" >> "$GITHUB_OUTPUT"
+      - name: publish this validated master commit
         id: tip
         run: scripts/release-publisher.sh check >> "$GITHUB_OUTPUT"
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
@@ -1278,9 +1273,8 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/**
-      # The gh CLI on the runner, not a third-party action holding this job's contents:write token.
-      # A rerun after a later step failed finds the release already published and re-uploads its
-      # assets instead.
+      # A tag is immutably bound before publication, including retries after a rewritten history.
+      # Drafts may resume incomplete uploads; a public release's assets are never replaced.
       - name: publish
         if: steps.tip.outputs.publish == 'true'
         env:
@@ -1290,18 +1284,26 @@ jobs:
           VER: ${{ steps.v.outputs.ver }}
         run: |
           set -euo pipefail
+          scripts/release-publisher.sh bind-tag "$TAG"
           mapfile -t assets < <(find dist -type f | sort)
           test "${#assets[@]}" -gt 0
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" --clobber "${assets[@]}"
+            draft=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+            case $draft in
+              true)
+                gh release upload "$TAG" --clobber "${assets[@]}"
+                gh release edit "$TAG" --draft=false --latest=false
+                ;;
+              false) ;;
+              *) echo "cannot determine draft state of $TAG" >&2; exit 1 ;;
+            esac
           else
-            # The titles of the pull requests merged since the previous release, each linked.
-            gh release create "$TAG" --target "$GITHUB_SHA" \
+            gh release create "$TAG" --target "$GITHUB_SHA" --draft --latest=false \
               --title "krusty $VER: Kotlin compiler written in Rust" --generate-notes "${assets[@]}"
+            gh release edit "$TAG" --draft=false --latest=false
           fi
-      # The Gradle Plugin Portal gets every published release under the same version. A Portal
-      # version is immutable, and the release lock above already publishes each version once. It
-      # runs before the commit is recorded, so a failed upload leaves the release to a rerun.
+      # Each exact version keeps its existing Maven Central deployment journal. The Plugin Portal
+      # also checks its immutable marker before retrying a previously successful upload.
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         if: steps.tip.outputs.publish == 'true'
         with:
@@ -1371,17 +1373,13 @@ jobs:
             echo "SIGNING_KEY is not set; refusing to publish an unsigned plugin" >&2
             exit 1
           fi
-          tools/krusty-gradle/gradlew --no-daemon -p tools/krusty-gradle \
-            -PkrustyPluginVersion="${{ steps.v.outputs.ver }}" publishPlugins
+          scripts/publish-gradle-plugin-portal.sh "${{ steps.v.outputs.ver }}"
       # Rebuild the site, whose Bazel registry is generated from the releases, so it lists this one.
       - name: refresh the Bazel registry
         if: steps.tip.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run pages.yml --ref master
-      - name: record the published commit
-        if: steps.tip.outputs.publish == 'true'
-        run: scripts/release-publisher.sh record
       # Badges: the max version's JVM case/byte reports and Native case report, each published to
       # its own gist file.
       - name: download max-version pct
@@ -1399,9 +1397,33 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: native-pct-${{ needs.build-tool-bins.outputs.max }}
+      # The global lock is held only while promoting latest, badges and the released ref.
+      - name: take the latest promotion lock
+        if: steps.tip.outputs.publish == 'true'
+        id: latest_lock
+        run: |
+          set -euo pipefail
+          lock=$(scripts/release-publisher.sh acquire-latest)
+          echo "lock=$lock" >> "$GITHUB_OUTPUT"
+      - name: select monotonic latest promotion
+        if: steps.tip.outputs.publish == 'true'
+        id: latest
+        run: scripts/release-publisher.sh check-promotion >> "$GITHUB_OUTPUT"
+      # Advance the monotonic guard before external updates. If a later update fails, this same
+      # SHA may retry; an older publisher can never overwrite it after the lock is released.
+      - name: record the promoted commit
+        if: steps.latest.outputs.promote == 'true'
+        run: scripts/release-publisher.sh record
+      - name: promote the GitHub release
+        if: steps.latest.outputs.promote == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: gh release edit "$TAG" --latest
       # One gist update with every badge's shields.io endpoint JSON, through the gh CLI.
       - name: publish badges → gist
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
+        if: ${{ steps.latest.outputs.promote == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         env:
           GH_TOKEN: ${{ secrets.GIST_TOKEN }}
           GIST_ID: ${{ vars.CONFORMANCE_GIST_ID }}
@@ -1418,6 +1440,9 @@ jobs:
             "krusty-native-conformance.json": {content: $n},
             "krusty-kotlin.json": {content: $k}}}' |
             gh api --method PATCH "gists/$GIST_ID" --input - >/dev/null
+      - name: drop the latest promotion lock
+        if: always() && steps.latest_lock.outputs.lock != ''
+        run: scripts/release-publisher.sh release-latest "${{ steps.latest_lock.outputs.lock }}"
       - name: drop the release lock
         if: always() && steps.lock.outputs.lock != ''
         run: scripts/release-publisher.sh release "${{ steps.lock.outputs.lock }}"

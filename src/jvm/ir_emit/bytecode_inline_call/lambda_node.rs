@@ -531,6 +531,7 @@ impl Emitter<'_> {
         &mut self,
         argument: u32,
         callee: &str,
+        callee_suspends: bool,
     ) -> Result<LambdaArgument, &'static str> {
         let reference_line = matches!(self.ir.expr(argument), IrExpr::CallableReference(_))
             .then(|| self.ir.source_line(argument))
@@ -558,8 +559,15 @@ impl Emitter<'_> {
         let declared_result = self.ir.functions[impl_fn as usize].ret;
         // A suspension in the body passes on the caller's continuation, which the lambda captures
         // as its last value, as kotlinc's lambda captures `$completion`. A suspend lambda passes on
-        // its own `$completion`, its last parameter.
-        let continuation_read = if suspend {
+        // its own `$completion`, its last parameter. A lambda of a suspend inline function captures
+        // nothing for it: kotlinc writes its continuation reads as fake continuations, which the
+        // caller's coroutine transformer replaces with the machine's own.
+        let fake_continuations = if !suspend && callee_suspends && self.transformer_owns_method() {
+            self.continuation_reads_within(inline_body)
+        } else {
+            Vec::new()
+        };
+        let continuation_read = if suspend || !fake_continuations.is_empty() {
             None
         } else {
             self.continuation_read_within(inline_body)
@@ -620,7 +628,9 @@ impl Emitter<'_> {
         let caller_machine = placed_machine
             .map(|(machine, completion)| self.arm_placed_suspend_lambda(machine, completion));
         let caller_type_parameters = self.type_parameter_function.replace(impl_fn);
+        let caller_fakes = self.enter_placed_fake_continuations(&fake_continuations);
         let result = self.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch);
+        self.leave_placed_fake_continuations(&fake_continuations, caller_fakes);
         self.type_parameter_function = caller_type_parameters;
         if let Some(caller_machine) = caller_machine {
             self.disarm_placed_suspend_lambda(caller_machine);
@@ -868,6 +878,21 @@ impl Emitter<'_> {
             crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
         }
         None
+    }
+
+    /// Every continuation read in `root`'s subtree not already written as a fake continuation.
+    fn continuation_reads_within(&self, root: u32) -> Vec<u32> {
+        let mut reads = Vec::new();
+        let mut pending = vec![root];
+        while let Some(expression) = pending.pop() {
+            if matches!(self.ir.expr(expression), IrExpr::CurrentContinuation)
+                && !self.is_fake_continuation(expression)
+            {
+                reads.push(expression);
+            }
+            crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
+        }
+        reads
     }
 
     /// Whether `root`'s subtree holds one of the current function's suspension points.
