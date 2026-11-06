@@ -919,6 +919,11 @@ jobs:
       - name: provision the Android integration SDK
         if: steps.android.outputs.enabled == 'true'
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        # SDK installation and downloader state belong to one matrix job, including reruns.
+        env:
+          ANDROID_SDK_ROOT: ${{ runner.temp }}/krusty-android/${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/sdk
+          ANDROID_HOME: ${{ runner.temp }}/krusty-android/${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/sdk
+          ANDROID_USER_HOME: ${{ runner.temp }}/krusty-android/${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/user
         with:
           packages: 'platforms;android-36'
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
@@ -951,6 +956,8 @@ jobs:
           echo "KRUSTY_GRADLE_PLUGIN_PROJECT=$PWD/dist-gradle/unpacked/krusty-gradle-plugin-$version" >> "$GITHUB_ENV"
       - name: run Gradle ${{ matrix.gradle }} integration with Kotlin ${{ matrix.kotlin }}
         env:
+          # setup-android exports both SDK aliases; retain its isolated user state here too.
+          ANDROID_USER_HOME: ${{ runner.temp }}/krusty-android/${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/user
           KRUSTY_GRADLE_TEST_BIN: ${{ github.workspace }}/krusty
           KRUSTY_GRADLE_KGP_VERSION: ${{ matrix.kotlin }}
           KRUSTY_GRADLE_VERSION: ${{ matrix.gradle }}
