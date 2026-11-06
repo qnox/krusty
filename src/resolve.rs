@@ -156,6 +156,7 @@ mod type_test_narrowing;
 use type_test_narrowing::TypeTest;
 mod enum_entries;
 mod enum_entry_method_owner;
+pub(crate) use enum_entry_method_owner::owns_storage as enum_entry_storage_owner_matches;
 mod explicit_backing_fields;
 mod explicit_property_write;
 mod explicit_receiver_levels;

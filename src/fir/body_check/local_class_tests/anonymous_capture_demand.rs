@@ -379,10 +379,12 @@ fn constructor_capture_families_project_one_canonical_field_through_shadowed_cal
 }
 
 #[test]
-fn a_missing_or_ambiguous_constructor_source_never_recovers_a_shadowing_parameter() {
+fn missing_ambiguous_and_malformed_constructor_sources_never_recover_a_shadowing_parameter() {
     let source =
         include_str!("../../../../tests/box_regressions/captureStorageConstructorFamilies.kt");
-    for missing_plan in [true, false] {
+    for corruption in 0..3 {
+        let missing_plan = corruption == 0;
+        let malformed_plan = corruption == 2;
         let inputs =
             [crate::source::SourceInput::kotlin(source).with_file_stem("FirCaptureProjection")];
         let mut diagnostics = crate::diag::DiagSink::new();
@@ -406,6 +408,31 @@ fn a_missing_or_ambiguous_constructor_source_never_recovers_a_shadowing_paramete
                 info.expr_lowers.len() < before,
                 "actual committed source plans removed"
             );
+        }
+        if malformed_plan {
+            for lowering in analysis.types[0]
+                .as_mut()
+                .expect("checked source")
+                .expr_lowers
+                .values_mut()
+            {
+                if let crate::resolve::ExprLowering::ConstructorCaptures(plan) = lowering {
+                    if let crate::resolve::ConstructorCapturePlan::Selected(projected) =
+                        plan.as_mut()
+                    {
+                        if let Some(first) = projected.first() {
+                            let mut unused = first.clone();
+                            unused.required = ClassCaptureIdentity::Value {
+                                owner: crate::types::type_name("UnusedCapturePlanOwner"),
+                                binding: u32::MAX,
+                            };
+                            let mut extended = projected.to_vec();
+                            extended.push(unused);
+                            *projected = extended.into_boxed_slice();
+                        }
+                    }
+                }
+            }
         }
         let streamed = analysis.streamed.take().expect("finalized source headers");
         let source_id = SourceFileId::from_raw(0);
@@ -434,16 +461,33 @@ fn a_missing_or_ambiguous_constructor_source_never_recovers_a_shadowing_paramete
         for work in ordinary {
             let name = index.declaration_name(DeclarationId::from_raw(work.owner.raw()));
             let requested = matches!(name, Some("requestedB" | "requestedC"));
+            let poisoned_owner = if malformed_plan && requested {
+                let target = if name == Some("requestedB") { "B" } else { "C" };
+                (0..index.declaration_count())
+                    .map(|raw| DeclarationId::from_raw(raw as u32))
+                    .find(|declaration| {
+                        index.classifier_header(*declaration).is_some()
+                            && index.declaration_name(*declaration) == Some(target)
+                    })
+                    .expect("actual selected target classifier")
+            } else {
+                a_owner
+            };
             let original = if requested && !missing_plan {
                 let context = session
                     .class_bodies
-                    .get_mut(&a_owner)
+                    .get_mut(&poisoned_owner)
                     .expect("completed real capture environment");
                 let original = context.clone();
                 assert!(!context.capture_values.is_empty());
                 let conflicts = context
                     .capture_values
                     .iter()
+                    .take(if malformed_plan {
+                        1
+                    } else {
+                        context.capture_values.len()
+                    })
                     .map(|(name, binding)| {
                         (
                             name.clone(),
@@ -474,7 +518,7 @@ fn a_missing_or_ambiguous_constructor_source_never_recovers_a_shadowing_paramete
                 &mut session,
             );
             if let Some(original) = original {
-                session.class_bodies.insert(a_owner, original);
+                session.class_bodies.insert(poisoned_owner, original);
             }
             if requested {
                 assert!(

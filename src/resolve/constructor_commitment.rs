@@ -71,6 +71,7 @@ pub(crate) enum ConstructorCaptureSource {
     Captured,
     ClassStorage(super::ClassStorageSource),
     EnumEntryProperty {
+        owner: TypeName,
         ordinal: u32,
     },
     /// The resolver selected this exact same-named binding in its lexical namespace.

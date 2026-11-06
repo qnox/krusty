@@ -64,9 +64,13 @@ impl BodyFirChecker<'_> {
             ExprLowering::ClassStorageRead(storage) => {
                 self.selected_class_capture_binding(*storage, span)?
             }
-            ExprLowering::EnumEntryStorageRead { field, .. } => {
-                self.enum_entry_storage_binding(*field, self.expression_type(expression)?, span)?
-            }
+            ExprLowering::EnumEntryStorageRead { owner, field } => self
+                .enum_entry_storage_binding(
+                    *owner,
+                    *field,
+                    self.expression_type(expression)?,
+                    span,
+                )?,
             _ => unreachable!("matched storage lowering"),
         };
         Ok(Some(binding))
@@ -84,6 +88,7 @@ impl BodyFirChecker<'_> {
 
     pub(super) fn selected_enum_entry_storage_owner(
         &self,
+        expected: crate::types::TypeName,
         field: u32,
         span: Option<Span>,
     ) -> Result<DeclarationId, BodyCheckFailure> {
@@ -99,11 +104,12 @@ impl BodyFirChecker<'_> {
             .declaration_anchor(declaration)
             .and_then(|anchor| anchor.owner)
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
-        if self
-            .index
-            .declaration_anchor(owner)
-            .map(|anchor| anchor.kind)
-            != Some(DeclarationKind::EnumEntry)
+        if !crate::resolve::enum_entry_storage_owner_matches(self.index, owner, expected)
+            || self
+                .index
+                .declaration_anchor(owner)
+                .map(|anchor| anchor.kind)
+                != Some(DeclarationKind::EnumEntry)
             || self
                 .index
                 .owned_declaration(owner, DeclarationKind::Property, field)
@@ -116,11 +122,12 @@ impl BodyFirChecker<'_> {
 
     pub(super) fn enum_entry_storage_binding(
         &self,
+        expected: crate::types::TypeName,
         field: u32,
         ty: ResolvedTy,
         span: Span,
     ) -> Result<ClassCaptureBinding, BodyCheckFailure> {
-        let owner = self.selected_enum_entry_storage_owner(field, Some(span))?;
+        let owner = self.selected_enum_entry_storage_owner(expected, field, Some(span))?;
         match self.selected_storage_capture_binding(owner, field, span)? {
             Some(binding) => Ok(binding),
             None => self.declared_class_storage_binding(owner, field, ty),
@@ -161,7 +168,7 @@ impl BodyFirChecker<'_> {
         if !self
             .index
             .declaration_header(classifier.declaration)
-            .is_some_and(|header| header.flags.has(DeclarationFlags::LOCAL_CLASS))
+            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS))
         {
             return Ok(None);
         }
@@ -203,6 +210,15 @@ impl BodyFirChecker<'_> {
             }
         }
         required.dedup_by(|left, right| left.same_storage(*right));
+        let mut identities = crate::fx_hash::HashSet::default();
+        for binding in &required {
+            if !binding
+                .capture_identity
+                .is_some_and(|identity| identities.insert(identity))
+            {
+                return Err(self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget));
+            }
+        }
         use crate::resolve::{ConstructorCapturePlan as Plan, ConstructorCaptureSource as Source};
         let operands = match plan {
             Plan::OwnStorage(owner) => {
@@ -267,9 +283,21 @@ impl BodyFirChecker<'_> {
                             Source::ClassStorage(storage) => self
                                 .selected_class_capture_binding(*storage, span)
                                 .map(ConstructorCaptureOperand::Class),
-                            Source::EnumEntryProperty { ordinal } => self
-                                .enum_entry_storage_binding(*ordinal, required.ty, span)
-                                .map(ConstructorCaptureOperand::Class),
+                            Source::EnumEntryProperty { owner, ordinal } => {
+                                if identity
+                                    != (ClassCaptureIdentity::DeclaredProperty {
+                                        owner: *owner,
+                                        ordinal: *ordinal,
+                                    })
+                                {
+                                    return Err(self.failure(
+                                        Some(span),
+                                        BodyCheckFailureKind::MissingStableCallTarget,
+                                    ));
+                                }
+                                self.enum_entry_storage_binding(*owner, *ordinal, required.ty, span)
+                                    .map(ConstructorCaptureOperand::Class)
+                            }
                             Source::Receiver(receiver) => Ok(
                                 ConstructorCaptureOperand::ImplicitReceiver(receiver.clone()),
                             ),
@@ -1273,10 +1301,14 @@ impl BodyFirChecker<'_> {
                             None,
                         ),
                         AnonymousObjectCaptureSource::EnumEntryPropertyStorage {
-                            field, ..
+                            owner: expected,
+                            field,
                         } => {
-                            let owner =
-                                self.selected_enum_entry_storage_owner(field, Some(span))?;
+                            let owner = self.selected_enum_entry_storage_owner(
+                                expected,
+                                field,
+                                Some(span),
+                            )?;
                             (
                                 self.selected_storage_capture_binding(owner, field, span)?,
                                 Some((owner, field)),

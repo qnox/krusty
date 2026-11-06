@@ -506,10 +506,11 @@ impl Checker<'_> {
         {
             return Some(Plan::OwnStorage(owner));
         }
-        let captures = self
-            .discovered_local_class_captures
-            .get(&declaration)
-            .cloned()?;
+        let captures = match self.discovered_local_class_captures.get(&declaration) {
+            Some(captures) => captures.clone(),
+            None if self.finalized_local_class_captures.contains(&declaration) => Vec::new(),
+            None => return None,
+        };
         let mut projected = Vec::with_capacity(captures.len());
         for capture in captures {
             let Some(required) = capture.logical_identity(owner) else {
@@ -531,8 +532,11 @@ impl Checker<'_> {
                 };
                 match binding.origin {
                     ReceiverFnValueOrigin::ClassStorage(storage) => Source::ClassStorage(storage),
-                    ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
-                        Source::EnumEntryProperty { ordinal: field }
+                    ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field } => {
+                        Source::EnumEntryProperty {
+                            owner,
+                            ordinal: field,
+                        }
                     }
                     ReceiverFnValueOrigin::Local => {
                         let mut crossed_class = false;
@@ -590,8 +594,11 @@ impl Checker<'_> {
                     AnonymousObjectCaptureSource::ClassStorage(storage) => {
                         Source::ClassStorage(storage)
                     }
-                    AnonymousObjectCaptureSource::EnumEntryPropertyStorage { field, .. } => {
-                        Source::EnumEntryProperty { ordinal: field }
+                    AnonymousObjectCaptureSource::EnumEntryPropertyStorage { owner, field } => {
+                        Source::EnumEntryProperty {
+                            owner,
+                            ordinal: field,
+                        }
                     }
                     AnonymousObjectCaptureSource::EnclosingInstance { .. }
                     | AnonymousObjectCaptureSource::ImplicitReceiver { .. } => {
