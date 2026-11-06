@@ -833,10 +833,7 @@ fn nested_anonymous_super_lambda_captures_its_callers_receiver() {
     );
 }
 
-#[test]
-fn local_super_capture_projection_reads_the_child_constructor_parameter() {
-    let source =
-        include_str!("../../../../tests/box_regressions/localSuperclassCaptureProjection.kt");
+fn checked_local_super_projection_bodies(source: &str) -> (ResolvedModuleIndex, RecordingSink) {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("LocalSuperclassCaptureProjection")],
@@ -876,6 +873,14 @@ fn local_super_capture_projection_reads_the_child_constructor_parameter() {
         )
         .expect("whole source must become checked FIR");
     }
+    (index, sink)
+}
+
+#[test]
+fn local_super_capture_projection_reads_the_child_constructor_parameter() {
+    let source =
+        include_str!("../../../../tests/box_regressions/localSuperclassCaptureProjection.kt");
+    let (index, sink) = checked_local_super_projection_bodies(source);
     let mut projections = Vec::new();
     for (body_owner, body) in &sink.0 {
         for raw in 0..body.statement_count() {
@@ -915,5 +920,33 @@ fn local_super_capture_projection_reads_the_child_constructor_parameter() {
         projections.len(),
         1,
         "only Child's super call projects a capture"
+    );
+}
+
+#[test]
+fn a_checked_empty_local_super_environment_is_an_explicit_empty_projection() {
+    let source =
+        include_str!("../../../../tests/box_regressions/localSuperclassWithoutCaptures.kt");
+    let (_index, sink) = checked_local_super_projection_bodies(source);
+    let projections = sink
+        .0
+        .iter()
+        .flat_map(|(_, body)| {
+            (0..body.statement_count()).filter_map(|raw| {
+                let FirStatementKind::ConstructorDelegation(call) =
+                    &body.statement(FirStatementId::from_raw(raw as u32))?.kind
+                else {
+                    return None;
+                };
+                call.external_capture_arguments
+                    .as_ref()
+                    .map(|captures| captures.len())
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        projections,
+        [0],
+        "the selected local superclass was checked and captures nothing"
     );
 }
