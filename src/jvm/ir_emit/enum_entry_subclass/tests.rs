@@ -2,15 +2,19 @@ use crate::ir::{IrClass, IrConst, IrExpr, IrField, IrFile, IrFunction, IrPropert
 use crate::jvm::classreader::parse_class;
 use crate::jvm::ir_emit::invariant_tests::emit_for_test;
 use crate::jvm::ir_emit::EmitRun;
-use crate::types::{type_name, Ty};
+use crate::types::{type_name, ClassifierDeclarationName, Ty};
 
 #[test]
 fn entry_fields_and_accessors_use_their_declared_types_and_source_positions() {
     let mut ir = IrFile::default();
-    let owner = type_name("ScheduledEnum");
-    let entry = type_name("ScheduledEnum$ENTRY");
+    let owner = type_name("fixture/ScheduledEnum");
+    let entry = owner.nested_child("ENTRY");
     let mut enumeration = IrClass::synthetic(owner);
     enumeration.is_enum = true;
+    enumeration.declaration_name = Some(ClassifierDeclarationName::TopLevel {
+        package: type_name("fixture"),
+        name: "ScheduledEnum".into(),
+    });
     ir.add_class(enumeration);
 
     let value = ir.add_expr(IrExpr::Const(IrConst::String("OK".into())));
@@ -44,6 +48,10 @@ fn entry_fields_and_accessors_use_their_declared_types_and_source_positions() {
     let optional_ty = Ty::nullable(Ty::fun(Vec::new(), Ty::String));
     let mut subclass = IrClass::synthetic(entry);
     subclass.is_enum_entry = true;
+    subclass.declaration_name = Some(ClassifierDeclarationName::Nested {
+        owner,
+        name: "ENTRY".into(),
+    });
     subclass.superclass = owner;
     subclass.fields = vec![
         IrField::new("first".into(), Ty::String),
@@ -63,10 +71,11 @@ fn entry_fields_and_accessors_use_their_declared_types_and_source_positions() {
     crate::metadata::class_declarations::record_all(&mut ir);
 
     let run = EmitRun::default();
-    let classes = emit_for_test(&ir, "EnumScheduleFixture", &run).expect("emitted enum classes");
+    let classes = emit_for_test(&ir, "EnumScheduleFixture", &run)
+        .unwrap_or_else(|| panic!("emitted enum classes: {:?}", run.emit_error()));
     let bytes = &classes
         .iter()
-        .find(|(name, _)| name == "ScheduledEnum$ENTRY")
+        .find(|(name, _)| name == "fixture/ScheduledEnum$ENTRY")
         .expect("entry subclass")
         .1;
     let info = parse_class(bytes).expect("readable entry class");
