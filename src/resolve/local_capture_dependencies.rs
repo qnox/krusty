@@ -565,9 +565,7 @@ impl Checker<'_> {
                             })
                             .position(|binding| binding.lexical_capture_identity == Some(identity))
                             .and_then(|depth| u32::try_from(depth).ok());
-                        let Some(shadow_depth) = shadow_depth else {
-                            return None;
-                        };
+                        let shadow_depth = shadow_depth?;
                         Source::Lexical {
                             name: capture.name.clone(),
                             shadow_depth,
