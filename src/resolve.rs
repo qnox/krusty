@@ -8924,8 +8924,8 @@ pub enum ReceiverFnValueOrigin {
         /// the getter. Inherited properties leave this false.
         owner_storage: bool,
     },
-    /// A value stored in a compiler-generated field of the class whose body is being checked.
-    /// The index is the exact IR field slot; lowering consumes it without looking up a name.
+    /// A captured value selected by immutable logical identity. FIR projects it to the complete
+    /// realized binding; provisional constructor-prefix positions stay in capture-layout analysis.
     ClassStorage(ClassStorageSource),
     /// A source property declared by an enum-entry anonymous subclass. The entry owner is the
     /// selected semantic storage owner and `field` is the property's stable owner-local sibling.
@@ -13751,15 +13751,27 @@ impl<'a> Checker<'a> {
                                     .map(|field| (*owner, *field))
                             });
                         let captured_field = match captured_field {
-                            Some((owner, field)) => {
-                                let Some(owner) = self.body_class_storage_owner(owner) else {
+                            Some((declaration, field)) => {
+                                let Some(owner) = self.body_class_storage_owner(declaration) else {
                                     self.diags.error(
                                         span,
                                         "class storage has no checked classifier owner",
                                     );
                                     return None;
                                 };
-                                Some(ClassStorageSource { owner, field })
+                                let Some(identity) = self
+                                    .discovered_anonymous_captures
+                                    .get(&declaration)
+                                    .and_then(|captures| captures.get(field as usize))
+                                    .and_then(|capture| capture.logical_identity(owner))
+                                else {
+                                    self.diags.error(
+                                        span,
+                                        "class storage has no selected logical capture identity",
+                                    );
+                                    return None;
+                                };
+                                Some(ClassStorageSource { owner, identity })
                             }
                             None => None,
                         };
@@ -14036,7 +14048,7 @@ impl<'a> Checker<'a> {
                     self.check_class(scope, &class, declaration);
                     self.restore_body_state(saved);
                     if !self.discovers_captures_at_construction {
-                        self.publish_anonymous_capture_layout(scope, declaration, &captures, None);
+                        self.publish_anonymous_capture_layout(scope, declaration, &captures);
                     }
                 }
                 return self.anonymous_object_type(scope, declaration);
@@ -39592,8 +39604,7 @@ impl<'a> Checker<'a> {
             ReceiverFnValueOrigin::DispatchProperty { declared_ty, .. } => declared_ty,
             _ => ty,
         };
-        let lexical_capture_identity = matches!(origin, ReceiverFnValueOrigin::Local)
-            .then(|| self.allocate_lexical_capture_identity());
+        let lexical_capture_identity = self.capture_lexical_identity(origin);
         let flow_identity = self.allocate_flow_identity();
         scope.rebind(
             name,
@@ -39615,22 +39626,6 @@ impl<'a> Checker<'a> {
             }),
         );
         flow_identity
-    }
-
-    fn allocate_flow_identity(&mut self) -> u32 {
-        let identity = self.next_flow_identity;
-        self.next_flow_identity = identity
-            .checked_add(1)
-            .expect("too many lexical bindings in one bounded checker");
-        identity
-    }
-
-    fn allocate_lexical_capture_identity(&mut self) -> u32 {
-        let identity = self.next_lexical_capture_identity;
-        self.next_lexical_capture_identity = identity
-            .checked_add(1)
-            .expect("too many lexical bindings in one bounded checker");
-        identity
     }
 
     /// Shadow a binding with its flow-narrowed type (`if (x != null) …`). Unlike a fresh

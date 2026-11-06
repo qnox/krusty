@@ -582,6 +582,9 @@ impl Checker<'_> {
         let enclosing_instance = scope
             .this_ty()
             .filter(|_| innermost_label.is_some_and(|label| label.2));
+        let enclosing_instance_role = innermost_label
+            .filter(|label| label.2)
+            .and_then(|label| label.3);
         if implicit_receiver_capture.is_some() {
             // Receiver properties are reached through the captured receiver coordinate below; they
             // are not independent lexical values. Keeping both creates an impossible constructor
@@ -890,7 +893,7 @@ impl Checker<'_> {
                     lexical_binding: None,
                     capture_dependency: None,
                     receiver_capture: None,
-                    receiver_role: None,
+                    receiver_role: enclosing_instance_role,
                 }),
                 None => {
                     result.unsupported.get_or_insert("this".to_string());

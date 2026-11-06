@@ -70,12 +70,25 @@ pub(super) fn remap_owned_anonymous_class_storage_captures(
     remap_selected_sources(selected, remap, captures)
 }
 
+fn original_field(
+    remap: &CaptureFieldRemap<'_>,
+    capture: &AnonymousObjectCapture,
+    identity: crate::fir::ClassCaptureIdentity,
+) -> Option<usize> {
+    let mut fields = remap.original.iter().enumerate().filter(|(_, original)| {
+        original.logical_identity(remap.owner) == Some(identity)
+            && capture.receiver_role == original.receiver_role
+    });
+    let (field, _) = fields.next()?;
+    fields.next().is_none().then_some(field)
+}
+
 fn remap_selected_sources(
     selected: Vec<(DeclId, bool)>,
     remap: CaptureFieldRemap<'_>,
     captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
 ) -> bool {
-    // Validate both coordinate changes before changing any descendant's selected source.
+    // The original logical value, not a provisional ordinal, proves every coordinate change.
     for &(declaration, outside_owner) in &selected {
         let Some(captures) = captures.get(&declaration) else {
             continue;
@@ -87,24 +100,18 @@ fn remap_selected_sources(
             if storage.owner != remap.owner {
                 continue;
             }
-            let field = storage.field;
-            let valid = if outside_owner {
-                remap
-                    .original
-                    .get(field as usize)
-                    .is_some_and(|original| capture.receiver_role == original.receiver_role)
-            } else {
-                remap
-                    .fields
-                    .get(field as usize)
-                    .is_some_and(Option::is_some)
+            let Some(field) = original_field(&remap, capture, storage.identity) else {
+                return false;
             };
-            if !valid {
+            if !outside_owner && !remap.fields.get(field).is_some_and(Option::is_some) {
                 return false;
             }
         }
     }
     for (declaration, outside_owner) in selected {
+        if !outside_owner {
+            continue;
+        }
         let Some(captures) = captures.get_mut(&declaration) else {
             continue;
         };
@@ -115,21 +122,16 @@ fn remap_selected_sources(
             if storage.owner != remap.owner {
                 continue;
             }
-            let field = storage.field;
-            if outside_owner {
-                let original = &remap.original[field as usize];
-                capture.source = original.source;
-                capture.lexical_binding = original.lexical_binding;
-                capture.lexical_shadow_depth = original.lexical_shadow_depth;
-                capture.capture_dependency = original.capture_dependency;
-            } else {
-                capture.source =
-                    AnonymousObjectCaptureSource::ClassStorage(super::ClassStorageSource {
-                        owner: remap.owner,
-                        field: remap.fields[field as usize]
-                            .expect("validated owner storage permutation"),
-                    });
-            }
+            let field = original_field(&remap, capture, storage.identity)
+                .expect("validated unique original logical capture");
+            let original = &remap.original[field];
+            capture.source = original.source;
+            capture.lexical_binding = original.lexical_binding;
+            capture.lexical_shadow_depth = original.lexical_shadow_depth;
+            capture.capture_dependency = match original.source {
+                AnonymousObjectCaptureSource::ClassStorage(_) => original.capture_dependency,
+                _ => Some(storage.identity),
+            };
         }
     }
     true
@@ -164,7 +166,10 @@ mod tests {
         let middle = type_name("Middle");
         let outer = ClassStorageSource {
             owner: type_name("Outer"),
-            field: 3,
+            identity: crate::fir::ClassCaptureIdentity::Value {
+                owner: type_name("Outer"),
+                binding: 7,
+            },
         };
         let child = DeclId(12);
         let mut original = selected_value(outer);
@@ -174,7 +179,7 @@ mod tests {
             child,
             vec![selected_value(ClassStorageSource {
                 owner: middle,
-                field: 0,
+                identity: outer.identity,
             })],
         );
         assert!(remap_selected_sources(
@@ -207,5 +212,65 @@ mod tests {
         assert_eq!(capture.lexical_binding, original.lexical_binding);
         assert_eq!(capture.lexical_shadow_depth, original.lexical_shadow_depth);
         assert_eq!(capture.capture_dependency, original.capture_dependency);
+    }
+
+    #[test]
+    fn logical_values_survive_prefix_reorder_and_distinguish_shadowed_checker_bindings() {
+        let owner = type_name("LogicalCaptureOwner");
+        let first = crate::fir::ClassCaptureIdentity::Value { owner, binding: 7 };
+        let second = crate::fir::ClassCaptureIdentity::Value { owner, binding: 8 };
+        let other_owner = crate::fir::ClassCaptureIdentity::Value {
+            owner: type_name("OtherCaptureOwner"),
+            binding: 7,
+        };
+        let a = selected_value(ClassStorageSource {
+            owner,
+            identity: first,
+        });
+        let b = selected_value(ClassStorageSource {
+            owner,
+            identity: second,
+        });
+        let (selected, remap) = super::super::capture_field_order::reconcile(
+            Some(&[a.clone(), b.clone()]),
+            vec![b, a],
+            false,
+        );
+        assert_eq!(remap, [Some(1), Some(0)]);
+        assert_eq!(selected[0].logical_identity(owner), Some(second));
+        assert_eq!(selected[1].logical_identity(owner), Some(first));
+        assert_ne!(first, other_owner);
+        let recaptured = selected_value(ClassStorageSource {
+            owner: type_name("Recapturer"),
+            identity: first,
+        });
+        assert_eq!(
+            recaptured.logical_identity(type_name("LaterRecapturer")),
+            Some(first)
+        );
+    }
+
+    #[test]
+    fn an_enclosing_class_capture_uses_the_recorded_receiver_role() {
+        let owner = type_name("LogicalCaptureOwner");
+        let selected = type_name("ActualEnclosingDeclaration");
+        let mut capture = selected_value(ClassStorageSource {
+            owner,
+            identity: crate::fir::ClassCaptureIdentity::Value { owner, binding: 7 },
+        });
+        capture.source = AnonymousObjectCaptureSource::EnclosingInstance {
+            current: true,
+            depth: 0,
+        };
+        capture.lexical_binding = None;
+        capture.receiver_role = Some(super::super::ReceiverDeclarationRole::EnclosingClass(
+            selected,
+        ));
+        assert_eq!(
+            capture.logical_identity(owner),
+            Some(crate::fir::ClassCaptureIdentity::EnclosingClass(selected))
+        );
+        capture.receiver_role = None;
+        assert_eq!(capture.logical_identity(owner), None);
     }
 }

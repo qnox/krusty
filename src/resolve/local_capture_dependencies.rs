@@ -22,14 +22,13 @@ struct SelectedLocalClassifierCaptures {
 struct RequiredLocalClassifierCapture {
     declaration: DeclId,
     owner: TypeName,
-    field: usize,
     capture: AnonymousObjectCapture,
     lexical_binding: Option<u32>,
 }
 
 impl Checker<'_> {
     pub(super) fn extend_selected_local_dependency_captures(
-        &self,
+        &mut self,
         scope: &CheckerScope<'_>,
         declaration: DeclId,
         class: &ClassDecl,
@@ -60,7 +59,7 @@ impl Checker<'_> {
     }
 
     pub(super) fn extend_anonymous_superclass_captures(
-        &self,
+        &mut self,
         scope: &CheckerScope<'_>,
         declaration: DeclId,
         captures: &mut Vec<AnonymousObjectCapture>,
@@ -252,7 +251,7 @@ impl Checker<'_> {
     /// krusty's backends were rejecting them — the JVM's with a `VerifyError` putting `this` where
     /// the capture belongs.
     fn extend_superclass_captures(
-        &self,
+        &mut self,
         scope: &CheckerScope<'_>,
         current_declaration: DeclId,
         captures: &mut Vec<AnonymousObjectCapture>,
@@ -283,7 +282,7 @@ impl Checker<'_> {
     }
 
     fn extend_selected_constructor_captures(
-        &self,
+        &mut self,
         scope: &CheckerScope<'_>,
         current_declaration: DeclId,
         expressions: &[ExprId],
@@ -302,12 +301,10 @@ impl Checker<'_> {
                 } = selected;
                 captures
                     .into_iter()
-                    .enumerate()
-                    .map(move |(field, selected)| RequiredLocalClassifierCapture {
+                    .map(move |selected| RequiredLocalClassifierCapture {
                         capture: selected.capture,
                         declaration,
                         owner,
-                        field,
                         lexical_binding: selected.lexical_binding,
                     })
             })
@@ -325,7 +322,7 @@ impl Checker<'_> {
     /// onto a source this scope can supply. A capture with no such source here is skipped: the
     /// declaration that needs it is reached from somewhere that has it, or not at all.
     fn extend_required_captures(
-        &self,
+        &mut self,
         scope: &CheckerScope<'_>,
         current_declaration: DeclId,
         required: Vec<RequiredLocalClassifierCapture>,
@@ -337,7 +334,6 @@ impl Checker<'_> {
         for RequiredLocalClassifierCapture {
             declaration,
             owner,
-            field,
             capture: mut required,
             lexical_binding: required_identity,
         } in required
@@ -359,7 +355,18 @@ impl Checker<'_> {
                         ReceiverFnValueOrigin::Local => AnonymousObjectCaptureSource::LexicalValue,
                         ReceiverFnValueOrigin::ClassStorage(storage) => {
                             if current_owner == Some(storage.owner) {
-                                if let Some(existing) = captures.get_mut(storage.field as usize) {
+                                if let Some(existing) = {
+                                    let mut selected =
+                                        captures.iter().enumerate().filter(|(_, capture)| {
+                                            capture.logical_identity(storage.owner)
+                                                == Some(storage.identity)
+                                        });
+                                    let index = selected.next().map(|(index, _)| index);
+                                    let unique = selected.next().is_none();
+                                    index
+                                        .filter(|_| unique)
+                                        .and_then(|index| captures.get_mut(index))
+                                } {
                                     existing.shared_cell |= required.shared_cell;
                                     continue;
                                 }
@@ -376,7 +383,18 @@ impl Checker<'_> {
                     // classifier. Carrying it through the current classifier's own constructor
                     // would duplicate the field and reinterpret its ordinal under another owner.
                     if current_owner == Some(storage.owner) {
-                        if let Some(existing) = captures.get_mut(storage.field as usize) {
+                        if let Some(existing) = {
+                            let mut selected =
+                                captures.iter().enumerate().filter(|(_, capture)| {
+                                    capture.logical_identity(storage.owner)
+                                        == Some(storage.identity)
+                                });
+                            let index = selected.next().map(|(index, _)| index);
+                            let unique = selected.next().is_none();
+                            index
+                                .filter(|_| unique)
+                                .and_then(|index| captures.get_mut(index))
+                        } {
                             existing.shared_cell |= required.shared_cell;
                             continue;
                         }
@@ -398,17 +416,14 @@ impl Checker<'_> {
             };
             required.source = source;
             required.lexical_shadow_depth = lexical_shadow_depth;
-            required.capture_dependency =
-                required
-                    .capture_dependency
-                    .or(match required.receiver_capture {
-                        Some(receiver) => {
-                            Some(crate::fir::ClassCaptureIdentity::Receiver(receiver))
-                        }
-                        None => u32::try_from(field)
-                            .ok()
-                            .map(|field| crate::fir::ClassCaptureIdentity::Field { owner, field }),
-                    });
+            let Some(identity) = required.logical_identity(owner) else {
+                self.diags.error(
+                    crate::diag::Span::new(0, 0),
+                    "required capture has no selected logical identity",
+                );
+                return;
+            };
+            required.capture_dependency = Some(identity);
             Self::merge_or_push_local_dependency_capture(
                 captures,
                 capture_bindings,
@@ -462,12 +477,10 @@ impl Checker<'_> {
                 .iter()
                 .cloned()
                 .zip(bindings.iter().copied())
-                .enumerate()
                 .map(
-                    |(field, (capture, lexical_binding))| RequiredLocalClassifierCapture {
+                    |(capture, lexical_binding)| RequiredLocalClassifierCapture {
                         declaration,
                         owner,
-                        field,
                         capture,
                         lexical_binding,
                     },

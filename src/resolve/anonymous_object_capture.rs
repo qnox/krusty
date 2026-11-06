@@ -117,6 +117,47 @@ pub struct AnonymousObjectCapture {
 }
 
 impl AnonymousObjectCapture {
+    /// The selected runtime value survives provisional prefix permutations and recapture.
+    pub(crate) fn logical_identity(
+        &self,
+        first_owner: crate::types::TypeName,
+    ) -> Option<crate::fir::ClassCaptureIdentity> {
+        use crate::fir::ClassCaptureIdentity;
+        let selected = match self.source {
+            AnonymousObjectCaptureSource::ClassStorage(storage) => Some(storage.identity),
+            AnonymousObjectCaptureSource::EnumEntryPropertyStorage { owner, field } => {
+                Some(ClassCaptureIdentity::DeclaredProperty {
+                    owner,
+                    ordinal: field,
+                })
+            }
+            _ => self
+                .receiver_capture
+                .map(ClassCaptureIdentity::Receiver)
+                .or_else(|| match self.receiver_role {
+                    Some(super::ReceiverDeclarationRole::EnclosingClass(owner)) => {
+                        Some(ClassCaptureIdentity::EnclosingClass(owner))
+                    }
+                    _ => self
+                        .lexical_binding
+                        .map(|binding| ClassCaptureIdentity::Value {
+                            owner: first_owner,
+                            binding,
+                        }),
+                }),
+        };
+        match (self.capture_dependency, selected) {
+            (Some(prior), Some(selected))
+                if !matches!(self.source, AnonymousObjectCaptureSource::LexicalValue)
+                    && prior != selected =>
+            {
+                None
+            }
+            (Some(prior), _) => Some(prior),
+            (None, selected) => selected,
+        }
+    }
+
     pub fn stored_ty(&self) -> Ty {
         self.storage_ty.unwrap_or(self.ty)
     }
@@ -143,12 +184,12 @@ impl AnonymousObjectCapture {
     }
 }
 
-/// Selected storage coordinates include their semantic classifier owner; a field ordinal alone
-/// cannot survive forwarding or a later finalization of another anonymous class.
+/// A selected captured value and the classifier scope that made it visible. Logical identity
+/// survives forwarding and layout reconciliation; no provisional field position crosses into FIR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClassStorageSource {
     pub(crate) owner: crate::types::TypeName,
-    pub(crate) field: u32,
+    pub(crate) identity: crate::fir::ClassCaptureIdentity,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

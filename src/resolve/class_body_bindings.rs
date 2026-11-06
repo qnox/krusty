@@ -32,27 +32,23 @@ impl Checker<'_> {
         is_var: bool,
     ) {
         if let Some(field) = property.class_storage {
-            if let Some(sibling) = property.enum_entry_property {
-                self.declare_enum_entry_property_storage(
-                    scope,
-                    &property.name,
-                    property.ty,
-                    is_var,
-                    property.owner,
-                    sibling,
+            let Some(sibling) = property
+                .enum_entry_property
+                .filter(|sibling| *sibling == field)
+            else {
+                self.diags.error(
+                    crate::diag::Span::new(0, 0),
+                    "declared property storage has no enum-entry declaration role",
                 );
                 return;
-            }
-            self.declare_class_storage(
+            };
+            self.declare_enum_entry_property_storage(
                 scope,
                 &property.name,
                 property.ty,
                 is_var,
-                ClassStorageSource {
-                    owner: property.owner,
-                    field,
-                },
-                false,
+                property.owner,
+                sibling,
             );
             return;
         }
@@ -154,11 +150,10 @@ impl Checker<'_> {
         declaration: DeclId,
         name: &str,
     ) {
-        let Some((field, capture)) = self
+        let Some(capture) = self
             .body_class_storage_captures(declaration)
             .into_iter()
-            .enumerate()
-            .find(|(_, capture)| {
+            .find(|capture| {
                 capture.name == name
                     && matches!(
                         capture.source,
@@ -178,15 +173,19 @@ impl Checker<'_> {
             }
             return;
         };
+        let Some(identity) = capture.logical_identity(owner) else {
+            self.diags.error(
+                crate::diag::Span::new(0, 0),
+                "class storage has no selected logical capture identity",
+            );
+            return;
+        };
         self.declare_class_storage(
             scope,
             &capture.name,
             capture.ty,
             capture.shared_cell,
-            super::ClassStorageSource {
-                owner,
-                field: u32::try_from(field).expect("too many local-class captures"),
-            },
+            super::ClassStorageSource { owner, identity },
             capture.shared_cell,
         );
     }
@@ -200,11 +199,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         declaration: DeclId,
     ) {
-        for (field, capture) in self
-            .body_class_storage_captures(declaration)
-            .into_iter()
-            .enumerate()
-        {
+        for capture in self.body_class_storage_captures(declaration) {
             if matches!(
                 capture.source,
                 AnonymousObjectCaptureSource::LexicalValue
@@ -219,15 +214,19 @@ impl Checker<'_> {
                     }
                     return;
                 };
+                let Some(identity) = capture.logical_identity(owner) else {
+                    self.diags.error(
+                        crate::diag::Span::new(0, 0),
+                        "class storage has no selected logical capture identity",
+                    );
+                    return;
+                };
                 self.declare_class_storage(
                     scope,
                     &capture.name,
                     capture.ty,
                     capture.shared_cell,
-                    super::ClassStorageSource {
-                        owner,
-                        field: field as u32,
-                    },
+                    super::ClassStorageSource { owner, identity },
                     capture.shared_cell,
                 );
             }

@@ -176,7 +176,7 @@ impl BodyFirChecker<'_> {
                     .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
                 let binding = match origin {
                     ReceiverFnValueOrigin::ClassStorage(storage) => {
-                        self.selected_class_capture_binding(storage, function_ty, span)?
+                        self.selected_class_capture_binding(storage, span)?
                     }
                     ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
                         self.enum_entry_storage_binding(field, function_ty, span)?

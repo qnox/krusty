@@ -60,11 +60,9 @@ impl BodyFirChecker<'_> {
             .expr_span(expression)
             .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
         let binding = match selected {
-            ExprLowering::ClassStorageRead(storage) => self.selected_class_capture_binding(
-                *storage,
-                self.expression_type(expression)?,
-                span,
-            )?,
+            ExprLowering::ClassStorageRead(storage) => {
+                self.selected_class_capture_binding(*storage, span)?
+            }
             ExprLowering::EnumEntryStorageRead { field, .. } => {
                 self.enum_entry_storage_binding(*field, self.expression_type(expression)?, span)?
             }
@@ -131,14 +129,15 @@ impl BodyFirChecker<'_> {
     pub(super) fn selected_class_capture_binding(
         &self,
         storage: crate::resolve::ClassStorageSource,
-        ty: ResolvedTy,
         span: Span,
     ) -> Result<ClassCaptureBinding, BodyCheckFailure> {
-        let owner = self.selected_storage_owner(storage, Some(span))?;
-        match self.selected_storage_capture_binding(owner, storage.field, span)? {
-            Some(binding) => Ok(binding),
-            None => self.declared_class_storage_binding(owner, storage.field, ty),
-        }
+        self.selected_storage_owner(storage, Some(span))?;
+        let binding = self
+            .class_capture_binding(storage.identity)
+            .ok_or_else(|| {
+                self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+            })?;
+        Ok(binding)
     }
 
     /// Publish the capture prefix for a local-class construction that crosses a streamed body
@@ -453,11 +452,21 @@ impl BodyFirChecker<'_> {
     /// can share a source spelling while denoting different fields, so this lookup deliberately
     /// has no name-based recovery path.
     fn class_capture_binding(&self, identity: ClassCaptureIdentity) -> Option<ClassCaptureBinding> {
-        self.class_capture_values
+        let candidates = self
+            .class_capture_values
             .iter()
             .map(|(_, binding)| *binding)
-            .filter(|binding| binding.capture_identity == Some(identity))
-            .min_by_key(|binding| binding.enclosing_depth)
+            .chain(self.class_receivers.iter().copied())
+            .filter(|binding| binding.capture_identity == Some(identity));
+        let depth = candidates
+            .clone()
+            .map(|binding| binding.enclosing_depth)
+            .min()?;
+        let mut nearest = candidates.filter(|binding| binding.enclosing_depth == depth);
+        let selected = nearest.next()?;
+        nearest
+            .all(|binding| binding == selected)
+            .then_some(selected)
     }
 
     /// The nearest class field that stores the binding whose lexical identity is `identity`.
@@ -682,18 +691,6 @@ impl BodyFirChecker<'_> {
                         .expect("a dispatch owner has a receiver depth"),
                 })
             })
-    }
-
-    /// The binding of field `field` of the class whose storage this body reads directly.
-    pub(super) fn direct_class_capture_binding(
-        &self,
-        field: u32,
-        ty: ResolvedTy,
-    ) -> Result<ClassCaptureBinding, BodyCheckFailure> {
-        let owner = self
-            .current_storage_owner()
-            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingStableCallTarget))?;
-        self.declared_class_storage_binding(owner, field, ty)
     }
 
     fn declared_class_storage_binding(
@@ -1089,20 +1086,12 @@ impl BodyFirChecker<'_> {
         };
         for (field, capture) in captures.iter().enumerate() {
             let field = u32::try_from(field).expect("too many local-class captures");
-            let field_identity = ClassCaptureIdentity::Field {
-                owner: capture_owner,
-                field,
-            };
-            // A receiver rung is normalized once, at capture publication, into the closure id.
-            // Hoisting an anonymous super argument still stores an enclosing class instance as
-            // this classifier's own field; that instance has no closure id.
-            let capture_identity = if let Some(receiver) = capture.receiver_capture {
-                Some(ClassCaptureIdentity::Receiver(receiver))
-            } else if self.hoist_anonymous_super_argument && capture.semantic_receiver.is_some() {
-                Some(field_identity)
-            } else {
-                capture.capture_dependency.or(Some(field_identity))
-            };
+            let logical_identity = capture.logical_identity(capture_owner).ok_or_else(|| {
+                self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+            })?;
+            // Transport the selected value identity independently of this declaration's final
+            // constructor-prefix position, retaining the complete binding's physical role below.
+            let capture_identity = Some(logical_identity);
             let mut ty = self.resolved_type(span, capture.ty)?;
             // A captured delegated property is its delegate's variable, named as such.
             let mut name = capture.name.clone();
@@ -1239,21 +1228,23 @@ impl BodyFirChecker<'_> {
                 }
                 source @ (AnonymousObjectCaptureSource::ClassStorage(_)
                 | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. }) => {
-                    let (source_owner, source_field) = match source {
+                    let (source_binding, declared_property) = match source {
                         AnonymousObjectCaptureSource::ClassStorage(storage) => (
-                            self.selected_storage_owner(storage, Some(span))?,
-                            storage.field,
+                            Some(self.selected_class_capture_binding(storage, span)?),
+                            None,
                         ),
                         AnonymousObjectCaptureSource::EnumEntryPropertyStorage {
                             field, ..
-                        } => (
-                            self.selected_enum_entry_storage_owner(field, Some(span))?,
-                            field,
-                        ),
+                        } => {
+                            let owner =
+                                self.selected_enum_entry_storage_owner(field, Some(span))?;
+                            (
+                                self.selected_storage_capture_binding(owner, field, span)?,
+                                Some((owner, field)),
+                            )
+                        }
                         _ => unreachable!("matched storage source"),
                     };
-                    let source_binding =
-                        self.selected_storage_capture_binding(source_owner, source_field, span)?;
                     instance_owner =
                         source_binding.and_then(|binding| binding.enclosing_instance_owner);
                     let hoisted_receiver = self
@@ -1327,11 +1318,8 @@ impl BodyFirChecker<'_> {
                         } else if let Some((receiver, path)) =
                             self.captured_class_storage_receiver(binding, origin)?
                         {
-                            // The receiver walk `captured_class_storage_receiver` builds lands on
-                            // `binding.owner`, so the field index must be that binding's own, as
-                            // both sibling outcomes use. `source_field` numbers the capture in the
-                            // anonymous object being DECLARED, and reading it from the enclosing
-                            // class addresses a field that class may not even have.
+                            // The selected logical value's realized binding owns both the receiver
+                            // walk and its finalized constructor-capture coordinate.
                             FirLocalClassCaptureSource::CapturedClassStorage {
                                 owner: binding.owner,
                                 receiver,
@@ -1346,6 +1334,8 @@ impl BodyFirChecker<'_> {
                             }
                         }
                     } else {
+                        let (source_owner, source_field) = declared_property
+                            .expect("only declared property storage can have no capture binding");
                         if self.reads_constructor_prefix_capture(source_owner, 0) {
                             FirLocalClassCaptureSource::ConstructorCapture {
                                 owner: source_owner,
