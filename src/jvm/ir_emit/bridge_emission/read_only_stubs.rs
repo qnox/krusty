@@ -40,14 +40,15 @@ pub(super) fn emit_stubs(ir: &IrFile, class: &IrClass, cw: &mut ClassWriter, env
         if cw.has_method(&stub.realized.name, &descriptor) {
             continue;
         }
+        let signature_parameters = stub.signature_parameters();
         let signature_result = stub.signature_result();
         let signature = if stub.declaration_site_wildcards {
             formatter.method_positions_with_declaration_site_wildcards(
-                &stub.parameters,
+                &signature_parameters,
                 &signature_result,
             )
         } else {
-            formatter.method_positions(&stub.parameters, &signature_result)
+            formatter.method_positions(&signature_parameters, &signature_result)
         }
         .filter(|signature| *signature != descriptor);
         let method = ThrowingMethod {

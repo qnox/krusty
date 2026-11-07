@@ -392,19 +392,34 @@ impl Checker<'_> {
                 // capture exposes the mutability of its source local. Rebind those names after the
                 // ordinary property rung so reads/writes carry `ClassStorage` identity rather than
                 // being mistaken for source property access.
-                for (field, capture) in class_storage_captures.iter().enumerate() {
+                for capture in &class_storage_captures {
                     if matches!(
                         capture.source,
                         AnonymousObjectCaptureSource::LexicalValue
-                            | AnonymousObjectCaptureSource::ClassStorage { .. }
+                            | AnonymousObjectCaptureSource::ClassStorage(_)
+                            | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. }
                     ) && capture.storage_ty.is_none()
                     {
+                        let Some(owner) = body_class_declaration
+                            .and_then(|declaration| self.body_class_storage_owner(declaration))
+                        else {
+                            self.diags
+                                .error(f.span, "class storage has no checked classifier owner");
+                            continue;
+                        };
+                        let Some(identity) = capture.logical_identity(owner) else {
+                            self.diags.error(
+                                f.span,
+                                "class storage has no selected logical capture identity",
+                            );
+                            continue;
+                        };
                         self.declare_class_storage(
                             scope,
                             &capture.name,
                             capture.ty,
                             capture.shared_cell,
-                            field as u32,
+                            ClassStorageSource { owner, identity },
                             capture.shared_cell,
                         );
                     }

@@ -65,6 +65,18 @@ impl Body<'_> {
                 };
                 self.string_of(value)
             }
+            IrIntrinsic::GeneratedPropertyHash { ty } => {
+                let (None, [value]) = (receiver, args) else {
+                    return Err("a malformed generated property hash".to_string());
+                };
+                self.generated_property_hash(*value, ty)
+            }
+            IrIntrinsic::GeneratedPropertyEquals { ty } => {
+                let (None, [left, right]) = (receiver, args) else {
+                    return Err("a malformed generated property comparison".to_string());
+                };
+                self.generated_property_equals(*left, *right, ty)
+            }
             other => Err(format!("a call to the intrinsic {other:?}")),
         }
     }

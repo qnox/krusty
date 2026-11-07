@@ -21,9 +21,11 @@ use crate::fx_hash::{HashMap, HashSet};
 mod absent_arguments;
 mod arrays;
 mod boxing;
+mod callable_reference_identity;
 mod dependency_exports;
 mod exceptions;
 mod function_values;
+mod generated_members;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
@@ -39,6 +41,7 @@ pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
+        || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
@@ -155,6 +158,10 @@ pub(super) fn lower_file(
         signatures.push(Some(module.func_type(params, results)));
     }
     let indices = callable_registry.declare_file(ir, module)?;
+    let reference_file =
+        runtime
+            .callable_references
+            .begin_file(module_name, ir, dependency_exports)?;
     let call_targets = callable_registry.file_calls(ir, callables, module)?;
     let inert_singleton_bindings = crate::backend::inert_staged_singleton_bindings(
         ir,
@@ -204,6 +211,7 @@ pub(super) fn lower_file(
         array_range_checks,
         classifiers,
         module_name,
+        reference_file,
         numbers: plan.interfaces(),
         ir,
         functions: &indices,
@@ -349,6 +357,8 @@ struct FileContext<'a> {
     array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
+    /// Backend namespace of this file's local callable declarations.
+    reference_file: u32,
     /// The module-wide numbers of the module's interface members.
     numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
@@ -384,6 +394,20 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         TyKind::DOUBLE => ValType::F64,
         TyKind::STRING | TyKind::Null => STRING,
         TyKind::Nullable(Ty::String) => STRING,
+        // Nullable scalars keep their semantic type until this representation boundary. They
+        // use the same boxes as erased values; nullable Unit can hold its singleton or null.
+        TyKind::Nullable(
+            Ty::Boolean
+            | Ty::Byte
+            | Ty::Short
+            | Ty::Char
+            | Ty::Int
+            | Ty::Long
+            | Ty::Float
+            | Ty::Double
+            | Ty::Unit
+            | Ty::Nothing,
+        ) => REFERENCE,
         // Every object, interface and `Any` value, and a type parameter's: a reference the
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
@@ -568,6 +592,7 @@ struct Body<'a> {
     array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
+    reference_file: u32,
     numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
     module: &'a mut Module,
@@ -627,6 +652,7 @@ impl<'a> Body<'a> {
         );
         Self {
             module_name: context.module_name,
+            reference_file: context.reference_file,
             array_range_checks: context.array_range_checks,
             classifiers: context.classifiers,
             numbers: context.numbers,
@@ -1134,7 +1160,7 @@ impl<'a> Body<'a> {
                 && defaults.is_empty()
                 && self.scalar_operation_of(*target).is_some() =>
             {
-                self.scalar_operation_call(*target, dispatch_receiver, params, *ret, &args)?;
+                self.scalar_operation_call(id, *target, dispatch_receiver, params, *ret, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1563,10 +1589,20 @@ impl<'a> Body<'a> {
         } else {
             left.is_unsigned() || right.is_unsigned()
         };
+        // Equality, shifts and the bitwise connectives are sign-agnostic on the carrier (a shift
+        // takes its right-shift kind from `unsigned` below); every other operator needs an
+        // unsigned instruction this lowering does not select yet.
         if unsigned
             && !matches!(
                 op,
-                IrBinOp::Eq | IrBinOp::Ne | IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr
+                IrBinOp::Eq
+                    | IrBinOp::Ne
+                    | IrBinOp::Shl
+                    | IrBinOp::Shr
+                    | IrBinOp::Ushr
+                    | IrBinOp::BitAnd
+                    | IrBinOp::BitOr
+                    | IrBinOp::BitXor
             )
         {
             return Err(format!("an ordinary operator on `{}`", describe(left)));

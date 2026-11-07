@@ -16,21 +16,42 @@ pub(crate) struct ClassCaptureBinding {
     pub(crate) semantic_receiver_depth: Option<u32>,
     pub(crate) receiver_source: Option<ClassReceiverCaptureSource>,
     pub(crate) enclosing_instance_owner: Option<crate::fir::EnclosingInstanceOwner>,
-    /// Original classifier field whose closure value this field forwards. A directly captured
-    /// value has its own `(owner, field)` identity; a transitive recapture preserves the upstream
-    /// identity so independently streamed members never join closure operands by source spelling.
+    /// Original logical closure value this field forwards. Its identity survives prefix reorder;
+    /// independently streamed members never join closure operands by source spelling.
     pub(crate) capture_identity: Option<ClassCaptureIdentity>,
     /// Lexical identity of the captured value's binding, which a local function the class calls
     /// maps its capture by: two same-named fields are told apart by it, never by spelling.
     pub(crate) lexical_binding: Option<u32>,
 }
 
-/// Semantic closure coordinate. A lexical capture is the classifier field that first stored it.
+impl ClassCaptureBinding {
+    /// Identity views can name the same operand only when its complete storage and lifetime agree.
+    pub(crate) fn same_storage(self, other: Self) -> bool {
+        self == Self {
+            capture_identity: self.capture_identity,
+            ..other
+        }
+    }
+}
+
+/// Semantic closure coordinate. A lexical capture keeps its first capturer and lexical binding.
 /// An implicit receiver is the checker's receiver-rung identity, shared by every classifier that
 /// captured that rung. Label spelling is not part of either coordinate.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ClassCaptureIdentity {
-    Field { owner: TypeName, field: u32 },
+    /// A capture-transport family anchored by its first capturer and original lexical binding.
+    /// It is not a global lexical-variable ID or a physical field position.
+    Value {
+        owner: TypeName,
+        binding: u32,
+    },
+    /// The existing selected enclosing-class receiver role, independent of its capture position.
+    EnclosingClass(TypeName),
+    /// A declared entry property retains its existing owner-local declaration coordinate.
+    DeclaredProperty {
+        owner: TypeName,
+        ordinal: u32,
+    },
     Receiver(u32),
 }
 

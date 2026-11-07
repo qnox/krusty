@@ -250,6 +250,7 @@ fn run_backend_passes_after_plugins(
     )
     .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
+    crate::jvm::platform_visible_constructors::realize(ir);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
     // declaration that has no class-file form. Before the value-class pass, which renames a marker
     // together with its mangled getter.
@@ -2291,14 +2292,17 @@ mod tests {
             Some(metadata.k),
             "a/AKt",
             None,
-            &[],
         )
         .expect("decode generated facade metadata");
 
-        let [property] = decoded.package_properties.as_ref() else {
+        let members = decoded
+            .members
+            .decode(&[], &decoded.type_parameter_scope)
+            .expect("decode generated facade members");
+        let [property] = members.package_properties.as_ref() else {
             panic!(
                 "expected one package property, got {:?}",
-                decoded.package_properties
+                members.package_properties
             );
         };
         assert_eq!(property.name, "topLevel");

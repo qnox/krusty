@@ -150,7 +150,11 @@ pub(super) fn score_with_declaration(
             );
         if (checker.postponed_call_mentions(expected)
             || checker.postponed_call_mentions(semantic_actual))
-            && !checker.postponed_argument_constraint_is_satisfiable(expected, semantic_actual)
+            && !call_constraints::postponed_argument_constraint_is_satisfiable(
+                checker,
+                expected,
+                semantic_actual,
+            )
         {
             return None;
         }
