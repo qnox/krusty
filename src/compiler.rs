@@ -262,10 +262,7 @@ fn emit_analyzed_into<B: Backend>(
             }
         }
         if let Err(error) = sink.accept_inline_bodies(&index, &mut inline_bodies) {
-            diags.error(
-                Span::new(0, 0),
-                format!("internal error: cannot consume inline FIR: {error:?}"),
-            );
+            report_inline_body_failure(diags, &error, symbols.shared_semantic_platform().as_ref());
             default_arguments.take_for_source(&index, source_id);
             continue;
         }
@@ -1377,6 +1374,32 @@ pub fn check_frontend_only(
     }
     assert!(default_arguments.is_empty());
     census
+}
+
+/// Preserve the lowering failure while identifying an external declaration through the same
+/// live provider that selected it. Diagnostic presentation never reconstructs a target.
+fn report_inline_body_failure(
+    diags: &mut DiagSink,
+    error: &crate::fir_lower::FirFileLoweringFailure,
+    platform: &dyn crate::libraries::SemanticPlatform,
+) {
+    let mut message = format!("internal error: cannot consume inline FIR: {error:?}");
+    let selected = match error {
+        crate::fir_lower::FirFileLoweringFailure::Body(
+            crate::fir_lower::FirLoweringFailure::UnsupportedExternalCall(target),
+        ) => platform.external_callable(*target),
+        _ => None,
+    };
+    if let Some(selected) = selected {
+        message = format!(
+            "{message}; selected dependency owner={:?}, name={:?}, declaration={:?}, dependency={:?}",
+            selected.declaration_owner,
+            selected.callable.name,
+            selected.declaration_signature,
+            selected.dependency_callable,
+        );
+    }
+    diags.error(Span::new(0, 0), message);
 }
 
 #[cfg(test)]
