@@ -8,10 +8,11 @@ use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantic
 
 #[test]
 fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
-    let modules = krusty::conformance::split_modules(include_str!(
-        "box_regressions/multimodule/dependencyConstructorAllocationExports.kt"
-    ))
-    .expect("the entire shared two-module program");
+    let source =
+        include_str!("box_regressions/multimodule/dependencyConstructorAllocationExports.kt");
+    let modules =
+        krusty::conformance::split_modules(source).expect("the entire shared two-module program");
+    let units = krusty::conformance::module_units(&modules);
     let [producer, consumer] = modules.as_slice() else {
         panic!("producer and consumer modules")
     };
@@ -33,6 +34,16 @@ fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
         let backend = WasmBackend::new(target).with_entry(Entry::Box);
         let compilation_target = backend.compilation_target();
         let work = crate::common::scratch_dir().expect("official dependency producer directory");
+        assert_eq!(
+            lane.compile_modules_and_run(
+                &work,
+                "productDependencyConstructorAllocation",
+                &units,
+                source,
+            ),
+            Outcome::Pass,
+            "the product producer's existing constructor export remains callable"
+        );
         let producer_path = work.join(producer_name);
         std::fs::write(&producer_path, producer_text).unwrap();
         let (produced, library) = crate::reference_invocation_support::run_reference(

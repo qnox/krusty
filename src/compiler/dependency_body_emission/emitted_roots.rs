@@ -212,6 +212,11 @@ pub(super) fn ordinary_roots<'a>(
             );
         }
         if construction {
+            // A target can already provide a constructor whose KLIB publishes metadata only.
+            // Only an executable serialized declaration asks this phase to realize its body.
+            if bodies.function_has_body(selected.identity()) != Some(true) {
+                continue;
+            }
             if callees
                 .constructor_initialization_callees(selected.identity(), bodies)
                 .map_err(|reason| format!("an invalid constructor root: {reason:?}"))?
