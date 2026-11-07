@@ -14179,7 +14179,7 @@ impl<'a> Checker<'a> {
                                 );
                             }
                             Some(CallableCandidateSelection::Ambiguous(candidates, _)) => {
-                                self.report_callable_ambiguity(call, &name, &candidates);
+                                self.report_callable_ambiguity(scope, call, &name, &candidates);
                                 return Ty::Error;
                             }
                             None => {}
@@ -17265,7 +17265,7 @@ impl<'a> Checker<'a> {
                             );
                     }
                     if postpone_raw_sam_lambda && matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                        return self.lambda_probe_ty(scope, a).unwrap_or(Ty::Error);
+                        return self.lambda_probe_ty(a).unwrap_or(Ty::Error);
                     }
                     if let Some(expected) = receiver_function_argument_types
                         .as_ref()
@@ -18000,11 +18000,14 @@ impl<'a> Checker<'a> {
                         let lambda_parameter = semantic_parameter.map(|parameter| {
                             let packed =
                                 sig.vararg_index == Some(pi) && !self.file.is_spread_arg(a);
-                            if packed {
+                            let parameter = if packed {
                                 parameter.array_read_elem().unwrap_or(parameter)
                             } else {
                                 parameter
-                            }
+                            };
+                            // A written function classifier (`Function1<Any?, *>`) is the same
+                            // function shape as its `(Any?) -> Any?` spelling.
+                            self.declared_function_semantic_type(parameter)
                         });
                         if let (Some(TyKind::Fun(expected_function)), true) = (
                             lambda_parameter.map(|ty| ty.kind()),
@@ -18246,7 +18249,7 @@ impl<'a> Checker<'a> {
                         && matches!(self.file.expr(a), Expr::Lambda { .. })
                         && self.expr_types[a.0 as usize] == Ty::Error
                     {
-                        return self.lambda_probe_ty(scope, a).unwrap_or(Ty::Error);
+                        return self.lambda_probe_ty(a).unwrap_or(Ty::Error);
                     }
                     if let Expr::Lambda { params, body } = self.file.expr(a).clone() {
                         return self.expr_inner_lambda(
@@ -34738,25 +34741,6 @@ impl<'a> Checker<'a> {
         })
     }
 
-    fn report_callable_ambiguity(
-        &mut self,
-        call: ExprId,
-        name: &str,
-        candidates: &[crate::libraries::FunctionInfo],
-    ) {
-        if let Expr::Call { args, .. } = self.file.expr(call) {
-            if self.call_has_error_argument(args) {
-                return;
-            }
-        }
-        let mut message = "overload resolution ambiguity between candidates:".to_string();
-        for candidate in candidates {
-            message.push('\n');
-            message.push_str(&Self::callable_candidate_display(name, candidate));
-        }
-        self.diags.error(self.call_callee_name_span(call), message);
-    }
-
     fn source_callable_display(&self, function: &crate::libraries::FunctionInfo) -> Option<String> {
         let (file_index, declaration) = function.source_key?;
         let (file, declaration) = if file_index == self.file_index {
@@ -36893,11 +36877,11 @@ impl<'a> Checker<'a> {
                     // Candidate applicability above has already checked each lambda's body result
                     // against its own expected return. For the final most-specific comparison,
                     // preserve the one remaining piece of postponed source syntax: an omitted
-                    // parameter list that does not bind `it` can denote either Function0 or a
-                    // one-input function with implicit `it`. Replacing it with the expectation-free
+                    // parameter list can denote either Function0 or a one-input function with
+                    // implicit `it`. Replacing it with the expectation-free
                     // fallback Function0 here would discard every applicable one-input SAM and turn
                     // a real ambiguity into “none applicable.”
-                    if self.lambda_probe_ty(scope, argument) == Some(Ty::Error) {
+                    if self.lambda_probe_ty(argument) == Some(Ty::Error) {
                         CallArgKind::LambdaLiteral(Ty::Error)
                     } else {
                         self.call_arg_kind(scope, argument)
@@ -47256,6 +47240,9 @@ impl<'a> Checker<'a> {
         if self.file.collection_literal_calls.contains(&argument.0) {
             return self.expr_expected(scope, argument, expected);
         }
+        if self.lambda_awaits_unshaped_analysis(argument, expected) {
+            return self.check_unshaped_argument(scope, argument);
+        }
         if self.lambda_needs_selected_shape(scope, argument, probed_actual, expected) {
             let has_receiver = call_sig
                 .lambda_receiver_params
@@ -47618,6 +47605,8 @@ impl<'a> Checker<'a> {
             && expected.non_null().is_fun()
         {
             self.check_argument_expected(scope, argument, expected, false, None)
+        } else if self.lambda_awaits_unshaped_analysis(argument, expected) {
+            self.check_unshaped_argument(scope, argument)
         } else if self.lambda_needs_selected_shape(scope, argument, actual, expected) {
             self.check_argument_expected(
                 scope,
@@ -49339,19 +49328,6 @@ impl<'a> Checker<'a> {
             .collect()
     }
 
-    fn lambda_probe_ty(&self, scope: &CheckerScope<'_>, arg: ExprId) -> Option<Ty> {
-        match self.file.expr(arg) {
-            Expr::Lambda { params, .. } if !params.is_empty() => {
-                Some(Ty::fun(vec![Ty::Error; params.len()], Ty::Error))
-            }
-            Expr::Lambda { body, .. } if self.untyped_lambda_binds_implicit_it(scope, *body) => {
-                Some(Ty::fun(vec![Ty::Error], Ty::Error))
-            }
-            Expr::Lambda { .. } => Some(Ty::Error),
-            _ => None,
-        }
-    }
-
     /// Project an explicitly declared Kotlin function classifier (`FunctionN<P..., R>`) onto the
     /// exact callable shape published by its semantic provider. Callable objects remain nominal:
     /// only classifiers whose declaration says they represent a function type are normalized.
@@ -49707,19 +49683,12 @@ impl<'a> Checker<'a> {
     /// a result-only type variable is uninferrable. The selected parameter immediately rechecks the
     /// argument and exclusively owns that diagnostic decision.
     fn check_postponed_argument(&mut self, scope: &CheckerScope<'_>, expression: ExprId) -> Ty {
-        self.postponed_argument_depth += 1;
-        let ty = self.expr(scope, expression);
-        self.postponed_argument_depth -= 1;
-        ty
-    }
-
-    /// Whether an UNTYPED lambda that omits its parameter list must synthesize Kotlin's implicit `it`.
-    ///
-    /// Merely finding the token in the body is insufficient: when a lexical value named `it` already
-    /// exists, the inner lambda CAPTURES that value and remains `Function0`. Keep this decision in one
-    /// helper because both overload probing and fallback lambda typing must infer the same arity.
-    fn untyped_lambda_binds_implicit_it(&self, scope: &CheckerScope<'_>, body: ExprId) -> bool {
-        self.file.expr_uses_name(body, "it") && self.lookup(scope, "it").is_none()
+        // A lambda is analysed only under the shape its selected parameter gives it: before
+        // selection its body has no parameters to bind, so it contributes just its written arity.
+        if let Some(probe) = self.lambda_probe_ty(expression) {
+            return probe;
+        }
+        self.check_unshaped_argument(scope, expression)
     }
 
     /// A lambda argument's expected shape at one parameter position of a semantic-provider
@@ -49859,7 +49828,7 @@ impl<'a> Checker<'a> {
             .iter()
             .enumerate()
             .map(|(index, &arg)| {
-                self.lambda_probe_ty(scope, arg)
+                self.lambda_probe_ty(arg)
                     .or_else(|| partial.get(index).copied().flatten())
                     .unwrap_or(Ty::Error)
             })
@@ -49961,7 +49930,7 @@ impl<'a> Checker<'a> {
         let ty = if matches!(self.file.expr(argument), Expr::Lambda { .. })
             && self.expr_types[argument.0 as usize] == Ty::Error
         {
-            self.lambda_probe_ty(scope, argument).unwrap_or(Ty::Error)
+            self.lambda_probe_ty(argument).unwrap_or(Ty::Error)
         } else {
             self.expr_types[argument.0 as usize]
         };
@@ -51245,6 +51214,8 @@ impl<'a> Checker<'a> {
             // parameter types — `val f: (Int) -> Int = { it * 2 }`, even when the lambda is the
             // result of a nested `if`/`when` branch or block. Delegate to the shared typed-lambda
             // check (the same path a HOF/typed-initializer argument takes).
+            // A written function classifier (`Function1<Any?, *>`) is the same function shape.
+            let expected = expected.map(|ty| self.declared_function_semantic_type(ty));
             if let Some(TyKind::Fun(signature)) = expected.map(|ty| ty.non_null().kind()) {
                 return self.check_lambda_with_function_type_labeled(
                     scope,
@@ -51254,15 +51225,10 @@ impl<'a> Checker<'a> {
                     implicit_label,
                 );
             }
-            // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`. With no explicit
-            // parameters but a body referencing `it`, bind the implicit single parameter.
-            let bind_names: Vec<String> = if !params.is_empty() {
-                params.clone()
-            } else if self.untyped_lambda_binds_implicit_it(scope, body) {
-                vec!["it".to_string()]
-            } else {
-                vec![]
-            };
+            // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`. Without an expected
+            // function type, only a contextual one-parameter shape could introduce `it`, so a
+            // lambda that omits its parameter list declares none and `it` resolves lexically.
+            let bind_names = params.clone();
             let arity = bind_names.len() as u8;
             // Type each parameter from its explicit annotation (`{ x: Int -> … }`) if present, so a
             // bare-value lambda checks its body correctly; otherwise the erased `Any` (an expected
@@ -56806,7 +56772,7 @@ impl<'a> Checker<'a> {
                     let message = Self::ambiguous_candidates_message(name, &candidates);
                     self.diags.error(self.call_callee_name_span(e), message);
                     // No candidate shapes the lambdas of an ambiguous call.
-                    self.report_unshaped_lambda_diagnostics(scope, args);
+                    self.report_unshaped_lambda_diagnostics(scope, args, Some(name));
                     return Some(Ty::Error);
                 }
             },

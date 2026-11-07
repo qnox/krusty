@@ -239,7 +239,7 @@ impl Checker<'_> {
                         inaccessible_member: None,
                     };
                 }
-                self.report_callable_ambiguity(call, name, &candidates);
+                self.report_callable_ambiguity(scope, call, name, &candidates);
                 return MemberSlotCall::Ambiguous;
             }
             None => {
