@@ -3,10 +3,16 @@
 //! Ordinary calls normally need only selected/none/ambiguous. Diagnostics for conventions need
 //! the exact tied maximal declarations, in provider order, without repeating candidate lookup.
 
+use super::postponed_lambda_selection::{select_with_postponed_lambda_results, LambdaResults};
+use super::separately_mapped_selection::{select_separately_mapped, SeparatelyMapped};
 use super::*;
 use crate::types::TyKind;
 
-type OverloadTowerRank = (u8, (u8, u32), u32);
+/// A receiver-call candidate's nearest-first callable-tower priority: the declaration-priority tier
+/// (`@kotlin.internal.HidesMembers` extensions, members, ordinary extensions), the semantic scope
+/// rung with its rank inside that rung, and the receiver distance. Only equal keys compete in one
+/// most-specific comparison; numeric ranks of different rungs or tiers are never compared alone.
+pub(crate) type OverloadTowerRank = (u8, (u8, u32), u32);
 type ReceiverRankedOverload<'a> = (OverloadTowerRank, Ty, &'a FunctionInfo);
 
 pub(crate) enum CandidateSelectionWithTies<T> {
@@ -33,12 +39,33 @@ pub(crate) struct SelectedReceiverFunction {
     pub(crate) bindings: GSigBinds,
 }
 
+impl ReceiverFunctionSelection {
+    /// A short label of the outcome for traces.
+    pub(crate) fn outcome(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Selected(_) => "yes",
+            Self::Ambiguous(_) => "ambiguous",
+        }
+    }
+}
+
 impl<T> CandidateSelectionWithTies<T> {
     pub(super) fn collapse(self) -> CandidateSelection<T> {
         match self {
             Self::None => CandidateSelection::None,
             Self::Selected(selected) => CandidateSelection::Selected(selected),
             Self::Ambiguous(_) => CandidateSelection::Ambiguous,
+        }
+    }
+
+    pub(super) fn map<U>(self, mut f: impl FnMut(T) -> U) -> CandidateSelectionWithTies<U> {
+        match self {
+            Self::None => CandidateSelectionWithTies::None,
+            Self::Selected(selected) => CandidateSelectionWithTies::Selected(f(selected)),
+            Self::Ambiguous(tied) => {
+                CandidateSelectionWithTies::Ambiguous(tied.into_iter().map(f).collect())
+            }
         }
     }
 }
@@ -61,6 +88,45 @@ pub(super) fn unique_most_specific_with_conflicts<T>(
         equivalent_conflicts,
     )
     .collapse()
+}
+
+// Declaration-priority tiers, tried in this order and falling through whenever the tier holds no
+// applicable candidate. Kotlin resolves a `@kotlin.internal.HidesMembers` extension above members
+// (the annotation exists so `Iterable<T>.forEach` wins over `java.lang.Iterable.forEach(Consumer)`)
+// and, as measured against kotlinc 2.4.10, above every ordinary extension level as well, whatever
+// its receiver specificity or lexical distance. Members still precede ordinary extensions.
+const HIDES_MEMBERS_PRIORITY: u8 = 0;
+const MEMBER_PRIORITY: u8 = 1;
+const EXTENSION_PRIORITY: u8 = 2;
+
+/// The [`OverloadTowerRank`] of a candidate whose `receiver_rank` is already recorded.
+pub(crate) fn callable_tower_rank(overload: &FunctionInfo) -> OverloadTowerRank {
+    if overload.kind == FnKind::Member {
+        (MEMBER_PRIORITY, (0, 0), overload.receiver_rank)
+    } else {
+        extension_tower_rank(overload.receiver_rank, overload)
+    }
+}
+
+/// The [`OverloadTowerRank`] of an extension candidate at `receiver_rank` from its receiver.
+pub(crate) fn extension_tower_rank(
+    receiver_rank: u32,
+    overload: &FunctionInfo,
+) -> OverloadTowerRank {
+    if overload.is_extension()
+        && overload
+            .callable
+            .annotations
+            .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
+    {
+        (HIDES_MEMBERS_PRIORITY, (0, 0), receiver_rank)
+    } else {
+        (
+            EXTENSION_PRIORITY,
+            overload.scope_rung.selection_key(overload.scope_rank),
+            receiver_rank,
+        )
+    }
 }
 
 /// Compare fixed-arity shapes with vararg element shapes in one specificity pass.
@@ -116,13 +182,29 @@ pub(super) fn select_recorded_exact<'a>(
     }) {
         return CandidateSelectionWithTies::None;
     }
-    let actual = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
+    // A lambda whose result is postponed matches exactly by its inputs alone.
+    let exact =
+        |parameter: &Ty, argument: &CallArgKind| match (parameter.kind(), argument.ty().kind()) {
+            (TyKind::Fun(parameter), TyKind::Fun(lambda))
+                if argument.is_lambda_literal() && lambda.ret == Ty::Error =>
+            {
+                parameter.params == lambda.params
+                    && parameter.context_count == lambda.context_count
+                    && parameter.has_receiver == lambda.has_receiver
+                    && parameter.suspend == lambda.suspend
+            }
+            _ => *parameter == argument.ty(),
+        };
     select_equally_specific(
         candidates
             .iter()
             .filter_map(|(candidate, parameters)| {
                 let declared = declaration_specificity_params(candidate);
-                (parameters.as_slice() == actual
+                (parameters.len() == args.len()
+                    && parameters
+                        .iter()
+                        .zip(args)
+                        .all(|(parameter, argument)| exact(parameter, argument))
                     && (!args.is_empty() || declared.len() == parameters.len()))
                 .then_some((declared, *candidate))
             })
@@ -367,7 +449,23 @@ pub(super) fn integer_literal_overload_with_ties<T>(
 pub(super) struct ExtCtx<'a> {
     pub(super) fn_scope: Option<FunctionScopeRef<'a>>,
     pub(super) source: &'a dyn SymbolSource,
-    pub(super) type_variables: &'a [String],
+    pub(super) type_variables: &'a [crate::types::TyParamName],
+    /// `+EagerLambdaAnalysis`: a lambda's checked result decides applicability.
+    pub(super) eager_lambda_results: bool,
+    /// The use site's member visibility, when the caller has a site. Selection ranks a
+    /// visibility error below every resolved candidate with it.
+    pub(super) member_access: Option<&'a dyn super::MemberAccessSite>,
+}
+
+/// One receiver call the overload selector answers: the receiver, the callee spelling, the
+/// supplied value and type arguments, and the indexed convention they are written in.
+#[derive(Clone, Copy)]
+pub(super) struct OverloadCall<'a> {
+    pub(super) recv: Ty,
+    pub(super) name: &'a str,
+    pub(super) args: &'a [CallArgKind],
+    pub(super) type_args: &'a [Ty],
+    pub(super) indexed: IndexedConvention,
 }
 
 /// The single call-overload selector for a receiver call `recv.name(args)`. It is parameterized by
@@ -446,31 +544,22 @@ fn indexed_fixed_parameter_projection(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn select_receiver_overload_from_functions_tracking(
     lib: &dyn SemanticPlatform,
-    recv: Ty,
-    name: &str,
-    args: &[CallArgKind],
-    type_args: &[Ty],
+    call: OverloadCall<'_>,
     ext: ExtCtx<'_>,
     functions: &[FunctionInfo],
-    indexed: IndexedConvention,
 ) -> CandidateSelectionWithTies<FunctionInfo> {
     let mut ambiguous = false;
     let mut ambiguous_candidates = Vec::new();
     let selected = select_overload_tracking_with_functions(
         lib,
-        recv,
-        name,
-        args,
-        type_args,
+        call,
         SelectionMode::Receiver,
         ext,
         Some(functions),
         &mut ambiguous,
         Some(&mut ambiguous_candidates),
-        indexed,
     );
     if ambiguous {
         CandidateSelectionWithTies::Ambiguous(ambiguous_candidates)
@@ -479,6 +568,182 @@ pub(super) fn select_receiver_overload_from_functions_tracking(
     } else {
         CandidateSelectionWithTies::None
     }
+}
+
+/// A receiver call's candidates, nearest tower rank first, each with the receiver it binds.
+fn ranked_receiver_candidates<'f>(
+    recv: Ty,
+    mode: SelectionMode,
+    ext: ExtCtx<'_>,
+    overloads: &[&'f FunctionInfo],
+) -> Vec<ReceiverRankedOverload<'f>> {
+    // Candidates from the scoped query are IN-SCOPE by construction: each came from a
+    // `resolve_symbols` over an imported package, so its declared package is in scope even when
+    // `@JvmPackageName` relocated its facade to a different JVM package (`kotlin.collections`'s
+    // `UArraysKt` → `kotlin/collections/unsigned/`). Re-deriving scope from the JVM owner
+    // (`fn_in_scope`) would wrongly drop those, so trust the query.
+    let pre_scoped = ext.fn_scope.is_some();
+    let mut ranked: Vec<ReceiverRankedOverload<'f>> = Vec::new();
+    if matches!(
+        mode,
+        SelectionMode::Kind(FnKind::Extension) | SelectionMode::Receiver
+    ) {
+        ranked.extend(
+            ranked_extension_candidates(
+                ext.source,
+                recv,
+                ext.type_variables,
+                overloads
+                    .iter()
+                    .copied()
+                    .filter(|o| pre_scoped || fn_in_scope(o, ext.fn_scope)),
+            )
+            .into_iter()
+            .map(|(rank, receiver, overload)| {
+                (extension_tower_rank(rank, overload), receiver, overload)
+            }),
+        );
+    }
+    if matches!(
+        mode,
+        SelectionMode::Kind(FnKind::Member) | SelectionMode::Receiver
+    ) && receiver_allows_member_dispatch(recv)
+    {
+        ranked.extend(
+            overloads
+                .iter()
+                .copied()
+                .filter(|o| o.kind == FnKind::Member)
+                .map(|o| (callable_tower_rank(o), recv, o)),
+        );
+    }
+    ranked.sort_by_key(|(rank, _, _)| *rank);
+    ranked
+}
+
+/// Kotlin ranks a visibility error below every resolved candidate, whatever tier either one sits
+/// on: a member the site cannot see is selected only when no accessible candidate applies, and its
+/// access error is then what the caller reports. An applicable extension therefore takes `b + 1`
+/// from an inaccessible `B.plus`, and an accessible overload takes the call from a more specific
+/// inaccessible one. The candidates the site can see, to be tried first, or `None` when the site
+/// restricts nothing in `overloads`.
+fn site_accessible_overloads<'f>(
+    ext: ExtCtx<'_>,
+    recv: Ty,
+    overloads: &[&'f FunctionInfo],
+) -> Option<Vec<&'f FunctionInfo>> {
+    let site = ext.member_access?;
+    let accessible = overloads
+        .iter()
+        .copied()
+        .filter(|overload| {
+            overload.kind != FnKind::Member || site.member_accessible(overload, recv)
+        })
+        .collect::<Vec<_>>();
+    (accessible.len() != overloads.len()).then_some(accessible)
+}
+
+/// Select from a receiver family whose declarations map the source arguments differently, each
+/// under its own mapping ([`CandidateCall`], parallel to `functions`), answering in indices of
+/// `functions`. Candidates compete rank by rank, nearest first, exactly as under a shared mapping;
+/// within a rank they are compared by [`select_separately_mapped`].
+pub(super) fn select_separately_mapped_receiver_overload(
+    lib: &dyn SemanticPlatform,
+    recv: Ty,
+    calls: &[CandidateCall],
+    source: &[CallArgKind],
+    type_args: &[Ty],
+    ext: ExtCtx<'_>,
+    functions: &[FunctionInfo],
+) -> CandidateSelectionWithTies<usize> {
+    let family = SeparatelyMappedFamily {
+        calls,
+        source,
+        type_args,
+        functions,
+    };
+    let overloads = functions.iter().collect::<Vec<_>>();
+    if let Some(accessible) = site_accessible_overloads(ext, recv, &overloads) {
+        match select_separately_mapped_among(lib, recv, family, ext, &accessible) {
+            CandidateSelectionWithTies::None => {}
+            selection => return selection,
+        }
+    }
+    select_separately_mapped_among(lib, recv, family, ext, &overloads)
+}
+
+/// A receiver family's declarations with their own argument mappings, parallel to `functions`.
+#[derive(Clone, Copy)]
+struct SeparatelyMappedFamily<'a> {
+    calls: &'a [CandidateCall],
+    source: &'a [CallArgKind],
+    type_args: &'a [Ty],
+    functions: &'a [FunctionInfo],
+}
+
+/// The tower walk of [`select_separately_mapped_receiver_overload`] over `overloads`, a subset of
+/// the family's declarations.
+fn select_separately_mapped_among(
+    lib: &dyn SemanticPlatform,
+    recv: Ty,
+    family: SeparatelyMappedFamily<'_>,
+    ext: ExtCtx<'_>,
+    overloads: &[&FunctionInfo],
+) -> CandidateSelectionWithTies<usize> {
+    let SeparatelyMappedFamily {
+        calls,
+        source,
+        type_args,
+        functions,
+    } = family;
+    let src = ext.source;
+    let mut by_rank: std::collections::BTreeMap<OverloadTowerRank, Vec<(usize, Vec<Ty>)>> =
+        std::collections::BTreeMap::new();
+    for (tower_rank, binding_receiver, o) in
+        ranked_receiver_candidates(recv, SelectionMode::Receiver, ext, overloads)
+    {
+        let index = functions
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, o))
+            .expect("a ranked receiver candidate is one of the family's declarations");
+        let args = &calls[index].args;
+        if !generic_function_call_admits(src, o, binding_receiver, args, type_args) {
+            continue;
+        }
+        let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
+        let params = apply_platform_call_parameter_nullability(
+            logical_call_params(src, o, binding_receiver, args, type_args),
+            &o.call_sig.platform_nullable_params,
+            &arg_tys,
+            o.call_sig.vararg,
+        );
+        by_rank.entry(tower_rank).or_default().push((index, params));
+    }
+    let fits = |p: &Ty, arg: &CallArgKind| receiver_argument_fits(lib, src, p, arg);
+    let adapts = |p: &Ty, arg: &CallArgKind, _i: usize| arg.adapts_integer_literal_to(*p);
+    for ranked in by_rank.values() {
+        let entries = ranked
+            .iter()
+            .map(|(index, params)| SeparatelyMapped {
+                function: &functions[*index],
+                params,
+                args: &calls[*index].args,
+                call: &calls[*index],
+            })
+            .collect::<Vec<_>>();
+        match select_separately_mapped(
+            src,
+            &entries,
+            source,
+            ext.eager_lambda_results,
+            &fits,
+            &adapts,
+        ) {
+            CandidateSelectionWithTies::None => {}
+            selection => return selection.map(|entry| ranked[entry].0),
+        }
+    }
+    CandidateSelectionWithTies::None
 }
 
 fn select_overload_tracking(
@@ -493,38 +758,32 @@ fn select_overload_tracking(
 ) -> Option<FunctionInfo> {
     select_overload_tracking_with_functions(
         lib,
-        recv,
-        name,
-        args,
-        type_args,
+        OverloadCall {
+            recv,
+            name,
+            args,
+            type_args,
+            indexed: IndexedConvention::Ordinary,
+        },
         SelectionMode::Kind(kind),
         ext,
         None,
         ambiguous,
         None,
-        IndexedConvention::Ordinary,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn select_overload_tracking_with_functions(
     lib: &dyn SemanticPlatform,
-    recv: Ty,
-    name: &str,
-    args: &[CallArgKind],
-    type_args: &[Ty],
+    call: OverloadCall<'_>,
     mode: SelectionMode,
     ext: ExtCtx<'_>,
     provided_functions: Option<&[FunctionInfo]>,
     ambiguous: &mut bool,
     mut ambiguous_candidates: Option<&mut Vec<FunctionInfo>>,
-    indexed: IndexedConvention,
 ) -> Option<FunctionInfo> {
+    let OverloadCall { recv, name, .. } = call;
     let src = ext.source;
-    // Argument assignability and candidate enumeration consume the same federated source. Access
-    // control is checked after selection from the declaration metadata carried by the winner.
-    let assign_src = src;
-    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     // EXTENSION candidates come from the ONE query — union `resolve_symbols`' function callables over the
     // in-scope packages (scope-pruned, tree-driven), so an unqualified extension binds only when its
     // facade's package is imported. No import scope → the whole-classpath `functions()` fallback
@@ -564,19 +823,61 @@ pub(super) fn select_overload_tracking_with_functions(
             _ => Vec::new(),
         }
     };
-    // Candidates from the scoped query are IN-SCOPE by construction: each came from a `resolve_symbols`
-    // over an imported package, so its declared package is in scope even when `@JvmPackageName` relocated
-    // its facade to a different JVM package (`kotlin.collections`'s `UArraysKt` → `kotlin/collections/
-    // unsigned/`). Re-deriving scope from the JVM owner (`fn_in_scope`) would wrongly drop those, so trust
-    // the query.
-    let pre_scoped = ext.fn_scope.is_some();
+    if let Some(accessible) = site_accessible_overloads(ext, recv, &overloads) {
+        let selected = select_among_overloads(
+            lib,
+            call,
+            mode,
+            ext,
+            &accessible,
+            ambiguous,
+            ambiguous_candidates.as_deref_mut(),
+        );
+        if selected.is_some() || *ambiguous {
+            return selected;
+        }
+    }
+    select_among_overloads(
+        lib,
+        call,
+        mode,
+        ext,
+        &overloads,
+        ambiguous,
+        ambiguous_candidates,
+    )
+}
+
+/// The tier walk over one candidate family: declaration-priority and receiver-distance tiers,
+/// each tried by the ordered applicability passes.
+fn select_among_overloads(
+    lib: &dyn SemanticPlatform,
+    call: OverloadCall<'_>,
+    mode: SelectionMode,
+    ext: ExtCtx<'_>,
+    overloads: &[&FunctionInfo],
+    ambiguous: &mut bool,
+    mut ambiguous_candidates: Option<&mut Vec<FunctionInfo>>,
+) -> Option<FunctionInfo> {
+    let OverloadCall {
+        recv,
+        name,
+        args,
+        type_args,
+        indexed,
+    } = call;
+    let src = ext.source;
+    // Argument assignability and candidate enumeration consume the same federated source. Access
+    // control is checked after selection from the declaration metadata carried by the winner.
+    let assign_src = src;
+    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     crate::trace_compiler!(
         "resolve",
         "select_overload name={name} recv={recv:?} mode={mode:?} scope={:?} cands={}",
         ext.fn_scope.map(FunctionScopeRef::package_count),
         overloads.len(),
     );
-    for o in &overloads {
+    for o in overloads {
         crate::trace_compiler!(
             "resolve",
             "  raw {name} kind={:?} recv={:?} params={:?} generic={:?} context={} required={} vararg={:?} pub={} rank={} origin={:?} owner={}",
@@ -593,77 +894,9 @@ pub(super) fn select_overload_tracking_with_functions(
             o.callable.owner.render(),
         );
     }
-    // Declaration-priority tiers, tried in this order and falling through whenever the tier holds no
-    // applicable candidate (the `by_rank` walk below). Kotlin resolves a `@kotlin.internal.HidesMembers`
-    // extension above members — the annotation exists so `Iterable<T>.forEach` wins over
-    // `java.lang.Iterable.forEach(Consumer)` — and, as measured against kotlinc 2.4.10, above every
-    // ordinary extension level as well, whatever its receiver specificity or lexical distance. Members
-    // still precede ordinary extensions.
-    const HIDES_MEMBERS_PRIORITY: u8 = 0;
-    const MEMBER_PRIORITY: u8 = 1;
-    const EXTENSION_PRIORITY: u8 = 2;
-
     let mut by_rank: std::collections::BTreeMap<OverloadTowerRank, Vec<(&FunctionInfo, Vec<Ty>)>> =
         std::collections::BTreeMap::new();
-    let mut ranked: Vec<ReceiverRankedOverload<'_>> = Vec::new();
-    if matches!(
-        mode,
-        SelectionMode::Kind(FnKind::Extension) | SelectionMode::Receiver
-    ) {
-        ranked.extend(
-            ranked_extension_candidates(
-                src,
-                recv,
-                ext.type_variables,
-                overloads
-                    .iter()
-                    .copied()
-                    .filter(|o| pre_scoped || fn_in_scope(o, ext.fn_scope)),
-            )
-            .into_iter()
-            .map(|(rank, receiver, overload)| {
-                (
-                    (
-                        if overload
-                            .callable
-                            .annotations
-                            .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
-                        {
-                            HIDES_MEMBERS_PRIORITY
-                        } else {
-                            EXTENSION_PRIORITY
-                        },
-                        if overload
-                            .callable
-                            .annotations
-                            .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
-                        {
-                            (0, 0)
-                        } else {
-                            overload.scope_rung.selection_key(overload.scope_rank)
-                        },
-                        rank,
-                    ),
-                    receiver,
-                    overload,
-                )
-            }),
-        );
-    }
-    if matches!(
-        mode,
-        SelectionMode::Kind(FnKind::Member) | SelectionMode::Receiver
-    ) && receiver_allows_member_dispatch(recv)
-    {
-        ranked.extend(
-            overloads
-                .iter()
-                .copied()
-                .filter(|o| o.kind == FnKind::Member)
-                .map(|o| ((MEMBER_PRIORITY, (0, 0), o.receiver_rank), recv, o)),
-        );
-    }
-    ranked.sort_by_key(|(rank, _, _)| *rank);
+    let ranked = ranked_receiver_candidates(recv, mode, ext, overloads);
     for (tower_rank, binding_receiver, o) in ranked {
         let lp = if indexed != IndexedConvention::Ordinary && o.call_sig.vararg_index.is_some() {
             let Some((params, _, _)) = indexed_call_shape(
@@ -756,7 +989,7 @@ pub(super) fn select_overload_tracking_with_functions(
         return None;
     }
     for cands in by_rank.values() {
-        match best_by_args_with_ties(lib, assign_src, cands, args) {
+        match best_by_args_with_ties(lib, assign_src, cands, args, ext.eager_lambda_results) {
             CandidateSelectionWithTies::Selected(overload) => return Some(overload.clone()),
             CandidateSelectionWithTies::Ambiguous(candidates) => {
                 *ambiguous = true;
@@ -821,7 +1054,13 @@ pub(super) fn select_overload_tracking_with_functions(
                     vararg_shape(candidate, parameters, exact).map(|shape| (*candidate, shape))
                 })
                 .collect::<Vec<_>>();
-            match best_by_args_with_ties(lib, assign_src, &applicable, args) {
+            match best_by_args_with_ties(
+                lib,
+                assign_src,
+                &applicable,
+                args,
+                ext.eager_lambda_results,
+            ) {
                 CandidateSelectionWithTies::Selected(candidate) => return Some(candidate.clone()),
                 CandidateSelectionWithTies::Ambiguous(candidates) => {
                     *ambiguous = true;
@@ -881,7 +1120,7 @@ fn generic_function_call_admits(
     let signature = overload.semantic_signature();
     let mut bindings = seeded_gsig_binds(&signature, type_args);
     if let Some(declared_receiver) = signature.receiver {
-        unify_ty_from_symbols(src, declared_receiver, receiver, &mut bindings);
+        unify_receiver_from_symbols(src, declared_receiver, receiver, &mut bindings);
     }
     let receiver_bindings = bindings.clone();
     let value_start = overload.context_count.min(signature.params.len());
@@ -1053,7 +1292,7 @@ pub(super) fn logical_call_params(
         // The receiver is matched through its supertypes: a `List<E>` receiver binds the `T` of
         // `Collection<T>.plus`. A structural-only match leaves `T` open, so a collection argument
         // alone would fix it and `plus(element: T)` would out-rank `plus(elements: Iterable<T>)`.
-        unify_ty_from_symbols(source, declared_receiver, receiver, &mut bindings);
+        unify_receiver_from_symbols(source, declared_receiver, receiver, &mut bindings);
     }
     // A receiver occurrence fixes the callable formal before value arguments are considered:
     // `String : Comparable<String>` makes the `T` in
@@ -1141,7 +1380,7 @@ pub(super) fn indexed_call_shape(
 
     let mut bindings = seeded_gsig_binds(&signature, type_arguments);
     if let Some(declared_receiver) = signature.receiver {
-        unify_ty_from_symbols(source, declared_receiver, receiver, &mut bindings);
+        unify_receiver_from_symbols(source, declared_receiver, receiver, &mut bindings);
     }
     let receiver_bindings = bindings.clone();
     let value_parameter = signature.params.len() - 1;
@@ -1232,7 +1471,7 @@ pub(super) fn semantic_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &
     if param == arg {
         return true;
     }
-    if let TyKind::TyParam(_, bound) = param.non_null().kind() {
+    if let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = param.non_null().kind() {
         if *arg == Ty::Null {
             return param.admits_null();
         }
@@ -1347,45 +1586,130 @@ pub(crate) fn best_by_args<'a>(
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
     args: &[CallArgKind],
 ) -> CandidateSelection<&'a FunctionInfo> {
-    best_by_args_with_ties(lib, src, cands, args).collapse()
+    best_by_args_with_ties(lib, src, cands, args, false).collapse()
 }
 
+/// A shared positional family under [`select_with_postponed_lambda_results`].
 fn best_by_args_with_ties<'a>(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
     args: &[CallArgKind],
+    eager_lambda_results: bool,
 ) -> CandidateSelectionWithTies<&'a FunctionInfo> {
-    let ordinary = cands
+    let functions = cands
         .iter()
-        .filter(|(candidate, _)| {
-            !candidate
-                .callable
-                .annotations
-                .contains(&crate::types::type_name(
-                    "kotlin/internal/LowPriorityInOverloadResolution",
-                ))
-        })
-        .cloned()
+        .map(|(candidate, _)| *candidate)
         .collect::<Vec<_>>();
-    match best_by_args_at_priority_with_ties(lib, src, &ordinary, args) {
-        CandidateSelectionWithTies::None => {
-            let low = cands
+    let postponed = args
+        .iter()
+        .map(CallArgKind::with_postponed_lambda_result)
+        .collect::<Vec<_>>();
+    select_with_postponed_lambda_results(
+        &functions,
+        args,
+        eager_lambda_results,
+        |candidate, position| cands[candidate].1.get(position).copied(),
+        |indices, results| {
+            let subset = indices
                 .iter()
-                .filter(|(candidate, _)| {
-                    candidate
-                        .callable
-                        .annotations
-                        .contains(&crate::types::type_name(
-                            "kotlin/internal/LowPriorityInOverloadResolution",
-                        ))
-                })
-                .cloned()
+                .map(|&index| cands[index].clone())
                 .collect::<Vec<_>>();
-            best_by_args_at_priority_with_ties(lib, src, &low, args)
-        }
+            let args = match results {
+                LambdaResults::Postponed => &postponed,
+                LambdaResults::Checked => args,
+            };
+            best_by_args_by_priority_with_ties(lib, src, &subset, args).map(|selected| {
+                indices
+                    .iter()
+                    .copied()
+                    .find(|&index| std::ptr::eq(cands[index].0, selected))
+                    .expect("a selection answers with one of the candidates it was given")
+            })
+        },
+    )
+    .map(|index| cands[index].0)
+}
+
+pub(super) fn low_priority_in_overload_resolution(candidate: &FunctionInfo) -> bool {
+    candidate
+        .callable
+        .annotations
+        .contains(&crate::types::type_name(
+            "kotlin/internal/LowPriorityInOverloadResolution",
+        ))
+}
+
+/// `@LowPriorityInOverloadResolution` declarations compete only when no other candidate is
+/// selected or ambiguous. `select` answers in the elements of the tier it is given.
+pub(super) fn select_by_priority_tier<'f, T: Copy>(
+    candidates: &[T],
+    function: impl Fn(T) -> &'f FunctionInfo,
+    select: impl Fn(&[T]) -> CandidateSelectionWithTies<T>,
+) -> CandidateSelectionWithTies<T> {
+    let (low, ordinary): (Vec<T>, Vec<T>) = candidates
+        .iter()
+        .copied()
+        .partition(|&candidate| low_priority_in_overload_resolution(function(candidate)));
+    match select(&ordinary) {
+        CandidateSelectionWithTies::None => select(&low),
         selected => selected,
     }
+}
+
+fn best_by_args_by_priority_with_ties<'a>(
+    lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
+    cands: &[(&'a FunctionInfo, Vec<Ty>)],
+    args: &[CallArgKind],
+) -> CandidateSelectionWithTies<&'a FunctionInfo> {
+    select_by_priority_tier(
+        &(0..cands.len()).collect::<Vec<_>>(),
+        |index| cands[index].0,
+        |tier| {
+            let tier_cands = tier
+                .iter()
+                .map(|&index| cands[index].clone())
+                .collect::<Vec<_>>();
+            best_by_args_at_priority_with_ties(lib, src, &tier_cands, args).map(|selected| {
+                tier.iter()
+                    .copied()
+                    .find(|&index| std::ptr::eq(cands[index].0, selected))
+                    .expect("a selection answers with one of the candidates it was given")
+            })
+        },
+    )
+    .map(|index| cands[index].0)
+}
+
+/// Whether `arg` fits a receiver-call candidate's parameter `p`.
+fn receiver_argument_fits(
+    lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
+    p: &Ty,
+    arg: &CallArgKind,
+) -> bool {
+    if arg.is_omitted_default() {
+        return true;
+    }
+    let sam = p.non_null().fun_arity().is_none()
+        && (arg.is_lambda_literal() || arg.function_type().is_some())
+        && sam_arg_matches(lib, src, *p, arg.function_type().unwrap_or(arg.ty()));
+    if arg.is_lambda_literal() && arg.ty() == Ty::Error {
+        return untyped_lambda_pertinent(lib, src, *p);
+    }
+    let function_like_fits = || {
+        arg.function_type()
+            .filter(|function| *function != arg.ty())
+            .is_some_and(|function| {
+                arg_fits_platform(lib, p, &function) || semantic_arg_assignable(src, p, &function)
+            })
+    };
+    sam || fun_arg_matches(src, p, &arg.ty(), arg.is_lambda_literal())
+        || semantic_arg_assignable(src, p, &arg.ty())
+        || (arg.ty() == Ty::Null && p.non_null().is_ty_param())
+        || function_like_fits()
+        || arg.binds_result_to(src, *p)
 }
 
 fn best_by_args_at_priority_with_ties<'a>(
@@ -1397,29 +1721,8 @@ fn best_by_args_at_priority_with_ties<'a>(
     // Exact passes see runtime types; literal provenance only drives the adaptation passes.
     let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     let adapts = |p: &Ty, arg: &CallArgKind, _i: usize| arg.adapts_integer_literal_to(*p);
-    let function_like_fits = |p: &Ty, arg: &CallArgKind| {
-        arg.function_type()
-            .filter(|function| *function != arg.ty())
-            .is_some_and(|function| {
-                arg_fits_platform(lib, p, &function) || semantic_arg_assignable(src, p, &function)
-            })
-    };
-    let fits = |_position: usize, p: &Ty, arg: &CallArgKind| {
-        if arg.is_omitted_default() {
-            return true;
-        }
-        let sam = p.non_null().fun_arity().is_none()
-            && (arg.is_lambda_literal() || arg.function_type().is_some())
-            && sam_arg_matches(lib, src, *p, arg.function_type().unwrap_or(arg.ty()));
-        if arg.is_lambda_literal() && arg.ty() == Ty::Error {
-            return untyped_lambda_pertinent(lib, src, *p);
-        }
-        sam || fun_arg_matches(src, p, &arg.ty(), arg.is_lambda_literal())
-            || semantic_arg_assignable(src, p, &arg.ty())
-            || (arg.ty() == Ty::Null && p.non_null().is_ty_param())
-            || function_like_fits(p, arg)
-            || arg.binds_result_to(src, *p)
-    };
+    let fits =
+        |_position: usize, p: &Ty, arg: &CallArgKind| receiver_argument_fits(lib, src, p, arg);
     match select_recorded_exact(cands, args, |_, left, right| {
         parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
     }) {

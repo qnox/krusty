@@ -16,14 +16,13 @@ fn runtime_checkout(root: &Path, marker: &str) {
     ] {
         fs::copy(source.join(name), root.join(name)).unwrap();
     }
-    for entry in fs::read_dir(source.join("src/native/runtime")).unwrap() {
-        let entry = entry.unwrap();
-        if entry.file_type().unwrap().is_file() {
-            fs::copy(
-                entry.path(),
-                root.join("src/native/runtime").join(entry.file_name()),
-            )
-            .unwrap();
+    for directory in ["src/native/runtime", "src/diag/releases"] {
+        fs::create_dir_all(root.join(directory)).unwrap();
+        for entry in fs::read_dir(source.join(directory)).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                fs::copy(entry.path(), root.join(directory).join(entry.file_name())).unwrap();
+            }
         }
     }
     let runtime = root.join("src/native/runtime/krusty_rt.c");

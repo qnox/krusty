@@ -37,38 +37,7 @@ pub(crate) fn field(name: &str, ty: Ty) -> IrField {
 }
 
 pub(crate) fn stored_property(name: &str, ty: Ty, field: u32) -> IrProperty {
-    IrProperty {
-        origin: crate::ir::IrPropertyOrigin::Declaration,
-        name: name.to_string(),
-        diagnostic_span: None,
-        getter_diagnostic_span: None,
-        setter_diagnostic_span: None,
-        context_params: Vec::new(),
-        source_order: 0,
-        decl_line: 0,
-        accessor_lines: crate::ir::IrAccessorLines::default(),
-        ty,
-        type_params: Vec::new(),
-        visibility: crate::types::Visibility::Public,
-        return_value_status: Default::default(),
-        annotations: Box::new([]),
-        initializer: None,
-        has_constant_initializer: false,
-        storage_ty: None,
-        backing_field: Some(field),
-        is_var: false,
-        is_open: false,
-        modifiers: Default::default(),
-        delegate_field: None,
-        is_private: false,
-        setter_visibility: crate::types::Visibility::Public,
-        getter: None,
-        setter: None,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
-        needs_access_bridge: false,
-        accessor_annotations: Default::default(),
-    }
+    IrProperty::stored_value(name.to_string(), ty, field)
 }
 
 pub(crate) fn class(ir: &mut IrFile, name: &str, superclass: &str, depth: u32) -> ClassId {

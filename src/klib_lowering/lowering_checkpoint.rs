@@ -8,6 +8,7 @@ pub(super) struct LoweringCheckpoint {
     expressions: usize,
     functions: usize,
     classes: usize,
+    class_self_types: crate::fx_hash::HashSet<crate::types::TypeName>,
 }
 
 impl LoweringCheckpoint {
@@ -16,6 +17,7 @@ impl LoweringCheckpoint {
             expressions: ir.exprs.len(),
             functions: ir.functions.len(),
             classes: ir.classes.len(),
+            class_self_types: ir.declared_class_self_type_owners(),
         }
     }
 
@@ -23,12 +25,14 @@ impl LoweringCheckpoint {
     pub(super) fn restore(self, ir: &mut IrFile) -> FunId {
         let first = ExprId::try_from(self.expressions).expect("an expression id fits u32");
         ir.exprs.truncate(self.expressions);
-        ir.logical_types.retain(|expression, _| *expression < first);
+        ir.truncate_types(first);
         ir.checked_return_depths
             .retain(|expression, _| *expression < first);
         ir.binding_read_stability
             .retain(|expression, _| *expression < first);
         ir.callable_scopes.retain(|expression| *expression < first);
+        ir.callable_reference_adapter_results
+            .retain(|body, result| *body < first && *result < first);
         ir.negations.retain(|expression| *expression < first);
         ir.short_circuits
             .retain(|expression, _| *expression < first);
@@ -41,6 +45,7 @@ impl LoweringCheckpoint {
         let first = FunId::try_from(self.functions).expect("a function id fits u32");
         ir.functions.truncate(self.functions);
         ir.classes.truncate(self.classes);
+        ir.restore_declared_class_self_type_owners(&self.class_self_types);
         ir.class_method_owners
             .retain(|function, _| *function < first);
         ir.fn_source_names.retain(|function, _| *function < first);

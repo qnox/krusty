@@ -373,6 +373,7 @@ pub(super) fn install_inherited_type_parameter_serializers(
     let this = ir.add_expr(IrExpr::GetValue(0));
     let inherited = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::Super {
+            qualifier: crate::types::type_name(super::GENERATED_SERIALIZER_FQ),
             owner: crate::types::type_name(super::GENERATED_SERIALIZER_FQ),
             dispatch_owner: owner,
             enclosing_dispatch: false,

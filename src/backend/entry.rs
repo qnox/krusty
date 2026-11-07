@@ -48,3 +48,29 @@ impl Entry {
         }
     }
 }
+
+/// Program-entry policy for one target emission, optionally limited to the exact source module
+/// the caller designated. Library source declarations keep their ordinary identity and emission.
+#[derive(Clone, Debug)]
+pub(crate) struct ProgramEntry {
+    pub kind: Entry,
+    module: Option<String>,
+}
+
+impl ProgramEntry {
+    pub fn new(kind: Entry) -> Self {
+        Self { kind, module: None }
+    }
+
+    pub fn in_module(mut self, module: String) -> Self {
+        self.module = Some(module);
+        self
+    }
+
+    pub fn for_module(&self, module: &str) -> Option<Entry> {
+        self.module
+            .as_deref()
+            .is_none_or(|selected| selected == module)
+            .then_some(self.kind)
+    }
+}

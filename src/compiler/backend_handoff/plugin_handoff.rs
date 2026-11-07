@@ -2,15 +2,15 @@
 //! came from, the declarations its calls selected, and the runtime declarations the plugin's
 //! generated code calls, selected through the compilation's symbol source.
 
-use crate::backend::CheckedBackendCallables;
+use crate::backend::{BackendClassifierSource, CheckedBackendCallables};
 use crate::diag::Span;
 use crate::fir::{ExternalCallableId, OriginStore, SourceFileId};
 use crate::ir::{ExprId, IrFile};
 use crate::libraries::FnKind;
 use crate::plugins::runtime_declarations::{
-    BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
+    BoundRuntimeFunction, PluginClassifier, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
 };
-use crate::plugins::CheckedSourceFacts;
+use crate::plugins::{CheckedSourceFacts, DependencyCallableShape};
 use crate::symbol_resolver::declared_member_callables;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName};
@@ -34,19 +34,34 @@ impl CheckedSourceFacts for HandoffSourceFacts<'_> {
             .callable(callable)
             .map_or(&[], |fact| &fact.annotations)
     }
+
+    fn dependency_shape(&self, callable: ExternalCallableId) -> Option<DependencyCallableShape> {
+        let fact = self.callables.callable(callable)?;
+        Some(DependencyCallableShape {
+            inline: fact.inline != crate::libraries::InlineKind::None,
+            receiver: fact.source_receiver.is_some() || fact.context_count > 0,
+            defaults: fact.declares_parameter_defaults,
+        })
+    }
 }
 
 /// The runtime declarations one file's plugins selected, by the declarations the compilation sees.
 pub(super) struct HandoffRuntime<'a> {
     source: &'a dyn SymbolSource,
+    /// The classifiers of the module and its dependencies, as the backend receives them.
+    classifiers: &'a dyn BackendClassifierSource,
     /// Each selected declaration, with the parameters the selecting plugin's transform appends.
     bound: Vec<(ExternalCallableId, Box<[Ty]>)>,
 }
 
 impl<'a> HandoffRuntime<'a> {
-    pub(super) fn new(source: &'a dyn SymbolSource) -> Self {
+    pub(super) fn new(
+        source: &'a dyn SymbolSource,
+        classifiers: &'a dyn BackendClassifierSource,
+    ) -> Self {
         Self {
             source,
+            classifiers,
             bound: Vec::new(),
         }
     }
@@ -98,7 +113,22 @@ impl PluginRuntime for HandoffRuntime<'_> {
         })
     }
 
-    fn declares_classifier(&self, classifier: TypeName) -> bool {
-        self.source.classifier(classifier).is_some()
+    fn appended_parameters(&mut self, target: ExternalCallableId, appended: Vec<Ty>) {
+        self.bound.push((target, appended.into_boxed_slice()));
+    }
+
+    fn classifier(&self, classifier: TypeName) -> Option<PluginClassifier> {
+        let fact = self.classifiers.classifier(classifier)?;
+        Some(PluginClassifier {
+            kind: fact.kind.into(),
+            is_kotlin: fact.is_kotlin || fact.mapped_builtin,
+            is_final: !fact.is_extensible,
+            value_class: fact.value_declaration.clone(),
+            in_module: fact.source,
+            is_inner: fact.outer_instance.is_some(),
+            type_parameters: fact.own_type_parameter_count,
+            supertypes: fact.supertypes.to_vec(),
+            annotations: fact.annotations.to_vec(),
+        })
     }
 }

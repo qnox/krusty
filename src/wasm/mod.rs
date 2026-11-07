@@ -13,12 +13,17 @@
 
 mod array_access;
 mod boxes;
+mod callable_references;
 mod codegen;
 mod encode;
 mod exception_transport;
+mod function_values;
+mod hashing;
 mod host;
+mod identity;
 mod interface_dispatch;
 mod objects;
+mod reference_arrays;
 mod runtime;
 mod target;
 

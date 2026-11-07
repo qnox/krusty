@@ -1,18 +1,11 @@
 //! Field order of a local or anonymous class's captures across repeated checks of its body.
 //!
 //! Postponed generic-lambda checking may revisit the same construction while one receiver type is
-//! temporarily `Pending`. A provisional revisit must neither replace the exact symbolic type
-//! recorded by the earlier check nor renumber an established capture field: descendant
-//! constructions can already carry one of these ordinals as their resolved `ClassStorage` source.
-//! The final check takes the order it selected (kotlinc's first-use order) and returns the field
-//! permutation, so direct descendants update their exact storage coordinates instead of the class
-//! body being checked again. This table crosses the retained-inline boundary and no pending
+//! temporarily `Pending`. Reconcile provisional capture inventories without replacing established
+//! symbolic types or logical capture families. Only this layout algorithm interprets provisional
+//! ordinals; recorded uses identify the selected logical value across reorder and forwarding.
+//! The final check records kotlinc's first-use order and which captures need storage. No pending
 //! semantic type may reach checked FIR.
-//!
-//! Field ordinals are identities, not the physical layout. Once a local class's body has been
-//! checked, its lexical-value captures also get kotlinc's first-use order, computed from the
-//! storage identities that body recorded. The order is a recorded fact the JVM backend applies;
-//! every earlier phase keeps field order. The same walk decides which captures need storage.
 
 use super::context_capture::context_argument_sites;
 use super::scope::PathRoot;
@@ -22,7 +15,7 @@ use super::{
     ReceiverFnValueOrigin, ResolvedCall, SelectedContextSources, Ty,
 };
 use crate::ast::{
-    ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, File, FunBody, FunDecl, Stmt,
+    ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, FunBody, FunDecl, Stmt,
     StmtId,
 };
 use crate::diag::Span;
@@ -72,95 +65,37 @@ pub(super) fn reconcile(
 }
 
 fn same_capture(capture: &AnonymousObjectCapture, exact: &AnonymousObjectCapture) -> bool {
-    capture.name == exact.name && capture.source == exact.source
+    capture.enum_entry_storage == exact.enum_entry_storage
+        && match (capture.source, exact.source) {
+            (
+                AnonymousObjectCaptureSource::ClassStorage(left),
+                AnonymousObjectCaptureSource::ClassStorage(right),
+            ) => left.identity == right.identity,
+            (
+                AnonymousObjectCaptureSource::ImplicitReceiver { .. },
+                AnonymousObjectCaptureSource::ImplicitReceiver { .. },
+            )
+            | (
+                AnonymousObjectCaptureSource::EnclosingInstance { .. },
+                AnonymousObjectCaptureSource::EnclosingInstance { .. },
+            ) => capture.same_direct_receiver(exact),
+            (left, right) => {
+                capture.name == exact.name
+                    && left == right
+                    && capture.lexical_binding == exact.lexical_binding
+            }
+        }
 }
 
-/// Translate children's storage coordinates through their actual owner's finalized prefix.
-/// A forwarded operand is transparent to storage ownership: its children read the enclosing
-/// construction rung. Follow those checked edges through any intervening anonymous classifiers,
-/// without walking their bodies again or applying an intermediate classifier's permutation.
-pub(super) fn remap_direct_storage_captures(
-    file: &File,
-    owner: DeclId,
-    lexical_scope: &super::AnonymousLexicalClassScope,
-    checked_forwards: &HashMap<DeclId, Vec<ExprId>>,
-    storage_fields: &[Option<u32>],
-    captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
-) -> bool {
-    let direct_children = |owner| {
-        lexical_scope
-            .owners
-            .iter()
-            .filter_map(|(&declaration, &candidate_owner)| {
-                (candidate_owner == owner).then_some(declaration)
-            })
-            .collect::<Vec<_>>()
-    };
-    let forwarded_children = |owner| {
-        let direct = direct_children(owner);
-        let targets = file
-            .anonymous_object_classes
-            .iter()
-            .filter_map(|(&expression, declaration)| {
-                direct.contains(declaration).then_some(expression)
-            })
-            .collect();
-        let mut construction_sites = HashSet::default();
-        super::record_expression_targets(
-            file,
-            &targets,
-            checked_forwards.get(&owner).into_iter().flatten().copied(),
-            &mut construction_sites,
-        );
-        construction_sites
-            .iter()
-            .filter_map(|expression| file.anonymous_object_classes.get(expression).copied())
-            .collect::<HashSet<_>>()
-    };
-    let enclosing_owned = forwarded_children(owner);
-    let mut pending = direct_children(owner)
-        .into_iter()
-        .filter(|child| !enclosing_owned.contains(child))
-        .collect::<Vec<_>>();
-    let mut actual_children = Vec::new();
-    let mut seen = HashSet::default();
-    while let Some(child) = pending.pop() {
-        if child == owner || !seen.insert(child) {
-            return false;
-        }
-        pending.extend(forwarded_children(child));
-        actual_children.push(child);
-    }
-    for declaration in actual_children {
-        let Some(child_captures) = captures.get_mut(&declaration) else {
-            continue;
-        };
-        for capture in child_captures {
-            let AnonymousObjectCaptureSource::ClassStorage { field } = &mut capture.source else {
-                continue;
-            };
-            let Some(Some(finalized_field)) = storage_fields.get(*field as usize) else {
-                return false;
-            };
-            *field = *finalized_field;
-        }
-    }
-    true
-}
-
-/// A capture keeps its established cell sharing, and its established type while the revisit only
-/// knows a pending one.
+/// A capture keeps its established cell sharing, and its established type while the revisit knows
+/// less: a pending type knows less than one that still holds an open call's variable (which that
+/// call's solution completes), and both know less than a determined type.
 fn keep_established_facts(capture: &mut AnonymousObjectCapture, exact: &AnonymousObjectCapture) {
     capture.shared_cell |= exact.shared_cell;
-    if (capture.ty.mentions_pending()
-        || capture
-            .storage_ty
-            .is_some_and(|storage| storage.mentions_pending()))
-        && !exact.ty.mentions_pending()
-        && exact
-            .storage_ty
-            .is_none_or(|storage| !storage.mentions_pending())
-    {
+    // Demand discovered during a revisit cannot retag an already published capture family.
+    capture.capture_dependency = exact.capture_dependency;
+    capture.retain_constructor_projections(&exact.constructor_projections);
+    if exact.type_knowledge() > capture.type_knowledge() {
         capture.ty = exact.ty;
         capture.storage_ty = exact.storage_ty;
     }
@@ -168,17 +103,25 @@ fn keep_established_facts(capture: &mut AnonymousObjectCapture, exact: &Anonymou
 
 /// Put a local class's used receiver captures in the order its body first used them, as kotlinc
 /// does, keeping every other capture in its field. `used` pairs each receiver's first-use position
-/// with its capture source.
+/// with its declaration role. A reconstructed operand coordinate is not a receiver identity.
 pub(super) fn order_receivers_by_first_use(
     captures: &mut [AnonymousObjectCapture],
     bindings: &mut [Option<u32>],
-    mut used: Vec<(usize, AnonymousObjectCaptureSource)>,
+    mut used: Vec<(usize, super::ReceiverDeclarationRole)>,
 ) {
     used.sort_by_key(|(first_use, _)| *first_use);
     let fields = captures
         .iter()
         .enumerate()
-        .filter(|(_, capture)| used.iter().any(|(_, source)| *source == capture.source))
+        .filter(|(_, capture)| {
+            matches!(
+                capture.source,
+                AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+                    | AnonymousObjectCaptureSource::EnclosingInstance { .. }
+            ) && used
+                .iter()
+                .any(|(_, role)| Some(*role) == capture.receiver_role)
+        })
         .map(|(field, _)| field)
         .collect::<Vec<_>>();
     let mut ordered = fields
@@ -187,7 +130,7 @@ pub(super) fn order_receivers_by_first_use(
         .collect::<Vec<_>>();
     ordered.sort_by_key(|(capture, _)| {
         used.iter()
-            .position(|(_, source)| *source == capture.source)
+            .position(|(_, role)| Some(*role) == capture.receiver_role)
     });
     for (field, (capture, binding)) in fields.into_iter().zip(ordered) {
         captures[field] = capture;
@@ -230,6 +173,76 @@ pub(super) fn order_receivers_by_first_use(
 /// storage, so its captures all keep fields. A shared cell keeps its field as well; keeping one in
 /// its parameter alone is not modelled yet.
 impl super::Checker<'_> {
+    /// Finalize the selected anonymous prefix before publishing its checked lifetime demands.
+    pub(super) fn finish_anonymous_capture_layout(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        declaration: DeclId,
+        construction: ExprId,
+        candidates: &[super::AnonymousCaptureCandidate],
+        provisional: bool,
+        forwarded: &super::receiver_uses::ReceiverUseSites,
+    ) -> bool {
+        let Some(owner) = self.body_class_storage_owner(declaration) else {
+            return false;
+        };
+        let original = self
+            .discovered_anonymous_captures
+            .get(&declaration)
+            .cloned()
+            .unwrap_or_default();
+        let fields = super::anonymous_object_capture::record_anonymous_construction_captures(
+            self.file,
+            construction,
+            &self.anonymous_lexical_scope,
+            candidates,
+            provisional,
+            super::anonymous_object_capture::SelectedLocalCallableCaptures {
+                calls: &self.resolved_calls,
+                expressions: &self.expr_lowers,
+                statements: &self.stmt_lowers,
+                constructor_arguments: super::capture_storage::ConstructorArgumentUses::Checked {
+                    expressions: &self.expr_lowers,
+                    types: &self.expr_types,
+                    delegations: &self.resolved_primary_ctor_delegations,
+                },
+                forwarded: Some(forwarded),
+            },
+            &mut self.discovered_anonymous_captures,
+        );
+        // Descendants were checked against provisional fields. Rewrite their selected sources
+        // through the finalized permutation instead of replaying the nested class bodies.
+        if !super::anonymous_capture_remap::remap_owned_anonymous_class_storage_captures(
+            self.file,
+            declaration,
+            &self.anonymous_lexical_scope,
+            &self.discovered_anonymous_super_forwards,
+            &self.resolved_primary_ctor_delegations,
+            super::anonymous_capture_remap::CaptureFieldRemap {
+                owner,
+                fields: &fields,
+                original: &original,
+            },
+            &mut self.discovered_anonymous_captures,
+        ) {
+            return false;
+        }
+        if let Some(mut captures) = self.discovered_anonymous_captures.remove(&declaration) {
+            self.extend_anonymous_superclass_captures(scope, declaration, &mut captures);
+            self.discovered_anonymous_captures
+                .insert(declaration, captures);
+        }
+        self.refresh_anonymous_receiver_capture_fields(declaration, candidates);
+        if let Some(captures) = self
+            .discovered_anonymous_captures
+            .get(&declaration)
+            .cloned()
+        {
+            self.publish_anonymous_capture_layout(scope, declaration, &captures);
+        }
+        true
+    }
+
     pub(super) fn publish_local_class_capture_layout(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -244,8 +257,19 @@ impl super::Checker<'_> {
             .discovered_local_class_capture_bindings
             .get(&declaration)
             .map_or(&[][..], Vec::as_slice);
-        let mut uses =
-            FirstUses::for_class(self, scope, Some(statement), class, captures, bindings);
+        let Some(owner) = self.body_class_storage_owner(declaration) else {
+            self.diags
+                .error(class.span, "class storage has no checked classifier owner");
+            return;
+        };
+        let mut uses = FirstUses::for_class(
+            self,
+            scope,
+            Some(statement),
+            (owner, class),
+            captures,
+            bindings,
+        );
         uses.collect(Closure::Class(class, Some(declaration)));
         if let Some(unordered) = uses.unordered.take() {
             let message = format!("internal error: local class '{}': {unordered}", class.name);
@@ -267,24 +291,27 @@ impl super::Checker<'_> {
 
     /// Anonymous classes use the same checked storage demands while retaining their established
     /// capture order. They have a declaration identity, not a local-declaration statement.
-    pub(super) fn publish_anonymous_class_capture_layout(
+    pub(super) fn publish_anonymous_capture_layout(
         &mut self,
         scope: &CheckerScope<'_>,
         declaration: DeclId,
-        storage_fields: Option<&[Option<u32>]>,
+        captures: &[AnonymousObjectCapture],
     ) {
         let Decl::Class(class) = self.file.decl(declaration) else {
             return;
         };
-        let Some(captures) = self.discovered_anonymous_captures.get(&declaration) else {
-            return;
-        };
+        // The caller supplies the selected vector: a retained inline body may consume canonical
+        // Pass-1 captures without running capture discovery in this checker instance.
         let bindings = captures
             .iter()
             .map(|capture| capture.lexical_binding)
             .collect::<Vec<_>>();
-        let mut uses = FirstUses::for_class(self, scope, None, class, captures, &bindings);
-        uses.storage_fields = storage_fields;
+        let Some(owner) = self.body_class_storage_owner(declaration) else {
+            self.diags
+                .error(class.span, "class storage has no checked classifier owner");
+            return;
+        };
+        let mut uses = FirstUses::for_class(self, scope, None, (owner, class), captures, &bindings);
         uses.collect(Closure::Class(class, Some(declaration)));
         if let Some(unordered) = uses.unordered.take() {
             self.diags.error(
@@ -345,9 +372,10 @@ impl super::Checker<'_> {
         let mut uses = FirstUses {
             checker: self,
             statement: Some(statement),
-            storage_fields: None,
+            inner_classes: Vec::new(),
             read_namespace: CaptureReadNamespace::OwnStorage,
             owner: Owner::Function,
+            classifier: None,
             span,
             captures: &[],
             bindings: &bindings,
@@ -448,11 +476,10 @@ impl super::Checker<'_> {
     /// Record an assignment to capture storage or to a local's binding.
     pub(super) fn record_class_storage_write(&mut self, statement: StmtId, target: Option<Local>) {
         let target = match target.map(|local| (local.origin, local.flow_identity)) {
-            Some((
-                ReceiverFnValueOrigin::ClassStorage(field)
-                | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. },
-                _,
-            )) => StorageUse::Field(field),
+            Some((ReceiverFnValueOrigin::ClassStorage(storage), _)) => StorageUse::Field(storage),
+            Some((ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field, .. }, _)) => {
+                StorageUse::EnumEntryField { owner, field }
+            }
             Some((ReceiverFnValueOrigin::Local, identity)) => StorageUse::Binding(identity),
             _ => return,
         };
@@ -515,7 +542,11 @@ impl std::fmt::Display for UnorderedCapture {
 #[derive(Clone, Copy)]
 enum StorageUse {
     /// Capture storage of the innermost classifier.
-    Field(u32),
+    Field(super::ClassStorageSource),
+    EnumEntryField {
+        owner: crate::types::TypeName,
+        field: u32,
+    },
     /// A local's lexical binding, by flow identity.
     Binding(u32),
 }
@@ -566,7 +597,8 @@ fn is_value_capture(capture: &AnonymousObjectCapture) -> bool {
         && matches!(
             capture.source,
             AnonymousObjectCaptureSource::LexicalValue
-                | AnonymousObjectCaptureSource::ClassStorage { .. }
+                | AnonymousObjectCaptureSource::ClassStorage(_)
+                | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. }
         )
 }
 
@@ -611,11 +643,13 @@ struct FirstUses<'w, 'c> {
     checker: &'w super::Checker<'c>,
     /// The local class's or function's statement, which owns a class's inner classes.
     statement: Option<StmtId>,
+    /// Named inner declarations whose code reaches this class through its enclosing instance.
+    inner_classes: Vec<DeclId>,
     /// A scratch body selected these reads before its owner finalized the receiver prefix.
     /// Included classifiers already carry finalized coordinates and do not use this permutation.
-    storage_fields: Option<&'w [Option<u32>]>,
     read_namespace: CaptureReadNamespace,
     owner: Owner,
+    classifier: Option<crate::types::TypeName>,
     /// The declaration's source range: a declaration inside it reads the captures directly.
     span: Span,
     captures: &'w [AnonymousObjectCapture],
@@ -679,10 +713,11 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         checker: &'w super::Checker<'c>,
         scope: &CheckerScope<'_>,
         statement: Option<StmtId>,
-        class: &ClassDecl,
+        class: (crate::types::TypeName, &ClassDecl),
         captures: &'w [AnonymousObjectCapture],
         bindings: &'w [Option<u32>],
     ) -> Self {
+        let (classifier, class) = class;
         let lexical_reads = captures
             .iter()
             .zip(bindings)
@@ -696,9 +731,10 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         Self {
             checker,
             statement,
-            storage_fields: None,
+            inner_classes: Vec::new(),
             read_namespace: CaptureReadNamespace::OwnStorage,
             owner: Owner::Class,
+            classifier: Some(classifier),
             span: class.span,
             captures,
             bindings,
@@ -817,9 +853,45 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         // Only the local class itself is under construction: an inner class's code reads this
         // class's storage through its outer instance.
         self.construction = declaration.is_some();
-        // The delegate expressions run in the constructor, before the body's initializers.
-        for delegation in &class.interface_delegations {
-            self.expression(delegation.value, uses);
+        if let Some(declaration) = declaration {
+            self.inner_classes = self
+                .statement
+                .and_then(|statement| self.checker.file.local_class_nested.get(&statement))
+                .cloned()
+                .unwrap_or_default();
+            // Anonymous classes have no local-class statement. Their hoisted inner declarations
+            // belong to the same recorded owner graph as capture discovery. Follow only named
+            // inner edges: crossing another anonymous construction changes the storage namespace.
+            for &candidate in &self.checker.file.decls {
+                let chain = self
+                    .checker
+                    .anonymous_lexical_scope
+                    .declaration_chain(candidate);
+                let Some(depth) = chain.iter().position(|owner| *owner == declaration) else {
+                    continue;
+                };
+                if depth != 0
+                    && chain[..depth].iter().all(|inner| {
+                        matches!(self.checker.file.decl(*inner), Decl::Class(class) if class.inner_of.is_some())
+                    })
+                    && !self.inner_classes.contains(&candidate)
+                {
+                    self.inner_classes.push(candidate);
+                }
+            }
+        }
+        let anonymous = declaration.is_some_and(|declaration| {
+            self.checker
+                .anonymous_lexical_scope
+                .declarations
+                .contains(&declaration)
+        });
+        // Named-class delegates run in its constructor. Anonymous delegates are explicit
+        // construction operands, evaluated on the enclosing rung by `expression`.
+        if !anonymous {
+            for delegation in &class.interface_delegations {
+                self.expression(delegation.value, uses);
+            }
         }
         for step in &class.init_order {
             match step {
@@ -849,12 +921,7 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                     .is_some_and(|forwarded| forwarded.contains(argument))
             }))
             .collect();
-        let namespace = if declaration.is_some_and(|declaration| {
-            self.checker
-                .anonymous_lexical_scope
-                .declarations
-                .contains(&declaration)
-        }) {
+        let namespace = if anonymous {
             CaptureReadNamespace::ConstructionStorage
         } else {
             CaptureReadNamespace::OwnStorage
@@ -903,12 +970,7 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         }
         // An inner class is a local declaration of the class, included where it is constructed.
         let file = self.checker.file;
-        for &declaration in self
-            .statement
-            .and_then(|statement| file.local_class_nested.get(&statement))
-            .into_iter()
-            .flatten()
-        {
+        for &declaration in &self.inner_classes {
             if matches!(file.decl(declaration), Decl::Class(inner) if inner.inner_of.is_some()) {
                 uses.declared.push(Inclusion::Classifier(declaration));
             }
@@ -981,10 +1043,7 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                     .collect(),
             ),
             (None, None) => {
-                let inner = self
-                    .statement
-                    .and_then(|statement| file.local_class_nested.get(&statement))
-                    .is_some_and(|nested| nested.contains(&declaration));
+                let inner = self.inner_classes.contains(&declaration);
                 if inner {
                     self.class(class, None, uses);
                 }
@@ -1005,9 +1064,10 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         for (field, capture) in physical {
             let carried = if inside {
                 match capture.source {
-                    AnonymousObjectCaptureSource::ClassStorage { field } => {
-                        (self.owner == Owner::Class).then_some(field)
-                    }
+                    AnonymousObjectCaptureSource::ClassStorage(storage) => (self.classifier
+                        == Some(storage.owner))
+                    .then(|| self.logical_capture_field(storage.identity))
+                    .flatten(),
                     // A value the class captured, which the nested classifier captures again.
                     _ => bindings
                         .get(field)
@@ -1024,6 +1084,21 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         }
     }
 
+    fn logical_capture_field(&self, identity: crate::fir::ClassCaptureIdentity) -> Option<u32> {
+        let owner = self.classifier?;
+        let mut selected = self
+            .captures
+            .iter()
+            .enumerate()
+            .filter(|(_, capture)| capture.represents_identity(owner, identity));
+        let (field, _) = selected.next()?;
+        selected
+            .next()
+            .is_none()
+            .then(|| u32::try_from(field).ok())
+            .flatten()
+    }
+
     /// The capture field a recorded use names, if it is one of this class's captures.
     fn storage_use(&self, used: StorageUse) -> Option<u32> {
         match used {
@@ -1031,10 +1106,10 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                 if self.owner == Owner::Class
                     && self.read_namespace == CaptureReadNamespace::ConstructionStorage =>
             {
+                let owner = self.classifier?;
                 let mut selected = self.captures.iter().enumerate().filter(|(_, capture)| {
                     capture.receiver.is_none()
-                        && capture.source
-                            == (AnonymousObjectCaptureSource::ClassStorage { field: source })
+                        && capture.represents_identity(owner, source.identity)
                 });
                 let (field, _) = selected.next()?;
                 if selected.next().is_some() {
@@ -1042,11 +1117,32 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                 }
                 u32::try_from(field).ok()
             }
-            StorageUse::Field(field) if self.owner == Owner::Class => match self.storage_fields {
-                Some(fields) => fields.get(field as usize).copied().flatten(),
-                None => Some(field),
-            },
+            StorageUse::Field(storage)
+                if self.owner == Owner::Class && self.classifier == Some(storage.owner) =>
+            {
+                self.logical_capture_field(storage.identity)
+            }
             StorageUse::Field(_) => None,
+            StorageUse::EnumEntryField { owner, field }
+                if self.owner == Owner::Class
+                    && self.read_namespace == CaptureReadNamespace::ConstructionStorage =>
+            {
+                let mut selected = self.captures.iter().enumerate().filter(|(_, capture)| {
+                    capture.receiver.is_none()
+                        && capture.source
+                            == AnonymousObjectCaptureSource::EnumEntryPropertyStorage {
+                                owner,
+                                field,
+                            }
+                });
+                let (field, _) = selected.next()?;
+                selected
+                    .next()
+                    .is_none()
+                    .then(|| u32::try_from(field).ok())
+                    .flatten()
+            }
+            StorageUse::EnumEntryField { .. } => None,
             StorageUse::Binding(identity) => self
                 .lexical_reads
                 .iter()
@@ -1072,18 +1168,35 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                 self.expression(argument, uses);
             }
             self.construction = construction;
+            // Interface delegates execute at this enclosing site too. Preserve its construction
+            // lifetime: an initializer can use its parameter, while a later method needs storage.
+            if let Decl::Class(class) = file.decl(object) {
+                for delegation in &class.interface_delegations {
+                    self.expression(delegation.value, uses);
+                }
+            }
             let object = Closure::Included(Inclusion::Classifier(object));
             uses.nested.push((position, object));
             return;
         }
         let read = match checker.expr_lowers.get(&expression) {
             Some(
-                ExprLowering::ClassStorageRead { field }
+                ExprLowering::ClassStorageRead(storage)
                 | ExprLowering::ReceiverFnInvoke {
-                    origin: ReceiverFnValueOrigin::ClassStorage(field),
+                    origin: ReceiverFnValueOrigin::ClassStorage(storage),
                     ..
                 },
-            ) => Some(StorageUse::Field(*field)),
+            ) => Some(StorageUse::Field(*storage)),
+            Some(
+                ExprLowering::EnumEntryStorageRead { owner, field }
+                | ExprLowering::ReceiverFnInvoke {
+                    origin: ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field, .. },
+                    ..
+                },
+            ) => Some(StorageUse::EnumEntryField {
+                owner: *owner,
+                field: *field,
+            }),
             _ => match checker.read_flow_roots.get(&expression) {
                 Some(PathRoot::Value(identity)) => Some(StorageUse::Binding(*identity)),
                 _ => None,

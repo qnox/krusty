@@ -39,6 +39,7 @@ fn java_target_mirror(
     elements.sort_unstable();
     elements.dedup();
     Some(crate::ir::AppliedAnnotation {
+        written_order: None,
         internal: crate::types::type_name("java/lang/annotation/Target"),
         values: vec![(
             "value".to_string(),
@@ -91,6 +92,7 @@ pub(super) fn emit_annotation_class(
         }
     }
     emit_jvm_interface_companion_surface(ir, c, facade, env, &mut cw);
+    super::companion_field::attach_companion_field_nullability(ir, c, &mut cw);
     // Documented/retention/target meta-annotations, matching kotlinc's ORDER: everything the source
     // declares comes first, in source order — `kotlin.annotation.Retention(X)` and
     // `kotlin.annotation.Target` among them — and the JVM mirrors are appended after:
@@ -98,6 +100,7 @@ pub(super) fn emit_annotation_class(
     // RUNTIME|CLASS|SOURCE)` (RUNTIME when defaulted), then `java.lang.annotation.Target`. The java retention
     // is what both the JVM and classpath consumers read the retention back from.
     let enum_stamp = |internal: &str, enum_ty: &str, constant: &str| crate::ir::AppliedAnnotation {
+        written_order: None,
         internal: crate::types::type_name(internal),
         values: vec![(
             "value".to_string(),
@@ -117,6 +120,7 @@ pub(super) fn emit_annotation_class(
         && !declares("java/lang/annotation/Documented")
     {
         mirrors.push(crate::ir::AppliedAnnotation {
+            written_order: None,
             internal: crate::types::type_name("java/lang/annotation/Documented"),
             values: Vec::new(),
         });

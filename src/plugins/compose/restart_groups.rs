@@ -274,7 +274,33 @@ fn add_lambda_composer_parameters(ir: &mut IrFile, lambda: &ComposableLambda) {
     };
     *arity = 2;
     // The value is called through the runtime's wrapper, never inlined.
-    *inline_body = None;
+    let template = inline_body.take();
+    if let Some(template) = template {
+        retire_library_calls(ir, template);
+    }
+}
+
+/// Empty the library composable calls of a lambda's dropped inline form. Nothing emits that form,
+/// and a library composable call there would still lack the composer arguments its compiled
+/// method takes.
+fn retire_library_calls(ir: &mut IrFile, template: ExprId) {
+    let mut pending = vec![template];
+    let mut library = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if let IrExpr::Call { callee, .. } = &ir.exprs[expression as usize] {
+            if matches!(**callee, Callee::External { .. }) {
+                library.push(expression);
+                continue;
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    for call in library {
+        ir.exprs[call as usize] = IrExpr::Block {
+            stmts: Vec::new(),
+            value: None,
+        };
+    }
 }
 
 /// The body kotlinc gives a composable lambda. The runtime's `ComposableLambda` wrapper starts
@@ -387,7 +413,7 @@ fn remember(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda
     // kotlinc builds the call at the lambda's offsets, so the lambda's line begins at its key.
     if lambda.opening_line != 0 {
         for expression in [key, remembered, value] {
-            ir.expr_source_lines.insert(expression, lambda.opening_line);
+            ir.set_source_line(expression, lambda.opening_line);
         }
     }
     let IrExpr::Call { args, .. } = &mut ir.exprs[lambda.call as usize] else {
@@ -469,6 +495,18 @@ fn pass_composer(
     let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
         unreachable!("a composable call is a call");
     };
+    // A library composable takes the composer parameters already, after every declared one.
+    if let Callee::External { .. } = **callee {
+        let composer = ir.add_expr(IrExpr::GetValue(caller.composer));
+        let changed = changed_argument(ir, caller, arguments);
+        ir.mark_positionless(composer);
+        ir.mark_positionless(changed);
+        let IrExpr::Call { args, .. } = &mut ir.exprs[call as usize] else {
+            unreachable!("a composable call is a call");
+        };
+        args.extend([composer, changed]);
+        return;
+    }
     let function = callee
         .source_function()
         .expect("a composable call in the file calls one of its functions");
@@ -544,22 +582,15 @@ fn changed_argument(ir: &mut IrFile, caller: Slots, arguments: &[ArgumentState])
                     order => {
                         let distance = slot.abs_diff(parent) * BITS_PER_SLOT;
                         let distance = ir.add_expr(IrExpr::Const(IrConst::Int(distance as i32)));
-                        ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: if order.is_gt() {
-                                IrBinOp::Shl
-                            } else {
-                                IrBinOp::Shr
-                            },
-                            lhs: bits,
-                            rhs: distance,
-                        })
+                        let shift = if order.is_gt() {
+                            IrBinOp::Shl
+                        } else {
+                            IrBinOp::Shr
+                        };
+                        ir.add_arithmetic(shift, bits, distance, Ty::Int)
                     }
                 };
-                forwarded.push(ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::BitAnd,
-                    lhs: mask,
-                    rhs: shifted,
-                }));
+                forwarded.push(ir.add_arithmetic(IrBinOp::BitAnd, mask, shifted, Ty::Int));
             }
         }
     }
@@ -576,21 +607,13 @@ fn changed_argument(ir: &mut IrFile, caller: Slots, arguments: &[ArgumentState])
 }
 
 fn or(ir: &mut IrFile, lhs: ExprId, rhs: ExprId) -> ExprId {
-    ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::BitOr,
-        lhs,
-        rhs,
-    })
+    ir.add_arithmetic(IrBinOp::BitOr, lhs, rhs, Ty::Int)
 }
 
 fn and_constant(ir: &mut IrFile, value: u32, bits: i32) -> ExprId {
     let lhs = ir.add_expr(IrExpr::GetValue(value));
     let rhs = ir.add_expr(IrExpr::Const(IrConst::Int(bits)));
-    ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::BitAnd,
-        lhs,
-        rhs,
-    })
+    ir.add_arithmetic(IrBinOp::BitAnd, lhs, rhs, Ty::Int)
 }
 
 fn int_comparison(ir: &mut IrFile, op: IrBinOp, lhs: ExprId, rhs: i32) -> ExprId {
@@ -792,7 +815,7 @@ fn restart_group(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableF
     let skip = runtime::call(ir, &runtime.skip_to_group_end, Some(composer), Vec::new());
     // kotlinc skips at the declaration's start offset, the `fun` keyword.
     mark_line(ir, skip, facts.declaration_line);
-    ir.expr_source_lines.insert(skip, facts.declaration_line);
+    ir.set_source_line(skip, facts.declaration_line);
     let skipped = ir.add_expr(IrExpr::Block {
         stmts: vec![skip],
         value: None,
@@ -855,7 +878,7 @@ fn update_scope(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableFu
         branches: vec![(Some(condition), null_result), (None, update)],
     });
     ir.whens.exhaustive.insert(guarded, Ty::Unit);
-    ir.logical_types.insert(guarded, Ty::Unit);
+    ir.set_logical_type(guarded, Ty::Unit);
     ir.null_guards.insert(guarded);
     let block = ir.add_expr(IrExpr::Block {
         stmts: vec![variable],
@@ -928,6 +951,7 @@ fn recompose_lambda(
     let capture = crate::ir::IrValueCapture {
         declaration: crate::ir::IrCapturedDeclaration::Parameter,
         capturer: crate::ir::IrCapturingCallable::Lambda,
+        crossinline_parameter: None,
     };
     let mut parameter_identities = (0u32..)
         .zip(

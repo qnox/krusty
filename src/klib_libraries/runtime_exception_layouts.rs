@@ -18,6 +18,8 @@ pub(super) fn normalize(
         RuntimeExceptionKind::RuntimeException,
         RuntimeExceptionKind::IndexOutOfBounds,
         RuntimeExceptionKind::NullPointer,
+        RuntimeExceptionKind::IllegalState,
+        RuntimeExceptionKind::IllegalArgument,
     ]
     .into_iter()
     .find(|kind| kind.classifier() == identity)?;
@@ -90,5 +92,30 @@ mod tests {
                 parent: Some(parent),
             }),
         );
+    }
+
+    #[test]
+    fn illegal_state_storage_requires_its_authenticated_stateless_declaration() {
+        let identity = crate::types::type_name("kotlin/IllegalStateException");
+        let parent = RuntimeExceptionKind::RuntimeException.classifier();
+        let mut shape = LibraryType::declaration_header();
+        shape.supertypes.push_name(parent);
+        let layout = normalize(identity, true, &shape, false)
+            .expect("the platform's stateless exception has a selected storage role");
+        assert_eq!(layout.kind.classifier(), identity);
+        assert_eq!(layout.parent, Some(parent));
+        assert_eq!(normalize(identity, false, &shape, false), None);
+        assert_eq!(normalize(identity, true, &shape, true), None);
+        assert_eq!(
+            normalize(
+                crate::types::type_name("user/LocalFailure"),
+                true,
+                &shape,
+                false
+            ),
+            None
+        );
+        shape.supertypes = Default::default();
+        assert_eq!(normalize(identity, true, &shape, false), None);
     }
 }

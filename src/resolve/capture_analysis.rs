@@ -2,6 +2,7 @@
 
 use crate::fx_hash::HashSet;
 
+use super::capture_storage::ConstructorArgumentUses;
 use super::{Checker, ExprLowering, LambdaCapture};
 use crate::ast::{
     ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, File, FunBody, Stmt, StmtId,
@@ -300,54 +301,65 @@ pub(super) fn local_fun_body_uses_any(
     expression: ExprId,
     outer: &HashSet<String>,
 ) -> bool {
-    enclosing_value_is_used(
+    lexical_uses_any(
         file,
-        EnclosingValueRoot::Expression(expression),
+        CaptureUseRoot::Expression(expression),
         outer,
         false,
+        None,
     )
 }
 
-/// The same lexical-scope walk for an anonymous classifier. Only the selected superclass
-/// operands run in its constructor; other arguments are evaluated at its construction site.
-pub(super) fn anonymous_class_uses_any(
+/// Read an anonymous body's lexical roots without losing callable parameter scopes. The caller
+/// supplies only superclass argument expressions that remain in the anonymous constructor.
+pub(super) fn anonymous_class_uses_name(
     file: &File,
     class: &ClassDecl,
-    constructor_arguments: &[ExprId],
-    outer: &HashSet<String>,
-    receiver_function: bool,
+    base_arguments: &[ExprId],
+    name: &str,
+    extension_calls: bool,
+    lambda_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
-    enclosing_value_is_used(
+    let outer = std::iter::once(name.to_owned()).collect();
+    lexical_uses_any(
         file,
-        EnclosingValueRoot::Class(class, constructor_arguments),
-        outer,
-        receiver_function,
+        CaptureUseRoot::Class {
+            class,
+            base_arguments,
+        },
+        &outer,
+        extension_calls,
+        Some(lambda_uses),
     )
 }
 
-enum EnclosingValueRoot<'a> {
+enum CaptureUseRoot<'a> {
     Expression(ExprId),
-    Class(&'a ClassDecl, &'a [ExprId]),
+    Class {
+        class: &'a ClassDecl,
+        base_arguments: &'a [ExprId],
+    },
 }
 
-fn enclosing_value_is_used(
-    file: &File,
-    root: EnclosingValueRoot<'_>,
-    outer: &HashSet<String>,
-    receiver_function: bool,
-) -> bool {
-    #[derive(Clone)]
-    struct ActiveValueNames {
-        names: HashSet<String>,
-        receiver_function: bool,
-    }
+#[derive(Clone)]
+struct ActiveCaptureUses<'a> {
+    names: HashSet<String>,
+    extension_calls: bool,
+    lambda_uses: Option<ConstructorArgumentUses<'a>>,
+}
 
+fn lexical_uses_any(
+    file: &File,
+    root: CaptureUseRoot<'_>,
+    outer: &HashSet<String>,
+    extension_calls: bool,
+    lambda_uses: Option<ConstructorArgumentUses<'_>>,
+) -> bool {
     fn class_uses(
         file: &File,
         class: &ClassDecl,
-        arguments: &[ExprId],
-        active: &ActiveValueNames,
-        include_delegates: bool,
+        active: &ActiveCaptureUses<'_>,
+        base_arguments: &[ExprId],
     ) -> bool {
         // A name this class introduces hides an enclosing value only when the enclosing scope
         // does not already have that value. A function local keeps its spelling through a
@@ -382,18 +394,10 @@ fn enclosing_value_is_used(
             }
             constructor_active.names.remove(&parameter.name);
         }
-        if arguments
+        if base_arguments
             .iter()
             .copied()
             .any(|expression| expression_uses(file, expression, &constructor_active))
-        {
-            return true;
-        }
-        if include_delegates
-            && class
-                .interface_delegations
-                .iter()
-                .any(|delegation| expression_uses(file, delegation.value, active))
         {
             return true;
         }
@@ -417,20 +421,17 @@ fn enclosing_value_is_used(
             {
                 return true;
             }
-            if let Some(FunBody::Expr(body) | FunBody::Block(body)) = &property.getter {
+            for body in property.getter.iter().chain(
+                property
+                    .setter
+                    .iter()
+                    .filter_map(|setter| setter.body.as_ref()),
+            ) {
+                let (FunBody::Expr(body) | FunBody::Block(body)) = body else {
+                    continue;
+                };
                 if expression_uses(file, *body, &class_active) {
                     return true;
-                }
-            }
-            if let Some(setter) = &property.setter {
-                let mut setter_active = class_active.clone();
-                setter_active
-                    .names
-                    .remove(&crate::ast::setter_param_or_value(setter.param.as_ref()));
-                if let Some(FunBody::Expr(body) | FunBody::Block(body)) = &setter.body {
-                    if expression_uses(file, *body, &setter_active) {
-                        return true;
-                    }
                 }
             }
         }
@@ -478,27 +479,20 @@ fn enclosing_value_is_used(
         false
     }
 
-    fn expression_uses(file: &File, expression: ExprId, active: &ActiveValueNames) -> bool {
-        if active.receiver_function {
-            let member = match file.expr(expression) {
-                Expr::SafeCall { name, .. } => Some(name),
-                Expr::Call { callee, .. } => match file.expr(*callee) {
-                    Expr::Member { name, .. } => Some(name),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if member.is_some_and(|name| active.names.contains(name)) {
-                return true;
-            }
-        }
-        if let Some(declaration) = file.anonymous_object_classes.get(&expression) {
-            if let Decl::Class(class) = file.decl(*declaration) {
-                return class_uses(file, class, &class.base_args, active, true);
-            }
-        }
+    fn expression_uses(file: &File, expression: ExprId, active: &ActiveCaptureUses<'_>) -> bool {
         match file.expr(expression) {
             Expr::Name(name) => active.names.contains(name),
+            Expr::SafeCall { name, .. }
+                if active.extension_calls && active.names.contains(name) =>
+            {
+                true
+            }
+            Expr::Call { callee, .. }
+                if active.extension_calls
+                    && matches!(file.expr(*callee), Expr::Member { name, .. } if active.names.contains(name)) =>
+            {
+                true
+            }
             Expr::Block { stmts, trailing } => {
                 let mut active = active.clone();
                 for &statement in stmts {
@@ -513,7 +507,11 @@ fn enclosing_value_is_used(
                 for parameter in params {
                     active.names.remove(parameter);
                 }
-                if params.is_empty() {
+                if params.is_empty()
+                    && active
+                        .lambda_uses
+                        .is_none_or(|uses| uses.binds_implicit_lambda_parameter(file, expression))
+                {
                     active.names.remove("it");
                 }
                 expression_uses(file, *body, &active)
@@ -546,7 +544,7 @@ fn enclosing_value_is_used(
         }
     }
 
-    fn statement_uses(file: &File, statement: StmtId, active: &mut ActiveValueNames) -> bool {
+    fn statement_uses(file: &File, statement: StmtId, active: &mut ActiveCaptureUses<'_>) -> bool {
         match file.stmt(statement) {
             Stmt::IncDec { name, .. } => active.names.contains(name),
             // Assignment targets are statement spellings rather than `Expr::Name` children.
@@ -620,19 +618,24 @@ fn enclosing_value_is_used(
                     FunBody::None => false,
                 }
             }
-            Stmt::LocalClass(class) => class_uses(file, class, &class.base_args, active, true),
+            Stmt::LocalClass(class) => class_uses(file, class, active, &class.base_args),
             _ => file.any_child_stmt(statement, &mut |child| expression_uses(file, child, active)),
         }
     }
 
-    let active = ActiveValueNames {
+    let active = ActiveCaptureUses {
         names: outer.clone(),
-        receiver_function,
+        extension_calls,
+        lambda_uses,
     };
     match root {
-        EnclosingValueRoot::Expression(expression) => expression_uses(file, expression, &active),
-        EnclosingValueRoot::Class(class, arguments) => {
-            class_uses(file, class, arguments, &active, false)
-        }
+        CaptureUseRoot::Expression(expression) => expression_uses(file, expression, &active),
+        CaptureUseRoot::Class {
+            class,
+            base_arguments,
+        } => class_uses(file, class, &active, base_arguments),
     }
 }
+
+#[cfg(test)]
+mod tests;

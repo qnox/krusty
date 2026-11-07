@@ -16,19 +16,23 @@ fn assert_facade_metadata(stem: &str, source: &str) {
             common::raw_kotlin_metadata(bytes),
         )
     };
-    assert_eq!(metadata(&classes.krusty[&name]), metadata(&classes.reference[&name]));
+    assert_eq!(
+        metadata(&classes.krusty[&name]),
+        metadata(&classes.reference[&name])
+    );
 }
 
 #[test]
 fn private_generic_anonymous_factory_metadata_matches_kotlinc() {
-    assert_facade_metadata("GenericAnonymousMetadataBaseline", r#"
+    assert_facade_metadata(
+        "GenericAnonymousMetadataBaseline",
+        r#"
 interface Token<T>
 private fun <T> copy(value: T) = object : Token<T> {}
 fun box(): String = "OK"
-"#);
+"#,
+    );
 }
-
-
 
 const ANONYMOUS_RESULT_EXPOSURE: &str = r#"
 interface Token<T> { fun value(): T }

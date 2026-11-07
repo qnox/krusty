@@ -4,6 +4,36 @@
 
 use super::common;
 
+#[test]
+fn named_constructor_delegates_precede_properties_and_init_blocks() {
+    let source = include_str!("box_regressions/namedInterfaceDelegateOrder.kt");
+    common::expect_box_same_as_kotlinc(source, "namedInterfaceDelegateOrder");
+    // PLATFORM: compare complete JVM class headers and member ABI after the portable runtime oracle.
+    let classes =
+        common::classes_against_kotlinc_module(&[("namedInterfaceDelegateOrder.kt", source)]);
+    let inventory = |classes: &std::collections::BTreeMap<String, Vec<u8>>| {
+        classes
+            .iter()
+            .map(|(name, bytes)| {
+                let class = krusty::jvm::classreader::parse_class(bytes).expect("readable class");
+                let header = format!(
+                    "{:?}",
+                    (
+                        class.access,
+                        class.this_class,
+                        class.super_class,
+                        class.interfaces(),
+                        class.signature,
+                        class.inner_classes
+                    )
+                );
+                (name.clone(), (header, common::member_table(bytes)))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(inventory(&classes.krusty), inventory(&classes.reference));
+}
+
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "C")
 }
@@ -771,34 +801,7 @@ class Forwarding(named: Named) : Named by named
 /// instance, and through a body that captures locals it does not call.
 #[test]
 fn anonymous_object_delegates_to_a_parameter() {
-    const SRC: &str = "interface A { fun foo(): Int }\n\
-class B1 : A { override fun foo() = 10 }\n\
-class B2(val z: Int) : A { override fun foo() = z }\n\
-fun f1(b: B1): Int {\n\
-    val o = object : A by b { }\n\
-    return o.foo()\n\
-}\n\
-fun f2(b: B2): Int {\n\
-    val o = object : A by B2(b.z) { }\n\
-    return o.foo()\n\
-}\n\
-fun f3(b: B2, mult: Int): Int {\n\
-    val o = object : A by B2(mult * b.z) { }\n\
-    return o.foo()\n\
-}\n\
-fun f4(b: B1, x: Int, y: Int, z: Int): Int {\n\
-    val o = object : A by b {\n\
-        fun bar() = x + y + z\n\
-    }\n\
-    return o.foo()\n\
-}\n\
-fun box(): String {\n\
-    if (f1(B1()) != 10) return \"fail #1\"\n\
-    if (f2(B2(239)) != 239) return \"fail #2\"\n\
-    if (f3(B2(239), 2) != 478) return \"fail #3\"\n\
-    if (f4(B1(), 1, 2, 3) != 10) return \"fail #4\"\n\
-    return \"OK\"\n\
-}\n";
+    const SRC: &str = include_str!("box_regressions/anonymousInterfaceDelegateOperands.kt");
     common::expect_box_ok_with_stdlib(SRC, "kt2224");
 }
 

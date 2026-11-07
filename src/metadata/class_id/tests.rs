@@ -186,3 +186,38 @@ fn resolved_klib_headers_and_class_inventory_share_the_same_qualified_name() {
     }
     assert_eq!(inventory, Some(vec![class_id.expect("Class.fq_name")]));
 }
+
+#[test]
+fn an_anonymous_declaration_keeps_its_raw_id_beside_a_dotted_nested_class() {
+    let entry = type_name("sample/Choice").nested_child("ENTRY");
+    let object = entry.nested_child("storage").nested_child("1");
+    let inner = object.nested_child("Inner");
+    let anonymous = ResolvedClassId::anonymous(object);
+    let locals = [entry, object, inner].into_iter().collect();
+    let namespaces = [entry, object, inner].into_iter().collect();
+    let mut strings = StringTable::with_local_classifiers(
+        &locals,
+        &namespaces,
+        None,
+        crate::metadata::MetadataTypeLookups::default().classifier_applications,
+    );
+    assert_eq!(strings.declaration_class_id(&anonymous), Ok(0));
+    assert_eq!(strings.class_id(inner), 1);
+    assert_eq!(
+        strings.serialize_types().as_bytes(),
+        &[10, 0, 10, 0, 42, 2, 0, 1]
+    );
+    assert_eq!(
+        strings.into_strings(),
+        [
+            "sample/Choice$ENTRY$storage$1",
+            "sample/Choice.ENTRY.storage.1.Inner"
+        ]
+    );
+    let mut klib =
+        StringTable::klib(crate::metadata::MetadataTypeLookups::default().classifier_applications);
+    assert_eq!(
+        klib.declaration_class_id(&anonymous),
+        Err(ClassIdError::LocalInKlib(object))
+    );
+}

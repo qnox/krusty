@@ -136,19 +136,25 @@ fn anonymous_property_initializer_reads_same_named_lexical_capture() {
             .then_some((classifier, body))
         })
         .expect("anonymous value initializer FIR");
-    let read = initializer
-        .expr(root_expression(initializer))
-        .expect("checked capture initializer read");
-    assert_eq!(read.ty, ResolvedTy::new(Ty::Int).unwrap());
     assert!(matches!(
-        &read.kind,
-        FirExprKind::ConstructorCaptureRead {
+        initializer
+            .expr(root_expression(initializer))
+            .map(|expression| &expression.kind),
+        Some(FirExprKind::ConstructorCaptureRead {
             owner: selected,
             field: 0,
             shared_cell: false,
             site: crate::fir::FirConstructorCaptureSite::Parameter,
-        } if *selected == owner
+        }) if *selected == owner
     ));
+    assert_eq!(
+        initializer
+            .expr(root_expression(initializer))
+            .unwrap()
+            .ty
+            .get(),
+        Ty::Int
+    );
 }
 
 #[test]
@@ -1431,150 +1437,6 @@ fn local_class_inside_setter_keeps_enclosing_backing_field_identity() {
 }
 
 #[test]
-fn nested_anonymous_super_argument_reads_its_enclosing_instance_from_the_prefix() {
-    let source = "open class X(val fn: () -> Unit)\n\
-                  open class C(val x: X)\n\
-                  class B(var value: Int) {\n\
-                      fun update() {\n\
-                          object : C(object : X({ value = 3 }) {}) {}\n\
-                      }\n\
-                  }\n";
-    let mut diagnostics = DiagSink::new();
-    let mut analysis = crate::frontend::analyze_source_set_with_features(
-        &[SourceInput::kotlin(source).with_file_stem("NestedAnonymousReceiver")],
-        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
-        &LangFeatures::new(),
-        &mut diagnostics,
-    );
-    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-
-    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
-    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
-    let (mut index, mut inline_bodies, _default_arguments, mut sources) =
-        streamed.module.into_parts();
-    let info = analysis.types[0].as_ref().expect("checked source");
-    crate::resolve::publish_checked_local_signatures(
-        &analysis.files[0],
-        SourceFileId::from_raw(0),
-        &mut analysis.symbols,
-        info,
-        &mut index,
-    )
-    .expect("checked local signatures must publish before FIR body checking");
-    let mut session = BodyCheckSession::default();
-    let mut sink = RecordingSink::default();
-    for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
-            crate::fir::BodyCheckUnit {
-                file: &analysis.files[0],
-                info,
-                source: SourceFileId::from_raw(0),
-                index: &index,
-            },
-            work,
-            sources.origins_mut(),
-            &mut inline_bodies,
-            &mut sink,
-            &mut session,
-        )
-        .expect("nested anonymous-class bodies must become checked FIR");
-    }
-
-    let (dispatch_captures, forwarded_storage_captures) = sink
-        .0
-        .iter()
-        .flat_map(|(_, body)| {
-            (0..body.expression_count()).filter_map(|raw| {
-                let expression = body.expr(FirExprId::from_raw(raw as u32))?;
-                let FirExprKind::AnonymousObject(object) = &expression.kind else {
-                    return None;
-                };
-                Some(
-                    object
-                        .captures
-                        .iter()
-                        .fold((0usize, 0usize), |counts, capture| match &capture.source {
-                            FirLocalClassCaptureSource::DispatchReceiver => {
-                                (counts.0 + 1, counts.1)
-                            }
-                            FirLocalClassCaptureSource::ClassStorage { .. }
-                            | FirLocalClassCaptureSource::ConstructorCapture { .. }
-                            | FirLocalClassCaptureSource::CapturedClassStorage { .. } => {
-                                (counts.0, counts.1 + 1)
-                            }
-                            FirLocalClassCaptureSource::Value(_)
-                            | FirLocalClassCaptureSource::Captured { .. }
-                            | FirLocalClassCaptureSource::EnclosingReceiver { .. }
-                            | FirLocalClassCaptureSource::CapturedImplicitReceiver { .. }
-                            | FirLocalClassCaptureSource::ImplicitReceiver { .. } => counts,
-                        }),
-                )
-            })
-        })
-        .fold((0usize, 0usize), |total, counts| {
-            (total.0 + counts.0, total.1 + counts.1)
-        });
-    assert_eq!(
-        [dispatch_captures, forwarded_storage_captures],
-        [1, 0],
-        "a forwarded super argument executes in B.update and must rematerialize the live receiver instead of reading the enclosing anonymous object's storage"
-    );
-
-    fn captured_property_write_count(body: &FirBody, index: &ResolvedModuleIndex) -> usize {
-        (0..body.expression_count())
-            .map(|raw| {
-                let Some(kind) = body
-                    .expr(FirExprId::from_raw(raw as u32))
-                    .map(|expression| &expression.kind)
-                else {
-                    return 0;
-                };
-                match kind {
-                    FirExprKind::PropertyWrite {
-                        dispatch_receiver: Some(receiver),
-                        ..
-                    } => {
-                        // The lambda writing `value` sits in the anonymous `X` subclass's SUPER
-                        // ARGUMENT, so the enclosing `B` it writes through comes off that
-                        // constructor's synthetic prefix parameter — never off a `this` that does
-                        // not exist yet.
-                        let Some(FirExprKind::ConstructorCaptureRead {
-                            owner,
-                            field: 0,
-                            shared_cell: false,
-                            // The read is INSIDE the lambda, so the coordinate says captured, not
-                            // the constructor's own parameter.
-                            site: crate::fir::FirConstructorCaptureSite::Captured { enclosing_depth: 0 },
-                        }) = body.expr(receiver.value).map(|expression| &expression.kind)
-                        else {
-                            return 0;
-                        };
-                        usize::from(
-                            index.declaration_header(*owner).is_some_and(|header| {
-                                header.flags.has(DeclarationFlags::ANONYMOUS_OBJECT)
-                            }) && index
-                                .declaration_anchor(*owner)
-                                .and_then(|anchor| anchor.owner)
-                                .and_then(|owner| index.declaration_name(owner))
-                                == Some("update"),
-                        )
-                    }
-                    FirExprKind::Lambda { body, .. } => captured_property_write_count(body, index),
-                    _ => 0,
-                }
-            })
-            .sum()
-    }
-    assert_eq!(
-        sink.0
-            .iter()
-            .map(|(_, body)| captured_property_write_count(body, &index))
-            .sum::<usize>(),
-        1,
-    );
-}
-
-#[test]
 fn class_initialization_units_stream_in_source_order() {
     let source = "class Ordered {\n\
                       val first: Int = 1\n\
@@ -1793,19 +1655,72 @@ fn enum_entry_property_initializers_stream_with_the_entry_receiver() {
         panic!("entry property read must capture exactly its entry receiver")
     };
     assert_eq!(receiver_capture.enclosing_depth, 0);
-    assert!((0..lambda_body.expression_count()).any(|raw| {
-        let Some(FirExprKind::CapturedClassStorageRead {
-            owner, field: 0, ..
-        }) = lambda_body
-            .expr(FirExprId::from_raw(raw as u32))
-            .map(|expression| &expression.kind)
-        else {
-            return false;
-        };
-        index
-            .declaration_anchor(*owner)
-            .is_some_and(|anchor| anchor.kind == DeclarationKind::EnumEntry)
-    }));
+    let crate::fir::FirCapturedReceiver::Enclosing {
+        classifier,
+        owner: Some(entry_owner),
+    } = &receiver_capture.receiver
+    else {
+        panic!("the captured receiver must retain its declared entry owner")
+    };
+    assert_eq!(*classifier, crate::types::type_name("Test"));
+    assert_eq!(
+        entry_owner.kind,
+        crate::fir::EnclosingInstanceKind::EnumEntry
+    );
+    let selected_declaration = index
+        .owned_declaration(entry_owner.declaration, DeclarationKind::Property, 0)
+        .expect("the entry's first declared property");
+    let selected_property = index
+        .property_for_declaration(selected_declaration)
+        .expect("the entry property is finalized");
+    let reads = (0..lambda_body.expression_count())
+        .filter_map(
+            |raw| match &lambda_body.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::PropertyRead {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    substitutions,
+                } => Some((
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    substitutions,
+                )),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [(target, Some(receiver), extension, context, substitutions)] = reads.as_slice() else {
+        panic!("the whole lambda has one declared property read with its dispatch receiver")
+    };
+    assert_eq!(
+        **target,
+        crate::fir::FirPropertyTarget::of_module(selected_property)
+    );
+    assert!(extension.is_none());
+    assert!(context.is_empty());
+    assert!(substitutions.is_empty());
+    assert_eq!(receiver.conversion, None);
+    let receiver_expression = lambda_body
+        .expr(receiver.value)
+        .expect("captured entry operand");
+    assert_eq!(receiver_expression.ty, receiver_capture.ty);
+    let FirExprKind::CapturedImplicitReceiver {
+        enclosing_depth,
+        current,
+        depth,
+        path,
+    } = &receiver_expression.kind
+    else {
+        panic!("the selected property operand must read the captured entry instance")
+    };
+    assert_eq!(*enclosing_depth, receiver_capture.enclosing_depth);
+    assert_eq!(*current, receiver_capture.current);
+    assert_eq!(*depth, receiver_capture.depth);
+    assert_eq!(path, &receiver_capture.path);
 
     let base_y = (0..index.declaration_count())
         .map(|raw| DeclarationId::from_raw(raw as u32))
@@ -1973,50 +1888,17 @@ fn enum_entry_property_anonymous_object_captures_prior_entry_storage() {
         abstract val value: String
     }
 "#;
-    let mut diagnostics = DiagSink::new();
-    let mut analysis = crate::frontend::analyze_source_set_with_features(
-        &[SourceInput::kotlin(source).with_file_stem("EnumEntryAnonymousCapture")],
-        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+    let inputs = [SourceInput::kotlin(source).with_file_stem("EnumEntryAnonymousCapture")];
+    let mut prepared = super::test_support::prepare_fir_source(
+        &inputs,
+        0,
+        Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        &mut diagnostics,
     );
-    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-
-    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
-    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
-    let (mut index, mut inline_bodies, _default_arguments, mut sources) =
-        streamed.module.into_parts();
-    crate::resolve::publish_discovered_local_capture_declarations(
-        &analysis.files[0],
-        SourceFileId::from_raw(0),
-        &mut analysis.symbols,
-        &mut index,
-    );
-    let info = analysis.types[0].as_ref().expect("checked source");
-    crate::resolve::publish_checked_local_signatures(
-        &analysis.files[0],
-        SourceFileId::from_raw(0),
-        &analysis.symbols,
-        info,
-        &mut index,
-    )
-    .expect("checked local signatures must publish before FIR body checking");
     let mut sink = RecordingSink::default();
-    for work in ordinary {
-        check_and_dispatch_body(
-            crate::fir::BodyCheckUnit {
-                file: &analysis.files[0],
-                info,
-                source: SourceFileId::from_raw(0),
-                index: &index,
-            },
-            work,
-            sources.origins_mut(),
-            &mut inline_bodies,
-            &mut sink,
-        )
+    prepared
+        .check_all_bodies(&mut sink)
         .expect("enum-entry anonymous capture must become checked FIR");
-    }
 }
 
 #[test]

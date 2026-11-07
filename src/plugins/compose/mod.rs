@@ -15,9 +15,12 @@
 //! lambda such a call passes that captures nothing becomes a property of the file's
 //! `ComposableSingletons` object ([`singleton_lambdas`]), with a restartable group of its own; one
 //! that captures value parameters of its function is remembered in the composition at the call.
-//! Source information, trace markers and `@FunctionKeyMeta` follow the plugin's options.
+//! Source information, trace markers and `@FunctionKeyMeta` follow the plugin's options. Every
+//! public or internal class gets the `$stable` field and `@StabilityInferred` kotlinc infers for it
+//! ([`class_stability`]).
 
 mod applier_targets;
+mod class_stability;
 mod durable_keys;
 mod options;
 mod restart_groups;

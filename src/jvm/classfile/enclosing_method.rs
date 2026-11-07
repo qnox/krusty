@@ -14,6 +14,15 @@ impl EnclosingMethodState {
     pub(super) fn retained_header_entries(&self) -> &[u16] {
         &self.retained_header_entries
     }
+
+    /// The enclosing method's descriptor, when the class is immediately enclosed by one. kotlinc
+    /// maps it through its type mapper, so the nested classes it names get `InnerClasses` rows.
+    pub(super) fn method_descriptor(&self) -> Option<&str> {
+        self.current
+            .as_ref()
+            .filter(|(_, method, _)| !method.is_empty())
+            .map(|(_, _, descriptor)| descriptor.as_str())
+    }
 }
 
 impl ClassWriter {
@@ -40,6 +49,8 @@ impl ClassWriter {
             method.to_string(),
             descriptor.to_string(),
         ));
+        // The memoized mentions are keyed by sizes that setting the descriptor does not change.
+        self.mentioned_names.borrow_mut().take();
     }
 
     /// Set only the enclosing CLASS. The JVM spec allows `method_index = 0` — "not immediately
