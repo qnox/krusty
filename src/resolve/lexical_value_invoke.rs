@@ -29,24 +29,42 @@ pub(super) struct LexicalInvokeSite<'a> {
 
 /// Candidates that share the deferred value's type-mismatch applicability, in tower order.
 pub(super) struct DeferredInvokePeers<'a> {
-    /// Functions declared inside the value's scope.
-    pub(super) nearer_lexical: &'a [LexicalCallable],
     /// Inapplicable members of an implicit receiver.
     pub(super) receiver: &'a [crate::libraries::FunctionInfo],
-    /// Functions declared outside the value's scope.
-    pub(super) farther_lexical: &'a [LexicalCallable],
     /// Top-level functions and other receiver-less candidates.
     pub(super) later: &'a [crate::libraries::FunctionInfo],
     /// Same-file constructors whose arguments were considered and rejected.
-    pub(super) constructors: &'a [CtorDelegationCandidate],
-    /// Simple name of the classifier those constructors belong to.
-    pub(super) constructor_name: &'a str,
+    pub(super) source_constructors: Option<(&'a [CtorDelegationCandidate], &'a str)>,
     /// A provider constructor that mapped and then rejected an argument type.
-    /// The string is its `constructor(...): Name` rendering.
-    pub(super) provider_constructor: Option<(&'a str, Ty, Ty)>,
+    pub(super) provider_constructor: Option<&'a LibraryConstructorFailure>,
 }
 
 impl Checker<'_> {
+    /// Every later level declined: report the type-mismatch peers together, or commit the nearer
+    /// value before any later mapping-failure reporter. This does not publish a rejected peer.
+    pub(super) fn finish_deferred_lexical_invoke_failure(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
+        site: &LexicalInvokeSite<'_>,
+        deferred: Option<DeferredLexicalInvoke>,
+        peers: DeferredInvokePeers<'_>,
+    ) -> Option<Ty> {
+        let deferred = deferred?;
+        if self.report_deferred_lexical_invoke_among(
+            scope,
+            call_args,
+            site.name,
+            site.span,
+            Some(&deferred),
+            peers,
+        ) {
+            Some(Ty::Error)
+        } else {
+            Some(self.commit_deferred_lexical_invoke(scope, call_args, site, deferred))
+        }
+    }
+
     /// Whether the explicit invoke form `value.invoke(args)` of the function value typed
     /// `value_ty` certainly cannot take `args`: an argument whose checked type is not assignable to
     /// its fixed parameter. A form whose shape is decided elsewhere (the implicit receiver form,
@@ -120,6 +138,7 @@ impl Checker<'_> {
     /// deferred value instead of reporting it.
     pub(super) fn report_deferred_lexical_invoke_among(
         &mut self,
+        scope: &CheckerScope<'_>,
         call_args: CallArgs<'_>,
         name: &str,
         span: Span,
@@ -155,13 +174,22 @@ impl Checker<'_> {
         ) else {
             return false;
         };
-        let nearer = peers
-            .nearer_lexical
+        let (nearer_lexical, farther_lexical) = Self::lexical_functions_around_value(scope, name);
+        let (constructors, constructor_name) = peers.source_constructors.unwrap_or((&[], ""));
+        let provider_constructor = match peers.provider_constructor {
+            Some(LibraryConstructorFailure::TypeMismatch {
+                rendered,
+                expected,
+                actual,
+                ..
+            }) => self.rendered_argument_mismatch_section(rendered, *expected, *actual),
+            _ => None,
+        };
+        let nearer = nearer_lexical
             .iter()
             .filter_map(|callable| self.lexical_callable_type_mismatch(call_args, callable))
             .collect::<Vec<_>>();
-        let farther = peers
-            .farther_lexical
+        let farther = farther_lexical
             .iter()
             .filter_map(|callable| self.lexical_callable_type_mismatch(call_args, callable))
             .chain(
@@ -173,16 +201,10 @@ impl Checker<'_> {
                         self.function_candidate_type_mismatch(call_args, name, candidate)
                     }),
             )
-            .chain(peers.constructors.iter().filter_map(|candidate| {
-                self.constructor_type_mismatch(call_args, peers.constructor_name, candidate)
+            .chain(constructors.iter().filter_map(|candidate| {
+                self.constructor_type_mismatch(call_args, constructor_name, candidate)
             }))
-            .chain(
-                peers
-                    .provider_constructor
-                    .and_then(|(display, expected, actual)| {
-                        self.rendered_argument_mismatch_section(display, expected, actual)
-                    }),
-            )
+            .chain(provider_constructor)
             .collect::<Vec<_>>();
         if nearer.is_empty() && farther.is_empty() {
             return false;
@@ -241,6 +263,25 @@ impl Checker<'_> {
         let signature = &callable.signature;
         let context_count = signature.context_count.min(signature.params.len());
         let call_sig = signature.call_sig().suffix(context_count);
+        let parameters = &signature.params[context_count..];
+        let bindings = signature
+            .generic_sig
+            .as_ref()
+            .map(|generic| {
+                self.rejected_generic_argument_bindings(
+                    call_args,
+                    generic,
+                    context_count,
+                    parameters,
+                    &call_sig,
+                    signature.vararg_index,
+                )
+            })
+            .unwrap_or_default();
+        let parameters = parameters
+            .iter()
+            .map(|&parameter| crate::symbol_resolver::ty_subst_keep_unbound(parameter, &bindings))
+            .collect::<Vec<_>>();
         self.rejected_type_mismatch_section(
             call_args,
             &super::source_signature_display::source_function_display(
@@ -248,7 +289,7 @@ impl Checker<'_> {
                 function,
                 signature.ret,
             ),
-            &signature.params[context_count..],
+            &parameters,
             &call_sig,
         )
     }
@@ -339,25 +380,51 @@ impl Checker<'_> {
         name: &str,
         candidate: &crate::libraries::FunctionInfo,
     ) -> Option<String> {
-        let CallArgs {
-            call,
-            args,
-            arg_tys,
-        } = call_args;
         let signature = candidate.semantic_signature();
         let context_count = candidate.context_count.min(signature.params.len());
         let call_sig = candidate.call_sig.suffix(context_count);
         let parameters = &signature.params[context_count..];
-        let bindings = call_argument_parameter_indices(
+        let bindings = self.rejected_generic_argument_bindings(
+            call_args,
+            &signature,
+            context_count,
+            parameters,
+            &call_sig,
+            candidate.call_sig.vararg_index,
+        );
+        let parameters = parameters
+            .iter()
+            .map(|&parameter| crate::symbol_resolver::ty_subst_keep_unbound(parameter, &bindings))
+            .collect::<Vec<_>>();
+        let display = self
+            .source_callable_display(candidate)
+            .unwrap_or_else(|| Self::generic_callable_display(name, candidate));
+        self.rejected_type_mismatch_section(call_args, &display, &parameters, &call_sig)
+    }
+
+    fn rejected_generic_argument_bindings(
+        &self,
+        CallArgs {
+            call,
+            args,
+            arg_tys,
+        }: CallArgs<'_>,
+        signature: &crate::libraries::GenericSig,
+        context_count: usize,
+        parameters: &[Ty],
+        call_sig: &CallSig,
+        vararg_index: Option<usize>,
+    ) -> crate::symbol_resolver::GSigBinds {
+        call_argument_parameter_indices(
             args.len(),
             parameters.len(),
             self.file.call_arg_names.get(&call.0).map(Vec::as_slice),
             self.file.call_has_trailing_lambda.contains(&call.0),
-            &call_sig,
+            call_sig,
         )
         .map(|mapping| {
             crate::symbol_resolver::infer_generic_call_bindings(
-                &signature,
+                signature,
                 mapping
                     .iter()
                     .copied()
@@ -365,7 +432,7 @@ impl Checker<'_> {
                     .zip(named_whole_array_varargs(
                         &mapping,
                         self.file.call_arg_names.get(&call.0).map(Vec::as_slice),
-                        &call_sig,
+                        call_sig,
                     ))
                     .enumerate()
                     .map(|(source, ((parameter, actual), whole_array))| {
@@ -375,23 +442,10 @@ impl Checker<'_> {
                             whole_array || self.file.is_spread_arg(args[source]),
                         )
                     }),
-                candidate.call_sig.vararg_index,
+                vararg_index,
             )
         })
-        .unwrap_or_default();
-        let parameters = parameters
-            .iter()
-            .map(|&parameter| crate::symbol_resolver::ty_subst_keep_unbound(parameter, &bindings))
-            .collect::<Vec<_>>();
-        self.rejected_type_mismatch_section(
-            call_args,
-            &signature_display_with_defaults(
-                &self.member_candidate_display(name, candidate),
-                &call_sig.param_defaults,
-            ),
-            &parameters,
-            &call_sig,
-        )
+        .unwrap_or_default()
     }
 
     /// The candidate section kotlinc prints for a mapped call whose argument types do not fit.
@@ -563,68 +617,4 @@ impl Checker<'_> {
                 _ => true,
             })
     }
-}
-
-/// A signature rendered without its defaults (`y: Int`) still denotes those parameters. kotlinc
-/// prints each one as `y: Int = ...` in a candidate list.
-fn signature_display_with_defaults(display: &str, defaults: &[bool]) -> String {
-    if !defaults.iter().any(|has_default| *has_default) || display.contains(" = ...") {
-        return display.to_string();
-    }
-    let Some(open) = display.find('(') else {
-        return display.to_string();
-    };
-    let Some(close) = matching_paren(display, open) else {
-        return display.to_string();
-    };
-    let mut parameters = split_top_level(&display[open + 1..close], ',');
-    if parameters.len() != defaults.len() {
-        return display.to_string();
-    }
-    for (parameter, &has_default) in parameters.iter_mut().zip(defaults) {
-        if has_default {
-            parameter.push_str(" = ...");
-        }
-    }
-    let mut rendered = String::new();
-    rendered.push_str(&display[..open + 1]);
-    rendered.push_str(&parameters.join(","));
-    rendered.push_str(&display[close..]);
-    rendered
-}
-
-fn matching_paren(text: &str, open: usize) -> Option<usize> {
-    let mut depth = 0;
-    for (offset, character) in text[open..].char_indices() {
-        match character {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(open + offset);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn split_top_level(text: &str, separator: char) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut depth = 0;
-    for (index, character) in text.char_indices() {
-        match character {
-            '(' | '<' | '[' => depth += 1,
-            ')' | '>' | ']' => depth -= 1,
-            found if found == separator && depth == 0 => {
-                parts.push(text[start..index].to_string());
-                start = index + character.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    parts.push(text[start..].to_string());
-    parts
 }

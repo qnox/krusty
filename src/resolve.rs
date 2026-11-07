@@ -20077,68 +20077,33 @@ impl<'a> Checker<'a> {
                 let mut candidates = inapplicable_associated;
                 candidates.extend(self.resolver().top_level_candidates(&fname));
                 candidates.extend(inapplicable_classifier_invoke.iter().cloned());
-                let (nearer_lexical, farther_lexical) = if deferred_lexical_invoke.is_some() {
-                    Self::lexical_functions_around_value(scope, &fname)
-                } else {
-                    (Vec::new(), Vec::new())
-                };
-                let invoke_call = CallArgs {
-                    call,
-                    args,
-                    arg_tys: &arg_tys,
-                };
-                let (constructor_candidates, constructor_name) = source_constructor_failure
-                    .as_ref()
-                    .map(|(_, candidates, name, _)| (candidates.as_slice(), name.as_str()))
-                    .unwrap_or((&[], ""));
-                let provider_constructor = match &constructor_mapping_failure {
-                    Some(LibraryConstructorFailure::TypeMismatch {
-                        rendered,
+                if let Some(result) = self.finish_deferred_lexical_invoke_failure(
+                    scope,
+                    CallArgs {
+                        call,
+                        args,
+                        arg_tys: &arg_tys,
+                    },
+                    &LexicalInvokeSite {
+                        callee,
+                        name: &fname,
+                        span,
                         expected,
-                        actual,
-                        ..
-                    }) if !rendered.is_empty() => Some((rendered.as_str(), *expected, *actual)),
-                    _ => None,
-                };
-                if self.report_deferred_lexical_invoke_among(
-                    invoke_call,
-                    &fname,
-                    span,
-                    deferred_lexical_invoke.as_ref(),
+                    },
+                    deferred_lexical_invoke,
                     DeferredInvokePeers {
-                        nearer_lexical: &nearer_lexical,
                         receiver: retained_receiver_call_rejections
                             .as_ref()
                             .map(|rejections| rejections.type_rejected_candidates())
                             .unwrap_or_default(),
-                        farther_lexical: &farther_lexical,
                         later: &candidates,
-                        constructors: constructor_candidates,
-                        constructor_name,
-                        provider_constructor,
+                        source_constructors: source_constructor_failure
+                            .as_ref()
+                            .map(|(_, candidates, name, _)| (candidates.as_slice(), name.as_str())),
+                        provider_constructor: constructor_mapping_failure.as_ref(),
                     },
                 ) {
-                    return Ty::Error;
-                }
-                // Every later level declined. A type-mismatch peer was reported above. Any
-                // remaining failure is a worse mapping error on a later rung, so the nearest
-                // deferred value owns the diagnostic before those reporters run.
-                if let Some(deferred) = deferred_lexical_invoke {
-                    return self.commit_deferred_lexical_invoke(
-                        scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys: &[],
-                        },
-                        &LexicalInvokeSite {
-                            callee,
-                            name: &fname,
-                            span,
-                            expected,
-                        },
-                        deferred,
-                    );
+                    return result;
                 }
                 let had_rejected_callable = had_inapplicable_constructor
                     || !candidates.is_empty()
