@@ -4756,7 +4756,7 @@ struct Emitter<'a> {
     /// The suspensions of the function being emitted, by call expression, each with the value
     /// class box its resumption unboxes. Empty for every function whose machine the IR pass owns.
     machine_suspensions: HashMap<u32, Option<(TypeName, Ty)>>,
-    /// Results and brace joins of inline-return frames in the method being emitted.
+    /// Results and deferred loop exits of inline-return frames in the method being emitted.
     inline_returns: inline_return_frames::InlineReturnState,
     /// Inline-return results whose expansion is discarded. A break to that frame leaves the
     /// value in its slot: the landing label does not read it, so it must not travel on the stack.

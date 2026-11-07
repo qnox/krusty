@@ -606,14 +606,13 @@ impl Emitter<'_> {
                 return;
             }
         };
-        // A `Unit` labeled return (`return@let`) is a `break` of the inline-return frame. The
-        // frame's own trailing break falls into the lambda's closing-brace `nop`. An earlier
-        // break is the return, and kotlinc lands it on the instruction after that `nop`. The
-        // join belongs to the frame the return names, not whichever lambda was opened last.
+        // A `Unit` labeled return (`return@let`, `return@outer`) breaks to the loop exit of the
+        // frame the return names. That exit is already `end`. Only the frame's synthetic trailing
+        // break falls through its closing brace instead of taking the exit.
         let target = if brk {
             label
                 .as_deref()
-                .and_then(|frame| self.unit_return_past_brace(transfer, frame))
+                .and_then(|frame| self.unit_return_fallthrough(transfer, frame))
                 .unwrap_or(end)
         } else {
             cont

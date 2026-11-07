@@ -183,14 +183,14 @@ impl Emitter<'_> {
         let brace_join_depth = self.unit_lambda_brace_depth();
         let owned_unit_frames = self.unit_frames_this_lambda_closes(stmts, value);
         if !owned_unit_frames.is_empty() {
-            self.open_unit_lambda_brace(owned_unit_frames, code.new_label());
+            self.open_unit_lambda_brace(owned_unit_frames);
         }
         // A same-file `Unit` lambda has no frame marker in its body. The frame block's trailing
         // `Unit` is the closing brace, and an early break must land on the instruction after it.
         // A lambda that already recorded this frame keeps that join.
         let frame_brace = self.plain_unit_return_frame(block, stmts, value);
         if let Some(frame) = frame_brace.clone() {
-            self.open_unit_lambda_return_brace(vec![frame], code.new_label());
+            self.open_unit_lambda_return_brace(vec![frame]);
         }
         let mut dead = false;
         let mut reserved_inline_stack = None;
@@ -1341,7 +1341,7 @@ impl Emitter<'_> {
         if !owned_unit_frames.is_empty() {
             // Bound after this lambda's closing-brace `nop`. An early break of a frame in
             // `owned_unit_frames` targets it; that frame's trailing break still falls into the nop.
-            self.open_unit_lambda_brace(owned_unit_frames, code.new_label());
+            self.open_unit_lambda_brace(owned_unit_frames);
         }
         let InlineBodyEntry {
             mut normalize_at_lambda_frame,

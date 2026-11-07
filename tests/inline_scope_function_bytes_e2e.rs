@@ -133,6 +133,14 @@ fun chain(s: String?): Int {
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
 
+/// Nested labeled returns, the `finally` they leave, and a value-producing `also` share one
+/// portable program with the box inventory.
+#[test]
+fn a_unit_lambda_labeled_return_matches_the_shared_box() {
+    let source = include_str!("box_regressions/unitLambdaLabeledReturn.kt");
+    common::expect_box_ok_with_stdlib(source, "UnitLambdaLabeledReturn");
+}
+
 /// A labeled return from an outer `Unit` lambda must leave that lambda, not the inner one whose
 /// closing brace was emitted most recently. `return@outer` skips `side`, and `return@inner` does
 /// not. Both jumps land where kotlinc lands them, past the frame's own closing `nop`.

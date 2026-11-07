@@ -53,8 +53,14 @@ impl Emitter<'_> {
         self.loop_stack
             .push((bottom, end, label.clone(), self.return_finalizers.len()));
         let trailing_unit_return = self.trailing_unit_return_break(body, label.as_deref());
+        // A `Unit` frame's labeled return keeps this loop exit. The exit is bound after the
+        // lambda's closing brace, and only the synthetic trailing break falls into the brace.
+        let brace_fallthrough = label.as_deref().and_then(|frame| {
+            self.defer_unit_frame_loop_end(frame, end)
+                .then(|| code.new_label())
+        });
         if let (Some(frame), Some(trailing)) = (label.clone(), trailing_unit_return) {
-            self.enter_unit_return_frame(frame, trailing);
+            self.enter_unit_return_frame(frame, trailing, brace_fallthrough);
         }
         let enclosing_terminal_target = self.terminal_statement_target.replace(bottom);
         // A lowered `for` loop's body is a transparent scope (kotlinc's `IrComposite`): what it
@@ -140,7 +146,11 @@ impl Emitter<'_> {
             code.goto(start);
         }
         self.loop_stack.pop();
-        self.bind(end, code);
+        if let Some(fallthrough) = brace_fallthrough {
+            self.bind(fallthrough, code);
+        } else {
+            self.bind(end, code);
+        }
         if let Some(saved) = retained_body_scope {
             self.close_scope_locals(code, false);
             self.block_depth -= 1;

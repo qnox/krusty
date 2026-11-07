@@ -7,9 +7,10 @@
 //! emitted; the first store activates that value's deferred JVM slot from whichever value domain
 //! it runs in.
 //!
-//! A `Unit` frame has no result slot. Its labeled return is still a `break` of the frame, and that
-//! break lands on the instruction after the spliced lambda's closing-brace `nop`. The join is keyed
-//! by the frame's label: a nested lambda pushes its own join, and an outer return must not take it.
+//! A `Unit` frame has no result slot. Its labeled return is still a `break` of that frame, and the
+//! break uses the frame's own loop exit. That exit is bound after the lambda's closing-brace `nop`.
+//! Only the frame's synthetic trailing `break` keeps the fallthrough that enters the `nop`. A nested
+//! lambda does not lend its exit to an outer return.
 
 use super::*;
 
@@ -18,19 +19,28 @@ use super::*;
 pub(super) struct InlineReturnState {
     /// Deferred result `(value, type)` of each value-producing frame, by the frame's label.
     results: HashMap<String, (u32, Ty)>,
-    /// Brace joins of spliced lambdas, innermost last. Each names the `Unit` frames whose early
-    /// `break` lands on `at`, just after that lambda's closing-brace `nop`.
+    /// Lambdas whose `Unit` frames defer their loop exits until after the closing brace, innermost
+    /// last. Each names the frames it owns.
     braces: Vec<UnitLambdaBrace>,
     /// Trailing synthetic breaks of `Unit` frames whose bodies are being emitted, innermost last.
-    trailing: Vec<(String, ExprId)>,
+    /// The label is the fallthrough into that frame's closing brace, when the loop exit itself is
+    /// bound after the brace.
+    trailing: Vec<TrailingUnitReturn>,
 }
 
 struct UnitLambdaBrace {
     frames: Vec<String>,
-    at: Label,
-    /// The join is the instruction after this lambda method's own return. The return is what the
-    /// inliner turns into the closing-brace `nop`, so the join cannot be bound in the body.
+    /// Loop exits of `frames`, filled in when each frame loop is emitted and bound after the brace.
+    ends: Vec<Label>,
+    /// The loop exit is the instruction after this lambda method's own return. The return is what
+    /// the inliner turns into the closing-brace `nop`, so the exit cannot be bound in the body.
     after_return: bool,
+}
+
+struct TrailingUnitReturn {
+    frame: String,
+    trailing: ExprId,
+    fallthrough: Option<Label>,
 }
 
 impl InlineReturnState {
@@ -52,48 +62,63 @@ impl InlineReturnState {
         self.results.values().map(|&(value, _)| value)
     }
 
-    fn push_brace(&mut self, frames: Vec<String>, at: Label, after_return: bool) {
+    fn push_brace(&mut self, frames: Vec<String>, after_return: bool) {
         self.braces.push(UnitLambdaBrace {
             frames,
-            at,
+            ends: Vec::new(),
             after_return,
         });
+    }
+
+    /// Remember `end` as a loop exit bound with the lambda that owns `frame`.
+    fn note_end(&mut self, frame: &str, end: Label) -> bool {
+        let Some(brace) = self
+            .braces
+            .iter_mut()
+            .rev()
+            .find(|brace| brace.frames.iter().any(|candidate| candidate == frame))
+        else {
+            return false;
+        };
+        brace.ends.push(end);
+        true
     }
 
     fn brace_len(&self) -> usize {
         self.braces.len()
     }
 
-    /// The innermost join, when it belongs after the lambda method's return.
-    fn last_return_brace(&self) -> Option<Label> {
-        self.braces
-            .last()
-            .filter(|brace| brace.after_return)
-            .map(|brace| brace.at)
-    }
-
     fn last_after_return(&self) -> bool {
         self.braces.last().is_some_and(|brace| brace.after_return)
     }
 
-    fn pop_brace(&mut self) -> Label {
+    fn last_return_ends(&self) -> Option<&[Label]> {
         self.braces
-            .pop()
-            .expect("a unit lambda brace join was pushed")
-            .at
+            .last()
+            .filter(|brace| brace.after_return)
+            .map(|brace| brace.ends.as_slice())
     }
 
-    /// The join after the lambda that owns `frame`, when one is open.
-    fn brace_for(&self, frame: &str) -> Option<Label> {
+    fn pop_brace(&mut self) -> Vec<Label> {
+        self.braces
+            .pop()
+            .expect("a unit lambda brace was pushed")
+            .ends
+    }
+
+    fn owns_frame(&self, frame: &str) -> bool {
         self.braces
             .iter()
             .rev()
-            .find(|brace| brace.frames.iter().any(|candidate| candidate == frame))
-            .map(|brace| brace.at)
+            .any(|brace| brace.frames.iter().any(|candidate| candidate == frame))
     }
 
-    fn enter_trailing(&mut self, frame: String, trailing: ExprId) {
-        self.trailing.push((frame, trailing));
+    fn enter_trailing(&mut self, frame: String, trailing: ExprId, fallthrough: Option<Label>) {
+        self.trailing.push(TrailingUnitReturn {
+            frame,
+            trailing,
+            fallthrough,
+        });
     }
 
     fn leave_trailing(&mut self) {
@@ -102,12 +127,17 @@ impl InlineReturnState {
             .expect("a unit inline-return frame was entered");
     }
 
-    fn trailing_for(&self, frame: &str) -> Option<ExprId> {
-        self.trailing
+    /// The fallthrough into `frame`'s closing brace when `transfer` is that frame's trailing break.
+    fn fallthrough_for(&self, frame: &str, transfer: ExprId) -> Option<(ExprId, Label)> {
+        let trailing = self
+            .trailing
             .iter()
             .rev()
-            .find(|(candidate, _)| candidate == frame)
-            .map(|(_, trailing)| *trailing)
+            .find(|candidate| candidate.frame == frame)?;
+        if trailing.trailing != transfer {
+            return None;
+        }
+        trailing.fallthrough.map(|label| (trailing.trailing, label))
     }
 }
 
@@ -146,35 +176,42 @@ impl Emitter<'_> {
         self.inline_returns.brace_len()
     }
 
-    /// Remember that early breaks of `frames` land on `at`, after this lambda's closing brace.
-    pub(super) fn open_unit_lambda_brace(&mut self, frames: Vec<String>, at: Label) {
+    /// Remember that `frames` close with this lambda, so their loop exits bind after its brace.
+    pub(super) fn open_unit_lambda_brace(&mut self, frames: Vec<String>) {
         if !frames.is_empty() {
-            self.inline_returns.push_brace(frames, at, false);
+            self.inline_returns.push_brace(frames, false);
         }
     }
 
     /// Like [`Self::open_unit_lambda_brace`], for a same-file lambda whose brace is its own return.
-    pub(super) fn open_unit_lambda_return_brace(&mut self, frames: Vec<String>, at: Label) {
+    pub(super) fn open_unit_lambda_return_brace(&mut self, frames: Vec<String>) {
         if !frames.is_empty() {
-            self.inline_returns.push_brace(frames, at, true);
+            self.inline_returns.push_brace(frames, true);
         }
     }
 
-    /// Bind the brace joins this lambda pushed, in reverse order of opening.
+    /// The frame's loop exit stays unbound until this lambda's closing brace, when `frame` is one
+    /// this lambda owns.
+    pub(super) fn defer_unit_frame_loop_end(&mut self, frame: &str, end: Label) -> bool {
+        self.inline_returns.note_end(frame, end)
+    }
+
+    /// Bind the loop exits this lambda deferred, in reverse order of opening.
     ///
-    /// A join that belongs after the lambda method's return stays open: the return has not been
-    /// written yet, and binding the join here would put it on the `Unit` the return then consumes.
+    /// An exit that belongs after the lambda method's return stays open: the return has not been
+    /// written yet.
     pub(super) fn bind_unit_lambda_braces(&mut self, depth: usize, code: &mut CodeBuilder) {
         while self.inline_returns.brace_len() > depth && !self.inline_returns.last_after_return() {
-            let at = self.inline_returns.pop_brace();
-            self.bind(at, code);
+            for end in self.inline_returns.pop_brace() {
+                self.bind(end, code);
+            }
         }
     }
 
-    /// Bind this builder's after-return joins, down to `depth`.
+    /// Bind this builder's after-return loop exits, down to `depth`.
     ///
-    /// An enclosing lambda's join is left in place: its label belongs to that lambda's builder.
-    /// Returns whether a bound join is reachable, so the caller can give it an instruction.
+    /// An enclosing lambda's exit is left in place: its label belongs to that lambda's builder.
+    /// Returns whether a bound exit is reachable, so the caller can give it an instruction.
     pub(super) fn bind_owned_unit_lambda_braces(
         &mut self,
         depth: usize,
@@ -182,21 +219,28 @@ impl Emitter<'_> {
     ) -> bool {
         let mut landed = false;
         while self.inline_returns.brace_len() > depth {
-            let Some(at) = self.inline_returns.last_return_brace() else {
+            let Some(ends) = self.inline_returns.last_return_ends() else {
                 break;
             };
-            if !code.owns_label(at) {
+            if ends.is_empty() || ends.iter().any(|end| !code.owns_label(*end)) {
                 break;
             }
-            let at = self.inline_returns.pop_brace();
-            self.bind(at, code);
-            landed |= !code.is_dead();
+            for end in self.inline_returns.pop_brace() {
+                self.bind(end, code);
+                landed |= !code.is_dead();
+            }
         }
         landed
     }
 
-    pub(super) fn enter_unit_return_frame(&mut self, frame: String, trailing: ExprId) {
-        self.inline_returns.enter_trailing(frame, trailing);
+    pub(super) fn enter_unit_return_frame(
+        &mut self,
+        frame: String,
+        trailing: ExprId,
+        fallthrough: Option<Label>,
+    ) {
+        self.inline_returns
+            .enter_trailing(frame, trailing, fallthrough);
     }
 
     pub(super) fn leave_unit_return_frame(&mut self) {
@@ -204,25 +248,17 @@ impl Emitter<'_> {
     }
 
     pub(super) fn has_open_unit_lambda_brace(&self, frame: &str) -> bool {
-        self.inline_returns.brace_for(frame).is_some()
+        self.inline_returns.owns_frame(frame)
     }
 
-    pub(super) fn unit_lambda_brace(&self, frame: &str) -> Option<Label> {
-        self.inline_returns.brace_for(frame)
-    }
-
-    /// Where an early `break` of the `Unit` frame `frame` lands: past that frame's lambda brace.
+    /// Where the synthetic trailing `break` of `frame` enters its closing brace.
     ///
-    /// The frame's own trailing break is not early; it falls into the brace `nop`. A frame with
-    /// no open join, or whose trailing break is not the one recorded for it, keeps the loop exit.
-    pub(super) fn unit_return_past_brace(&self, transfer: ExprId, frame: &str) -> Option<Label> {
-        let at = self.inline_returns.brace_for(frame)?;
-        let trailing = self.inline_returns.trailing_for(frame)?;
-        if trailing == transfer {
-            return None;
-        }
+    /// An earlier `break` of that frame is the labeled return. It keeps the loop exit resolved for
+    /// the frame, which is bound after the brace.
+    pub(super) fn unit_return_fallthrough(&self, transfer: ExprId, frame: &str) -> Option<Label> {
+        let (trailing, fallthrough) = self.inline_returns.fallthrough_for(frame, transfer)?;
         match self.ir.expr(trailing) {
-            IrExpr::Break { label: Some(found) } if found == frame => Some(at),
+            IrExpr::Break { label: Some(found) } if found == frame => Some(fallthrough),
             _ => None,
         }
     }

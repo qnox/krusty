@@ -283,16 +283,11 @@ impl Emitter<'_> {
             return;
         }
         let brk = exit != LoopExit::Continue;
-        // An early break of a `Unit` frame leaves past that frame's closing brace. The frame's
-        // own trailing break still uses the loop exit, which falls into the brace.
-        let target = if brk {
-            label
-                .as_deref()
-                .and_then(|frame| self.unit_lambda_brace(frame))
-                .unwrap_or(end)
-        } else {
-            cont
-        };
+        // The break names one open loop. Its target is that loop's exit, the one recorded for the
+        // resolved inline-return frame, not whichever lambda brace was opened last. A frame's
+        // synthetic trailing break is emitted with the frame and is not a jump out of a nested
+        // lambda; it alone falls through the closing brace.
+        let target = if brk { end } else { cont };
         if self.emit_transfer_finalizers(depth, code) {
             self.finish_loop_transfer(&label, target, brk, None, code);
         }
