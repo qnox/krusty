@@ -17,7 +17,7 @@ fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
         panic!("producer and consumer modules")
     };
     assert_eq!(consumer.deps, std::slice::from_ref(&producer.name));
-    let [(producer_name, producer_text)] = producer.files.as_slice() else {
+    let [(producer_stem, producer_text)] = producer.files.as_slice() else {
         panic!("one complete producer")
     };
     assert_eq!(
@@ -44,7 +44,7 @@ fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
             Outcome::Pass,
             "the product producer's existing constructor export remains callable"
         );
-        let producer_path = work.join(producer_name);
+        let producer_path = work.join(format!("{producer_stem}.kt"));
         std::fs::write(&producer_path, producer_text).unwrap();
         let (produced, library) = crate::reference_invocation_support::run_reference(
             compilation_target,
@@ -67,7 +67,7 @@ fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
         let stems = consumer
             .files
             .iter()
-            .map(|(name, _)| name.strip_suffix(".kt").expect("Kotlin source").to_owned())
+            .map(|(stem, _)| stem.clone())
             .collect::<Vec<_>>();
         let inputs = consumer
             .files

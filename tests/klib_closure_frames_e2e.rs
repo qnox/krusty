@@ -213,31 +213,29 @@ fn official_dependency_constructor_roots_allocate_and_rebind_between_consumer_fi
         panic!("producer and consumer modules")
     };
     assert_eq!(consumer.deps, std::slice::from_ref(&producer.name));
-    let [(library_name, library)] = producer.files.as_slice() else {
+    let [(_, library)] = producer.files.as_slice() else {
         panic!("one complete producer file")
     };
     let consumers = consumer
         .files
         .iter()
-        .map(|(name, text)| {
-            (
-                name.strip_suffix(".kt").expect("Kotlin file"),
-                text.as_str(),
-            )
-        })
+        .map(|(stem, text)| (stem.as_str(), text.as_str()))
         .collect::<Vec<_>>();
     assert_eq!(
         consumers.len(),
         2,
         "later source file must reuse the first allocation export"
     );
-    let mut oracle = vec![(library_name.as_str(), library.as_str())];
-    oracle.extend(
-        consumer
-            .files
-            .iter()
-            .map(|(name, text)| (name.as_str(), text.as_str())),
-    );
+    let oracle_sources = producer
+        .files
+        .iter()
+        .chain(&consumer.files)
+        .map(|(stem, text)| (format!("{stem}.kt"), text.as_str()))
+        .collect::<Vec<_>>();
+    let oracle = oracle_sources
+        .iter()
+        .map(|(name, text)| (name.as_str(), *text))
+        .collect::<Vec<_>>();
     assert_eq!(
         common::kotlinc_box_files_result_with_classpath(&oracle, "fixture.ConsumerKt", &[]),
         "OK"
