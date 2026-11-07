@@ -111,7 +111,7 @@ impl ProductionSignatureSemantics<'_> {
                         .type_params()
                         .iter()
                         .chain(class.captured_type_parameters.type_params())
-                        .map(|formal| formal.as_str()),
+                        .map(|formal| crate::types::intern(formal)),
                 );
             }
             owner = self
