@@ -1,18 +1,11 @@
 //! Field order of a local or anonymous class's captures across repeated checks of its body.
 //!
 //! Postponed generic-lambda checking may revisit the same construction while one receiver type is
-//! temporarily `Pending`. A provisional revisit must neither replace the exact symbolic type
-//! recorded by the earlier check nor renumber an established capture field: descendant
-//! constructions can already carry one of these ordinals as their resolved `ClassStorage` source.
-//! The final check takes the order it selected (kotlinc's first-use order) and returns the field
-//! permutation, so direct descendants update their exact storage coordinates instead of the class
-//! body being checked again. This table crosses the retained-inline boundary and no pending
+//! temporarily `Pending`. Reconcile provisional capture inventories without replacing established
+//! symbolic types or logical capture families. Only this layout algorithm interprets provisional
+//! ordinals; recorded uses identify the selected logical value across reorder and forwarding.
+//! The final check records kotlinc's first-use order and which captures need storage. No pending
 //! semantic type may reach checked FIR.
-//!
-//! Field ordinals are identities, not the physical layout. Once a local class's body has been
-//! checked, its lexical-value captures also get kotlinc's first-use order, computed from the
-//! storage identities that body recorded. The order is a recorded fact the JVM backend applies;
-//! every earlier phase keeps field order. The same walk decides which captures need storage.
 
 use super::context_capture::context_argument_sites;
 use super::scope::PathRoot;
@@ -72,7 +65,25 @@ pub(super) fn reconcile(
 }
 
 fn same_capture(capture: &AnonymousObjectCapture, exact: &AnonymousObjectCapture) -> bool {
-    capture.name == exact.name && capture.source == exact.source
+    match (capture.source, exact.source) {
+        (
+            AnonymousObjectCaptureSource::ClassStorage(left),
+            AnonymousObjectCaptureSource::ClassStorage(right),
+        ) => left.identity == right.identity,
+        (
+            AnonymousObjectCaptureSource::ImplicitReceiver { .. },
+            AnonymousObjectCaptureSource::ImplicitReceiver { .. },
+        )
+        | (
+            AnonymousObjectCaptureSource::EnclosingInstance { .. },
+            AnonymousObjectCaptureSource::EnclosingInstance { .. },
+        ) => capture.same_direct_receiver(exact),
+        (left, right) => {
+            capture.name == exact.name
+                && left == right
+                && capture.lexical_binding == exact.lexical_binding
+        }
+    }
 }
 
 /// A capture keeps its established cell sharing, and its established type while the revisit knows
@@ -80,6 +91,9 @@ fn same_capture(capture: &AnonymousObjectCapture, exact: &AnonymousObjectCapture
 /// call's solution completes), and both know less than a determined type.
 fn keep_established_facts(capture: &mut AnonymousObjectCapture, exact: &AnonymousObjectCapture) {
     capture.shared_cell |= exact.shared_cell;
+    // Demand discovered during a revisit cannot retag an already published capture family.
+    capture.capture_dependency = exact.capture_dependency;
+    capture.retain_constructor_projections(&exact.constructor_projections);
     if exact.type_knowledge() > capture.type_knowledge() {
         capture.ty = exact.ty;
         capture.storage_ty = exact.storage_ty;
@@ -88,17 +102,25 @@ fn keep_established_facts(capture: &mut AnonymousObjectCapture, exact: &Anonymou
 
 /// Put a local class's used receiver captures in the order its body first used them, as kotlinc
 /// does, keeping every other capture in its field. `used` pairs each receiver's first-use position
-/// with its capture source.
+/// with its declaration role. A reconstructed operand coordinate is not a receiver identity.
 pub(super) fn order_receivers_by_first_use(
     captures: &mut [AnonymousObjectCapture],
     bindings: &mut [Option<u32>],
-    mut used: Vec<(usize, AnonymousObjectCaptureSource)>,
+    mut used: Vec<(usize, super::ReceiverDeclarationRole)>,
 ) {
     used.sort_by_key(|(first_use, _)| *first_use);
     let fields = captures
         .iter()
         .enumerate()
-        .filter(|(_, capture)| used.iter().any(|(_, source)| *source == capture.source))
+        .filter(|(_, capture)| {
+            matches!(
+                capture.source,
+                AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+                    | AnonymousObjectCaptureSource::EnclosingInstance { .. }
+            ) && used
+                .iter()
+                .any(|(_, role)| Some(*role) == capture.receiver_role)
+        })
         .map(|(field, _)| field)
         .collect::<Vec<_>>();
     let mut ordered = fields
@@ -107,7 +129,7 @@ pub(super) fn order_receivers_by_first_use(
         .collect::<Vec<_>>();
     ordered.sort_by_key(|(capture, _)| {
         used.iter()
-            .position(|(_, source)| *source == capture.source)
+            .position(|(_, role)| Some(*role) == capture.receiver_role)
     });
     for (field, (capture, binding)) in fields.into_iter().zip(ordered) {
         captures[field] = capture;
@@ -160,6 +182,9 @@ impl super::Checker<'_> {
         provisional: bool,
         forwarded: &super::receiver_uses::ReceiverUseSites,
     ) -> bool {
+        let Some(owner) = self.body_class_storage_owner(declaration) else {
+            return false;
+        };
         let original = self
             .discovered_anonymous_captures
             .get(&declaration)
@@ -186,16 +211,17 @@ impl super::Checker<'_> {
         );
         // Descendants were checked against provisional fields. Rewrite their selected sources
         // through the finalized permutation instead of replaying the nested class bodies.
-        let remap = super::anonymous_capture_remap::CaptureFieldRemap {
-            fields: &fields,
-            original: &original,
-            forwarded,
-        };
-        let storage_fields = remap.fields;
-        if !super::anonymous_capture_remap::remap_direct_anonymous_class_storage_captures(
+        if !super::anonymous_capture_remap::remap_owned_anonymous_class_storage_captures(
+            self.file,
             declaration,
             &self.anonymous_lexical_scope,
-            remap,
+            &self.discovered_anonymous_super_forwards,
+            &self.resolved_primary_ctor_delegations,
+            super::anonymous_capture_remap::CaptureFieldRemap {
+                owner,
+                fields: &fields,
+                original: &original,
+            },
             &mut self.discovered_anonymous_captures,
         ) {
             return false;
@@ -211,12 +237,7 @@ impl super::Checker<'_> {
             .get(&declaration)
             .cloned()
         {
-            self.publish_anonymous_capture_layout(
-                scope,
-                declaration,
-                &captures,
-                Some(storage_fields),
-            );
+            self.publish_anonymous_capture_layout(scope, declaration, &captures);
         }
         true
     }
@@ -235,8 +256,19 @@ impl super::Checker<'_> {
             .discovered_local_class_capture_bindings
             .get(&declaration)
             .map_or(&[][..], Vec::as_slice);
-        let mut uses =
-            FirstUses::for_class(self, scope, Some(statement), class, captures, bindings);
+        let Some(owner) = self.body_class_storage_owner(declaration) else {
+            self.diags
+                .error(class.span, "class storage has no checked classifier owner");
+            return;
+        };
+        let mut uses = FirstUses::for_class(
+            self,
+            scope,
+            Some(statement),
+            (owner, class),
+            captures,
+            bindings,
+        );
         uses.collect(Closure::Class(class, Some(declaration)));
         if let Some(unordered) = uses.unordered.take() {
             let message = format!("internal error: local class '{}': {unordered}", class.name);
@@ -263,7 +295,6 @@ impl super::Checker<'_> {
         scope: &CheckerScope<'_>,
         declaration: DeclId,
         captures: &[AnonymousObjectCapture],
-        storage_fields: Option<&[Option<u32>]>,
     ) {
         let Decl::Class(class) = self.file.decl(declaration) else {
             return;
@@ -274,8 +305,12 @@ impl super::Checker<'_> {
             .iter()
             .map(|capture| capture.lexical_binding)
             .collect::<Vec<_>>();
-        let mut uses = FirstUses::for_class(self, scope, None, class, captures, &bindings);
-        uses.storage_fields = storage_fields;
+        let Some(owner) = self.body_class_storage_owner(declaration) else {
+            self.diags
+                .error(class.span, "class storage has no checked classifier owner");
+            return;
+        };
+        let mut uses = FirstUses::for_class(self, scope, None, (owner, class), captures, &bindings);
         uses.collect(Closure::Class(class, Some(declaration)));
         if let Some(unordered) = uses.unordered.take() {
             self.diags.error(
@@ -337,9 +372,9 @@ impl super::Checker<'_> {
             checker: self,
             statement: Some(statement),
             inner_classes: Vec::new(),
-            storage_fields: None,
             read_namespace: CaptureReadNamespace::OwnStorage,
             owner: Owner::Function,
+            classifier: None,
             span,
             captures: &[],
             bindings: &bindings,
@@ -440,11 +475,10 @@ impl super::Checker<'_> {
     /// Record an assignment to capture storage or to a local's binding.
     pub(super) fn record_class_storage_write(&mut self, statement: StmtId, target: Option<Local>) {
         let target = match target.map(|local| (local.origin, local.flow_identity)) {
-            Some((
-                ReceiverFnValueOrigin::ClassStorage(field)
-                | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. },
-                _,
-            )) => StorageUse::Field(field),
+            Some((ReceiverFnValueOrigin::ClassStorage(storage), _)) => StorageUse::Field(storage),
+            Some((ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field }, _)) => {
+                StorageUse::EnumEntryField { owner, field }
+            }
             Some((ReceiverFnValueOrigin::Local, identity)) => StorageUse::Binding(identity),
             _ => return,
         };
@@ -507,7 +541,11 @@ impl std::fmt::Display for UnorderedCapture {
 #[derive(Clone, Copy)]
 enum StorageUse {
     /// Capture storage of the innermost classifier.
-    Field(u32),
+    Field(super::ClassStorageSource),
+    EnumEntryField {
+        owner: crate::types::TypeName,
+        field: u32,
+    },
     /// A local's lexical binding, by flow identity.
     Binding(u32),
 }
@@ -558,7 +596,8 @@ fn is_value_capture(capture: &AnonymousObjectCapture) -> bool {
         && matches!(
             capture.source,
             AnonymousObjectCaptureSource::LexicalValue
-                | AnonymousObjectCaptureSource::ClassStorage { .. }
+                | AnonymousObjectCaptureSource::ClassStorage(_)
+                | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. }
         )
 }
 
@@ -607,9 +646,9 @@ struct FirstUses<'w, 'c> {
     inner_classes: Vec<DeclId>,
     /// A scratch body selected these reads before its owner finalized the receiver prefix.
     /// Included classifiers already carry finalized coordinates and do not use this permutation.
-    storage_fields: Option<&'w [Option<u32>]>,
     read_namespace: CaptureReadNamespace,
     owner: Owner,
+    classifier: Option<crate::types::TypeName>,
     /// The declaration's source range: a declaration inside it reads the captures directly.
     span: Span,
     captures: &'w [AnonymousObjectCapture],
@@ -673,10 +712,11 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         checker: &'w super::Checker<'c>,
         scope: &CheckerScope<'_>,
         statement: Option<StmtId>,
-        class: &ClassDecl,
+        class: (crate::types::TypeName, &ClassDecl),
         captures: &'w [AnonymousObjectCapture],
         bindings: &'w [Option<u32>],
     ) -> Self {
+        let (classifier, class) = class;
         let lexical_reads = captures
             .iter()
             .zip(bindings)
@@ -691,9 +731,9 @@ impl<'w, 'c> FirstUses<'w, 'c> {
             checker,
             statement,
             inner_classes: Vec::new(),
-            storage_fields: None,
             read_namespace: CaptureReadNamespace::OwnStorage,
             owner: Owner::Class,
+            classifier: Some(classifier),
             span: class.span,
             captures,
             bindings,
@@ -1023,9 +1063,10 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         for (field, capture) in physical {
             let carried = if inside {
                 match capture.source {
-                    AnonymousObjectCaptureSource::ClassStorage { field } => {
-                        (self.owner == Owner::Class).then_some(field)
-                    }
+                    AnonymousObjectCaptureSource::ClassStorage(storage) => (self.classifier
+                        == Some(storage.owner))
+                    .then(|| self.logical_capture_field(storage.identity))
+                    .flatten(),
                     // A value the class captured, which the nested classifier captures again.
                     _ => bindings
                         .get(field)
@@ -1042,6 +1083,21 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         }
     }
 
+    fn logical_capture_field(&self, identity: crate::fir::ClassCaptureIdentity) -> Option<u32> {
+        let owner = self.classifier?;
+        let mut selected = self
+            .captures
+            .iter()
+            .enumerate()
+            .filter(|(_, capture)| capture.represents_identity(owner, identity));
+        let (field, _) = selected.next()?;
+        selected
+            .next()
+            .is_none()
+            .then(|| u32::try_from(field).ok())
+            .flatten()
+    }
+
     /// The capture field a recorded use names, if it is one of this class's captures.
     fn storage_use(&self, used: StorageUse) -> Option<u32> {
         match used {
@@ -1049,10 +1105,10 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                 if self.owner == Owner::Class
                     && self.read_namespace == CaptureReadNamespace::ConstructionStorage =>
             {
+                let owner = self.classifier?;
                 let mut selected = self.captures.iter().enumerate().filter(|(_, capture)| {
                     capture.receiver.is_none()
-                        && capture.source
-                            == (AnonymousObjectCaptureSource::ClassStorage { field: source })
+                        && capture.represents_identity(owner, source.identity)
                 });
                 let (field, _) = selected.next()?;
                 if selected.next().is_some() {
@@ -1060,11 +1116,32 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                 }
                 u32::try_from(field).ok()
             }
-            StorageUse::Field(field) if self.owner == Owner::Class => match self.storage_fields {
-                Some(fields) => fields.get(field as usize).copied().flatten(),
-                None => Some(field),
-            },
+            StorageUse::Field(storage)
+                if self.owner == Owner::Class && self.classifier == Some(storage.owner) =>
+            {
+                self.logical_capture_field(storage.identity)
+            }
             StorageUse::Field(_) => None,
+            StorageUse::EnumEntryField { owner, field }
+                if self.owner == Owner::Class
+                    && self.read_namespace == CaptureReadNamespace::ConstructionStorage =>
+            {
+                let mut selected = self.captures.iter().enumerate().filter(|(_, capture)| {
+                    capture.receiver.is_none()
+                        && capture.source
+                            == AnonymousObjectCaptureSource::EnumEntryPropertyStorage {
+                                owner,
+                                field,
+                            }
+                });
+                let (field, _) = selected.next()?;
+                selected
+                    .next()
+                    .is_none()
+                    .then(|| u32::try_from(field).ok())
+                    .flatten()
+            }
+            StorageUse::EnumEntryField { .. } => None,
             StorageUse::Binding(identity) => self
                 .lexical_reads
                 .iter()
@@ -1103,12 +1180,22 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         }
         let read = match checker.expr_lowers.get(&expression) {
             Some(
-                ExprLowering::ClassStorageRead { field }
+                ExprLowering::ClassStorageRead(storage)
                 | ExprLowering::ReceiverFnInvoke {
-                    origin: ReceiverFnValueOrigin::ClassStorage(field),
+                    origin: ReceiverFnValueOrigin::ClassStorage(storage),
                     ..
                 },
-            ) => Some(StorageUse::Field(*field)),
+            ) => Some(StorageUse::Field(*storage)),
+            Some(
+                ExprLowering::EnumEntryStorageRead { owner, field }
+                | ExprLowering::ReceiverFnInvoke {
+                    origin: ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field },
+                    ..
+                },
+            ) => Some(StorageUse::EnumEntryField {
+                owner: *owner,
+                field: *field,
+            }),
             _ => match checker.read_flow_roots.get(&expression) {
                 Some(PathRoot::Value(identity)) => Some(StorageUse::Binding(*identity)),
                 _ => None,

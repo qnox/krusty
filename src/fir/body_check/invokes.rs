@@ -168,9 +168,21 @@ impl BodyFirChecker<'_> {
                     ));
                 }
             }
-            ReceiverFnValueOrigin::ClassStorage(field)
-            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
-                let binding = self.direct_class_capture_binding(field, function_ty)?;
+            origin @ (ReceiverFnValueOrigin::ClassStorage(_)
+            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }) => {
+                let span = self
+                    .file
+                    .expr_span(expression)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+                let binding = match origin {
+                    ReceiverFnValueOrigin::ClassStorage(storage) => {
+                        self.selected_class_capture_binding(storage, span)?
+                    }
+                    ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field } => {
+                        self.enum_entry_storage_binding(owner, field, function_ty, span)?
+                    }
+                    _ => unreachable!("matched storage origin"),
+                };
                 let kind = self.capture_read_kind(expression, binding)?;
                 self.body.add_expr(FirExpr {
                     origin: origin_id,

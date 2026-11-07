@@ -374,8 +374,18 @@ impl BodyFirChecker<'_> {
         )?;
         let outer_receiver = self.constructor_outer_receiver(expression, outer)?;
         let origin = self.expression_origin(expression)?;
-        let external_capture_arguments =
-            self.external_constructor_capture_arguments(declaration, origin)?;
+        let capture_plan = match self.info.expr_lowers.get(&expression) {
+            Some(ExprLowering::ConstructorCaptures(plan)) => Some(plan.as_ref().clone()),
+            _ => None,
+        };
+        let external_capture_arguments = self.external_constructor_capture_arguments(
+            declaration,
+            origin,
+            self.file
+                .expr_span(expression)
+                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
+            capture_plan.as_ref(),
+        )?;
         let outer_parameter =
             if outer_receiver.is_some() {
                 let outer = self
@@ -1209,7 +1219,12 @@ fn add_constructor_delegation(
                     }
                     Some(
                         checker
-                            .external_constructor_capture_arguments(declaration, origin)?
+                            .external_constructor_capture_arguments(
+                                declaration,
+                                origin,
+                                span,
+                                resolved.capture_plan.as_ref(),
+                            )?
                             .unwrap_or_default(),
                     )
                 } else {
@@ -1397,6 +1412,9 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
     let owner = BodyOwnerId::from_raw(work.target.raw());
     let mut checker = BodyFirChecker::new(unit, owner, span, origins, session);
     checker.constructor_prefix_capture_access = true;
+    checker
+        .bind_signature_constructor_capture_prefix(active, work.target, span)
+        .map_err(CheckedBodyDriverFailure::Check)?;
     bind_parameters_and_check_defaults(
         &mut checker,
         &parameters,
