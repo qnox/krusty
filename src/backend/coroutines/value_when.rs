@@ -13,6 +13,9 @@ use super::value_namespace::{max_value_index, zero_value};
 use super::value_try::{assign_branch_to_tmp, ValueBranchWrap};
 use super::CoroutineRepresentation;
 
+#[cfg(test)]
+mod tests;
+
 /// Desugar a VALUE-position `when`/`if` in `return` position whose BRANCH VALUES suspend (but whose
 /// CONDITIONS do not — a suspending condition is hoisted earlier) into a STATEMENT-position `when` binding
 /// a temp: `return when (x) { a -> v0; else -> v1 }` becomes `var tmp = <default>; when (x) { a -> { …
@@ -192,7 +195,15 @@ pub(super) fn normalize_value_when(ir: &mut IrFile, expression: ExprId) -> Optio
             let result = ir
                 .named_type(expression)
                 .expect("a type operation names its result");
-            Some(ir.add_when(branches, result))
+            if ir.whens.exhaustive.contains_key(&arg) {
+                // The checked original can be exhaustive without an `else`. Conversion changes
+                // its result, not the checked coverage of its unchanged conditions.
+                let converted = ir.add_expr(IrExpr::When { branches });
+                ir.whens.exhaustive.insert(converted, result);
+                Some(converted)
+            } else {
+                Some(ir.add_when(branches, result))
+            }
         }
         _ => None,
     }
