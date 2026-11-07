@@ -58,7 +58,7 @@ fn initializer_object(ir: &mut IrFile, owner: TypeName, property: &str) -> TypeN
 }
 
 fn encoded_id(ir: &IrFile, classifier: TypeName) -> String {
-    let known_inner = |_| Ok(None);
+    let known_inner = |_| Ok(crate::metadata::ClassifierApplication::Direct);
     let mut strings =
         StringTable::with_local_classifiers(&names(ir), &enum_entry_bodies(ir), None, &known_inner);
     let index = strings.class_id(classifier);
