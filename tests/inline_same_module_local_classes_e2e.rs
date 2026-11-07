@@ -7,46 +7,27 @@
 
 use super::common;
 
-const DECLARATION: &str = r#"interface Named {
-    fun name(): String
+// PLATFORM-SPECIFIC: exact JVM class inventories, bytes, metadata and reference runtime errors.
+// Whole portable inputs are also selected by the canonical backend/version inventory.
+fn with_same_module_sources<T>(run: impl FnOnce(&[(&str, &str)]) -> T) -> T {
+    let (blocks, java) = krusty::conformance::split_files(include_str!(
+        "box_regressions/inlineCompiledBodyObjects.kt"
+    ));
+    assert!(java.is_empty());
+    let files: Vec<_> = blocks
+        .into_iter()
+        .map(|(stem, source)| (format!("{stem}.kt"), source))
+        .collect();
+    let files: Vec<_> = files
+        .iter()
+        .map(|(name, source)| (name.as_str(), source.as_str()))
+        .collect();
+    run(&files)
 }
-
-inline fun named(): Named = object : Named {
-    override fun name() = "O"
-}
-
-inline fun counted(times: Int): Int {
-    val counter = object {
-        var count = 0
-    }
-    repeat(times) { counter.count++ }
-    return counter.count
-}
-
-class Box<T>
-
-private inline fun <reified T> Box<T>.tagged(): Named = object : Named {
-    override fun name() = T::class.simpleName!!
-}
-
-fun tags(): String = Box<String>().tagged().name() + Box<Int>().tagged().name()
-"#;
-
-const CALLER: &str = r#"fun box(): String {
-    val first = named()
-    val second = named()
-    if (counted(3) != 3) return "counted"
-    if (tags() != "StringInt") return "tags ${tags()}"
-    return if (second.name() == "O") first.name() + "K" else "second"
-}
-"#;
 
 #[test]
 fn an_inline_bodys_objects_are_inlined_from_the_compiled_body_like_kotlinc() {
-    let classes = common::classes_against_kotlinc_module(&[
-        ("Declaration.kt", DECLARATION),
-        ("Caller.kt", CALLER),
-    ]);
+    let classes = with_same_module_sources(common::classes_against_kotlinc_module);
     assert_eq!(
         classes.krusty.keys().collect::<Vec<_>>(),
         classes.reference.keys().collect::<Vec<_>>()
@@ -61,27 +42,10 @@ fn an_inline_bodys_objects_are_inlined_from_the_compiled_body_like_kotlinc() {
 
 #[test]
 fn an_inline_bodys_objects_inlined_from_the_compiled_body_run() {
-    common::expect_box_ok_files_with_stdlib(
-        &[("Declaration.kt", DECLARATION), ("Caller.kt", CALLER)],
-        "CallerKt",
-    );
+    with_same_module_sources(|files| common::expect_box_ok_files_with_stdlib(files, "CallerKt"));
 }
 
-const NESTED: &str = r#"interface Named {
-    fun name(): String
-}
-
-inline fun <reified T> make(): Named = object : Named {
-    val type = T::class
-    val nested: Named = object : Named {
-        override fun name() = "nested"
-    }
-
-    override fun name() = nested.name()
-}
-
-fun box(): String = make<String>().name().let { if (it == "nested") "OK" else it }
-"#;
+const NESTED: &str = include_str!("box_regressions/inlineCompiledNestedObjects.kt");
 
 #[test]
 fn an_object_a_regenerated_constructor_creates_is_regenerated_like_kotlinc() {
@@ -103,6 +67,7 @@ fn an_object_a_regenerated_constructor_creates_runs() {
     common::expect_box_ok_files_with_stdlib(&[("Nested.kt", NESTED)], "NestedKt");
 }
 
+/// PLATFORM-SPECIFIC: this deliberately preserves kotlinc/JVM's exact NoSuchFieldError.
 /// kotlinc declares a copy's fields before it regenerates the constructor's objects, so a field of
 /// an anonymous type keeps the original's type while the constructor stores the copy: the program
 /// fails as kotlinc's does.
@@ -130,31 +95,7 @@ fn an_object_of_anonymous_type_a_regenerated_constructor_creates_fails_as_kotlin
 
 /// A regenerated object's suspend method constructs its continuation, which is regenerated with
 /// the object; the copy's method names the copied continuation from its first instruction.
-const SUSPEND_METHOD: &str = r#"import kotlin.coroutines.*
-
-interface Named {
-    suspend fun name(): String
-}
-
-var pending: Any? = null
-
-inline fun <reified T> make(): Named = object : Named {
-    override suspend fun name(): String {
-        suspendCoroutine<Unit> { pending = it }
-        return T::class.simpleName!!
-    }
-}
-
-fun box(): String {
-    var result = ""
-    suspend { make<String>().name() }.startCoroutine(Continuation(EmptyCoroutineContext) {
-        result = it.getOrThrow()
-    })
-    @Suppress("UNCHECKED_CAST")
-    (pending as Continuation<Unit>).resume(Unit)
-    return if (result == "String") "OK" else result
-}
-"#;
+const SUSPEND_METHOD: &str = include_str!("box_regressions/inlineCompiledSuspendObjects.kt");
 
 #[test]
 fn a_regenerated_objects_suspend_method_takes_a_regenerated_continuation_like_kotlinc() {

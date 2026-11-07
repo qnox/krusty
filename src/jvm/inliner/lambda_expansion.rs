@@ -644,6 +644,7 @@ fn lambda_parameters(lambda: &Lambda, host: &Parameters) -> Parameters {
         parameters: real,
         captured: host.captured[lambda.captured.clone()].to_vec(),
         capture_owners: Vec::new(),
+        non_inline_suspend: Vec::new(),
     }
 }
 

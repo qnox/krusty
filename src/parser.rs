@@ -830,31 +830,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn push_lexical_type_params(
-        &mut self,
-        params: &[String],
-        bounds: &[(String, TypeRef)],
-    ) -> usize {
-        self.lexical_type_parameters.push(params, bounds)
-    }
-
-    fn pop_lexical_type_params(&mut self, old_len: usize) {
-        self.lexical_type_parameters.pop(old_len);
-    }
-
-    fn current_lexical_type_params(&self) -> Vec<String> {
-        self.lexical_type_parameters.names()
-    }
-
-    fn cut_lexical_type_parameter_scope(&mut self) -> LexicalTypeParameters {
-        std::mem::take(&mut self.lexical_type_parameters)
-    }
-
-    fn restore_lexical_type_parameter_scope(&mut self, scope: LexicalTypeParameters) {
-        debug_assert!(self.lexical_type_parameters.names().is_empty());
-        self.lexical_type_parameters = scope;
-    }
-
     // ---- cursor helpers ----
     fn kind(&self) -> TokenKind {
         self.t[self.i].kind
@@ -3243,6 +3218,8 @@ impl<'a> Parser<'a> {
                 Vec::new(),
             )
         };
+        let lexical_type_param_lens =
+            self.push_lexical_type_params(&type_params, &type_param_bounds);
         let (supertypes, _base, _base_span, _base_type_args, _base_args, _) =
             self.parse_supertypes();
         // `interface I<T> where T : Bound` — generic constraints after the supertype list, before the
@@ -3324,6 +3301,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
+        self.pop_lexical_type_params(lexical_type_param_lens);
         ClassDecl {
             name_span,
             primary_ctor_visibility: Visibility::Public,

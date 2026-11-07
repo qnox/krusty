@@ -9,6 +9,7 @@
 //! its parameter checks and its variable names; only the lambdas' locals are added above its own.
 
 use crate::fx_hash::HashMap;
+use crate::ir::InlineLambdaPlacement;
 
 use crate::jvm::bytecode_passes::fix_stack::fix_stack;
 use crate::jvm::bytecode_passes::insn_list::EditableMethod;
@@ -22,7 +23,6 @@ use super::super::{functional_arguments, object_regeneration, preparation, retur
 use super::super::{Binding, ClassRoles, InlineError, Parameter, Parameters};
 use super::constructor::{self, DeclaredCapture};
 use super::{CopiedLines, NestedObjects, RegenerationError};
-use crate::ir::InlineLambdaPlacement;
 
 const ALOAD: u8 = 0x19;
 const GETFIELD: u8 = 0xb4;
@@ -278,6 +278,7 @@ fn method_parameters(
             parameters: own,
             captured,
             capture_owners: Vec::new(),
+            non_inline_suspend: Vec::new(),
         },
         placed,
     ))
@@ -327,6 +328,7 @@ fn own_parameters(method: &MethodNode, lambdas: usize) -> Result<Parameters, Reg
         parameters,
         captured,
         capture_owners: Vec::new(),
+        non_inline_suspend: Vec::new(),
     })
 }
 

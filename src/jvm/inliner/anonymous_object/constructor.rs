@@ -186,6 +186,32 @@ pub(super) fn rename_field(code: &mut MethodNode, owner: &str, from: &str, to: &
 }
 
 impl Constructor {
+    /// The captured fields the original constructor stores the arguments at `arguments` of
+    /// `call_desc` in; an argument it keeps in no field has none.
+    pub(super) fn argument_fields(
+        &self,
+        call_desc: &str,
+        arguments: &[usize],
+    ) -> Result<Vec<String>, RegenerationError> {
+        let descriptors = argument_descriptors(call_desc).ok_or(RegenerationError::Unsupported(
+            "a malformed constructor descriptor",
+        ))?;
+        let mut fields = Vec::new();
+        let mut slot = 1u16;
+        for (index, argument) in descriptors.iter().enumerate() {
+            if arguments.contains(&index) {
+                fields.extend(
+                    self.fields
+                        .iter()
+                        .filter(|field| field.slot == slot)
+                        .map(|field| field.name.clone()),
+                );
+            }
+            slot += descriptor_words(argument);
+        }
+        Ok(fields)
+    }
+
     /// The captured field the constructor, called through `call_desc`, stores its argument at
     /// `index` in: the field a copy that inlines a lambda passed there reads it from.
     pub(super) fn field_of_argument(&self, call_desc: &str, index: usize) -> Option<&str> {

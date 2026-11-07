@@ -280,7 +280,10 @@ impl Emitter<'_> {
                         } else {
                             self.emit_value(value, code);
                         }
-                    } else if let Some(result) = self.copied_frame_result(block, value) {
+                    } else if let Some(result) = self
+                        .copied_frame_result(block, value)
+                        .or_else(|| self.spliced_lambda_result_conversion(stmts, value))
+                    {
                         copied_frame_result = Some(
                             self.emit_copied_frame_result_before_adaptation(result, value, code),
                         );
@@ -329,7 +332,7 @@ impl Emitter<'_> {
             if let Some(pending) = self
                 .inline_coercions
                 .pending_for(block)
-                .filter(|pending| pending.saved.is_some())
+                .filter(|pending| pending.defers_frame_close())
             {
                 pending.closes_spliced_frame = true;
             } else {
@@ -416,6 +419,41 @@ impl Emitter<'_> {
             }
             _ => None,
         }
+    }
+
+    /// A spliced lambda's result converted to the type its inline function expects of it. kotlinc
+    /// inlines the lambda body as a method of its own: the body, and its locals, end at the
+    /// lambda's own result, and the conversion to the invocation's type (boxing `parse(it)` for
+    /// `let`'s `R`) follows those locals, before the inline function's line returns.
+    fn spliced_lambda_result_conversion(
+        &self,
+        stmts: &[u32],
+        value: u32,
+    ) -> Option<CopiedFrameResult> {
+        if !self.opens_spliced_lambda_frame(stmts) {
+            return None;
+        }
+        let IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = *self.ir.expr(value)
+        else {
+            return None;
+        };
+        // An enclosing copied frame whose tail reaches this conversion already owns its
+        // adaptation.
+        if self.inline_coercions.is_deferred(value) {
+            return None;
+        }
+        self.transformed_result(value)
+            .is_none()
+            .then_some(CopiedFrameResult::Coercion {
+                expression: value,
+                arg,
+                type_operand,
+                physical_arg: None,
+            })
     }
 
     /// Follow only transparent trailing-value blocks inside one explicitly recorded copied result
@@ -1376,13 +1414,19 @@ impl Emitter<'_> {
         })
     }
 
-    /// The exact block whose result adaptation must remain inside an inline-stack bracket.
-    pub(super) fn inline_stack_coercion_block(
+    /// The exact block whose result adaptation must remain inside an inline-stack bracket, or
+    /// precede the closing line of its spliced lambda frame.
+    pub(super) fn inline_result_coercion_owner(
         &self,
         expression: u32,
         stack_height: i32,
-    ) -> Option<u32> {
+    ) -> Option<InlineResultCoercionOwner> {
         inline_stack_coercion_owner(self.ir, expression, stack_height)
+            .map(InlineResultCoercionOwner::StackBracket)
+            .or_else(|| {
+                spliced_lambda_result_owner(self.ir, expression)
+                    .map(InlineResultCoercionOwner::LambdaFrame)
+            })
     }
 
     fn close_or_defer_inline_stack(
@@ -1392,7 +1436,11 @@ impl Emitter<'_> {
         reserved: &mut Option<Vec<TempSlot>>,
         code: &mut CodeBuilder,
     ) {
-        if let Some(pending) = self.inline_coercions.pending_for(block) {
+        if let Some(pending) = self
+            .inline_coercions
+            .pending_for(block)
+            .filter(|pending| pending.brackets_stack)
+        {
             pending.saved = Some(saved);
             pending.reserved = reserved.take();
         } else {
@@ -1412,12 +1460,14 @@ impl Emitter<'_> {
         let Some(pending) = self.inline_coercions.take_pending() else {
             return false;
         };
-        let Some(saved) = pending.saved else {
-            self.inline_coercions.restore_pending(Some(pending));
-            return false;
-        };
-        close_inline_stack(saved, code);
-        self.release_reserved_inline_stack(pending.reserved);
+        if pending.brackets_stack {
+            let Some(saved) = pending.saved else {
+                self.inline_coercions.restore_pending(Some(pending));
+                return false;
+            };
+            close_inline_stack(saved, code);
+            self.release_reserved_inline_stack(pending.reserved);
+        }
         if pending.closes_spliced_frame {
             // kotlinc closes the frame inside the inlined call and only then resets the line in
             // effect (`markLineNumberAfterInlineIfNeeded`). Deferring the close past that reset
@@ -1585,6 +1635,23 @@ fn inline_stack_coercion_owner(
             || (ir.is_inline_copy(expression) && has_lambda_frame)
         {
             return Some(expression);
+        }
+        match (stmts.is_empty(), value) {
+            (true, Some(value)) => expression = *value,
+            _ => return None,
+        }
+    }
+}
+
+/// The block opening a spliced lambda frame whose result `expression` yields, through only
+/// empty value wrappers.
+fn spliced_lambda_result_owner(ir: &crate::ir::IrFile, mut expression: u32) -> Option<u32> {
+    loop {
+        let IrExpr::Block { stmts, value } = ir.expr(expression) else {
+            return None;
+        };
+        if opens_spliced_lambda_frame(ir, stmts) {
+            return value.is_some().then_some(expression);
         }
         match (stmts.is_empty(), value) {
             (true, Some(value)) => expression = *value,
@@ -1777,7 +1844,9 @@ enum CopiedFrameResult {
         caller_line: u32,
     },
     /// A same-module copied body physically produces its declaration-erased result inside the
-    /// frame; the caller narrows or unboxes it only after the frame's debug locals end.
+    /// frame; the caller narrows or unboxes it only after the frame's debug locals end. A spliced
+    /// lambda's result converts to its invocation's type after the lambda's locals end the same
+    /// way.
     Coercion {
         expression: u32,
         arg: u32,
@@ -1838,7 +1907,7 @@ impl InlineCoercionState {
 
     pub(super) fn replace_pending(
         &mut self,
-        block: Option<u32>,
+        block: Option<InlineResultCoercionOwner>,
     ) -> Option<PendingInlineStackCoercion> {
         std::mem::replace(
             &mut self.pending,
@@ -1863,20 +1932,44 @@ impl InlineCoercionState {
 
 pub(super) struct PendingInlineStackCoercion {
     pub(super) block: u32,
+    /// Whether the coercion also stays inside the block's inline-stack bracket. Otherwise it
+    /// defers only the spliced lambda frame's closing line.
+    brackets_stack: bool,
     saved: Option<i32>,
     reserved: Option<Vec<TempSlot>>,
     closes_spliced_frame: bool,
 }
 
 impl PendingInlineStackCoercion {
-    fn new(block: u32) -> Self {
+    fn new(block: InlineResultCoercionOwner) -> Self {
+        let (block, brackets_stack) = match block {
+            InlineResultCoercionOwner::StackBracket(block) => (block, true),
+            InlineResultCoercionOwner::LambdaFrame(block) => (block, false),
+        };
         Self {
             block,
+            brackets_stack,
             saved: None,
             reserved: None,
             closes_spliced_frame: false,
         }
     }
+
+    /// Whether the owning block leaves its spliced lambda frame for the coercion to close.
+    fn defers_frame_close(&self) -> bool {
+        self.saved.is_some() || !self.brackets_stack
+    }
+}
+
+/// The block whose result an implicit coercion adapts before that block's spliced lambda frame
+/// closes. kotlinc inlines a lambda body as a method of its own, so the conversion of its result
+/// follows the lambda's locals but precedes the frame's closing line.
+#[derive(Clone, Copy)]
+pub(super) enum InlineResultCoercionOwner {
+    /// A copied block whose caller operands stay normalized until the coercion is done.
+    StackBracket(u32),
+    /// A block opening a spliced lambda frame with no caller operands to normalize.
+    LambdaFrame(u32),
 }
 
 #[derive(Clone, Copy)]

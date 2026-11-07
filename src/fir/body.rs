@@ -103,6 +103,15 @@ pub struct FirSamConversion {
     pub kotlin_interface: bool,
     /// Provider-normalized semantic identities parallel to `declared_parameters`.
     pub parameter_identities: Box<[super::ResolvedParameterIdentity]>,
+    /// The interface's own type parameters in declaration order, which the declared shape names.
+    pub type_parameters: Box<[FirSamTypeParameter]>,
+}
+
+/// One type parameter a functional interface declares, with every declared upper bound.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirSamTypeParameter {
+    pub name: Box<str>,
+    pub bounds: Box<[super::ResolvedTypeParameterBound]>,
 }
 
 /// The abstract method a SAM conversion implements.
@@ -122,6 +131,18 @@ pub enum FirSamMethod {
 pub struct FirPlatformNarrowing {
     /// The checked producer's name; `None` for a value kotlinc cannot name, such as a block's.
     pub message: Option<Box<str>>,
+    /// The consumer the narrowed value reaches.
+    pub site: FirPlatformNarrowingSite,
+}
+
+/// Where a narrowed platform value is consumed. kotlinc's `-Xno-receiver-assertions` removes the
+/// checks of exactly the values that reach an extension receiver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirPlatformNarrowingSite {
+    /// An argument, an assignment, a returned value or any other non-receiver consumer.
+    Value,
+    /// The receiver of an extension call, written or through an operator convention.
+    ExtensionReceiver,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -218,7 +239,6 @@ pub enum FirIntrinsic {
     },
     ArrayGet,
     ArraySet,
-    ArraySize,
     StringGet,
     StringLength,
     StringPlus,
@@ -280,6 +300,11 @@ pub enum FirCallTarget {
         default_provider: Option<ExternalCallableId>,
         receiver: Option<ResolvedTy>,
         declared_receiver: Option<ResolvedTy>,
+        /// A member's dispatch receiver applied as the member's declaring class, when the
+        /// receiver's own classifier is a subclass of a generic declaring class: `Base<String>`
+        /// for `Derived : Base<String>`. A call binds the declaring class's type parameters from
+        /// its arguments. `None` when the receiver already names the declaring class.
+        declaring_receiver: Option<ResolvedTy>,
         parameters: Box<[ResolvedTy]>,
         result: ResolvedTy,
         declared_result: Option<ResolvedTy>,
@@ -322,6 +347,8 @@ pub enum FirCallTarget {
     /// express "this declaration, bypassing overriding" — the same source declaration is an ordinary
     /// virtual target at every other call site.
     Super {
+        /// The original selected qualifier, before a target maps the invocation owner.
+        qualifier: crate::types::TypeName,
         owner: crate::types::TypeName,
         /// Classifier whose instance supplies `this` for this selected super dispatch.
         dispatch_owner: crate::types::TypeName,
@@ -2169,6 +2196,19 @@ impl FirBody {
 
     pub fn platform_narrowing(&self, id: FirPlatformNarrowingId) -> Option<&FirPlatformNarrowing> {
         self.platform_narrowings.get(id.raw() as usize)
+    }
+
+    /// The number of narrowings recorded so far, which [`Self::consume_narrowings_at`] reads as
+    /// the start of the narrowings one guard records.
+    pub fn platform_narrowing_count(&self) -> usize {
+        self.platform_narrowings.len()
+    }
+
+    /// Record that every narrowing from `start` on guards a value consumed at `site`.
+    pub fn consume_narrowings_at(&mut self, start: usize, site: FirPlatformNarrowingSite) {
+        for narrowing in &mut self.platform_narrowings[start..] {
+            narrowing.site = site;
+        }
     }
 
     /// Finalize the complete capture ABI of every nested callable. A body must forward both values

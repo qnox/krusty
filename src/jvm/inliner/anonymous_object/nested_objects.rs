@@ -67,7 +67,7 @@ impl AnonymousObjects for NestedObjects<'_, '_> {
             .0
             .desc
             .clone();
-        self.regenerate(class, &constructor, &[], prior_classes)
+        self.regenerate(class, &constructor, &[], &[], prior_classes)
     }
 
     fn regenerate(
@@ -75,6 +75,7 @@ impl AnonymousObjects for NestedObjects<'_, '_> {
         class: &str,
         constructor_desc: &str,
         lambdas: &[ObjectLambda<'_>],
+        suspend_values: &[usize],
         prior_classes: &[(String, String)],
     ) -> Result<RegeneratedObject, InlineError> {
         let unsupported =
@@ -133,6 +134,7 @@ impl AnonymousObjects for NestedObjects<'_, '_> {
                 },
                 prior_classes: &prior,
                 lambdas,
+                suspend_values,
                 continuation: None,
                 ..*outer
             },

@@ -120,7 +120,9 @@ mod repository_owned {
 
     /// An entry the central directory LISTS and whose payload does not inflate. The archive
     /// advertises a fragment it cannot hand back, which is corruption; skipping it would publish a
-    /// library with silently fewer declarations than it claims.
+    /// library with silently fewer declarations than it claims. A zip KLIB's entries are read on
+    /// first use, so opening succeeds on the intact central directory; the fragment stays listed and
+    /// reading it reports the corruption.
     #[test]
     fn an_entry_that_cannot_be_inflated_is_reported_not_skipped() {
         let directory = scratch("klib-zip-bad-entry");
@@ -145,7 +147,12 @@ mod repository_owned {
         std::fs::write(&path, &bytes).expect("write the corrupted fixture");
 
         let entry = "default/linkdata/package_fixture.core/01_core.knm";
-        match KlibArchive::open(&path) {
+        let archive = KlibArchive::open(&path).expect("the central directory is intact");
+        let fragments = archive.package_fragments();
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].package_fqname, "fixture.core");
+        assert_eq!(fragments[0].entry, entry);
+        match archive.read(&fragments[0].entry) {
             Err(KlibError::Io {
                 operation,
                 path: failed,
@@ -157,7 +164,7 @@ mod repository_owned {
                 assert_eq!(source.to_string(), "corrupt deflate stream");
             }
             Err(error) => panic!("unexpected corrupt-entry error: {error}"),
-            Ok(_) => panic!("an archive with a corrupt semantic entry opened"),
+            Ok(bytes) => panic!("read {} bytes from a corrupt semantic entry", bytes.len()),
         }
     }
 }
