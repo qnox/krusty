@@ -103,6 +103,9 @@ impl BodyLowering<'_, '_, '_> {
                     }
                     self.list_storage_construction(plan, args)
                 }
+                DependencyOperation::PrimitiveIteratorNext => {
+                    self.primitive_iterator_next(receiver, args, extension_receiver_parameter, ret)
+                }
                 DependencyOperation::StringPlus => {
                     let Some((left, right)) =
                         exact_extension_pair(receiver, args, extension_receiver_parameter)
