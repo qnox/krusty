@@ -245,6 +245,9 @@ pub struct ClassTail<'a> {
     /// with a default (`routes: List<String> = emptyList()`) gets the flag, as kotlinc emits. Empty ⇒
     /// no param has a default.
     pub ctor_param_defaults: &'a [bool],
+    /// Closed defaults of annotation constructor parameters, when the carrier's format supports
+    /// `ValueParameter.annotation_parameter_default_value`. Ordinary constructors carry none.
+    pub annotation_param_defaults: Option<&'a [Option<crate::ir::AnnoValue>]>,
     /// Per-primary-constructor-parameter class type-parameter index, for a parameter declared as a
     /// bare type parameter (`class C<T>(val a: T)` → `[Some(0)]`).
     pub ctor_param_tparams: &'a [Option<u32>],
@@ -326,6 +329,7 @@ impl Default for ClassTail<'_> {
             type_aliases: &[],
             secondary_ctors: &[],
             ctor_param_defaults: &[],
+            annotation_param_defaults: None,
             ctor_param_tparams: &[],
             ctor_param_annotations: &[],
             inline_underlying: None,

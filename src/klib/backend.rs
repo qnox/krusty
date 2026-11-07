@@ -198,6 +198,22 @@ impl KlibBackend {
             );
             return DependencyExportSignatures::default();
         };
+        let annotation_defaults_in_metadata =
+            crate::metadata::annotation_defaults::supported(self.stamp.metadata_version);
+        if annotation_defaults_in_metadata {
+            for record in &records {
+                if let Some(parameter) = record.missing_annotation_default() {
+                    diags.error(
+                        crate::diag::Span::new(0, 0),
+                        format!(
+                            "{DECLINE_PREFIX}annotation default metadata for {}.{parameter}: missing normalized element value",
+                            record.classifier().render()
+                        ),
+                    );
+                    return DependencyExportSignatures::default();
+                }
+            }
+        }
         let constants = records
             .iter()
             .map(|record| {
@@ -236,6 +252,7 @@ impl KlibBackend {
                     ClassTailOptions {
                         param_assertions: false,
                         annotations_in_metadata: self.annotations_in_metadata,
+                        annotation_defaults_in_metadata,
                         compiler_version_requirement: None,
                         intersection: None,
                         inner_classifiers: &inner_classifier,

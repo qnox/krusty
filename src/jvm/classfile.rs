@@ -1310,6 +1310,7 @@ impl ClassWriter {
             Rvpa,
             Ripa,
             Sig,
+            AnnotationDefault(&'static str),
             Mp,
         }
         /// A method's `RuntimeInvisibleParameterAnnotations` entries: the USER (BINARY-retained)
@@ -1414,6 +1415,12 @@ impl ClassWriter {
             if !invisible_param_anns(m).is_empty() && !seq.contains(&An::Ripa) {
                 seq.push(An::Ripa);
             }
+            if let Some(default) = &m.annotation_default {
+                let attribute = An::AnnotationDefault(default.attribute_name());
+                if !seq.contains(&attribute) {
+                    seq.push(attribute);
+                }
+            }
             if !m.method_parameters.is_empty() && !seq.contains(&An::Mp) {
                 seq.push(An::Mp);
             }
@@ -1434,6 +1441,7 @@ impl ClassWriter {
         let mut rvpa_attr_name = None;
         // A method-level RIA first use dedups onto the field-level index when both are present.
         let mut invis_ann_name = field_ria;
+        let mut annotation_default_attrs = HashMap::default();
         for k in &seq {
             match k {
                 An::Code => code_attr_name = self.cp.utf8("Code"),
@@ -1452,6 +1460,9 @@ impl ClassWriter {
                 An::Sig => {
                     self.cp.utf8("Signature");
                 }
+                An::AnnotationDefault(name) => {
+                    annotation_default_attrs.insert(*name, self.cp.utf8(name));
+                }
                 An::Mp => method_parameters_attr_name = Some(self.cp.utf8("MethodParameters")),
             }
         }
@@ -1467,17 +1478,6 @@ impl ClassWriter {
                 .any(|m| m.signature.is_some())
                 .then(|| self.cp.utf8("Signature"))
         });
-        let mut annotation_default_attrs = HashMap::default();
-        for default in self
-            .methods
-            .iter()
-            .filter_map(|m| m.annotation_default.as_ref())
-        {
-            let name = default.attribute_name();
-            if !annotation_default_attrs.contains_key(name) {
-                annotation_default_attrs.insert(name, self.cp.utf8(name));
-            }
-        }
         // Field annotation attribute names, interned only when a field actually carries them.
         let field_vis_ann_name = field_rva;
         // Field-level `RuntimeInvisibleAnnotations` reuses the name interned before `Code` (dedup).
