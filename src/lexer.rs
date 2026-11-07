@@ -420,12 +420,18 @@ impl<'a> Lexer<'a> {
 
     fn run_names(mut self) -> Vec<NameToken> {
         let mut names = Vec::new();
+        // `import` is a soft keyword: a directive only where it starts a line (or follows `;`,
+        // which lexes as a line break), as an import list entry does.
+        let mut line_start = true;
         loop {
             let token = self.next_token();
+            let starts_line = std::mem::replace(&mut line_start, token.kind == TokenKind::Newline);
             let kind = match token.kind {
+                TokenKind::Ident if starts_line && token.text(self.s) == "import" => {
+                    Some(NameTokenKind::Import)
+                }
                 TokenKind::Ident => Some(NameTokenKind::Ident),
                 TokenKind::KwPackage => Some(NameTokenKind::Package),
-                TokenKind::KwImport => Some(NameTokenKind::Import),
                 TokenKind::At => Some(NameTokenKind::At),
                 TokenKind::Dot => Some(NameTokenKind::Dot),
                 TokenKind::Plus
@@ -1691,6 +1697,29 @@ mod tests {
                 (StrChunk, "]\"\""),
                 (TemplateEnd, ""),
                 (Eof, ""),
+            ]
+        );
+        assert!(!diagnostics.has_errors());
+    }
+
+    /// `import` is a soft keyword: the name scan reports a directive only for a line-initial
+    /// `import` (a `;` lexes as a line break); elsewhere it is an ordinary name.
+    #[test]
+    fn only_a_line_initial_import_is_a_directive_name_token() {
+        let source = "package p; import q.Semi\nimport q.Shown\nval import = q.import\n";
+        let mut diagnostics = DiagSink::new();
+        let names = lex_name_tokens(source, &mut diagnostics)
+            .into_iter()
+            .filter(|token| token.text(source) == "import")
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                NameTokenKind::Import,
+                NameTokenKind::Import,
+                NameTokenKind::Ident,
+                NameTokenKind::Ident,
             ]
         );
         assert!(!diagnostics.has_errors());
