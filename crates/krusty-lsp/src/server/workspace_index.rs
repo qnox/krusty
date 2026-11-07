@@ -7,10 +7,7 @@
 
 use std::collections::HashMap;
 
-use super::super::{
-    workspace_index_uri_bytes, IndexedFile, MAX_WORKSPACE_INDEX_FILES,
-    MAX_WORKSPACE_INDEX_URI_BYTES,
-};
+use super::super::IndexedFile;
 use krusty::diag::{DiagnosticKind, Severity};
 
 /// `(start line, start UTF-16 column, end line, end UTF-16 column, packed severity + message id)`.
@@ -20,30 +17,9 @@ use super::implementation::{
     DIAGNOSTIC_INSPECTION_BIT, DIAGNOSTIC_MESSAGE_MASK, DIAGNOSTIC_WARNING_BIT,
 };
 
-/// Ceiling on live retained entries, so a workspace whose every file fails to compile cannot
-/// exhaust memory. A changed file replaces its old slice with a bounded prefix; it never keeps
-/// stale diagnostics merely because the store is full.
-const MAX_RETAINED_ENTRIES: usize = 512 * 1024;
-/// Companion allocation ceiling on the interned message table and its lookup keys.
-const MAX_RETAINED_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
-
-fn retained_message_bytes(message: &str) -> usize {
-    // Every distinct message owns one payload in `messages` and another as the `message_ids` key.
-    // Include both plus their fixed records; counting only `message.len()` understated the actual
-    // retained allocation by roughly half before hash-table overhead.
-    message
-        .len()
-        .saturating_mul(2)
-        .saturating_add(std::mem::size_of::<String>())
-        .saturating_add(std::mem::size_of::<Box<str>>())
-        .saturating_add(std::mem::size_of::<u32>())
-}
-
-fn retained_file_uri_bytes(uri: &str) -> usize {
-    // Reuse the producer's URI unit and add the map value. This is conservative for the store's
-    // `Box<str>` key, whose fixed record is smaller than the producer's `String`.
-    workspace_index_uri_bytes(uri).saturating_add(std::mem::size_of::<u32>())
-}
+/// Superseded entries tolerated before the store compacts. Replacing a file appends its new slice,
+/// so readers always see one contiguous slice per file; compaction reclaims the old ones.
+const COMPACTION_STALE_ENTRIES: usize = 1024;
 
 pub(crate) struct WorkspaceDiagnostics<'a> {
     pub entries: &'a [WorkspaceEntry],
@@ -53,7 +29,6 @@ pub(crate) struct WorkspaceDiagnostics<'a> {
 pub(crate) struct WorkspaceMergeOutcome {
     pub accepted: bool,
     pub changed: bool,
-    pub newly_truncated: bool,
 }
 
 #[derive(Default)]
@@ -64,17 +39,14 @@ pub(crate) struct WorkspaceDiagnosticStore {
     /// Tombstoned slots are reused so a long session creating and deleting distinct paths cannot
     /// grow the parallel file metadata forever while the live `files` map stays small.
     free_file_ids: Vec<u32>,
-    file_uri_bytes: usize,
     entries: Vec<WorkspaceEntry>,
     messages: Vec<String>,
     message_ids: HashMap<Box<str>, u32>,
-    message_bytes: usize,
     /// Entries reachable through current file ranges. `entries.len()` may be larger between
     /// compactions because replacing one file appends its new compact slice.
     live_entries: usize,
     /// Generation the retained data belongs to. A batch from an older model is rejected outright.
     generation: u64,
-    truncated: bool,
 }
 
 impl WorkspaceDiagnosticStore {
@@ -100,10 +72,8 @@ impl WorkspaceDiagnosticStore {
             return WorkspaceMergeOutcome {
                 accepted: false,
                 changed: false,
-                newly_truncated: false,
             };
         }
-        let was_truncated = self.truncated;
         let mut changed = false;
         if generation > self.generation {
             self.reset_to(generation);
@@ -115,40 +85,13 @@ impl WorkspaceDiagnosticStore {
             if self.text_hash(&file.uri) == Some(file.text_hash) {
                 continue;
             }
-            if !self.files.contains_key(file.uri.as_str()) {
-                let retained_bytes = retained_file_uri_bytes(&file.uri);
-                if self.files.len() >= MAX_WORKSPACE_INDEX_FILES
-                    || retained_bytes
-                        > MAX_WORKSPACE_INDEX_URI_BYTES.saturating_sub(self.file_uri_bytes)
-                {
-                    self.truncated = true;
-                    continue;
-                }
-            }
             self.compact_if_wasteful();
-            let previous_entries = self
-                .files
-                .get(file.uri.as_str())
-                .map(|&id| {
-                    let (start, end) = self.ranges[id as usize];
-                    (end - start) as usize
-                })
-                .unwrap_or_default();
-            let available_entries = MAX_RETAINED_ENTRIES
-                .saturating_sub(self.live_entries.saturating_sub(previous_entries));
-            let mut pending = Vec::with_capacity(file.diagnostics.len().min(available_entries));
+            let mut pending = Vec::with_capacity(file.diagnostics.len());
             for diagnostic in file.diagnostics {
-                if pending.len() >= available_entries {
-                    self.truncated = true;
-                    break;
-                }
                 // Same protocol-boundary casing the open-document path applies, so a message does
                 // not change appearance depending on whether its file happens to be open.
                 let message = super::implementation::lsp_diagnostic_message(diagnostic.msg);
-                let Some(message_id) = self.try_intern(&message) else {
-                    self.truncated = true;
-                    break;
-                };
+                let message_id = self.intern(&message);
                 let severity = match diagnostic.severity {
                     Severity::Error => 0,
                     Severity::Warning => DIAGNOSTIC_WARNING_BIT,
@@ -164,9 +107,9 @@ impl WorkspaceDiagnosticStore {
             // Resolve while the text is still in hand: the store keeps no text, and re-reading the
             // file at pull time would race whatever the sweep is writing.
             let resolved = resolve(&file.text, &pending);
-            let start = u32::try_from(self.entries.len()).unwrap_or(u32::MAX);
+            let start = entry_offset(self.entries.len());
             self.entries.extend(resolved);
-            let end = u32::try_from(self.entries.len()).unwrap_or(u32::MAX);
+            let end = entry_offset(self.entries.len());
             let id = self.file_id(&file.uri);
             let (old_start, old_end) = self.ranges[id as usize];
             self.live_entries = self
@@ -185,7 +128,6 @@ impl WorkspaceDiagnosticStore {
             return WorkspaceMergeOutcome {
                 accepted: true,
                 changed,
-                newly_truncated: !was_truncated && self.truncated,
             };
         }
         for uri in attempted {
@@ -197,7 +139,6 @@ impl WorkspaceDiagnosticStore {
         WorkspaceMergeOutcome {
             accepted: true,
             changed,
-            newly_truncated: !was_truncated && self.truncated,
         }
     }
 
@@ -205,14 +146,11 @@ impl WorkspaceDiagnosticStore {
     /// batched compaction reclaims them once stale slices become material, avoiding a memmove for
     /// every individual delete.
     pub(crate) fn forget(&mut self, uri: &str) -> bool {
-        if let Some((stored_uri, id)) = self.files.remove_entry(uri) {
+        if let Some(id) = self.files.remove(uri) {
             let (start, end) = self.ranges[id as usize];
             self.live_entries = self.live_entries.saturating_sub((end - start) as usize);
             self.ranges[id as usize] = (0, 0);
             self.text_hashes[id as usize] = 0;
-            self.file_uri_bytes = self
-                .file_uri_bytes
-                .saturating_sub(retained_file_uri_bytes(&stored_uri));
             self.free_file_ids.push(id);
             true
         } else {
@@ -247,46 +185,32 @@ impl WorkspaceDiagnosticStore {
         }
         let id = self.free_file_ids.pop().unwrap_or_else(|| {
             let id = u32::try_from(self.ranges.len())
-                .expect("the workspace file-count ceiling fits in a u32");
+                .expect("u32 file ids address more workspace files than memory can hold");
             self.ranges.push((0, 0));
             self.text_hashes.push(0);
             id
         });
-        self.file_uri_bytes = self
-            .file_uri_bytes
-            .saturating_add(retained_file_uri_bytes(uri));
         self.files.insert(uri.into(), id);
         id
     }
 
-    fn try_intern(&mut self, message: &str) -> Option<u32> {
+    fn intern(&mut self, message: &str) -> u32 {
         if let Some(&id) = self.message_ids.get(message) {
-            return Some(id);
+            return id;
         }
-        let retained_bytes = retained_message_bytes(message);
-        if retained_bytes > MAX_RETAINED_MESSAGE_BYTES.saturating_sub(self.message_bytes) {
-            return None;
-        }
-        let id = u32::try_from(self.messages.len()).ok()?;
-        if id > DIAGNOSTIC_MESSAGE_MASK {
-            return None;
-        }
-        self.message_bytes = self.message_bytes.saturating_add(retained_bytes);
+        let id = message_id(self.messages.len());
         self.messages.push(message.to_string());
         self.message_ids.insert(message.into(), id);
-        Some(id)
+        id
     }
 
     /// Reclaim entries and messages made unreachable by file replacement or deletion.
     ///
-    /// Updates append so readers always see one contiguous slice per file. Compacting once stale
-    /// storage is materially larger than live storage preserves that layout without letting normal
-    /// edits consume the lifetime admission budget.
+    /// Updates append so readers always see one contiguous slice per file; compacting once enough
+    /// superseded entries accumulate preserves that layout while reclaiming them.
     fn compact_if_wasteful(&mut self) {
         let stale_entries = self.entries.len().saturating_sub(self.live_entries);
-        if stale_entries == 0
-            || (stale_entries < 1024 && self.message_bytes < MAX_RETAINED_MESSAGE_BYTES)
-        {
+        if stale_entries < COMPACTION_STALE_ENTRIES {
             return;
         }
 
@@ -298,15 +222,14 @@ impl WorkspaceDiagnosticStore {
         let mut message_ids = HashMap::<Box<str>, u32>::new();
         for id in active_ids {
             let (old_start, old_end) = self.ranges[id as usize];
-            let start = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+            let start = entry_offset(entries.len());
             for entry in &self.entries[old_start as usize..old_end as usize] {
                 let old_message = entry[4] & DIAGNOSTIC_MESSAGE_MASK;
                 let message = &self.messages[old_message as usize];
                 let message_id = if let Some(&message_id) = message_ids.get(message.as_str()) {
                     message_id
                 } else {
-                    let message_id =
-                        u32::try_from(messages.len()).unwrap_or(DIAGNOSTIC_MESSAGE_MASK);
+                    let message_id = message_id(messages.len());
                     messages.push(message.clone());
                     message_ids.insert(message.as_str().into(), message_id);
                     message_id
@@ -319,18 +242,28 @@ impl WorkspaceDiagnosticStore {
                     (entry[4] & !DIAGNOSTIC_MESSAGE_MASK) | message_id,
                 ]);
             }
-            let end = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+            let end = entry_offset(entries.len());
             self.ranges[id as usize] = (start, end);
         }
-        self.message_bytes = messages
-            .iter()
-            .map(|message| retained_message_bytes(message))
-            .sum();
         self.entries = entries;
         self.live_entries = self.entries.len();
         self.messages = messages;
         self.message_ids = message_ids;
     }
+}
+
+/// An entry offset. `u32` addresses more entries than memory can hold (each is 20 bytes).
+fn entry_offset(len: usize) -> u32 {
+    u32::try_from(len).expect("u32 entry offsets address more diagnostics than memory can hold")
+}
+
+/// A message id, packed beside the severity and kind bits. Its 30 bits address more distinct
+/// messages than memory can hold.
+fn message_id(len: usize) -> u32 {
+    u32::try_from(len)
+        .ok()
+        .filter(|&id| id <= DIAGNOSTIC_MESSAGE_MASK)
+        .expect("30-bit message ids address more distinct diagnostics than memory can hold")
 }
 
 #[cfg(test)]
@@ -400,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn deleted_file_slots_and_uri_bytes_are_reused() {
+    fn deleted_file_slots_are_reused() {
         let mut store = WorkspaceDiagnosticStore::default();
         for index in 0..1_100 {
             let uri = format!("file:///workspace/Generated{index}.kt");
@@ -415,12 +348,69 @@ mod tests {
         }
 
         assert!(store.files.is_empty());
-        assert_eq!(store.file_uri_bytes, 0);
         assert_eq!(
             store.ranges.len(),
             1,
             "distinct deleted paths must reuse tombstoned metadata instead of growing forever"
         );
         assert_eq!(store.free_file_ids, [0]);
+    }
+
+    fn diagnostic(message: String, at: u32) -> Diagnostic {
+        Diagnostic {
+            span: Span::new(at, at + 1),
+            editor_span: None,
+            identity: None,
+            name: None,
+            severity: Severity::Error,
+            kind: DiagnosticKind::Compiler,
+            msg: message,
+            file: 0,
+        }
+    }
+
+    /// Every diagnostic of a workspace is retained: past the former 512k-entry ceiling, and with
+    /// more distinct message text than the former 8 MiB interning cap.
+    #[test]
+    fn every_workspace_diagnostic_is_retained() {
+        let mut store = WorkspaceDiagnosticStore::default();
+        let files = 600usize;
+        let per_file = 1_000usize;
+        let mut attempted = Vec::with_capacity(files);
+        let mut indexed = Vec::with_capacity(files);
+        for file in 0..files {
+            let uri = format!("file:///workspace/File{file}.kt");
+            let diagnostics = (0..per_file)
+                .map(|index| {
+                    // Every 40th message is distinct and long, so the interned text alone passes
+                    // the former cap.
+                    let message = if index % 40 == 0 {
+                        format!("distinct {file}:{index} {}", "x".repeat(640))
+                    } else {
+                        "repeated".to_string()
+                    };
+                    diagnostic(message, index as u32)
+                })
+                .collect();
+            attempted.push(uri.clone());
+            indexed.push(IndexedFile {
+                uri,
+                diagnostics,
+                text_hash: 1,
+                text: String::new(),
+            });
+        }
+
+        let outcome = store.merge(0, &attempted, true, indexed, resolve);
+
+        assert!(outcome.accepted && outcome.changed);
+        assert_eq!(store.live_entries, files * per_file);
+        assert!(store.live_entries > 512 * 1024);
+        let interned: usize = store.messages.iter().map(String::len).sum();
+        assert!(interned > 8 * 1024 * 1024, "{interned} bytes of messages");
+        let last = store
+            .diagnostics(&format!("file:///workspace/File{}.kt", files - 1))
+            .expect("the last file is retained");
+        assert_eq!(last.entries.len(), per_file);
     }
 }
