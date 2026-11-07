@@ -20075,9 +20075,18 @@ impl<'a> Checker<'a> {
                 candidates.extend(self.resolver().top_level_candidates(&fname));
                 candidates.extend(inapplicable_classifier_invoke.iter().cloned());
                 if self.report_deferred_lexical_invoke_among(
-                    args,
+                    CallArgs {
+                        call,
+                        args,
+                        arg_tys: &arg_tys,
+                    },
+                    &fname,
                     span,
                     deferred_lexical_invoke.as_ref(),
+                    retained_receiver_call_rejections
+                        .as_ref()
+                        .map(|rejections| rejections.type_rejected_candidates())
+                        .unwrap_or_default(),
                     &candidates,
                 ) {
                     return Ty::Error;
@@ -50352,10 +50361,6 @@ impl<'a> Checker<'a> {
     }
 
     fn report_assignability_error(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
-        // Neither side is a TYPE when it still carries the not-determined marker: the declaration it
-        // came from has not been resolved yet, and the message would name `<not determined>` — a
-        // placeholder the source never wrote — for a program that may well be correct. Whatever
-        // could not be determined is reported at its own declaration.
         if expected.mentions_pending() || actual.mentions_pending() {
             return;
         }
@@ -50367,43 +50372,9 @@ impl<'a> Checker<'a> {
             "resolve",
             "assignability failure context={ctx} expected={expected:?} actual={actual:?} span={span:?}"
         );
-        let context = [expected, actual];
-        let expected = self.diagnostic_type_name(expected, &context);
-        let actual = self.diagnostic_type_name(actual, &context);
-        if actual == "Null" {
-            self.diags.error(
-                span,
-                format!("null cannot be a value of a non-null type '{expected}'."),
-            );
-            return;
+        if let Some(message) = self.assignability_error_message(expected, actual, ctx) {
+            self.diags.error(span, message);
         }
-        let msg = match ctx {
-            "function body" | "getter body" | "local function body" | "return" => {
-                format!("return type mismatch: expected '{expected}', actual '{actual}'.")
-            }
-            "initializer" | "property initializer" | "default argument" => {
-                format!("initializer type mismatch: expected '{expected}', actual '{actual}'.")
-            }
-            "assignment" => {
-                format!(
-                    "assignment type mismatch: actual type is '{actual}', but '{expected}' was expected."
-                )
-            }
-            argument if argument.ends_with("argument") => {
-                format!(
-                    "argument type mismatch: actual type is '{actual}', but '{expected}' was expected."
-                )
-            }
-            condition if condition.ends_with("condition") => {
-                format!(
-                    "condition type mismatch: inferred type is '{actual}' but '{expected}' was expected."
-                )
-            }
-            _ => {
-                format!("type mismatch: inferred type is {actual} but {expected} was expected")
-            }
-        };
-        self.diags.error(span, msg);
     }
 
     fn expr(&mut self, scope: &CheckerScope<'_>, e: ExprId) -> Ty {

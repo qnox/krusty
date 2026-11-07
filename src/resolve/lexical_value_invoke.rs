@@ -97,17 +97,166 @@ impl Checker<'_> {
     /// than either level's own argument mismatch.
     pub(super) fn report_deferred_lexical_invoke_among(
         &mut self,
-        args: &[ExprId],
+        call_args: CallArgs<'_>,
+        name: &str,
         span: Span,
         deferred: Option<&DeferredLexicalInvoke>,
+        receiver_candidates: &[crate::libraries::FunctionInfo],
         later_candidates: &[crate::libraries::FunctionInfo],
     ) -> bool {
-        if deferred.is_none() || later_candidates.is_empty() || self.call_has_error_argument(args) {
+        let CallArgs {
+            call,
+            args,
+            arg_tys,
+        } = call_args;
+        let Some(deferred) = deferred else {
+            return false;
+        };
+        if (receiver_candidates.is_empty() && later_candidates.is_empty())
+            || self.call_has_error_argument(args)
+        {
             return false;
         }
-        self.diags
-            .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+        let TyKind::Fun(signature) = self
+            .declared_function_semantic_type(deferred.receiver_ty)
+            .kind()
+        else {
+            return false;
+        };
+        let mut invoke_sig = CallSig::metadata_plain(signature.params.len());
+        invoke_sig.param_names = (1..=signature.params.len())
+            .map(|index| format!("p{index}"))
+            .collect();
+        let parameters = Self::callable_ref_parameters(&signature.params, &invoke_sig.param_names);
+        let suspend = if signature.suspend { "suspend " } else { "" };
+        let mut message = String::from(INAPPLICABLE_OVERLOAD_PREFIX);
+        self.append_rejected_lexical_candidate(
+            &mut message,
+            call_args,
+            &format!(
+                "{suspend}fun invoke({parameters}): {}",
+                signature.ret.source_name()
+            ),
+            &signature.params,
+            &invoke_sig,
+        );
+        for candidate in receiver_candidates.iter().chain(later_candidates) {
+            let signature = candidate.semantic_signature();
+            let context_count = candidate.context_count.min(signature.params.len());
+            let call_sig = candidate.call_sig.suffix(context_count);
+            let parameters = &signature.params[context_count..];
+            let bindings = call_argument_parameter_indices(
+                args.len(),
+                parameters.len(),
+                self.file.call_arg_names.get(&call.0).map(Vec::as_slice),
+                self.file.call_has_trailing_lambda.contains(&call.0),
+                &call_sig,
+            )
+            .map(|mapping| {
+                crate::symbol_resolver::infer_generic_call_bindings(
+                    &signature,
+                    mapping
+                        .iter()
+                        .copied()
+                        .zip(arg_tys.iter().copied())
+                        .zip(named_whole_array_varargs(
+                            &mapping,
+                            self.file.call_arg_names.get(&call.0).map(Vec::as_slice),
+                            &call_sig,
+                        ))
+                        .enumerate()
+                        .map(|(source, ((parameter, actual), whole_array))| {
+                            (
+                                parameter + context_count,
+                                actual,
+                                whole_array || self.file.is_spread_arg(args[source]),
+                            )
+                        }),
+                    candidate.call_sig.vararg_index,
+                )
+            })
+            .unwrap_or_default();
+            let parameters = parameters
+                .iter()
+                .map(|&parameter| {
+                    crate::symbol_resolver::ty_subst_keep_unbound(parameter, &bindings)
+                })
+                .collect::<Vec<_>>();
+            self.append_rejected_lexical_candidate(
+                &mut message,
+                call_args,
+                &self.member_candidate_display(name, candidate),
+                &parameters,
+                &call_sig,
+            );
+        }
+        self.diags.error(span, message);
         true
+    }
+
+    /// Render each mapped rejection without publishing or retrying the rejected call.
+    fn append_rejected_lexical_candidate(
+        &self,
+        message: &mut String,
+        CallArgs {
+            call,
+            args,
+            arg_tys,
+        }: CallArgs<'_>,
+        display: &str,
+        parameters: &[Ty],
+        signature: &CallSig,
+    ) {
+        message.push_str(&format!("\n\n{display}:"));
+        let names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let Some(mapping) = call_argument_parameter_indices(
+            args.len(),
+            parameters.len(),
+            names,
+            trailing_lambda,
+            signature,
+        ) else {
+            return;
+        };
+        let whole_arrays = named_whole_array_varargs(&mapping, names, signature);
+        for (source, parameter) in mapping.into_iter().enumerate() {
+            let declared = parameters[parameter];
+            let expected = if signature.vararg_index == Some(parameter)
+                && !self.file.is_spread_arg(args[source])
+                && !whole_arrays[source]
+            {
+                declared.array_read_elem().unwrap_or(declared)
+            } else {
+                declared
+            };
+            let actual = arg_tys[source];
+            if actual == Ty::Error
+                || expected == Ty::Error
+                || actual.mentions_pending()
+                || expected.mentions_pending()
+            {
+                continue;
+            }
+            if signature.parameter_admits(parameter, expected, actual)
+                && self.receiver_is_assignable(actual, expected)
+                && !self.function_value_rejected(args[source], expected, actual)
+            {
+                continue;
+            }
+            if let Some(reason) = self.assignability_error_message(
+                expected,
+                self.suspend_converted_argument(expected, actual),
+                "argument",
+            ) {
+                message.push_str("\n  ");
+                let mut chars = reason.chars();
+                if let Some(first) = chars.next() {
+                    message.extend(first.to_uppercase());
+                }
+                message.extend(chars);
+            }
+        }
     }
 
     /// Commit a deferred function value after every later level of the call tower declined: its
