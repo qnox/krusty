@@ -340,12 +340,12 @@ fn realize_accessor(
     }
     if accessor.line != 0 {
         ir.expr_lines.insert(accessor.body, accessor.line);
-        ir.expr_source_lines.insert(accessor.body, accessor.line);
+        ir.set_source_line(accessor.body, accessor.line);
     }
     let returned = if accessor.result == crate::types::Ty::Unit {
         let returned = ir.add_expr(IrExpr::Return(None));
         if accessor.line != 0 {
-            ir.expr_source_lines.insert(returned, accessor.line);
+            ir.set_source_line(returned, accessor.line);
         }
         ir.add_expr(IrExpr::Block {
             stmts: vec![accessor.body, returned],
@@ -354,7 +354,7 @@ fn realize_accessor(
     } else {
         let returned = ir.add_expr(IrExpr::Return(Some(accessor.body)));
         if accessor.line != 0 {
-            ir.expr_source_lines.insert(returned, accessor.line);
+            ir.set_source_line(returned, accessor.line);
         }
         ir.add_expr(IrExpr::Block {
             stmts: vec![returned],

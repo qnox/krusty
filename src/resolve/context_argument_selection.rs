@@ -10,8 +10,8 @@
 use super::scope::{ContextValue, Ns};
 use super::{
     arg_assignable_simple, selected_context_values, CheckerScope, ContextBinding,
-    ImplicitReceiverSelection, Local, MissingContextParameter, ReceiverFnValueOrigin,
-    ResolvedContextArgument, SelectedContextSources,
+    ImplicitReceiverSelection, Local, MissingContextParameter, ReceiverDeclarationRole,
+    ReceiverFnValueOrigin, ResolvedContextArgument, SelectedContextSources,
 };
 use crate::ast::ExprId;
 use crate::fx_hash::HashSet;
@@ -76,6 +76,9 @@ impl super::Checker<'_> {
                         classifier: None,
                         context_binding: None,
                         singleton: self.implicit_singleton_value(actual, receiver.current),
+                        context_parameter: receiver
+                            .receiver_role
+                            .is_some_and(ReceiverDeclarationRole::is_context_parameter),
                         construction_sites: self
                             .implicit_receiver_selection(receiver)
                             .construction_sites,
@@ -142,6 +145,12 @@ impl super::Checker<'_> {
                             classifier: None,
                             context_binding,
                             singleton: self.implicit_singleton_value(ty, current),
+                            context_parameter: self
+                                .implicit_receivers(scope)
+                                .into_iter()
+                                .find(|receiver| receiver.receiver_depth == receiver_depth)
+                                .and_then(|receiver| receiver.receiver_role)
+                                .is_some_and(ReceiverDeclarationRole::is_context_parameter),
                             construction_sites:
                                 super::constructor_receiver_frames::scoped_construction_sites(
                                     &self.constructor_receiver_frames,
@@ -176,6 +185,8 @@ impl super::Checker<'_> {
                                 flow_identity: selected_identity,
                             }),
                             singleton: self.implicit_singleton_value(ty, receiver.current),
+                            // The binding was selected as a context parameter.
+                            context_parameter: true,
                             construction_sites: self
                                 .implicit_receiver_selection(receiver)
                                 .construction_sites,

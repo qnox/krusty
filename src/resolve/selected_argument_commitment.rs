@@ -288,6 +288,10 @@ impl Checker<'_> {
                 debug_assert!(false, "selected call argument lies outside its signature");
                 return false;
             };
+            // The probe was checked under this call's variables; the selection it commits to is
+            // published over the callee's own formals.
+            let probed_actual =
+                crate::types::ty_declared_at_call(probed_actual, self.call_site(call));
             let named = arg_names
                 .and_then(|names| names.get(source))
                 .is_some_and(Option::is_some);
@@ -479,7 +483,7 @@ impl Checker<'_> {
             let resolved = signature
                 .formals
                 .iter()
-                .map(|formal| bindings.get(formal).copied())
+                .map(|formal| bindings.get(formal.as_str()).copied())
                 .collect::<Vec<_>>();
             self.replace_selected_generic_call(expression, signature, &selected.call_sig, resolved);
         } else {

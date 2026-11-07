@@ -100,7 +100,7 @@ pub(crate) fn declarations_equally_specific(
         .chain(right)
         .copied()
         .collect::<Vec<_>>();
-    let open = crate::fx_hash::HashMap::default();
+    let open = crate::types::TyParamBindings::default();
     let at_least_as_specific = |specific: Ty, general: Ty| {
         specific == general
             || super::resolution_subtype(src, specific, crate::types::ty_subst(general, &open))
@@ -215,4 +215,31 @@ fn retain_earliest_intersection_member<T>(
         index += 1;
         keep
     });
+}
+
+/// kotlinc's second most-specific pass (`discriminateGenerics`): when declarations are left tied,
+/// a non-generic one is more specific than a generic one, and two generic ones are incomparable.
+/// A generic declaration that a call instantiates to a non-generic one's parameters (`make<T>(T)`
+/// and `make(Int)` for `make(0)`) therefore loses to it instead of making the call ambiguous.
+pub(super) fn discriminate_generics<T: Copy>(
+    selection: super::overload_selection::CandidateSelectionWithTies<T>,
+    generic: impl Fn(T) -> bool,
+) -> super::overload_selection::CandidateSelectionWithTies<T> {
+    use super::overload_selection::CandidateSelectionWithTies;
+    let CandidateSelectionWithTies::Ambiguous(tied) = selection else {
+        return selection;
+    };
+    if tied.iter().all(|&candidate| !generic(candidate)) {
+        return CandidateSelectionWithTies::Ambiguous(tied);
+    }
+    let non_generic = tied
+        .iter()
+        .copied()
+        .filter(|&candidate| !generic(candidate))
+        .collect::<Vec<_>>();
+    match non_generic.as_slice() {
+        [] => CandidateSelectionWithTies::Ambiguous(tied),
+        [selected] => CandidateSelectionWithTies::Selected(*selected),
+        _ => CandidateSelectionWithTies::Ambiguous(non_generic),
+    }
 }

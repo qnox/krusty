@@ -2,6 +2,8 @@
 
 use super::common;
 
+#[path = "../context_argument_line_marks_e2e.rs"]
+mod context_argument_line_marks;
 #[path = "../implicit_receiver_extension_tower_e2e.rs"]
 mod extension_tower;
 #[path = "../implicit_receiver_inapplicable_call_e2e.rs"]
@@ -10,5 +12,7 @@ mod inapplicable_call;
 mod member_shadow;
 #[path = "../implicit_receiver_named_args_e2e.rs"]
 mod named_args;
+#[path = "../qualifier_root_extension_property_e2e.rs"]
+mod qualifier_root_extension_property;
 #[path = "../implicit_receiver_tower_lambda_shape_e2e.rs"]
 mod tower_lambda_shape;

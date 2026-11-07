@@ -347,9 +347,13 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
             }
             IrCheckedOperation::ConstructorDelegation {
                 outer_receiver,
+                capture_arguments,
                 arguments,
                 ..
             } => {
+                for (value, _) in capture_arguments.iter_mut().flatten() {
+                    *value = map(*value);
+                }
                 map_option(outer_receiver, &mut map);
                 arguments
                     .iter_mut()
@@ -469,6 +473,11 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::LateinitCheck { operand: arg, .. }
         | IrExpr::Throw { operand: arg }
         | IrExpr::EnumValueOf { arg, .. }
+        | IrExpr::EnumConstant {
+            construction: arg, ..
+        }
+        | IrExpr::EnumEntriesList { values: arg, .. }
+        | IrExpr::NoSuchEnumConstant { name: arg, .. }
         | IrExpr::EnumSwitchOrdinal { subject: arg, .. }
         | IrExpr::ReifiedTypeOp { arg, .. }
         | IrExpr::RefGet { holder: arg, .. }
@@ -578,6 +587,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumSwitchKey { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumAllocation { .. }
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation
@@ -809,6 +819,7 @@ mod tests {
                 bounds: vec![(Ty::obj("kotlin/Any"), false)],
                 variance: Default::default(),
                 reified: true,
+                captured_from_enclosing: false,
             }],
             params: vec![parameter],
             ret: Some(parameter),
@@ -837,6 +848,58 @@ mod tests {
         assert_eq!(ir.reified_call_subst.len(), 2);
         assert_eq!(ir.reified_call_subst.get(&source), Some(&reified));
         assert_eq!(ir.reified_call_subst.get(&target), Some(&reified));
+    }
+
+    #[test]
+    fn expression_clone_keeps_constructor_declaration_types_separate_from_representation() {
+        let mut ir = IrFile::default();
+        let value = ir.add_expr(super::super::IrExpr::Const(super::super::IrConst::Int(7)));
+        let declared = Ty::obj("sample/Money");
+        let source = ir.add_expr(super::super::IrExpr::New {
+            internal: crate::types::type_name("sample/Holder"),
+            args: vec![value],
+            ctor_params: Some(vec![Ty::Int]),
+            declared_params: Some(vec![declared].into_boxed_slice()),
+            ctor_desc: Some("(I)V".into()),
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        });
+
+        let (target, copies) = clone_expression_dag(&mut ir, source);
+
+        let super::super::IrExpr::New {
+            args,
+            ctor_params,
+            ctor_desc,
+            ..
+        } = ir.expr(target)
+        else {
+            panic!("a construction copy");
+        };
+        assert_ne!(source, target);
+        assert_eq!(args, &[copies[&value]]);
+        assert_eq!(ctor_params.as_deref(), Some([Ty::Int].as_slice()));
+        assert_eq!(ctor_desc.as_deref(), Some("(I)V"));
+        assert_eq!(
+            ir.construction_declared_params(target),
+            Some([declared].as_slice())
+        );
+        let super::super::IrExpr::New {
+            declared_params, ..
+        } = &mut ir.exprs[target as usize]
+        else {
+            panic!("a construction copy");
+        };
+        declared_params.as_mut().expect("the selected declaration")[0] = Ty::String;
+        assert_eq!(
+            ir.construction_declared_params(source),
+            Some([declared].as_slice())
+        );
+        assert_eq!(
+            ir.construction_declared_params(target),
+            Some([Ty::String].as_slice())
+        );
     }
 
     #[test]
@@ -899,6 +962,7 @@ mod tests {
                 bounds: vec![(parameter, false)],
                 variance: Default::default(),
                 reified: false,
+                captured_from_enclosing: false,
             }],
         );
         ir.record_lambda_type_parameters(source, vec![signature(parameter).type_params[0].clone()]);

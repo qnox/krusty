@@ -75,6 +75,7 @@ fn straight_line_intrinsic(operation: &IrIntrinsic) -> bool {
             | IrIntrinsic::ArraySize
             | IrIntrinsic::StringGet
             | IrIntrinsic::StringLength
+            | IrIntrinsic::EnumOrdinal
             | IrIntrinsic::NullableAnyToString
             | IrIntrinsic::PrimitiveCompare { .. }
             | IrIntrinsic::UnsignedCompare { .. }

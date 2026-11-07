@@ -27,12 +27,17 @@ impl FunctionHeader {
         let Some(value) = self.value(symbol) else {
             return Ok(None);
         };
-        let offset = usize::from(self.receiver_slot.is_some());
+        // Both authenticated instance roles occupy slot zero ahead of parameter identities.
+        let offset = self.parameter_count() - self.params.len();
         let receiver = if (value.index as usize) < offset {
             Some(IrCapturedReceiver::Enclosing {
+                owner: None,
                 classifier: self
-                    .receiver_slot
-                    .expect("a receiver slot has its classifier"),
+                    .slot_type(value.index)
+                    .kotlin_class_internal()
+                    .ok_or_else(|| {
+                        mismatch("an instance receiver has no declared classifier".to_owned())
+                    })?,
             })
         } else {
             let original = &self.identities[value.index as usize - offset];
@@ -100,6 +105,12 @@ impl FunctionHeader {
                             _ => IrCapturedDeclaration::Parameter,
                         },
                         capturer,
+                        crossinline_parameter: match original.role {
+                            IrParameterRole::CapturedValue { capture, .. } => {
+                                capture.crossinline_parameter
+                            }
+                            _ => None,
+                        },
                     },
                 )
             }
