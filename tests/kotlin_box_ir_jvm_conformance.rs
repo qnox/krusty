@@ -1001,20 +1001,25 @@ impl BoxRunner {
 
 /// Milliseconds `BoxRunner` waits for one `box()` call.
 ///
-/// Unset or blank keeps the hosted-runner deadline of 2s. A positive integer lengthens it for a
-/// slower machine. The value is compiled into that run's runner, and the client waits longer.
+/// Unset or blank keeps the hosted-runner deadline of 2s. An explicit positive integer selects
+/// up to `u32::MAX` milliseconds, keeping the Java long literal and the client's additional
+/// duration representable. The value is compiled into that run's runner.
 fn box_case_timeout_ms_from(raw: Option<&str>) -> u64 {
     const DEFAULT_MS: u64 = 2_000;
     let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
         return DEFAULT_MS;
     };
-    let Ok(value) = raw.parse::<u64>() else {
-        panic!("KRUSTY_BOX_CASE_TIMEOUT_MS must be a positive integer, got {raw}");
+    let Ok(value) = raw.parse::<u32>() else {
+        panic!(
+            "KRUSTY_BOX_CASE_TIMEOUT_MS must be an integer from 1 through 4294967295, got {raw}"
+        );
     };
     if value == 0 {
-        panic!("KRUSTY_BOX_CASE_TIMEOUT_MS must be a positive integer, got {raw}");
+        panic!(
+            "KRUSTY_BOX_CASE_TIMEOUT_MS must be an integer from 1 through 4294967295, got {raw}"
+        );
     }
-    value
+    u64::from(value)
 }
 
 fn box_case_timeout_ms() -> u64 {
@@ -1031,17 +1036,24 @@ fn box_case_timeout_uses_two_seconds_unless_overridden() {
     assert_eq!(box_case_timeout_ms_from(Some("")), 2_000);
     assert_eq!(box_case_timeout_ms_from(Some("  ")), 2_000);
     assert_eq!(box_case_timeout_ms_from(Some("8000")), 8_000);
-    let source = box_runner_source(8_000);
-    assert!(
-        source.contains("static final long TIMEOUT_MS = 8000L;"),
-        "{source}"
+    assert_eq!(box_case_timeout_ms_from(Some("1")), 1);
+    assert_eq!(
+        box_case_timeout_ms_from(Some("4294967295")),
+        u64::from(u32::MAX)
     );
-    assert!(!source.contains("__TIMEOUT_MS__"));
 }
 
 #[test]
 fn box_case_timeout_rejects_values_that_are_not_positive_integers() {
-    for raw in ["0", "nope", "-5", "8_000"] {
+    for raw in [
+        "0",
+        "nope",
+        "-5",
+        "8_000",
+        "4294967296",
+        "9223372036854775807",
+        "18446744073709551615",
+    ] {
         let panicked = std::panic::catch_unwind(|| box_case_timeout_ms_from(Some(raw))).is_err();
         assert!(panicked, "{raw}");
     }

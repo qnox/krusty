@@ -3,9 +3,6 @@
 # the maximum-version Native conformance row. The two targets compile the whole `krusty` crate
 # twice (once as the library behind klib_e2e, once with cfg(test)); separate Cargo invocations keep
 # those two compiles from running at the same time and adding up their peak memory.
-#
-# `KRUSTY_KLIB_CRATE_OPT_LEVEL`, when set to 0, 1, 2, 3, s, or z, overrides only the `krusty`
-# package opt-level. The 8 GB CI pool sets 0: opt-level 1 of the cfg(test) crate is killed there.
 
 set -euo pipefail
 
@@ -20,23 +17,11 @@ output_dir="$1"
 artifacts=$(mktemp)
 trap 'rm -f "$artifacts"' EXIT
 
-cargo_config=()
-if [ -n "${KRUSTY_KLIB_CRATE_OPT_LEVEL:-}" ]; then
-  case "$KRUSTY_KLIB_CRATE_OPT_LEVEL" in
-    0|1|2|3|s|z) ;;
-    *)
-      echo "KRUSTY_KLIB_CRATE_OPT_LEVEL must be 0, 1, 2, 3, s, or z" >&2
-      exit 2
-      ;;
-  esac
-  cargo_config+=(--config "profile.klib-test.package.krusty.opt-level=${KRUSTY_KLIB_CRATE_OPT_LEVEL}")
-fi
-
 build() {
   local step cargo_status jq_status
   step=$(mktemp)
   set +e
-  cargo test --no-run --profile klib-test -p krusty "${cargo_config[@]}" "$@" \
+  cargo test --no-run --profile klib-test -p krusty "$@" \
     --features focused-klib-tests \
     --message-format=json >"$step"
   cargo_status=$?

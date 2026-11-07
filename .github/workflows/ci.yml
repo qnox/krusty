@@ -333,9 +333,7 @@ jobs:
           if-no-files-found: error
 
   build-klib-test-bins:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
-    env:
-      CARGO_BUILD_JOBS: *rust-build-budget
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -351,15 +349,6 @@ jobs:
       - name: build focused KLIB test binaries
         run: |
           set -euo pipefail
-          # One Cargo job still leaves a single rustc of the cfg(test) crate above 8 GB at
-          # opt-level 1 (signal 9). The non-test library at that profile fits. On the serial
-          # budget, compile only the krusty package unoptimized and keep 256 codegen units so
-          # each LLVM module stays small. Cap glibc arenas so they do not fragment the rest of
-          # the budget away. Forks keep four jobs and the hosted profile.
-          if [ "${CARGO_BUILD_JOBS}" = 1 ]; then
-            export MALLOC_ARENA_MAX=2
-            export KRUSTY_KLIB_CRATE_OPT_LEVEL=0
-          fi
           source scripts/phase-timing.sh
           phase_log_prefix=klib-test-bins
           PHASE_TIMING_LOG="$(mktemp)"
