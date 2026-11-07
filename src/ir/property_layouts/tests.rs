@@ -324,7 +324,7 @@ fn a_copied_anonymous_class_keeps_its_inherited_storage_and_accessors_on_the_bas
         let mut anonymous = IrClass::synthetic("p/Anonymous".into());
         anonymous.is_anonymous_object = true;
         if interface {
-            anonymous.interfaces = vec!["p/Declaration".into()].into();
+            anonymous.interfaces = vec![crate::types::type_name("p/Declaration")].into();
         } else {
             anonymous.superclass = "p/Declaration".into();
         }
