@@ -7,7 +7,7 @@ use std::rc::Rc;
 use krusty::diag::Span;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
-use krusty::jvm::metadata::{KotlinMeta, MetaFn, MetaProp};
+use krusty::jvm::metadata::{KotlinMembers, MetaFn, MetaProp};
 use krusty::libraries::{LibraryMember, LibraryType, TypeKind};
 use krusty::symbol_source::SymbolSource;
 use krusty::types::{type_name, TypeName};
@@ -92,26 +92,24 @@ pub(crate) fn materialize_with_libraries(
     }
     let classifier = libraries.classifier(type_name(internal))?;
     let mut lib = (*classifier).clone();
-    let mut meta = classpath
+    let mut class = classpath
         .find(internal)
-        .map(|class| class.meta.clone())
-        .filter(KotlinMeta::is_present);
+        .filter(|class| class.meta.is_present());
     if classpath.builtin_is_interface(internal).is_some() {
         lib.supertypes = classpath.builtin_supertypes_name(type_name(internal));
         lib.members = classpath.builtin_members(internal);
-        meta = None;
+        class = None;
     }
+    let members = class.as_deref().map(|class| classpath.class_members(class));
     Some(MaterializedSource::Rendered(render_library_class(
-        internal,
-        &lib,
-        meta.as_ref(),
+        internal, &lib, members,
     )))
 }
 
 pub fn render_library_class(
     internal: &str,
     lib: &LibraryType,
-    meta: Option<&KotlinMeta>,
+    kotlin_members: Option<&KotlinMembers>,
 ) -> RenderedClass {
     let (package, class_name) = match internal.rsplit_once('/') {
         Some((pkg, name)) => (pkg.replace('/', "."), name.to_string()),
@@ -195,11 +193,11 @@ pub fn render_library_class(
             text.push_str(if i == last { ";\n" } else { ",\n" });
         }
     }
-    if let Some(meta) = meta {
-        render_properties(&mut text, &mut members, &meta.class_properties);
-        render_properties(&mut text, &mut members, &meta.package_properties);
-        render_functions(&mut text, &mut members, &meta.class_functions);
-        render_functions(&mut text, &mut members, &meta.package_functions);
+    if let Some(kotlin_members) = kotlin_members {
+        render_properties(&mut text, &mut members, &kotlin_members.class_properties);
+        render_properties(&mut text, &mut members, &kotlin_members.package_properties);
+        render_functions(&mut text, &mut members, &kotlin_members.class_functions);
+        render_functions(&mut text, &mut members, &kotlin_members.package_functions);
     } else {
         render_library_members(&mut text, &mut members, &lib.members);
     }
@@ -551,7 +549,7 @@ fn attached_source_in(
     member_descriptor: &str,
 ) -> Option<(String, Span)> {
     let file = std::fs::File::open(sources_jar).ok()?;
-    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut archive = krusty::archive::open_file(file).ok()?;
     let (package, class_name) = internal.rsplit_once('/').unwrap_or(("", internal));
     let outer_name = class_name.split('$').next().unwrap_or(class_name);
     let mut names = vec![class_name];

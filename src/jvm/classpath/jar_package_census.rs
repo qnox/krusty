@@ -14,7 +14,7 @@ pub(super) fn catalog_jar(jar: &Path, jp: &mut JarPackages) -> bool {
         // A missing entry is empty until its snapshot changes.
         Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
     };
-    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+    let Ok(mut archive) = crate::archive::open_file(file) else {
         return false;
     };
     catalog_archive(&mut archive, jp)

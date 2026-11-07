@@ -8,7 +8,7 @@
 //! `call arity mismatch` bail.
 //!
 //! These are the suspensions whose machine moves to emission, where the spliced body's own locals
-//! exist. See `docs/JVM_INLINE_BEFORE_CPS.md`.
+//! exist.
 //!
 //! Carrying an `inline_body` is NOT by itself proof that the body will run in this frame: the
 //! emitter may decline the splice, in which case the lambda is realized as an ordinary `invoke` and
@@ -43,17 +43,12 @@ fn calls_an_inline_function(ir: &IrFile, expression: ExprId) -> bool {
     else {
         return false;
     };
-    let Callee::Static { name, inline, .. } = &**call_callee else {
+    let Callee::Static { inline, .. } = &**call_callee else {
         return false;
     };
-    match inline {
-        InlineKind::None => false,
-        // The emitter's own rule: a `$default` synthetic is an ABI dispatcher whose mask prologue
-        // has to run as emitted, so only a splice-only declaration bypasses it. Claiming one here
-        // would promise a machine a state that never gets emitted.
-        InlineKind::CanInline => !name.ends_with("$default"),
-        InlineKind::MustInline => true,
-    }
+    // The emitter splices an inline function's `$default` bridge like the function itself, its
+    // masks resolving the bridge's header, so a defaulted call's lambda runs in this frame too.
+    !matches!(inline, InlineKind::None)
 }
 
 /// Suspension points inside the `inline_body` of a lambda reached from `body`, in encounter order.

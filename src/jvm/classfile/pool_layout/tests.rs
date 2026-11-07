@@ -613,6 +613,24 @@ fn tied_inner_class_rows_follow_their_classes_pool_order() {
         table
     };
     let mut laid_out = table(&[(9, 1), (4, 2), (7, 3), (5, 4)]);
-    order_tied_rows(&mut laid_out, &[9, 7, 5]);
+    order_tied_rows(
+        &mut laid_out,
+        &TiedInnerRows {
+            rows: vec![9, 7, 5],
+            declarations: vec![],
+        },
+    );
     assert_eq!(laid_out, table(&[(5, 4), (4, 2), (7, 3), (9, 1)]));
+
+    // Final pool order can move a generated row across source declarations. Only source slots
+    // are permuted afterward; access and every other row payload travel with their declaration.
+    let mut mixed = table(&[(9, 1), (4, 2), (7, 3), (5, 4)]);
+    order_tied_rows(
+        &mut mixed,
+        &TiedInnerRows {
+            rows: vec![9, 7, 5],
+            declarations: vec![9, 5],
+        },
+    );
+    assert_eq!(mixed, table(&[(9, 1), (4, 2), (7, 3), (5, 4)]));
 }

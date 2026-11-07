@@ -18,36 +18,40 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
+mod absent_arguments;
 mod arrays;
-mod default_arguments;
+mod boxing;
+mod callable_reference_identity;
 mod dependency_exports;
 mod exceptions;
+mod function_values;
+mod generated_members;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
 mod shared_cells;
+mod string_conversion;
+pub(super) mod value_hash;
 
 #[cfg(test)]
 use tests::lower_alone;
 
 pub(super) use scalar_instructions::is_scalar_operation;
+pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
+        || operation == crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
 }
 
 use crate::backend::class_tables::module_interfaces::ModuleInterfaces;
 use crate::backend::class_tables::module_slots::ModuleSlotPlan;
 use crate::backend::{CheckedBackendCallables, DependencyExportSignatures};
-use crate::ir::{
-    module_override_callable, Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic,
-    IrTypeOp,
-};
+use crate::ir::{Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
 use crate::types::{EqualityMode, Ty, TyKind};
 
-use super::super::boxes::BOX_VALUE_FIELD;
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::super::objects::REFERENCE;
 use super::super::runtime::*;
@@ -143,13 +147,20 @@ pub(super) fn lower_file(
         let params = function
             .params
             .iter()
-            .map(|param| carrier(*param)?.ok_or_else(|| "a `Unit` parameter".to_string()))
+            .enumerate()
+            .map(|(parameter, _)| {
+                parameter_carrier(module, ir, id as FunId, parameter as u32)?
+                    .ok_or_else(|| "a `Unit` parameter".to_string())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
     }
     let indices = callable_registry.declare_file(ir, module)?;
-    let default_indices = callable_registry.declare_file_defaults(ir, module)?;
+    let reference_file =
+        runtime
+            .callable_references
+            .begin_file(module_name, ir, dependency_exports)?;
     let call_targets = callable_registry.file_calls(ir, callables, module)?;
     let inert_singleton_bindings = crate::backend::inert_staged_singleton_bindings(
         ir,
@@ -199,10 +210,10 @@ pub(super) fn lower_file(
         array_range_checks,
         classifiers,
         module_name,
+        reference_file,
         numbers: plan.interfaces(),
         ir,
         functions: &indices,
-        default_functions: &default_indices,
         globals: &globals,
         classes: classes.as_ref(),
         calls: &call_targets,
@@ -246,6 +257,8 @@ pub(super) fn lower_file(
             ir.declared_value_slot_types(root),
             function.ret,
         );
+        body.scope = crate::ir::IrEnclosure::Function(id as FunId);
+        body.shared_cell_parameters(id as FunId)?;
         match body.function_body(root, function.ret) {
             Ok(()) => {
                 let Body { code, locals, .. } = body;
@@ -261,8 +274,7 @@ pub(super) fn lower_file(
             Err(_reason)
                 if ir.signatures.get(&(id as FunId)).is_some_and(|signature| {
                     signature
-                        .type_params
-                        .iter()
+                        .declared_type_parameters()
                         .any(|parameter| parameter.reified)
                 }) =>
             {
@@ -292,7 +304,6 @@ pub(super) fn lower_file(
             }
         }
     }
-    default_arguments::define(&context, module, runtime)?;
     if let Some(classes) = &classes {
         objects::define_class_functions(&context, classes, module, runtime)?;
         objects::define_module_property_functions(
@@ -332,7 +343,7 @@ pub(super) fn lower_file(
     } else {
         None
     };
-    callable_registry.publish(ir, dependency_exports, &indices, &default_indices)?;
+    callable_registry.publish(ir, dependency_exports, &indices)?;
     Ok(LoweredFile {
         functions: indices,
         initializer,
@@ -345,13 +356,13 @@ struct FileContext<'a> {
     array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
+    /// Backend namespace of this file's local callable declarations.
+    reference_file: u32,
     /// The module-wide numbers of the module's interface members.
     numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
     /// The Wasm function of each emitted function, by `FunId`.
     functions: &'a [Option<u32>],
-    /// Default-argument mask entry for each emitted source function that declares defaults.
-    default_functions: &'a [Option<u32>],
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
@@ -382,17 +393,50 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         TyKind::DOUBLE => ValType::F64,
         TyKind::STRING | TyKind::Null => STRING,
         TyKind::Nullable(Ty::String) => STRING,
+        // Nullable scalars keep their semantic type until this representation boundary. They
+        // use the same boxes as erased values; nullable Unit can hold its singleton or null.
+        TyKind::Nullable(
+            Ty::Boolean
+            | Ty::Byte
+            | Ty::Short
+            | Ty::Char
+            | Ty::Int
+            | Ty::Long
+            | Ty::Float
+            | Ty::Double
+            | Ty::Unit
+            | Ty::Nothing,
+        ) => REFERENCE,
         // Every object, interface and `Any` value, and a type parameter's: a reference the
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
+        TyKind::Intersection(..) if is_reference_intersection(ty) => REFERENCE,
         TyKind::DefinitelyNotNull(inner) if inner.is_ty_param() => REFERENCE,
+        // A function value is an object (see `super::super::function_values`).
+        TyKind::Fun(signature) if !signature.suspend => REFERENCE,
+        TyKind::Fun(_) => return Err("a suspend function value".into()),
+        TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Fun(signature) if !signature.suspend) => {
+            REFERENCE
+        }
         TyKind::Nullable(inner)
-            if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..)) =>
+            if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..))
+                || is_reference_intersection(inner) =>
         {
             REFERENCE
         }
         _ => return Err(format!("the type `{}`", describe(ty))),
     }))
+}
+
+/// Whether `ty` is an intersection whose every component is carried as a reference: its value is
+/// each of those types at once, so it is carried as one too.
+fn is_reference_intersection(ty: Ty) -> bool {
+    match ty.kind() {
+        TyKind::Intersection(parts) => parts
+            .iter()
+            .all(|&part| matches!(carrier(part), Ok(Some(REFERENCE)))),
+        _ => false,
+    }
 }
 
 /// Carrier admitted to the ordinary signed numeric instruction table. Unsigned values are carried
@@ -456,8 +500,8 @@ fn expression_type(
         IrExpr::Block {
             value: Some(value), ..
         } if ir.checked_type(id).is_none() => return expression_type(ir, declared, *value),
-        IrExpr::GetValue(slot) => match ir.logical_types.get(&id) {
-            Some(ty) => *ty,
+        IrExpr::GetValue(slot) => match ir.logical_type(id) {
+            Some(ty) => ty,
             None => *declared
                 .get(slot)
                 .ok_or_else(|| format!("a read of value {slot} before its declaration"))?,
@@ -472,6 +516,8 @@ fn expression_type(
             ir.functions[function as usize].ret
         }
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        // A top-level property read has its storage's declared type.
+        IrExpr::GetStatic(index) if ir.checked_type(id).is_none() => ir.statics[*index as usize].ty,
         // A shared cell's element is read, and a write evaluates to what it stored, at the
         // element's declared type.
         IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. }
@@ -488,6 +534,9 @@ fn expression_type(
         {
             result
         }
+        // A SAM-converted lambda may have no checked type to ask about; it declines here as
+        // it does where it is lowered.
+        IrExpr::Lambda { sam: Some(_), .. } => return Err(function_values::SAM_CONVERSION.into()),
         node => ir
             .checked_type(id)
             .ok_or_else(|| format!("{} without a checked type", describe_node(node)))?,
@@ -542,6 +591,7 @@ struct Body<'a> {
     array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
+    reference_file: u32,
     numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
     module: &'a mut Module,
@@ -574,6 +624,10 @@ struct Body<'a> {
     /// How many structured instructions enclose the current position.
     depth: u32,
     loops: Vec<Loop>,
+    /// The executable scope whose code this body emits: the function, the class's constructor or
+    /// singleton, or the file's static initializer. Only the template ownership of a reified
+    /// type operation reads it.
+    scope: crate::ir::IrEnclosure,
 }
 
 impl<'a> Body<'a> {
@@ -583,28 +637,6 @@ impl<'a> Body<'a> {
         module: &'a mut Module,
         runtime: &'a mut Runtime,
         parameters: &[Ty],
-        declared: HashMap<u32, Ty>,
-        result: Ty,
-    ) -> Self {
-        Self::with_physical_parameters(
-            context,
-            module,
-            runtime,
-            parameters,
-            parameters.len(),
-            declared,
-            result,
-        )
-    }
-
-    /// Build a body whose physical Wasm signature has trailing backend parameters that are not
-    /// semantic value slots (the default-argument entry's mask words).
-    fn with_physical_parameters(
-        context: &FileContext<'a>,
-        module: &'a mut Module,
-        runtime: &'a mut Runtime,
-        parameters: &[Ty],
-        physical_parameter_count: usize,
         mut declared: HashMap<u32, Ty>,
         result: Ty,
     ) -> Self {
@@ -619,6 +651,7 @@ impl<'a> Body<'a> {
         );
         Self {
             module_name: context.module_name,
+            reference_file: context.reference_file,
             array_range_checks: context.array_range_checks,
             classifiers: context.classifiers,
             numbers: context.numbers,
@@ -634,7 +667,7 @@ impl<'a> Body<'a> {
             properties: context.properties,
             code: Code::default(),
             locals: Vec::new(),
-            next_local: physical_parameter_count as u32,
+            next_local: parameters.len() as u32,
             values: parameters
                 .iter()
                 .enumerate()
@@ -646,6 +679,7 @@ impl<'a> Body<'a> {
             result,
             depth: 0,
             loops: Vec::new(),
+            scope: crate::ir::IrEnclosure::File,
         }
     }
 
@@ -812,6 +846,11 @@ impl<'a> Body<'a> {
             return Ok(());
         };
         let Some(source) = carrier(source)? else {
+            if source == Ty::Unit && target == REFERENCE {
+                let unit = self.runtime.unit_object(self.module);
+                self.code.global_get(unit);
+                return Ok(());
+            }
             return Err("a `Unit` value where a value is expected".to_string());
         };
         if source == target {
@@ -860,43 +899,6 @@ impl<'a> Body<'a> {
         }
     }
 
-    /// Box the `ty` value on the stack (see `super::super::boxes`).
-    fn box_value(&mut self, ty: Ty) -> Result<(), Unsupported> {
-        let form = self
-            .runtime
-            .box_form(self.module, ty)
-            .ok_or_else(|| format!("a `{}` value carried as a reference", describe(ty)))?;
-        if let Some([no, yes]) = form.booleans {
-            self.code
-                .if_(BlockType::Value(REFERENCE))
-                .global_get(yes)
-                .else_()
-                .global_get(no)
-                .end();
-            return Ok(());
-        }
-        let value = carrier(ty)?.expect("a boxed primitive has a value");
-        let local = self.local(value);
-        self.code
-            .local_set(local)
-            .global_get(form.table)
-            .local_get(local)
-            .struct_new(form.structure);
-        Ok(())
-    }
-
-    /// Read the `ty` value out of the box the frontend checked the reference on the stack is.
-    fn unbox(&mut self, ty: Ty) -> Result<(), Unsupported> {
-        let form = self
-            .runtime
-            .box_form(self.module, ty)
-            .ok_or_else(|| format!("a reference read as a `{}` value", describe(ty)))?;
-        self.code
-            .ref_cast(false, HeapType::Concrete(form.structure))
-            .struct_get(form.structure, BOX_VALUE_FIELD);
-        Ok(())
-    }
-
     /// Emit `id`, leaving its value on the stack when it has one.
     fn expression(&mut self, id: u32) -> Result<(), Unsupported> {
         let node = self.ir.expr(id).clone();
@@ -906,6 +908,7 @@ impl<'a> Body<'a> {
         match node {
             IrExpr::Const(constant) => self.constant(&constant)?,
             IrExpr::UnitInstance | IrExpr::InlineFrameMarker => {}
+            IrExpr::AbsentArgument { ty } => self.absent_argument(ty)?,
             IrExpr::GetValue(slot) if self.cells.contains_key(&slot) => {
                 return Err("a shared cell read as a value".to_string());
             }
@@ -1058,8 +1061,8 @@ impl<'a> Body<'a> {
                 if params.len() != args.len() {
                     return Err("a call whose arguments do not match its parameters".into());
                 }
-                for (arg, param) in args.iter().zip(params) {
-                    self.value(*arg, param)?;
+                for (parameter, &arg) in args.iter().enumerate() {
+                    self.function_argument(*function, parameter as u32, arg)?;
                 }
                 let function = self.emitted_function(*function)?;
                 self.code.call(function);
@@ -1085,23 +1088,20 @@ impl<'a> Body<'a> {
                 callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
-            } if let Callee::ModuleWithDefaults {
-                default_provider,
-                params,
-                defaults,
-                dispatch_receiver_ty: None,
-                extension_receiver_parameter: None,
-                ..
+            } if let Callee::ModuleDefaultEntry {
+                provider, params, ..
             } = &**call_callee =>
             {
-                let provider = module_override_callable(*default_provider).ok_or_else(|| {
-                    "a source default entry whose provider is not in the current module".to_string()
-                })?;
                 let function = self
                     .calls
-                    .module_default(provider)
+                    .module_default(*provider)
                     .ok_or_else(|| "an unregistered source default entry".to_string())?;
-                self.defaulted_call(function, params, defaults, &args)?;
+                let mut frame = params.clone();
+                frame.extend(std::iter::repeat_n(
+                    Ty::Int,
+                    crate::backend::default_arguments::mask_words(params.len()),
+                ));
+                self.direct_call(function, &frame, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1141,6 +1141,9 @@ impl<'a> Body<'a> {
             {
                 self.throwable_message(dispatch_receiver, &args, *ret)?;
             }
+            IrExpr::Call { .. } if value_hash::call_kind(self.ir, self.callables, id).is_some() => {
+                self.value_hash_call(id)?;
+            }
             IrExpr::Call {
                 callee: ref call_callee,
                 dispatch_receiver,
@@ -1178,7 +1181,7 @@ impl<'a> Body<'a> {
                 op: op @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast),
                 arg,
                 type_operand,
-            } => self.type_test(op, arg, type_operand)?,
+            } => self.type_test(id, op, arg, type_operand)?,
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::ImplicitCoercion | IrTypeOp::Cast),
                 arg,
@@ -1245,6 +1248,7 @@ impl<'a> Body<'a> {
                 ..
             } => {
                 self.new_object(
+                    id,
                     internal,
                     &args,
                     ctor_params.as_deref(),
@@ -1285,11 +1289,22 @@ impl<'a> Body<'a> {
                 receiver,
                 args,
             } => self.method_call(class, index, receiver, &args)?,
+            // `Unit` has no carrier: its one value is the absence of one.
+            IrExpr::SingletonValue { .. } if self.carrier_of(id)?.is_none() => {}
             IrExpr::SingletonValue { classifier } => self.singleton(classifier)?,
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
+                ty,
                 ..
-            } => self.realized_property_read(id, receiver)?,
+            } => {
+                self.realized_property_read(id, receiver)?;
+                // A property stored as `kotlin.Unit`'s instance and read where the checked use is
+                // `Unit` has no carrier there: the stored reference is discarded, as any value
+                // converted to a type without a carrier is.
+                if carrier(ty)?.is_some() && self.carrier_of(id)?.is_none() {
+                    self.code.drop_();
+                }
+            }
             IrExpr::PropertyWrite {
                 receiver: Some(receiver),
                 value,
@@ -1362,6 +1377,28 @@ impl<'a> Body<'a> {
                     self.code.unreachable();
                 }
             }
+            IrExpr::Lambda {
+                impl_fn,
+                captures,
+                sam: None,
+                ..
+            } => self.function_value(
+                impl_fn,
+                &captures,
+                function_values::FunctionEquality::Identity,
+            )?,
+            IrExpr::Lambda { sam: Some(_), .. } => {
+                return Err(function_values::SAM_CONVERSION.into());
+            }
+            IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
+                self.callable_reference(&reference)?
+            }
+            IrExpr::InvokeFunction {
+                func,
+                args,
+                params,
+                ret,
+            } => self.invoke_function(func, &args, &params, ret)?,
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
             }
@@ -1417,32 +1454,6 @@ impl<'a> Body<'a> {
             IrConst::UInt(value) => self.code.i32_const(*value as i32),
             IrConst::ULong(value) => self.code.i64_const(*value as i64),
         };
-        Ok(())
-    }
-
-    /// Push `id` converted to a non-null `String`, as a string template does.
-    fn string_of(&mut self, id: u32) -> Result<(), Unsupported> {
-        let ty = self.type_of(id)?;
-        self.expression(id)?;
-        let function = match ty {
-            Some(Ty::String | Ty::Null) => self.runtime.string_or_null,
-            Some(ty) if ty == Ty::nullable(Ty::String) => self.runtime.string_or_null,
-            Some(Ty::Int | Ty::Short | Ty::Byte) => self.runtime.string_of_i32,
-            Some(Ty::Long) => self.runtime.string_of_i64,
-            Some(Ty::Char) => self.runtime.string_of_char,
-            Some(Ty::Boolean) => self.runtime.string_of_boolean,
-            Some(ty) if self.class_of_type(ty).is_some() => {
-                return self.object_to_string(ty);
-            }
-            Some(other) => {
-                return Err(format!(
-                    "a string template part of type `{}`",
-                    describe(other)
-                ));
-            }
-            None => return Ok(()),
-        };
-        self.code.call(function);
         Ok(())
     }
 
@@ -1683,6 +1694,34 @@ impl<'a> Body<'a> {
             (Some(ValType::Ref { .. }), Some(ValType::Ref { .. })) => {
                 self.object_equality(lhs, rhs)?
             }
+            // `Unit` has one value, so two `Unit` operands are equal, by identity as well.
+            (None, None) => {
+                self.statement(lhs)?;
+                self.statement(rhs)?;
+                self.code.i32_const(1);
+            }
+            // `Unit` against a reference: its instance, compared as any object is.
+            (None, Some(ValType::Ref { .. })) | (Some(ValType::Ref { .. }), None)
+                if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) =>
+            {
+                self.value(lhs, objects::any())?;
+                self.value(rhs, objects::any())?;
+                self.code.ref_eq();
+            }
+            (None, Some(ValType::Ref { .. })) | (Some(ValType::Ref { .. }), None) => {
+                self.object_equality(lhs, rhs)?
+            }
+            // `any == 3`: the primitive side is boxed and the left value's `equals` decides, as
+            // kotlinc's `Intrinsics.areEqual` does. IEEE-754 equality of a nullable floating
+            // value is a different relation and stays unsupported.
+            (Some(ValType::Ref { .. }), Some(scalar))
+            | (Some(scalar), Some(ValType::Ref { .. }))
+                if rank(scalar).is_some()
+                    && matches!(op, IrBinOp::Eq | IrBinOp::Ne)
+                    && mode != EqualityMode::Ieee754 =>
+            {
+                self.object_equality(lhs, rhs)?
+            }
             _ => {
                 return Err("an equality between values of these types".into());
             }
@@ -1847,19 +1886,18 @@ mod tests {
     ) -> Result<(), Unsupported> {
         let mut ir = IrFile::default();
         let seven = ir.add_expr(IrExpr::Const(IrConst::Int(7)));
-        ir.logical_types.insert(seven, Ty::Int);
+        ir.set_logical_type(seven, Ty::Int);
         let statement = if diverges {
             ir.add_expr(IrExpr::Return(Some(seven)))
         } else {
             ir.add_expr(IrExpr::UnitInstance)
         };
-        ir.logical_types
-            .insert(statement, if diverges { Ty::Nothing } else { Ty::Unit });
+        ir.set_logical_type(statement, if diverges { Ty::Nothing } else { Ty::Unit });
         let operand = ir.add_expr(IrExpr::Block {
             stmts: vec![statement],
             value: None,
         });
-        ir.logical_types.insert(operand, Ty::Unit);
+        ir.set_logical_type(operand, Ty::Unit);
         let returned = ir.add_expr(IrExpr::Return(Some(operand)));
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![returned],
@@ -1914,7 +1952,7 @@ mod tests {
             type_operand: Ty::String,
         });
         ir.call_declared_ret.insert(call, formal);
-        ir.logical_types.insert(coercion, Ty::String);
+        ir.set_logical_type(coercion, Ty::String);
         assert_eq!(ir.checked_type(call), None);
         assert_eq!(
             expression_type(&ir, &HashMap::default(), call),
@@ -1951,7 +1989,7 @@ mod tests {
             args: Vec::new(),
         });
         ir.call_declared_ret.insert(call, declared);
-        ir.logical_types.insert(call, Ty::String);
+        ir.set_logical_type(call, Ty::String);
         assert_eq!(
             expression_type(&ir, &HashMap::default(), call),
             Ok(Some(Ty::String))
@@ -1983,7 +2021,7 @@ mod tests {
             stmts: Vec::new(),
             value: Some(value),
         });
-        ir.logical_types.insert(block, Ty::Byte);
+        ir.set_logical_type(block, Ty::Byte);
         let declared = HashMap::from_iter([(7, Ty::Int)]);
 
         assert_eq!(expression_type(&ir, &declared, block), Ok(Some(Ty::Byte)));

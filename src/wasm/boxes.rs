@@ -3,7 +3,7 @@
 //! A Kotlin primitive read as `Any`, as a type parameter's value or through a supertype that is a
 //! class (`Number`, `Comparable`) is an object, as it is on every Kotlin target. Each primitive
 //! type has one box type: a struct of the dispatch table every object starts with, then the value
-//! itself. Its table holds the primitive's own `equals`, as the JVM's box defines it, which is what
+//! itself. Its table holds the primitive's own `equals` and `hashCode`, as the JVM's box defines them, which is what
 //! kotlinc's output observes. A box type and its table are declared the first time a
 //! file boxes that primitive.
 //!
@@ -45,6 +45,19 @@ impl Primitive {
         })
     }
 
+    fn ty(self) -> Ty {
+        match self {
+            Self::Boolean => Ty::Boolean,
+            Self::Byte => Ty::Byte,
+            Self::Short => Ty::Short,
+            Self::Char => Ty::Char,
+            Self::Int => Ty::Int,
+            Self::Long => Ty::Long,
+            Self::Float => Ty::Float,
+            Self::Double => Ty::Double,
+        }
+    }
+
     fn value(self) -> ValType {
         match self {
             Self::Long => ValType::I64,
@@ -66,12 +79,46 @@ pub(super) struct BoxForm {
 }
 
 /// The value field of a box struct, after the dispatch table.
-pub(super) const BOX_VALUE_FIELD: u32 = 1;
+const BOX_VALUE_FIELD: u32 = 1;
+
+impl BoxForm {
+    /// Whether boxing needs a scratch local of the value's carrier: every box but a `Boolean`'s,
+    /// which is one of two existing instances.
+    pub(super) fn needs_scratch(&self) -> bool {
+        self.booleans.is_none()
+    }
+
+    /// Replace the value on the stack with its box, through `scratch` when
+    /// [`Self::needs_scratch`].
+    pub(super) fn emit_box(&self, code: &mut Code, scratch: Option<u32>) {
+        if let Some([no, yes]) = self.booleans {
+            code.if_(BlockType::Value(super::objects::REFERENCE))
+                .global_get(yes)
+                .else_()
+                .global_get(no)
+                .end();
+            return;
+        }
+        let scratch = scratch.expect("a box built through a scratch local");
+        code.local_set(scratch)
+            .global_get(self.table)
+            .local_get(scratch)
+            .struct_new(self.structure);
+    }
+
+    /// Replace the reference on the stack, which the frontend checked is this box, with its value.
+    pub(super) fn emit_unbox(&self, code: &mut Code) {
+        code.ref_cast(false, HeapType::Concrete(self.structure))
+            .struct_get(self.structure, BOX_VALUE_FIELD);
+    }
+}
 
 /// The box types this module has declared.
 #[derive(Default)]
 pub(super) struct Boxes {
     forms: HashMap<Primitive, BoxForm>,
+    /// The global holding `kotlin.Unit`, once something reads it as a reference.
+    unit: Option<u32>,
 }
 
 impl Runtime {
@@ -93,9 +140,9 @@ impl Runtime {
         });
         let [equals_ty, hash_code_ty, to_string_ty] = objects.any_slot_types;
         let equals = define(module, equals_ty, equals(primitive, structure));
-        // A box's `hashCode` and `toString` are reached only by a call of `kotlin.Any`'s members
-        // on an `Any` receiver, which this backend does not lower yet.
-        let hash_code = self.objects.trap(module, hash_code_ty);
+        let hash_code = define(module, hash_code_ty, self.hash_code(primitive, structure));
+        // A box's `toString` is reached only by a call of `kotlin.Any`'s members on an `Any`
+        // receiver, which this backend does not lower yet.
         let to_string = self.objects.trap(module, to_string_ty);
         let objects = &mut self.objects;
         let (_, itable) = objects
@@ -124,6 +171,43 @@ impl Runtime {
         };
         self.boxes.forms.insert(primitive, form);
         Some(form)
+    }
+}
+
+impl Runtime {
+    /// The global holding `kotlin.Unit`: what a `Unit` expression is where a reference is expected
+    /// (a lambda's result, a type parameter's value). `Unit` has no carrier of its own, so it is
+    /// boxed like a primitive is, into the one instance it has.
+    pub(super) fn unit_object(&mut self, module: &mut Module) -> u32 {
+        if let Some(unit) = self.boxes.unit {
+            return unit;
+        }
+        let objects = &mut self.objects;
+        let structure = module.subtype(SubType {
+            composite: CompositeType::Struct(vec![immutable(ValType::reference(
+                objects.any_table,
+            ))]),
+            supertype: Some(objects.object),
+            open: false,
+        });
+        let [_, _, to_string_ty] = objects.any_slot_types;
+        let hash_code = self.hashing.unit_hash_code;
+        let to_string = objects.trap(module, to_string_ty);
+        let (_, itable) = objects
+            .interfaces
+            .class(module, objects.itable, vec![structure]);
+        let mut init = Code::default();
+        for function in [objects.identity_equals, hash_code, to_string] {
+            module.reference_function(function);
+            init.ref_func(function);
+        }
+        init.global_get(itable).struct_new(objects.any_table);
+        let table = module.constant_global(ValType::reference(objects.any_table), init);
+        let mut init = Code::default();
+        init.global_get(table).struct_new(structure);
+        let unit = module.constant_global(ValType::reference(structure), init);
+        self.boxes.unit = Some(unit);
+        unit
     }
 }
 
@@ -168,6 +252,19 @@ fn equals(primitive: Primitive, structure: u32) -> (Vec<ValType>, Code) {
     }
     code.else_().i32_const(0).end();
     (vec![value, value], code)
+}
+
+impl Runtime {
+    /// `hashCode(this)`: the hash of the primitive value the box holds.
+    fn hash_code(&self, primitive: Primitive, structure: u32) -> (Vec<ValType>, Code) {
+        let mut code = Code::default();
+        code.local_get(0)
+            .ref_cast(false, HeapType::Concrete(structure))
+            .struct_get(structure, BOX_VALUE_FIELD);
+        let hashed = self.hashing.emit_scalar_hash(&mut code, primitive.ty());
+        debug_assert!(hashed, "every boxed primitive has a scalar hash");
+        (Vec::new(), code)
+    }
 }
 
 /// The NaN test, the reinterpretation as bits and the bits' equality of a floating carrier.

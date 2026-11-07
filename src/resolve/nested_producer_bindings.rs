@@ -17,7 +17,7 @@ pub(super) fn open_variable<'a>(
     type_args: &[Ty],
     declared: Ty,
 ) -> Option<&'a str> {
-    let TyKind::TyParam(name, _) = declared.non_null().kind() else {
+    let (TyKind::TyParam(name, _) | TyKind::Var(name, _)) = declared.non_null().kind() else {
         return None;
     };
     let index = signature
@@ -45,7 +45,7 @@ pub(super) fn open_variable_bindings(
 ) -> Option<crate::symbol_resolver::GSigBinds> {
     let solves_result = |bindings: &crate::symbol_resolver::GSigBinds| {
         generic_sig.formals.iter().all(|formal| {
-            bindings.contains_key(formal)
+            bindings.contains_key(formal.as_str())
                 || !crate::types::ty_mentions_param(generic_sig.ret, std::slice::from_ref(formal))
         })
     };
@@ -103,6 +103,21 @@ pub(super) fn join_lower_bounds(
     });
 }
 
+/// `signature` with the bounds of its formals restated over the evidence already solved. An
+/// expected result checked against `C : MutableCollection<in T>` after the receiver fixed
+/// `T = Sub` must meet `MutableCollection<in Sub>`, not the erased `MutableCollection<in Any?>` that
+/// would reject every expectation other than one admitting `Any?`.
+pub(super) fn solved_bound_signature(
+    signature: &GenericSig,
+    bindings: &crate::symbol_resolver::GSigBinds,
+) -> GenericSig {
+    let mut solved = signature.clone();
+    for bound in solved.formal_bounds.iter_mut().flatten() {
+        *bound = crate::symbol_resolver::ty_subst_keep_unbound(*bound, bindings);
+    }
+    solved
+}
+
 /// The expectation a postponed producer is solved against at outer parameter `declared`. An open outer variable whose
 /// declared bound depends on another, already bound variable (`S : T?` after `T = String`) is not
 /// a rigid type for the producer: the producer may only produce what that bound admits, so the
@@ -117,7 +132,7 @@ pub(super) fn producer_expectation(
 ) -> Ty {
     let mut dependent = crate::symbol_resolver::GSigBinds::default();
     for (index, formal) in signature.formals.iter().enumerate() {
-        if bindings.contains_key(formal)
+        if bindings.contains_key(formal.as_str())
             || type_args
                 .get(index)
                 .is_some_and(|argument| *argument != Ty::Error)
@@ -138,7 +153,7 @@ pub(super) fn producer_expectation(
         }
         let bound = crate::symbol_resolver::ty_subst_keep_unbound(*bound, bindings);
         if !crate::types::ty_mentions_param(bound, &signature.formals) {
-            dependent.insert(formal.clone(), bound);
+            dependent.insert(crate::types::TyParamName::new(formal), bound);
         }
     }
     let substituted = crate::symbol_resolver::ty_subst_keep_unbound(
@@ -147,7 +162,9 @@ pub(super) fn producer_expectation(
     );
     // A still-open bare variable offers the producer its own bound.
     match substituted.kind() {
-        TyKind::TyParam(_, bound) => crate::symbol_resolver::ty_subst_keep_unbound(bound, bindings),
+        TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
+            crate::symbol_resolver::ty_subst_keep_unbound(bound, bindings)
+        }
         _ => substituted,
     }
 }
@@ -164,7 +181,7 @@ pub(super) fn enforce_declared_bounds(
     mut admits: impl FnMut(Ty, Ty) -> bool,
 ) {
     for (index, formal) in generic_sig.formals.iter().enumerate() {
-        let Some(actual) = nested_bindings.get(formal).copied() else {
+        let Some(actual) = nested_bindings.get(formal.as_str()).copied() else {
             continue;
         };
         let Some(actual_bound) = actual.non_null().ty_param_bound() else {
@@ -184,7 +201,7 @@ pub(super) fn enforce_declared_bounds(
             continue;
         };
         if actual.is_nullable() || !admits(actual_bound, required) {
-            nested_bindings.insert(formal.clone(), required);
+            nested_bindings.insert(crate::types::TyParamName::new(formal), required);
         }
     }
 }

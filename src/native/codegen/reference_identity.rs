@@ -4,6 +4,13 @@
 pub(super) struct ReferenceDeclaration(String);
 
 impl ReferenceDeclaration {
+    pub(super) fn constructor(module: &str, declaration: crate::fir::DeclarationId) -> Self {
+        Self(super::super::symbols::constructor_reference_symbol(
+            module,
+            declaration,
+        ))
+    }
+
     pub(super) fn source(module: &str, callable: crate::fir::CallableId) -> Self {
         Self(super::super::symbols::module_function_symbol(
             module, callable,
@@ -14,6 +21,8 @@ impl ReferenceDeclaration {
         ir: &crate::ir::IrFile,
         module: &str,
         function: crate::ir::FunId,
+        exports: &crate::backend::DependencyExportSignatures,
+        identity: &crate::backend::KlibDependencyCallable,
     ) -> Result<Option<Self>, &'static str> {
         let mut identities = ir
             .checked_callable_functions
@@ -23,7 +32,42 @@ impl ReferenceDeclaration {
         if identities.next().is_some() {
             return Err("a source export has more than one checked callable identity");
         }
-        Ok(first.map(|identity| Self::source(module, identity)))
+        if let Some(identity) = first {
+            return Ok(Some(Self::source(module, identity)));
+        }
+        // Construction entries export the constructor itself, rather than a source function.
+        // Join that exact metadata identity to its checked class/ordinal and declaration ID.
+        let mut constructors = exports
+            .constructors()
+            .iter()
+            .filter_map(|(constructor, candidate)| (candidate == identity).then_some(constructor));
+        let Some(constructor) = constructors.next() else {
+            return Ok(None);
+        };
+        if constructors.next().is_some() {
+            return Err("a source export has more than one checked constructor identity");
+        }
+        let ordinal = match constructor.secondary {
+            None => 0,
+            Some(ordinal) => u32::try_from(ordinal)
+                .ok()
+                .and_then(|ordinal| ordinal.checked_add(1))
+                .ok_or("a source constructor export has an invalid declaration ordinal")?,
+        };
+        let mut declarations =
+            ir.checked_constructor_bodies
+                .iter()
+                .filter_map(|(declaration, body)| {
+                    (body.class == constructor.class && body.ordinal == ordinal)
+                        .then_some(*declaration)
+                });
+        let declaration = declarations
+            .next()
+            .ok_or("a source constructor export has no checked declaration identity")?;
+        if declarations.next().is_some() {
+            return Err("a source constructor export has ambiguous checked declaration identities");
+        }
+        Ok(Some(Self::constructor(module, declaration)))
     }
 
     pub(super) fn dependency(callable: &crate::backend::KlibDependencyCallable) -> Self {

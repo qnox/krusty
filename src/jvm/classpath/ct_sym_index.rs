@@ -72,7 +72,7 @@ fn build_ct_sym_index(
     };
     let Some(mut archive) = File::open(path)
         .ok()
-        .and_then(|file| zip::ZipArchive::new(file).ok())
+        .and_then(|file| crate::archive::open_file(file).ok())
     else {
         return Ok(None);
     };

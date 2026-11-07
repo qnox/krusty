@@ -449,7 +449,7 @@ pub type ClassAudit = Result<Vec<MethodAudit>, String>;
 pub fn audit_jar(path: &std::path::Path) -> Result<Vec<(String, ClassAudit)>, String> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
+    let mut archive = crate::archive::open_file(file).map_err(|error| error.to_string())?;
     let mut out = Vec::new();
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;

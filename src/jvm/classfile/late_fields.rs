@@ -22,6 +22,7 @@ pub(super) struct LateField {
     /// before the class's own `@Metadata`, not after the methods.
     user_visible: Vec<crate::ir::AppliedAnnotation>,
     user_invisible: Vec<crate::ir::AppliedAnnotation>,
+    deprecated: bool,
 }
 
 /// Position in the finished field table, independent from the constant-pool interning window.
@@ -50,8 +51,14 @@ impl LateField {
             ann: ann.map(str::to_string),
             user_visible: Vec::new(),
             user_invisible: Vec::new(),
+            deprecated: false,
         }
     }
+}
+
+/// kotlinc's `generateField` writes no nullability annotation on a synthetic or enum field.
+pub(super) fn carries_nullability(access: u16) -> bool {
+    access & (super::ACC_SYNTHETIC | super::ACC_ENUM) == 0
 }
 
 impl ClassWriter {
@@ -149,7 +156,7 @@ impl ClassWriter {
             });
             // A user annotation interns before the nullability one, matching the attribute order
             // (`RuntimeVisibleAnnotations` precedes `RuntimeInvisibleAnnotations`).
-            let visible_anns: Vec<Vec<u8>> = lf
+            let mut visible_anns: Vec<Vec<u8>> = lf
                 .user_visible
                 .iter()
                 .map(|annotation| self.encode_annotation(annotation))
@@ -159,11 +166,24 @@ impl ClassWriter {
                 .iter()
                 .map(|annotation| self.encode_annotation(annotation))
                 .collect();
-            let nullability = lf.ann.as_deref().and_then(|a| self.written_annotation(a));
+            let nullability = lf
+                .ann
+                .as_deref()
+                .filter(|_| carries_nullability(lf.access))
+                .and_then(|a| self.written_annotation(a));
             invisible_anns.extend(nullability.map(|a| {
                 let ti = self.cp.utf8(a);
                 vec![(ti >> 8) as u8, ti as u8, 0, 0]
             }));
+            // kotlinc adds the Java deprecation after every declared and nullability annotation:
+            // its type interns last and it ends the runtime-visible list.
+            if lf.deprecated {
+                visible_anns.push(self.encode_annotation(&crate::ir::AppliedAnnotation {
+                    internal: crate::types::type_name("java/lang/Deprecated"),
+                    values: Vec::new(),
+                    written_order: None,
+                }));
+            }
             let info = FieldInfo {
                 access: lf.access,
                 name: n,
@@ -172,6 +192,7 @@ impl ClassWriter {
                 const_value: cv,
                 visible_anns,
                 invisible_anns,
+                deprecated: lf.deprecated,
             };
             match lf.placement {
                 LateFieldPlacement::Trailing => self.fields.push(info),
@@ -195,6 +216,14 @@ impl ClassWriter {
         if let Some(field) = self.late_fields.last_mut() {
             field.user_visible = visible;
             field.user_invisible = invisible;
+        }
+    }
+
+    /// Deprecate the most recently DEFERRED field for Java: `@java.lang.Deprecated` after its
+    /// other annotations, and the `Deprecated` attribute.
+    pub fn deprecate_last_late_field(&mut self) {
+        if let Some(field) = self.late_fields.last_mut() {
+            field.deprecated = true;
         }
     }
 }

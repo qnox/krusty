@@ -138,6 +138,7 @@ pub(super) fn source_ordered_members<'a>(
             .find(|property| property.getter == Some(function) || property.setter == Some(function))
     };
     let first_accessor = |property: &IrProperty| property.getter.or(property.setter);
+    let function_key = plugin_and_structural_member_keys(ir, class);
     use super::static_fields::StaticAccessor;
     let slot = |accessor: StaticAccessor| match accessor {
         StaticAccessor::Getter => 0,
@@ -228,6 +229,7 @@ pub(super) fn source_ordered_members<'a>(
                         block_accessor_slots
                             .get(&function)
                             .or_else(|| property_marker_slots.get(&function))
+                            .or_else(|| function_key.get(&function))
                             .copied()
                             .unwrap_or((function_order(function), 0))
                     },
@@ -281,6 +283,42 @@ pub(super) fn source_ordered_members<'a>(
 /// so they follow every member without a source position, constructors included.
 fn lowered_after_generated_members(ir: &IrFile, function: u32) -> bool {
     ir.lifted_functions.contains_key(&function) && !ir.fn_source_order.contains_key(&function)
+}
+
+/// The schedule keys of a data class's members a compiler plugin declares and of its generated
+/// `toString`, `hashCode` and `equals`. kotlinc adds a plugin's member, such as a serializable data
+/// object's `serializer()`, after the class's source declarations and generates the structural
+/// members after it. A class without structural members keeps its plugin members' own keys.
+fn plugin_and_structural_member_keys(
+    ir: &IrFile,
+    class: &IrClass,
+) -> std::collections::HashMap<u32, (u32, u8)> {
+    use crate::ir::IrDataClassMemberRole;
+    let owner = class.fq_name_id();
+    let structural: Vec<(u32, u32)> = [
+        IrDataClassMemberRole::ToString,
+        IrDataClassMemberRole::HashCode,
+        IrDataClassMemberRole::Equals,
+    ]
+    .into_iter()
+    .filter_map(|role| ir.data_class_member(owner, role))
+    .filter_map(|function| Some((function, *ir.fn_source_order.get(&function)?)))
+    .collect();
+    let Some(first) = structural.iter().map(|&(_, order)| order).min() else {
+        return std::collections::HashMap::new();
+    };
+    let plugin_members = ir
+        .plugin_declaration_functions
+        .values()
+        .flatten()
+        .copied()
+        .filter(|function| ir.functions[*function as usize].dispatch_receiver == Some(owner))
+        .map(|function| (function, (first, 0)));
+    structural
+        .iter()
+        .map(|&(function, order)| (function, (order, 1)))
+        .chain(plugin_members)
+        .collect()
 }
 
 /// Split the schedule around the primary `<init>`. kotlinc emits a value class's declared members

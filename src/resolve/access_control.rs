@@ -158,6 +158,14 @@ impl SourceMemberSite for Checker<'_> {
     }
 }
 
+/// The checker's member visibility, read by the resolver's overload selection so a member this
+/// site cannot see ranks below every accessible applicable candidate.
+impl crate::symbol_resolver::MemberAccessSite for Checker<'_> {
+    fn member_accessible(&self, member: &crate::libraries::FunctionInfo, receiver: Ty) -> bool {
+        self.member_candidate_accessible(member, Some(receiver))
+    }
+}
+
 impl<'a> Checker<'a> {
     pub(super) fn source_callable_visible(
         &self,
@@ -252,66 +260,6 @@ impl<'a> Checker<'a> {
         overloads.len() != before
     }
 
-    /// Drop the hidden members of `receiver` only when one of the visible extensions applies to
-    /// this operator call. An extension of the same name that does not apply (`b + 1` against
-    /// `B.plus(String)`) leaves the hidden member to report its visibility; an applicable but
-    /// ambiguous extension family still takes the call, so the ambiguity is what is reported.
-    pub(super) fn drop_members_hidden_by_applicable_extensions(
-        &self,
-        receiver: Ty,
-        overloads: &mut Vec<crate::libraries::FunctionInfo>,
-        call: OperatorCallShape<'_>,
-    ) {
-        let mut visible = overloads.clone();
-        if !self.drop_members_hidden_by_extensions(receiver, &mut visible) {
-            return;
-        }
-        let extensions = crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
-            overloads: visible
-                .iter()
-                .filter(|candidate| candidate.is_extension())
-                .cloned()
-                .collect(),
-        });
-        let resolver = self.resolver();
-        let applies = match call {
-            OperatorCallShape::Call { name, args } => !matches!(
-                resolver.select_receiver_function_with_params_tracking(
-                    receiver,
-                    name,
-                    args,
-                    &[],
-                    &extensions,
-                    None,
-                ),
-                crate::symbol_resolver::CandidateSelection::None
-            ),
-            OperatorCallShape::IndexedGet { args } => !matches!(
-                resolver.select_receiver_indexed_get_function_with_params(
-                    receiver,
-                    "get",
-                    args,
-                    &[],
-                    &extensions,
-                ),
-                crate::symbol_resolver::CandidateSelection::None
-            ),
-            OperatorCallShape::IndexedSet { args } => !matches!(
-                resolver.select_receiver_indexed_set_function_with_params(
-                    receiver,
-                    "set",
-                    args,
-                    &[],
-                    &extensions,
-                ),
-                crate::symbol_resolver::CandidateSelection::None
-            ),
-        };
-        if applies {
-            *overloads = visible;
-        }
-    }
-
     /// Reject an inaccessible selected constructor after diagnosing its local inference result.
     /// Evidence from the rejected call is never published into the committed-call sidecar.
     pub(super) fn reject_ctor_access(
@@ -335,36 +283,6 @@ impl<'a> Checker<'a> {
             diagnostics::constructor_message(&self.fed_source(), owner, member),
         );
         true
-    }
-
-    pub(super) fn source_callable_visible(
-        &self,
-        candidate: &crate::libraries::FunctionInfo,
-    ) -> bool {
-        if self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-            || self.suppresses_diagnostic("INVISIBLE_MEMBER")
-        {
-            return true;
-        }
-        if !matches!(
-            candidate.kind,
-            crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
-        ) {
-            return true;
-        }
-        crate::callable_access::source_callable_accessible(
-            candidate.visibility,
-            candidate.source_file,
-            Some(self.file_index),
-            || {
-                self.libraries
-                    .dependency_access_policy()
-                    .internal_callable_accessible(
-                        candidate.callable.external_identity,
-                        candidate.callable.owner,
-                    )
-            },
-        )
     }
 
     /// Whether a member candidate is accessible through the call's receiver. Top-level and
@@ -716,20 +634,4 @@ mod tests {
             None,
         ));
     }
-}
-
-/// The operator convention a hidden member competes for, so extension applicability is checked
-/// with the same selection the call itself uses.
-#[derive(Clone, Copy)]
-pub(super) enum OperatorCallShape<'a> {
-    Call {
-        name: &'a str,
-        args: &'a [crate::symbol_resolver::CallArgKind],
-    },
-    IndexedGet {
-        args: &'a [crate::symbol_resolver::CallArgKind],
-    },
-    IndexedSet {
-        args: &'a [crate::symbol_resolver::CallArgKind],
-    },
 }

@@ -1,4 +1,4 @@
-//! Java **signature stubs** — slice 2 of Java-source interop (`docs/JAVA_INTEROP.md`).
+//! Java **signature stubs** for Java-source interop.
 //!
 //! Kotlin-first mixed compilation needs Java *signatures* before javac can run (the Java may
 //! reference Kotlin declarations, so javac must come AFTER krusty). This module parses the

@@ -72,6 +72,11 @@ fn scope_info(name: &str) -> Option<ScopeInfo> {
     })
 }
 
+/// The call-site line a numbered marker's name records.
+pub(crate) fn call_site_line(name: &str) -> Option<i32> {
+    scope_info(name)?.call_site_line
+}
+
 /// `dropInlineScopeInfo`.
 fn without_scope_info(name: &str) -> &str {
     name.split_once(SEPARATOR)
@@ -90,7 +95,7 @@ fn inline_depth(name: &str) -> i32 {
 }
 
 /// `computeNewVariableName`.
-fn numbered_name(
+pub(crate) fn numbered_name(
     name: &str,
     scope: i32,
     call_site_line: Option<i32>,
@@ -232,6 +237,21 @@ impl InlineScopes {
         if scheme != Scheme::RegeneratingObject {
             self.inlined += numbered;
         }
+    }
+
+    /// [`Self::number`] for a body known only by its debug tables: `lines` as `(offset, line)` and
+    /// `locals` as `(start, length, name)`. Returns each local's new name, in their order.
+    pub(crate) fn number_table(
+        &mut self,
+        lines: &[(u16, u16)],
+        locals: &[(u16, u16, String)],
+    ) -> Vec<String> {
+        let mut node = table_node(lines, locals);
+        self.number(&mut node, false);
+        node.local_variables
+            .into_iter()
+            .map(|local| local.name)
+            .collect()
     }
 
     /// `VariableRenamer.renameVariables`: build the scope tree, then rename each scope's marker and
@@ -421,6 +441,39 @@ impl InlineScopes {
     }
 }
 
+/// A body known only by its debug tables, as the class reader leaves them: a label at each offset
+/// they name, `lines` as `(offset, line)` and `locals` as `(start, length, name)`. A method's
+/// finished table places a lambda's body from this, since the body has no instructions of its own.
+fn table_node(lines: &[(u16, u16)], locals: &[(u16, u16, String)]) -> MethodNode {
+    let mut offsets: Vec<u16> = lines.iter().map(|&(offset, _)| offset).collect();
+    for &(start, length, _) in locals {
+        offsets.extend([start, start.saturating_add(length)]);
+    }
+    offsets.sort_unstable();
+    offsets.dedup();
+    let mut node = MethodNode::new(0, "", "()V");
+    let mut labels = HashMap::new();
+    for offset in offsets {
+        let label = node.new_label();
+        labels.insert(offset, label);
+        node.nodes.push(Node::Label(label));
+        if let Some(&(_, line)) = lines.iter().find(|&&(at, _)| at == offset) {
+            node.nodes.push(Node::Line { line, start: label });
+        }
+    }
+    node.local_variables = locals
+        .iter()
+        .map(|(start, length, name)| LocalVariable {
+            name: name.clone(),
+            desc: String::new(),
+            start: labels[start],
+            end: labels[&start.saturating_add(*length)],
+            slot: 0,
+        })
+        .collect();
+    node
+}
+
 /// `getLabelToIndexMap`: each label's position among the body's labels.
 fn label_indices(node: &MethodNode) -> HashMap<LabelId, usize> {
     node.nodes
@@ -454,36 +507,12 @@ fn label_lines(node: &MethodNode) -> HashMap<LabelId, u16> {
 mod tests {
     use super::*;
 
-    /// A body with a label at each offset its tables name, `lines` starting at their offsets and
-    /// `locals` as `(start, length, name)`, as the class reader produces it.
     fn body(lines: &[(u16, u16)], locals: &[(u16, u16, &str)]) -> MethodNode {
-        let mut offsets: Vec<u16> = lines.iter().map(|&(offset, _)| offset).collect();
-        for &(start, length, _) in locals {
-            offsets.extend([start, start + length]);
-        }
-        offsets.sort_unstable();
-        offsets.dedup();
-        let mut node = MethodNode::new(0, "f", "()V");
-        let mut labels = HashMap::new();
-        for offset in offsets {
-            let label = node.new_label();
-            labels.insert(offset, label);
-            node.nodes.push(Node::Label(label));
-            if let Some(&(_, line)) = lines.iter().find(|&&(at, _)| at == offset) {
-                node.nodes.push(Node::Line { line, start: label });
-            }
-        }
-        node.local_variables = locals
+        let locals: Vec<(u16, u16, String)> = locals
             .iter()
-            .map(|&(start, length, name)| LocalVariable {
-                name: name.to_string(),
-                desc: "I".to_string(),
-                start: labels[&start],
-                end: labels[&(start + length)],
-                slot: 0,
-            })
+            .map(|&(start, length, name)| (start, length, name.to_string()))
             .collect();
-        node
+        table_node(lines, &locals)
     }
 
     fn names(node: &MethodNode) -> Vec<&str> {
