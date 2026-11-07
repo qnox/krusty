@@ -245,7 +245,7 @@ fn run_backend_passes_after_plugins(
     } = target;
     let facades = file_classes.map(|classes| &classes.containers[..]);
     // kotlinc's lambda-offset lowering runs after the plugins' IR extensions, over their output.
-    crate::lambda_offsets::patch(ir);
+    crate::lambda_offsets::patch(ir, &facts.property_realizations);
     // Every later pass reads a type parameter's JVM carrier off its occurrences. Select it once,
     // from the declarations' complete bounds, before any of them runs.
     crate::enclosing_capture_storage::realize(ir).map_err(SkipReason::CallArguments)?;
