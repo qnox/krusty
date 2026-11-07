@@ -175,6 +175,10 @@ pub(super) fn ordinary_roots<'a>(
                 Callee::External { target, .. } => *target,
                 _ => continue,
             },
+            IrExpr::New {
+                external_target: Some(target),
+                ..
+            } => *target,
             IrExpr::Checked(operation) => match &**operation {
                 IrCheckedOperation::ExternalPropertyRead { target, .. } => {
                     source
@@ -200,6 +204,29 @@ pub(super) fn ordinary_roots<'a>(
         let Some(selected) = source.callables.klib_body_callable_at(expression, target) else {
             continue;
         };
+        let construction = matches!(source.ir.expr(expression), IrExpr::New { .. });
+        if construction != (callable.kind == ExternalCallableKind::Constructor) {
+            return Err(
+                "an emitted dependency construction disagrees with its selected callable role"
+                    .to_owned(),
+            );
+        }
+        if construction {
+            // A target can already provide a constructor whose KLIB publishes metadata only.
+            // Only an executable serialized declaration asks this phase to realize its body.
+            if bodies.function_has_body(selected.identity()) != Some(true) {
+                continue;
+            }
+            if callees
+                .constructor_initialization_callees(selected.identity(), bodies)
+                .map_err(|reason| format!("an invalid constructor root: {reason:?}"))?
+                .is_some()
+                && seen.insert(selected.identity())
+            {
+                roots.push(selected);
+            }
+            continue;
+        }
         // Instance dispatch/storage is a different emission capability. This category accepts
         // declaration-owned top-level and extension frames, and the members of a value class,
         // which are final and read their receiver only through its one value.
