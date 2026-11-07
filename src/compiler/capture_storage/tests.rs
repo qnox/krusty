@@ -605,18 +605,38 @@ fn whole_constructor_lambda_has_no_field_and_keeps_the_exact_receiver_operand() 
             continue;
         }
         if let IrExpr::Lambda {
-            captures: operands, ..
+            impl_fn,
+            captures: operands,
+            ..
         } = ir.expr(expression)
         {
-            captures.push(operands);
+            captures.push((impl_fn, operands));
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
-    let [operands] = captures.as_slice() else {
+    let [(function, operands)] = captures.as_slice() else {
         panic!("one superclass lambda")
     };
     assert_eq!(operands.len(), 1);
     assert!(matches!(ir.expr(operands[0]), IrExpr::GetValue(1)));
+    let declaration = ir
+        .checked_classifier_classes
+        .iter()
+        .find_map(|(&declaration, &class)| (class == *id as u32).then_some(declaration))
+        .expect("selected original source classifier");
+    let [identity] = ir.function_parameter_identities(**function).unwrap() else {
+        panic!("one exact receiver capture parameter")
+    };
+    let crate::ir::IrParameterRole::CapturedValue { capture, .. } = identity.role else {
+        panic!("constructor operand remains a captured value")
+    };
+    assert_eq!(
+        capture.declaration,
+        crate::ir::IrCapturedDeclaration::ConstructorReceiver {
+            owner: declaration,
+            parameter: 0,
+        }
+    );
 }
 
 #[test]
