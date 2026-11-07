@@ -209,7 +209,6 @@ binaryOp/kt11163.kt
 binaryOp/kt11163_properIeee754comparisons.kt
 binaryOp/kt23030_properIeee754comparisons.kt
 binaryOp/kt44402.kt
-binaryOp/primitiveEqualsSafeCall.kt
 boxing/boxBoolean.kt
 boxing/box_cache0.kt
 boxing/boxing1.kt
@@ -231,7 +230,6 @@ boxingOptimization/boxedIntegersCmp.kt
 boxingOptimization/boxedRealsCmp.kt
 boxingOptimization/casts.kt
 boxingOptimization/checkcastAndInstanceOf2.kt
-boxingOptimization/explicitEqualsOnDouble.kt
 boxingOptimization/fold.kt
 boxingOptimization/foldRange.kt
 boxingOptimization/intCompareTo.kt
@@ -402,7 +400,6 @@ callableReference/bound/boundReferenceToOverloadedFunction.kt
 callableReference/bound/coercionToUnit.kt
 callableReference/bound/companionObjectReceiver.kt
 callableReference/bound/companionObjectReceiverInheritsFromOuter.kt
-callableReference/bound/dontShareReceiver.kt
 callableReference/bound/emptyLHS.kt
 callableReference/bound/equals/nullableReceiverInEquals.kt
 callableReference/bound/genericBoundPropertyAsCrossinline.kt
@@ -436,7 +433,6 @@ callableReference/function/booleanNotIntrinsic.kt
 callableReference/function/classMemberFromCompanionObject.kt
 callableReference/function/coercionToUnit.kt
 callableReference/function/enumValueOfMethod.kt
-callableReference/function/equalsIntrinsic.kt
 callableReference/function/extensionFromCompanion.kt
 callableReference/function/extensionFunctionAsASuperTypePassToSAMInterface.kt
 callableReference/function/extensionFunctionInSAMInterface.kt
@@ -454,7 +450,6 @@ callableReference/function/kt32462.kt
 callableReference/function/kt47741.kt
 callableReference/function/local/captureOuter.kt
 callableReference/function/local/enumExtendsTrait.kt
-callableReference/function/local/equalsHashCode.kt
 callableReference/function/local/localFunctionName.kt
 callableReference/function/nestedExtensionInSAMInterface.kt
 callableReference/function/newArray.kt
@@ -593,7 +588,6 @@ classes/defaultObjectSameNamesAsInOuter.kt
 classes/delegationGenericArg.kt
 classes/delegationGenericArgUpperBound.kt
 classes/delegationGenericLongArg.kt
-classes/delegationMethodsWithArgs.kt
 classes/exceptionConstructor.kt
 classes/extensionOnNamedClassObject.kt
 classes/implementComparableInSubclass.kt
@@ -1471,7 +1465,6 @@ dataClasses/equals/null.kt
 dataClasses/equals/nullother.kt
 dataClasses/equals/sameinstance.kt
 dataClasses/floatParam.kt
-dataClasses/fromOtherModule.kt
 dataClasses/genericParam.kt
 dataClasses/hashCode/byte.kt
 dataClasses/hashCode/char.kt
@@ -1878,7 +1871,6 @@ extensionProperties/kt46952.kt
 fakeOverride/fakeOverrideWithMissingClassInSignature.kt
 fakeOverride/internalFromFriendModule.kt
 fakeOverride/intersectionInLocal.kt
-fakeOverride/methodOfAnyFromInterface.kt
 fakeOverride/privateFakeOverrides0.kt
 fakeOverride/privateFakeOverrides1.kt
 fakeOverride/substitutionInLocal.kt
@@ -3381,7 +3373,6 @@ multiplatform/k2/annotations/expectAnnotationCallInLibrary.kt
 multiplatform/k2/annotations/optionalExpectationAnnotation.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
 multiplatform/k2/basic/accessToLocalClassFromBackend.kt
-multiplatform/k2/basic/anyMethodInExpect.kt
 multiplatform/k2/basic/contextInFakeOverride.kt
 multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
 multiplatform/k2/basic/expectActualDifferentExtensionReceiversOnOverloads.kt
@@ -3416,7 +3407,6 @@ multiplatform/k2/basic/transitiveSuperclassActualization.kt
 multiplatform/k2/basic/widerVisibilityInActualClassifier.kt
 multiplatform/k2/commonFakeOverridePropertyRef.kt
 multiplatform/k2/complexMatchings/expectCtorlessFinalToActualObject.kt
-multiplatform/k2/complexMatchings/expectCtorlessFinalToActualUnit.kt
 multiplatform/k2/dataClassInCommonAndPlatform.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
@@ -3453,7 +3443,6 @@ multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflict.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
-multiplatform/k2/hmpp/expectActualChainExtra3-3.kt
 multiplatform/k2/hmpp/expectActualGeneric2-2.kt
 multiplatform/k2/hmpp/expectActualGeneric3-3.kt
 multiplatform/k2/hmpp/expectActualGenericTwoLibs.kt
@@ -3652,11 +3641,8 @@ primitiveTypes/kt2269NotOptimizable.kt
 primitiveTypes/kt2275.kt
 primitiveTypes/kt248.kt
 primitiveTypes/kt2768.kt
-primitiveTypes/kt3517.kt
-primitiveTypes/kt3576.kt
 primitiveTypes/kt3613.kt
 primitiveTypes/kt36952_identityEqualsWithBooleanInLocalFunction.kt
-primitiveTypes/kt37505.kt
 primitiveTypes/kt4098.kt
 primitiveTypes/kt4210.kt
 primitiveTypes/kt4251.kt
@@ -5188,7 +5174,6 @@ wasm-old-exception-handling/tryFinallyInsideInlineLambda.kt
 wasm-old-exception-handling/tryFinallyWithHandleResult.kt
 wasm-old-exception-handling/tryLoopTry.kt
 wasmStringSwitch/typeOperatorCast.kt
-when/edgeCases.kt
 when/enumOptimization/bigEnum.kt
 when/enumOptimization/duplicatingItems.kt
 when/enumOptimization/enumInsideClassObject.kt
@@ -5209,7 +5194,6 @@ when/is.kt
 when/kt45081.kt
 when/kt47365.kt
 when/kt5448.kt
-when/kt83740.kt
 when/oneUnitBranch.kt
 when/range.kt
 when/stringOptimization/duplicatingItems.kt
