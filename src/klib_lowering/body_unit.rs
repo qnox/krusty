@@ -52,6 +52,7 @@ enum DependencyExternalRealization {
     EmittedBody,
     TargetIntrinsic(crate::libraries::CompilerIntrinsic),
     Constructor,
+    AllocatingConstructor,
     PropertyGetter,
     TargetMember,
     ProviderLeaf,
@@ -88,6 +89,13 @@ impl EmittedDependencyCallable {
     pub(crate) fn constructor(target: ExternalCallableId) -> Self {
         Self {
             realization: DependencyExternalRealization::Constructor,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    pub(crate) fn allocating_constructor(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::AllocatingConstructor,
             ..Self::new(target, None, None)
         }
     }
@@ -141,7 +149,11 @@ impl EmittedDependencyCallable {
     }
 
     fn is_constructor(self) -> bool {
-        matches!(self.realization, DependencyExternalRealization::Constructor)
+        matches!(
+            self.realization,
+            DependencyExternalRealization::Constructor
+                | DependencyExternalRealization::AllocatingConstructor
+        )
     }
 
     pub(crate) fn singleton_dispatch(self) -> Option<Ty> {
@@ -397,6 +409,26 @@ impl DependencyBodyUnit {
                 ))
             }
         };
+        if root.kind() == crate::libraries::ExternalCallableKind::Constructor {
+            callees
+                .constructor(root.identity(), bodies)
+                .map_err(|reason| KlibBodyDecline::new(root.signature().clone(), reason))?
+                .ok_or_else(|| {
+                    KlibBodyDecline::new(
+                        root.signature().clone(),
+                        KlibBodyDeclineReason::SignatureMismatch(
+                            "a constructor root lost its selected declaration".to_owned(),
+                        ),
+                    )
+                })?;
+            return self.lower_function_with_intrinsics_and_externals(
+                callables[0],
+                bodies,
+                callees,
+                intrinsics,
+                externals,
+            );
+        }
         let (arena, declaration) = bodies.function(root.identity()).ok_or_else(|| {
             KlibBodyDecline::new(root.signature().clone(), KlibBodyDeclineReason::Unjoined)
         })?;
@@ -472,6 +504,15 @@ impl DependencyBodyUnit {
             .map(|(identity, &function)| (identity, function))
     }
 
+    /// Allocation exports are separate from their private instance initialization functions.
+    pub(crate) fn allocating_constructors(
+        &self,
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, crate::ir::ClassId)> {
+        self.classes.iter().filter_map(|(identity, &class)| {
+            (!self.ir.classes[class as usize].is_value).then_some((identity, class))
+        })
+    }
+
     /// Ordinary classes owned by this closed unit, keyed by their authenticated constructor.
     pub(crate) fn materialized_classes(
         &self,
@@ -507,13 +548,23 @@ impl DependencyBodyUnit {
             .function(callable.identity())
             .ok_or(KlibBodyDeclineReason::Unjoined)
             .and_then(|(arena, function)| {
-                linker.declare(
-                    &mut self.ir,
-                    callable.identity(),
-                    Some(callable),
-                    arena,
-                    function,
-                )
+                if callable.kind() == crate::libraries::ExternalCallableKind::Constructor {
+                    linker.materialize_class(&mut self.ir, callable.identity(), callable)?;
+                    let class = linker.classes.get(callable.identity()).ok_or(
+                        KlibBodyDeclineReason::UnsupportedDeclaration(
+                            "a constructor without ordinary initialization",
+                        ),
+                    )?;
+                    Ok(self.ir.classes[*class as usize].methods[0])
+                } else {
+                    linker.declare(
+                        &mut self.ir,
+                        callable.identity(),
+                        Some(callable),
+                        arena,
+                        function,
+                    )
+                }
             })
             .map_err(|reason| KlibBodyDecline::new(callable.signature().clone(), reason))?;
         while let Some(body) = linker.pending.pop_front() {
@@ -721,7 +772,7 @@ impl CallLinker for Linker<'_, '_> {
             // exact provider evidence this unit cannot realize construction; that is not a
             // missing declaration and must not invent a constructor handle.
             .ok_or_else(|| KlibBodyDeclineReason::UnsupportedCallee(Box::new(callee.clone())))?;
-        let target = self
+        let external = self
             .sources
             .externals
             .get(&identity)
@@ -731,8 +782,12 @@ impl CallLinker for Linker<'_, '_> {
                     "an authenticated constructor has no exact constructor external handle"
                         .to_owned(),
                 )
-            })?
-            .target();
+            })?;
+        let target = external.target();
+        let allocating = matches!(
+            external.realization,
+            DependencyExternalRealization::AllocatingConstructor
+        );
         let selected = match self.sources.callees.get(&identity) {
             Some(KlibCalleeFact::Selected(callables)) => callables[0],
             _ => {
@@ -741,7 +796,9 @@ impl CallLinker for Linker<'_, '_> {
                 ))
             }
         };
-        self.materialize_class(ir, &identity, selected)?;
+        if !allocating {
+            self.materialize_class(ir, &identity, selected)?;
+        }
         Ok(LinkedConstructor {
             target,
             declaration,

@@ -1141,3 +1141,6 @@ fn wasm_declines_an_enum_class_by_name() {
 
 #[path = "wasm_value_hash.rs"]
 mod value_hash;
+
+#[path = "wasm_dependency_constructor_exports.rs"]
+mod dependency_constructor_exports;
