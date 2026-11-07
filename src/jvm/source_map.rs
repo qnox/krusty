@@ -742,7 +742,7 @@ mod tests {
         );
     }
 
-    /// The shape `docs/JVM_INLINE_BEFORE_CPS.md` measures: a two-line caller — so three claimable
+    /// A two-line caller — so three claimable
     /// lines — expanding lines 2..9 of a library at its line 2. Contiguous lines grow one range.
     #[test]
     fn one_inlined_region_reproduces_the_reference_map() {

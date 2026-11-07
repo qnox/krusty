@@ -92,8 +92,12 @@ upstream release notes, which can name an assistant that contributed upstream. T
   A shared target must not authenticate a sibling checkout's typed model by source mtimes alone.
   Test checkout switching and unchanged-checkout reuse; do not clean the shared target to mask it.
   Audit: `rg -n 'KRUSTY_BUILD_CHECKOUT|shared_target_rebuilds_plugin_ir' .cargo crates/krusty-plugin-ir`.
-- Record every Kotlin-semantics decision in `docs/SPEC.md` with a test.
-- Keep `docs/SPEC.md`, `docs/IMPLEMENTATION_PLAN.md`, and `docs/METADATA_NOTES.md` current.
+- **kotlinc is the spec; tests are the record.** A Kotlin-semantics decision lands as a test that
+  pins kotlinc's behavior, not as prose. Plans, progress, and per-change notes belong in the pull
+  request and its issue, not in the repository.
+- `docs/` holds only design decisions kotlinc cannot answer (for example `docs/NATIVE.md`), format
+  references (`docs/METADATA_NOTES.md`), and user- or contributor-facing guides. Update one when a
+  change alters what it states; never append a per-change log entry or a status section.
 
 # Compiler implementation and review rules
 
@@ -192,6 +196,10 @@ review explanation tied to an active migration plan.
   the selected getter/setter slot. Matching a function signature alone does not prove membership.
   Positive primitive queries do not preempt function-invocation/builtin priority or replace the
   canonical producer-origin and selected-declaration ambiguity diagnostics.
+- A fact every expression of a kind has, or one a copy of the expression must keep, belongs on
+  the IR node or in its operation's payload, not in a new `IrFile` side table. A table that stays
+  (a backend's own realization fact) is classified in `src/ir/expression_copy.rs`, which does not
+  compile until every `IrFile` field is. See `docs/PHASE_FACTS.md`.
 - Common FIR/IR lowering records debug-local source identity, semantic role, and inline-frame
   provenance. It must not format JVM/kotlinc synthetic local spellings such as `$iv`, `_u24`, or a
   `$lambda$N` implementation name; the JVM debug-info boundary owns those conventions.
@@ -344,6 +352,17 @@ change, not a quiet reset inside yours.
 - A portable Native regression must establish its expected result through the JVM/kotlinc oracle
   before asserting the Native result. Use `expect_box_ok_with_stdlib` (or the result-returning
   equivalent when the exact value matters) before `expect_native_box`.
+- **Keep one shared portable regression inventory.** Store each whole portable Kotlin program
+  once in `tests/box_regressions/`; select it through the canonical backend/version matrix.
+  E2E artifact or strict backend guards reuse that source with `include_str!` and preserve all
+  original inputs and assertions. A missing backend capability is not a platform-specific
+  language or setup exception; report the gap without cropping or removing shared coverage.
+  Genuinely platform-specific parts carry a `PLATFORM-SPECIFIC` explanation or move to their
+  owning E2E leaf. This rule does not require an unrelated backend fix in a frontend change.
+- Do not add failure/applicability allowances, skips or platform exclusions without explicit
+  approval for the exact case; preserve existing whole controls. Audit fixture moves and
+  matrix selection with `git diff <base>...HEAD -- tests .github/workflows/ci.yml`, and run
+  `scripts/check-outcome-lists.sh <base> HEAD`.
 - Use `./run-tests.sh`; do not use release builds for ordinary validation.
 - `gate` is a Cargo profile: `--profile gate`. Never `--target-dir target/gate` or
   `CARGO_TARGET_DIR=target/gate`; that builds the dev profile into `target/gate/debug`, which
@@ -358,4 +377,4 @@ change, not a quiet reset inside yours.
   ceiling. Deadlines must remain configurable for slow systems; timeout output must identify the
   active test/case well enough to diagnose loops.
 
-See also `docs/ARCHITECTURE.md`, `docs/COMPILER_REVIEW.md`, and `docs/TEST_HARNESS.md`.
+See also `docs/ARCHITECTURE.md` and `docs/TEST_HARNESS.md`.

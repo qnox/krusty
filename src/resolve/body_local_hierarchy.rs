@@ -5,6 +5,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 impl Checker<'_> {
     /// Retain a fully checked direct-supertype edge for active body-local lookup. An empty entry is
     /// authoritative: the active local owner has no direct edges. The first exact lexical result
@@ -32,7 +35,8 @@ impl Checker<'_> {
     /// declaration form; specialize them when the receiver applies the local classifier's own or
     /// captured parameters.
     pub(super) fn body_local_supertypes(&self, receiver: Ty) -> Vec<Ty> {
-        let Some(internal) = receiver.non_null().kotlin_class_internal() else {
+        let receiver = receiver.non_null();
+        let Some(internal) = receiver.kotlin_class_internal() else {
             return Vec::new();
         };
         let Some(declared) = self.resolved_body_local_supertypes.get(&internal) else {
@@ -67,13 +71,17 @@ impl Checker<'_> {
                 .unwrap_or_default();
             formals
                 .into_iter()
+                .map(crate::types::TyParamName::from)
                 .zip(receiver.type_args().iter().copied())
                 .collect()
         };
         let bindings = if deferred_body_local {
             active_bindings()
         } else {
-            self.resolved_type_name(internal)
+            // These edges already belong to `internal`. Inherited-name recovery can ask for
+            // this same hierarchy again; only its exact declaration can supply the formals.
+            self.fed_source()
+                .classifier(internal)
                 .map(|class| crate::symbol_resolver::classifier_bindings(&class, receiver))
                 .unwrap_or_else(active_bindings)
         };

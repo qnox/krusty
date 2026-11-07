@@ -19,7 +19,8 @@ pub struct ContinuationMetadata {
     pub enclosing_function: Option<u32>,
 }
 
-pub type ContinuationMetadataMap = crate::fx_hash::HashMap<String, ContinuationMetadata>;
+pub type ContinuationMetadataMap =
+    crate::fx_hash::HashMap<crate::types::TypeName, ContinuationMetadata>;
 
 /// What a JVM return node makes of the suspend result it returns when that result is not
 /// `COROUTINE_SUSPENDED`, which it returns as is.

@@ -76,6 +76,11 @@ pub(crate) fn semantic_call_role(
         }
         return None;
     }
+    if let Some(operation) =
+        crate::libraries::intrinsic_const_numeric::member_operation(&declaration)
+    {
+        return Some(SemanticCallRole::IntrinsicConstNumeric(operation));
+    }
     if declaration.owner == crate::types::wk::any() {
         return match (declaration.name, declaration.params, declaration.ret) {
             ("equals", [parameter], Ty::Boolean)

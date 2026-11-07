@@ -32,18 +32,6 @@ use crate::analysis::{
     WorkspaceQuery, WorkspaceSymbolRung, MAX_WORKSPACE_SYMBOL_GLOB_STEPS,
 };
 
-/// Ceiling on raw class entries inspected and searchable classes retained for one project.
-///
-/// Measured against real dependency sets rather than guessed: 100 jars declare 91,182 classes,
-/// 200 declare 219,272, and 400 declare 392,275. A 256k ceiling truncated the 400-jar set exactly,
-/// which is a large but ordinary enterprise dependency graph, so it sits above that.
-///
-/// Applying it before filtering also bounds malformed or synthetic-heavy archives whose entries
-/// would never become searchable. The retained cost is deliberately two `u32`s per accepted class
-/// plus interned names — the slashed internal name is *derived* rather than stored, because one per
-/// class is the largest table there would be and it is recoverable from the package and the name.
-pub const MAX_DEPENDENCY_CLASSES: usize = 1024 * 1024;
-
 /// One in this many response slots is held for nested classes matched by their leaf name.
 ///
 /// A floor rather than a split: nested matches outnumber whole-name ones several times over, so
@@ -107,7 +95,6 @@ pub struct DependencySymbolIndex {
     /// Only nested entries participate, avoiding a full classpath scan for ordinary queries.
     by_simple_segment: Vec<u32>,
     by_initials: Vec<u32>,
-    complete: bool,
 }
 
 impl DependencySymbolIndex {
@@ -166,28 +153,11 @@ impl DependencySymbolIndex {
     /// Repeats collapse. A classpath can carry two versions of one artifact, and a name both
     /// declare is a single class, resolved from whichever entry comes first.
     pub fn from_internal_names(internals: impl IntoIterator<Item = String>) -> Self {
-        Self::from_internal_names_with_limit(internals, MAX_DEPENDENCY_CLASSES)
-    }
-
-    fn from_internal_names_with_limit(
-        internals: impl IntoIterator<Item = String>,
-        limit: usize,
-    ) -> Self {
-        let mut result = Self {
-            complete: true,
-            ..Self::default()
-        };
+        let mut result = Self::default();
         let mut name_ids = HashMap::<String, u32>::new();
         let mut package_ids = HashMap::<String, u32>::new();
         let mut declared = std::collections::HashSet::new();
-        for (inspected, internal) in internals.into_iter().enumerate() {
-            // The work/temporary-retention ceiling applies before filtering. A hostile archive can
-            // contain an arbitrary number of multi-release, descriptor, or synthetic entries that
-            // never become searchable; counting only accepted classes left that input unbounded.
-            if inspected >= limit {
-                result.complete = false;
-                break;
-            }
+        for internal in internals {
             if !declared.insert(internal.clone()) {
                 continue;
             }
@@ -240,11 +210,6 @@ impl DependencySymbolIndex {
 
     pub fn class_count(&self) -> usize {
         self.entries.len()
-    }
-
-    /// Whether every class offered was indexed.
-    pub fn is_complete(&self) -> bool {
-        self.complete
     }
 
     /// The best `limit` classes for `query`, strongest rung first.
@@ -1002,22 +967,21 @@ mod tests {
         let index = DependencySymbolIndex::from_internal_names(internals);
 
         assert_eq!(index.candidates("Widget", 8).len(), 8);
-        assert!(index.is_complete());
     }
 
+    /// A classpath is indexed whole, whatever its size; a class past the former 1M-entry ceiling is
+    /// as searchable as the first.
     #[test]
-    fn filtered_archive_entries_still_consume_the_bounded_scan_budget() {
-        let index = DependencySymbolIndex::from_internal_names_with_limit(
-            [
-                "META-INF/versions/9/demo/Versioned".to_string(),
-                "module-info".to_string(),
-                "demo/WouldOtherwiseBeUnbounded".to_string(),
-            ],
-            2,
+    fn every_dependency_class_is_indexed() {
+        let classes = 1024 * 1024 + 2;
+        let index = DependencySymbolIndex::from_internal_names(
+            (0..classes).map(|index| format!("demo/Generated{index}")),
         );
 
-        assert_eq!(index.class_count(), 0);
-        assert!(!index.is_complete());
+        assert_eq!(index.class_count(), classes);
+        let last = index.candidates(&format!("Generated{}", classes - 1), 1);
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].name, format!("Generated{}", classes - 1));
     }
 
     #[test]

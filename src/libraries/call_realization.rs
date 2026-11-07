@@ -383,6 +383,8 @@ pub struct ExternalCallableRealization {
     pub(crate) klib_body_accessor: Option<super::KlibBodyAccessor>,
     pub(crate) klib_body_vararg_index: Option<usize>,
     pub(crate) klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
+    /// Whether a source parameter declares a default value, as the provider's declaration says.
+    pub declares_parameter_defaults: bool,
 }
 
 impl ExternalCallableRealization {
@@ -504,7 +506,6 @@ impl LibraryCallable {
             annotations: Vec::new(),
             external_default_provider: None,
             external_property_identity: None,
-            compiler_core_declaration: None,
             declaration_owner: None,
             owner: owner.into(),
             name: name.into(),

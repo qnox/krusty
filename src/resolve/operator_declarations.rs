@@ -370,7 +370,10 @@ impl Checker<'_> {
                             self.file
                                 .forbid_operator_equals_in_enum_entries_and_anonymous_objects,
                             self.file.inapplicable_operator_modifier_warning.as_deref(),
-                            crate::diag::CompilerWarningName::InapplicableOperatorModifier,
+                            DeprecationNames {
+                                error: crate::diag::names::INAPPLICABLE_OPERATOR_MODIFIER,
+                                warning: crate::diag::names::INAPPLICABLE_OPERATOR_MODIFIER_WARNING,
+                            },
                             &message,
                         );
                     } else {
