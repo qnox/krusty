@@ -1,3 +1,4 @@
+// WASM_ENABLE_ARRAY_RANGE_CHECKS
 // FILE: ArrayStoreIndexAfterValue.kt
 
 // An array element write evaluates the array, the index and the value, in that order, before it
