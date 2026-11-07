@@ -1192,3 +1192,11 @@ mod value_hash;
 
 #[path = "wasm_dependency_constructor_exports.rs"]
 mod dependency_constructor_exports;
+
+#[test]
+fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
+    expect_wasm_box(
+        include_str!("box_regressions/finallyValueAndKotlinThrow.kt"),
+        "wasmFinallyValueAndKotlinThrow",
+    );
+}

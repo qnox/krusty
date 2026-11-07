@@ -1157,13 +1157,11 @@ impl BodyLowering<'_> {
                 property: target,
                 inline_splice,
             } => {
-                self.index
-                    .property(*target)
-                    .ok_or(FirLoweringFailure::MissingProperty(*target))?;
-                let dispatch_class = self.dispatch_class(dispatch_receiver);
+                let (dispatch_receiver, dispatch_class) =
+                    self.module_property_receiver(*target, dispatch_receiver)?;
                 let operation = IrCheckedOperation::PropertyRead {
                     target: *target,
-                    dispatch_receiver: self.receiver(dispatch_receiver)?,
+                    dispatch_receiver,
                     extension_receiver: self.receiver(extension_receiver)?,
                     context_arguments: context_arguments
                         .iter()
@@ -1237,13 +1235,11 @@ impl BodyLowering<'_> {
                 property: target,
                 inline_splice,
             } => {
-                self.index
-                    .property(*target)
-                    .ok_or(FirLoweringFailure::MissingProperty(*target))?;
-                let dispatch_class = self.dispatch_class(dispatch_receiver);
+                let (dispatch_receiver, dispatch_class) =
+                    self.module_property_receiver(*target, dispatch_receiver)?;
                 let operation = IrCheckedOperation::PropertyWrite {
                     target: *target,
-                    dispatch_receiver: self.receiver(dispatch_receiver)?,
+                    dispatch_receiver,
                     extension_receiver: self.receiver(extension_receiver)?,
                     context_arguments: context_arguments
                         .iter()

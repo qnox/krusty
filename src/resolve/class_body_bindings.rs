@@ -3,8 +3,9 @@
 
 use super::{
     AnonymousObjectCapture, AnonymousObjectCaptureSource, Checker, CheckerModuleSymbols,
-    CheckerScope, ClassSig, ClassStorageSource, DispatchPropertyBinding, ErrorProvenance,
-    ReceiverFnValueOrigin, ScopedProperty, SourceFragmentMode, ValueBindingDeclaration,
+    CheckerScope, ClassSig, ClassStorageSource, DispatchPropertyBinding, EnumEntryPropertyBinding,
+    ErrorProvenance, ReceiverFnValueOrigin, ScopedProperty, SourceFragmentMode,
+    ValueBindingDeclaration,
 };
 use crate::ast::{Decl, DeclId, PropParam};
 use crate::types::Ty;
@@ -139,24 +140,42 @@ impl Checker<'_> {
         owner_storage_visible: bool,
         is_var: bool,
     ) {
-        if let Some(field) = property.class_storage {
-            let Some(sibling) = property
-                .enum_entry_property
-                .filter(|sibling| *sibling == field)
-            else {
+        if let Some((selected, span)) = property.enum_entry_property {
+            if property
+                .class_storage
+                .is_some_and(|field| field != selected.sibling)
+            {
                 self.diags.error(
-                    crate::diag::Span::new(0, 0),
+                    span,
                     "declared property storage has no enum-entry declaration role",
                 );
                 return;
-            };
-            self.declare_enum_entry_property_storage(
-                scope,
-                &property.name,
-                property.ty,
-                is_var,
-                property.owner,
-                sibling,
+            }
+            if self
+                .declare_enum_entry_dispatch_property(
+                    scope,
+                    &property.name,
+                    property.ty,
+                    is_var,
+                    EnumEntryPropertyBinding {
+                        owner: property.owner,
+                        property: selected,
+                        receiver: property.dispatch_receiver_identity,
+                    },
+                )
+                .is_err()
+            {
+                self.diags.error(
+                    span,
+                    "declared enum-entry property has no selected receiver",
+                );
+            }
+            return;
+        }
+        if property.class_storage.is_some() {
+            self.diags.error(
+                crate::diag::Span::new(0, 0),
+                "declared property storage has no enum-entry declaration role",
             );
             return;
         }
@@ -180,7 +199,7 @@ impl Checker<'_> {
             },
             is_var,
             property.owner,
-            property.enum_entry_property,
+            None,
             property.dispatch_receiver_identity,
         );
     }
@@ -263,6 +282,7 @@ impl Checker<'_> {
             .into_iter()
             .find(|capture| {
                 capture.name == name
+                    && capture.enum_entry_storage.is_none()
                     && matches!(
                         capture.source,
                         AnonymousObjectCaptureSource::LexicalValue
@@ -308,6 +328,17 @@ impl Checker<'_> {
         declaration: DeclId,
     ) {
         for capture in self.body_class_storage_captures(declaration) {
+            if capture.enum_entry_storage.is_some() {
+                if !self.declare_captured_enum_property(scope, &capture) {
+                    if let Decl::Class(class) = self.file.decl(declaration) {
+                        self.diags.error(
+                            class.span,
+                            "selected enum-entry property has no declaring receiver",
+                        );
+                    }
+                }
+                continue;
+            }
             if matches!(
                 capture.source,
                 AnonymousObjectCaptureSource::LexicalValue

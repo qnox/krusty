@@ -81,6 +81,8 @@ pub(crate) struct StringTable<'a> {
     /// The local classifiers kotlinc gives no raw-name replacement: enum entry bodies, whose ids
     /// keep their `pkg/Enum.ENTRY` spelling.
     enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
+    /// Exact anonymous declaration identities; their references use the same raw ID as their declaration.
+    anonymous_classifiers: crate::fx_hash::HashSet<TypeName>,
     /// Explicit declaration approximation for non-denotable intersection types. Metadata has no
     /// classifier context of its own, so a target that emits intersections must supply the checked
     /// semantic lookup at the serialization boundary; absence is an error, never invariant fallback.
@@ -147,6 +149,7 @@ pub(crate) struct MetadataTypeLookups<'a> {
     pub(crate) inner_classifiers: InnerClassifiers<'a>,
     pub(crate) local_classifiers: crate::fx_hash::HashSet<TypeName>,
     pub(crate) enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
+    pub(crate) anonymous_classifiers: crate::fx_hash::HashSet<TypeName>,
 }
 
 impl Default for MetadataTypeLookups<'_> {
@@ -158,6 +161,7 @@ impl Default for MetadataTypeLookups<'_> {
             inner_classifiers: &no_inner_classifiers,
             local_classifiers: Default::default(),
             enum_entry_bodies: Default::default(),
+            anonymous_classifiers: Default::default(),
         }
     }
 }
@@ -172,6 +176,7 @@ impl Default for StringTable<'_> {
             record_starts: Vec::new(),
             local_classifiers: Default::default(),
             enum_entry_bodies: Default::default(),
+            anonymous_classifiers: Default::default(),
             intersection_approximation: None,
             inner_classifiers: &no_inner_classifiers,
             klib: None,
@@ -183,12 +188,14 @@ impl<'a> StringTable<'a> {
     pub(crate) fn with_local_classifiers(
         local_classifiers: &crate::fx_hash::HashSet<TypeName>,
         enum_entry_bodies: &crate::fx_hash::HashSet<TypeName>,
+        anonymous_classifiers: &crate::fx_hash::HashSet<TypeName>,
         intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
         inner_classifiers: InnerClassifiers<'a>,
     ) -> Self {
         StringTable {
             local_classifiers: local_classifiers.clone(),
             enum_entry_bodies: enum_entry_bodies.clone(),
+            anonymous_classifiers: anonymous_classifiers.clone(),
             intersection_approximation,
             inner_classifiers,
             ..StringTable::default()
@@ -417,6 +424,9 @@ impl<'a> StringTable<'a> {
             return self.klib_class_id(classifier);
         }
         if self.local_classifiers.contains(&classifier) {
+            if self.anonymous_classifiers.contains(&classifier) {
+                return self.anonymous_class_id(classifier);
+            }
             let literal = self.local_class_literal(classifier);
             return self.class_literal(literal, true);
         }
@@ -439,6 +449,10 @@ impl<'a> StringTable<'a> {
         self.class_literal(encoded.literal, false)
     }
 
+    fn anonymous_class_id(&mut self, classifier: TypeName) -> u32 {
+        self.class_literal(classifier.render(), true)
+    }
+
     /// A declaration's class ID, using its retained segments in either metadata carrier.
     pub(crate) fn declaration_class_id(
         &mut self,
@@ -455,7 +469,7 @@ impl<'a> StringTable<'a> {
                 "a raw class ID requires local provenance"
             );
             if class.is_anonymous() {
-                return Ok(self.class_literal(class.classifier().render(), true));
+                return Ok(self.anonymous_class_id(class.classifier()));
             }
             return Ok(self.class_id(class.classifier()));
         };
@@ -1578,6 +1592,7 @@ mod tests {
         let mut strings = StringTable::with_local_classifiers(
             &Default::default(),
             &Default::default(),
+            &Default::default(),
             None,
             &missing,
         );
@@ -1606,6 +1621,7 @@ mod tests {
                 .ok_or(classifier)
         };
         let mut strings = StringTable::with_local_classifiers(
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             None,
