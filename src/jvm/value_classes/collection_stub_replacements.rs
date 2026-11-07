@@ -30,7 +30,9 @@ pub(crate) struct StubRealization {
 }
 
 /// The realization of a stub named `name` with the semantic `parameters` and `result` (the result
-/// as the stub declares it, a boxed scalar's wrapper included). `in_value_class` is whether the
+/// as the stub declares it, a boxed scalar's wrapper included). `boxed_parameters` are the
+/// parameters whose JVM slot is a scalar's wrapper (a JDK method's reference slot): the name hashes
+/// the semantic parameter, the descriptor writes the wrapper. `in_value_class` is whether the
 /// class that receives the stub is a value class; `removes_at` is whether the stub is kotlinc's
 /// `removeAt` stub `remove(Int)`.
 pub(crate) fn collection_stub_realization(
@@ -39,6 +41,7 @@ pub(crate) fn collection_stub_realization(
     removes_at: bool,
     name: &str,
     parameters: &[Ty],
+    boxed_parameters: &[bool],
     result: Ty,
 ) -> StubRealization {
     let name = if in_value_class && removes_at {
@@ -50,7 +53,15 @@ pub(crate) fn collection_stub_realization(
     let under = super::representation::known_underlyings(ir);
     let erased: Vec<Ty> = parameters
         .iter()
-        .map(|parameter| super::erase(parameter, &under))
+        .zip(boxed_parameters)
+        .map(|(parameter, &boxed)| {
+            let erased = super::erase(parameter, &under);
+            if boxed {
+                Ty::nullable(erased)
+            } else {
+                erased
+            }
+        })
         .collect();
     let erased_result = super::erase(&result, &under);
     // A nullable value class whose carrier is a reference holds its null in the carrier.

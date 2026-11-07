@@ -1889,11 +1889,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     receiver: Some(receiver),
                     ..
                 } = &**checked_op
-                    && self.enum_member_name(*target).is_some() =>
+                    && let Some(member) =
+                        crate::backend::enums::base_member(self.file.callables, *target) =>
             {
-                let member = self
-                    .enum_member_name(*target)
-                    .expect("checked by the guard");
                 self.enum_member(member, *receiver)
             }
             IrExpr::Checked(ref checked_op)

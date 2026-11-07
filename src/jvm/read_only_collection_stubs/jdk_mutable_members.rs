@@ -15,12 +15,13 @@ use crate::fx_hash::HashMap;
 use crate::jvm::classpath::Classpath;
 use crate::jvm::classreader::MethodSig;
 use crate::jvm::jvm_class_map::to_jvm_type_name;
+use crate::jvm::mapped_builtin_declarations::enhance_jdk_signature;
 use crate::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
-use crate::jvm::names::method_descriptor;
+use crate::jvm::override_results::scalar_over_reference;
 use crate::jvm::value_classes::collection_stub_replacements::StubRealization;
 use crate::types::{ty_subst_applied_arguments, Ty, TypeName};
 
-use super::{physical_stub_result, Face, ReadOnlyStub, StubBody};
+use super::{Face, ReadOnlyStub, StubBody};
 
 const MUTABLE_METHODS_2_4: &str = include_str!("mutable_methods_2_4.tsv");
 
@@ -29,41 +30,6 @@ struct MutableMethod {
     jvm_owner: TypeName,
     name: &'static str,
     descriptor: &'static str,
-    parameters: Box<[Qualifier]>,
-    result: Qualifier,
-}
-
-/// kotlinc's predefined top-level qualifier of one position.
-#[derive(Clone, Copy)]
-enum Qualifier {
-    /// Not enhanced: the Java type as declared.
-    Platform,
-    /// `NOT_PLATFORM`: the declared type, its nullability that of the substituted argument.
-    Declared,
-    /// `NOT_NULL`: the declared type made definitely non-null.
-    NotNull,
-    /// `NULLABLE`: the declared type made nullable.
-    Nullable,
-}
-
-impl Qualifier {
-    fn parse(spelling: &str) -> Self {
-        match spelling {
-            "platform" => Self::Platform,
-            "declared" => Self::Declared,
-            "not-null" => Self::NotNull,
-            "nullable" => Self::Nullable,
-            _ => panic!("invalid mutable JDK member qualifier `{spelling}`"),
-        }
-    }
-
-    fn enhance(self, ty: Ty) -> Ty {
-        match self {
-            Self::Platform | Self::Declared => ty,
-            Self::NotNull => ty.non_null(),
-            Self::Nullable => Ty::nullable(ty),
-        }
-    }
 }
 
 fn mutable_methods() -> &'static [MutableMethod] {
@@ -75,35 +41,15 @@ fn mutable_methods() -> &'static [MutableMethod] {
             .filter(|(_, line)| !line.trim().is_empty() && !line.starts_with('#'))
             .map(|(index, line)| {
                 let mut fields = line.split('\t');
-                let (
-                    Some(owner),
-                    Some(name),
-                    Some(descriptor),
-                    Some(parameters),
-                    Some(result),
-                    None,
-                ) = (
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                )
+                let (Some(owner), Some(name), Some(descriptor), None) =
+                    (fields.next(), fields.next(), fields.next(), fields.next())
                 else {
                     panic!("invalid mutable JDK member policy row {}", index + 1);
-                };
-                let parameters = if parameters == "-" {
-                    Box::default()
-                } else {
-                    parameters.split(',').map(Qualifier::parse).collect()
                 };
                 MutableMethod {
                     jvm_owner: crate::types::type_name(owner),
                     name,
                     descriptor,
-                    parameters,
-                    result: Qualifier::parse(result),
                 }
             })
             .collect()
@@ -168,63 +114,54 @@ fn stub(
         }
         None => crate::jvm::jvm_libraries::parse_method_desc(&method.descriptor)?,
     };
-    assert_eq!(
-        declared_parameters.len(),
-        row.parameters.len(),
-        "a mutable JDK member policy row qualifies every parameter of its descriptor"
+    let (enhanced_parameters, enhanced_result) = enhance_jdk_signature(
+        row.jvm_owner,
+        &method.name,
+        &method.descriptor,
+        &declared_parameters,
+        declared_result,
     );
-    let parameters: Vec<Ty> = declared_parameters
+    let parameters: Vec<Ty> = enhanced_parameters
         .iter()
-        .zip(row.parameters.iter())
-        .map(|(ty, qualifier)| specialized_slot(*ty, *qualifier, bindings))
+        .map(|ty| ty_subst_applied_arguments(*ty, bindings))
         .collect();
-    let result = specialized_slot(declared_result, row.result, bindings);
-    let realized = StubRealization {
-        name: method.name.clone(),
-        parameters: jvm_tys(&parameters),
-        result: physical_stub_result(result, false),
-        result_box: None,
-    };
+    let result = ty_subst_applied_arguments(enhanced_result, bindings);
+    let boxed_parameters = parameters
+        .iter()
+        .zip(&declared_parameters)
+        .map(|(&parameter, &declared)| scalar_over_reference(parameter, declared))
+        .collect();
+    let boxed_result = scalar_over_reference(result, declared_result);
     let (erased_parameters, erased_result) =
         crate::jvm::jvm_libraries::parse_method_desc(&method.descriptor)?;
     let erased_parameters = jvm_tys(&erased_parameters);
     let erased_result = jvm_declared_ty(&erased_result);
-    let bridge = (method_descriptor(&erased_parameters, erased_result)
-        != method_descriptor(&realized.parameters, realized.result))
-    .then_some((erased_parameters, erased_result));
-    Some(ReadOnlyStub {
+    let mut stub = ReadOnlyStub {
         name: method.name.clone(),
         physical_name: method.name.clone(),
-        realized,
+        realized: StubRealization {
+            name: method.name.clone(),
+            parameters: Vec::new(),
+            result: Ty::Unit,
+            result_box: None,
+        },
         body: StubBody::Throwing,
         override_parameters: parameters.clone(),
         parameter_names: (0..parameters.len())
             .map(crate::jvm::parameter_names::unnamed_java_parameter)
             .collect(),
         parameters,
+        boxed_parameters,
         result,
-        boxed_result: false,
+        boxed_result,
         declaration_site_wildcards: false,
-        bridge,
+        bridge: None,
         type_safe: false,
         barrier: None,
-    })
-}
-
-/// A Java slot specialized to the face's arguments and enhanced by its qualifier. A slot that is the interface's own type
-/// parameter holds a reference, so a scalar argument is its box there (`putIfAbsent(String,
-/// Integer)` on `Map<String, Int>`), while a value class keeps its own representation.
-fn specialized_slot(declared: Ty, qualifier: Qualifier, bindings: &HashMap<String, Ty>) -> Ty {
-    // The face's arguments were validated where the class applied it; a Java formal's `Object`
-    // bound does not narrow them (`V` of `Map<String, S?>` stays `S?`).
-    let substituted = qualifier.enhance(ty_subst_applied_arguments(declared, bindings));
-    let is_formal = declared
-        .non_null()
-        .ty_param_name()
-        .is_some_and(|name| bindings.contains_key(name));
-    if is_formal && substituted.non_null().is_jvm_scalar() {
-        Ty::nullable(substituted.non_null())
-    } else {
-        substituted
-    }
+    };
+    stub.realized.parameters = stub.physical_parameters();
+    stub.realized.result = stub.physical_result();
+    stub.bridge =
+        (method.descriptor != stub.descriptor()).then_some((erased_parameters, erased_result));
+    Some(stub)
 }

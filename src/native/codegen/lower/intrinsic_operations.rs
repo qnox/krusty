@@ -141,7 +141,7 @@ impl BodyLowering<'_, '_, '_> {
                 let (Some(receiver), []) = (receiver, args) else {
                     return Err("a malformed `Enum.ordinal` read".into());
                 };
-                self.enum_member("ordinal", receiver)
+                self.enum_member(crate::backend::enums::BaseMember::Ordinal, receiver)
             }
             IrIntrinsic::NullableAnyToString => {
                 let Some(receiver) = receiver else {

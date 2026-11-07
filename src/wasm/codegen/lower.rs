@@ -23,6 +23,7 @@ mod arrays;
 mod boxing;
 mod callable_reference_identity;
 mod dependency_exports;
+mod enums;
 mod exceptions;
 mod function_values;
 mod generated_members;
@@ -41,6 +42,7 @@ pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
+        || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
@@ -628,6 +630,9 @@ struct Body<'a> {
     /// singleton, or the file's static initializer. Only the template ownership of a reified
     /// type operation reads it.
     scope: crate::ir::IrEnclosure,
+    /// `kotlin.Enum`'s `name` and `ordinal` for the enum constant whose construction is being
+    /// lowered, taken by that construction's allocation.
+    enum_base: Option<(Box<str>, u32)>,
 }
 
 impl<'a> Body<'a> {
@@ -680,6 +685,7 @@ impl<'a> Body<'a> {
             depth: 0,
             loops: Vec::new(),
             scope: crate::ir::IrEnclosure::File,
+            enum_base: None,
         }
     }
 
@@ -1159,7 +1165,7 @@ impl<'a> Body<'a> {
                 && defaults.is_empty()
                 && self.scalar_operation_of(*target).is_some() =>
             {
-                self.scalar_operation_call(*target, dispatch_receiver, params, *ret, &args)?;
+                self.scalar_operation_call(id, *target, dispatch_receiver, params, *ret, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1256,6 +1262,16 @@ impl<'a> Body<'a> {
                     &defaults,
                 )?;
             }
+            IrExpr::EnumConstant {
+                name,
+                ordinal,
+                construction,
+                published: None,
+                ..
+            } => self.enum_constant(&name, ordinal, construction)?,
+            IrExpr::NoSuchEnumConstant { classifier, name } => {
+                self.no_such_enum_constant(classifier, name)?
+            }
             IrExpr::Throw { operand } => self.throw_value(operand)?,
             IrExpr::Vararg {
                 array_type,
@@ -1321,6 +1337,19 @@ impl<'a> Body<'a> {
                     && context_arguments.is_empty() =>
             {
                 self.property_read(*target, *dispatch_receiver)?
+            }
+            // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from
+            // the `$Enum` fields its struct leads with.
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && let Some(member) =
+                        crate::backend::enums::base_member(self.callables, *target) =>
+            {
+                self.enum_member(member, *receiver)?
             }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
@@ -1603,10 +1632,20 @@ impl<'a> Body<'a> {
         } else {
             left.is_unsigned() || right.is_unsigned()
         };
+        // Equality, shifts and the bitwise connectives are sign-agnostic on the carrier (a shift
+        // takes its right-shift kind from `unsigned` below); every other operator needs an
+        // unsigned instruction this lowering does not select yet.
         if unsigned
             && !matches!(
                 op,
-                IrBinOp::Eq | IrBinOp::Ne | IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr
+                IrBinOp::Eq
+                    | IrBinOp::Ne
+                    | IrBinOp::Shl
+                    | IrBinOp::Shr
+                    | IrBinOp::Ushr
+                    | IrBinOp::BitAnd
+                    | IrBinOp::BitOr
+                    | IrBinOp::BitXor
             )
         {
             return Err(format!("an ordinary operator on `{}`", describe(left)));
