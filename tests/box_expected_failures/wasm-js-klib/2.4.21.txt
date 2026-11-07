@@ -200,9 +200,6 @@ bce/forUntilWithStep.kt
 bce/forWithIndex.kt
 bce/inheritance.kt
 bce/withGetter.kt
-binaryOp/bitwiseOp.kt
-binaryOp/bitwiseOpAny.kt
-binaryOp/bitwiseOpNullable.kt
 binaryOp/callAny.kt
 binaryOp/divisionByZero.kt
 binaryOp/eqNullableDoubles.kt
@@ -639,7 +636,6 @@ classes/kt508.kt
 classes/kt5347.kt
 classes/kt6136.kt
 classes/kt633.kt
-classes/kt723.kt
 classes/kt725.kt
 classes/kt8011.kt
 classes/kt8011a.kt
@@ -1852,7 +1848,6 @@ escapeAnalysis/test13.kt
 escapeAnalysis/zeroOutObjectOnAlloc.kt
 evaluate/inJavaLangPackage.kt
 evaluate/inJavaPackage.kt
-evaluate/intrinsicConst/bitwiseOperations.kt
 evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
 evaluate/intrinsicConst/incDec.kt
@@ -3308,8 +3303,6 @@ interfaceCallsNCasts/interface0.kt
 intrinsics/charToInt.kt
 intrinsics/kt10131.kt
 intrinsics/kt10131a.kt
-intrinsics/kt12125_inc.kt
-intrinsics/kt12125_inc_2.kt
 intrinsics/kt52163_doubleCompareToInt.kt
 intrinsics/kt8666.kt
 intrinsics/longRangeWithExplicitDot.kt
@@ -3795,7 +3788,6 @@ privateConstructors/inner.kt
 privateConstructors/kt4860.kt
 privateConstructors/withVarargs.kt
 properties/PrivatePropertyOfComplexGenericFunctionType.kt
-properties/PrivatePropertyOfGenericContravariantFunctionType.kt
 properties/accessorForProtectedPropertyWithPrivateSetter.kt
 properties/accessorForProtectedPropertyWithPrivateSetterInObjectLiteral.kt
 properties/accessorForProtectedPropertyWithPrivateSetterViaSuper.kt
@@ -4785,7 +4777,6 @@ regressions/lambdaWrongReturnType.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
 regressions/multimodule/inlineBuiltString.kt
-regressions/multimodule/inlineNarrowBitwiseOperators.kt
 regressions/multimodule/inlineNarrowElementInRange.kt
 regressions/multimodule/inlineNullCheckReturnTargets.kt
 regressions/multimodule/inlineStdlibRepeat.kt
