@@ -221,7 +221,7 @@ fn rebound_member_formals<P: AsRef<[Ty]> + FromIterator<Ty>>(
             let bound = parameter
                 .bounds
                 .first()
-                .map_or(Ty::nullable(Ty::obj("kotlin/Any")), |(bound, _)| *bound);
+                .map_or(Ty::nullable(Ty::obj("kotlin/Any")), |bound| bound.ty.get());
             let name = &*parameter.semantic_name;
             occurrence(name)
                 .is_some_and(|current| current != bound)
@@ -774,12 +774,13 @@ fn type_parameters(
                 .get(ordinal)
                 .into_iter()
                 .flatten()
-                .map(|&bound| {
-                    let is_interface =
-                        crate::fir::ResolvedTypeParameterBound::is_interface_type(bound, |owner| {
-                            is_interface(source, owner)
-                        });
-                    (bound, is_interface)
+                .map(|&bound| crate::fir::ResolvedTypeParameterBound {
+                    ty: crate::fir::ResolvedTy::new(bound)
+                        .expect("an applied member's formal bound is a published type"),
+                    is_interface: crate::fir::ResolvedTypeParameterBound::is_interface_type(
+                        bound,
+                        |owner| is_interface(source, owner),
+                    ),
                 })
                 .collect(),
         })

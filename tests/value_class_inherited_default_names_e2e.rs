@@ -134,6 +134,8 @@ object Plain : Ids
 value class Wrapped(val s: String) : Ids
 ";
 
+/// PLATFORM-SPECIFIC: complete JVM class bytes pin the inherited forwarder signatures and
+/// annotations for sibling-file value classes.
 #[test]
 fn a_forwarder_declares_a_sibling_file_value_class_by_its_carrier() {
     let sources = [
@@ -157,6 +159,8 @@ fn a_forwarder_declares_a_sibling_file_value_class_by_its_carrier() {
     }
 }
 
+/// PLATFORM-SPECIFIC: compare complete JVM forwarder classes against separately compiled
+/// product and reference dependency libraries.
 #[test]
 fn a_forwarder_declares_a_dependency_value_class_by_its_carrier() {
     let library_source = format!("package lib\n\n{CARRIER_INTERFACE}\n{CARRIER_VALUE_CLASSES}");

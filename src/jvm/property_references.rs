@@ -432,9 +432,8 @@ fn synthesize_delegated(
             internal,
             args: vec![owner, name, signature, flags],
             ctor_params: None,
-            ctor_desc: Some(
-                "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string(),
-            ),
+            declared_params: None,
+            ctor_desc: Some("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".into()),
             external_target: None,
             defaults: Box::new([]),
             default_prefix_count: 0,
@@ -475,7 +474,8 @@ fn local_property_reference(
         )),
         args: vec![owner, name, signature, flags],
         ctor_params: None,
-        ctor_desc: Some("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string()),
+        declared_params: None,
+        ctor_desc: Some("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".into()),
         external_target: None,
         defaults: Box::new([]),
         default_prefix_count: 0,
@@ -1113,11 +1113,7 @@ fn synthesize(
     let mut class = IrClass::synthetic(internal);
     class.enclosure = super::function_references::reference_enclosure(ir, expression);
     // The carrier's `get`/`set` bodies are attributed to the reference's line.
-    class.decl_line = ir
-        .expr_source_lines
-        .get(&(expression as u32))
-        .copied()
-        .unwrap_or(0);
+    class.decl_line = ir.source_line(expression as u32).unwrap_or(0);
     class.superclass = type_name(superclass);
     class.prop_ref = Some(property);
     realizations.record(internal, realization);
@@ -1127,6 +1123,7 @@ fn synthesize(
             internal,
             args: vec![receiver],
             ctor_params: Some(vec![Ty::obj("kotlin/Any")]),
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),

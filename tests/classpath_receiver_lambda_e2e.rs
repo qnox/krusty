@@ -176,7 +176,10 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
         .expect("exact load metadata generic signature");
     assert_eq!(load_generic.params, [krusty::types::Ty::obj("lib/Id")]);
     let ui = library.find("lib/Ui").expect("compiled Ui class");
-    let row = krusty::jvm::metadata::class_functions(&ui)
+    let row = ui
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|function| function.kotlin_name == "row")
         .expect("row metadata");
@@ -198,7 +201,10 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
         "member call facts must retain the concrete lambda receiver"
     );
     assert_eq!(call_sig.lambda_receiver_params, [false, true]);
-    let bind = krusty::jvm::metadata::class_functions(&ui)
+    let bind = ui
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|function| function.kotlin_name == "bind")
         .expect("bind metadata");
@@ -246,7 +252,10 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
     let generic_ui_class = library
         .find("lib/GenericUi")
         .expect("compiled GenericUi class");
-    let generic_bind_metadata = krusty::jvm::metadata::class_functions(&generic_ui_class)
+    let generic_bind_metadata = generic_ui_class
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|function| function.kotlin_name == "bind")
         .expect("GenericUi.bind metadata");
@@ -257,7 +266,7 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
             .map(|signature| signature
                 .formals
                 .iter()
-                .map(String::as_str)
+                .map(|formal| formal.as_str())
                 .collect::<Vec<_>>()),
         Some(vec![]),
         "GenericUi.bind metadata: {generic_bind_metadata:#?}"
@@ -273,7 +282,10 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
         .expect("GenericUi.bind metadata signature");
     assert!(generic_bind_signature.formals.is_empty());
     assert_eq!(generic_bind_member.call_sig.lambda_receiver_params, [true]);
-    let holder = krusty::jvm::metadata::class_functions(&ui)
+    let holder = ui
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|function| function.kotlin_name == "holder")
         .expect("holder metadata");
@@ -288,7 +300,10 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
             if matches!(function.params.first().map(|ty| ty.kind()), Some(krusty::types::TyKind::Obj(name, arguments))
                 if name.matches("lib/Holder") && arguments.len() == 1)
     ));
-    let receiver_vararg = krusty::jvm::metadata::class_functions(&ui)
+    let receiver_vararg = ui
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|function| function.kotlin_name == "receiverVararg")
         .expect("receiverVararg metadata");
@@ -299,7 +314,10 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
         [Some(krusty::types::Ty::obj("lib/Box"))]
     );
     assert_eq!(receiver_vararg_sig.lambda_receiver_params, [true]);
-    let variadic = krusty::jvm::metadata::class_functions(&ui)
+    let variadic = ui
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|function| function.kotlin_name == "variadic")
         .expect("variadic metadata");
@@ -316,7 +334,10 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
                 && matches!(function.params.first().map(|ty| ty.kind()), Some(krusty::types::TyKind::TyParam(name, _)) if &*name == "T")
     ));
     let facade = library.find("lib/LibKt").expect("compiled file facade");
-    let bounded_extension = krusty::jvm::metadata::package_functions(&facade)
+    let bounded_extension = facade
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .package_functions
         .iter()
         .find(|function| function.kotlin_name == "bounded" && function.is_extension())
         .expect("bounded extension metadata");

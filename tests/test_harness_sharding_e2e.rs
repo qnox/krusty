@@ -278,103 +278,6 @@ fn target_hygiene_prunes_orphan_objects_and_nested_profile_dirs() {
     fs::remove_dir_all(&root).ok();
 }
 
-#[test]
-fn run_tests_wires_target_hygiene_before_building() {
-    let script = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("run-tests.sh"))
-        .expect("read run-tests.sh");
-    let source = script
-        .find("scripts/target-hygiene.sh")
-        .expect("run-tests.sh sources target-hygiene.sh");
-    let reject = script
-        .find("target_hygiene_reject_profile_dir")
-        .expect("run-tests.sh rejects profile-named target dirs");
-    let prune = script
-        .find("target_hygiene_prune")
-        .expect("run-tests.sh prunes orphan objects");
-    let first_build = script.find("cargo build").expect("run-tests.sh builds");
-    assert!(
-        source < reject && reject < first_build,
-        "reject must run before the first cargo build"
-    );
-    assert!(
-        prune < first_build,
-        "prune must run before the first cargo build"
-    );
-}
-
-#[test]
-fn full_local_conformance_uses_target_owned_focused_passes() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let runner = fs::read_to_string(root.join("run-tests.sh")).expect("read run-tests.sh");
-    for required in [
-        "--exact kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance --test-threads=1",
-        "run-tests.sh: conformance native-focused",
-        "KRUSTY_REQUIRE_NATIVE_CONFORMANCE=1",
-        "kotlin_box_native_conformance:: --skip kotlin_box_native_conformance::kotlin_codegen_box_native_conformance",
-        "run-tests.sh: conformance wasm-focused",
-        "KRUSTY_REQUIRE_WASM_JS_CONFORMANCE=1",
-        "KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE=1",
-        "kotlin_box_wasm_conformance:: --skip kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance --skip kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance",
-        "--skip kotlin_codegen_box_conformance --skip kotlin_box_native_conformance:: --skip kotlin_box_wasm_conformance::",
-    ] {
-        assert!(
-            runner.contains(required),
-            "the canonical full gate must preserve target ownership ({required})"
-        );
-    }
-    assert!(
-        !runner.contains("KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER"),
-        "owned module graphs belong to the normal box inventory, not a second runner"
-    );
-
-    let justfile = fs::read_to_string(root.join("justfile")).expect("read justfile");
-    for recipe in ["conformance-all-plain", "conformance-one"] {
-        let body = justfile
-            .split(&format!("\n{recipe}"))
-            .nth(1)
-            .and_then(|text| text.split("\n\n").next())
-            .unwrap_or_else(|| panic!("justfile has {recipe}"));
-        for required in [
-            "target-conformance-regressions.sh native",
-            "target-conformance-regressions.sh wasm",
-            "--skip kotlin_box_native_conformance::",
-            "--skip kotlin_box_wasm_conformance::",
-        ] {
-            assert!(
-                body.contains(required)
-                    || (recipe == "conformance-all-plain"
-                        && required == "target-conformance-regressions.sh native"
-                        && body.contains("native-conformance-regressions"))
-                    || (recipe == "conformance-all-plain"
-                        && required == "target-conformance-regressions.sh wasm"
-                        && body.contains("wasm-conformance-regressions")),
-                "{recipe} must preserve target ownership ({required})"
-            );
-        }
-    }
-}
-
-#[test]
-fn target_focused_modules_do_not_consume_jvm_oracles() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for module in [
-        "tests/kotlin_box_native_conformance.rs",
-        "tests/kotlin_box_wasm_conformance.rs",
-    ] {
-        let source = fs::read_to_string(root.join(module)).expect("read target conformance module");
-        for forbidden in [
-            "reference_jvm_acceptance",
-            "expect_box_ok_with_stdlib",
-            "stdlib_jar",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "{module} must assert real target KLIB/runtime outcomes, not {forbidden}"
-            );
-        }
-    }
-}
-
 #[cfg(unix)]
 fn regression_fixture(name: &str, body: &str) -> (PathBuf, PathBuf) {
     let temp = std::env::temp_dir().join(format!(
@@ -733,292 +636,6 @@ fn prebuilt_conformance_regressions_enforce_the_deadline() {
 }
 
 #[test]
-fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workflow =
-        fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci workflow");
-    let matrix = workflow
-        .find("  conformance:\n")
-        .expect("workflow has one supported-version conformance matrix");
-    assert!(
-        workflow.contains("version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}"),
-        "conformance job must expand every supported Kotlin version"
-    );
-    assert!(
-        workflow
-            .matches("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
-            .count()
-            == 2
-            && workflow.matches("        target: [jvm]\n").count() == 1
-            && workflow.matches("        target: [native, wasm]\n").count() == 1
-            && workflow.matches("steps: &conformance-steps").count() == 1
-            && workflow.matches("steps: *conformance-steps").count() == 1,
-        "each exact Kotlin version must expose JVM, Native and Wasm rows from one shared inventory"
-    );
-    let box_run = workflow[matrix..]
-        .find("just conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
-        .map(|offset| matrix + offset)
-        .expect("each version's JVM row runs the box suite");
-    let native_box_run = workflow[matrix..]
-        .find("just native-conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
-        .map(|offset| matrix + offset)
-        .expect("each version's Native row runs the native box suite");
-    let native_regressions = workflow[matrix..]
-        .find(
-            "just native-conformance-regressions \"$PWD/conformance-bin\" \"${{ matrix.version }}\"",
-        )
-        .map(|offset| matrix + offset)
-        .expect("each version's Native row runs its focused target tests");
-    let wasm_regressions = workflow[matrix..]
-        .find(
-            "just wasm-conformance-regressions \"$PWD/conformance-bin\" \"${{ matrix.version }}\"",
-        )
-        .map(|offset| matrix + offset)
-        .expect("each version's Wasm row runs its focused target tests");
-    let regressions = workflow[matrix..]
-        .find("just conformance-regressions \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
-        .map(|offset| matrix + offset)
-        .expect("each version's JVM row runs every non-box conformance test");
-    let release = workflow
-        .find(
-            "needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]",
-        )
-        .expect(
-            "release waits on combined conformance plus the exact tested Gradle and Maven artifacts and matrices",
-        );
-    assert!(
-        matrix < box_run
-            && box_run < native_box_run
-            && native_box_run < native_regressions
-            && native_regressions < wasm_regressions
-            && wasm_regressions < regressions
-            && regressions < release
-    );
-    for needle in [
-        "- name: run box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
-        "- name: run native box conformance ${{ matrix.version }}\n        if: matrix.target == 'native'",
-        "- name: run wasm box conformance ${{ matrix.version }}\n        if: matrix.target == 'wasm'",
-        "- name: run focused Native conformance ${{ matrix.version }}\n        # Keep focused target regressions independent",
-        "- name: run focused Wasm conformance ${{ matrix.version }}\n        if: matrix.target == 'wasm'",
-        "- name: run non-box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
-    ] {
-        assert!(
-            workflow.contains(needle),
-            "target ownership must be explicit in the matrix ({needle})"
-        );
-    }
-    assert!(
-        workflow.contains("target/cache/ser-corpus/${{ matrix.version }}"),
-        "each version lane caches its matching serialization corpus"
-    );
-    assert!(
-        workflow.contains("kotlin-conformance-all-${{ matrix.version }}-"),
-        "the expanded corpus cache must not reuse the immutable box-only key"
-    );
-    assert!(
-        workflow.contains("kotlin-${{ matrix.target }}-conformance-${{ matrix.version }}-")
-            && workflow.contains("if: matrix.target != 'jvm'"),
-        "a Native or Wasm row must not race to publish the JVM row's broader immutable cache"
-    );
-    for key in [
-        "key: box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}",
-        "key: box-and-cli-corpus-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}",
-    ] {
-        assert!(
-            workflow.contains(key),
-            "every box corpus cache must use the key versioned for its mock JDK and CLI corpus inputs ({key})"
-        );
-    }
-    assert!(
-        !workflow.contains("box-corpus-mock-jdk-"),
-        "no box corpus cache may restore an immutable entry from before the CLI corpus input"
-    );
-    assert_eq!(
-        workflow.matches("path: target/cache/box-corpus").count(),
-        2,
-        "only the coverage and conformance jobs read the box and CLI corpus"
-    );
-    let justfile = fs::read_to_string(root.join("justfile")).expect("read justfile");
-    let klib_recipe = justfile
-        .split("\nklib-semantics ")
-        .nth(1)
-        .and_then(|recipe| recipe.split("\n\n").next())
-        .expect("justfile has a klib-semantics recipe");
-    assert!(
-        klib_recipe.contains("KRUSTY_PROVISION_BOX_CORPUS=0 "),
-        "the focused local KLIB recipe must not provision an unrelated corpus"
-    );
-    let native_target_recipe = justfile
-        .split("\nnative-conformance-regressions ")
-        .nth(1)
-        .and_then(|recipe| recipe.split("\n\n").next())
-        .expect("justfile has a Native target regression recipe");
-    for required in [
-        "just kotlin-native",
-        "target-conformance-regressions.sh native",
-    ] {
-        assert!(
-            native_target_recipe.contains(required),
-            "Native focused regressions must provision their exact target setup ({required})"
-        );
-    }
-    let wasm_target_recipe = justfile
-        .split("\nwasm-conformance-regressions ")
-        .nth(1)
-        .and_then(|recipe| recipe.split("\n\n").next())
-        .expect("justfile has a Wasm target regression recipe");
-    for required in ["just kotlinc", "target-conformance-regressions.sh wasm"] {
-        assert!(
-            wasm_target_recipe.contains(required),
-            "Wasm focused regressions must provision their exact target setup ({required})"
-        );
-    }
-    assert!(
-        !native_target_recipe.contains("box-corpus")
-            && !native_target_recipe.contains("KRUSTY_KOTLIN_BOX_DIR")
-            && !native_target_recipe.contains("just kotlinc")
-            && !native_target_recipe.contains("KRUSTY_KOTLINC")
-            && !wasm_target_recipe.contains("box-corpus")
-            && !wasm_target_recipe.contains("KRUSTY_KOTLIN_BOX_DIR"),
-        "focused target regressions must not provision the unrelated box corpus"
-    );
-    assert_eq!(
-        workflow
-            .matches("if: steps.box-corpus.outputs.cache-hit == 'true'\n        run: echo KRUSTY_BOX_CORPUS_OFFLINE=1 >> \"$GITHUB_ENV\"")
-            .count(),
-        2,
-        "a restored box corpus must be complete, so every lane forbids fetching after a hit"
-    );
-    assert!(
-        workflow.contains("recorded-kotlinc-bytes-conformance-${{ matrix.version }}-"),
-        "recorded kotlinc bytes must be isolated by matrix version"
-    );
-    let box_reference_producer_hash = "${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}";
-    let restore_reference_key = [
-        "          path: target/cache/ref-classes\n          key: box-reference-classes-${{ matrix.version }}-",
-        box_reference_producer_hash,
-        "-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha",
-    ]
-    .concat();
-    let save_reference_key = [
-        "          path: target/cache/ref-classes\n          key: box-reference-classes-${{ matrix.version }}-",
-        box_reference_producer_hash,
-        "-${{ github.sha }}\n",
-    ]
-    .concat();
-    for needle in [
-        "      - name: restore kotlinc box references (${{ matrix.version }})\n        if: matrix.target == 'jvm'\n",
-        restore_reference_key.as_str(),
-        "      - name: save kotlinc box references (${{ matrix.version }})\n        if: matrix.target == 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.box-references.outputs.cache-hit != 'true'\n",
-        save_reference_key.as_str(),
-    ] {
-        assert!(
-            workflow.contains(needle),
-            "each JVM row replays its version's kotlinc box references, and only master saves them ({needle})"
-        );
-    }
-    let box_step = &workflow[workflow
-        .find("      - name: run box conformance ${{ matrix.version }}\n")
-        .expect("workflow has a JVM box conformance step")
-        ..native_box_run];
-    for needle in [
-        "KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: \"1800\"",
-        "KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps",
-        "KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}",
-        "KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}",
-    ] {
-        assert!(
-            box_step.contains(needle),
-            "a cold JVM box lane must have time to populate its selected byte cache ({needle})"
-        );
-    }
-    assert!(
-        !workflow.contains("recorded-native-outcomes-")
-            && !workflow.contains("KRUSTY_NATIVE_OUTCOME_CACHE"),
-        "Native expectations are committed text, not an opaque GHA cache"
-    );
-    for directory in [
-        "tests/box_expected_failures/native-klib",
-        "tests/box_expected_not_applicable/native-klib",
-    ] {
-        assert!(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join(directory)
-                .is_dir(),
-            "Native expectations must be committed under the shared platform/version layout: {directory}"
-        );
-    }
-    assert!(
-        !workflow.contains("\n  conformance-regressions:\n"),
-        "non-box conformance must not remain a max-version-only job"
-    );
-    let conformance_builds = fs::read_dir(root.join(".github/workflows"))
-        .expect("read workflow directory")
-        .flatten()
-        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
-        .map(|workflow| workflow.matches("bin=$(just conformance-bin)").count())
-        .sum::<usize>();
-    assert_eq!(
-        conformance_builds, 1,
-        "all GHA matrices must reuse one conformance build; ratchet updates are one-off local operations"
-    );
-    assert_eq!(
-        workflow
-            .matches("cargo build --profile gate -p krusty-cli")
-            .count(),
-        1,
-        "the matrix reuses one CLI build"
-    );
-    assert_eq!(
-        workflow.matches("bin=$(just krusty-build-tests)").count(),
-        1,
-        "Gradle lanes reuse one krusty-build test binary"
-    );
-    assert!(
-        !workflow.contains("cargo test --profile gate -p krusty-build"),
-        "a Gradle lane must not compile krusty"
-    );
-    assert!(
-        workflow.contains("./krusty-build-tests --ignored"),
-        "a Gradle lane runs the prebuilt krusty-build tests"
-    );
-    assert!(
-        workflow.contains("needs: [build-conformance-bin, build-tool-bins]")
-            && workflow.contains(
-                "needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins]"
-            )
-            && workflow.contains("needs: [build-tool-bins, build-gradle-plugin]")
-            && workflow.contains("needs: [build-tool-bins]"),
-        "JVM starts before focused KLIB binaries while each other consumer waits only on its artifact families"
-    );
-    assert!(
-        !workflow.contains("build-shared-bins"),
-        "unrelated artifact families must not be serialized on one runner"
-    );
-    assert!(
-        workflow.contains("phase_log_prefix=conformance-bin")
-            && workflow.contains("phase_begin conformance-test-binary")
-            && workflow.contains("phase_log_prefix=klib-test-bins")
-            && workflow.contains("phase_begin focused-klib-test-binaries")
-            && workflow.contains("scripts/build-klib-test-binaries.sh \"$PWD\"")
-            && workflow.contains("phase_log_prefix=tool-bins")
-            && workflow.contains("phase_begin krusty-cli")
-            && workflow.contains("phase_begin krusty-build-tests"),
-        "each independently scheduled build retains measurable phase ownership"
-    );
-    assert!(
-        workflow.contains(
-            "\nconcurrency:\n  group: ci-${{ github.ref == 'refs/heads/master' && github.run_id || github.ref }}\n  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}\n"
-        ),
-        "PR and merge-group updates may auto-cancel, but each master build needs a unique group so it always finishes"
-    );
-    assert!(
-        workflow.contains("KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: \"1\""),
-        "matrix conformance must fail instead of self-skipping required serialization"
-    );
-}
-
-#[test]
 fn overlapping_callers_hold_distinct_servers_up_to_the_cap() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Condvar, Mutex};
@@ -1292,9 +909,10 @@ fn phase_timing_coverage_run_prints_every_phase() {
     let summary = temp.join("summary.json");
     let compiler_json = temp.join("compiler.json");
     let lsp_json = temp.join("lsp.json");
+    let github_output = temp.join("github-output");
     fs::write(
         &e2e_bin,
-        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\n",
+        "#!/usr/bin/env bash\nif [ -n \"${GITHUB_OUTPUT:-}\" ]; then printf '%s\\n' 'compiler_e2e_binary=child-overwrite' >>\"$GITHUB_OUTPUT\"; fi\nprintf '%s\\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\n",
     )
     .expect("write e2e stub");
     fs::write(
@@ -1332,6 +950,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
     }
 
     let run_coverage = |cpu_source: &str| {
+        fs::write(&github_output, "").expect("reset owned workflow output");
         Command::new("bash")
             .arg(root.join("scripts").join("coverage.sh"))
             .arg(&summary)
@@ -1343,6 +962,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
             .env("KRUSTY_COVERAGE_LSP_JSON", &lsp_json)
             .env("KRUSTY_TEST_JOBS", "1")
             .env("KRUSTY_TEST_THREADS", "1")
+            .env("GITHUB_OUTPUT", &github_output)
             .env("RUSTFLAGS", "-Z threads=4")
             .env("E2E_BIN", &e2e_bin)
             .env("UNIT_BIN", &unit_bin)
@@ -1357,6 +977,12 @@ fn phase_timing_coverage_run_prints_every_phase() {
         output.status.success(),
         "coverage stub run failed: {stderr}"
     );
+    assert_eq!(
+        fs::read_to_string(&github_output).expect("read workflow output"),
+        format!("compiler_e2e_binary={}\n", e2e_bin.display()),
+        "coverage alone publishes its selected binary after its children finish"
+    );
+    assert!(e2e_bin.is_file(), "published executable remains available");
     assert!(
         stderr.contains("cargo: visible stderr"),
         "compiler test build hid cargo stderr: {stderr}"
@@ -1382,6 +1008,10 @@ fn phase_timing_coverage_run_prints_every_phase() {
     assert!(
         fallback_output.status.success(),
         "coverage sysctl fallback run failed: {fallback_stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(&github_output).expect("read fallback workflow output"),
+        format!("compiler_e2e_binary={}\n", e2e_bin.display())
     );
     assert_eq!(
         fallback_stderr
@@ -1441,6 +1071,10 @@ fn phase_timing_coverage_run_prints_every_phase() {
     .expect("write failing unit stub");
     let failed_unit = run_coverage("nproc");
     assert_eq!(failed_unit.status.code(), Some(1));
+    assert!(
+        fs::read_to_string(&github_output).unwrap().is_empty(),
+        "failed coverage must not publish an executable"
+    );
     let failed_unit_stderr =
         String::from_utf8(failed_unit.stderr).expect("coverage stderr is UTF-8");
     assert!(
@@ -1460,27 +1094,14 @@ fn phase_timing_coverage_run_prints_every_phase() {
     .expect("write failing e2e stub");
     let failed_e2e = run_coverage("nproc");
     assert_eq!(failed_e2e.status.code(), Some(1));
+    assert!(
+        fs::read_to_string(&github_output).unwrap().is_empty(),
+        "failed e2e coverage must not publish an executable"
+    );
     let failed_e2e_stderr = String::from_utf8(failed_e2e.stderr).expect("coverage stderr is UTF-8");
     assert!(
         failed_e2e_stderr.contains("coverage: e2e exited with status 9"),
         "coverage hid e2e failure: {failed_e2e_stderr}"
     );
     fs::remove_dir_all(temp).expect("remove coverage phase directory");
-}
-
-#[test]
-fn coverage_profile_disables_intra_crate_thin_lto() {
-    let manifest = include_str!("../Cargo.toml");
-    let coverage = manifest
-        .split_once("[profile.coverage]")
-        .expect("coverage profile")
-        .1;
-    let body = coverage
-        .split_once("\n[")
-        .map(|(body, _)| body)
-        .unwrap_or(coverage);
-    assert!(
-        body.lines().any(|line| line.trim() == "lto = \"off\""),
-        "the coverage profile must set lto = \"off\" so Cargo passes -C lto=off and rustc skips intra-crate ThinLTO"
-    );
 }

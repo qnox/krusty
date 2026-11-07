@@ -257,6 +257,12 @@ impl JvmLibraries {
                 (kind, _) => kind,
             };
             self.register_external_callable(&mut function.callable, realization, declaration_owner);
+            if let Some(identity) = function.callable.external_identity {
+                if function.call_sig.param_defaults.contains(&true) {
+                    self.cp
+                        .publish_external_callable_parameter_defaults(identity);
+                }
+            }
             if let (Some(identity), Some(parameter_identities)) =
                 (function.callable.external_identity, parameter_identities)
             {

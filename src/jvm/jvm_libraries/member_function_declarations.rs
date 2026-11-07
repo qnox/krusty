@@ -13,8 +13,6 @@ impl JvmLibraries {
         self.member_functions_with_renames(receiver, name, &function_renames)
     }
 
-    /// The member-extension functions named `name` that `receiver`'s classifier declares, each with
-    /// its semantic extension receiver.
     pub(super) fn member_extension_declarations(
         &self,
         receiver: Ty,

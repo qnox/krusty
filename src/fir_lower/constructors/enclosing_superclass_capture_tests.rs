@@ -43,6 +43,7 @@ fn capture(field: u32, identity: ClassCaptureIdentity) -> IrCtorArg {
                 label: "same".into(),
                 owner: crate::fir::CapturedCallableOwner::Declaration,
             }),
+            crossinline_parameter: None,
         }),
         Some(identity),
     )
@@ -107,4 +108,127 @@ fn inner_super_argument_follows_identity_and_enclosing_parameter_role() {
         ir.classes[*class as usize].ctor_args[*index as usize].capture_identity,
         Some(wanted)
     );
+}
+
+fn explicit_projection() -> (IrFile, crate::ir::IrCheckedConstructorBody, u32, u32) {
+    let mut ir = IrFile::default();
+    let wanted = ClassCaptureIdentity::Receiver(17);
+    let actual = ClassCaptureIdentity::Receiver(18);
+    let mut parent = IrClass::synthetic("Parent".into());
+    parent.constructor_prefix_count = 1;
+    parent
+        .fields
+        .push(crate::ir::IrField::new("value".into(), Ty::String));
+    parent.ctor_args.push(capture(0, wanted));
+    let parent = ir.add_class(parent);
+    ir.class_capture_identities.insert((parent, 0), wanted);
+    let mut child = IrClass::synthetic("Child".into());
+    child.superclass = ir.classes[parent as usize].fq_name;
+    child.constructor_prefix_count = 1;
+    child
+        .fields
+        .push(crate::ir::IrField::new("value".into(), Ty::String));
+    child.ctor_args.push(capture(0, actual));
+    let child = ir.add_class(child);
+    ir.class_capture_identities.insert((child, 0), actual);
+    let parameter = ir.add_expr(IrExpr::GetValue(1));
+    let constructor = crate::ir::IrCheckedConstructorBody {
+        class: child,
+        ordinal: 0,
+        annotations: Default::default(),
+        parameters: Vec::new(),
+        defaults: Vec::new(),
+        delegation: None,
+        body: None,
+        body_attached: true,
+    };
+    (ir, constructor, parent, parameter)
+}
+
+#[test]
+fn an_explicit_super_capture_reads_the_parameter_without_retagging_the_child() {
+    let (mut ir, constructor, parent, parameter) = explicit_projection();
+    let original = ir.class_capture_identities[&(constructor.class, 0)];
+    let mut arguments = Vec::new();
+    let mut parameters = Vec::new();
+    assert_eq!(
+        super::project_delegation_captures(
+            &mut ir,
+            &constructor,
+            Some(parent),
+            Some(vec![(parameter, Ty::String)]),
+            &mut arguments,
+            &mut parameters,
+            crate::fir::DeclarationId::from_raw(0),
+        )
+        .expect("checked explicit capture"),
+        1
+    );
+    assert_eq!(arguments, [parameter]);
+    assert_eq!(parameters, [Ty::String]);
+    assert!(matches!(ir.expr(arguments[0]), IrExpr::GetValue(1)));
+    assert_eq!(
+        ir.class_capture_identities[&(constructor.class, 0)],
+        original
+    );
+    assert_ne!(original, ir.class_capture_identities[&(parent, 0)]);
+    ir.classes[constructor.class as usize].super_args = arguments.clone();
+    ir.classes[constructor.class as usize].super_ctor_params = parameters;
+    super::finalize_local_superclass_captures(&mut ir).expect("complete prefix needs no inference");
+    assert_eq!(ir.classes[constructor.class as usize].super_args, arguments);
+    assert_eq!(ir.classes[constructor.class as usize].ctor_args.len(), 1);
+    assert_eq!(
+        ir.class_capture_identities[&(constructor.class, 0)],
+        original
+    );
+}
+
+#[test]
+fn explicit_shared_super_prefix_retains_the_targets_holder_role() {
+    let (mut ir, mut constructor, parent, parameter) = explicit_projection();
+    ir.shared_class_capture_fields
+        .insert((parent, 0), Ty::String);
+    for ordinal in [0, 1] {
+        constructor.ordinal = ordinal;
+        super::project_delegation_captures(
+            &mut ir,
+            &constructor,
+            Some(parent),
+            Some(vec![(parameter, Ty::String)]),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            crate::fir::DeclarationId::from_raw(0),
+        )
+        .expect("raw constructor parameter carries the same shared holder");
+    }
+    assert_eq!(
+        ir.shared_super_capture_parameters[&(constructor.class, 0)],
+        Ty::String
+    );
+    assert_eq!(
+        ir.shared_secondary_super_capture_parameters[&(constructor.class, 0, 0)],
+        Ty::String
+    );
+}
+
+#[test]
+fn an_invalid_explicit_projection_is_not_repaired_by_closure_inference() {
+    for wrong in [Vec::new(), vec![(0, Ty::Int)]] {
+        let (mut ir, constructor, parent, _) = explicit_projection();
+        let mut arguments = Vec::new();
+        let mut parameters = Vec::new();
+        assert!(super::project_delegation_captures(
+            &mut ir,
+            &constructor,
+            Some(parent),
+            Some(wrong),
+            &mut arguments,
+            &mut parameters,
+            crate::fir::DeclarationId::from_raw(0),
+        )
+        .is_err());
+        assert!(arguments.is_empty());
+        assert!(parameters.is_empty());
+        assert!(ir.shared_super_capture_parameters.is_empty());
+    }
 }

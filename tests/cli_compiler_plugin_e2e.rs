@@ -627,11 +627,25 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          function from another file yet",
     );
     assert_compose_rejects(
-        "compose-generic-class-field",
-        "class Box<T>(val value: T)\nclass User(val box: Box<Int>)\n",
+        "compose-library-call-result",
+        "@Composable fun Greeting() {\nandroidx.compose.runtime.rememberCompositionContext()\n}\n",
         &[],
-        "4:1: error: krusty's Compose compiler plugin does not support a class whose stability \
-         depends on a generic class yet",
+        "4:1: error: krusty's Compose compiler plugin does not support a call to a library \
+         composable function with a result yet",
+    );
+    assert_compose_rejects(
+        "compose-library-call-function-parameter",
+        "val action: () -> Unit = {}\n@Composable fun Greeting() {\nandroidx.compose.runtime.SideEffect(action)\n}\n",
+        &[],
+        "5:1: error: krusty's Compose compiler plugin does not support a call to a library \
+         composable function with a function-typed parameter yet",
+    );
+    assert_compose_library_call_rejects(
+        "compose-library-call-defaults",
+        "@Composable fun Sized(size: Int = 1) {}\n",
+        "@Composable fun Greeting() {\nlib.Sized(2)\n}\n",
+        "4:1: error: krusty's Compose compiler plugin does not support a call to a library \
+         composable function with default arguments yet",
     );
     assert_compose_rejects(
         "compose-generic-value-class-field",
@@ -646,13 +660,6 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "3:1: error: krusty's Compose compiler plugin does not support a class with a field of a \
          numbered reflection function type yet",
-    );
-    assert_compose_rejects(
-        "compose-library-generic-class-field",
-        "class Holder(val value: androidx.compose.runtime.ProvidedValue<Int>)\n",
-        &[],
-        "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
-         depends on a generic class of another file or a Compose library yet",
     );
     assert_compose_rejects(
         "compose-other-file-inner-class-field",
@@ -720,6 +727,41 @@ fn compose_report_destinations_fail_the_compile() {
 
 /// Compile `declarations` (after a package line and the `Composable` import) and the `others`
 /// files with the Compose plugin, and assert the one error `Probe.kt:<error>` krusty reports.
+/// Like [`assert_compose_rejects`], with a call into `library`, a module krusty compiles first
+/// with the Compose plugin in package `lib`.
+fn assert_compose_library_call_rejects(name: &str, library: &str, declarations: &str, error: &str) {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let library = Probe::new(
+        &format!("{name}-lib"),
+        &format!("package lib\nimport androidx.compose.runtime.Composable\n{library}"),
+    );
+    let built = library.krusty(&classpath, &switches);
+    assert_eq!(built.code, Some(0), "{}", built.stderr);
+    classpath.push(library.dir.join("krusty"));
+    let probe = Probe::new(
+        name,
+        &format!("package probe\nimport androidx.compose.runtime.Composable\n{declarations}"),
+    );
+    let compiled = probe.krusty(&classpath, &switches);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+    }
+    .message();
+    assert_eq!(
+        compiled.stderr,
+        format!(
+            "info: {partial}\n{}:{error}; compile this module with kotlinc\nkrusty: 1 error(s)\n",
+            probe.source.display()
+        )
+    );
+    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.classes, Vec::<String>::new());
+}
+
 fn assert_compose_rejects(name: &str, declarations: &str, others: &[(&str, &str)], error: &str) {
     let compose = reference_plugin_jar("compose-compiler-plugin.jar");
     let source =

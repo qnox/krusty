@@ -5,6 +5,7 @@ use super::capture_storage::{
     anonymous_body_expressions, anonymous_descendant_uses_name, anonymous_descendant_writes_name,
     anonymous_descendants, enclosing_value_visible_beside_member, ConstructorArgumentUses,
 };
+use super::receiver_uses::{ReceiverUseSite, ReceiverUseSites};
 use super::scope::ContextReceiverKind;
 use super::{
     capture_field_order, AnonymousLexicalClassScope, Checker, CheckerScope, ExprLowering,
@@ -15,6 +16,58 @@ use crate::diag::Span;
 use crate::fir::{CapturedCallableOwner, FirCapturedReceiver};
 use crate::fx_hash::HashMap;
 use crate::types::{CapturedContextKind, Ty};
+
+#[cfg(test)]
+mod tests;
+
+/// Project completed Pass-1 selections into the current retained file before checking its bodies.
+/// A selected empty vector is authoritative; an absent record remains absent. Finalized checking
+/// uses stable classifier identity to reach the original Pass-1 arena, never a coincident parser ID.
+pub(super) fn published_captures(
+    file: &File,
+    file_index: u32,
+    pass_one: &super::SymbolTable,
+    active: Option<&crate::fir::ActiveSourceDeclarations>,
+    index: Option<&crate::fir::ResolvedModuleIndex>,
+) -> HashMap<DeclId, Vec<AnonymousObjectCapture>> {
+    file.anonymous_object_classes
+        .values()
+        .copied()
+        .filter_map(|declaration| {
+            let original = match active {
+                Some(active) => {
+                    let stable = active.canonical_classifier_declaration(
+                        declaration,
+                        index.expect("active declarations require their finalized index"),
+                    )?;
+                    let class = pass_one.class_by_stable_declaration(stable)?;
+                    if class.source_file != file_index {
+                        return None;
+                    }
+                    class.source_decl?
+                }
+                // Annotation-only legacy fragments still hold the same Pass-1 parser arena.
+                None => declaration,
+            };
+            pass_one
+                .anonymous_object_captures
+                .get(&(file_index, original))
+                .cloned()
+                .map(|captures| (declaration, captures))
+        })
+        .collect()
+}
+
+/// What a visit knows about a captured value's type, least first.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum CaptureTypeKnowledge {
+    /// It waits on inference that has not run yet.
+    Pending,
+    /// It holds an inference variable of a call that is still being solved; that call's solution
+    /// completes it.
+    AwaitingCall,
+    Determined,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnonymousObjectCapture {
@@ -51,9 +104,12 @@ pub struct AnonymousObjectCapture {
     /// and the context value it hides) are two captures with distinct identities. Absent for a
     /// receiver, and for a value that is not a function-local binding.
     pub(crate) lexical_binding: Option<u32>,
-    /// Semantic closure field forwarded by this capture. Direct captures leave this absent and
-    /// establish their own identity when checked; transitive captures preserve the upstream field.
+    /// Required constructor-transport family retained by a transitive capture. Its selected
+    /// operand can belong to another family; direct captures establish their own identity.
     pub(crate) capture_dependency: Option<crate::fir::ClassCaptureIdentity>,
+    /// Constructor requirements proven to read this same resolved lexical value. They are lookup
+    /// views of this one capture, not additional fields or changes to its canonical family.
+    pub(crate) constructor_projections: Vec<crate::fir::ClassCaptureIdentity>,
     /// Stable identity of the implicit-receiver rung this capture holds. Absent for lexical values
     /// and for an enclosing class instance. Two classifiers that capture the same rung share it;
     /// the callable or lambda label is not this identity.
@@ -64,17 +120,140 @@ pub struct AnonymousObjectCapture {
 }
 
 impl AnonymousObjectCapture {
+    /// Direct receiver operands correlate by their declaration role across reconstructed towers.
+    /// Their current/depth coordinates belong only to this visit's construction site.
+    pub(super) fn same_direct_receiver(&self, other: &Self) -> bool {
+        matches!(
+            (self.source, other.source),
+            (
+                AnonymousObjectCaptureSource::ImplicitReceiver { .. },
+                AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+            ) | (
+                AnonymousObjectCaptureSource::EnclosingInstance { .. },
+                AnonymousObjectCaptureSource::EnclosingInstance { .. }
+            )
+        ) && self.receiver_role.is_some()
+            && self.receiver_role == other.receiver_role
+            && self.receiver_capture == other.receiver_capture
+    }
+
+    /// The captured transport family is anchored once; its selected source may be a different
+    /// class's storage when the resolver proved a lexical forward mapping.
+    pub(crate) fn logical_identity(
+        &self,
+        first_owner: crate::types::TypeName,
+    ) -> Option<crate::fir::ClassCaptureIdentity> {
+        self.capture_dependency
+            .or_else(|| self.source_identity(first_owner))
+    }
+
+    /// The logical identity of the exact operand from which this capture is initialized.
+    pub(crate) fn source_identity(
+        &self,
+        first_owner: crate::types::TypeName,
+    ) -> Option<crate::fir::ClassCaptureIdentity> {
+        use crate::fir::ClassCaptureIdentity;
+        match self.source {
+            AnonymousObjectCaptureSource::ClassStorage(storage) => Some(storage.identity),
+            AnonymousObjectCaptureSource::EnumEntryPropertyStorage { owner, field } => {
+                Some(ClassCaptureIdentity::DeclaredProperty {
+                    owner,
+                    ordinal: field,
+                })
+            }
+            _ => self
+                .receiver_capture
+                .map(ClassCaptureIdentity::Receiver)
+                .or_else(|| match self.receiver_role {
+                    Some(super::ReceiverDeclarationRole::EnclosingClass(owner)) => {
+                        Some(ClassCaptureIdentity::EnclosingClass(owner))
+                    }
+                    _ => self
+                        .lexical_binding
+                        .map(|binding| ClassCaptureIdentity::Value {
+                            owner: first_owner,
+                            binding,
+                        }),
+                }),
+        }
+    }
+
+    /// Both identities are proven views of this one realized capture, not additional storage.
+    pub(crate) fn represents_identity(
+        &self,
+        owner: crate::types::TypeName,
+        identity: crate::fir::ClassCaptureIdentity,
+    ) -> bool {
+        self.logical_identity(owner) == Some(identity)
+            || self.source_identity(owner) == Some(identity)
+    }
+
+    pub(super) fn retain_constructor_projections(
+        &mut self,
+        projections: &[crate::fir::ClassCaptureIdentity],
+    ) {
+        for &projection in projections {
+            if !self.constructor_projections.contains(&projection) {
+                self.constructor_projections.push(projection);
+            }
+        }
+    }
+
+    /// Preserve the required transport identity before projecting its resolved source operand.
+    pub(super) fn forwarded_from(
+        mut self,
+        first_owner: crate::types::TypeName,
+        source: AnonymousObjectCaptureSource,
+    ) -> Option<Self> {
+        let wanted = self.logical_identity(first_owner)?;
+        self.source = source;
+        self.capture_dependency = Some(wanted);
+        Some(self)
+    }
+
     pub fn stored_ty(&self) -> Ty {
         self.storage_ty.unwrap_or(self.ty)
     }
+
+    /// Whether the captured value's type is not known yet: it still waits on pending inference, or
+    /// it holds an inference variable of a call that is still being solved (a builder lambda's
+    /// receiver before the builder call completes). Such a capture is provisional; the visit after
+    /// the owning call is solved records its determined type.
+    pub(super) fn has_undetermined_type(&self) -> bool {
+        self.type_knowledge() != CaptureTypeKnowledge::Determined
+    }
+
+    /// How much is known about the captured value's type, for preferring the better-informed of
+    /// two visits.
+    pub(super) fn type_knowledge(&self) -> CaptureTypeKnowledge {
+        let types = || [Some(self.ty), self.storage_ty].into_iter().flatten();
+        if types().any(Ty::mentions_pending) {
+            CaptureTypeKnowledge::Pending
+        } else if types().any(Ty::mentions_type_variable) {
+            CaptureTypeKnowledge::AwaitingCall
+        } else {
+            CaptureTypeKnowledge::Determined
+        }
+    }
+}
+
+/// A selected captured value and the classifier scope that made it visible. Logical identity
+/// survives forwarding and layout reconciliation; no provisional field position crosses into FIR.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClassStorageSource {
+    pub(crate) owner: crate::types::TypeName,
+    pub(crate) identity: crate::fir::ClassCaptureIdentity,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnonymousObjectCaptureSource {
     LexicalValue,
-    /// A field of the construction site's current classifier, selected by the checker. The capture
-    /// constructor reads this exact ordinal; neither FIR construction nor lowering looks the name up.
-    ClassStorage {
+    /// A field of the exact classifier selected at the construction site.
+    ClassStorage(ClassStorageSource),
+    /// A declared entry property keeps its own declaration-local field coordinate. It is never
+    /// an ordinal in an anonymous constructor's generated capture prefix.
+    EnumEntryPropertyStorage {
+        owner: crate::types::TypeName,
         field: u32,
     },
     /// Exact class-receiver rung selected at the construction site.
@@ -83,8 +262,8 @@ pub enum AnonymousObjectCaptureSource {
         depth: u32,
     },
     /// A receiver introduced by an enclosing extension/receiver-function/context rung. The
-    /// coordinate is relative to the construction body's checked receiver tower; it is semantic
-    /// identity and must not be reconstructed from the capture field spelling.
+    /// coordinate is relative to the construction body's checked receiver tower. The recorded
+    /// declaration role owns its identity across visits; the field spelling proves neither.
     ImplicitReceiver {
         current: bool,
         depth: u32,
@@ -386,6 +565,7 @@ impl Checker<'_> {
                     lexical_shadow_depth: 0,
                     lexical_binding: None,
                     capture_dependency: None,
+                    constructor_projections: Vec::new(),
                     receiver_capture,
                     receiver_role: receiver.receiver_role,
                 };
@@ -434,15 +614,9 @@ fn merge_local_receiver_capture(
 ) {
     if let Some(existing) = captures
         .iter_mut()
-        .find(|existing| existing.source == candidate.source)
+        .find(|existing| existing.same_direct_receiver(&candidate))
     {
-        if existing.receiver_role.is_none() && candidate.receiver_role.is_some() {
-            existing.receiver_capture = candidate.receiver_capture;
-            existing.receiver_role = candidate.receiver_role;
-        } else if candidate.receiver_role.is_some() {
-            assert_eq!(existing.receiver_capture, candidate.receiver_capture);
-            assert_eq!(existing.receiver_role, candidate.receiver_role);
-        }
+        existing.retain_constructor_projections(&candidate.constructor_projections);
         return;
     }
     captures.push(candidate);
@@ -497,7 +671,7 @@ impl Checker<'_> {
             merge_local_receiver_capture(captures, bindings, current.clone());
             let selected = captures
                 .iter_mut()
-                .find(|capture| capture.source == prior.source)
+                .find(|capture| capture.same_direct_receiver(prior))
                 .expect("the refreshed receiver was installed");
             *selected = current;
         }
@@ -537,7 +711,13 @@ impl Checker<'_> {
             else {
                 continue;
             };
-            used_receivers.push((first_use, observed.capture.source));
+            used_receivers.push((
+                first_use,
+                observed
+                    .capture
+                    .receiver_role
+                    .expect("a selected receiver has declaration provenance"),
+            ));
             merge_local_receiver_capture(captures, bindings, observed.capture.clone());
         }
         // An inner class is not entered as its own local-class statement, so it never publishes
@@ -551,31 +731,32 @@ impl Checker<'_> {
         );
         // Provisional visits publish only proven selections, but cannot mark their types final.
         let provisional = self.postponed_argument_depth != 0
-            || captures.iter().any(|capture| {
-                capture.ty.mentions_pending()
-                    || capture
-                        .storage_ty
-                        .is_some_and(|storage| storage.mentions_pending())
-            });
+            || captures
+                .iter()
+                .any(AnonymousObjectCapture::has_undetermined_type);
         // Established fields are proven reads, not the temporary candidate overlay. A completed
         // local method never selects its receiver again during a memoized revisit.
         let mut proven_uses = established
             .captures
             .iter()
-            .filter_map(|capture| {
+            .filter(|capture| {
                 matches!(
                     capture.source,
                     AnonymousObjectCaptureSource::ImplicitReceiver { .. }
                         | AnonymousObjectCaptureSource::EnclosingInstance { .. }
                 )
-                .then_some(capture.source)
+            })
+            .map(|capture| {
+                capture
+                    .receiver_role
+                    .expect("a proven receiver has declaration provenance")
             })
             .enumerate()
             .collect::<Vec<_>>();
         used_receivers.sort_by_key(|(position, _)| *position);
-        for (_, source) in used_receivers {
-            if !proven_uses.iter().any(|(_, proven)| *proven == source) {
-                proven_uses.push((proven_uses.len(), source));
+        for (_, role) in used_receivers {
+            if !proven_uses.iter().any(|(_, proven)| *proven == role) {
+                proven_uses.push((proven_uses.len(), role));
             }
         }
         let used_receivers = proven_uses;
@@ -773,11 +954,13 @@ fn refreshed_local_receiver_capture(
             assert_eq!(current.receiver_capture, None);
         }
         AnonymousObjectCaptureSource::LexicalValue
-        | AnonymousObjectCaptureSource::ClassStorage { .. } => {
+        | AnonymousObjectCaptureSource::ClassStorage(_)
+        | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. } => {
             panic!("only receiver captures are refreshed")
         }
     }
     current.capture_dependency = prior.capture_dependency;
+    current.retain_constructor_projections(&prior.constructor_projections);
     current
 }
 
@@ -810,6 +993,7 @@ mod receiver_remap_tests {
             lexical_shadow_depth: 0,
             lexical_binding: None,
             capture_dependency: None,
+            constructor_projections: Vec::new(),
             receiver_capture: Some(identity),
             receiver_role: Some(role),
         }
@@ -1021,7 +1205,7 @@ mod receiver_remap_tests {
 pub(super) fn drop_unused_implicit_receivers(
     captures: &mut Vec<AnonymousObjectCapture>,
     bindings: &mut Vec<Option<u32>>,
-    used: &[(usize, AnonymousObjectCaptureSource)],
+    used: &[(usize, super::ReceiverDeclarationRole)],
 ) {
     let mut kept_captures = Vec::with_capacity(captures.len());
     let mut kept_bindings = Vec::with_capacity(bindings.len());
@@ -1030,7 +1214,10 @@ pub(super) fn drop_unused_implicit_receivers(
             capture.source,
             AnonymousObjectCaptureSource::ImplicitReceiver { .. }
         ) && capture.capture_dependency.is_none()
-            && !used.iter().any(|(_, source)| *source == capture.source);
+            && capture.constructor_projections.is_empty()
+            && !used
+                .iter()
+                .any(|(_, role)| Some(*role) == capture.receiver_role);
         if unused_receiver {
             continue;
         }
@@ -1047,6 +1234,7 @@ pub(super) struct SelectedLocalCallableCaptures<'a> {
     pub(super) expressions: &'a HashMap<ExprId, ExprLowering>,
     pub(super) statements: &'a HashMap<StmtId, StmtLowering>,
     pub(super) constructor_arguments: ConstructorArgumentUses<'a>,
+    pub(super) forwarded: Option<&'a ReceiverUseSites>,
 }
 
 fn expression_uses_selected_local_callable_capture(
@@ -1105,12 +1293,11 @@ fn expression_uses_selected_local_callable_capture(
 
 fn anonymous_descendant_uses_selected_local_callable_capture(
     file: &File,
-    declaration: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
+    mut descendants: impl Iterator<Item = DeclId>,
     name: &str,
     selected: SelectedLocalCallableCaptures<'_>,
 ) -> bool {
-    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
+    descendants.any(|candidate| {
         anonymous_body_expressions(file, candidate, selected.constructor_arguments)
             .into_iter()
             .any(|expression| {
@@ -1130,6 +1317,15 @@ pub(super) fn record_anonymous_construction_captures(
 ) -> Vec<Option<u32>> {
     let Some(&declaration) = file.anonymous_object_classes.get(&construction) else {
         return Vec::new();
+    };
+    // A forwarded argument and its nested declarations execute outside this classifier.
+    // Their captures belong to the construction site, not this classifier's storage prefix.
+    let descendants = || {
+        anonymous_descendants(declaration, lexical_scope).filter(|candidate| {
+            !selected_local_callables.forwarded.is_some_and(|forwarded| {
+                forwarded.contains(ReceiverUseSite::Declaration(*candidate))
+            })
+        })
     };
     crate::trace_compiler!(
         "resolve",
@@ -1161,39 +1357,37 @@ pub(super) fn record_anonymous_construction_captures(
             // Enclosing-instance need was decided against the anonymous body's receiver uses.
             // It has no source variable name, so lexical bound/write/use filters do not apply.
             AnonymousObjectCaptureSource::EnclosingInstance { .. }
-            | AnonymousObjectCaptureSource::ImplicitReceiver { .. }
-            | AnonymousObjectCaptureSource::ClassStorage { .. } => true,
-            AnonymousObjectCaptureSource::LexicalValue => {
+            | AnonymousObjectCaptureSource::ImplicitReceiver { .. } => true,
+            AnonymousObjectCaptureSource::ClassStorage(_) if candidate.receiver.is_some() => true,
+            AnonymousObjectCaptureSource::LexicalValue
+            | AnonymousObjectCaptureSource::ClassStorage(_)
+            | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. } => {
                 enclosing_value_visible_beside_member(
                     file,
                     declaration,
                     &candidate.name,
                     candidate.function_local,
-                ) && (candidate.delegate_storage.is_some()
-                    || anonymous_descendant_uses_name(
-                        file,
-                        declaration,
-                        lexical_scope,
-                        &candidate.name,
-                        candidate.ty,
-                        candidate.function_local,
-                        selected_local_callables.constructor_arguments,
-                    )
-                    || anonymous_descendant_uses_selected_local_callable_capture(
-                        file,
-                        declaration,
-                        lexical_scope,
-                        &candidate.name,
-                        selected_local_callables,
-                    )
-                    || anonymous_descendant_writes_name(
-                        file,
-                        declaration,
-                        lexical_scope,
-                        &candidate.name,
-                        candidate.function_local,
-                        selected_local_callables.constructor_arguments,
-                    ))
+                ) && (anonymous_descendant_uses_name(
+                    file,
+                    declaration,
+                    descendants(),
+                    &candidate.name,
+                    candidate.ty,
+                    candidate.function_local,
+                    selected_local_callables.constructor_arguments,
+                ) || anonymous_descendant_uses_selected_local_callable_capture(
+                    file,
+                    descendants(),
+                    &candidate.name,
+                    selected_local_callables,
+                ) || anonymous_descendant_writes_name(
+                    file,
+                    declaration,
+                    descendants(),
+                    &candidate.name,
+                    candidate.function_local,
+                    selected_local_callables.constructor_arguments,
+                ))
             }
         })
         .map(|(_, candidate)| AnonymousObjectCapture {
@@ -1208,6 +1402,7 @@ pub(super) fn record_anonymous_construction_captures(
             lexical_shadow_depth: 0,
             lexical_binding: candidate.lexical_binding,
             capture_dependency: None,
+            constructor_projections: Vec::new(),
             receiver_capture: candidate.receiver_capture,
             receiver_role: candidate.receiver_role,
         })
@@ -1233,6 +1428,7 @@ pub(super) fn record_anonymous_construction_captures(
 /// member's dispatch receiver is that class's instance type.
 pub(super) fn enclosing_instance(ty: Ty) -> FirCapturedReceiver {
     FirCapturedReceiver::Enclosing {
+        owner: None,
         classifier: ty
             .non_null()
             .kotlin_class_internal()

@@ -623,7 +623,9 @@ impl Checker<'_> {
             .select_receiver_function_with_params_tracking(
                 char_sequence,
                 name,
-                &[crate::symbol_resolver::CallArgKind::Typed(Ty::Int)],
+                crate::symbol_resolver::FamilyArguments::Shared(&[
+                    crate::symbol_resolver::CallArgKind::Typed(Ty::Int),
+                ]),
                 &[],
                 &callables,
                 None,
@@ -639,6 +641,7 @@ impl Checker<'_> {
         Some(super::ResolvedCall::Member(
             crate::symbol_resolver::ResolvedMember {
                 receiver: char_sequence,
+                declaring_receiver: None,
                 physical_params: selected.callable.physical_params.clone(),
                 context_args: Vec::new(),
                 ret,

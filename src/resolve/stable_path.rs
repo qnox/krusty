@@ -64,4 +64,19 @@ impl<'checker, 'source> StablePathRead<'checker, 'source> {
         }
         Some(ty)
     }
+
+    /// The declared type a smart cast on `path` starts from, before any flow narrowing: a local's
+    /// declaration, or the declaration selected by the path's last property read
+    /// (`delegate is B` on a member `val delegate: A` keeps `A` beside `B`).
+    pub(super) fn declared_ty(&self, scope: &CheckerScope<'_>, path: &NarrowPath) -> Option<Ty> {
+        match (&path.root, path.segments.last()) {
+            (_, Some(segment)) => Some(segment.ty),
+            (PathRoot::Value(identity), None) => self
+                .checker
+                .visible_flow_value(scope, *identity)
+                .map(|(_, local)| local.declared_ty),
+            (PathRoot::TopLevel(property), None) => Some(property.ty),
+            (PathRoot::Receiver(_), None) => None,
+        }
+    }
 }

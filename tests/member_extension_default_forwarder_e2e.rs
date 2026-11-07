@@ -1,3 +1,6 @@
+//! PLATFORM-SPECIFIC: complete JVM class bytes pin inherited member-extension forwarders,
+//! their generic signatures, parameter labels and annotations.
+//!
 //! A class inheriting an interface's member extensions gets a forwarder for each, as kotlinc writes
 //! them, whether the interface is in the same module or a dependency: plain and generic extension
 //! functions, and extension properties' getters and setters. An ordinary class labels an accessor's

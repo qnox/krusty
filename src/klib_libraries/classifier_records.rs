@@ -130,6 +130,7 @@ pub(super) fn published_constructor(
     builtin_realizations::realize_constructor(
         identity,
         classifier.compiler_builtin_owner,
+        classifier.shape.runtime_exception,
         &mut member,
     );
     builtin_realizations::realize_array_constructor(
