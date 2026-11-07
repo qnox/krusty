@@ -12,6 +12,7 @@ mod closure_frames;
 mod closure_producers;
 mod constructor_calls;
 mod constructor_contracts;
+mod constructor_exports;
 mod control_forms;
 mod demo_package;
 mod elvis_blocks;
