@@ -64,8 +64,9 @@ pub(crate) struct BridgeAdaptations {
 
 impl BridgeAdaptations {
     /// The final result a renamed special bridge emits instead of its erased one.
-    /// This is queried only after value-class realization: any adapter keeps the single planned
-    /// erased bridge, including a bridge that adapts only its parameters.
+    /// This is queried only after value-class realization. A parameter-only adapter keeps the
+    /// single planned erased bridge. A box adapter finalizes the carrier (`int` for `Token`);
+    /// emission boxes only the erased `Object` bridge.
     pub(crate) fn renamed_special_result(
         &self,
         owner: TypeName,
@@ -75,7 +76,6 @@ impl BridgeAdaptations {
     ) -> Option<Ty> {
         if owner_is_interface
             || !bridge.special
-            || self.get(owner, ordinal).is_some()
             || bridge.target_ret.is_some()
             || bridge.collection_barrier.is_some()
             || !matches!(
@@ -86,9 +86,20 @@ impl BridgeAdaptations {
         {
             return None;
         }
+        let boxes_result = self.boxes_result(owner, ordinal);
+        // A parameter adapter, or an unbox, does not move the final method off the erased slot.
+        if self.get(owner, ordinal).is_some() && !boxes_result {
+            return None;
+        }
         let concrete = crate::jvm::physical_type::ir_ty_to_jvm(&bridge.concrete_ret);
         let erased = crate::jvm::physical_type::ir_ty_to_jvm(&bridge.erased_ret);
-        (concrete.is_reference() && erased.is_reference() && concrete != erased).then_some(concrete)
+        if concrete == erased {
+            return None;
+        }
+        if boxes_result {
+            return Some(concrete);
+        }
+        (concrete.is_reference() && erased.is_reference()).then_some(concrete)
     }
 
     /// Record the plans of one class's bridges. A bridge is planned exactly once; a bridge with

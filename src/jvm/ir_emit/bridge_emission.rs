@@ -429,6 +429,37 @@ fn emit_planned_bridge(
         )
         .is_some()
     {
+        // The carrier bridge does not box. TargetResult skips the result adapter; the erased
+        // bridge below is the one that calls it and applies `box-impl`.
+        let carrier = class.adaptations.boxes_result(
+            class.class.fq_name_id(),
+            u32::try_from(bridge_index).expect("bridge ordinals fit u32"),
+        );
+        if carrier {
+            emit_bridge(
+                class,
+                cw,
+                bridge_index,
+                b,
+                None,
+                BridgeRealization::TargetResult,
+            );
+            let erased = crate::ir::Bridge {
+                special: false,
+                target_name: Some(b.name.clone()),
+                target_ret: Some(b.concrete_ret),
+                ..b.clone()
+            };
+            emit_bridge(
+                class,
+                cw,
+                bridge_index,
+                &erased,
+                None,
+                BridgeRealization::Planned,
+            );
+            return;
+        }
         emit_bridge(
             class,
             cw,

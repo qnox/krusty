@@ -1252,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn adapted_inherited_renamed_bridges_use_the_emitted_final_slot_and_move_survivors() {
+    fn adapted_inherited_renamed_bridges_keep_the_erased_bridge_beside_the_carrier() {
         use crate::jvm::bridge_adaptations::{
             BridgeAdaptations, BridgeAdapter, BridgeResultAdapter, ValueClassAdapter,
         };
@@ -1295,12 +1295,17 @@ mod tests {
                 .iter()
                 .map(|bridge| bridge.name.as_str())
                 .collect::<Vec<_>>(),
-            ["other"]
+            ["remove", "other"]
         );
-        assert_eq!(ir.classes[1].bridges.len(), 1);
+        assert!(!ir.classes[0].bridges[0].special);
+        assert!(ir.classes[1].bridges[0].special);
+        assert_eq!(
+            adaptations.renamed_special_result(parent, 0, false, &ir.classes[1].bridges[0]),
+            Some(Ty::Int)
+        );
         assert_eq!(adaptations.get(parent, 0), Some(&boxing(token)));
-        assert_eq!(adaptations.get(child, 0), Some(&boxing(survivor)));
-        assert_eq!(adaptations.get(child, 1), None);
+        assert_eq!(adaptations.get(child, 0), Some(&boxing(token)));
+        assert_eq!(adaptations.get(child, 1), Some(&boxing(survivor)));
     }
 
     #[test]
