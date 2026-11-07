@@ -535,6 +535,9 @@ impl BodyLowering<'_> {
         ty: Ty,
     ) -> Lowered<ExprId> {
         if !access.type_arguments.is_empty() {
+            if let Some(linked) = self.linker.link_generic_accessor(self.ir, accessor)? {
+                return self.linked_call(linked, access, ty);
+            }
             return unsupported("an access of a generic property");
         }
         let signature = crate::libraries::KlibDeclarationSignature::Accessor(accessor.clone());

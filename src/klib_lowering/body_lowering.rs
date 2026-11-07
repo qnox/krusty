@@ -194,6 +194,17 @@ pub(super) trait CallLinker {
         callee: &KlibAccessorIdSignature,
     ) -> Lowered<LinkedAccessor>;
 
+    /// A generic property accessor the provider publishes as a callable, linked as that callable
+    /// so the call's type arguments specialize its receiver and result. `Ok(None)` keeps the
+    /// access on the property path, including a linker that does not publish provider callables.
+    fn link_generic_accessor(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &KlibAccessorIdSignature,
+    ) -> Lowered<Option<LinkedCallee>> {
+        Ok(None)
+    }
+
     /// Proves that `classifier` is a dependency object, whose value a body may read.
     fn singleton(&self, classifier: TypeName) -> Lowered<()>;
 

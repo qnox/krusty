@@ -1078,8 +1078,13 @@ impl CallLinker for Linker<'_, '_> {
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
-        // A support unit links no member of a generic class.
-        (sub.kotlin_class_internal() == Some(owner)).then_some(sub)
+        // The member is declared on `owner`. A receiver of a subtype carries that class's type
+        // arguments through the same hierarchy a source call uses (`IntIterator` is `Iterator<Int>`).
+        crate::assignable::applied_supertype(
+            &crate::symbol_resolver::SourceOracle(self.sources.declarations),
+            sub,
+            Ty::obj_name(owner),
+        )
     }
 
     fn dependency_override(
@@ -1221,6 +1226,14 @@ impl CallLinker for Linker<'_, '_> {
                 "a dependency property accessor without a getter contract",
             ),
         )
+    }
+
+    fn link_generic_accessor(
+        &mut self,
+        _ir: &mut IrFile,
+        callee: &KlibAccessorIdSignature,
+    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
+        self.generic_accessor(callee)
     }
 
     fn requires_declaration(
@@ -1468,7 +1481,17 @@ impl CallLinker for Linker<'_, '_> {
             if !value_class_member {
                 // A member reached from a same-library body is not in the root's checked call
                 // set. Its provider record is the external declaration a source call would use.
-                if selected.is_none() {
+                // A selected compiler intrinsic is that operation, not a virtual call.
+                let provider_intrinsic = self
+                    .sources
+                    .declarations
+                    .external_callable_by_dependency(&identity)
+                    .is_some_and(|(_, realization)| {
+                        realization
+                            .klib_body_callable()
+                            .is_some_and(|callable| callable.compiler_intrinsic().is_some())
+                    });
+                if selected.is_none() || provider_intrinsic {
                     if let Some(linked) = self
                         .link_provider_member(&identity, arena, declaration)
                         .map_err(callee_declined)?
@@ -1541,6 +1564,83 @@ impl CallLinker for Linker<'_, '_> {
 }
 
 impl<'s> Linker<'_, 's> {
+    /// The provider callable of a generic extension accessor, specialized by the call.
+    ///
+    /// A member getter stays on the property path. A linker without this provider record returns
+    /// nothing, so the access keeps its existing decline.
+    fn generic_accessor(
+        &self,
+        callee: &KlibAccessorIdSignature,
+    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Accessor(callee.clone());
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => return Ok(None),
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.property().clone(),
+                )))
+            }
+        };
+        let Some((target, realization)) = self
+            .sources
+            .declarations
+            .external_callable_by_dependency(&identity)
+        else {
+            return Ok(None);
+        };
+        let Some(callable) = realization.klib_body_callable() else {
+            return Ok(None);
+        };
+        if callable.is_member() || callable.type_parameters().is_empty() {
+            return Ok(None);
+        }
+        let Some((arena, declaration)) = self.sources.bodies.function(&identity) else {
+            return Ok(None);
+        };
+        let Some(selected) = selected_callable_for_header_purpose(
+            Some(SelectedKlibCallables::One(callable)),
+            HeaderPurpose::External,
+            arena,
+            declaration,
+            Some(self.sources.bodies),
+        )?
+        else {
+            return Ok(None);
+        };
+        let header =
+            raw_function_header(Some(selected), HeaderPurpose::External, arena, declaration)?;
+        let (params, ret, context_count, extension_receiver, receiver) = header.linked_signature();
+        Ok(Some(LinkedCallee {
+            callee: Callee::External {
+                target,
+                default_provider: None,
+                params: params.to_vec(),
+                ret,
+                substitutions: Vec::new(),
+                defaults: Vec::new(),
+                extension_receiver_parameter: extension_receiver.then_some(context_count as u32),
+            },
+            receiver,
+            params: params.to_vec(),
+            ret,
+            context_count,
+            singleton_dispatch: selected.singleton_classifier(),
+            type_parameters: selected
+                .generic_signature()
+                .map_or_else(Vec::new, |signature| signature.formals.clone()),
+            type_parameter_bounds: selected
+                .generic_signature()
+                .map(|signature| signature.formal_bounds.clone()),
+            class_type_parameters: Vec::new(),
+            parameter_defaults: Vec::new(),
+        }))
+    }
+
     /// An unselected member call, realized through the provider's external declaration.
     ///
     /// Returns `None` when this provider has no member record for `identity`. The record is not
@@ -1713,7 +1813,7 @@ impl<'s> Linker<'_, 's> {
             receiver: None,
             params: declared.params.clone(),
             ret: declared.ret,
-            context_count: ir.fn_context_counts.get(&function).copied().unwrap_or(0),
+            context_count: ir.declared_parameters(function).context_count,
             singleton_dispatch: None,
             type_parameters,
             type_parameter_bounds,

@@ -13,7 +13,9 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::klib::KlibManifest;
 use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
-use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::metadata::id_signature::{
+    class_signature, ClassScope, DeclarationContainer, KlibPublicIdSignature,
+};
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction, KlibIrMember,
     KlibIrStatement, KlibIrType,
@@ -21,6 +23,7 @@ use crate::metadata::klib_ir::tree::{
 use crate::metadata::klib_ir::{
     KlibIrModuleTrees, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind,
 };
+use crate::metadata::semantic::KotlinType;
 use crate::types::{type_name_child, TypeName};
 
 /// The decoded function declarations of a set of KLIB libraries, joined by exact signature.
@@ -42,6 +45,16 @@ pub struct KlibDeclarationBodies {
 pub(crate) enum LocatedClass<'a> {
     Missing,
     One(&'a KlibIrClass),
+    Several,
+}
+
+/// [`KlibDeclarationBodies::located_public_class`]: the class and the arena that owns its types.
+enum FoundClass<'a> {
+    Missing,
+    One {
+        arena: &'a KlibIrArena,
+        class: &'a KlibIrClass,
+    },
     Several,
 }
 
@@ -668,6 +681,143 @@ impl KlibDeclarationBodies {
         }
     }
 
+    /// The declaration a missing member call names through the dispatch class's supertypes.
+    ///
+    /// A fake override is not serialized as its own function. The call's member id is the shape
+    /// of the member, independent of which class the call names, so the nearest supertype that
+    /// declares that shape is the member the call invokes. Two declarations of that shape at the
+    /// same distance are ambiguous.
+    pub(crate) fn inherited_callee(
+        &self,
+        module: &str,
+        call: &KlibPublicIdSignature,
+    ) -> KlibCalleeOrigin {
+        let Some(owner) = owner_class_signature(call) else {
+            return KlibCalleeOrigin::Missing;
+        };
+        let start = match self.located_public_class(module, &owner) {
+            FoundClass::Missing => return KlibCalleeOrigin::Missing,
+            FoundClass::Several => return KlibCalleeOrigin::Ambiguous,
+            FoundClass::One { arena, class } => (arena, class),
+        };
+        let mut level = vec![start];
+        let mut visited = HashSet::default();
+        while !level.is_empty() {
+            let mut matches = Vec::new();
+            let mut next = Vec::new();
+            for (arena, class) in level {
+                if !visited.insert(class.base.symbol.signature.clone()) {
+                    continue;
+                }
+                matches.extend(self.matching_members(module, call, arena, class));
+                for supertype in &class.supertypes {
+                    let KlibIrType::Simple { classifier, .. } = arena.ty(*supertype) else {
+                        continue;
+                    };
+                    let KlibIrSignature::Public(signature) = &classifier.signature else {
+                        continue;
+                    };
+                    if let FoundClass::One { arena, class } =
+                        self.located_public_class(module, signature)
+                    {
+                        next.push((arena, class));
+                    }
+                }
+            }
+            let mut unique = None;
+            for identity in matches {
+                if unique.as_ref().is_some_and(|found| found != &identity) {
+                    return KlibCalleeOrigin::Ambiguous;
+                }
+                unique = Some(identity);
+            }
+            if let Some(identity) = unique {
+                return KlibCalleeOrigin::Exact(identity);
+            }
+            level = next;
+        }
+        KlibCalleeOrigin::Missing
+    }
+
+    /// The public class `signature` in `module`'s producer graph, with the arena that owns it.
+    fn located_public_class<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> FoundClass<'a> {
+        let wanted = KlibIrSignature::Public(signature.clone());
+        let mut found = None;
+        for owner in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&owner) else {
+                continue;
+            };
+            for tree in self.libraries[library].trees() {
+                let mut pending = vec![&tree.declaration];
+                while let Some(member) = pending.pop() {
+                    let Some(class) = class_of(&tree.arena, member) else {
+                        continue;
+                    };
+                    pending.extend(class.members.iter());
+                    if class.base.symbol.signature != wanted {
+                        continue;
+                    }
+                    if found.is_some() {
+                        return FoundClass::Several;
+                    }
+                    found = Some((&tree.arena, class));
+                }
+            }
+        }
+        match found {
+            Some((arena, class)) => FoundClass::One { arena, class },
+            None => FoundClass::Missing,
+        }
+    }
+
+    /// Declarations of `call`'s shape that `class` itself publishes.
+    fn matching_members(
+        &self,
+        module: &str,
+        call: &KlibPublicIdSignature,
+        arena: &KlibIrArena,
+        class: &KlibIrClass,
+    ) -> Vec<KlibDependencyCallable> {
+        let mut found = Vec::new();
+        for member in &class.members {
+            let KlibIrMember::Function(id) = member else {
+                continue;
+            };
+            let function = arena.function(*id);
+            if function.constructor || function.base.symbol.kind != KlibIrSymbolKind::Function {
+                continue;
+            }
+            let KlibIrSignature::Public(signature) = &function.base.symbol.signature else {
+                continue;
+            };
+            if signature.member_id() != call.member_id() || signature.mask() != call.mask() {
+                continue;
+            }
+            let declared = if function.base.origin == "FAKE_OVERRIDE" {
+                function
+                    .overridden
+                    .iter()
+                    .filter_map(|symbol| declaration_signature(&symbol.signature))
+                    .collect()
+            } else {
+                vec![KlibDeclarationSignature::Public(signature.clone())]
+            };
+            for declaration in declared {
+                if let KlibCalleeOrigin::Exact(identity) = self.callee_origin(module, &declaration)
+                {
+                    if !found.contains(&identity) {
+                        found.push(identity);
+                    }
+                }
+            }
+        }
+        found
+    }
+
     /// The class in `module`'s producer graph that directly declares `signature`.
     ///
     /// The match is the function's serialized symbol, including a property accessor. Two classes
@@ -1030,6 +1180,36 @@ fn declaration_owner(signature: &KlibIrSignature) -> Option<TypeName> {
     Some(identity)
 }
 
+/// The class a member call names: its package and declaration path without the member.
+fn owner_class_signature(member: &KlibPublicIdSignature) -> Option<KlibPublicIdSignature> {
+    let segments = member.declaration().segments();
+    let owners = segments.split_last()?.1;
+    let (class_name, outer) = owners.split_last()?;
+    let outer_scopes = outer
+        .iter()
+        .map(|name| ClassScope::<KotlinType> {
+            name: name.as_str(),
+            type_parameters: Vec::new(),
+            expect: false,
+        })
+        .collect::<Vec<_>>();
+    let class = ClassScope {
+        name: class_name.as_str(),
+        type_parameters: Vec::new(),
+        // A member inside an `expect` class carries that flag. The class signature records it on
+        // the innermost class, which sets the same mask bit.
+        expect: member.mask() & 1 != 0,
+    };
+    Some(class_signature(
+        DeclarationContainer {
+            package: member.package().segments(),
+            classes: &outer_scopes,
+            native_interop_library: member.mask() & (1 << 2) != 0,
+        },
+        &class,
+    ))
+}
+
 fn ir_signature(declaration: &KlibDeclarationSignature) -> KlibIrSignature {
     match declaration {
         KlibDeclarationSignature::Public(signature) => KlibIrSignature::Public(signature.clone()),
@@ -1090,7 +1270,8 @@ mod tests {
         Placement,
     };
     use crate::metadata::klib_ir::tree::{
-        KlibIrArguments, KlibIrDeclarationBase, KlibIrMemberAccess, KlibIrNullability,
+        KlibIrArguments, KlibIrClass, KlibIrDeclarationBase, KlibIrFunction, KlibIrMember,
+        KlibIrMemberAccess, KlibIrNullability,
     };
     use crate::metadata::klib_ir::KlibIrSymbol;
     use crate::metadata::semantic::KotlinType;
@@ -1274,5 +1455,178 @@ mod tests {
         };
         statements.push(KlibIrStatement::Expression(effect));
         assert!(!inert_constructor(&arena, &executable, &class));
+    }
+
+    fn member_signature(class: &str, name: &str) -> KlibPublicIdSignature {
+        let package = ["demo".to_owned()];
+        let classes = [ClassScope::<KotlinType> {
+            name: class,
+            type_parameters: Vec::new(),
+            expect: false,
+        }];
+        callable_signature(
+            DeclarationContainer {
+                package: &package,
+                classes: &classes,
+                native_interop_library: false,
+            },
+            &CallableShape {
+                name,
+                contexts: Vec::new(),
+                receiver: None,
+                params: Vec::new(),
+                vararg: None,
+                type_parameters: Vec::new(),
+                expect: false,
+                placement: Placement::Ordinary,
+            },
+        )
+        .expect("a parameterless member is signable")
+    }
+
+    fn class_tree(
+        name: &str,
+        supertypes: Vec<KlibIrSymbol>,
+        function: Option<KlibPublicIdSignature>,
+    ) -> crate::metadata::klib_ir::KlibIrDeclarationTree {
+        let mut arena = KlibIrArena::default();
+        let symbol = class_symbol("demo", name);
+        let ty = arena.push_type(KlibIrType::Simple {
+            classifier: symbol.clone(),
+            nullability: KlibIrNullability::NotSpecified,
+            arguments: Vec::new(),
+            annotations: Vec::new(),
+            abbreviation: None,
+        });
+        let supertypes = supertypes
+            .into_iter()
+            .map(|classifier| {
+                arena.push_type(KlibIrType::Simple {
+                    classifier,
+                    nullability: KlibIrNullability::NotSpecified,
+                    arguments: Vec::new(),
+                    annotations: Vec::new(),
+                    abbreviation: None,
+                })
+            })
+            .collect();
+        let mut members = Vec::new();
+        if let Some(signature) = function {
+            let function = arena.push_function(KlibIrFunction {
+                base: KlibIrDeclarationBase {
+                    symbol: KlibIrSymbol {
+                        kind: KlibIrSymbolKind::Function,
+                        signature: KlibIrSignature::Public(signature),
+                    },
+                    origin: "DEFINED".to_owned(),
+                    flags: 0,
+                    annotations: Vec::new(),
+                },
+                name: "iterator".to_owned(),
+                constructor: false,
+                type_parameters: Vec::new(),
+                dispatch_receiver: None,
+                context_parameters: Vec::new(),
+                extension_receiver: None,
+                regular_parameters: Vec::new(),
+                return_type: ty,
+                overridden: Vec::new(),
+                companion_extension_class: None,
+                prepared_inline_file: None,
+                body: None,
+            });
+            members.push(KlibIrMember::Function(function));
+        }
+        let class = arena.push_class(KlibIrClass {
+            base: KlibIrDeclarationBase {
+                symbol,
+                origin: "DEFINED".to_owned(),
+                flags: 0,
+                annotations: Vec::new(),
+            },
+            name: name.to_owned(),
+            this_receiver: None,
+            type_parameters: Vec::new(),
+            supertypes,
+            members,
+            value_class_representation: None,
+            sealed_subclasses: Vec::new(),
+        });
+        crate::metadata::klib_ir::KlibIrDeclarationTree {
+            arena,
+            declaration: KlibIrMember::Class(class),
+        }
+    }
+
+    fn bodies_of(
+        trees: Vec<crate::metadata::klib_ir::KlibIrDeclarationTree>,
+    ) -> KlibDeclarationBodies {
+        KlibDeclarationBodies::from_body_libraries(vec![KlibBodyLibrary::new(
+            "stdlib".to_owned(),
+            Vec::<String>::new(),
+            crate::metadata::klib_ir::KlibIrModuleTrees::from_trees(trees).expect("indexed"),
+        )])
+        .expect("one module")
+    }
+
+    #[test]
+    fn a_missing_member_call_follows_the_supertype_that_declares_it() {
+        let declared = member_signature("Progression", "iterator");
+        let call = member_signature("IntRange", "iterator");
+        assert_eq!(call.member_id(), declared.member_id());
+        assert_ne!(call.declaration(), declared.declaration());
+        let bodies = bodies_of(vec![
+            class_tree(
+                "Progression",
+                vec![class_symbol("demo", "Any")],
+                Some(declared.clone()),
+            ),
+            class_tree("IntRange", vec![class_symbol("demo", "Progression")], None),
+        ]);
+        let signature = KlibDeclarationSignature::Public(call.clone());
+        assert!(matches!(
+            bodies.callee_origin("stdlib", &signature),
+            KlibCalleeOrigin::Missing
+        ));
+        match bodies.inherited_callee("stdlib", &call) {
+            KlibCalleeOrigin::Exact(identity) => {
+                assert_eq!(identity.module, "stdlib");
+                assert_eq!(
+                    identity.declaration,
+                    KlibDeclarationSignature::Public(declared)
+                );
+            }
+            KlibCalleeOrigin::Missing => panic!("the supertype declares the member"),
+            KlibCalleeOrigin::Ambiguous => panic!("one supertype declares the member"),
+        }
+    }
+
+    #[test]
+    fn two_supertypes_declaring_one_member_shape_are_ambiguous() {
+        let call = member_signature("IntRange", "iterator");
+        let bodies = bodies_of(vec![
+            class_tree(
+                "Progression",
+                Vec::new(),
+                Some(member_signature("Progression", "iterator")),
+            ),
+            class_tree(
+                "Iterable",
+                Vec::new(),
+                Some(member_signature("Iterable", "iterator")),
+            ),
+            class_tree(
+                "IntRange",
+                vec![
+                    class_symbol("demo", "Progression"),
+                    class_symbol("demo", "Iterable"),
+                ],
+                None,
+            ),
+        ]);
+        assert!(matches!(
+            bodies.inherited_callee("stdlib", &call),
+            KlibCalleeOrigin::Ambiguous
+        ));
     }
 }

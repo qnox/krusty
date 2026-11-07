@@ -25,6 +25,7 @@ use crate::metadata::klib_ir::tree::{
 };
 use crate::metadata::klib_ir::{KlibIrDeclarationTree, KlibIrSymbolKind};
 use crate::metadata::semantic::{KotlinType, KotlinTypeParameter, KotlinTypeParameterId};
+use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
 /// Every function of a unit as a backend reads its declaration.
@@ -1718,4 +1719,68 @@ fn an_unserialized_inherited_member_call_links_to_its_declaration() {
             KlibCalleeOrigin::Exact(serialized) if serialized == linked
         ));
     }
+}
+
+/// `Array.indexOf` walks `indices`, then the iterator `IntRange` does not itself serialize, then
+/// that iterator's `hasNext` and `next`. The provider lowers the generic property and the inherited
+/// member, and a subtype receiver carries the generic class's type arguments (`IntIterator` is
+/// `Iterator<Int>`), so the index loop lowers.
+#[test]
+fn array_index_of_lowers_its_index_loop() {
+    let Some(root) = super::distribution_root() else {
+        return;
+    };
+    let libraries = super::stdlib(&root);
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name(
+            "kotlin/collections",
+        )),
+        "indexOf",
+    );
+    let array = symbols
+        .callables
+        .functions()
+        .iter()
+        .find(|function| {
+            let Some(target) = function.callable.external_identity else {
+                return false;
+            };
+            let Some(selected) = libraries.external_callable(target) else {
+                return false;
+            };
+            let Some(callable) = selected.klib_body_callable() else {
+                return false;
+            };
+            callable.type_parameters().len() == 1
+                && callable
+                    .params()
+                    .first()
+                    .and_then(|receiver| receiver.kotlin_class_internal())
+                    .is_some_and(|owner| owner.matches("kotlin/Array"))
+        })
+        .expect("Array.indexOf");
+    let selected = libraries
+        .external_callable(array.callable.external_identity.unwrap())
+        .unwrap();
+    let callable = selected.klib_body_callable().unwrap();
+    let oracle = crate::symbol_resolver::SourceOracle(&libraries);
+    let facts = KlibCalleeFacts::default().with_type_oracle(&oracle);
+    let mut unit = DependencyBodyUnit::default();
+    let _function = unit
+        .lower_function_with_declarations(
+            callable,
+            libraries.declaration_bodies(),
+            &facts,
+            libraries.intrinsic_facts(),
+            &crate::fx_hash::HashMap::default(),
+            &libraries,
+        )
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    assert!(
+        unit.ir()
+            .exprs
+            .iter()
+            .any(|expr| matches!(expr, crate::ir::IrExpr::While { .. })),
+        "indexOf lowers its index loop"
+    );
 }
