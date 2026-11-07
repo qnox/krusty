@@ -503,9 +503,7 @@ impl BodyFirChecker<'_> {
                     depth: source.depth,
                     path: Box::new([]),
                     ty,
-                    receiver: FirCapturedReceiver::Enclosing {
-                        classifier: classifier.classifier,
-                    },
+                    receiver: self.enclosing_instance(owner),
                 });
             let value = self.body.add_expr(FirExpr {
                 origin,
@@ -1130,9 +1128,6 @@ impl BodyFirChecker<'_> {
                     return Ok(None);
                 };
                 let intrinsic = match compiler_intrinsic {
-                    Some(crate::libraries::CompilerIntrinsic::ArraySize) => {
-                        Some(FirIntrinsic::ArraySize)
-                    }
                     Some(crate::libraries::CompilerIntrinsic::StringLength) => {
                         Some(FirIntrinsic::StringLength)
                     }
@@ -1470,11 +1465,13 @@ impl BodyFirChecker<'_> {
                 return Ok(None);
             }
             Some(
-                ExprLowering::BuiltinUnaryCall { .. }
+                ExprLowering::ConstructorCaptures(_)
+                | ExprLowering::BuiltinUnaryCall { .. }
                 | ExprLowering::RuntimeTypeTest { .. }
                 | ExprLowering::ExtensionFunctionBinding { .. }
                 | ExprLowering::PluginExpression(_)
-                | ExprLowering::ClassStorageRead { .. }
+                | ExprLowering::ClassStorageRead(_)
+                | ExprLowering::EnumEntryStorageRead { .. }
                 | ExprLowering::EnumEntryPropertyRead { .. }
                 | ExprLowering::BackingFieldRead
                 | ExprLowering::ImplicitPropertyIncDec(_)

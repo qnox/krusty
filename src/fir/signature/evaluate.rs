@@ -327,7 +327,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     let result =
                         evaluate_expression(semantics, result, graph, demand, memo, computing)?;
                     let ty = semantics.make_contextual_function_type(
-                        contextual_declaration,
+                        ContextualFunctionSite {
+                            declaration: contextual_declaration,
+                            argument: argument.origin,
+                        },
                         &[],
                         result,
                         0,
@@ -361,7 +364,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 let result =
                     evaluate_expression(semantics, result, graph, demand, memo, computing)?;
                 let ty = semantics.make_contextual_function_type(
-                    contextual_declaration,
+                    ContextualFunctionSite {
+                        declaration: contextual_declaration,
+                        argument: argument.origin,
+                    },
                     &resolved_parameters,
                     result,
                     0,
@@ -472,7 +478,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| semantics.missing_signature_diagnostic(DeclarationId::from_raw(0)))?;
             let ty = semantics.make_contextual_function_type(
-                contextual_declaration,
+                ContextualFunctionSite {
+                    declaration: contextual_declaration,
+                    argument: argument.origin,
+                },
                 &complete_parameters,
                 result,
                 expected.context_count as u32,

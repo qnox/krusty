@@ -97,14 +97,16 @@ fn symbolic_from_resolved_bounds(
             .and_then(|bounds| bounds.first())
             .copied()
             .map(|bound| match bound.kind() {
-                TyKind::TyParam(next, upper_bound) => parameter_reference(
-                    next.as_str(),
-                    upper_bound,
-                    direct,
-                    source_by_semantic,
-                    visiting,
-                    implicit,
-                ),
+                TyKind::TyParam(next, upper_bound) | TyKind::Var(next, upper_bound) => {
+                    parameter_reference(
+                        next.as_str(),
+                        upper_bound,
+                        direct,
+                        source_by_semantic,
+                        visiting,
+                        implicit,
+                    )
+                }
                 _ => bound,
             })
             .unwrap_or(resolved_upper_bound);
@@ -123,7 +125,7 @@ fn symbolic_from_resolved_bounds(
             return;
         }
         for bound in direct.get(source).into_iter().flatten() {
-            if let TyKind::TyParam(semantic, _) = bound.kind() {
+            if let TyKind::TyParam(semantic, _) | TyKind::Var(semantic, _) = bound.kind() {
                 if let Some(source) = source_by_semantic.get(semantic.as_str()) {
                     inherited_bounds(source, direct, source_by_semantic, visiting, inherited);
                     continue;
@@ -145,19 +147,21 @@ fn symbolic_from_resolved_bounds(
         let declared = direct.get(name.as_str()).map(Vec::as_slice).unwrap_or(&[]);
         let primary = declared.first().copied().unwrap_or(implicit);
         let primary = match primary.kind() {
-            TyKind::TyParam(parameter, upper_bound) => parameter_reference(
-                parameter.as_str(),
-                upper_bound,
-                &direct,
-                &source_by_semantic,
-                &mut crate::fx_hash::HashSet::default(),
-                implicit,
-            ),
+            TyKind::TyParam(parameter, upper_bound) | TyKind::Var(parameter, upper_bound) => {
+                parameter_reference(
+                    parameter.as_str(),
+                    upper_bound,
+                    &direct,
+                    &source_by_semantic,
+                    &mut crate::fx_hash::HashSet::default(),
+                    implicit,
+                )
+            }
             _ => primary,
         };
         let mut extra = declared.iter().copied().skip(1).collect::<Vec<_>>();
         for bound in declared {
-            let TyKind::TyParam(parameter, _) = bound.kind() else {
+            let (TyKind::TyParam(parameter, _) | TyKind::Var(parameter, _)) = bound.kind() else {
                 continue;
             };
             let Some(source) = source_by_semantic.get(parameter.as_str()) else {
@@ -307,7 +311,7 @@ pub(super) fn semantic_name<'a>(
 ) -> &'a str {
     stable
         .and_then(|generic| generic.formals.get(ordinal))
-        .map(String::as_str)
+        .map(|formal| formal.as_str())
         .unwrap_or(local)
 }
 
@@ -595,11 +599,11 @@ pub(super) fn publish_source_declarations(
     }
 }
 
-fn mentions_external_formal(ty: Ty, own_formals: &[String]) -> bool {
+fn mentions_external_formal(ty: Ty, own_formals: &[crate::types::TyParamName]) -> bool {
     match ty.kind() {
         // The occurrence identity is the declaration relation. Its inline bound is descriptive
         // metadata and may recursively mention other formals without adding a source edge here.
-        TyKind::TyParam(name, _) => !own_formals.iter().any(|formal| formal == name),
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => !own_formals.contains(&name),
         TyKind::Fun(shape) => {
             shape
                 .params

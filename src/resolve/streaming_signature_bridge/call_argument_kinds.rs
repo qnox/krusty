@@ -50,7 +50,7 @@ impl ProductionSignatureSemantics<'_> {
             .into_iter()
             .filter(|formal| {
                 !visible.contains(formal)
-                    && !active.iter().any(|variable| variable == formal)
+                    && !active.iter().any(|variable| variable.as_str() == *formal)
                     && !crate::types::is_nested_result_type_variable(formal)
             })
             .map(|formal| (formal, crate::types::nested_result_type_variable(formal)))
@@ -103,7 +103,7 @@ pub(super) fn nested_result_template(ty: Ty) -> Option<crate::libraries::Generic
     }
     let (formals, formal_bounds) = open
         .into_iter()
-        .map(|(formal, bound)| (formal.to_owned(), vec![bound]))
+        .map(|(formal, bound)| (crate::types::TyParamName::new(formal), vec![bound]))
         .unzip();
     Some(crate::libraries::GenericSig {
         formals,

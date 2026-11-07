@@ -43,6 +43,8 @@ mod receiver_type_line_break_e2e;
 mod safe_call_inline_null_path_line_e2e;
 #[path = "../safe_call_lambda_result_conversion_e2e.rs"]
 mod safe_call_lambda_result_conversion_e2e;
+#[path = "../serializable_default_own_lines_e2e.rs"]
+mod serializable_default_own_lines_e2e;
 #[path = "../suspend_call_start_line_e2e.rs"]
 mod suspend_call_start_line_e2e;
 #[path = "../type_annotation_newline_e2e.rs"]

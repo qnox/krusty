@@ -10,7 +10,7 @@
 
 use super::*;
 
-const MESSAGE: &str = "type arguments are not allowed for packages.";
+const MESSAGE: &str = "Type arguments are not allowed for packages.";
 
 /// The lists `reference` wrote before its already-selected classifier segment.
 fn package_argument_lists(
@@ -118,7 +118,10 @@ impl Checker<'_> {
             list.span,
             forbidden,
             warning.as_deref(),
-            crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_WARNING,
+            DeprecationNames {
+                error: crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED,
+                warning: crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_WARNING,
+            },
             MESSAGE,
         );
     }

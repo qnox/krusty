@@ -1,5 +1,8 @@
 use crate::fx_hash::HashMap;
 
+#[cfg(test)]
+mod constructor_capture_tests;
+
 use crate::fir::{
     FirBody, FirCapture, FirImplicitReceiverCapture, FirLocalCallableRef, FirStatementId,
     FirStatementKind, LocalCallableId,
@@ -271,7 +274,6 @@ impl BodyLowering<'_> {
             &lowered,
         )?;
         let declared = self.ir.functions[realization.function as usize].ret;
-        self.ir.call_declared_ret.insert(call, declared);
         Ok((call, declared))
     }
 
@@ -400,11 +402,16 @@ impl BodyLowering<'_> {
                     .ok_or_else(|| FirLoweringFailure::MissingLocalCallable(target.clone()))?,
             )
         };
-        Ok(self.ir.add_expr(IrExpr::Call {
+        let call = self.ir.add_expr(IrExpr::Call {
             callee: Box::new(callee),
             dispatch_receiver: None,
             args,
-        }))
+        });
+        // Ordinary calls and callable-reference adapters share this materializer. Both retain
+        // the lifted declaration's result before a checked use applies its own conversion.
+        let declared = self.ir.functions[realization.function as usize].ret;
+        self.ir.call_declared_ret.insert(call, declared);
+        Ok(call)
     }
 
     pub(super) fn checked_lambda(
@@ -1075,6 +1082,7 @@ impl BodyLowering<'_> {
         let parameter_identities = local_function_parameter_identities(
             self.body,
             &self.capture_slots,
+            self.ir,
             body,
             &crossinline,
         )?;
@@ -1587,6 +1595,7 @@ fn local_function_parameters(body: &FirBody) -> Vec<Ty> {
 /// declared in `enclosing` is a parameter there or a variable; one declared further out reaches
 /// `body` through `enclosing`'s own capture slot, which already carries both facts.
 fn captured_declaration(
+    ir: &crate::ir::IrFile,
     enclosing: &FirBody,
     enclosing_slots: &HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
     capture: &crate::fir::FirCapture,
@@ -1624,10 +1633,37 @@ fn captured_declaration(
                 },
             }
         }
-        crate::fir::FirCaptureSource::ConstructorPrefix { .. } => CapturedDeclaration {
-            name: None,
-            declaration: crate::ir::IrCapturedDeclaration::Parameter,
-        },
+        crate::fir::FirCaptureSource::ConstructorPrefix { owner, field } => {
+            let class = ir
+                .checked_classifier_classes
+                .get(&owner)
+                .or_else(|| ir.checked_enum_entry_classes.get(&owner))
+                .copied()
+                .ok_or(FirLoweringFailure::MissingLocalClass(owner))?;
+            let class = &ir.classes[class as usize];
+            let argument = class
+                .ctor_args
+                .get(field as usize)
+                .filter(|_| field < class.constructor_prefix_count)
+                .ok_or(FirLoweringFailure::InvalidConstructorCapture { owner, field })?;
+            let receiver = argument.provenance == crate::ir::IrCtorParameterProvenance::Capture
+                && argument
+                    .capture
+                    .as_ref()
+                    .is_some_and(|capture| capture.receiver.is_some());
+            CapturedDeclaration {
+                name: None,
+                declaration: if receiver {
+                    crate::ir::IrCapturedDeclaration::ConstructorReceiver {
+                        owner,
+                        parameter: field,
+                    }
+                } else {
+                    // Value captures and other legacy prefix roles keep their existing identity.
+                    crate::ir::IrCapturedDeclaration::Parameter
+                },
+            }
+        }
     })
 }
 
@@ -1635,6 +1671,7 @@ fn captured_declaration(
 fn local_function_parameter_identities(
     enclosing: &FirBody,
     enclosing_slots: &HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
+    ir: &crate::ir::IrFile,
     body: &FirBody,
     crossinline: &[Option<u32>],
 ) -> Result<Vec<crate::ir::IrParameterIdentity>, FirLoweringFailure> {
@@ -1650,7 +1687,7 @@ fn local_function_parameter_identities(
         .iter()
         .enumerate()
         .map(|(ordinal, capture)| {
-            let declared = captured_declaration(enclosing, enclosing_slots, capture)?;
+            let declared = captured_declaration(ir, enclosing, enclosing_slots, capture)?;
             Ok(crate::ir::IrParameterIdentity::captured_value(
                 declared.name,
                 u32::try_from(ordinal).expect("too many captured parameters"),

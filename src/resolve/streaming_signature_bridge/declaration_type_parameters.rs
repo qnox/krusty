@@ -23,7 +23,7 @@ impl ProductionSignatureSemantics<'_> {
                 super::DeclarationTypeParameters,
             >,
                           declaration: crate::fir::DeclarationId,
-                          formals: &[String],
+                          formals: &[crate::types::TyParamName],
                           formal_bounds: &[Ty]| {
                 parameters
                     .entry(declaration)
@@ -99,20 +99,10 @@ impl ProductionSignatureSemantics<'_> {
                 .callable_signature(declaration)
                 .and_then(|signature| signature.generic_sig.as_ref())
             {
-                visible.extend(
-                    generic
-                        .formals
-                        .iter()
-                        .map(|formal| crate::types::intern(formal)),
-                );
+                visible.extend(generic.formals.iter().map(|formal| formal.as_str()));
             }
             if let Some(parameters) = self.property_type_parameters(declaration) {
-                visible.extend(
-                    parameters
-                        .formals
-                        .iter()
-                        .map(|formal| crate::types::intern(formal)),
-                );
+                visible.extend(parameters.formals.iter().map(|formal| formal.as_str()));
             }
             if let Some(class) = self.classifier_signature(declaration) {
                 visible.extend(
@@ -121,7 +111,7 @@ impl ProductionSignatureSemantics<'_> {
                         .type_params()
                         .iter()
                         .chain(class.captured_type_parameters.type_params())
-                        .map(|formal| crate::types::intern(formal)),
+                        .map(|formal| formal.as_str()),
                 );
             }
             owner = self

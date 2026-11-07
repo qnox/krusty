@@ -218,6 +218,8 @@ pub struct FileInput<'a> {
     /// KLIB identity the dependency provider attaches to `Callee::External`.
     pub dependency_symbols:
         &'a HashMap<crate::backend::KlibDependencyCallable, super::DependencyExport>,
+    /// The exported instance entry of each preceding source module's object, by its classifier.
+    pub dependency_singletons: &'a HashMap<crate::types::TypeName, String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::native::dependency_references`].
     pub dependency_properties:
@@ -235,7 +237,7 @@ pub fn lower_file(
     input: FileInput<'_>,
     target: NativeTarget,
     stem: &str,
-    entry: Entry,
+    entry: Option<Entry>,
     verify: bool,
 ) -> Result<Lowered, Unsupported> {
     let FileInput {
@@ -252,6 +254,7 @@ pub fn lower_file(
         dependency_exports,
         dependency_signatures,
         dependency_symbols,
+        dependency_singletons,
         value_classes,
         slot_plan,
         module_facts,
@@ -324,7 +327,6 @@ pub fn lower_file(
         statics: Vec::new(),
         lambdas: HashMap::default(),
         local_delegate_helpers: HashMap::default(),
-        enum_entries: HashMap::default(),
         reference_identities: HashMap::default(),
         holders: HashMap::default(),
         references: HashMap::default(),
@@ -342,6 +344,7 @@ pub fn lower_file(
         unit_kind,
         dependency_signatures,
         dependency_symbols,
+        dependency_singletons,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
     // receivers have a runtime-walkable representation and which shapes still decline; both are read while
@@ -352,14 +355,12 @@ pub fn lower_file(
     lowering.declare_statics()?;
     lowering.declare_lambdas()?;
     lowering.declare_local_delegate_helpers()?;
-    lowering.declare_enum_entries()?;
     // Constructors are bodies too, so property-reference artifacts must exist before classes are
     // defined: a class initializer may itself contain `C::property`.
     lowering.declare_property_references()?;
     lowering.declare_local_property_references()?;
     lowering.define_local_delegate_helpers()?;
     lowering.define_classes()?;
-    lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let file_init_linkage = match unit_kind {
         crate::backend::CheckedIrUnitKind::Source => Linkage::Hidden,
@@ -367,12 +368,15 @@ pub fn lower_file(
     };
     let file_init = lowering.define_file_init(source, statics_init, file_init_linkage)?;
     let selected = match unit_kind {
-        crate::backend::CheckedIrUnitKind::Source => entry.selected(ir),
+        crate::backend::CheckedIrUnitKind::Source => entry.and_then(|entry| entry.selected(ir)),
         crate::backend::CheckedIrUnitKind::DependencySupport => None,
     };
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
-        if let Some((_, parameters)) = selected.filter(|(function, _)| *function == index as u32) {
+        if let Some(((_, parameters), entry)) = selected
+            .filter(|(function, _)| *function == index as u32)
+            .zip(entry)
+        {
             lowering.define_program_entry(
                 index,
                 entry,
@@ -469,8 +473,6 @@ struct FileLowering<'a> {
     lambdas: HashMap<u32, functions::LambdaItems>,
     /// Native-local accessor helper per checked local-delegate plan and accessor side.
     local_delegate_helpers: HashMap<(u32, bool), FuncId>,
-    /// Per enum class, its constants' static slots and getters, in declaration order.
-    enum_entries: HashMap<ClassId, enums::EnumItems>,
     /// The holder type for a captured `var` of each carrier, by the carrier's spelling.
     holders: HashMap<String, DataId>,
     /// The emitted pieces of each property reference, by the expression that creates it.
@@ -523,6 +525,8 @@ struct FileLowering<'a> {
     /// modules.
     dependency_symbols:
         &'a HashMap<crate::backend::KlibDependencyCallable, super::DependencyExport>,
+    /// The exported instance entry of each preceding source module's object, by its classifier.
+    dependency_singletons: &'a HashMap<crate::types::TypeName, String>,
 }
 
 impl<'a> FileLowering<'a> {
@@ -735,6 +739,7 @@ impl<'a> FileLowering<'a> {
                     unresolved_reified: Vec::new(),
                     frame_objects: crate::fx_hash::HashMap::default(),
                     frame_fields: crate::fx_hash::HashMap::default(),
+                    enum_base: None,
                 };
                 let params = body.builder.block_params(entry).to_vec();
                 fill(&mut body, &params)?;
@@ -932,6 +937,9 @@ struct BodyLowering<'a, 'b, 'c> {
     frame_objects: crate::fx_hash::HashMap<u32, u32>,
     /// The field variables of each local that holds a frame object.
     frame_fields: crate::fx_hash::HashMap<u32, Vec<Variable>>,
+    /// The enum constant whose construction is being lowered, taken by that construction: its
+    /// object, and the `kotlin.Enum` storage filled on it before any constructor runs.
+    enum_base: Option<enums::EnumBase>,
 }
 
 /// One `finally` the current position is inside.
@@ -1782,10 +1790,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 internal,
                 args,
                 ctor_params,
+                external_target,
                 defaults,
                 default_prefix_count,
                 ..
             } => {
+                if let Some(constructed) = external_target
+                    .filter(|_| defaults.is_empty())
+                    .and_then(|target| self.dependency_construction(target, internal, &args))
+                {
+                    return constructed;
+                }
                 // A construction's `defaults` name SOURCE-value ordinals, which begin after the
                 // compiler's leading operands; the generator works in the constructor's physical
                 // frame, so they are shifted once, here, rather than at each use.
@@ -1844,19 +1859,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 elem,
                 value,
             } => self.ref_set(holder, elem, value),
-            IrExpr::EnumEntry { classifier, name } => self.enum_entry(classifier, &name),
-            IrExpr::EnumValues { classifier } => self.enum_values(classifier),
-            IrExpr::EnumEntries { classifier } => self.enum_entries(classifier),
-            // `declaration` separates the classifier's own `E.valueOf(name)` from the standard
-            // library's INLINE `enumValueOf<E>(name)`. Both name the same lookup by entry name, and
-            // the two differ only in what a consumer that records SOURCE POSITIONS attributes an
-            // inline expansion to. This generator records none, so the lookup it emits is the same
-            // one either way; the distinction is read where it is meaningful, not repeated here.
-            IrExpr::EnumValueOf {
-                classifier,
-                arg,
-                declaration: _,
-            } => self.enum_value_of(classifier, arg),
+            // The shared enum lowering realized every enum this file declares; what is left names
+            // an enum another file declares, whose constants live there.
+            IrExpr::EnumEntry { classifier, .. }
+            | IrExpr::EnumValues { classifier }
+            | IrExpr::EnumEntries { classifier }
+            | IrExpr::EnumValueOf { classifier, .. } => Err(declined!(
+                "an enum another file declares (`{}`)",
+                classifier.render()
+            )),
+            IrExpr::EnumConstant {
+                name,
+                ordinal,
+                construction,
+                published,
+                ..
+            } => self.enum_constant(&name, ordinal, construction, published),
+            IrExpr::EnumAllocation { instance, .. } => self.enum_allocation(instance),
+            IrExpr::EnumEntriesList { values, .. } => self.enum_entries_list(values),
+            IrExpr::NoSuchEnumConstant { name, .. } => self.no_such_enum_constant(name),
             IrExpr::EnclosingInstance {
                 receiver, inner, ..
             } => self.enclosing_instance(receiver, inner),
@@ -1868,11 +1889,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     receiver: Some(receiver),
                     ..
                 } = &**checked_op
-                    && self.enum_member_name(*target).is_some() =>
+                    && let Some(member) =
+                        crate::backend::enums::base_member(self.file.callables, *target) =>
             {
-                let member = self
-                    .enum_member_name(*target)
-                    .expect("checked by the guard");
                 self.enum_member(member, *receiver)
             }
             IrExpr::Checked(ref checked_op)

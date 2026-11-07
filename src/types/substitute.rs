@@ -44,7 +44,7 @@ where
 {
     match ty.kind() {
         // A Java raw receiver binds each formal to its erasure: its member reads it as erased.
-        TyKind::TyParam(name, bound) => lookup(name.as_str())
+        TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => lookup(name.as_str())
             .map(Ty::raw_binding_read)
             .map(|binding| {
                 if bound.upper_bound_admits_null() {
@@ -82,7 +82,7 @@ where
         TyKind::DefinitelyNotNull(inner) => {
             let other = inner;
             match other.kind() {
-                TyKind::TyParam(name, bound) => {
+                TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => {
                     match lookup(name.as_str()).map(Ty::raw_binding_read) {
                         Some(binding) => binding.contributed_through_nullable_formal(),
                         None if preserve_unbound(name.as_str()) => ty,
@@ -160,6 +160,11 @@ pub(crate) trait TyParamKey: std::borrow::Borrow<str> + Eq + std::hash::Hash {}
 
 impl TyParamKey for TyParamName {}
 impl TyParamKey for String {}
+
+/// Whether `formals` declares the type parameter `name`.
+pub(crate) fn declares_formal<K: TyParamKey>(formals: &[K], name: &str) -> bool {
+    formals.iter().any(|formal| formal.borrow() == name)
+}
 
 fn recorded_binding<K: TyParamKey>(bindings: &HashMap<K, Ty>, name: &str) -> Option<Ty> {
     bindings.get(name).copied()
@@ -244,15 +249,15 @@ pub(crate) fn ty_subst_alias_expansion<K: TyParamKey>(ty: Ty, bindings: &HashMap
 /// does. Every other type parameter belongs to a declaration enclosing the call (`T` of the class
 /// whose member is called through `this`); it is in scope at the call site, not a variable of the
 /// call, so it stays as written.
-pub(crate) fn ty_subst_formals<K: TyParamKey>(
+pub(crate) fn ty_subst_formals<F: TyParamKey, K: TyParamKey>(
     ty: Ty,
-    formals: &[String],
+    formals: &[F],
     bindings: &HashMap<K, Ty>,
 ) -> Ty {
     substitute_type_parameters(
         ty,
         |name| recorded_binding(bindings, name),
-        |name| !formals.iter().any(|formal| formal == name),
+        |name| !declares_formal(formals, name),
         |_| BoundNarrowing::NonNull,
     )
 }
@@ -266,10 +271,9 @@ pub(crate) fn ty_subst_all<K: TyParamKey>(types: &[Ty], bindings: &HashMap<K, Ty
 /// operation joins them without each decoder growing its own recursive walk.
 pub(crate) fn ty_with_param_bounds<K: TyParamKey>(ty: Ty, bounds: &HashMap<K, Ty>) -> Ty {
     match ty.kind() {
-        TyKind::TyParam(name, current) => Ty::ty_param(
-            name.as_str(),
-            bounds.get(name.as_str()).copied().unwrap_or(current),
-        ),
+        TyKind::TyParam(name, current) | TyKind::Var(name, current) => {
+            ty.with_symbol_bound(bounds.get(name.as_str()).copied().unwrap_or(current))
+        }
         TyKind::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params
@@ -326,7 +330,7 @@ pub(crate) fn ty_with_transitive_param_bounds<K: TyParamKey>(
         visiting: &mut Vec<&'static str>,
     ) -> Ty {
         match ty.kind() {
-            TyKind::TyParam(name, current) => {
+            TyKind::TyParam(name, current) | TyKind::Var(name, current) => {
                 if visiting.contains(&name.as_str()) {
                     return ty;
                 }
@@ -334,7 +338,7 @@ pub(crate) fn ty_with_transitive_param_bounds<K: TyParamKey>(
                 let declared = bounds.get(name.as_str()).copied().unwrap_or(current);
                 let hydrated = hydrate(declared, bounds, visiting);
                 visiting.pop();
-                Ty::ty_param(name.as_str(), hydrated)
+                ty.with_symbol_bound(hydrated)
             }
             TyKind::Fun(signature) => Ty::fun_with_shape(
                 signature
@@ -384,53 +388,57 @@ pub(crate) fn ty_with_transitive_param_bounds<K: TyParamKey>(
 /// Replace declaration-local type-parameter identities throughout a semantic type, including the
 /// inline upper bounds carried by nested `TyParam` nodes. Renaming only the outer occurrence leaves
 /// chains such as `D : B, B : A` partly keyed by source spelling and breaks bound member lookup.
+/// An inference variable keeps its kind; only its identity is renamed.
 pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>) -> Ty {
+    ty_map_symbols(ty, &|symbol, bound| {
+        let (TyKind::TyParam(name, _) | TyKind::Var(name, _)) = symbol.kind() else {
+            unreachable!("only type parameters and variables are mapped")
+        };
+        let renamed = identities
+            .get(name.as_str())
+            .map_or(name, |&identity| TyParamName::new(identity));
+        match symbol.kind() {
+            TyKind::Var(..) => Ty::type_variable(renamed, bound),
+            _ => Ty::from(TyKind::TyParam(renamed, bound)),
+        }
+    })
+}
+
+/// Rebuild every type-parameter and inference-variable occurrence of `ty`, innermost bound first:
+/// `rebuild` receives the original occurrence and its already-mapped bound.
+pub(crate) fn ty_map_symbols(ty: Ty, rebuild: &dyn Fn(Ty, Ty) -> Ty) -> Ty {
+    let map = |ty: Ty| ty_map_symbols(ty, rebuild);
     match ty.kind() {
-        TyKind::TyParam(name, bound) => Ty::ty_param(
-            identities
-                .get(name.as_str())
-                .copied()
-                .unwrap_or(name.as_str()),
-            ty_rename_params(bound, identities),
-        ),
+        TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => rebuild(ty, map(bound)),
         TyKind::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params
                 .iter()
-                .map(|parameter| ty_rename_params(*parameter, identities))
+                .map(|parameter| map(*parameter))
                 .collect(),
-            ty_rename_params(signature.ret, identities),
+            map(signature.ret),
             signature.context_count,
             signature.has_receiver,
             signature.suspend,
         ),
-        TyKind::DefinitelyNotNull(inner) => Ty::from(TyKind::DefinitelyNotNull(ty_rename_params(
-            inner, identities,
-        ))),
-        TyKind::Nullable(inner) => Ty::nullable(ty_rename_params(inner, identities)),
-        TyKind::PlatformNullable(inner) => {
-            Ty::platform_nullable(ty_rename_params(inner, identities))
-        }
-        TyKind::MutabilityFlexible(inner) => {
-            Ty::mutability_flexible(ty_rename_params(inner, identities))
-        }
-        TyKind::InProjection(inner) => Ty::in_projection(ty_rename_params(inner, identities)),
-        TyKind::OutProjection(inner) => Ty::out_projection(ty_rename_params(inner, identities)),
-        TyKind::StarProjection(inner) => Ty::star_projection(ty_rename_params(inner, identities)),
-        TyKind::RawProjection(inner) => Ty::raw_projection(ty_rename_params(inner, identities)),
+        TyKind::DefinitelyNotNull(inner) => Ty::from(TyKind::DefinitelyNotNull(map(inner))),
+        TyKind::Nullable(inner) => Ty::nullable(map(inner)),
+        TyKind::PlatformNullable(inner) => Ty::platform_nullable(map(inner)),
+        TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(map(inner)),
+        TyKind::InProjection(inner) => Ty::in_projection(map(inner)),
+        TyKind::OutProjection(inner) => Ty::out_projection(map(inner)),
+        TyKind::StarProjection(inner) => Ty::star_projection(map(inner)),
+        TyKind::RawProjection(inner) => Ty::raw_projection(map(inner)),
         TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             name,
             &arguments
                 .iter()
-                .map(|argument| ty_rename_params(*argument, identities))
+                .map(|argument| map(*argument))
                 .collect::<Vec<_>>(),
         ),
-        TyKind::Intersection(parts) => Ty::intersection(
-            &parts
-                .iter()
-                .map(|part| ty_rename_params(*part, identities))
-                .collect::<Vec<_>>(),
-        ),
+        TyKind::Intersection(parts) => {
+            Ty::intersection(&parts.iter().map(|part| map(*part)).collect::<Vec<_>>())
+        }
         _ => ty,
     }
 }
@@ -438,13 +446,13 @@ pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>)
 /// Canonicalize declaration-owned type-parameter identities by their ordinal. This is used for
 /// declaration-shape equality: two independently declared `<T>` parameters have different semantic
 /// identities during inference, but occupy the same slot when comparing callable signatures.
-pub(crate) fn ty_canonicalize_params(ty: Ty, formals: &[String]) -> Ty {
+pub(crate) fn ty_canonicalize_params<F: TyParamKey>(ty: Ty, formals: &[F]) -> Ty {
     let identities = formals
         .iter()
         .enumerate()
         .map(|(ordinal, formal)| {
             (
-                formal.as_str(),
+                formal.borrow(),
                 intern(&format!("\0signature-parameter:{ordinal}")),
             )
         })

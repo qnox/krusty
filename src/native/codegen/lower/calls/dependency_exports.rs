@@ -17,10 +17,14 @@ impl BodyLowering<'_, '_, '_> {
         let export = self.file.dependency_symbols.get(identity)?;
         Some((|| {
             let callee = access.callee().map_err(Unsupported::from)?;
+            let selected = ExportedDeclaration {
+                realization,
+                export,
+            };
             self.emitted_dependency_call(
                 site,
-                export,
-                realization,
+                selected,
+                selected,
                 &callee,
                 access.receiver,
                 access.arguments,
@@ -31,12 +35,16 @@ impl BodyLowering<'_, '_, '_> {
     pub(super) fn emitted_dependency_call(
         &mut self,
         site: u32,
-        export: &super::super::super::DependencyExport,
-        realization: &crate::backend::BackendCallableFact,
+        selected: ExportedDeclaration<'_>,
+        provider: ExportedDeclaration<'_>,
         callee: &Callee,
         dispatch_receiver: Option<u32>,
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
+        let ExportedDeclaration {
+            realization,
+            export,
+        } = selected;
         let Callee::External {
             params,
             ret,
@@ -100,7 +108,20 @@ impl BodyLowering<'_, '_, '_> {
         }
         .authenticate()
         .map_err(Unsupported::from)?;
-        let declared = export.signature.parameters();
+        // A call leaving arguments out goes through the default provider's entry, so its operands
+        // and result take that declaration's own ABI: an override's can differ from the inherited
+        // declaration's when the class it inherits from is generic.
+        let abi_export = if defaults.is_empty() {
+            export
+        } else {
+            provider.export
+        };
+        if abi_export.signature.parameters().len() != export.signature.parameters().len() {
+            return Err(
+                "an inherited default provider whose operands disagree with its override".into(),
+            );
+        }
+        let declared = abi_export.signature.parameters();
         let inserts_receiver = matches!(
             call,
             DependencyExportCall::Member
@@ -121,7 +142,8 @@ impl BodyLowering<'_, '_, '_> {
                 defaults,
                 crate::backend::DeclaredOperandRoles {
                     context_count: realization.context_count,
-                    defaults: realization
+                    defaults: provider
+                        .realization
                         .klib_body_parameter_defaults
                         .map(|defaults| defaults.as_slice()),
                     declared: declared.len(),
@@ -252,14 +274,17 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
-        let (symbol, signature, arguments) = match &export.default_entry {
+        let (symbol, signature, arguments) = match &provider.export.default_entry {
             Some(entry) if !omitted.is_empty() => {
                 // A zero in each omitted slot and its bit in the mask; the entry evaluates the
                 // marked defaults in the declaring module, in declaration order.
                 let mut supplied = arguments.into_iter();
+                // A member's receiver leads the operands; the masks number the parameters after
+                // it.
+                let receiver_operands = call.unmasked_receiver_operands();
                 let masks = crate::backend::default_arguments::omission_masks(
-                    declared.len(),
-                    omitted.iter().copied(),
+                    declared.len() - receiver_operands,
+                    omitted.iter().map(|&position| position - receiver_operands),
                 );
                 let mut operands = Vec::with_capacity(declared.len() + masks.len());
                 for (position, ty) in declared.iter().enumerate() {
@@ -279,20 +304,73 @@ impl BodyLowering<'_, '_, '_> {
                 let mut signature = declared.to_vec();
                 signature.extend(std::iter::repeat_n(
                     Ty::Int,
-                    crate::backend::default_arguments::mask_words(declared.len()),
+                    crate::backend::default_arguments::mask_words(
+                        declared.len() - receiver_operands,
+                    ),
                 ));
                 (entry.as_str(), signature, operands)
             }
-            _ => (export.symbol.as_str(), declared.to_vec(), arguments),
+            // An ordinary call to an overridable member runs the receiver's override.
+            _ => (
+                match call {
+                    DependencyExportCall::Member | DependencyExportCall::MemberExtension => {
+                        export.dispatch_entry.as_deref()
+                    }
+                    _ => None,
+                }
+                .unwrap_or(export.symbol.as_str()),
+                declared.to_vec(),
+                arguments,
+            ),
         };
         let id = self
             .file
-            .import(symbol, &signature, export.signature.result())?;
+            .import(symbol, &signature, abi_export.signature.result())?;
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
         match self.builder.inst_results(call).first().copied() {
-            Some(value) => self.convert(value, Some(export.signature.result()), *ret),
+            Some(value) => self.convert(value, Some(abi_export.signature.result()), *ret),
             None => Ok(None),
         }
+    }
+
+    /// Another module's class, constructed through the entry its module exports under the
+    /// selected constructor's identity; `None` when that module published none.
+    pub(in super::super) fn dependency_construction(
+        &mut self,
+        target: crate::fir::ExternalCallableId,
+        internal: crate::types::TypeName,
+        args: &[u32],
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        if self.file.ir.class_id_by_name(internal).is_some() {
+            return None;
+        }
+        let identity = self
+            .file
+            .callables
+            .callable(target)?
+            .dependency_callable
+            .as_ref()?;
+        let export = self.file.dependency_symbols.get(identity)?;
+        Some((|| {
+            let parameters = export.signature.parameters().to_vec();
+            let result = export.signature.result();
+            if parameters.len() != args.len() {
+                return Err(
+                    "a dependency construction whose operands disagree with its constructor".into(),
+                );
+            }
+            let arguments = self.arguments(args, &parameters)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            let id = self.file.import(&export.symbol, &parameters, result)?;
+            let func_ref = self.func_ref(id);
+            let call = self.emit_call(func_ref, &arguments)?;
+            match self.builder.inst_results(call).first().copied() {
+                Some(value) => self.convert(value, Some(result), Ty::obj_name(internal)),
+                None => Err("a dependency constructor answering nothing".into()),
+            }
+        })())
     }
 }

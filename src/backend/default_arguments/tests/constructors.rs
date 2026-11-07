@@ -78,6 +78,7 @@ fn secondary(
         body: None,
         delegate,
         synthetic: false,
+        platform_visible: false,
         vc_params: false,
         param_checks: Vec::new(),
     }
@@ -104,6 +105,7 @@ fn construction(
         internal: type_name(name),
         args,
         ctor_params,
+        declared_params: None,
         ctor_desc: None,
         external_target: None,
         defaults: defaults.into(),
@@ -161,7 +163,7 @@ fn a_construction_reaches_a_constructor_entry_that_fills_and_delegates() {
     let five = int(&mut ir, 5);
     let site = construction(&mut ir, "demo/C", vec![five], None, &[1], 0, Some(0));
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     let constructors = &ir.classes[class as usize].secondary_ctors;
     assert_eq!(constructors.len(), 1);
@@ -189,6 +191,7 @@ fn a_construction_reaches_a_constructor_entry_that_fills_and_delegates() {
         )
     );
     assert_eq!(ir.construction_targets[&site], target(1));
+    assert_eq!(ir.construction_declared_params(site), None);
     assert_eq!(
         crate::backend::selected_constructor(&ir, site, class, Some(&[Ty::Int; 3])),
         Some(1)
@@ -236,7 +239,7 @@ fn an_entry_whose_parameter_list_a_declared_constructor_has_is_reached_by_its_pl
         Some(1),
     );
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     let constructors = &ir.classes[class as usize].secondary_ctors;
     assert_eq!(constructors.len(), 2);
@@ -291,9 +294,20 @@ fn an_entry_takes_the_prefix_first_and_counts_masks_after_it() {
         1,
         Some(1),
     );
+    let IrExpr::New {
+        declared_params, ..
+    } = &mut ir.exprs[site as usize]
+    else {
+        panic!("a construction");
+    };
+    *declared_params = Some(vec![outer, Ty::String].into_boxed_slice());
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
+    assert_eq!(
+        ir.construction_declared_params(site),
+        Some([outer, Ty::String, Ty::Int].as_slice())
+    );
     let entry = &ir.classes[class as usize].secondary_ctors[1];
     assert_eq!(entry.prefix_params, vec![outer]);
     assert_eq!(entry.params, vec![Ty::String, Ty::Int]);
@@ -335,7 +349,7 @@ fn a_superclass_call_drops_its_placeholders_for_the_entry() {
     ir.super_constructor_default_arguments
         .insert(type_name("demo/Child"), vec![0]);
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     let declaration = &ir.classes[child as usize];
     assert_eq!(
@@ -393,7 +407,7 @@ fn a_delegation_and_an_enum_constant_share_one_entry() {
         subclass: None,
     });
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     let declaration = &ir.classes[class as usize];
     assert_eq!(declaration.secondary_ctors.len(), 2);
@@ -454,7 +468,7 @@ fn constructor_calls_this_lowering_cannot_realize_keep_their_checked_form() {
         ),
     );
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     for site in [elsewhere, unselected, omitting] {
         assert_eq!(construction_shape(&ir, site).2, vec![0]);
@@ -494,7 +508,7 @@ fn a_default_calling_with_an_omission_calls_the_entry_from_the_constructor_entry
     );
     construction(&mut ir, "demo/C", Vec::new(), None, &[0], 0, Some(0));
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     let function_entry = ir.default_entries[&function];
     let constructor_entry = &ir.classes[class as usize].secondary_ctors[0];
@@ -543,7 +557,7 @@ fn an_uncalled_constructors_defaults_publish_no_function_entry() {
         Vec::new(),
     ));
 
-    realize(&mut ir, &mut CheckedBackendCallables::default());
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
     // Only a constructor entry's filled copies are emitted; no construction asked for one here.
     assert!(!ir.default_entries.contains_key(&function));

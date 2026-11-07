@@ -7,7 +7,7 @@ use crate::types::{Ty, TyKind, TypeName};
 /// The type parameters a type may name, by their declared names: a dependency callable's own, in
 /// declaration order. A module function's body names none.
 #[derive(Clone, Copy)]
-pub(super) struct TypeParameters<'a>(pub(super) &'a [String]);
+pub(super) struct TypeParameters<'a>(pub(super) &'a [crate::types::TyParamName]);
 
 impl TypeParameters<'_> {
     pub(super) const NONE: TypeParameters<'static> = TypeParameters(&[]);
@@ -48,7 +48,7 @@ pub(super) fn identity(ty: Ty, parameters: TypeParameters<'_>) -> Result<TypeIde
             return Err("a projection outside a type argument".into())
         }
         TyKind::RawProjection(_) => return Err("a Java raw type argument".into()),
-        TyKind::Null | TyKind::Nullable(_) | TyKind::Error | TyKind::Pending => {
+        TyKind::Null | TyKind::Nullable(_) | TyKind::Error | TyKind::Pending | TyKind::Var(..) => {
             return Err(format!("the unchecked type {ty:?}"))
         }
     };
