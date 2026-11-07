@@ -358,6 +358,37 @@ pub(super) fn level_properties(
 }
 
 impl SymbolResolver<'_> {
+    /// The receiver-less function overloads named `name` at the nearest scope level that offers one.
+    pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
+        let functions = self.nearest_top_level_functions(&self.symbol_levels_in_scope(name));
+        crate::trace_compiler!(
+            "resolve",
+            "top-level candidate inventory {name}: {:?}",
+            functions
+                .overloads
+                .iter()
+                .map(|function| (
+                    function.kind,
+                    function.callable.owner.render(),
+                    function.callable.name.as_str(),
+                    function.semantic_params(),
+                    function.semantic_receiver(),
+                    function
+                        .generic_sig
+                        .as_ref()
+                        .map(|signature| signature.formal_bounds.as_slice()),
+                ))
+                .collect::<Vec<_>>()
+        );
+        functions
+            .into_top_level()
+            // `$default` is a physical realization attached to its source declaration, never a
+            // source-level overload candidate. Letting it into this family can select a synthetic
+            // by declaration order and later append `$default` a second time.
+            .filter(|function| !function.callable.default_call)
+            .collect()
+    }
+
     /// The top-level properties named `name` at the nearest scope level that declares a visible
     /// one: the property facet of [`SymbolResolver::select_symbol`] on a receiver-less name,
     /// without collecting and selecting among the same name's function overloads.
@@ -405,12 +436,13 @@ impl SymbolResolver<'_> {
         let mut nearest_inaccessible = None;
         for symbols in levels {
             let functions = function_set_from_symbols(symbols);
-            if functions.overloads.is_empty() {
+            // Extensions require a receiver. Only the receiver-less facet can own this scope
+            // level or supply the inaccessible candidates retained for a bare-call diagnostic.
+            if functions.top_level().next().is_none() {
                 continue;
             }
             if functions
-                .overloads
-                .iter()
+                .top_level()
                 .any(|function| self.non_member_callable_accessible(function))
             {
                 return functions;
@@ -558,5 +590,85 @@ mod tests {
             &symbols[2].callables.functions()[0]
         ));
         assert_eq!(level_properties(&symbols).count(), 0);
+    }
+
+    #[test]
+    fn receiverless_scope_selection_preserves_access_and_inaccessible_fallback() {
+        use crate::types::{type_name, Visibility};
+
+        let function = |kind, owner, visibility| {
+            let mut function = FunctionInfo::plain(
+                kind,
+                (kind == FnKind::Extension).then_some(Ty::String),
+                LibraryCallable::library(
+                    owner,
+                    "pick",
+                    if kind == FnKind::Extension {
+                        vec![Ty::String]
+                    } else {
+                        vec![]
+                    },
+                    Ty::String,
+                    Ty::String,
+                    if kind == FnKind::Extension {
+                        "(Ljava/lang/String;)Ljava/lang/String;"
+                    } else {
+                        "()Ljava/lang/String;"
+                    },
+                ),
+            );
+            function.visibility = visibility;
+            function
+        };
+        let level = |overloads| {
+            vec![Rc::new(ResolvedSymbols {
+                callables: Callables::Functions(FunctionSet { overloads }),
+                ..ResolvedSymbols::default()
+            })]
+        };
+        let extensions = level(vec![function(
+            FnKind::Extension,
+            "near/ExtensionsKt",
+            Visibility::Public,
+        )]);
+        let inaccessible = level(vec![
+            function(FnKind::TopLevel, "middle/PrivateKt", Visibility::Private),
+            function(FnKind::Extension, "middle/ExtensionsKt", Visibility::Public),
+        ]);
+        let accessible = level(vec![
+            function(FnKind::TopLevel, "far/FunctionsKt", Visibility::Public),
+            function(FnKind::Extension, "far/ExtensionsKt", Visibility::Public),
+        ]);
+        let resolver = SymbolResolver::new(&crate::libraries::EmptySymbolSource);
+        let selected = resolver.nearest_top_level_functions(&[
+            extensions.clone(),
+            inaccessible.clone(),
+            accessible,
+        ]);
+        assert_eq!(
+            selected
+                .overloads
+                .iter()
+                .map(|function| function.callable.owner)
+                .collect::<Vec<_>>(),
+            [type_name("far/FunctionsKt"), type_name("far/ExtensionsKt")]
+        );
+        let retained = resolver.nearest_top_level_functions(&[extensions.clone(), inaccessible]);
+        assert_eq!(
+            retained
+                .overloads
+                .iter()
+                .map(|function| function.callable.owner)
+                .collect::<Vec<_>>(),
+            [
+                type_name("middle/PrivateKt"),
+                type_name("middle/ExtensionsKt")
+            ]
+        );
+        assert!(!resolver.non_member_callable_accessible(retained.top_level().next().unwrap()));
+        assert!(resolver
+            .nearest_top_level_functions(&[extensions])
+            .overloads
+            .is_empty());
     }
 }
