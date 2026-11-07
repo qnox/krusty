@@ -7,11 +7,14 @@
 use super::super::*;
 use super::demo_package::{demo, lowered_f, relation, source_body, Body, Demo, Shape, T};
 use super::{distribution_root, frozen_function, lowered_body, stdlib, validated};
+use crate::ir::IrExpr;
 use crate::metadata::klib_ir::tree::{
     KlibIrArguments, KlibIrExprId, KlibIrExprKind, KlibIrMemberAccess, KlibIrStatement,
     KlibIrTypeOperator,
 };
 use crate::metadata::klib_ir::{KlibIrConstant, KlibIrSignature, KlibIrSymbolKind};
+use crate::symbol_source::{SymbolNamespace, SymbolSource};
+use crate::types::Ty;
 
 /// The rendered body of `name` in a unit that lowered it with the frozen `callees`.
 fn lowered(demo: &Demo, name: &str, callees: &[&str]) -> String {
@@ -1099,4 +1102,101 @@ fn stdlib_unit_bodies_lower_as_their_source_does() {
         initialize,
         source_body("fun initRuntimeIfNeeded() {\n}\n", "initRuntimeIfNeeded", 0)
     );
+}
+
+/// `kotlin.collections.collectionSizeOrDefault` narrows its `Iterable<T>` receiver to
+/// `Collection<*>` before reading `size`: kotlinc erases the checked arguments, so the implicit
+/// cast is to a subtype of the receiver's star projection, and lowers as a cast.
+#[test]
+fn stdlib_star_projected_smart_cast_lowers_as_a_cast() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(crate::types::type_name("kotlin/collections")),
+        "collectionSizeOrDefault",
+    );
+    let [helper] = symbols.callables.functions() else {
+        panic!("expected one collectionSizeOrDefault declaration");
+    };
+    let fact = frozen_function(
+        &libraries,
+        "kotlin/collections",
+        "collectionSizeOrDefault",
+        helper.semantic_receiver(),
+        helper.semantic_params().as_ref(),
+    );
+    let root = fact.klib_body_callable().expect("signed");
+    let collection = libraries
+        .classifier(crate::types::type_name("kotlin/collections/Collection"))
+        .unwrap();
+    let getter = libraries
+        .external_callable(
+            collection.declared_callables["size"].properties()[0]
+                .getter
+                .external_identity
+                .unwrap(),
+        )
+        .unwrap();
+    let getter = getter.klib_body_callable().unwrap();
+    let leaves = [(
+        getter.identity().clone(),
+        super::super::EmittedDependencyCallable::target_member(
+            crate::fir::ExternalCallableId::from_raw(73),
+        ),
+    )]
+    .into_iter()
+    .collect();
+    let oracle = crate::symbol_resolver::SourceOracle(&libraries);
+    let facts = KlibCalleeFacts::with_declarations([root], [getter]).with_type_oracle(&oracle);
+    let mut unit = DependencyBodyUnit::default();
+    let function = unit
+        .lower_function_with_intrinsics_and_externals(
+            root,
+            libraries.declaration_bodies(),
+            &facts,
+            crate::klib_libraries::KlibIntrinsicFacts::empty(),
+            &leaves,
+        )
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    assert_eq!(unit.ir().functions[function as usize].ret, Ty::Int);
+    // `size` is read at the receiver cast to `Collection<out Any?>`, the serialized `Collection<*>`.
+    let ir = unit.ir();
+    let collection = Ty::obj_args_name(
+        crate::types::type_name("kotlin/collections/Collection"),
+        &[Ty::out_projection(Ty::nullable(Ty::obj_name(
+            crate::types::wk::any(),
+        )))],
+    );
+    let reads = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Checked(operation) => match &**operation {
+                crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    receiver: Some(receiver),
+                    source_receiver,
+                    result,
+                    ..
+                } => Some((&ir.exprs[*receiver as usize], *source_receiver, *result)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(
+        IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::Cast,
+            type_operand,
+            ..
+        },
+        Some(source_receiver),
+        Ty::Int,
+    )] = reads.as_slice()
+    else {
+        panic!("one `size` read at a cast receiver: {reads:?}")
+    };
+    assert_eq!((*type_operand, *source_receiver), (collection, collection));
 }

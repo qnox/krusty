@@ -200,6 +200,30 @@ fn is_inherited_special_bridge(method: &crate::jvm::classreader::MethodSig) -> b
         && (method.is_public() || method.is_protected())
 }
 
+/// The name a bridge for a dependency's member function starts from.
+fn external_function_name(
+    ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
+    target: crate::fir::ExternalCallableId,
+) -> Result<String, SkipReason> {
+    let callable = callables.callable(target).ok_or(SkipReason::Bridges)?;
+    // A value class in a dependency member's signature gives its JVM method kotlinc's mangled
+    // name (`get-d1cXd_c`). The value-class pass derives that name for a bridge from the
+    // supertype's parameters, as it does for a declaration of this module, so the bridge starts
+    // from the Kotlin name; starting from the mangled one mangles it twice. An overridable member
+    // cannot carry `@JvmName`, and an internal one keeps its module-suffixed name.
+    if callable.visibility != crate::types::Visibility::Internal
+        && crate::jvm::value_classes::member_signature_is_mangled(
+            ir,
+            callable.source_receiver.iter().chain(&callable.params),
+            &callable.ret,
+        )
+    {
+        return Ok(callable.name.clone());
+    }
+    external_method_name(callables, target)
+}
+
 fn external_method_name(
     callables: &crate::backend::CheckedBackendCallables,
     target: crate::fir::ExternalCallableId,
@@ -447,7 +471,7 @@ fn superclass_method_bridges(
                 module_function_name(ir, callable).unwrap_or_else(|| edge.name.clone())
             }
             crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
-                external_method_name(callables, target)?
+                external_function_name(ir, callables, target)?
             }
         };
         let target_name = if let Some(function) = own_fid {
@@ -458,7 +482,7 @@ fn superclass_method_bridges(
                     module_function_name(ir, callable).unwrap_or_else(|| edge.name.clone())
                 }
                 crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
-                    external_method_name(callables, target)?
+                    external_function_name(ir, callables, target)?
                 }
             }
         };
@@ -922,8 +946,13 @@ fn push_property_bridge(
             (internal_getter_bridge || getter_name != getter_target).then_some(getter_target);
         // As for a function, the name an internal slot publishes (`getV$lib`) is not a builtin's
         // mapped JVM name, so its bridge is an ordinary overridable one, not a final special bridge.
+        // So is a value class's: kotlinc's `JvmInlineClassLowering` replaces the accessor with a
+        // member that no longer belongs to the property, so `BridgeLowering` finds no special
+        // property under it and bridges the builtin's mapped name (`size()`) like any other
+        // override, synthetic and without a generic signature.
         let special = !internal_getter_bridge
             && !overridden_internal
+            && !ir.classes[cid].is_value
             && getter_name != property_getter_name(&edge.name);
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertyGetter,

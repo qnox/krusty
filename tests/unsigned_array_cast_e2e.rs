@@ -64,6 +64,7 @@ fun box(): String {
 }
 "#;
 
+// PLATFORM-SPECIFIC: exact JVM checkcast/unbox class bytes and original source-file facade.
 #[test]
 fn a_cast_to_an_unsigned_array_checks_its_box_like_kotlinc() {
     common::assert_classes_identical_to_kotlinc(
@@ -73,6 +74,8 @@ fn a_cast_to_an_unsigned_array_checks_its_box_like_kotlinc() {
     );
 }
 
+// PLATFORM-SPECIFIC: this whole program observes Java exception classes through
+// javaClass.simpleName; retain its original single-source runtime grouping.
 #[test]
 fn a_cast_to_an_unsigned_array_runs_like_kotlinc() {
     common::expect_box_same_as_kotlinc(&format!("{DECLARATIONS}{BOX}"), "unsigned_array_casts");

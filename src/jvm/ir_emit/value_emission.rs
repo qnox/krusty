@@ -116,6 +116,9 @@ impl super::Emitter<'_> {
                     );
                 };
                 self.load_constructor_value(*i, jt, slot, code);
+                if let Some(primitive) = self.unboxed_scalar_read(e, *i) {
+                    super::scalar_coercion::unbox_prim_from(self.cw, code, jt, primitive);
+                }
             }
             IrExpr::PropertyRead {
                 receiver,
@@ -214,11 +217,28 @@ impl super::Emitter<'_> {
                 internal,
                 args,
                 ctor_params,
+                declared_params: _,
                 ctor_desc,
                 external_target: _,
                 defaults: default_parameters,
                 default_prefix_count,
             } => {
+                // A dependency construction realized through its `$default` constructor carries
+                // its placeholders, masks and marker as operands; the realization recorded which.
+                let synthesized: Vec<bool> = self
+                    .default_call_operands
+                    .matching(e, args)
+                    .map(|plan| {
+                        plan.iter()
+                            .map(|operand| {
+                                operand.origin
+                                    == crate::jvm::default_call_operands::DefaultOperandOrigin::Synthesized
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let synthesized_operand =
+                    |parameter: usize| synthesized.get(parameter).copied().unwrap_or(false);
                 // A local class takes its captures, which lead its arguments, in its physical order.
                 let args = capture_order::physical_for(self.ir, *internal, args.clone());
                 if self.emit_nullable_sam_wrapper_new(e, *internal, &args, code) {
@@ -239,7 +259,7 @@ impl super::Emitter<'_> {
                         // Every parameter of a verbatim descriptor is a supplied operand; the
                         // descriptor, not the argument count, says how many there are.
                         let parameters = self.constructor_physical_params(e, d).len();
-                        (d.clone(), false, parameters, parameters)
+                        (d.to_string(), false, parameters, parameters)
                     } else {
                         let mut field_tys: Vec<Ty> = match ctor_params {
                             Some(ps) => jvm_tys(&capture_order::physical_for(
@@ -351,7 +371,12 @@ impl super::Emitter<'_> {
                         .enumerate()
                     {
                         let omitted = omitted_parameter(parameter);
-                        self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
+                        self.mark_synthesized_run_start(
+                            e,
+                            omitted || synthesized_operand(parameter),
+                            &mut inside_run,
+                            code,
+                        );
                         if omitted {
                             push_zero(physical, code, self.cw);
                         } else {
@@ -404,7 +429,12 @@ impl super::Emitter<'_> {
                         .enumerate()
                     {
                         let omitted = omitted_parameter(parameter);
-                        self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
+                        self.mark_synthesized_run_start(
+                            e,
+                            omitted || synthesized_operand(parameter),
+                            &mut inside_run,
+                            code,
+                        );
                         if omitted {
                             push_zero(physical, code, self.cw);
                         } else {
@@ -541,6 +571,27 @@ impl super::Emitter<'_> {
                 // unverifiable call: the operand contract refuses, this arm bails the file (the gate
                 // SKIPS it) and pushes a typed zero so the dead code that follows still assembles.
                 let desc = method_descriptor(&param_tys, ret);
+                // A virtual call names the receiver's dispatch class, and its receiver is
+                // materialized at that class, not at the member's declaring class.
+                let virtual_owner =
+                    if protected_bridge.is_none() && !self.ir.method_visibility(fid).is_private() {
+                        let Some(virtual_owner) =
+                            self.module_member_call_owner(e, c.fq_name_id(), is_iface)
+                        else {
+                            return;
+                        };
+                        Some(virtual_owner)
+                    } else {
+                        None
+                    };
+                // A realized overridden signature takes its own parameters: an `Int` argument of
+                // `remove(element: Int)` is boxed for `remove(Object)`.
+                let realized_parameters = virtual_owner
+                    .is_some()
+                    .then(|| self.ir.jvm_overridden_call_realizations.get(&e))
+                    .flatten()
+                    .and_then(|realization| parse_descriptor_params(&realization.descriptor));
+                let call_param_tys = realized_parameters.as_deref().unwrap_or(call_param_tys);
                 let operand_result = if let Some(bridge) = protected_bridge.as_ref() {
                     let mut operands = Vec::with_capacity(call_args.len() + 1);
                     operands.push(*receiver);
@@ -553,7 +604,9 @@ impl super::Emitter<'_> {
                     self.emit_descriptor_virtual_operands(
                         e,
                         crate::jvm::ir_emit::call_operands::VirtualCallTarget {
-                            owner: &owner,
+                            owner: virtual_owner
+                                .as_ref()
+                                .map_or(owner.as_str(), |(owner, _)| owner.as_str()),
                             name: &name,
                             descriptor: &desc,
                         },
@@ -628,10 +681,8 @@ impl super::Emitter<'_> {
                         code.invokespecial(m, aw, physical_call_result_words(ret));
                     }
                 } else {
-                    let Some((owner, is_iface)) =
-                        self.module_member_call_owner(e, c.fq_name_id(), is_iface)
-                    else {
-                        return;
+                    let Some((owner, is_iface)) = virtual_owner else {
+                        unreachable!("an ordinary virtual call selected its owner before operands");
                     };
                     let (name, desc, result_narrow) = self
                         .ir
@@ -728,7 +779,7 @@ impl super::Emitter<'_> {
                         return;
                     }
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                    let owner = self.facade.clone();
+                    let owner = self.file_function_owner(*fid);
                     let m = self
                         .cw
                         .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
@@ -770,6 +821,7 @@ impl super::Emitter<'_> {
                     | crate::ir::IrIntrinsic::StringGet
                     | crate::ir::IrIntrinsic::StringLength
                     | crate::ir::IrIntrinsic::EnumName
+                    | crate::ir::IrIntrinsic::EnumOrdinal
                     | crate::ir::IrIntrinsic::NullableAnyToString) => {
                         self.emit_builtin_member(e, op, dispatch_receiver.unwrap(), args, code)
                     }
@@ -940,8 +992,10 @@ impl super::Emitter<'_> {
                     };
                     self.mark_call_start(e, code);
                     code.invokestatic(m, aw, physical_call_result_words(ret));
+                    self.guard_private_lateinit_read(e, code);
                 }
                 Callee::Module { .. }
+                | Callee::ModuleDefaultEntry { .. }
                 | Callee::ModuleWithDefaults { .. }
                 | Callee::LocalWithDefaults { .. }
                 | Callee::ClassStaticWithDefaults { .. }
@@ -1055,6 +1109,7 @@ impl super::Emitter<'_> {
                     };
                     self.mark_call_start(e, code);
                     code.invokestatic(m, aw, slot_words(ret) as i32);
+                    self.guard_private_lateinit_read(e, code);
                 }
                 Callee::Virtual {
                     owner,
@@ -1086,15 +1141,11 @@ impl super::Emitter<'_> {
                             return;
                         }
                         let owner_identity = *owner;
-                        // Array `clone` names the JVM array type. That decision reads the receiver's
-                        // type; the dispatch classifier still selects every other owner.
-                        let semantic_receiver = self.value_ty(recv);
-                        let Some((owner, interface)) = self.source_virtual_call_owner(
-                            e,
-                            owner_identity,
-                            interface,
-                            semantic_receiver,
-                        ) else {
+                        // A member an array inherits names the erased JVM array type. That decision
+                        // reads the receiver's type; the dispatch classifier selects every other owner.
+                        let Some((owner, interface)) =
+                            self.source_virtual_call_owner(e, owner_identity, interface, recv)
+                        else {
                             return;
                         };
                         let mut name = name.clone();
@@ -1131,16 +1182,44 @@ impl super::Emitter<'_> {
                                 descriptor = realization.descriptor.clone();
                                 narrow
                             });
+                        // A realized overridden signature takes its own parameters: an `Int`
+                        // argument of `remove(element: Int)` is boxed for `remove(Object)`.
+                        let realized_parameters = ordinary_virtual
+                            .then(|| self.ir.jvm_overridden_call_realizations.get(&e))
+                            .flatten()
+                            .and_then(|realization| {
+                                parse_descriptor_params(&realization.descriptor)
+                            });
+                        let realized = realized_parameters.is_some();
+                        let ptys = realized_parameters.unwrap_or(ptys);
                         let call_parameters = bridge.as_ref().map_or(ptys.as_slice(), |bridge| {
                             bridge.bridge_parameters.as_slice()
                         });
+                        // A receiver read from a generic declaration's erased result narrows once,
+                        // to the class the call names, as kotlinc's does: an upcast to the
+                        // member's declaring class between them would leave the slot unnarrowed.
+                        let erased_receiver = bridge
+                            .is_none()
+                            .then(|| self.erased_dispatch_receiver(recv))
+                            .flatten()
+                            .filter(|_| !owner.starts_with('['));
+                        if let Some(erased) = erased_receiver {
+                            ops[0] = erased;
+                        }
                         let mut physical = vec![bridge.as_ref().map_or_else(
-                            || self.value_ty(recv),
+                            || match erased_receiver {
+                                Some(_) => Ty::obj(&owner),
+                                None => self.value_ty(recv),
+                            },
                             |bridge| Ty::obj_name(bridge.owner),
                         )];
                         physical.extend(call_parameters.iter().copied());
                         let operand_result = if bridge.is_some() {
                             self.emit_source_access_bridge_operands(&ops, &physical, code)
+                        } else if realized {
+                            // The realized parameters are a physical signature of their own: an
+                            // `Int` argument is boxed for `remove(Object)`, not only re-cast.
+                            self.emit_call_descriptor_operands(e, 1, &ops, &physical, code)
                         } else {
                             self.emit_source_call_operands(e, 1, &ops, &physical, code)
                         };
@@ -1198,10 +1277,15 @@ impl super::Emitter<'_> {
                         .borrow()
                         .get(&e)
                         .cloned();
+                    // An overridden declaration's realization can erase the result the selected
+                    // declaration names (`get(Ljava/lang/Object;)Ljava/lang/Object;` for an
+                    // override returning `Int?`); the call then narrows it back, as kotlinc does.
+                    let mut realized_result = false;
                     if protected_bridge.is_none() {
                         if let Some(realization) = self.ir.jvm_overridden_call_realizations.get(&e)
                         {
                             name = realization.physical_name.clone();
+                            realized_result = realization.descriptor != descriptor;
                             descriptor = realization.descriptor.clone();
                         }
                     }
@@ -1346,7 +1430,10 @@ impl super::Emitter<'_> {
                     let declared_ret = ty_from_descriptor_ret(&declared_descriptor);
                     if declared_ret != widened_ret
                         && declared_ret.is_reference()
-                        && !crate::jvm::ir_emit::declaration_types::jvm_is_erased_top(widened_ret)
+                        && (realized_result
+                            || !crate::jvm::ir_emit::declaration_types::jvm_is_erased_top(
+                                widened_ret,
+                            ))
                     {
                         let internal = crate::jvm::names::instanceof_internal_name(declared_ret);
                         let class = self.cw.class_ref(&internal);
@@ -1424,6 +1511,7 @@ impl super::Emitter<'_> {
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.emit_binop(e, *op, *lhs, *rhs, code),
             IrExpr::PrimitiveNeg { operand, ty } => {
                 self.emit_value(*operand, code);
+                self.mark_intrinsic_instruction(e, code);
                 match ir_ty_to_jvm(ty) {
                     Ty::Long => code.lneg(),
                     Ty::Float => code.fneg(),
@@ -1530,7 +1618,7 @@ impl super::Emitter<'_> {
                 // first, as kotlinc's `-value as T` boxes the negated `Double`.
                 let physical = self.value_ty(*arg);
                 if physical.is_jvm_scalar() {
-                    let semantic = self.ir.logical_types.get(arg).copied().unwrap_or(physical);
+                    let semantic = self.ir.logical_type(*arg).unwrap_or(physical);
                     super::box_prim_free(
                         self.cw,
                         code,
@@ -1854,7 +1942,7 @@ impl super::Emitter<'_> {
                 // An inlined operand leaves the caller's line forgotten. kotlinc marks the checked
                 // expression's line again at the implicit check, so the check owns an entry even
                 // though the restored caller line is already in effect.
-                if matches!(check, NullCheck::Named(_)) && code.line_forgotten() {
+                if matches!(check, NullCheck::Named { .. }) && code.line_forgotten() {
                     if let Some(line) = code.current_line() {
                         code.mark_line(line.into());
                     }
@@ -1864,7 +1952,7 @@ impl super::Emitter<'_> {
                 // in its failure (`getenv(...) must not be null`); `x!!` has no such name and uses the
                 // one-argument form. Both consume the duplicate and leave the value in place.
                 let m = match check {
-                    NullCheck::Named(message) => {
+                    NullCheck::Named { message, .. } => {
                         code.push_string(message, self.cw);
                         self.cw.methodref(
                             "kotlin/jvm/internal/Intrinsics",
@@ -1872,13 +1960,13 @@ impl super::Emitter<'_> {
                             "(Ljava/lang/Object;Ljava/lang/String;)V",
                         )
                     }
-                    NullCheck::Source | NullCheck::Unnamed => self.cw.methodref(
+                    NullCheck::Source | NullCheck::Unnamed { .. } => self.cw.methodref(
                         "kotlin/jvm/internal/Intrinsics",
                         "checkNotNull",
                         "(Ljava/lang/Object;)V",
                     ),
                 };
-                let arguments = if matches!(check, NullCheck::Named(_)) {
+                let arguments = if matches!(check, NullCheck::Named { .. }) {
                     2
                 } else {
                     1
@@ -1923,6 +2011,7 @@ impl super::Emitter<'_> {
                 let array = vararg::NewArray {
                     ty: array_type,
                     reified_marker: marker.as_deref(),
+                    source: Some(e),
                 };
                 vararg::emit(self, array, elements, spreads, code);
             }

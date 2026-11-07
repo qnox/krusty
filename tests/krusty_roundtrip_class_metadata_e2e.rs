@@ -98,7 +98,7 @@ fun <T> choose(value: T): String where T : Comparable<T>, T : Number = "number"
             "(Ljava/lang/Object;)Ljava/lang/String;",
         ]
     );
-    let metadata = parsed.meta;
+    let metadata = parsed.kotlin_members().expect("member metadata decodes");
     let mut bound_sets = metadata
         .package_functions
         .iter()
@@ -120,7 +120,9 @@ fun <T> choose(value: T): String where T : Comparable<T>, T : Number = "number"
         [
             Vec::<String>::new(),
             vec!["Comparable<T>".to_string()],
-            vec!["Number".to_string(), "Comparable<T>".to_string()],
+            // Written order (`where T : Comparable<T>, T : Number`), as kotlinc records it; only
+            // the JVM signature and erasure lead with the class bound.
+            vec!["Comparable<T>".to_string(), "Number".to_string()],
         ]
     );
 
@@ -149,7 +151,8 @@ fn a_class_carries_its_own_metadata_by_default() {
         .iter()
         .find(|(name, _)| name == "Point")
         .expect("krusty emits Point.class");
-    let meta = parse_class(bytes).expect("Point.class parses").meta;
+    let class = parse_class(bytes).expect("Point.class parses");
+    let meta = class.kotlin_members().expect("member metadata decodes");
     let functions: Vec<&str> = meta
         .class_functions
         .iter()
@@ -190,10 +193,10 @@ fun use() {\n\
         .iter()
         .find(|(name, _)| name == "A")
         .expect("krusty emits A.class");
-    let metadata = parse_class(bytes).expect("A.class parses").meta;
-    assert_eq!(metadata.class_type_parameters.type_params(), &["T"]);
+    let class = parse_class(bytes).expect("A.class parses");
+    assert_eq!(class.meta.class_type_parameters.type_params(), &["T"]);
     assert_eq!(
-        metadata.class_type_parameters.type_param_bounds(),
+        class.meta.class_type_parameters.type_param_bounds(),
         &vec![vec![krusty::types::Ty::String]],
     );
 
@@ -282,7 +285,8 @@ fn value_class_body_property_round_trips() {
         .name
         .clone();
     let described = info
-        .meta
+        .kotlin_members()
+        .expect("member metadata decodes")
         .class_properties
         .iter()
         .find(|p| p.name == "k")
@@ -317,7 +321,8 @@ fn value_class_computed_property_round_trips_as_a_static_carrier_accessor() {
         .expect("computed value-class property is a static carrier accessor");
     assert_eq!(accessor.descriptor, "([I)I");
     let property = info
-        .meta
+        .kotlin_members()
+        .expect("member metadata decodes")
         .class_properties
         .iter()
         .find(|property| property.name == "size")
@@ -385,7 +390,8 @@ class Holder {\n\
         .iter()
         .find(|(name, _)| name == "Holder")
         .expect("krusty emits Holder.class");
-    let meta = parse_class(bytes).expect("Holder.class parses").meta;
+    let class = parse_class(bytes).expect("Holder.class parses");
+    let meta = class.kotlin_members().expect("member metadata decodes");
     assert!(
         meta.class_functions.iter().any(|f| f.kotlin_name == "make"),
         "the class's own @Metadata must describe the value-class-returning member",
@@ -432,7 +438,8 @@ fn a_sibling_file_value_class_member_round_trips() {
     assert!(
         parse_class(value_class)
             .expect("A.class parses")
-            .meta
+            .kotlin_members()
+            .expect("member metadata decodes")
             .class_functions
             .iter()
             .any(|function| function.kotlin_name == "shout"),
@@ -441,7 +448,8 @@ fn a_sibling_file_value_class_member_round_trips() {
     assert!(
         parse_class(holder)
             .expect("Holder.class parses")
-            .meta
+            .kotlin_members()
+            .expect("member metadata decodes")
             .class_functions
             .iter()
             .any(|function| function.kotlin_name == "make"),
@@ -500,7 +508,8 @@ class C {\n\
         .iter()
         .find(|(name, _)| name == "C")
         .expect("krusty emits C.class");
-    let metadata = parse_class(bytes).expect("C.class parses").meta;
+    let class = parse_class(bytes).expect("C.class parses");
+    let metadata = class.kotlin_members().expect("member metadata decodes");
     assert!(metadata
         .class_functions
         .iter()
@@ -534,7 +543,8 @@ fn a_value_class_with_a_declared_member_round_trips() {
         .iter()
         .find(|(name, _)| name == "S")
         .expect("krusty emits S.class");
-    let metadata = parse_class(bytes).expect("S.class parses").meta;
+    let class = parse_class(bytes).expect("S.class parses");
+    let metadata = class.kotlin_members().expect("member metadata decodes");
     assert!(
         metadata
             .class_functions
@@ -570,7 +580,8 @@ fn a_body_property_adds_no_component_or_copy_parameter() {
         .iter()
         .find(|(name, _)| name == "P")
         .expect("krusty emits P.class");
-    let meta = parse_class(bytes).expect("P.class parses").meta;
+    let class = parse_class(bytes).expect("P.class parses");
+    let meta = class.kotlin_members().expect("member metadata decodes");
     let functions: Vec<&str> = meta
         .class_functions
         .iter()
@@ -648,7 +659,8 @@ fn object_member_extension_function_round_trips_as_an_importable_extension() {
         .iter()
         .find(|(name, _)| name == "test/C")
         .expect("krusty emits the object class");
-    let metadata = parse_class(bytes).expect("object class parses").meta;
+    let class = parse_class(bytes).expect("object class parses");
+    let metadata = class.kotlin_members().expect("member metadata decodes");
     let functions = metadata
         .class_functions
         .iter()
@@ -666,7 +678,8 @@ fn object_member_extension_function_round_trips_as_an_importable_extension() {
         .iter()
         .find(|(name, _)| name == "test/I")
         .expect("krusty emits the interface class");
-    let metadata = parse_class(bytes).expect("interface class parses").meta;
+    let class = parse_class(bytes).expect("interface class parses");
+    let metadata = class.kotlin_members().expect("member metadata decodes");
     let inherited_extension = metadata
         .class_functions
         .iter()

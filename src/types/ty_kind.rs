@@ -40,6 +40,12 @@ pub enum TyKind {
     /// A Java platform type `T!`: flexible between `T` and `T?`. Unlike [`Nullable`](TyKind::Nullable),
     /// direct member access is permitted; assignability accepts it at either nullability bound.
     PlatformNullable(Ty),
+    /// A non-null Java collection type `(Mutable)List<T>`: flexible between the carried mutable
+    /// face (`MutableList<T>`) and its read-only face (`List<T>`). A Java `@NotNull` qualifier
+    /// fixes the nullability of `List<T>` but not its mutability. A nullable or platform occurrence
+    /// is [`PlatformNullable`](TyKind::PlatformNullable) of the mutable face, which already carries
+    /// that flexibility.
+    MutabilityFlexible(Ty),
     /// Use-site type projections. These occur only as generic arguments (`Box<in T>`, `Box<out T>`,
     /// and `Box<*>`) and remain semantic until assignability/inference consumes their variance. A
     /// star retains its readable upper bound, but stays distinct from an explicitly written `out`
@@ -58,6 +64,15 @@ pub enum TyKind {
     /// reasons about `T` as `T` (subtyping against the bound, substitution at instantiation); runtime
     /// erasure is a backend concern.
     TyParam(TyParamName, Ty),
+    /// An inference variable of one call: the unknown argument a call's constraint system solves
+    /// for one formal of the called declaration, carrying the formal's instantiated upper bound.
+    ///
+    /// It is distinct from [`TyKind::TyParam`] even when it stands for a formal of an enclosing
+    /// declaration: inside `class Tree<T>`, the call `Tree(label)` with `label: T` solves its own
+    /// variable for `T` against the enclosing, fixed `T`. A variable exists only while its call is
+    /// solved; the solution is expressed over the declaration's formals again before anything else
+    /// sees it, so lowering and the backends never meet one.
+    Var(TyParamName, Ty),
     /// Kotlin's definitely-non-null type `T & Any`.
     ///
     /// The wrapped type is the original type parameter, including a bound that still admits null.

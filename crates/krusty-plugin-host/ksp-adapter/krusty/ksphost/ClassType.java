@@ -133,7 +133,12 @@ final class ClassType implements KSType {
 
     @Override
     public KSType starProjection() {
-        throw Nodes.notImplemented("KSType.starProjection");
+        return starProjected(declaration).withNullability(nullable);
+    }
+
+    // This type with `nullable` as its nullability.
+    KSType withNullability(boolean nullable) {
+        return nullable ? makeNullable() : makeNotNullable();
     }
 
     @Override

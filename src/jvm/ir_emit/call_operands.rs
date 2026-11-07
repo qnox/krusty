@@ -246,7 +246,16 @@ impl Emitter<'_> {
                         .is_continuation(call, argument_index)
                 });
             if !is_continuation {
-                this.coerce_reference_on_stack(source, target, code);
+                let declared = parameter_index
+                    .checked_sub(leading_non_argument_operands)
+                    .and_then(|argument_index| {
+                        this.ir
+                            .call_declared_params
+                            .get(&call)?
+                            .get(argument_index)
+                            .copied()
+                    });
+                this.coerce_declared_reference(source, declared, target, code);
             }
         });
         Ok(())
@@ -407,6 +416,11 @@ impl Emitter<'_> {
         });
         physical.extend_from_slice(physical_params);
         self.mark_generated_operand_start(call_expression, ops.first().copied(), code);
+        // An upcast to the member's declaring class over an erased generic result changes nothing
+        // the JVM sees; that result narrows once, to the class the call names.
+        if let Some(erased) = self.erased_dispatch_receiver(receiver) {
+            ops[0] = erased;
+        }
         let ops = self.slot_operands(
             &ops,
             KeptSmartCasts::CallReceivers {
@@ -429,11 +443,14 @@ impl Emitter<'_> {
                 // (`T : Throwable` read as `Throwable`) is not the receiver's own class yet:
                 // kotlinc coerces it to the substituted type the call names.
                 let property_reference = this.property_ref_class_and_captures(operand).is_some();
+                let annotation_implementation =
+                    this.annotation_implementation_interface(source).is_some();
                 let erased_bound = matches!(
                     this.erased_reference_result(operand),
                     Some(super::operand_representation::ErasedResult::Coerced { .. })
                 );
                 let target = if !property_reference
+                    && !annotation_implementation
                     && !erased_bound
                     && source.is_reference()
                     && !super::jvm_is_erased_top(super::ir_ty_to_jvm(&source))
@@ -443,6 +460,7 @@ impl Emitter<'_> {
                     target
                 };
                 this.adapt_physical_operand_for(operand, source, target, code);
+                this.coerce_array_dispatch_receiver(source, code);
             } else {
                 this.adapt_physical_call_operand_for(
                     call_expression,
@@ -633,6 +651,7 @@ mod tests {
             internal: crate::types::type_name("sample/Holder"),
             args,
             ctor_params: None,
+            declared_params: None,
             ctor_desc: Some("(Ljava/lang/Object;Ljava/lang/Object;)V".into()),
             external_target: None,
             defaults: Box::new([]),

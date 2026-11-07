@@ -15,6 +15,11 @@ use crate::types::{stored_value_ty, Ty, TyKind, TypeName};
 
 use super::{DeclarationFlags, DeclarationId, DeclarationKind, ResolvedModuleIndex, SourceFileId};
 
+mod declaration_names;
+
+#[cfg(test)]
+mod declaration_name_tests;
+
 /// Pass-2 current-module provider. Its type deliberately cannot retain the Pass-1 symbol table.
 pub(crate) struct StreamedModuleSymbols<'a> {
     index: &'a ResolvedModuleIndex,
@@ -101,6 +106,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         let header = self.index.type_alias_by_identity(identity)?;
         Some(crate::libraries::AliasExpansion {
             identity: header.identity,
+            declaration_name: header.declaration_name.clone().map(std::sync::Arc::new),
             target: header.target,
             formals: self
                 .index
@@ -140,6 +146,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         };
         Some(crate::libraries::AliasExpansion {
             identity: header.identity,
+            declaration_name: header.declaration_name.clone().map(std::sync::Arc::new),
             target: header.target,
             formals: self
                 .index
@@ -287,6 +294,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         let flags = declaration_header.flags;
         let mut projected = crate::libraries::LibraryType::declaration_header();
 
+        projected.declaration_name = classifier_header.declaration_name.clone();
         projected.is_kotlin = true;
         projected.access = declaration_header.visibility.into();
         projected.source_file = Some(anchor.source.raw());
@@ -520,7 +528,10 @@ impl<'a> StreamedModuleSymbols<'a> {
             if !parameter_names.is_empty() {
                 let type_arguments = parameters_for_classifier(&parameter_names, &parameter_bounds);
                 constructor.generic_sig = Some(GenericSig {
-                    formals: parameter_names.clone(),
+                    formals: parameter_names
+                        .iter()
+                        .map(crate::types::TyParamName::from)
+                        .collect(),
                     formal_bounds: parameter_bounds.clone(),
                     receiver: None,
                     params: parameters.clone(),
@@ -684,7 +695,6 @@ impl<'a> StreamedModuleSymbols<'a> {
             annotations: Vec::new(),
             external_default_provider: None,
             external_property_identity: None,
-            compiler_core_declaration: None,
             declaration_owner: None,
             owner: TypeName::ROOT,
             name: name.to_owned(),
@@ -711,6 +721,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             member_realization: MemberRealization::Dispatch,
             inline: InlineKind::None,
             default_call: false,
+            defaults_from_declaration: false,
             vararg_elem: None,
             vararg_index: None,
             signature: None,
@@ -880,7 +891,10 @@ impl<'a> StreamedModuleSymbols<'a> {
         Some(function)
     }
 
-    fn declaration_formals(&self, declaration: DeclarationId) -> (Vec<String>, Vec<Vec<Ty>>) {
+    fn declaration_formals(
+        &self,
+        declaration: DeclarationId,
+    ) -> (Vec<crate::types::TyParamName>, Vec<Vec<Ty>>) {
         let mut formals = Vec::new();
         let mut bounds = Vec::new();
         for ordinal in 0.. {
@@ -890,12 +904,11 @@ impl<'a> StreamedModuleSymbols<'a> {
             let Some(header) = self.index.type_parameter_header(parameter) else {
                 break;
             };
-            formals.push(
+            formals.push(crate::types::TyParamName::new(
                 self.index
                     .type_parameter_semantic_name(parameter)
-                    .unwrap_or("")
-                    .to_owned(),
-            );
+                    .unwrap_or(""),
+            ));
             bounds.push(header.bounds.iter().map(|bound| bound.ty.get()).collect());
         }
         (formals, bounds)
@@ -1863,6 +1876,13 @@ impl<'a> StreamedModuleSymbols<'a> {
 }
 
 impl SymbolSource for StreamedModuleSymbols<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        declaration_names::source_declaration_name(self, declaration)
+    }
+
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
         self.index
             .actualizes_expect(self.source_file, internal)
@@ -1883,8 +1903,8 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
         self.type_parameter_bounds(name)
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        self.index.sam_with_receiver_annotations()
+    fn annotation_conventions(&self) -> &crate::symbol_source::AnnotationConventions {
+        self.index.annotation_conventions()
     }
 
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {

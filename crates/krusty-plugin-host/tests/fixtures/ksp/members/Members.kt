@@ -54,3 +54,86 @@ class Numbers(vararg val ids: Int)
 class NativeApi {
     external fun ping(): Int
 }
+
+abstract class Fields(val fromConstructor: Int) {
+    val initialized: Int = 1
+    val computed: Int get() = 2
+    var usesField: Int = 3
+        get() = field + 1
+    val readsField: Int
+        get() = field
+    val blockReadsField: Int
+        get() {
+            return field
+        }
+    lateinit var late: String
+    val delegated: Int by lazy { 4 }
+    abstract val pending: Int
+    var noField: Int
+        get() = 5
+        set(value) {}
+    val shadowed: Int
+        get() {
+            val field = 8
+            return field
+        }
+    val throughLambda: Int
+        get() = run { field }
+    val throughLocalFunction: Int
+        get() {
+            fun read() = field
+            return read()
+        }
+    val lambdaParameter: Int
+        get() = 9.let { field -> field }
+    val localFunctionParameter: Int
+        get() {
+            fun read(field: Int) = field
+            return read(10)
+        }
+    val throughObject: Int
+        get() = object {
+            fun read() = field
+        }.read()
+    var setterShadowed: Int
+        get() = 11
+        set(value) {
+            val field = value
+            println(field)
+        }
+    val throughParameterDefault: Int
+        get() {
+            fun read(x: Int = field) = x
+            return read()
+        }
+    val objectMember: Int
+        get() = object {
+            val field = 16
+            fun read() = field
+        }.read()
+    var setterWrites: Int = 17
+        get() = 18
+        set(value) {
+            field = value
+        }
+
+    init {
+        readsField = 6
+        blockReadsField = 7
+        throughLambda = 13
+        throughLocalFunction = 14
+        throughObject = 15
+        throughParameterDefault = 19
+        objectMember = 20
+    }
+}
+
+class Spelled(val fromConstructor: List<String>, plain: Map<String, Int?>) {
+    val property: Map<String, List<Int?>>? = null
+
+    fun function(parameter: Set<out Number>, vararg rest: String): Array<String> = arrayOf()
+}
+
+fun List<String>.spelledExtension(): Unit {}
+
+class Plain(val names: List<String>)

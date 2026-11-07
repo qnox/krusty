@@ -503,9 +503,7 @@ impl BodyFirChecker<'_> {
                     depth: source.depth,
                     path: Box::new([]),
                     ty,
-                    receiver: FirCapturedReceiver::Enclosing {
-                        classifier: classifier.classifier,
-                    },
+                    receiver: self.enclosing_instance(owner),
                 });
             let value = self.body.add_expr(FirExpr {
                 origin,
@@ -611,6 +609,24 @@ impl BodyFirChecker<'_> {
         span: Option<Span>,
         selected: &crate::resolve::ImplicitReceiverSelection,
     ) -> Result<Option<FirReceiver>, BodyCheckFailure> {
+        let mut projected = selected.clone();
+        for projection in selected
+            .construction_sites
+            .iter()
+            .rev()
+            .filter(|projection| {
+                self.construction_site_receiver_frames
+                    .contains(&projection.declaration)
+            })
+        {
+            let coordinate = projection
+                .project(projected.receiver_depth)
+                .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
+            projected.current = coordinate.current;
+            projected.receiver_depth = coordinate.depth;
+        }
+        projected.construction_sites.clear();
+        let selected = &projected;
         let origin = self
             .origins
             .synthetic(cause, SyntheticOriginKind::ImplicitReceiver);
@@ -1112,9 +1128,6 @@ impl BodyFirChecker<'_> {
                     return Ok(None);
                 };
                 let intrinsic = match compiler_intrinsic {
-                    Some(crate::libraries::CompilerIntrinsic::ArraySize) => {
-                        Some(FirIntrinsic::ArraySize)
-                    }
                     Some(crate::libraries::CompilerIntrinsic::StringLength) => {
                         Some(FirIntrinsic::StringLength)
                     }
@@ -1452,11 +1465,13 @@ impl BodyFirChecker<'_> {
                 return Ok(None);
             }
             Some(
-                ExprLowering::BuiltinUnaryCall { .. }
+                ExprLowering::ConstructorCaptures(_)
+                | ExprLowering::BuiltinUnaryCall { .. }
                 | ExprLowering::RuntimeTypeTest { .. }
                 | ExprLowering::ExtensionFunctionBinding { .. }
                 | ExprLowering::PluginExpression(_)
-                | ExprLowering::ClassStorageRead { .. }
+                | ExprLowering::ClassStorageRead(_)
+                | ExprLowering::EnumEntryStorageRead { .. }
                 | ExprLowering::EnumEntryPropertyRead { .. }
                 | ExprLowering::BackingFieldRead
                 | ExprLowering::ImplicitPropertyIncDec(_)
@@ -1573,7 +1588,10 @@ impl BodyFirChecker<'_> {
             .iter()
             .enumerate()
             .filter_map(|(ordinal, formal)| {
-                bindings.get(formal).copied().map(|value| (ordinal, value))
+                bindings
+                    .get(formal.as_str())
+                    .copied()
+                    .map(|value| (ordinal, value))
             })
             .map(|(ordinal, value)| {
                 let ordinal = u32::try_from(ordinal).map_err(|_| {
@@ -2689,6 +2707,7 @@ impl BodyFirChecker<'_> {
                 Some(
                     StmtLowering::LocalFunction(_)
                     | StmtLowering::PlusAssign(_)
+                    | StmtLowering::OverloadedAssignment { .. }
                     | StmtLowering::BackingFieldWrite { .. }
                     | StmtLowering::DeferredPropertyWrite { .. }
                     | StmtLowering::SuperPropertyWrite { .. }

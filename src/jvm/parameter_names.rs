@@ -92,6 +92,8 @@ pub(super) fn local_variable(
             }
             IrGeneratedParameterRole::LocalDelegateDispatch => Some("this$0".to_string()),
             IrGeneratedParameterRole::DelegateMethodReceiver => Some("<this>".to_string()),
+            // kotlinc writes no local-variable row for a mask parameter.
+            IrGeneratedParameterRole::DefaultMask => None,
         },
     }
 }
@@ -173,7 +175,9 @@ pub(super) fn function_locals(
             .iter()
             .zip(anonymous)
             .map(|(identity, anonymous)| {
-                anonymous.or_else(|| function_local_variable(ir, function, identity))
+                anonymous.or_else(|| {
+                    function_local_variable(ir, function, identity, ReceiverSpelling::Written)
+                })
             })
             .collect(),
     )
@@ -243,6 +247,16 @@ pub(super) fn lambda_receiver(origin: &crate::ir::IrLambdaOrigin) -> String {
     }
 }
 
+/// Which of kotlinc's two spellings of a source extension receiver a surface takes.
+#[derive(Clone, Copy)]
+enum ReceiverSpelling {
+    /// The replacement parameter inline-class lowering declares, named before the function is
+    /// renamed: the null-check guard and the parameter's own name quote it (`$this$top`).
+    Declared,
+    /// The local table, written from the function's final IR name (`$this$top_u2dK5cTq2M`).
+    Written,
+}
+
 /// JVM local-table spelling for a parameter of one exact common-IR function, apart from the
 /// anonymous context labels [`function_locals`] adds for the whole parameter list.
 ///
@@ -253,7 +267,15 @@ fn function_local_variable(
     ir: &IrFile,
     function: u32,
     identity: &IrParameterIdentity,
+    spelling: ReceiverSpelling,
 ) -> Option<String> {
+    if let Some((owner, parameter)) = identity.constructor_receiver() {
+        return Some(
+            super::capture_names::constructor_receiver(ir, owner, parameter)
+                .expect("a captured constructor receiver keeps its exact original prefix")
+                .field,
+        );
+    }
     if let IrParameterRole::CapturedReceiver { ordinal } = identity.role {
         let (name, _) = super::capture_names::lifted_receiver(ir, function, ordinal as usize)
             .expect("a lifted callable publishes the origin of each captured receiver");
@@ -292,6 +314,19 @@ fn function_local_variable(
             .fn_source_names
             .get(&function)
             .expect("an extension receiver retains its declaration source name");
+        // By then kotlinc's inline-class lowering has renamed a function with a value class in its
+        // signature to its `-<hash>` mangle, which the receiver's name escapes.
+        if let Some(suffix) = ir
+            .value_class_mangle_suffixes
+            .get(&function)
+            .filter(|_| matches!(spelling, ReceiverSpelling::Written))
+        {
+            let ir_name = format!("{source_name}{suffix}");
+            return Some(format!(
+                "$this${}",
+                super::debug_local_names::escaped(&ir_name)
+            ));
+        }
         return Some(format!("$this${source_name}"));
     }
     // kotlinc's `LocalDeclarationsLowering` keeps a captured variable's own name when a named
@@ -541,9 +576,9 @@ pub(super) fn function_method_parameters(
             .iter()
             .enumerate()
             .map(|(index, identity)| {
-                anonymous[index]
-                    .clone()
-                    .or_else(|| function_local_variable(ir, function, identity))
+                anonymous[index].clone().or_else(|| {
+                    function_local_variable(ir, function, identity, ReceiverSpelling::Declared)
+                })
             })
             .collect(),
     )
@@ -575,7 +610,7 @@ pub(super) fn function_assertions(
             .map(|(index, identity)| {
                 anonymous[index].clone().or_else(|| match identity.role {
                     IrParameterRole::ExtensionReceiver if replaced => {
-                        function_local_variable(ir, function, identity)
+                        function_local_variable(ir, function, identity, ReceiverSpelling::Declared)
                     }
                     // A lambda's guard quotes its receiver's local name, `$this$<label>`.
                     IrParameterRole::ExtensionReceiver => ir
@@ -821,6 +856,12 @@ pub(super) fn dependency_access_bridge_local_variables(
 /// The bridge plan supplies the metadata declaration's complete arity and records this generated
 /// identity before emission; classfile emission never recovers it from a descriptor.
 pub(super) fn inherited_collection_specialized_local(ordinal: usize) -> String {
+    format!("p{ordinal}")
+}
+
+/// The name kotlinc's Java class reader gives a parameter of a Java method compiled without
+/// parameter names (a JDK interface's default member): `p` and its ordinal.
+pub(super) fn unnamed_java_parameter(ordinal: usize) -> String {
     format!("p{ordinal}")
 }
 
@@ -1313,12 +1354,14 @@ mod suspend_lambda_member_tests {
             IrValueCapture {
                 declaration: IrCapturedDeclaration::Variable,
                 capturer: IrCapturingCallable::Lambda,
+                crossinline_parameter: None,
             },
         );
         let lambda = SuspendLambdaParameters::new(
             vec![captured, IrParameterIdentity::captured_receiver(0)],
             1,
             vec![IrCapturedReceiver::Enclosing {
+                owner: None,
                 classifier: crate::types::type_name("Outer"),
             }],
             None,

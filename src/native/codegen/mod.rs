@@ -20,6 +20,9 @@
 use crate::compilation_target::CompilationTarget;
 mod dependency_intrinsics;
 mod lower;
+mod reference_identity;
+
+use reference_identity::ReferenceDeclaration;
 
 use crate::backend::{Artifact, Backend, CheckedIrFile};
 use crate::diag::DiagSink;
@@ -33,10 +36,18 @@ use super::target::NativeTarget;
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DependencyExport {
     symbol: String,
+    /// The declaration's marker key, distinct from this export's invocation alias.
+    reference_declaration: Option<ReferenceDeclaration>,
     signature: crate::backend::DependencyFunctionSignature,
     member_receiver: Option<crate::backend::DependencyMemberReceiver>,
     singleton_member_receiver: Option<crate::backend::SingletonMemberReceiver>,
     singleton_extension_receiver: Option<crate::backend::SingletonExtensionUnreadReceiver>,
+    /// The entry filling this declaration's omitted defaults, when it declares any: every operand
+    /// of [`Self::signature`], then one `Int` mask per 32 of them with a bit per omitted operand.
+    default_entry: Option<String>,
+    /// The entry an ordinary call to an overridable member goes through, which dispatches on
+    /// the receiver; [`Self::symbol`] stays the member's own body.
+    dispatch_entry: Option<String>,
 }
 
 /// One source function this target must publish for dependent source modules.
@@ -45,6 +56,8 @@ struct DependencyExportDefinition {
     symbol: String,
     signature: crate::backend::DependencyFunctionSignature,
     member_receiver: Option<crate::backend::DependencyMemberReceiver>,
+    default_entry: Option<String>,
+    dispatch_entry: Option<String>,
 }
 
 /// The symbol every program object must define for the runtime's `_start` to call.
@@ -54,7 +67,7 @@ pub use crate::backend::{Entry, BOX_RESULT_FRAME};
 
 pub struct CraneliftBackend {
     target: NativeTarget,
-    entry: Entry,
+    entry: crate::backend::ProgramEntry,
     verify: bool,
 }
 
@@ -62,7 +75,7 @@ impl CraneliftBackend {
     pub fn new(target: NativeTarget) -> Self {
         Self {
             target,
-            entry: Entry::Main,
+            entry: crate::backend::ProgramEntry::new(Entry::Main),
             verify: false,
         }
     }
@@ -77,7 +90,14 @@ impl CraneliftBackend {
 
     /// Start the program in `entry` instead of `main`.
     pub fn with_entry(mut self, entry: Entry) -> Self {
-        self.entry = entry;
+        self.entry.kind = entry;
+        self
+    }
+
+    /// Emit the synthetic program entry only for this exact declared source module. Ordinary
+    /// library functions, dependency exports and initialization are still emitted.
+    pub fn with_entry_module(mut self, module: impl Into<String>) -> Self {
+        self.entry = self.entry.in_module(module.into());
         self
     }
 }
@@ -102,6 +122,9 @@ pub struct CodegenModule {
     /// distinguishes legal same-signature internals in unrelated dependencies.
     dependency_symbols:
         crate::fx_hash::HashMap<crate::backend::KlibDependencyCallable, DependencyExport>,
+    /// The exported entry answering each preceding source module's object instance, by the
+    /// object's classifier.
+    dependency_singletons: crate::fx_hash::HashMap<crate::backend::DependencyClassifier, String>,
     next_dependency_symbol: usize,
     next_dependency_support_object: usize,
     next_disambiguated_source_object: usize,
@@ -177,6 +200,20 @@ impl Backend for CraneliftBackend {
         dependency_intrinsics::operation_plan(operation).is_some()
     }
 
+    fn realizes_dependency_getter(
+        &self,
+        signature: crate::backend::DependencyGetterSignature<'_>,
+    ) -> bool {
+        lower::realizes_dependency_getter(signature)
+    }
+
+    fn represents_dependency_classifier(
+        &self,
+        classifier: crate::backend::DependencyClassifier,
+    ) -> bool {
+        lower::represents_dependency_classifier(classifier)
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -193,6 +230,20 @@ impl Backend for CraneliftBackend {
             }
         };
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
+        // Before default arguments: a constant leaving constructor arguments out is then an
+        // ordinary construction for that lowering.
+        crate::backend::enums::realize(&mut file.ir);
+        crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables, |function| {
+            file.dependency_exports.callable(function).is_some()
+        });
+        crate::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
+        if let Err(error) =
+            crate::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)
+        {
+            report_decline(&lower::Unsupported::from(error), &file, diags);
+            return Vec::new();
+        }
+        crate::backend::dispatch_entries::realize(&mut file.ir, &file.dependency_exports);
         // A local or anonymous classifier arrives with an opaque identity; this target names it
         // from its provenance as Kotlin/Native does. There is no facade class here, so a
         // classifier local to a top-level function starts in the package: `box$MyLocalObject`,
@@ -225,8 +276,8 @@ impl Backend for CraneliftBackend {
         }
         let runtime_symbols = state.runtime_symbols.as_ref().expect("read just above");
         // Which classifiers are value classes, read from the checked declarations: a file's own
-        // and its dependencies' alike. See `native::value_classes`.
-        let value_classes = match super::value_classes::NativeValueClasses::inventory(
+        // and its dependencies' alike. See `crate::backend::value_classes`.
+        let value_classes = match crate::backend::value_classes::ValueClassInventory::inventory(
             &file.ir,
             &file.classifiers,
         ) {
@@ -251,7 +302,7 @@ impl Backend for CraneliftBackend {
             .is_none_or(|(module, _)| module != file.module_name)
         {
             let classes = file.classifiers.module().classes();
-            let plan = match super::value_classes::NativeValueClasses::of_module_classes(
+            let plan = match crate::backend::value_classes::ValueClassInventory::of_module_classes(
                 classes.iter().map(|(name, _)| name),
                 classes.carried_types(),
                 &file.classifiers,
@@ -290,8 +341,40 @@ impl Backend for CraneliftBackend {
             };
             let symbol = format!("kt_klib_export_{}", state.next_dependency_symbol);
             state.next_dependency_symbol += 1;
+            // A later module calling this declaration with arguments left out reaches the
+            // declaring file's default entry through an export of its own.
+            let default_entry =
+                crate::backend::default_arguments::published_entry(&file.ir, callable)
+                    .map(|_| format!("{symbol}__defaults"));
+            // A later module's ordinary call to an overridable member dispatches on its receiver.
+            let dispatch_entry = file
+                .ir
+                .dispatch_entries
+                .contains_key(&callable)
+                .then(|| format!("{symbol}__dispatch"));
+            let reference_declaration = match file.kind {
+                crate::backend::CheckedIrUnitKind::Source => {
+                    match ReferenceDeclaration::source_export(
+                        &file.ir,
+                        file.module_name,
+                        callable,
+                        &file.dependency_exports,
+                        identity,
+                    ) {
+                        Ok(identity) => identity,
+                        Err(error) => {
+                            diags.error(crate::diag::Span::new(0, 0), error);
+                            return Vec::new();
+                        }
+                    }
+                }
+                crate::backend::CheckedIrUnitKind::DependencySupport => {
+                    Some(ReferenceDeclaration::dependency(identity))
+                }
+            };
             let export = DependencyExport {
                 symbol: symbol.clone(),
+                reference_declaration,
                 signature: signature.clone(),
                 member_receiver: file.dependency_exports.member_receiver(callable),
                 singleton_member_receiver: file
@@ -300,6 +383,8 @@ impl Backend for CraneliftBackend {
                 singleton_extension_receiver: file
                     .dependency_exports
                     .singleton_extension_unread_receiver(callable),
+                default_entry: default_entry.clone(),
+                dispatch_entry: dispatch_entry.clone(),
             };
             if state
                 .dependency_symbols
@@ -318,6 +403,38 @@ impl Backend for CraneliftBackend {
                     symbol,
                     signature,
                     member_receiver: file.dependency_exports.member_receiver(callable),
+                    default_entry,
+                    dispatch_entry,
+                },
+            );
+        }
+        let mut singletons = file.dependency_exports.singleton_entries().to_vec();
+        singletons.sort_unstable_by_key(|&(_, entry)| entry);
+        for (classifier, entry) in singletons {
+            let symbol = format!("kt_klib_instance_{}", state.next_dependency_symbol);
+            state.next_dependency_symbol += 1;
+            let signature =
+                match crate::backend::DependencyFunctionSignature::from_ir(&file.ir, entry, None) {
+                    Ok(signature) => signature,
+                    Err(error) => {
+                        diags.error(
+                            crate::diag::Span::new(0, 0),
+                            format!("internal error: {error}"),
+                        );
+                        return Vec::new();
+                    }
+                };
+            state
+                .dependency_singletons
+                .insert(classifier, symbol.clone());
+            dependency_exports.insert(
+                entry,
+                DependencyExportDefinition {
+                    symbol,
+                    signature,
+                    member_receiver: None,
+                    default_entry: None,
+                    dispatch_entry: None,
                 },
             );
         }
@@ -339,10 +456,11 @@ impl Backend for CraneliftBackend {
                 dependency_exports: &dependency_exports,
                 dependency_signatures: &file.dependency_exports,
                 dependency_symbols: &state.dependency_symbols,
+                dependency_singletons: &state.dependency_singletons,
             },
             self.target,
             &object_stem,
-            self.entry,
+            self.entry.for_module(file.module_name),
             self.verify,
         ) {
             Ok(lowered) => lowered,

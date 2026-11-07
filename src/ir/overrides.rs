@@ -41,7 +41,7 @@ pub struct IrFunctionOverride {
     pub overridden: crate::fir::ResolvedFunctionOverrideTarget,
     pub overridden_owner: TypeName,
     pub overridden_semantic_role: Option<crate::types::SemanticCallRole>,
-    pub collection_barrier: Option<crate::libraries::CollectionBarrierOutcome>,
+    pub collection_barrier: Option<crate::libraries::CollectionBarrier>,
     pub overridden_is_interface: bool,
     pub name: String,
     /// The overridden declaration's own parameters and result, before the implementing class's

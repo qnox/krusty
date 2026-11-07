@@ -35,9 +35,6 @@ pub struct SecondaryCtor {
     /// 1-based source line this constructor's declaration ENDS on — its delegation's closing `)`
     /// or its block's `}`. Filled by the same post-pass.
     pub decl_end_line: u32,
-    /// 1-based source line of each parameter's default expression, parallel to [`Self::params`];
-    /// 0 where the parameter has no default. Filled by the same post-pass.
-    pub default_lines: Vec<u32>,
     /// The visibility the declaration was written with. A secondary constructor is the one member
     /// whose modifiers used to be dropped, which published every `private constructor` publicly.
     pub visibility: Visibility,

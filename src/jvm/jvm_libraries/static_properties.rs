@@ -26,7 +26,10 @@ impl JvmLibraries {
                 .is_some_and(|field| field.name == field_name && field.desc == field_descriptor)
         };
         let ci = self.cp.find_name(internal)?;
-        if let Some(property) = super::metadata::class_properties(&ci)
+        if let Some(property) = self
+            .cp
+            .class_members(&ci)
+            .class_properties
             .iter()
             .find(|property| realizes_field(property))
             .cloned()
@@ -47,7 +50,9 @@ impl JvmLibraries {
         let companion_name = super::metadata::class_companion_name(&ci)?;
         let companion = crate::types::existing_type_name_nested_child(internal, &companion_name)?;
         let companion = self.cp.find_name(companion)?;
-        super::metadata::class_properties(&companion)
+        self.cp
+            .class_members(&companion)
+            .class_properties
             .iter()
             .find(|property| realizes_field(property))
             .cloned()
@@ -106,7 +111,10 @@ impl JvmLibraries {
     /// `JvmPropertySignature` names, whose `ConstantValue` is the declaration's constant.
     fn companion_block_property(&self, internal: TypeName, name: &str) -> Option<PropertyInfo> {
         let class = self.cp.find_name(internal)?;
-        let declaration = super::metadata::class_properties(&class)
+        let declaration = self
+            .cp
+            .class_members(&class)
+            .class_properties
             .iter()
             .find(|property| property.is_companion_block_member && property.name == name)?;
         let accessor = |jvm_name: &str, descriptor: &str| {
@@ -290,7 +298,9 @@ impl JvmLibraries {
             }
             let companion = self.cp.find_name(internal)?;
             let field = self.static_field_name(outer, name)?;
-            super::metadata::class_properties(&companion)
+            self.cp
+                .class_members(&companion)
+                .class_properties
                 .iter()
                 .any(|property| {
                     property.field.as_ref().is_some_and(|signature| {
@@ -320,6 +330,45 @@ impl JvmLibraries {
             Some(SemanticCallableOwner::Classifier(field.owner)),
         ));
         field.external_identity = declaration.external_identity;
+    }
+
+    /// Join a package facade's static field with the metadata property it realizes. A `const val`
+    /// keeps its metadata declaration and gains the field's constant. A top-level `@JvmField`
+    /// property has no getter: the field is its only accessor, so it is published as the
+    /// field-backed property a qualified read selects.
+    pub(super) fn merge_top_level_field_property(
+        &self,
+        name: &str,
+        field: &JvmStaticField,
+        properties: &mut Vec<PropertyInfo>,
+    ) {
+        let Some(metadata) =
+            self.metadata_property_for_field(field.owner, &field.name, &field.descriptor)
+        else {
+            return;
+        };
+        let deprecated_hidden = field.deprecated_hidden;
+        super::super::top_level_properties::merge_metadata_const(
+            name,
+            &metadata,
+            field,
+            deprecated_hidden,
+            properties,
+        );
+        if metadata.name == name
+            && metadata.getter.is_none()
+            && !metadata.is_const
+            && !metadata.is_extension
+            && metadata.context_params.is_empty()
+        {
+            // The field's access flags are the JVM realization; an `internal` property's field is
+            // public. Kotlin visibility comes from the declaration's metadata.
+            let field = JvmStaticField {
+                visibility: metadata.visibility,
+                ..field.clone()
+            };
+            properties.extend(self.associated_property_for_static_field(field));
+        }
     }
 
     pub(super) fn associated_property_for_static_field(

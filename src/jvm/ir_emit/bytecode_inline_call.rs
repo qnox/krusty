@@ -602,13 +602,7 @@ impl Emitter<'_> {
         call: &ClasspathInlineCall<'_, '_>,
         code: &mut CodeBuilder,
     ) -> Option<()> {
-        let ClasspathInlineCall {
-            call_expression,
-            target,
-            args,
-            reified,
-            ..
-        } = *call;
+        let ClasspathInlineCall { target, args, .. } = *call;
         if code.is_dead() {
             return Some(());
         }
@@ -654,39 +648,14 @@ impl Emitter<'_> {
             return None;
         }
         let parameters = self.call_parameters(
+            call,
             &supplies,
             &physical,
-            args,
             &lambda_bindings,
             captured,
             &lambdas,
         );
         let base = self.inline_splice_base(self.frame.size());
-        // The body's lines are mapped once the arguments are evaluated, like kotlinc's, so that
-        // the source map numbers them after any call inlined into an argument; this first pass only
-        // settles whether the port covers the body.
-        if let Err(error) = inliner::inline(
-            &callee,
-            &parameters,
-            &lambdas,
-            target.inline_only,
-            base,
-            reified,
-            inliner::InliningContext {
-                lines: &mut UnmappedLines,
-                classes: &self.bodies,
-                objects: &mut self.call_objects(
-                    call_expression,
-                    target.name,
-                    false,
-                    SourceMap::default(),
-                ),
-                enum_entries: &mut self.call_enum_entries(false),
-            },
-        ) {
-            crate::trace_compiler!("splice", "unified inliner declines: {error:?}");
-            return None;
-        }
         let inlined_call = InlinedCall {
             call: *call,
             physical: &physical,
@@ -697,8 +666,16 @@ impl Emitter<'_> {
             lines: SourceMap::default(),
             captures: &[],
         };
-        self.emit_inlined_call(&inlined_call, &callee, &parameters, inlined, base, code)
-            .expect("the body was inlined before its arguments were evaluated");
+        // The route was settled from the callee's facts before any argument was evaluated: a body
+        // the port then cannot inline is an error, never a direct call.
+        if let Err(error) =
+            self.emit_inlined_call(&inlined_call, &callee, &parameters, inlined, base, code)
+        {
+            self.run.set_emit_error(format!(
+                "the compiled inline body of `{}` cannot be inlined: {error:?}",
+                target.name
+            ));
+        }
         Some(())
     }
 
@@ -735,6 +712,11 @@ impl Emitter<'_> {
         let supplies = self
             .parameter_supplies(call, &physical, callee, &declared)
             .ok_or("a function-typed argument has no published crossinline/noinline modifier")?;
+        let callee_suspends = self.ir.suspend_calls.contains_key(&call_expression)
+            || self
+                .ir
+                .compiled_inline_call(call_expression)
+                .is_some_and(|function| self.ir.suspend_funs.contains(&function));
         let mut lambdas = Vec::new();
         let mut captured = Vec::new();
         let mut captures = Vec::new();
@@ -749,7 +731,7 @@ impl Emitter<'_> {
             )? {
                 continue;
             }
-            let argument = self.inline_lambda_node(argument, target.name)?;
+            let argument = self.inline_lambda_node(argument, target.name, callee_suspends)?;
             let start = captured.len();
             for &(capture, ty) in &argument.captures {
                 captured.push(Parameter {
@@ -801,9 +783,9 @@ impl Emitter<'_> {
             }
         }
         let parameters = self.call_parameters(
+            call,
             &supplies,
             &physical,
-            args,
             &lambda_bindings,
             captured,
             &lambdas,
@@ -827,16 +809,24 @@ impl Emitter<'_> {
     }
 
     /// Each parameter's binding: a lambda the callee invokes, a caller local, or a temporary. A
-    /// default bridge call's masks and method handle are none of the body's parameters.
+    /// default bridge call's masks and method handle are none of the body's parameters. A function
+    /// value the call passes for an inline suspend parameter is recorded as such (kotlinc's
+    /// `NonInlineArgumentForInlineSuspendParameter.OTHER`).
     fn call_parameters(
         &self,
+        call: &ClasspathInlineCall<'_, '_>,
         supplies: &[Supply],
         physical: &[Ty],
-        args: &[u32],
         lambda_bindings: &HashMap<usize, usize>,
         captured: Vec<Parameter>,
         lambdas: &[inliner::Lambda],
     ) -> Parameters {
+        let ClasspathInlineCall {
+            call_expression,
+            args,
+            leading_non_argument_operands,
+            ..
+        } = *call;
         let capture_owners = (0..captured.len())
             .map(|capture| {
                 lambdas
@@ -845,31 +835,43 @@ impl Emitter<'_> {
                     .expect("every captured value belongs to a lambda")
             })
             .collect();
+        let mut parameters = Vec::with_capacity(args.len());
+        let mut non_inline_suspend = Vec::new();
+        for (index, ((supply, &ty), &argument)) in
+            supplies.iter().zip(physical).zip(args).enumerate()
+        {
+            let binding = match (lambda_bindings.get(&index), supply) {
+                (_, Supply::MaskOperand) => continue,
+                (Some(&lambda), Supply::Omitted) => Binding::DefaultLambda(lambda),
+                (Some(&lambda), _) => Binding::Lambda(lambda),
+                (None, Supply::CallerLocal) => self.caller_local_binding(argument, ty),
+                (None, Supply::Unread) => Binding::Unread,
+                (None, Supply::Stored | Supply::InPlace | Supply::Omitted) => Binding::Temporary,
+            };
+            let suspend_value = !matches!(binding, Binding::Lambda(_) | Binding::DefaultLambda(_))
+                && index
+                    .checked_sub(leading_non_argument_operands)
+                    .and_then(|parameter| {
+                        crate::jvm::inline_parameters::is_inline_suspend_parameter(
+                            self.ir,
+                            call_expression,
+                            parameter,
+                        )
+                    })
+                    == Some(true);
+            if suspend_value {
+                non_inline_suspend.push(parameters.len());
+            }
+            parameters.push(Parameter {
+                category: Category::of_descriptor(&type_descriptor(ty)),
+                binding,
+            });
+        }
         Parameters {
-            parameters: supplies
-                .iter()
-                .zip(physical)
-                .zip(args)
-                .enumerate()
-                .filter(|(_, ((supply, _), _))| **supply != Supply::MaskOperand)
-                .map(|(index, ((supply, &ty), &argument))| Parameter {
-                    category: Category::of_descriptor(&type_descriptor(ty)),
-                    binding: match (lambda_bindings.get(&index), supply) {
-                        (Some(&lambda), Supply::Omitted) => Binding::DefaultLambda(lambda),
-                        (Some(&lambda), _) => Binding::Lambda(lambda),
-                        (None, Supply::CallerLocal) => self.caller_local_binding(argument, ty),
-                        (None, Supply::Unread) => Binding::Unread,
-                        (None, Supply::Stored | Supply::InPlace | Supply::Omitted) => {
-                            Binding::Temporary
-                        }
-                        (None, Supply::MaskOperand) => {
-                            unreachable!("a mask operand is filtered out above")
-                        }
-                    },
-                })
-                .collect(),
+            parameters,
             captured,
             capture_owners,
+            non_inline_suspend,
         }
     }
 
@@ -1009,21 +1011,31 @@ impl Emitter<'_> {
 
         // Like any call, an inline call states its line once its arguments are evaluated; that line
         // is the call site the body's lines are mapped against.
+        let since = match code.value_boundary_here() {
+            Some((first, value)) if debug_lines::evaluates_to(self.ir, value, call_expression) => {
+                first
+            }
+            _ => code.line_entry_count(),
+        };
         self.mark_expression_start(call_expression, code);
         let caller_line = code.current_line();
         let call_line = caller_line.unwrap_or(1);
         // An `@InlineOnly` body whose ordinary arguments are movable evaluates them where the
-        // copied body first loads their temporary. The eager expression boundary above exists so
-        // the call line can anchor the body's source-map interval, but it must not claim the
-        // generated prefix before that first source argument. Withdrawing it leaves the enclosing
-        // inline line in effect until emitting the in-place operand marks the call-site line.
-        if supplies.contains(&Supply::InPlace)
-            && !inliner::in_place_arguments_begin_at_entry(callee)
-        {
-            code.withdraw_line();
-        }
+        // copied body loads their temporary. kotlinc generated that code, with its lines, before
+        // the call marked its own line, so the entry is settled once the body has placed them.
+        let deferred_line = if supplies.contains(&Supply::InPlace) {
+            code.defer_line_mark(since)
+        } else {
+            None
+        };
         let claimable = self.claimable_lines();
         let bodies = self.bodies;
+        // The body is numbered from the method's scopes so far, its own scope at the call's line
+        // (`currentCallSiteLineNumber = lastLineNumber`).
+        let mut scopes = self.inline_scopes.take().map(|mut scopes| {
+            scopes.call_site_line = caller_line.map_or(-1, i32::from);
+            scopes
+        });
         let mut lines = CallLines {
             emitter: self,
             body,
@@ -1038,7 +1050,7 @@ impl Emitter<'_> {
         let mut objects =
             lines
                 .emitter
-                .call_objects(call_expression, target.name, true, lambda_lines.clone());
+                .call_objects(call_expression, target.name, lambda_lines.clone());
         let (classifiers, run, owner) = (
             lines.emitter.classifiers,
             lines.emitter.run,
@@ -1048,7 +1060,6 @@ impl Emitter<'_> {
             classifiers,
             run,
             owner: &owner,
-            commit: true,
         };
         let inlined = inliner::inline(
             callee,
@@ -1062,11 +1073,16 @@ impl Emitter<'_> {
                 classes: &bodies,
                 objects: &mut objects,
                 enum_entries: &mut enum_entries,
+                scopes: scopes.as_mut(),
             },
         );
+        self.inline_scopes = scopes;
         let inlined = match inlined {
             Ok(inlined) => inlined,
             Err(error) => {
+                if let Some(deferred) = deferred_line {
+                    code.settle_deferred_line(deferred);
+                }
                 for lease in leases {
                     self.release_temporary(lease);
                 }
@@ -1105,6 +1121,9 @@ impl Emitter<'_> {
             code.set_stack_height(0);
         }
         self.write_inlined_node(&inlined, placement, code);
+        if let Some(deferred) = deferred_line {
+            code.settle_deferred_line(deferred);
+        }
         if spills_operands {
             code.inline_call_marker(false);
             code.set_stack_height(saved + code.stack_height());
@@ -1225,9 +1244,7 @@ impl Emitter<'_> {
         let function_typed = |argument: u32| {
             let semantic = self
                 .ir
-                .logical_types
-                .get(&argument)
-                .copied()
+                .logical_type(argument)
                 .unwrap_or_else(|| self.value_ty(argument));
             semantic.non_null().is_fun()
         };
@@ -1739,21 +1756,6 @@ impl Emitter<'_> {
         self.cw
             .source_map_for_inlining(claimable)
             .and_then(|map| map.map_line(name, path, source, call_line))
-    }
-}
-
-/// Lines left as the body's own, for the pass that only checks the body can be inlined.
-struct UnmappedLines;
-
-impl inliner::SourceLines for UnmappedLines {
-    fn map(&mut self, line: u16) -> Option<u16> {
-        Some(line)
-    }
-    fn synthetic(&mut self) -> Option<u16> {
-        None
-    }
-    fn call_site(&self) -> Option<u16> {
-        None
     }
 }
 

@@ -104,12 +104,7 @@ impl Emitter<'_> {
 
     fn append(&mut self, concat: u32, expression: u32, code: &mut CodeBuilder) {
         let ty = self.value_ty(expression);
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&expression)
-            .copied()
-            .unwrap_or(ty);
+        let semantic = self.ir.logical_type(expression).unwrap_or(ty);
         if ty == Ty::Unit {
             let unit = Ty::obj("kotlin/Unit");
             self.emit_value_as(expression, unit, code);
@@ -164,11 +159,16 @@ impl Emitter<'_> {
     }
 
     /// Emit a template part for the slot that consumes it. A smart cast is kotlinc's
-    /// `IMPLICIT_CAST`, so the part reaches that slot unnarrowed and the slot casts it if it must;
-    /// answers the stack type left.
+    /// `IMPLICIT_CAST`, and a generic result keeps its declaration's erased slot, so either part
+    /// reaches that slot unnarrowed and the slot casts it if it must: `append(String)` does,
+    /// `valueOf(Object)`, `append(Object)` and an `invokedynamic` argument do not. Answers the
+    /// stack type left.
     fn emit_template_part(&mut self, part: u32, code: &mut CodeBuilder) -> Ty {
         if let Some(operand) = self.consumed_implicit_cast_operand(part) {
             return self.emit_consumed_operand(operand, code);
+        }
+        if self.erased_reference_result(part).is_some() {
+            return self.emit_consumed_operand(part, code);
         }
         self.emit_value(part, code);
         self.value_ty(part)
@@ -221,8 +221,7 @@ impl Emitter<'_> {
         }
         if parts.iter().any(|part| {
             self.ir
-                .logical_types
-                .get(part)
+                .logical_type(*part)
                 .is_some_and(|ty| !ty.is_nullable() && ty.is_unsigned())
         }) {
             return false;

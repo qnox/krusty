@@ -33,12 +33,15 @@ use rayon::prelude::*;
 
 use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::classreader::parse_class;
 
 use super::box_byte_score;
 use super::box_ratchet::{self, Outcome, Platform};
 use super::box_reference_classes;
 use super::common;
+
+#[path = "kotlin_box_ir_jvm_conformance/entry.rs"]
+mod entry;
+use entry::{find_box_class, CompiledClasses};
 
 // BoxRunner.java source embedded at compile time; compiled once at test start.
 const BOX_RUNNER_SRC: &str = r#"
@@ -294,6 +297,7 @@ fn unit_options<'a>(
     if !refusals.is_empty() {
         return Err(refusals.join("\n"));
     }
+    options.inline_scopes_numbers = configuration.inline_scopes_numbers;
     if configuration.language_version.is_some() || configuration.api_version.is_some() {
         let language_version = configuration
             .language_version
@@ -359,6 +363,19 @@ fn typed_levels_preserve_every_other_language_setting() {
     );
 }
 
+/// What a unit analyzes against: its JVM libraries, with the native compiler plugins its command
+/// line requests (`// WITH_COMPOSE`). `None` when the command line requests one krusty refuses.
+fn plugin_provider(
+    platform: Box<krusty::jvm::jvm_libraries::JvmLibraries>,
+    options: &krusty_cli::cli::Options,
+    classpath: &[std::path::PathBuf],
+) -> Option<krusty::frontend::PlatformProvider> {
+    let plugins = options.resolve_plugins(classpath);
+    plugins.errors.is_empty().then(|| {
+        krusty::frontend::PlatformProvider::jvm(platform).with_native_plugins(plugins.native)
+    })
+}
+
 /// The JVM library provider a unit analyzes against, at the API version its command line selects.
 fn jvm_libraries(
     cp: &std::rc::Rc<Classpath>,
@@ -388,7 +405,8 @@ fn compile_source(
         cp_paths.push(p.to_path_buf());
     }
     // Reuse stable jar/jimage classpaths; scratch directory classpaths die with their compile.
-    let cp = harness_classpath(cp_paths);
+    let provider = |platform| plugin_provider(platform, &options, &cp_paths);
+    let cp = harness_classpath(cp_paths.clone());
     progress("two-pass FIR");
     let started = std::time::Instant::now();
     let platform = Box::new(jvm_libraries(&cp, &options));
@@ -396,7 +414,7 @@ fn compile_source(
     let stems = [stem.to_string()];
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        krusty::frontend::PlatformProvider::jvm(platform),
+        provider(platform)?,
         &options.language_settings.features,
         &mut diags,
     );
@@ -468,7 +486,7 @@ fn compile_multifile(
     // sees the emitted classes as an overlay on the shared jar classpath, and they ride along to
     // BoxRunner's loader. When javac-first fails — the Java references Kotlin declarations, so it
     // cannot be ordered first — fall back to the KOTLIN-FIRST pipeline: signature stubs → krusty →
-    // real javac (docs/JAVA_INTEROP.md slice 2).
+    // real javac.
     let mut java_classes: Vec<(String, Vec<u8>)> = Vec::new();
     if !java_blocks.is_empty() {
         match common::javac_compile(&java_blocks, cp_jars) {
@@ -616,7 +634,8 @@ fn compile_blocks_mixed(
     if let Some(p) = jdk_modules {
         cp_paths.push(p.to_path_buf());
     }
-    let cp = harness_classpath_with_friends(cp_paths, friend_paths.to_vec());
+    let provider = |platform| plugin_provider(platform, &options, &cp_paths);
+    let cp = harness_classpath_with_friends(cp_paths.clone(), friend_paths.to_vec());
     let _overlay = OverlayGuard::set(&cp, overlay);
     report("module two-pass FIR");
     let platform = Box::new(jvm_libraries(&cp, &options));
@@ -644,7 +663,7 @@ fn compile_blocks_mixed(
     );
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        krusty::frontend::PlatformProvider::jvm(platform),
+        provider(platform)?,
         &options.language_settings.features,
         &mut diags,
     );
@@ -669,38 +688,6 @@ fn write_classes_to_dir(classes: &[(String, Vec<u8>)], dir: &Path) -> Option<()>
         fs::write(&path, bytes).ok()?;
     }
     Some(())
-}
-
-/// krusty's emitted classes for one box case: the flat list the JVM runner loads, plus the module
-/// boundaries byte scoring pairs on. Every class is kept once in `flat`; `module_ranges` records
-/// each module's contiguous half-open range into it, in emission order. A single-module topology
-/// holds one range covering every class under [`box_reference_classes::MAIN_MODULE`]; a multi-module
-/// build records one range per module so a class name shared by two modules stays two identities.
-struct CompiledClasses {
-    flat: Vec<(String, Vec<u8>)>,
-    module_ranges: Vec<(String, std::ops::Range<usize>)>,
-}
-
-impl CompiledClasses {
-    /// Wrap a single module's flat class list (ordinary, `// FILE:`, or mixed-Java topology).
-    fn single_module(flat: Vec<(String, Vec<u8>)>) -> Self {
-        let range = 0..flat.len();
-        CompiledClasses {
-            module_ranges: vec![(box_reference_classes::MAIN_MODULE.to_string(), range)],
-            flat,
-        }
-    }
-
-    /// The module-qualified inventory for byte scoring, keyed by `(module, internal name)`.
-    fn qualified(&self) -> box_byte_score::QualifiedClasses {
-        let mut out = box_byte_score::QualifiedClasses::new();
-        for (module, range) in &self.module_ranges {
-            for (name, bytes) in &self.flat[range.clone()] {
-                out.insert((module.clone(), name.clone()), bytes.clone());
-            }
-        }
-        out
-    }
 }
 
 /// Compile a `// MODULE:` test the way a Gradle multi-module build (or kotlinc's separate-compilation
@@ -872,21 +859,6 @@ fn compile_box_case(
         compile_source(src, stem, cp_jars, jdk_modules, progress)
             .map(CompiledClasses::single_module)
     }
-}
-
-/// Find the class that declares `static box()Ljava/lang/String;`.
-fn find_box_class(classes: &[(String, Vec<u8>)]) -> Option<String> {
-    for (name, bytes) in classes {
-        if let Ok(ci) = parse_class(bytes) {
-            if ci
-                .method("box", "()Ljava/lang/String;")
-                .is_some_and(|m| m.is_static())
-            {
-                return Some(name.replace('/', "."));
-            }
-        }
-    }
-    None
 }
 
 /// Read exactly `buf.len()` bytes from `fd`, aborting after `deadline`.
@@ -1344,6 +1316,9 @@ fun box(): String = Registry.value()\n";
     let classpath = common::classpath_jars_for(&source);
     let classes = compile_module_test(&source, &classpath, Some(jdk.as_path()), &|_| {})
         .expect("the folded common source compiles through the module harness");
+    let box_class = classes
+        .box_class()
+        .expect("the platform source emits box()");
     let classes: Vec<_> = classes
         .flat
         .into_iter()
@@ -1381,9 +1356,125 @@ fun box(): String = Registry.value()\n";
         "the module-harness output must be byte-identical to kotlinc"
     );
 
-    let box_class = find_box_class(&classes).expect("the platform source emits box()");
     assert_eq!(
         common::run_box(&classes, &box_class, std::slice::from_ref(&stdlib)),
+        Some("OK".to_string())
+    );
+}
+
+/// Each Compose fixture, JVM-only and so outside the portable box regressions, compiles to exactly
+/// the classes the reference compiler and its Compose plugin emit, byte for byte, and both builds
+/// pass its `box()`, which composes and recomposes the transformed functions through a recording
+/// composer.
+#[test]
+fn compose_restartable_functions_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("restartableFunctions");
+}
+
+#[test]
+fn compose_tracked_parameters_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("trackedParameters");
+}
+
+#[test]
+fn compose_default_arguments_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("defaultArguments");
+}
+
+#[test]
+fn compose_lambda_parameters_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("lambdaParameters");
+}
+
+#[test]
+fn compose_lambda_applier_schemes_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("lambdaSchemes");
+}
+
+#[test]
+fn compose_singleton_lambdas_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("singletonLambdas");
+}
+
+#[test]
+fn compose_remembered_lambdas_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("rememberedLambdas");
+}
+
+#[test]
+fn compose_class_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("classStability");
+}
+
+#[test]
+fn compose_class_stability_keeps_java_origin_apart_from_mapped_builtins() {
+    assert_compose_fixture_matches_kotlinc("classStabilityJavaOrigin");
+}
+
+#[test]
+fn compose_runtime_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("runtimeStability");
+}
+
+#[test]
+fn compose_generic_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("genericStability");
+}
+
+#[test]
+fn compose_value_class_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("valueClassStability");
+}
+
+#[test]
+fn compose_library_calls_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("libraryCalls");
+}
+
+#[test]
+fn compose_generic_field_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("genericFieldStability");
+}
+
+fn assert_compose_fixture_matches_kotlinc(stem: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/compose")
+        .join(format!("{stem}.kt"));
+    let source = fs::read_to_string(&path).expect("read the Compose fixture");
+    let source =
+        krusty::conformance::prepare_test_source(&source, krusty::conformance::TestTarget::Jvm);
+    let reference = box_reference_classes::checked_prepared_box(&source, stem)
+        .expect("the reference compiler compiles the fixture and its box() returns OK");
+    let classpath = common::classpath_jars_for(&source);
+    let jdk = common::jdk_modules();
+    // Every module is krusty's own: a library module is compiled before the modules using it.
+    let compiled = if source.contains("// MODULE:") {
+        compile_module_test(&source, &classpath, Some(jdk.as_path()), &|_| {})
+    } else {
+        compile_multifile(&source, stem, &classpath, Some(jdk.as_path()))
+            .map(CompiledClasses::single_module)
+    }
+    .expect("krusty compiles the fixture");
+    let class_file = |(_, bytes): &&(String, Vec<u8>)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]);
+    for (module, range) in &compiled.module_ranges {
+        let classes: Vec<_> = compiled.flat[range.clone()]
+            .iter()
+            .filter(class_file)
+            .cloned()
+            .collect();
+        let expected = reference
+            .module(module)
+            .unwrap_or_else(|| panic!("the reference compiler emits module {module}"));
+        assert_eq!(
+            compare_class_sets(&classes, expected),
+            Ok(()),
+            "module {module}"
+        );
+    }
+    let classes: Vec<_> = compiled.flat.iter().filter(class_file).cloned().collect();
+    let box_class = find_box_class(&classes).expect("the fixture emits box()");
+    assert_eq!(
+        common::run_box(&classes, &box_class, &classpath),
         Some("OK".to_string())
     );
 }
@@ -1535,8 +1626,8 @@ fn kotlin_codegen_box_conformance() {
     // compile time and on the JVM at runtime. No bespoke env var.
     eprintln!("box setup: locate Kotlin runtime jars");
     let stdlib_jar = common::stdlib_jar();
-    // Runtime classpath. kotlin-stdlib, kotlin-test, stdlib-jdk8, coroutines, and annotations stay
-    // on every runner. kotlin-reflect does not: `PropertyReference.getDelegate` upgrades to the
+    // Runtime classpath. kotlin-stdlib, kotlin-test, stdlib-jdk8, coroutines, annotations and the
+    // Compose runtime stay on every runner. kotlin-reflect does not: `PropertyReference.getDelegate` upgrades to the
     // reflection implementation as soon as that jar is visible. `// WITH_REFLECT` tests get a
     // second per-thread JVM whose classpath is this one plus kotlin-reflect. The compile classpath
     // stays directive-exact either way.
@@ -1560,6 +1651,13 @@ fn kotlin_codegen_box_conformance() {
     add_runtime_jar(common::find_jar("kotlin-stdlib-jdk8", &[]), true);
     add_runtime_jar(common::find_jar("kotlinx-coroutines-core", &["jdk8"]), true);
     add_runtime_jar(common::find_jar("annotations-", &[]), true);
+    // `// WITH_COMPOSE` cases run against the Compose runtime; no other case loads its classes.
+    for jar in krusty::toolchain::compose_runtime_jars()
+        .into_iter()
+        .flatten()
+    {
+        add_runtime_jar(Some(jar), true);
+    }
     let runtime_classpath = plain_jars.join(":");
     let reflect_runtime_classpath = reflect_jars.join(":");
     eprintln!("box setup: Kotlin runtime jars ready");
@@ -1792,7 +1890,7 @@ fn kotlin_codegen_box_conformance() {
                                 );
                             }
                         }
-                        let box_class = match find_box_class(&compiled.flat) {
+                        let box_class = match compiled.box_class() {
                             Some(c) => c,
                             None => {
                                 return (

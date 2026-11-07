@@ -17,8 +17,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
             }
         };
     }
-    copy_fact!(physical_types);
-    copy_fact!(logical_types);
+    ir.copy_types(source, target);
     copy_fact!(property_declaration_types);
     if ir.jvm_erased_primitive_wrapper_values.contains(&source) {
         ir.jvm_erased_primitive_wrapper_values.insert(target);
@@ -38,9 +37,9 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(intrinsic_suspension_points);
     move_fact!(reified_call_subst);
     move_fact!(inline_call_type_arguments);
-    move_fact!(construction_declared_params);
     move_fact!(construction_targets);
     move_fact!(synthesized_accessor_calls);
+    move_fact!(private_property_accessor_calls);
     // These facts identify the selected call operation. The source expression is now the
     // representation wrapper, so leaving a copy there would both orphan the real call and let a
     // later consumer mistake the wrapper for the operation that owns the provider decision.
@@ -59,6 +58,12 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     // The static a value-class member or constructor call was realized as: a private one reached
     // from another class goes through its accessor, which only the call itself names.
     move_fact!(jvm_member_targets);
+    // The source line is the call's: kotlinc marks it where the call starts and again at its
+    // dispatch, and writes the representation adaptation after it with no line of its own. The
+    // wrapper starts where the call does, so its start keeps the same mark.
+    if let Some(line) = ir.take_source_line(source) {
+        ir.set_source_line(target, line);
+    }
     ir.move_generated_operand_start(source, target);
     ir.move_compiled_inline_call(source, target);
 
@@ -80,7 +85,7 @@ mod tests {
         ir.reified_call_subst.insert(source, substitutions.clone());
         ir.inline_call_type_arguments
             .insert(source, substitutions.clone());
-        ir.logical_types.insert(source, Ty::String);
+        ir.set_logical_type(source, Ty::String);
 
         let target = clone_below_representation_wrapper(&mut ir, source);
 
@@ -91,8 +96,8 @@ mod tests {
             ir.inline_call_type_arguments.get(&target),
             Some(&substitutions)
         );
-        assert_eq!(ir.logical_types.get(&source), Some(&Ty::String));
-        assert_eq!(ir.logical_types.get(&target), Some(&Ty::String));
+        assert_eq!(ir.logical_type(source), Some(Ty::String));
+        assert_eq!(ir.logical_type(target), Some(Ty::String));
     }
 
     #[test]

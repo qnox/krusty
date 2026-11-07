@@ -7,6 +7,10 @@ use crate::klib_libraries::KlibDeclarationBodies;
 use crate::libraries::{KlibBodyCallable, KlibBodyClassContract, KlibBodyClassParameters};
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrClass, KlibIrFunction, KlibIrVariance};
 use crate::metadata::klib_ir::KlibIrSymbolKind;
+use crate::metadata::klib_ir::{
+    tree::{KlibIrNullability, KlibIrType},
+    KlibIrSignature,
+};
 use crate::types::{Ty, TyKind, TypeVariance};
 
 pub(super) struct ClassMemberHeader<'a, 'b> {
@@ -20,6 +24,38 @@ pub(super) struct ClassMemberHeader<'a, 'b> {
 
 fn mismatch(detail: &str) -> KlibBodyDeclineReason {
     KlibBodyDeclineReason::SignatureMismatch(detail.to_owned())
+}
+
+/// Semantic type conversion interns class paths, so prove the raw identity, including its mask,
+/// before using a member's dispatch receiver as a semantic class application.
+pub(super) fn authenticate_receiver(
+    class: &KlibBodyClassContract,
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> Result<(), KlibBodyDeclineReason> {
+    let dispatch = function
+        .dispatch_receiver
+        .as_ref()
+        .ok_or_else(|| mismatch("a class member has no serialized dispatch receiver"))?;
+    if !matches!(arena.ty(dispatch.ty), KlibIrType::Simple { classifier,
+        nullability: KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull, .. }
+        if classifier.kind == KlibIrSymbolKind::Class
+            && classifier.signature == KlibIrSignature::Public(class.signature.clone()))
+    {
+        return Err(mismatch(
+            "the serialized member receiver names a different class identity",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn declared_receiver(class: &KlibBodyClassContract) -> Ty {
+    if class.parameters.formals.is_empty() {
+        crate::types::builtin_semantic(class.classifier)
+            .unwrap_or_else(|| Ty::obj_name(class.classifier))
+    } else {
+        Ty::obj_args_name(class.classifier, &class.parameters.formals)
+    }
 }
 
 pub(super) fn authenticate<'a, 'b>(
@@ -50,6 +86,51 @@ pub(super) fn authenticate<'a, 'b>(
             "the serialized class header has a non-class symbol",
         ));
     }
+    let (types, formals) = bind_class_parameters(&class.parameters, member.arena, member.class)?;
+    Ok(ClassMemberHeader {
+        contract: class,
+        arena: member.arena,
+        function: member.function,
+        class: member.class,
+        types,
+        formals,
+    })
+}
+
+/// The raw header of `identity`, a private member of `class` that no provider records. Only
+/// members of its class call a private member, so the calling member's authenticated class is
+/// the authority: the callee must be a direct member of that exact class header (a getter in its
+/// own property's getter slot), its receiver must name that exact class, and it must be private.
+pub(super) fn authenticate_private_member<'a, 'b>(
+    class: &'a KlibBodyClassContract,
+    identity: &crate::libraries::KlibDependencyCallable,
+    bodies: &'b KlibDeclarationBodies,
+) -> Result<ClassMemberHeader<'a, 'b>, KlibBodyDeclineReason> {
+    if class.module != identity.module
+        || class.signature.member_id().is_some()
+        || classifier_name(&class.signature)? != class.classifier
+    {
+        return Err(mismatch(
+            "the calling class identity disagrees with its private member",
+        ));
+    }
+    let member = bodies
+        .class_member_header(identity, &class.signature)
+        .map_err(mismatch)?
+        .ok_or_else(|| mismatch("a private member is not a direct member of its calling class"))?;
+    if member.class.base.symbol.kind != KlibIrSymbolKind::Class {
+        return Err(mismatch(
+            "the serialized class header has a non-class symbol",
+        ));
+    }
+    if crate::metadata::semantic::declaration_visibility(member.function.base.flags)
+        != crate::types::Visibility::Private
+    {
+        return Err(mismatch(
+            "a class member without a provider record is not private",
+        ));
+    }
+    authenticate_receiver(class, member.arena, member.function)?;
     let (types, formals) = bind_class_parameters(&class.parameters, member.arena, member.class)?;
     Ok(ClassMemberHeader {
         contract: class,

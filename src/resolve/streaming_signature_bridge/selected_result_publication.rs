@@ -91,7 +91,7 @@ impl ProductionSignatureSemantics<'_> {
             origin,
             CompactSelectedResultPublication::constructor(
                 owner,
-                declaration.type_parameters.type_params.clone(),
+                crate::types::TyParamName::all(&declaration.type_parameters.type_params),
                 bounds,
                 parameters,
                 selected,
@@ -244,6 +244,31 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
         origin: crate::fir::OriginId,
     ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
         self.selected_calls.abbreviation(origin)
+    }
+
+    fn published_call_result_abbreviation(
+        &self,
+        origin: crate::fir::OriginId,
+        published: crate::fir::ResolvedTy,
+    ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
+        let abbreviation = self.selected_calls.abbreviation(origin)?;
+        let Some(inferred) = self.selected_calls.inferred_abbreviation(origin) else {
+            return Some(abbreviation);
+        };
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
+        crate::symbol_resolver::unify_ty(inferred.expansion, published.get(), &mut bindings);
+        // A formal the published expansion leaves unbound keeps the argument ordinary selection
+        // inferred for it.
+        let arguments = inferred
+            .formals
+            .iter()
+            .zip(abbreviation.arguments.iter())
+            .map(|(formal, ordinary)| bindings.get(formal.as_str()).copied().unwrap_or(*ordinary))
+            .collect();
+        Some(crate::fir::ResolvedTypeAbbreviation {
+            arguments,
+            ..abbreviation
+        })
     }
 
     fn call_result_publication(

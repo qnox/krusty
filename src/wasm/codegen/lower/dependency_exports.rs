@@ -49,9 +49,9 @@ impl Body<'_> {
     ) -> Result<(), Unsupported> {
         let Callee::External {
             target,
+            default_provider,
             params,
             ret,
-            substitutions,
             defaults,
             extension_receiver_parameter,
             ..
@@ -59,12 +59,17 @@ impl Body<'_> {
         else {
             return Err("an emitted dependency call without a checked external identity".into());
         };
-        if !defaults.is_empty() {
-            return Err(
-                "a dependency call with omitted arguments and no exported default bridge".into(),
-            );
-        }
-        if arguments.len() != params.len() {
+        let default_entry = match self.calls.external_default(*target) {
+            _ if defaults.is_empty() => None,
+            Some(entry) => Some(entry),
+            None => {
+                return Err(
+                    "a dependency call with omitted arguments and no exported default bridge"
+                        .into(),
+                )
+            }
+        };
+        if arguments.len() + defaults.len() != params.len() {
             return Err(
                 "a dependency call whose operands disagree with its checked parameters".into(),
             );
@@ -73,17 +78,40 @@ impl Body<'_> {
             .calls
             .external(*target)
             .ok_or_else(|| "an unregistered dependency callable identity".to_owned())?;
-        let signature = self
+        // A call leaving arguments out goes through the default provider's entry, so its operands
+        // and result take that declaration's own ABI: an override's can differ from the inherited
+        // declaration's when the class it inherits from is generic.
+        let signature = match default_entry {
+            Some(_) => self.calls.external_default_signature(*target),
+            None => self.calls.signature(*target),
+        }
+        .ok_or_else(|| "an emitted dependency without its declared signature".to_owned())?
+        .clone();
+        if self
             .calls
             .signature(*target)
-            .ok_or_else(|| "an emitted dependency without its declared signature".to_owned())?
-            .clone();
+            .is_none_or(|own| own.parameters().len() != signature.parameters().len())
+        {
+            return Err(
+                "an inherited default provider whose operands disagree with its override".into(),
+            );
+        }
         let callable = self
             .callables
             .callable(*target)
             .ok_or_else(|| "a dependency call without frozen callable facts".to_owned())?;
-        let instantiated = instantiate_dependency_signature(callable, *target, substitutions)
-            .map_err(str::to_owned)?;
+        let instantiated =
+            instantiate_dependency_signature(callable, callee).map_err(str::to_owned)?;
+        // An override's omitted arguments are the defaults of the declaration it inherits them
+        // from, whose entry evaluates them before dispatching to the actual member.
+        let provider = match default_provider {
+            Some(provider) if !defaults.is_empty() => {
+                self.callables.callable(*provider).ok_or_else(|| {
+                    "an inherited default provider without frozen callable facts".to_owned()
+                })?
+            }
+            _ => callable,
+        };
         if callable
             .generic_sig
             .as_ref()
@@ -136,7 +164,7 @@ impl Body<'_> {
         }
         .authenticate()
         .map_err(str::to_owned)?;
-        let abi = signature.parameters();
+        let declared = signature.parameters();
         let inserts_receiver = matches!(
             call,
             DependencyExportCall::Member
@@ -145,14 +173,36 @@ impl Body<'_> {
                 | DependencyExportCall::SourceSingletonExtension { .. }
                 | DependencyExportCall::ClassifierAssociated { .. }
         );
-        if abi.len() != arguments.len() + usize::from(inserts_receiver) {
+        if declared.len() != params.len() + usize::from(inserts_receiver) {
             return Err(
                 "a dependency export whose declared operand count disagrees with its call".into(),
             );
         }
+        // The operands the call supplies, at their declared positions. Only a value parameter
+        // whose declaration owns a default is omitted, so it follows the contexts and receiver.
+        let omitted = call
+            .omitted_operands(
+                defaults,
+                crate::backend::DeclaredOperandRoles {
+                    context_count: callable.context_count,
+                    defaults: provider
+                        .klib_body_parameter_defaults
+                        .map(|defaults| defaults.as_slice()),
+                    declared: declared.len(),
+                },
+            )
+            .map_err(str::to_owned)?;
+        let abi = declared;
+        // A member's receiver leads its operands but is not one of the parameters an omission
+        // mask covers, so the masks number the parameters after it.
+        let receiver_operands = call.unmasked_receiver_operands();
+        let masked = omitted
+            .iter()
+            .map(|&position| position - receiver_operands)
+            .collect::<Vec<_>>();
         match call {
             DependencyExportCall::TopLevel | DependencyExportCall::SerializedExtension => {
-                self.dependency_arguments(arguments, abi)?;
+                self.dependency_arguments_omitting(arguments, abi, &omitted)?;
             }
             DependencyExportCall::SerializedClassifierAssociated { receiver } => {
                 if !matches!(carrier(receiver)?, Some(ValType::Ref { .. })) {
@@ -170,14 +220,14 @@ impl Body<'_> {
                 if effect.evaluate_source() {
                     self.statement(dispatch_receiver.expect("validated singleton receiver"))?;
                 }
-                self.dependency_arguments(arguments, abi)?;
+                self.dependency_arguments_omitting(arguments, abi, &omitted)?;
             }
             DependencyExportCall::Member | DependencyExportCall::MemberExtension => {
                 self.value(
                     dispatch_receiver.expect("validated member receiver"),
                     abi[0],
                 )?;
-                self.dependency_arguments(arguments, &abi[1..])?;
+                self.dependency_arguments_omitting(arguments, &abi[1..], &masked)?;
             }
             DependencyExportCall::SourceExtension {
                 receiver_position, ..
@@ -190,9 +240,15 @@ impl Body<'_> {
                     dispatch_receiver.expect("validated extension receiver"),
                     abi[receiver_position],
                 )?;
-                self.dependency_arguments(
+                let values = receiver_position + 1;
+                let omitted = omitted
+                    .iter()
+                    .map(|&position| position - values)
+                    .collect::<Vec<_>>();
+                self.dependency_arguments_omitting(
                     &arguments[receiver_position..],
-                    &abi[receiver_position + 1..],
+                    &abi[values..],
+                    &omitted,
                 )?;
             }
             DependencyExportCall::SourceSingletonExtension {
@@ -226,8 +282,55 @@ impl Body<'_> {
                 )?;
             }
         }
-        self.code.call(function);
+        match default_entry {
+            Some(entry) => {
+                for mask in crate::backend::default_arguments::omission_masks(
+                    abi.len() - receiver_operands,
+                    masked.iter().copied(),
+                ) {
+                    self.code.i32_const(mask as i32);
+                }
+                self.code.call(entry);
+            }
+            None => {
+                // An ordinary call to an overridable member runs the receiver's override.
+                let dispatch = match call {
+                    DependencyExportCall::Member | DependencyExportCall::MemberExtension => {
+                        self.calls.external_dispatch(*target)
+                    }
+                    _ => None,
+                };
+                self.code.call(dispatch.unwrap_or(function));
+            }
+        }
         self.coerce_emitted_value(signature.result(), *ret)
+    }
+
+    /// The operands of `abi` in order: each supplied one evaluated, and a zero at each `omitted`
+    /// position, whose default the declaration's default entry evaluates.
+    fn dependency_arguments_omitting(
+        &mut self,
+        arguments: &[u32],
+        abi: &[Ty],
+        omitted: &[usize],
+    ) -> Result<(), Unsupported> {
+        if arguments.len() + omitted.len() != abi.len() {
+            return Err(
+                "a dependency export whose declared operand count disagrees with its call".into(),
+            );
+        }
+        let mut supplied = arguments.iter();
+        for (position, &parameter) in abi.iter().enumerate() {
+            if omitted.contains(&position) {
+                let carrier = carrier(parameter)?
+                    .ok_or_else(|| "a defaulted call with a `Unit` parameter".to_string())?;
+                super::absent_arguments::push_zero(&mut self.code, carrier);
+            } else {
+                let argument = supplied.next().expect("counted above");
+                self.value(*argument, parameter)?;
+            }
+        }
+        Ok(())
     }
 
     fn dependency_arguments(&mut self, arguments: &[u32], abi: &[Ty]) -> Result<(), Unsupported> {
@@ -240,5 +343,37 @@ impl Body<'_> {
             self.value(argument, parameter)?;
         }
         Ok(())
+    }
+
+    /// Another module's class, constructed through the entry its module exports under the
+    /// selected constructor's identity; `None` when that module published none.
+    pub(super) fn dependency_construction(
+        &mut self,
+        target: crate::fir::ExternalCallableId,
+        internal: crate::types::TypeName,
+        args: &[u32],
+    ) -> Option<Result<(), Unsupported>> {
+        if self.ir.class_id_by_name(internal).is_some() {
+            return None;
+        }
+        let function = self.calls.external(target)?;
+        Some((|| {
+            let signature = self
+                .calls
+                .signature(target)
+                .ok_or("a dependency constructor without its declared signature")?
+                .clone();
+            if signature.parameters().len() != args.len() {
+                return Err(
+                    "a dependency construction whose operands disagree with its constructor"
+                        .to_string(),
+                );
+            }
+            for (argument, parameter) in args.iter().zip(signature.parameters()) {
+                self.value(*argument, *parameter)?;
+            }
+            self.code.call(function);
+            self.coerce_emitted_value(signature.result(), Ty::obj_name(internal))
+        })())
     }
 }

@@ -43,7 +43,7 @@ pub(super) struct SelectedGenericCall {
     arguments: Vec<Option<Ty>>,
     argument_provenance: Vec<ReifiedArgumentProvenance>,
     additional_bounds: Vec<Vec<Ty>>,
-    pub(super) reified_parameters: Vec<(usize, String)>,
+    pub(super) reified_parameters: Vec<(usize, crate::types::TyParamName)>,
     pub(super) intersections: HashMap<usize, InferredIntersection>,
     /// The runtime classifier of each reified slot inferred as an intersection: kotlinc reifies
     /// the whole intersection to its common supertype. Only reification reads it; the semantic
@@ -97,7 +97,7 @@ impl SelectedGenericCall {
             self.arguments.resize(signature.formals.len(), None);
         }
         for (ordinal, formal) in signature.formals.iter().enumerate() {
-            if let Some(&completion) = completion_bindings.get(formal) {
+            if let Some(&completion) = completion_bindings.get(formal.as_str()) {
                 self.arguments[ordinal] = Some(completion);
             }
         }
@@ -181,22 +181,25 @@ fn reified_provenance_of_ty_with_declaration(
         | TyKind::StarProjection(inner) => {
             reified_provenance_of_ty_with_declaration(inner, declaration)
         }
-        TyKind::TyParam(identity, occurrence_bound) => ReifiedArgumentProvenance {
-            through_definitely_non_null: declaration(identity.as_str())
-                .and_then(|declared| match declared.non_null().kind() {
-                    TyKind::TyParam(declared_identity, declared_bound)
-                        if declared_identity == identity =>
-                    {
-                        Some(declared_bound)
-                    }
-                    _ => None,
-                })
-                .is_some_and(|declared_bound| {
-                    declared_bound.upper_bound_admits_null()
-                        && !occurrence_bound.upper_bound_admits_null()
-                }),
-            ..Default::default()
-        },
+        TyKind::TyParam(identity, occurrence_bound) | TyKind::Var(identity, occurrence_bound) => {
+            ReifiedArgumentProvenance {
+                through_definitely_non_null: declaration(identity.as_str())
+                    .and_then(|declared| match declared.non_null().kind() {
+                        TyKind::TyParam(declared_identity, declared_bound)
+                        | TyKind::Var(declared_identity, declared_bound)
+                            if declared_identity == identity =>
+                        {
+                            Some(declared_bound)
+                        }
+                        _ => None,
+                    })
+                    .is_some_and(|declared_bound| {
+                        declared_bound.upper_bound_admits_null()
+                            && !occurrence_bound.upper_bound_admits_null()
+                    }),
+                ..Default::default()
+            }
+        }
         TyKind::Obj(_, arguments) => ReifiedArgumentProvenance {
             arguments: arguments
                 .iter()
@@ -220,14 +223,14 @@ fn reified_provenance_of_ty_with_declaration(
 }
 
 fn constrain_reified_argument_provenance(
-    formals: &[String],
+    formals: &[crate::types::TyParamName],
     declared: Ty,
     actual: Ty,
     provenance: &ReifiedArgumentProvenance,
     facts: &mut HashMap<String, Vec<ReifiedArgumentProvenance>>,
 ) {
-    if let TyKind::TyParam(formal, _) = declared.non_null().kind() {
-        if formals.iter().any(|candidate| candidate == formal) {
+    if let TyKind::TyParam(formal, _) | TyKind::Var(formal, _) = declared.non_null().kind() {
+        if formals.contains(&formal) {
             facts
                 .entry(formal.to_string())
                 .or_default()
@@ -409,7 +412,7 @@ impl Checker<'_> {
             .formals
             .iter()
             .map(|formal| {
-                let Some(values) = facts.get(formal) else {
+                let Some(values) = facts.get(formal.as_str()) else {
                     return Default::default();
                 };
                 values
@@ -524,13 +527,13 @@ impl Checker<'_> {
     fn reified_parameters(
         signature: &crate::libraries::GenericSig,
         call_sig: &CallSig,
-    ) -> Vec<(usize, String)> {
+    ) -> Vec<(usize, crate::types::TyParamName)> {
         call_sig
             .reified_type_parameter_ordinals
             .iter()
             .filter_map(|&ordinal| {
                 let ordinal = usize::try_from(ordinal).ok()?;
-                Some((ordinal, signature.formals.get(ordinal)?.clone()))
+                Some((ordinal, *signature.formals.get(ordinal)?))
             })
             .collect()
     }
@@ -613,7 +616,9 @@ impl Checker<'_> {
             .formals
             .iter()
             .zip(&arguments)
-            .filter_map(|(formal, argument)| argument.map(|argument| (formal.clone(), argument)))
+            .filter_map(|(formal, argument)| {
+                argument.map(|argument| (crate::types::TyParamName::from(formal), argument))
+            })
             .collect::<crate::symbol_resolver::GSigBinds>();
         let lower_inputs = self.positional_lower_inputs(signature, logical_arg_tys);
         let mut intersection_bindings = self.intersection_bindings_from_lower_inputs(&lower_inputs);
@@ -772,7 +777,7 @@ impl Checker<'_> {
             {
                 continue;
             }
-            let Some(&selected_argument) = selected_bindings.get(formal) else {
+            let Some(&selected_argument) = selected_bindings.get(formal.as_str()) else {
                 continue;
             };
             let direct_arguments = slots
@@ -831,9 +836,9 @@ impl Checker<'_> {
                 if !all_arguments_prove_parts {
                     continue;
                 }
-                selected_bindings.insert(formal.clone(), fact.parts[0]);
-                intersection_bindings.insert(formal.clone(), fact.parts.clone());
-                propagated.insert(formal.clone(), fact);
+                selected_bindings.insert(*formal, fact.parts[0]);
+                intersection_bindings.insert(formal.to_string(), fact.parts.clone());
+                propagated.insert(formal.to_string(), fact);
                 break;
             }
         }
@@ -884,7 +889,7 @@ impl Checker<'_> {
                     .get(index)
                     .copied()
                     .filter(|argument| *argument != Ty::Error)
-                    .or_else(|| selected_bindings.get(formal).copied())
+                    .or_else(|| selected_bindings.get(formal.as_str()).copied())
             })
             .collect::<Vec<_>>();
         self.publish_selected_call_intersections(
@@ -920,14 +925,17 @@ impl Checker<'_> {
         let mut intersections = HashMap::default();
         for (ordinal, formal) in signature.formals.iter().enumerate() {
             let Some(parts) = intersection_bindings
-                .get(formal)
+                .get(formal.as_str())
                 .filter(|parts| parts.len() > 1)
             else {
                 continue;
             };
-            let selected_result = selected_bindings.get(formal).copied().unwrap_or(parts[0]);
+            let selected_result = selected_bindings
+                .get(formal.as_str())
+                .copied()
+                .unwrap_or(parts[0]);
             let through_flexible = propagated
-                .get(formal)
+                .get(formal.as_str())
                 .is_some_and(|fact| fact.through_flexible);
             intersections.insert(
                 ordinal,
@@ -960,8 +968,10 @@ impl Checker<'_> {
         );
 
         let result_formal = match signature.ret.kind() {
-            TyKind::TyParam(formal, _) => Some(formal.as_str()),
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner.ty_param_name(),
+            TyKind::TyParam(formal, _) | TyKind::Var(formal, _) => Some(formal.as_str()),
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => inner.ty_param_name(),
             _ => None,
         };
         let Some(formal) = result_formal else {
@@ -1002,7 +1012,7 @@ mod tests {
         let declared = Ty::fun_suspend(vec![formal], Ty::Unit);
         let actual = Ty::fun_suspend(vec![occurrence], Ty::Unit);
         let provenance = reified_provenance_of_ty(actual);
-        let formals = vec![formal_name.clone()];
+        let formals = vec![crate::types::TyParamName::new(&formal_name)];
         let mut facts = HashMap::default();
 
         constrain_reified_argument_provenance(&formals, declared, actual, &provenance, &mut facts);
@@ -1062,7 +1072,7 @@ mod tests {
 
     #[test]
     fn contextual_completion_preserves_the_current_winners_unrelated_evidence() {
-        let formal = "sample:produce:T".to_string();
+        let formal = crate::types::TyParamName::new("sample:produce:T");
         let retained_bound = Ty::obj("sample/Retained");
         let retained_intersection = InferredIntersection {
             selected_result: Ty::obj("sample/Primary"),
@@ -1075,12 +1085,12 @@ mod tests {
             arguments: vec![None, Some(Ty::String)],
             argument_provenance: Vec::new(),
             additional_bounds: vec![vec![retained_bound], Vec::new()],
-            reified_parameters: vec![(1, "sample:produce:U".to_string())],
+            reified_parameters: vec![(1, crate::types::TyParamName::new("sample:produce:U"))],
             intersections,
             reified_runtimes: HashMap::default(),
         };
         let signature = crate::libraries::GenericSig {
-            formals: vec![formal.clone(), "sample:produce:U".to_string()],
+            formals: vec![formal, crate::types::TyParamName::new("sample:produce:U")],
             formal_bounds: vec![Vec::new(), Vec::new()],
             receiver: None,
             params: Vec::new(),
@@ -1109,7 +1119,7 @@ mod tests {
         );
         assert_eq!(
             completed.reified_parameters,
-            vec![(1, "sample:produce:U".to_string())]
+            vec![(1, crate::types::TyParamName::new("sample:produce:U"))]
         );
         let retained = completed
             .intersections

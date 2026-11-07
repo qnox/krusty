@@ -138,6 +138,7 @@ pub(super) fn source_ordered_members<'a>(
             .find(|property| property.getter == Some(function) || property.setter == Some(function))
     };
     let first_accessor = |property: &IrProperty| property.getter.or(property.setter);
+    let function_key = plugin_and_structural_member_keys(ir, class);
     use super::static_fields::StaticAccessor;
     let slot = |accessor: StaticAccessor| match accessor {
         StaticAccessor::Getter => 0,
@@ -220,12 +221,15 @@ pub(super) fn source_ordered_members<'a>(
                 None => Some((
                     if ir.is_jvm_delegate_method(function) {
                         (function_order(function), 3)
+                    } else if lowered_after_generated_members(ir, function) {
+                        (u32::MAX, 4)
                     } else if ir.follows_declared_constructors(class.fq_name_id(), function) {
                         (function_order(function), 1)
                     } else {
                         block_accessor_slots
                             .get(&function)
                             .or_else(|| property_marker_slots.get(&function))
+                            .or_else(|| function_key.get(&function))
                             .copied()
                             .unwrap_or((function_order(function), 0))
                     },
@@ -238,12 +242,17 @@ pub(super) fn source_ordered_members<'a>(
             .secondary_ctors
             .iter()
             .enumerate()
-            .filter(|(ordinal, _)| {
-                !defer_serialization_constructor(*ordinal, deferred_serialization_constructor)
-            })
             .map(|(ordinal, constructor)| {
                 (
-                    (constructor.source_order, 0),
+                    // The exact serialization-plugin deserialization constructor follows every
+                    // declared member (`write$Self$main` included), which is kotlinc's member
+                    // order for it; the functions kotlinc lifts out of bodies afterwards follow it.
+                    if defer_serialization_constructor(ordinal, deferred_serialization_constructor)
+                    {
+                        (u32::MAX, 3)
+                    } else {
+                        (constructor.source_order, 0)
+                    },
                     SourceOrderedMember::SecondaryConstructor(ordinal, constructor),
                 )
             }),
@@ -266,6 +275,50 @@ pub(super) fn source_ordered_members<'a>(
         }
     }
     ordered
+}
+
+/// Whether `function` is a lambda's or local function's implementation that has no declaration
+/// order of its own. kotlinc lifts those in `LocalDeclarationsLowering`, after a compiler plugin
+/// has generated its members (a serializable class's `write$Self` and deserialization constructor),
+/// so they follow every member without a source position, constructors included.
+fn lowered_after_generated_members(ir: &IrFile, function: u32) -> bool {
+    ir.lifted_functions.contains_key(&function) && !ir.fn_source_order.contains_key(&function)
+}
+
+/// The schedule keys of a data class's members a compiler plugin declares and of its generated
+/// `toString`, `hashCode` and `equals`. kotlinc adds a plugin's member, such as a serializable data
+/// object's `serializer()`, after the class's source declarations and generates the structural
+/// members after it. A class without structural members keeps its plugin members' own keys.
+fn plugin_and_structural_member_keys(
+    ir: &IrFile,
+    class: &IrClass,
+) -> std::collections::HashMap<u32, (u32, u8)> {
+    use crate::ir::IrDataClassMemberRole;
+    let owner = class.fq_name_id();
+    let structural: Vec<(u32, u32)> = [
+        IrDataClassMemberRole::ToString,
+        IrDataClassMemberRole::HashCode,
+        IrDataClassMemberRole::Equals,
+    ]
+    .into_iter()
+    .filter_map(|role| ir.data_class_member(owner, role))
+    .filter_map(|function| Some((function, *ir.fn_source_order.get(&function)?)))
+    .collect();
+    let Some(first) = structural.iter().map(|&(_, order)| order).min() else {
+        return std::collections::HashMap::new();
+    };
+    let plugin_members = ir
+        .plugin_declaration_functions
+        .values()
+        .flatten()
+        .copied()
+        .filter(|function| ir.functions[*function as usize].dispatch_receiver == Some(owner))
+        .map(|function| (function, (first, 0)));
+    structural
+        .iter()
+        .map(|&(function, order)| (function, (order, 1)))
+        .chain(plugin_members)
+        .collect()
 }
 
 /// Split the schedule around the primary `<init>`. kotlinc emits a value class's declared members
@@ -336,9 +389,15 @@ pub(super) fn enum_member_schedule(ir: &IrFile, class: &IrClass) -> EnumMemberSc
 }
 
 /// Whether a lifted function implements a lambda, rather than a local function or a local delegated
-/// property's accessor (which, like a lambda, has no source name of its own).
+/// property's accessor (which, like a lambda, has no source name of its own). A lambda a compiler
+/// plugin generates is one too, though no source lambda gives it an origin.
 fn is_lifted_lambda(ir: &IrFile, function: u32) -> bool {
     ir.lambda_origins.contains_key(&function)
+        || ir.lifted_functions.get(&function).is_some_and(|(_, site)| {
+            site.path.last().is_some_and(|step| {
+                step.kind == crate::lifting_provenance::LiftingCallableKind::Lambda
+            })
+        })
 }
 
 /// Reorder the functions lowered from lambdas and local functions inside `members` into kotlinc's

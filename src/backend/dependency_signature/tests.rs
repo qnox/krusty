@@ -44,7 +44,7 @@ fn the_emitted_signature_authenticates_retained_member_dispatch() {
 fn generic() -> GenericSig {
     let formal = Ty::ty_param("dependency-owned-T", Ty::nullable(Ty::obj("kotlin/Any")));
     GenericSig {
-        formals: vec!["dependency-owned-T".to_owned()],
+        formals: vec![crate::types::TyParamName::new("dependency-owned-T")],
         formal_bounds: vec![Vec::new()],
         receiver: Some(formal),
         params: vec![Ty::Long, formal],
@@ -63,6 +63,22 @@ fn argument(callable: u32, ordinal: u32, value: Ty) -> IrCheckedSubstitution {
         value,
         reified_runtime: value,
         additional_bounds: Vec::new(),
+    }
+}
+
+fn checked_call(
+    parameters: Vec<Ty>,
+    result: Ty,
+    substitutions: Vec<IrCheckedSubstitution>,
+) -> Callee {
+    Callee::External {
+        target: ExternalCallableId::from_raw(7),
+        default_provider: None,
+        params: parameters,
+        ret: result,
+        substitutions,
+        defaults: Vec::new(),
+        extension_receiver_parameter: None,
     }
 }
 
@@ -106,8 +122,11 @@ fn frozen(signature: GenericSig) -> BackendCallableFact {
         klib_body_type_parameters: Box::new([]),
         klib_body_declaration_modifiers: None,
         klib_body_class_contract: None,
+        klib_body_accessor: None,
         klib_body_vararg_index: None,
         klib_body_parameter_defaults: None,
+        declares_parameter_defaults: false,
+        annotations: Box::new([]),
     }
 }
 
@@ -117,8 +136,11 @@ fn a_frozen_generic_declaration_is_instantiated_without_changing_its_contract() 
     for actual in [Ty::Int, Ty::String, Ty::Long] {
         let instantiated = instantiate_dependency_signature(
             &fact,
-            ExternalCallableId::from_raw(7),
-            &[argument(7, 0, actual)],
+            &checked_call(
+                vec![Ty::Long, actual, actual],
+                actual,
+                vec![argument(7, 0, actual)],
+            ),
         )
         .unwrap();
         assert_eq!(&*instantiated.parameters, [Ty::Long, actual, actual]);
@@ -130,13 +152,18 @@ fn a_frozen_generic_declaration_is_instantiated_without_changing_its_contract() 
     assert_eq!(
         instantiate_dependency_signature(
             &fact,
-            ExternalCallableId::from_raw(7),
-            &[argument(7, 0, Ty::Int)],
+            &checked_call(
+                vec![Ty::Long, Ty::Int, Ty::Int],
+                Ty::Int,
+                vec![argument(7, 0, Ty::Int)]
+            ),
         )
         .err(),
         Some("a dependency generic signature disagrees with its frozen declaration")
     );
 }
+
+mod class_application;
 
 #[test]
 fn checked_instantiation_keeps_the_context_boundary_for_every_carrier() {

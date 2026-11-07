@@ -6,7 +6,7 @@ use super::*;
 mod super_calls;
 mod targets;
 use targets::ExternalCallTarget;
-pub(super) use targets::{MemberExtensionFirTarget, SelectedOperatorTarget};
+pub(super) use targets::{is_intrinsic_const, MemberExtensionFirTarget, SelectedOperatorTarget};
 
 use crate::resolve::ResolvedCall;
 
@@ -590,11 +590,13 @@ impl BodyFirChecker<'_> {
                         .as_deref()
                         .map(|singleton| singleton.ty()),
                     declared_receiver: None,
+                    declaring_receiver: None,
                     parameters: parameters.clone(),
                     result: member.ret,
                     declared_result: member.declared_ret,
                     overridden_results: &member.overridden_results,
                     semantic_role: member.semantic_role,
+                    intrinsic_const: targets::is_intrinsic_const(&member.annotations),
                     overridden_declarations: &member.overridden_declarations,
                     suspend: member.suspend(),
                     inline: member.inline,
@@ -886,11 +888,15 @@ impl BodyFirChecker<'_> {
                         singleton_dispatch: Some(singleton.classifier),
                         receiver: Some(singleton.ty()),
                         declared_receiver: None,
+                        declaring_receiver: None,
                         parameters: target_parameters,
                         result: extension.callable.ret,
                         declared_result: extension.callable.declared_ret,
                         overridden_results: &extension.callable.overridden_results,
                         semantic_role: extension.callable.semantic_role,
+                        intrinsic_const: targets::is_intrinsic_const(
+                            &extension.callable.annotations,
+                        ),
                         overridden_declarations: &extension.callable.overridden_declarations,
                         suspend: extension.callable.suspend,
                         inline: extension.callable.inline,
@@ -1073,6 +1079,10 @@ impl BodyFirChecker<'_> {
                         })?
                 } else {
                     FirCallTarget::External {
+                        declaring_receiver: selected
+                            .declaring_receiver
+                            .map(resolved)
+                            .transpose()?,
                         declaration: selected.member.external_identity.ok_or_else(|| {
                             self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
                         })?,
@@ -1103,6 +1113,7 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: selected.member.semantic_role,
+                        intrinsic_const: targets::is_intrinsic_const(&selected.member.annotations),
                         overridden_declarations: selected.member.overridden_declarations.clone(),
                         suspend: selected.member.suspend(),
                         inline: selected.member.inline,
@@ -1178,6 +1189,7 @@ impl BodyFirChecker<'_> {
                             .source_receiver
                             .map(resolved)
                             .transpose()?,
+                        declaring_receiver: None,
                         parameters: selected.callable.params[..context_count]
                             .iter()
                             .copied()
@@ -1200,6 +1212,9 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: selected.callable.semantic_role,
+                        intrinsic_const: targets::is_intrinsic_const(
+                            &selected.callable.annotations,
+                        ),
                         overridden_declarations: selected.callable.overridden_declarations.clone(),
                         suspend: selected.callable.suspend,
                         inline: selected.callable.inline,
@@ -1292,6 +1307,7 @@ impl BodyFirChecker<'_> {
                         default_provider: *external_default_provider,
                         receiver: Some(resolved(dispatch_receiver.ty)?),
                         declared_receiver: None,
+                        declaring_receiver: None,
                         parameters: target_parameters
                             .into_iter()
                             .map(resolved)
@@ -1306,6 +1322,7 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: None,
+                        intrinsic_const: false,
                         overridden_declarations: Box::new([]),
                         suspend: *suspend,
                         inline: *inline,
@@ -1445,11 +1462,13 @@ impl BodyFirChecker<'_> {
                     .map(|singleton| singleton.classifier),
                 receiver,
                 declared_receiver: callable.source_receiver,
+                declaring_receiver: None,
                 parameters: parameters.into_iter().collect(),
                 result: callable.ret,
                 declared_result: callable.declared_ret,
                 overridden_results: &callable.overridden_results,
                 semantic_role: callable.semantic_role,
+                intrinsic_const: targets::is_intrinsic_const(&callable.annotations),
                 overridden_declarations: &callable.overridden_declarations,
                 suspend: callable.suspend,
                 inline: callable.inline,
@@ -1594,11 +1613,13 @@ impl BodyFirChecker<'_> {
                     .map(|singleton| singleton.classifier),
                 receiver: Some(dispatch_receiver.ty),
                 declared_receiver: None,
+                declaring_receiver: None,
                 parameters: target_parameters,
                 result: *ret,
                 declared_result: *declared_ret,
                 overridden_results,
                 semantic_role: None,
+                intrinsic_const: false,
                 overridden_declarations: &[],
                 suspend: *suspend,
                 inline: *inline,
@@ -1670,11 +1691,13 @@ impl BodyFirChecker<'_> {
             singleton_dispatch,
             receiver,
             declared_receiver,
+            declaring_receiver,
             parameters,
             result,
             declared_result,
             overridden_results,
             semantic_role,
+            intrinsic_const,
             overridden_declarations,
             suspend,
             inline,
@@ -1736,6 +1759,7 @@ impl BodyFirChecker<'_> {
             .collect::<Result<Vec<_>, BodyCheckFailure>>()?;
         Ok((
             FirCallTarget::External {
+                declaring_receiver: declaring_receiver.map(resolved).transpose()?,
                 declaration,
                 singleton_dispatch,
                 default_provider: None,
@@ -1751,6 +1775,7 @@ impl BodyFirChecker<'_> {
                     .collect::<Result<Vec<_>, _>>()?
                     .into_boxed_slice(),
                 semantic_role,
+                intrinsic_const,
                 overridden_declarations: overridden_declarations.into(),
                 suspend,
                 inline,
@@ -2080,7 +2105,7 @@ impl BodyFirChecker<'_> {
             let lhs_conversion = self
                 .selected_type_conversion(lhs_actual, lhs_target, cause)
                 .or(receiver.conversion);
-            let lhs = self.convert_fir_value(receiver.value, lhs_target, cause, lhs_conversion);
+            let lhs = self.convert_fir_value(receiver.value, lhs_target, lhs_conversion);
             let rhs = self.value_at_selected_boundary(*argument, rhs_target)?;
             return Ok(FirExprKind::Binary {
                 operation,
@@ -2128,7 +2153,7 @@ impl BodyFirChecker<'_> {
                     }
                     crate::libraries::PrimitiveUnaryIntrinsic::Negate => FirUnaryOperation::Negate,
                 },
-                operand: self.convert_fir_value(receiver.value, target, cause, conversion),
+                operand: self.convert_fir_value(receiver.value, target, conversion),
             });
         }
         if primitive_operation == Some(crate::libraries::CompilerIntrinsic::PrimitiveBitNot) {
@@ -2414,11 +2439,13 @@ impl BodyFirChecker<'_> {
                     .map(|singleton| singleton.classifier),
                 receiver: Some(selected.receiver),
                 declared_receiver: None,
+                declaring_receiver: selected.declaring_receiver,
                 parameters: selected.member.params.clone(),
                 result: selected.ret,
                 declared_result: selected.member.declared_ret,
                 overridden_results: &selected.member.overridden_results,
                 semantic_role: selected.member.semantic_role,
+                intrinsic_const: targets::is_intrinsic_const(&selected.member.annotations),
                 overridden_declarations: &selected.member.overridden_declarations,
                 suspend: selected.member.suspend(),
                 inline: selected.member.inline,
@@ -2491,13 +2518,14 @@ impl BodyFirChecker<'_> {
                 operands,
             );
         }
-        self.source_member_operator_call_on_value(
+        let mut call = self.source_member_operator_call_on_value(
             expression,
             convention,
             dispatch_receiver,
             operands,
-        )
-        .map(FirExprKind::Call)
+        )?;
+        self.guard_operator_extension_receiver(receiver, &mut call)?;
+        Ok(FirExprKind::Call(call))
     }
 
     pub(super) fn source_member_operator_call_on_value(
@@ -2731,6 +2759,7 @@ impl BodyFirChecker<'_> {
                 }
             }
         }
+        let receiver_source = receiver;
         let receiver = FirReceiver {
             value: self.expression(receiver)?,
             conversion: None,
@@ -2763,23 +2792,27 @@ impl BodyFirChecker<'_> {
             let dispatch_receiver = self
                 .materialize_implicit_receiver(cause, span, &dispatch)?
                 .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
-            return Ok(FirCall {
+            let mut call = FirCall {
                 target: selected.target,
                 dispatch_receiver: Some(dispatch_receiver),
                 extension_receiver: Some(receiver),
                 parameter_types,
                 arguments: arguments.into_boxed_slice(),
                 substitutions: Box::new([]),
-            });
+            };
+            self.guard_operator_extension_receiver(receiver_source, &mut call)?;
+            return Ok(call);
         }
-        Ok(FirCall {
+        let mut call = FirCall {
             target: selected.target,
             dispatch_receiver: (!selected.extension).then_some(receiver),
             extension_receiver: selected.extension.then_some(receiver),
             parameter_types,
             arguments: arguments.into_boxed_slice(),
             substitutions: Box::new([]),
-        })
+        };
+        self.guard_operator_extension_receiver(receiver_source, &mut call)?;
+        Ok(call)
     }
 
     pub(super) fn source_member_statement_operator_on_value(

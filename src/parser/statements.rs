@@ -295,18 +295,20 @@ impl Parser<'_> {
                             self.skip_newlines();
                             let value = self.parse_unlabelled_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
-                            return self.finish_assignment_stmt(
+                            let statement = self.finish_assignment_stmt(
                                 Stmt::Assign { name: n, value },
                                 start,
                                 target_span,
                             );
+                            self.record_assignment_overload_call(statement, e, value);
+                            return statement;
                         }
                         Expr::Member { receiver, name } => {
                             let operator = self.bump().span; // '='
                             self.skip_newlines();
                             let value = self.parse_unlabelled_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
-                            return self.finish_assignment_stmt(
+                            let statement = self.finish_assignment_stmt(
                                 Stmt::AssignMember {
                                     receiver,
                                     name,
@@ -316,6 +318,8 @@ impl Parser<'_> {
                                 start,
                                 target_span,
                             );
+                            self.record_assignment_overload_call(statement, e, value);
+                            return statement;
                         }
                         Expr::Index { array, indices } => {
                             let operator = self.bump().span; // '='
@@ -541,14 +545,23 @@ impl Parser<'_> {
             .truncate_shadows(classifier_shadow_count);
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
-        // A trailing bare expression is the block's value.
+        self.block_with_trailing_value(stmts, Span::new(start.lo, end.hi))
+    }
+
+    /// The block of `stmts`, a block body or a lambda body. A trailing bare expression is the
+    /// block's value, and the annotations written on that statement (`@OptIn(M::class) call()`)
+    /// annotate the value.
+    pub(super) fn block_with_trailing_value(
+        &mut self,
+        mut stmts: Vec<StmtId>,
+        span: Span,
+    ) -> ExprId {
         let mut trailing = None;
         if let Some(&last) = stmts.last() {
             if let Stmt::Expr(e) = self.file.stmt(last) {
                 let e = *e;
                 trailing = Some(e);
                 stmts.pop();
-                // The statement's annotations (`@Suppress("NAME") call()`) annotate the value.
                 if let Some(mut annotations) = self.file.statement_annotations.remove(&last) {
                     if let Some(own) = self.file.expression_annotations.remove(&e) {
                         annotations.extend(own);
@@ -557,7 +570,38 @@ impl Parser<'_> {
                 }
             }
         }
+        self.file.add_expr(Expr::Block { stmts, trailing }, span)
+    }
+
+    /// kotlinc's assignment plugin resolves `target = value` on an annotated `val` as the call
+    /// `target.assign(value)`, whose source is the whole target. Keep that call beside the
+    /// statement so the checker resolves and reports it as any other call.
+    fn record_assignment_overload_call(
+        &mut self,
+        statement: StmtId,
+        target: ExprId,
+        value: ExprId,
+    ) {
+        let target_span = self.file.expr_spans[target.0 as usize];
+        let callee = self.file.add_expr(
+            Expr::Member {
+                receiver: target,
+                name: "assign".to_string(),
+            },
+            target_span,
+        );
         self.file
-            .add_expr(Expr::Block { stmts, trailing }, Span::new(start.lo, end.hi))
+            .exact_member_name_spans
+            .insert(callee.0, target_span);
+        let call = self.file.add_expr(
+            Expr::Call {
+                callee,
+                args: vec![value],
+            },
+            target_span,
+        );
+        self.file
+            .assignment_overload_calls
+            .insert(statement.0, call);
     }
 }

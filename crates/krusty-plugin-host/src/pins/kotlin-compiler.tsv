@@ -2,7 +2,8 @@
 # and size of each jar. A plugin host loads this classpath; every jar is verified before use.
 #
 # The closure is the embeddable compiler's POM dependencies (runtime scope) plus kotlin-stdlib's
-# `org.jetbrains:annotations`, as Gradle resolves it. Each digest was computed from the jar on Maven
+# `org.jetbrains:annotations`, as Gradle resolves it, and the scripting libraries kotlinc's own
+# `lib/` loads beside its compiler, through which it reads a script template's definition. Each digest was computed from the jar on Maven
 # Central and checked against the `.sha1` Central publishes beside it.
 #
 # kotlin    group:artifact:version    sha256    size
@@ -14,6 +15,8 @@
 2.4.0	org.jetbrains.kotlin:kotlin-reflect:1.6.10	3277ac102ae17aad10a55abec75ff5696c8d109790396434b496e75087854203	3038560
 2.4.0	org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.8.0	9860906a1937490bf5f3b06d2f0e10ef451e65b95b269f22daf68a3d1f5065c5	1548360
 2.4.0	org.jetbrains:annotations:13.0	ace2a10dc8e2d5fd34925ecac03e4988b2c0f851650c94b8cef49ba1bd111478	17536
+2.4.0	org.jetbrains.kotlin:kotlin-scripting-common:2.4.0	5902e5cd0104f9a3bd65aa03679c5898d1ceb36ce01651a48a3db606bb97ada3	203068
+2.4.0	org.jetbrains.kotlin:kotlin-scripting-jvm:2.4.0	72638e2c43ef0a08981863017780b133212193fbb0bfd0f5f35a24321764105f	136265
 2.4.10	org.jetbrains.kotlin:kotlin-compiler-embeddable:2.4.10	9309638a2ee03e6bde9ef4b7444055a94b84ab906563675d71ff9aecb64da913	60352373
 2.4.10	org.jetbrains.kotlin:kotlin-build-tools-api:2.4.10	3953d283e7710c990672e403a87df393d9726a9bf3e172194ebb5c33e062fcb0	310932
 2.4.10	org.jetbrains.kotlin:kotlin-daemon-embeddable:2.4.10	547d969a2eab602fe0bdfd9fcb1b563a5c6d30099d3351394d6427eba8288467	381839
@@ -22,6 +25,8 @@
 2.4.10	org.jetbrains.kotlin:kotlin-reflect:1.6.10	3277ac102ae17aad10a55abec75ff5696c8d109790396434b496e75087854203	3038560
 2.4.10	org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.8.0	9860906a1937490bf5f3b06d2f0e10ef451e65b95b269f22daf68a3d1f5065c5	1548360
 2.4.10	org.jetbrains:annotations:13.0	ace2a10dc8e2d5fd34925ecac03e4988b2c0f851650c94b8cef49ba1bd111478	17536
+2.4.10	org.jetbrains.kotlin:kotlin-scripting-common:2.4.10	d5399982cdbf5994f7f3a731afacfbc5c21b797d97ffd7328b62cea670103076	203069
+2.4.10	org.jetbrains.kotlin:kotlin-scripting-jvm:2.4.10	0b7518219da69b427e0b3f840f13e280db9e61a839c7d3ff094de4630ddbc9f5	136266
 2.4.20	org.jetbrains.kotlin:kotlin-compiler-embeddable:2.4.20	cf97161430683fb9af96dc6a7017ffae1fe8737b80d12eee11f2fe3e76f8ded8	58593245
 2.4.20	org.jetbrains.kotlin:kotlin-build-tools-api:2.4.20	47a622dce7231b1916334b69a00bc1094adf6577e6492f9f06b3d9c2450fe459	468126
 2.4.20	org.jetbrains.kotlin:kotlin-daemon-embeddable:2.4.20	eef72cf8f17e6d98d33e5b7c7e1cab31a1cf5fc34084dd5e563e7b1f3ef53435	393409
@@ -30,6 +35,8 @@
 2.4.20	org.jetbrains.kotlin:kotlin-reflect:1.6.10	3277ac102ae17aad10a55abec75ff5696c8d109790396434b496e75087854203	3038560
 2.4.20	org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.8.0	9860906a1937490bf5f3b06d2f0e10ef451e65b95b269f22daf68a3d1f5065c5	1548360
 2.4.20	org.jetbrains:annotations:13.0	ace2a10dc8e2d5fd34925ecac03e4988b2c0f851650c94b8cef49ba1bd111478	17536
+2.4.20	org.jetbrains.kotlin:kotlin-scripting-common:2.4.20	3385f7f05984a6488809b015727eca9aeba7998dc5995d87b4ae5dc9c8d4124b	207840
+2.4.20	org.jetbrains.kotlin:kotlin-scripting-jvm:2.4.20	2be43e56bdaf38db30f87347ad4f42e9cd69ca8433e579780143791933b01fac	136419
 2.4.21	org.jetbrains.kotlin:kotlin-compiler-embeddable:2.4.21	ef19419c765e7ac8404465fa026ca8fc4dbb8a822de0fc79aa53c8dce29f1d02	58593291
 2.4.21	org.jetbrains.kotlin:kotlin-build-tools-api:2.4.21	c5cd6a49bd072b529ae10809111c16a7aa0f92147e95d288354017fd65799461	468126
 2.4.21	org.jetbrains.kotlin:kotlin-daemon-embeddable:2.4.21	7b3ef24674e5bcffcadfc4e43202ea314194939ecbcdd90a4770b2f1b04e0d07	393410
@@ -38,3 +45,5 @@
 2.4.21	org.jetbrains.kotlin:kotlin-reflect:1.6.10	3277ac102ae17aad10a55abec75ff5696c8d109790396434b496e75087854203	3038560
 2.4.21	org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.8.0	9860906a1937490bf5f3b06d2f0e10ef451e65b95b269f22daf68a3d1f5065c5	1548360
 2.4.21	org.jetbrains:annotations:13.0	ace2a10dc8e2d5fd34925ecac03e4988b2c0f851650c94b8cef49ba1bd111478	17536
+2.4.21	org.jetbrains.kotlin:kotlin-scripting-common:2.4.21	67817eeee13da1f827f7ab9b961e300c2a6c612c290dfebb12db2eafcf0813b3	207841
+2.4.21	org.jetbrains.kotlin:kotlin-scripting-jvm:2.4.21	f00bc053865d7c2864e26087ce50b60ee8bdd30f9a252890d21a34e35d398f17	136420

@@ -423,6 +423,18 @@ impl ClassDeclarationRecord {
             .collect()
     }
 
+    /// Re-record the annotations of the secondary constructor at `ordinal` after a target pass
+    /// attached a metadata-visible application to it.
+    pub(crate) fn refresh_secondary_constructor_annotations(
+        &mut self,
+        ordinal: usize,
+        annotations: &crate::ir::DeclarationAnnotations,
+    ) {
+        if let Some(index) = self.secondary_ordinals.iter().position(|&o| o == ordinal) {
+            self.secondary_ctors[index].annotations = MetadataAnnotations::of(annotations);
+        }
+    }
+
     /// The nested classifier names as the class builder takes them.
     pub(crate) fn nested(&self) -> Vec<&str> {
         self.nested.iter().map(String::as_str).collect()
@@ -482,17 +494,23 @@ impl ClassDeclarationRecord {
 
     pub(crate) fn declaration<'a>(
         &'a self,
+        class_id: &'a crate::metadata::class_id::ResolvedClassId,
         tail: &'a ClassTail<'a>,
         enum_entries: &'a [EnumEntryMeta<'a>],
     ) -> ClassDeclaration<'a> {
         ClassDeclaration {
             name: self.class,
+            class_id,
             ctor_params: &self.ctor_params,
             props: &self.props,
             methods: &self.methods,
             enum_entries,
             tail,
         }
+    }
+
+    pub(crate) fn classifier(&self) -> TypeName {
+        self.class
     }
 }
 
@@ -638,8 +656,9 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
                 setter_visibility: property.setter_visibility,
                 tparam: match property.ty.kind() {
                     TyKind::TyParam(name, _) => Some(name),
-                    TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => match inner.kind()
-                    {
+                    TyKind::Nullable(inner)
+                    | TyKind::PlatformNullable(inner)
+                    | TyKind::MutabilityFlexible(inner) => match inner.kind() {
                         TyKind::TyParam(name, _) => Some(name),
                         _ => None,
                     },
@@ -976,7 +995,14 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         &prop_source_orders,
         &declared_fids,
         MemberRanges {
-            synthesized: declared_method_count..inferred_method_count,
+            synthesized: member_order::generated_function_order(
+                ir,
+                &declared_fids,
+                &methods,
+                &method_origins,
+                declared_method_count.min(inferred_method_count)..inferred_method_count,
+            ),
+            published_functions: inferred_method_count,
             delegation_functions,
             delegation_properties,
         },
@@ -1039,10 +1065,12 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         flags: class_flags(ir, c),
         // A class with a companion records its simple name (`Class.companionObjectName`, f4) —
         // the consumer resolves `C.member` through it.
-        companion: c
-            .companion_class
-            .as_ref()
-            .map(|companion| companion.nested_segment_ref().to_string()),
+        companion: c.companion_class.as_ref().map(|companion| {
+            companion
+                .nested_segment_within(c.fq_name)
+                .expect("a declared companion belongs to its exact owner")
+                .to_string()
+        }),
         nested: nested_classifiers(ir, c),
         member_order,
         delegation_members,
@@ -1627,56 +1655,7 @@ fn declared_supertypes(
     (supertypes, class_spellings, supertype_spellings)
 }
 
-/// The simple names `Class.nestedClassName` (f7) lists: every DECLARED direct nested classifier in
-/// declaration order, the names a producer generates and publishes, then a generated companion.
-pub(crate) fn nested_classifiers(ir: &IrFile, c: &IrClass) -> Vec<String> {
-    // Declaration origin and the exact identity-tree relation keep synthesized classes out without
-    // interpreting their backend spellings. Common IR carries the stable declaration order selected
-    // by the frontend; the IR arena and debug lines do not define this order.
-    let mut source_nested: Vec<(u32, String)> = ir
-        .classes
-        .iter()
-        .enumerate()
-        .filter(|(_, candidate)| {
-            // A classifier declared in executable code is nobody's member; one nested in a local
-            // class is that class's member like any other.
-            candidate.is_source_declared
-                && !candidate.is_compiler_generated
-                && candidate.enclosure.is_none()
-                && candidate.fq_name.nested_owner() == Some(c.fq_name)
-        })
-        .map(|(index, candidate)| {
-            (
-                ir.class_source_order(index as crate::ir::ClassId)
-                    .expect("a source classifier carries its stable declaration order"),
-                candidate.fq_name.nested_segment_ref().to_string(),
-            )
-        })
-        .collect();
-    source_nested.sort_by_key(|(source_order, _)| *source_order);
-    let mut nested_names: Vec<String> = source_nested
-        .into_iter()
-        .map(|(_, segment)| segment)
-        .collect();
-    // A producer can generate a classifier that Kotlin code names (`Foo.$serializer`) and publish
-    // that fact on the owning class. Other synthesized implementation classes stay out on their
-    // `is_source_declared` record alone. Generated names follow every declared classifier, a
-    // declared companion included (`N`, `Companion`, `M`, `$serializer`); a generated companion
-    // comes last (`$serializer` then `Companion` for a `@Serializable` class without one).
-    nested_names.extend(c.published_nested_classifiers.iter().cloned());
-    // kotlinc lists the companion under `nestedClassName` (f7) TOO, alongside its own
-    // `companionObjectName` (f4) record — both reference the same interned string.
-    let companion_segment = c
-        .companion_class
-        .as_ref()
-        .map(|companion| companion.nested_segment_ref().to_string());
-    if let Some(segment) = companion_segment {
-        if !nested_names.contains(&segment) {
-            nested_names.push(segment);
-        }
-    }
-    nested_names
-}
+pub(crate) use super::classifier_inventory::nested_classifiers;
 
 /// The annotations of a PROPERTY's own applications. The records name the same applications a
 /// target's annotation carrier holds; a property whose only application is an erased optional
@@ -1811,6 +1790,7 @@ mod tests {
                 default_masks: Vec::new(),
             },
             synthetic: true,
+            platform_visible: false,
             vc_params: false,
             param_checks: Vec::new(),
         }

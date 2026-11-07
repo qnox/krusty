@@ -13,6 +13,8 @@ mod classpath_annotation_classes;
 mod collection_canonicalization;
 mod declaration_headers;
 mod declared_members;
+mod facade_package_callables;
+mod symbol_source;
 use classpath_annotation_classes::{
     annotation_element_defaults, classpath_annotation_targets, java_annotation_parameter_list,
 };
@@ -24,6 +26,8 @@ mod contract_dsl_tests;
 mod dependency_access_policy;
 mod dependency_deprecation;
 use dependency_deprecation::{ClassifierShape, PropertyDeclaration, PropertyDeprecations};
+#[cfg(test)]
+mod builtin_declaration_name_tests;
 mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
@@ -76,7 +80,7 @@ use crate::jvm::names::type_descriptor;
 use crate::libraries::{
     CallSig, EmptySymbolSource, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy,
     GenericSig, InlineKind, LibraryCallable, LibraryConst, LibraryMember, LibraryType, PropKind,
-    PropertyInfo, PropertyProducer, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
+    PropertyInfo, PropertyProducer, PropertySet, ReturnInfo, Visibility,
 };
 use crate::runtime::{PlatformRangeCtor, RangeConstruction};
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
@@ -284,7 +288,7 @@ impl JvmLibraries {
             push(mapping.source_name.clone());
         }
         if let Some(class) = self.cp.find_name(internal) {
-            for property in metadata::class_properties(&class) {
+            for property in self.cp.class_members(&class).class_properties.iter() {
                 if !property.is_companion_block_member {
                     push(property.name.clone());
                 }
@@ -712,7 +716,7 @@ impl JvmLibraries {
                 .find(|method| method.name == jvm_name && method.descriptor == desc)
                 .map(|method| method.is_public())
         };
-        for function in super::metadata::class_functions(&class) {
+        for function in self.cp.class_members(&class).class_functions.iter() {
             if function.kotlin_name != name
                 || !function.is_public()
                 || self.hides_function(function)
@@ -811,7 +815,7 @@ impl JvmLibraries {
             });
             self.publish_function_deprecation(overloads.last_mut(), function.deprecation());
         }
-        for property in super::metadata::class_properties(&class) {
+        for property in self.cp.class_members(&class).class_properties.iter() {
             if property.name != name || !property.is_extension {
                 continue;
             }
@@ -968,11 +972,13 @@ impl JvmLibraries {
         else {
             return crate::fx_hash::HashMap::default();
         };
-        let prop_rets: crate::fx_hash::HashMap<_, _> =
-            super::metadata::class_properties(&companion)
-                .iter()
-                .filter_map(|p| p.ret_class.map(|ret| (p.name.clone(), ret)))
-                .collect();
+        let prop_rets: crate::fx_hash::HashMap<_, _> = self
+            .cp
+            .class_members(&companion)
+            .class_properties
+            .iter()
+            .filter_map(|p| p.ret_class.map(|ret| (p.name.clone(), ret)))
+            .collect();
         Self::const_fields(&ci.fields, |f| {
             prop_rets
                 .get(&f.name)
@@ -1004,7 +1010,10 @@ impl JvmLibraries {
                 }
             }
         }
-        let declared: crate::fx_hash::HashMap<_, _> = super::metadata::class_properties(ci)
+        let declared: crate::fx_hash::HashMap<_, _> = self
+            .cp
+            .class_members(ci)
+            .class_properties
             .iter()
             .filter(|property| property.is_const)
             .filter_map(|property| {
@@ -1188,11 +1197,11 @@ impl JvmLibraries {
         &self,
         receiver: Ty,
         target_internal: TypeName,
-        method_formals: &[String],
+        method_formals: &[crate::types::TyParamName],
     ) -> crate::fx_hash::HashMap<String, Ty> {
         let mut bindings = self.receiver_type_bindings_name(receiver, target_internal);
         for formal in method_formals {
-            bindings.remove(formal);
+            bindings.remove(formal.as_str());
         }
         bindings
     }
@@ -1270,11 +1279,11 @@ impl JvmLibraries {
             // default flags, which the erased JVM descriptor loses. Populate every member's `call_sig` from
             // its record so a named-argument / omitted-`$default` member call resolves through the ONE
             // `resolve_type` member seam (the `instance_members` query), not a separate `functions()` walk.
-            let meta_fns = metadata::class_functions(&ci);
+            let meta_fns = &self.cp.class_members(&ci).class_functions;
             // The class's `@Metadata` CONSTRUCTOR records — the only place a constructor parameter's
             // source-level shape survives (a receiver function type erases to `FunctionN` in both the
             // descriptor and the `Signature`).
-            let meta_constructors = metadata::class_constructors(&ci);
+            let meta_constructors = &self.cp.class_members(&ci).constructors;
             let ctor_param_lists = self.visible_constructor_params(meta_constructors);
             crate::trace_compiler!(
                 "resolve",
@@ -1839,10 +1848,14 @@ impl JvmLibraries {
             // Leaving `kotlin/CharSequence` joined is also why whatever `java.lang.CharSequence` declares
             // still reaches `String` one rung up — `charAt` on every JDK, plus `getChars` as of JDK 25,
             // which added it as a `default` method. That is the price of keeping `chars`/`codePoints`,
-            // and it makes the residual leak JDK-DEPENDENT. See docs/SPEC.md.
+            // and it makes the residual leak JDK-DEPENDENT.
             let is_mapped_builtin =
                 super::jvm_class_map::maps_to_distinct_jvm_internal(internal_name);
             let builtin_class_signature = self.cp.builtin_class_signature_name(internal_name);
+            let builtin_declaration_name = builtin_class_signature
+                .as_ref()
+                .filter(|signature| signature.declaration == internal_name)
+                .map(|signature| signature.declaration_name.clone());
             let metadata_class_signature = ci.meta.class_visibility.map(|_| {
                 (
                     ci.meta.class_type_parameters.type_params.clone(),
@@ -2030,7 +2043,7 @@ impl JvmLibraries {
             // marker overloads remain public. Publish every missing declaration here. Its empty opaque
             // emit token says only "the provider has no direct physical method for this declaration";
             // the selected application is paired with the matching physical marker below resolution.
-            for declaration in meta_constructors {
+            for declaration in meta_constructors.iter() {
                 // A HIDDEN-deprecated declaration was dropped above; never resurrect it here.
                 // Iterating the declarations directly (rather than the filtered param-list
                 // projection) keeps this loop and the hidden filter from ever disagreeing.
@@ -2405,9 +2418,12 @@ impl JvmLibraries {
             let own_type_parameter_count = application_header.own_count;
             let type_parameters = application_header.parameters;
             Some(LibraryType {
-                declaration_name: (ci.this_class == internal_name)
-                    .then(|| classifier_facts::classifier_declaration_name(&ci))
-                    .flatten(),
+                runtime_exception: None,
+                declaration_name: if ci.this_class == internal_name {
+                    classifier_facts::classifier_declaration_name(&ci)
+                } else {
+                    builtin_declaration_name
+                },
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
                 access: if let Some(visibility) = ci.meta.class_visibility {
@@ -2476,6 +2492,7 @@ impl JvmLibraries {
                 annotation_targets: (kind == crate::libraries::TypeKind::Annotation)
                     .then(|| classpath_annotation_targets(&ci)),
                 mapped_collection: None,
+                mapped_builtin: is_mapped_builtin,
                 annotation_element_defaults: annotation_element_defaults(&ci),
                 deprecation,
             })
@@ -2771,7 +2788,7 @@ impl JvmLibraries {
             .iter()
             .find(|mapping| mapping.is_property() && mapping.source_name == name);
         if let Some(ci) = self.cp.find_name(cn) {
-            for mp in metadata::class_properties(&ci) {
+            for mp in self.cp.class_members(&ci).class_properties.iter() {
                 // A `companion { … }` block property is a classifier member, not an instance one.
                 if mp.name != name || mp.is_companion_block_member {
                     continue;
@@ -3289,16 +3306,9 @@ impl JvmLibraries {
                 function_renames,
             ));
         }
-        const ACC_STATIC: u16 = 0x0008;
-        const ACC_PUBLIC: u16 = 0x0001;
-        let declares_instance_field = self.cp.find_name(cn).is_some_and(|class| {
-            class.fields.iter().any(|field| {
-                field.name == name
-                    && field.access & ACC_STATIC == 0
-                    && field.access & ACC_PUBLIC != 0
-            })
-        });
-        if !declares_instance_field {
+        let class = self.cp.find_name(cn);
+        let declares_field = |class: &_| synthetic_properties::declares_field(class, name);
+        if !class.as_deref().is_some_and(declares_field) {
             // The getters come from this classifier's own method inventory: each one declares
             // `name` by its spelling, and its arity and return type are checked below.
             for getter_name in accessors.getters(name) {
@@ -3326,17 +3336,7 @@ impl JvmLibraries {
                         .member_functions_with_renames(recv, &setter_name, function_renames)
                         .overloads
                         .into_iter()
-                        .find(|setter| {
-                            // Java synthetic-property pairing is declaration-shape matching, not
-                            // call overload selection. A `setX` is the setter when its single
-                            // value parameter is the getter's exact semantic storage type. The
-                            // method's return type is not part of that shape: a fluent or
-                            // otherwise non-void Java setter is still a `var`, and the assignment
-                            // discards the result. Core assignability belongs above this boundary.
-                            setter.callable.params.len() == 1
-                                && self.library_value_form(ty)
-                                    == self.library_value_form(setter.callable.params[0])
-                        });
+                        .find(|setter| self.pairs_java_setter(ty, &setter.semantic_params()));
                     let setter_visibility = setter
                         .as_ref()
                         .map_or(visibility, |setter| setter.visibility);
@@ -3381,6 +3381,10 @@ impl JvmLibraries {
                     });
                 }
             }
+        }
+        if let Some(class) = class.as_deref() {
+            use classpath_annotation_classes::java_annotation_element_properties as elements;
+            overloads.extend(elements(class, cn, recv, name, &mut functions));
         }
         if let Some(mapping) = mapped_property {
             // A mapped builtin property and its JVM getter are one property declaration, not a
@@ -3459,7 +3463,8 @@ impl JvmLibraries {
                         .collect::<Vec<_>>();
                     let member_names =
                         self.member_scope_names(internal_name, &classifier, &mapped_members);
-                    let accessors = if classifier.is_kotlin {
+                    // A Java `@interface` element is a property already, never an accessor.
+                    let accessors = if classifier.is_kotlin || classifier.is_annotation() {
                         AccessorInventory::default()
                     } else {
                         AccessorInventory::from_methods(
@@ -3527,8 +3532,8 @@ impl JvmLibraries {
     /// source dependencies publish the semantic source arity. Providers must agree before the
     /// resolver selects the declaration; core must not accept two physical spellings afterward.
     fn semantic_type_alias_target(&self, identity: TypeName) -> Option<TypeName> {
-        let (target, _, expansion, _) = self.cp.type_alias_expansion(identity)?;
-        Self::normalized_type_alias_target(target, expansion)
+        let alias = self.cp.type_alias_expansion(identity)?;
+        Self::normalized_type_alias_target(alias.target, alias.expansion)
     }
 
     fn normalized_type_alias_target(target: TypeName, expansion: Ty) -> Option<TypeName> {
@@ -3653,279 +3658,11 @@ impl JvmLibraries {
             self.object_member_callables(owner, name, &mut overloads, &mut props);
             props.extend(self.classifier_associated_property(owner, name));
         }
-        // Extension discovery is @Metadata-driven (the source of truth), NOT a scan of JVM statics: the
-        // package's PUBLIC facades' metadata carry each extension's SOURCE receiver, parameters, return
-        // (with nullability), visibility, and generic signature. The JVM method (`@JvmName`-mangled name +
-        // descriptor) is only the emit handle, rooted at the PUBLIC facade — kotlinc's `invokestatic`
-        // target — so a package-private multifile PART never leaks a `false` visibility. Receiver-coupled
-        // JVM specifics (element-variant `sumOfInt`, value-class mangling) are the emitter's job.
         for facade in package
             .into_iter()
             .flat_map(|package| self.cp.package_facades_name(package))
         {
-            let lambda_return_overload = self.cp.lambda_return_overloads(facade).contains(name);
-            for mf in self.cp.meta_functions_name(facade).iter() {
-                if mf.kotlin_name != name || !mf.is_extension() {
-                    continue;
-                }
-                if self.since_kotlin_withheld(mf.since_kotlin()) {
-                    if let Some(receiver) = mf.receiver_class {
-                        self.note_api_withheld(receiver, name);
-                    }
-                }
-                if self.hides_function(mf) {
-                    continue;
-                }
-                let raw_receiver = mf.generic_sig.as_ref().and_then(|g| g.receiver);
-                let receiver = raw_receiver
-                    .map(|r| match r.kind() {
-                        TyKind::TyParam(..) => r,
-                        _ => ty_subst(r, &crate::fx_hash::HashMap::default()),
-                    })
-                    .or_else(|| mf.receiver_class.map(kotlin_type_name_to_ty))
-                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                // Emit handle: the JVM method + descriptor on the public facade. Prefer the metadata
-                // `method_signature`. When it is absent, resolve the real bytecode method by name against the
-                // facade's super chain, trying: the metadata name, then the ELEMENT-materialized name kotlinc
-                // gives an `@OverloadResolutionByLambdaReturnType` reduction (`sum` on `Iterable<Byte>` →
-                // `sumOfByte`) — derived from the receiver's element type and VERIFIED against the bytecode,
-                // no hardcoded name list. The discovered method's real name becomes the emit `jvm_name`.
-                let elem_mangled = receiver
-                    .type_args()
-                    .first()
-                    .copied()
-                    .and_then(Ty::kotlin_class_internal)
-                    .map(|element| format!("{}Of{}", mf.jvm_name, element.segment_ref()));
-                let lambda_return_mangled = lambda_return_overload
-                    .then_some(mf.ret_class)
-                    .flatten()
-                    .map(|ret| format!("{}{}", mf.kotlin_name, ret.segment()));
-                // The receiver's erased descriptor disambiguates same-named overloads on the facade
-                // (`maxOrNull([I)` vs `maxOrNull([D)`); the return descriptor disambiguates same-receiver
-                // overloads (`maxOrNull(Iterable)Double` vs `…Comparable`). A type-var return has no class.
-                let recv_desc = type_descriptor(
-                    <Self as crate::libraries::SemanticPlatform>::library_value_form(
-                        self,
-                        raw_receiver.unwrap_or(receiver),
-                    ),
-                );
-                let ret_desc = mf.ret_class.map(|r| {
-                    type_descriptor(
-                        <Self as crate::libraries::SemanticPlatform>::library_value_form(
-                            self,
-                            kotlin_type_name_to_ty(r),
-                        ),
-                    )
-                });
-                // The value parameters' ERASED JVM descriptors, from the metadata generic signature, so a
-                // bytecode lookup disambiguates same-receiver/same-return overloads by their VALUE param —
-                // both a concrete type (`appendLine(StringBuilder, int)` vs `appendLine(StringBuilder)`) and
-                // a FUNCTION type (`any(Iterable, Function1)` vs `any(Iterable)`). Type variables erase
-                // through their bounds. `None` (match by receiver alone) means no generic signature.
-                let value_param_descs: Option<Vec<String>> = mf.generic_sig.as_ref().map(|g| {
-                    g.params
-                        .iter()
-                        .map(|p| {
-                            type_descriptor(
-                                <Self as crate::libraries::SemanticPlatform>::library_value_form(
-                                    self, *p,
-                                ),
-                            )
-                        })
-                        .collect()
-                });
-                let by_name = |n: &str| {
-                    self.cp.facade_method(
-                        facade,
-                        n,
-                        Some(&recv_desc),
-                        ret_desc.as_deref(),
-                        value_param_descs.as_deref(),
-                    )
-                };
-                // Match the bytecode method to recover its descriptor and inline implementation details.
-                // A metadata JVM signature names the method exactly: a value-class receiver
-                // (`Result<T>.getOrThrow`) erases to its carrier there, which the receiver-keyed
-                // overload lookup would miss, losing the method's privacy (`@InlineOnly`).
-                let cand = if let Some(d) = mf.jvm_desc {
-                    self.cp.facade_static(facade, &mf.jvm_name, d)
-                } else {
-                    by_name(&mf.jvm_name)
-                        .or_else(|| lambda_return_mangled.as_ref().and_then(|n| by_name(n)))
-                        .or_else(|| elem_mangled.as_ref().and_then(|n| by_name(n)))
-                };
-                let Some(cand) = cand else {
-                    continue;
-                };
-                let (jvm_name, descriptor) = (cand.name.clone(), cand.descriptor.clone());
-                crate::trace_compiler!(
-                    "resolve",
-                    "extension emit handle {} metadata_params={:?} expected_descs={value_param_descs:?} selected={jvm_name}{descriptor}",
-                    mf.kotlin_name,
-                    mf.generic_sig.as_ref().map(|signature| &signature.params),
-                );
-                let bytecode_public = cand.public;
-                // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
-                // return to `Object`; present the LOGICAL signature (drop the continuation) so a
-                // normal call resolves — the same rule the top-level and member paths apply. The
-                // coroutine pass re-threads the CPS `Continuation` at the emitted call.
-                let descriptor = if mf.is_suspend() {
-                    parameter_plans::logical_suspend_descriptor(&descriptor)
-                } else {
-                    descriptor
-                };
-                let Some((physical_params, pret)) = parse_method_desc(&descriptor) else {
-                    continue;
-                };
-                if physical_params.is_empty() {
-                    continue;
-                }
-                let call_sig = mf.extension_call_sig();
-                let ret_class = mf.ret_class.map(kotlin_type_name_to_ty);
-                let ret = match ret_class {
-                    Some(t) if mf.ret_nullable() && t.is_jvm_scalar() => Ty::nullable(t),
-                    Some(t) => t,
-                    None if mf.ret_nullable() && pret.is_jvm_scalar() => Ty::nullable(pret),
-                    None => pret,
-                };
-                // The metadata-primary generic signature drives lambda-parameter and return binding.
-                let generic_sig = mf.generic_sig.clone();
-                let params = generic_sig
-                    .as_ref()
-                    .map(|signature| {
-                        signature
-                            .receiver
-                            .into_iter()
-                            .chain(signature.params.iter().copied())
-                            .collect::<Vec<_>>()
-                    })
-                    .filter(|params| params.len() == physical_params.len())
-                    .unwrap_or_else(|| physical_params.clone());
-                // The extension's DECLARED receiver source type — carried so the value-class pass can unbox
-                // a boxed receiver (`fun Result<T>.getOrThrow` on a boxed `kotlin.Result`). `None` for a
-                // type-VARIABLE receiver (`fun <T> T.let` — erases to `Object`, no value-class identity).
-                let source_receiver = match generic_sig.as_ref().and_then(|g| g.receiver) {
-                    Some(r) if r.is_ty_param() => None,
-                    None => None,
-                    _ => Some(receiver),
-                };
-                let inline = metadata_inline(
-                    mf.is_inline(),
-                    mf.has_reified_type_params(),
-                    bytecode_public,
-                );
-                let declared_ret = (!mf.ret_nullable())
-                    .then(|| {
-                        generic_sig
-                            .as_ref()
-                            .map(|signature| signature.ret)
-                            .or(ret_class)
-                    })
-                    .flatten();
-                let mut callable = LibraryCallable {
-                    annotations: mf.annotations.clone(),
-                    inline,
-                    suspend: mf.is_suspend(),
-                    source_receiver,
-                    // Preserve the metadata declaration independently of its Object-erased JVM
-                    // handle. `Result<T>` is the canonical ambiguous carrier: its physical return
-                    // and a boxed generic result are both `Object`, and only this selected
-                    // declaration fact tells value-class lowering which representation it received.
-                    declared_ret,
-                    context_count: mf.context_count(),
-                    contract: mf.contract.clone(),
-                    generic_sig: generic_sig.clone().map(Box::new),
-                    reified_type_parameter_ordinals: call_sig
-                        .reified_type_parameter_ordinals
-                        .clone()
-                        .into_boxed_slice(),
-                    declared_params: generic_sig
-                        .as_ref()
-                        .map(|signature| signature.parameters_with_receiver(mf.context_count())),
-                    // Carry the bytecode generic `Signature` so a reified extension can bind explicit
-                    // type arguments instead of invoking its throwing inline-only method.
-                    signature: cand.signature.clone(),
-                    // The name this extension is DECLARED under, beside the JVM method it is
-                    // realized as: `@JvmName` renames the method, and a value-class signature
-                    // appends kotlinc's hash (`UInt.downTo` is `downTo-J1ME1BU`). Neither is
-                    // recoverable from the spelling, so the provider publishes both, as a
-                    // classifier member does (`LibraryCallable::classifier_member`).
-                    reflection_name: Some(mf.kotlin_name.clone()),
-                    physical_name: (jvm_name != mf.kotlin_name).then(|| jvm_name.clone()),
-                    ..LibraryCallable::library(
-                        facade,
-                        mf.kotlin_name.clone(),
-                        params,
-                        ret,
-                        pret,
-                        descriptor,
-                    )
-                };
-                callable.physical_params = physical_params;
-                if call_sig.param_defaults.iter().any(|default| *default) {
-                    callable.default_realization =
-                        self.top_level_default_realization(&callable).map(Box::new);
-                }
-                callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
-                let paired = cand.paired_common;
-                overloads.push(FunctionInfo {
-                    ret: ReturnInfo::new(mf.ret_nullable(), ret_class),
-                    visibility: mf.visibility,
-                    generic_sig,
-                    context_count: mf.context_count(),
-                    flags: FnFlags {
-                        inline,
-                        reified: mf.has_reified_type_params(),
-                        suspend: mf.is_suspend(),
-                        operator: mf.is_operator(),
-                        infix: mf.is_infix(),
-                        is_abstract: false,
-                        is_final: mf.is_final(),
-                        deprecated_hidden: false,
-                        inherited_by_delegation: false,
-                        return_value_status: Some(mf.return_value_status),
-                    },
-                    call_sig,
-                    ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
-                });
-                self.publish_function_deprecation(overloads.last_mut(), mf.deprecation());
-                let common = &self.common_expectations;
-                normalize_tail(&self.cp, common, namespace, name, paired, &mut overloads);
-            }
-            // PROPERTIES declared by the facade — receiver-less TOP-LEVEL ones (`val plugin: Plugin`)
-            // and EXTENSION ones (`arr.lastIndex`, `list.indices`). Both are the callable namespace's
-            // property half, and both differ only by whether the accessors take a receiver parameter.
-            // Metadata records the property with its REAL accessor names (`JvmPropertySignature`), so the
-            // getter name is authoritative, never a `getX` guess. Facade parts are merged in the shared
-            // cached decode (`meta_properties_name`), the property analogue of `meta_functions_name`.
-            let mprops = self.cp.meta_properties_name(facade);
-            let matching_properties = mprops
-                .iter()
-                .filter(|property| property.name == name)
-                .count();
-            if matching_properties != 0 {
-                crate::trace_compiler!(
-                    "metadata_properties",
-                    "property symbols namespace={namespace:?} name={name} facade={} decoded={} matching={matching_properties}",
-                    facade.render(),
-                    mprops.iter().count(),
-                );
-            }
-            for mp in mprops.iter().filter(|property| property.name == name) {
-                let package = match namespace {
-                    SymbolNamespace::Package(package) => Some(package),
-                    SymbolNamespace::Classifier(_) => None,
-                };
-                let accessor = |jvm_name: &str, descriptor: &str| {
-                    self.cp
-                        .facade_static(facade, jvm_name, descriptor)
-                        .map(|method| StaticAccessor {
-                            owner: method.owner,
-                            public: method.public,
-                        })
-                };
-                props.extend(self.static_metadata_property(mp, facade, package, accessor));
-            }
+            self.facade_package_callables(facade, namespace, name, &mut overloads, &mut props);
         }
         if let SymbolNamespace::Package(package) = namespace {
             for property in &mut props {
@@ -3943,17 +3680,7 @@ impl JvmLibraries {
             SymbolNamespace::Classifier(owner) => self.static_field_name(owner, name),
         };
         if let (SymbolNamespace::Package(_), Some(field)) = (namespace, static_field.as_ref()) {
-            if let Some(metadata) =
-                self.metadata_property_for_field(field.owner, &field.name, &field.descriptor)
-            {
-                super::top_level_properties::merge_metadata_const(
-                    name,
-                    &metadata,
-                    field,
-                    field.deprecated_hidden,
-                    &mut props,
-                );
-            }
+            self.merge_top_level_field_property(name, field, &mut props);
         }
         let hidden = self.withhold_hidden_declarations(package, name, &mut props);
         let platform_callables = match (overloads.is_empty(), props.is_empty()) {
@@ -3968,7 +3695,7 @@ impl JvmLibraries {
         // Language builtin classifiers exist independently of whether the target classpath contains
         // stdlib. Federate that classifier source with the platform record here; platform metadata wins
         // when present, while callables remain exclusively metadata/platform declarations.
-        let core = EmptySymbolSource.symbols(namespace, name);
+        let core = EmptySymbolSource::declarations(namespace, name);
         let (classifier_name, classifier_declaration, classifier, builtin_classifier) =
             if classifier.is_some() {
                 (
@@ -4012,57 +3739,6 @@ impl JvmLibraries {
                 importable_declaration,
             },
         )
-    }
-}
-
-impl SymbolSource for JvmLibraries {
-    /// Both answered by the classpath, which is where this provider interned them.
-    fn external_callable(
-        &self,
-        identity: crate::fir::ExternalCallableId,
-    ) -> Option<crate::libraries::ExternalCallableRealization> {
-        self.cp.external_callable(identity)
-    }
-
-    fn external_property(
-        &self,
-        identity: crate::fir::ExternalPropertyId,
-    ) -> Option<crate::libraries::ExternalPropertyRealization> {
-        self.cp.external_property(identity)
-    }
-
-    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
-        JvmLibraries::package_exists(self, parent, name)
-    }
-
-    fn symbols(
-        &self,
-        namespace: SymbolNamespace,
-        name: &str,
-    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-        JvmLibraries::symbols(self, namespace, name)
-    }
-
-    fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
-        self.api_withheld
-            .borrow()
-            .get(&owner)
-            .is_some_and(|names| names.contains(name))
-    }
-
-    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
-        super::jvm_class_map::platform_flexible_upper_bound(lower)
-    }
-
-    fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
-        classifier_facts::generated_serializer_singleton(self, classifier)
-    }
-
-    fn serializable_class_elements(
-        &self,
-        classifier: TypeName,
-    ) -> Option<crate::types::SerializableClassElements> {
-        classifier_facts::serializable_class_elements(self, classifier)
     }
 }
 
@@ -4575,28 +4251,25 @@ fn collection_barrier_role(
     owner: TypeName,
     source_name: &str,
     descriptor: &str,
-) -> Option<crate::libraries::CollectionBarrierOutcome> {
+) -> Option<crate::libraries::CollectionBarrier> {
+    use super::mapped_builtin_declarations::CollectionBridgeFailure as Failure;
+    use crate::libraries::CollectionBarrierOutcome as Outcome;
     let policy = classpath.collection_bridge_policy_name(
         owner,
         source_name,
         descriptor,
         super::mapped_builtin_declarations::MappedBuiltinMemberKind::Function,
     )?;
-    if policy.checked_parameters != [0] {
-        return None;
-    }
-    match policy.failure {
-        super::mapped_builtin_declarations::CollectionBridgeFailure::False => {
-            Some(crate::libraries::CollectionBarrierOutcome::False)
-        }
-        super::mapped_builtin_declarations::CollectionBridgeFailure::Null => {
-            Some(crate::libraries::CollectionBarrierOutcome::Null)
-        }
-        super::mapped_builtin_declarations::CollectionBridgeFailure::NotFound => {
-            Some(crate::libraries::CollectionBarrierOutcome::NotFound)
-        }
-        super::mapped_builtin_declarations::CollectionBridgeFailure::Argument(_) => None,
-    }
+    let outcome = match policy.failure {
+        Failure::False => Outcome::False,
+        Failure::Null => Outcome::Null,
+        Failure::NotFound => Outcome::NotFound,
+        Failure::Argument(_) => return None,
+    };
+    Some(crate::libraries::CollectionBarrier {
+        checked_parameters: policy.checked_parameters,
+        outcome,
+    })
 }
 
 impl crate::libraries::SemanticPlatform for JvmLibraries {
@@ -4676,18 +4349,14 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             .iter()
             .map(|(_, name, source)| (name.clone(), source.clone()))
             .collect::<Vec<_>>();
-        let Some(headers) = super::java_stub::stub_classes(
+        // Lenient, like kotlinc: one unresolvable Java type must not withdraw every Java header of
+        // the module (`an_unresolved_type_in_one_java_source_keeps_the_module_java_headers`).
+        let headers = super::java_stub::stub_classes(
             &java_blocks,
-            super::java_stub::StubMode::Strict,
+            super::java_stub::StubMode::Lenient,
             &world,
-        ) else {
-            return Err(crate::libraries::SourceHeaderError {
-                source: java[0].0,
-                message:
-                    "cannot resolve Java source declaration headers against this source module"
-                        .into(),
-            });
-        };
+        )
+        .expect("lenient Java header stubbing keeps every source set");
         *self.source_headers.borrow_mut() = Some(self.cp.push_stub_overlay(headers));
         Ok(())
     }
@@ -4837,21 +4506,20 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {
-        self.cp.type_alias_expansion(internal).and_then(
-            |(target, formals, expansion, expansion_spelling)| {
-                let target = Self::normalized_type_alias_target(target, expansion)?;
-                Some(crate::libraries::AliasExpansion {
-                    identity: internal,
-                    target: self.canonical_source_type_name(target),
-                    formals,
-                    expansion_spelling,
-                    // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
-                    // the complete template at the provider boundary so core resolution only sees
-                    // source identities, including inside projections, function types, and nullability.
-                    expansion: canonicalize_jvm_collections(expansion),
-                })
-            },
-        )
+        self.cp.type_alias_expansion(internal).and_then(|alias| {
+            let target = Self::normalized_type_alias_target(alias.target, alias.expansion)?;
+            Some(crate::libraries::AliasExpansion {
+                identity: internal,
+                declaration_name: alias.declaration_name,
+                target: self.canonical_source_type_name(target),
+                formals: alias.formals,
+                expansion_spelling: alias.expansion_spelling,
+                // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
+                // the complete template at the provider boundary so core resolution only sees
+                // source identities, including inside projections, function types, and nullability.
+                expansion: canonicalize_jvm_collections(alias.expansion),
+            })
+        })
     }
 
     fn canonical_source_type_name(&self, internal: TypeName) -> TypeName {
@@ -4859,7 +4527,9 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         // may find the JVM realization (`java/lang/String`, `java/util/List`), but its source identity
         // is the one `.kotlin_builtins` record that declares the Kotlin API. Keeping the physical name
         // here loses members such as inherited `CharSequence.length` and creates a second class model.
-        super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(internal).unwrap_or(internal)
+        // Only a group Java source maps to Kotlin has that identity: `java.lang.Void` is the realization
+        // `Nothing` erases to, yet a Java or Kotlin reference to it names the ordinary Java class.
+        super::jvm_class_map::to_kotlin_type_name(internal)
     }
 
     fn is_default_library_owner(&self, internal: TypeName) -> bool {
@@ -4951,13 +4621,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 let setter = setter_callables
                     .functions()
                     .iter()
-                    .find(|setter| {
-                        // Same pairing as a setter declared on the receiver: one value parameter
-                        // of the getter's storage type. The Java method may return anything.
-                        setter.semantic_params().len() == 1
-                            && self.library_value_form(ty)
-                                == self.library_value_form(setter.semantic_params()[0])
-                    })
+                    .find(|setter| self.pairs_java_setter(ty, &setter.semantic_params()))
                     .cloned();
                 let getter_declaration = function.stable_declaration;
                 let setter_declaration =
@@ -5105,12 +4769,11 @@ impl JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::{
-        collection_barrier_role, desc_to_ty, java_method_has_operator_convention,
-        java_type_nullability, overlay_metadata_collection_names, parse_class_gsig,
-        parse_concrete_field_gsig, parse_field_gsig, parse_formals, parse_method_desc,
-        parse_method_gsig, suspend_return_from_gsig,
+        desc_to_ty, java_method_has_operator_convention, java_type_nullability,
+        overlay_metadata_collection_names, parse_class_gsig, parse_concrete_field_gsig,
+        parse_field_gsig, parse_formals, parse_method_desc, parse_method_gsig,
+        suspend_return_from_gsig,
     };
-    use crate::libraries::CollectionBarrierOutcome;
     use crate::libraries::{GenericReturnPolicy, SemanticPlatform};
     use crate::symbol_source::SymbolNamespace;
     use crate::types::type_name;
@@ -5159,42 +4822,6 @@ mod tests {
                     && function.callable.params.len() == 1
             });
         assert!(operator_get, "realized charAt must be operator get");
-    }
-
-    #[test]
-    fn decoded_collection_barrier_role_is_declaration_exact() {
-        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
-            return;
-        };
-        let classpath = crate::jvm::classpath::Classpath::new(vec![stdlib]);
-        assert_eq!(
-            collection_barrier_role(
-                &classpath,
-                type_name("kotlin/collections/MutableCollection"),
-                "remove",
-                "(Ljava/lang/Object;)Z",
-            ),
-            Some(CollectionBarrierOutcome::False)
-        );
-        assert_eq!(
-            collection_barrier_role(
-                &classpath,
-                type_name("kotlin/collections/MutableCollection"),
-                "add",
-                "(Ljava/lang/Object;)Z",
-            ),
-            None,
-            "a same-signature ordinary collection member must keep its parameter assertion"
-        );
-        assert_eq!(
-            collection_barrier_role(
-                &classpath,
-                type_name("example/MutableCollection"),
-                "remove",
-                "(Ljava/lang/Object;)Z",
-            ),
-            None
-        );
     }
 
     #[test]
@@ -5429,7 +5056,7 @@ mod tests {
                 .generic_sig
                 .as_ref()
                 .map(|signature| signature.formals.as_slice()),
-            Some(["T".to_string()].as_slice())
+            Some([crate::types::TyParamName::new("T")].as_slice())
         );
         let scope = [type_name("kotlin/reflect")];
         let selected = crate::symbol_resolver::SymbolResolver::new_scoped(&libraries, &scope)
@@ -6158,6 +5785,10 @@ mod tests {
         assert_eq!(
             libs.canonical_source_type_name(type_name("java/lang/String")),
             type_name("kotlin/String")
+        );
+        assert_eq!(
+            libs.canonical_source_type_name(type_name("java/lang/Void")),
+            type_name("java/lang/Void")
         );
     }
 

@@ -208,7 +208,6 @@ pub(super) fn accept_active_debug_metadata(
                         decl_line: secondary.decl_line,
                         delegation_line: secondary.delegation_line,
                         decl_end_line: secondary.decl_end_line,
-                        defaults: secondary.default_lines.clone(),
                     },
                 );
             }
@@ -277,6 +276,44 @@ pub(super) fn accept_active_debug_metadata(
             }
         }
     }
+    attach_specialized_copy_lines(ir);
+}
+
+/// A call-site copy of an anonymous object can be taken before its declaration's members receive
+/// their lines, when the caller is lowered in the same declaration unit. Its methods are the
+/// declaration's methods regenerated for that call and keep their source lines, as kotlinc's do:
+/// each copy takes the lines its source method has now. A copy of a copy follows its source, so
+/// the copies are visited in the order they were taken.
+fn attach_specialized_copy_lines(ir: &mut IrFile) {
+    let mut copies = ir
+        .specialized_anonymous_classes
+        .iter()
+        .map(|(&class, specialization)| {
+            let mut methods = specialization
+                .method_clones
+                .iter()
+                .map(|(&source, &copy)| (source, copy))
+                .collect::<Vec<_>>();
+            methods.sort_unstable();
+            (class, methods)
+        })
+        .collect::<Vec<_>>();
+    copies.sort_unstable_by_key(|(class, _)| *class);
+    for (source, copy) in copies.into_iter().flat_map(|(_, methods)| methods) {
+        for lines in [
+            &mut ir.fn_decl_lines,
+            &mut ir.fn_sig_lines,
+            &mut ir.fn_close_lines,
+            &mut ir.fn_end_lines,
+        ] {
+            if let Some(line) = lines.get(&source).copied() {
+                lines.entry(copy).or_insert(line);
+            }
+        }
+        if let Some(offset) = ir.fn_signature_offsets.get(&source).copied() {
+            ir.fn_signature_offsets.entry(copy).or_insert(offset);
+        }
+    }
 }
 
 /// Attach declaration-only metadata for one already-bound source function. The stable declaration
@@ -300,6 +337,12 @@ fn attach_function_metadata(
         super::declaration_metadata::declaration_annotations(&function.annotations, info);
     if annotations.declares_annotations() {
         ir.function_annotations.insert(function_id, annotations);
+    }
+    let source_retained =
+        super::declaration_metadata::source_retained_annotations(&function.annotations, info);
+    if !source_retained.is_empty() {
+        ir.function_source_annotations
+            .insert(function_id, source_retained);
     }
     let mut parameter_annotations = function
         .params
@@ -396,9 +439,9 @@ fn attach_property_metadata(
         .expect("a checked property retains its declaration header");
     if header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER) {
         let property_annotations =
-            super::declaration_metadata::companion_block_property_annotations(property, info);
+            super::declaration_metadata::property_declaration_annotations(property, info);
         let field_annotations =
-            super::declaration_metadata::companion_block_field_annotations(property, info);
+            super::declaration_metadata::property_field_annotations(property, info);
         if field_annotations.declares_annotations() {
             ir.companion_block_field_annotations
                 .insert(property_id, field_annotations);
@@ -442,10 +485,19 @@ fn attach_property_metadata(
         if let Some(spelling) = published_declaration_spellings(declaration, info, index) {
             package_property.spellings = spelling;
         }
-        package_property.suppressed_source_annotation_application =
-            super::declaration_metadata::top_level_property_retains_suppressed_source_application(
-                property, info,
-            );
+        let property_annotations =
+            super::declaration_metadata::property_declaration_annotations(property, info);
+        let field_annotations =
+            super::declaration_metadata::property_field_annotations(property, info);
+        ir.package_property_annotations.insert(
+            property_id,
+            crate::ir::PackagePropertyAnnotations {
+                declares_metadata_annotations: property_annotations.declares_metadata_annotations()
+                    || field_annotations.declares_metadata_annotations(),
+                property: property_annotations,
+                field: field_annotations,
+            },
+        );
     }
 }
 

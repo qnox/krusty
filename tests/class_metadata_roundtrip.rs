@@ -1,15 +1,12 @@
 //! Writer→reader round-trip for CLASS `@Metadata`: `metadata::class_builder::build_class` encodes a
-//! class's member functions (with their SOURCE `value_parameter` types), and `metadata::class_functions`
-//! decodes them back. This is the contract cross-module resolution relies on — a dependent module reads
+//! class's member functions (with their SOURCE `value_parameter` types), and the class's lazily
+//! decoded members decode them back. This is the contract cross-module resolution relies on — a dependent module reads
 //! a lib class's member signatures (their source arity) from the lib's emitted `@Metadata`, exactly as
 //! `Classpath::metadata_call_facts` does for a classpath callee. `build_class` existed but was unwired
 //! and untested; this pins the round-trip before it is wired into emit.
 
 use krusty::jvm::classreader::ClassInfo;
-use krusty::jvm::metadata::{
-    class_constructors, class_functions, decode_metadata_within, package_functions, RawMetadata,
-    ScopedTypeParameter,
-};
+use krusty::jvm::metadata::{decode_metadata_within, RawMetadata, ScopedTypeParameter};
 use krusty::metadata::class_builder::{
     build_class, CapturedTypeParameters, ClassTail, CtorMeta, FnMeta, JvmClassSignatures,
     JvmConstructorSignature, DEFAULT_CLASS_FLAGS, EQUALS_FN_FLAGS,
@@ -49,7 +46,7 @@ fn class_info_within(
         fields: Vec::new(),
         methods: Vec::new(),
         deprecation: None,
-        meta: decode_metadata_within(&raw, internal, &[], enclosing)
+        meta: decode_metadata_within(&raw, internal, enclosing)
             .expect("round-trip metadata decodes"),
         signature: None,
         retention: None,
@@ -74,7 +71,11 @@ fn class_member_value_params_round_trip() {
         Ty::String,
     )];
     let (d1, d2) = build_class(
-        type_name("com/example/Greeter"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("com/example/Greeter"),
+            type_name("com/example"),
+            &["Greeter"],
+        ),
         &[("name".to_string(), Ty::String)],
         &[],
         &methods,
@@ -84,10 +85,14 @@ fn class_member_value_params_round_trip() {
             primary_constructor: Some(JvmConstructorSignature::init("(Ljava/lang/String;)V")),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info("com/example/Greeter", d1, d2);
 
-    let fns = class_functions(&ci);
+    let fns = &ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions;
     let greet = fns
         .iter()
         .find(|f| f.jvm_name == "greet")
@@ -108,7 +113,11 @@ fn class_member_value_params_round_trip() {
 #[test]
 fn value_class_constructor_realization_name_round_trips() {
     let (d1, d2) = build_class(
-        type_name("sample/Name"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("sample/Name"),
+            type_name("sample"),
+            &["Name"],
+        ),
         &[("value".to_string(), Ty::String)],
         &[],
         &[],
@@ -124,9 +133,13 @@ fn value_class_constructor_realization_name_round_trips() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info_kind("sample/Name", d1, d2, Some(1));
-    let constructors = class_constructors(&ci);
+    let constructors = &ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .constructors;
 
     assert_eq!(constructors.len(), 1);
     assert_eq!(constructors[0].params.names, ["value"]);
@@ -154,7 +167,11 @@ fn secondary_constructor_default_flags_round_trip() {
         annotations: &krusty::metadata::NO_ANNOTATIONS,
     }];
     let (d1, d2) = build_class(
-        type_name("sample/Secondary"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("sample/Secondary"),
+            type_name("sample"),
+            &["Secondary"],
+        ),
         &[],
         &[],
         &[],
@@ -174,11 +191,15 @@ fn secondary_constructor_default_flags_round_trip() {
             )],
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     // Constructors are a `Class`-schema field. Preserve the carrier kind the real `@Metadata`
     // annotation supplies so the decoder does not reinterpret an unknown carrier as a class.
-    let constructors =
-        class_constructors(&class_info_kind("sample/Secondary", d1, d2, Some(1))).to_vec();
+    let constructors = class_info_kind("sample/Secondary", d1, d2, Some(1))
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .constructors
+        .to_vec();
 
     assert_eq!(constructors.len(), 1);
     assert_eq!(constructors[0].params.names, ["required", "fallback"]);
@@ -195,7 +216,11 @@ fn synthesized_data_equals_recovers_its_implicit_equality_bound() {
     );
     equals.flags = EQUALS_FN_FLAGS;
     let (d1, d2) = build_class(
-        type_name("sample/Data"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("sample/Data"),
+            type_name("sample"),
+            &["Data"],
+        ),
         &[],
         &[],
         &[equals],
@@ -211,9 +236,13 @@ fn synthesized_data_equals_recovers_its_implicit_equality_bound() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info_kind("sample/Data", d1, d2, Some(1));
-    let equals = class_functions(&ci)
+    let equals = ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|function| function.jvm_name == "equals")
         .expect("synthesized equals metadata");
@@ -229,10 +258,15 @@ fn class_type_parameter_bound_and_variance_round_trip() {
         bounds: vec![(Ty::obj("kotlin/CharSequence"), true)],
         variance: TypeVariance::Out,
         reified: false,
+        captured_from_enclosing: false,
     };
     let names = vec!["T".to_string()];
     let (d1, d2) = build_class(
-        type_name("com/example/Producer"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("com/example/Producer"),
+            type_name("com/example"),
+            &["Producer"],
+        ),
         &[],
         &[],
         &[],
@@ -249,7 +283,8 @@ fn class_type_parameter_bound_and_variance_round_trip() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info_kind("com/example/Producer", d1, d2, Some(1));
     assert_eq!(
         ci.meta.class_type_parameters.type_param_variances(),
@@ -280,6 +315,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         bounds: vec![(Ty::obj("kotlin/Any"), false)],
         variance: TypeVariance::Invariant,
         reified: false,
+        captured_from_enclosing: false,
     };
     let methods = vec![FnMeta {
         has_source: true,
@@ -321,7 +357,11 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
     let own_names = vec!["U".to_string()];
     let captured = vec![outer];
     let (d1, d2) = build_class(
-        type_name("sample/Outer$Inner"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("sample/Outer$Inner"),
+            type_name("sample"),
+            &["Outer", "Inner"],
+        ),
         &[],
         &[],
         &methods,
@@ -339,7 +379,8 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info_within(
         "sample/Outer$Inner",
         d1,
@@ -348,7 +389,10 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         &[scoped(0, "outer-semantic")],
     );
     assert_eq!(ci.meta.class_type_parameters.type_params(), &["U"]);
-    let pair = class_functions(&ci)
+    let pair = ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|function| function.jvm_name == "pair")
         .expect("pair metadata");
@@ -372,6 +416,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         bounds: vec![(bound, false)],
         variance: TypeVariance::Invariant,
         reified: false,
+        captured_from_enclosing: false,
     };
     let parameter = |name: &str| (name.to_string(), Ty::ty_param(name, bound));
     let methods = vec![FnMeta {
@@ -399,7 +444,11 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
     let own_names = vec!["V".to_string()];
     let captured = vec![outer, middle];
     let (d1, d2) = build_class(
-        type_name("sample/Outer$Middle$Inner"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("sample/Outer$Middle$Inner"),
+            type_name("sample"),
+            &["Outer", "Middle", "Inner"],
+        ),
         &[],
         &[],
         &methods,
@@ -417,7 +466,8 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info_within(
         "sample/Outer$Middle$Inner",
         d1,
@@ -425,7 +475,10 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         Some(1),
         &[scoped(0, "outer-semantic"), scoped(1, "middle-semantic")],
     );
-    let signature = class_functions(&ci)
+    let signature = ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|function| function.jvm_name == "triple")
         .and_then(|function| function.generic_sig.as_ref())
@@ -459,7 +512,11 @@ fn member_type_parameter_bounds_can_reference_later_parameters() {
     get.type_param_bounds = vec![vec![t_bound], vec![any]];
 
     let (d1, d2) = build_class(
-        type_name("sample/ErrorTest"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("sample/ErrorTest"),
+            type_name("sample"),
+            &["ErrorTest"],
+        ),
         &[],
         &[],
         &[get],
@@ -472,9 +529,13 @@ fn member_type_parameter_bounds_can_reference_later_parameters() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info("sample/ErrorTest", d1, d2);
-    let signature = class_functions(&ci)
+    let signature = ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|function| function.jvm_name == "get")
         .and_then(|function| function.generic_sig.as_ref())
@@ -537,7 +598,10 @@ fn package_value_param_defaults_round_trip() {
     let (d1, d2) = build_package(&funcs, &[], &[], (None, &[]), true);
     let ci = class_info("com/example/HostKt", d1, d2);
 
-    let fns = package_functions(&ci);
+    let fns = &ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .package_functions;
     let host = fns
         .iter()
         .find(|f| f.kotlin_name == "host")
@@ -554,7 +618,6 @@ fn package_value_param_defaults_round_trip() {
 
 #[test]
 fn package_function_type_parameter_bound_round_trips() {
-    use krusty::jvm::metadata::package_functions;
     use krusty::metadata::builder::{build_package, FnMeta as PkgFnMeta};
     let t = Ty::ty_param("T", Ty::obj("kotlin/CharSequence"));
     let funcs = vec![PkgFnMeta {
@@ -588,7 +651,10 @@ fn package_function_type_parameter_bound_round_trips() {
     }];
     let (d1, d2) = build_package(&funcs, &[], &[], (None, &[]), true);
     let ci = class_info("com/example/HostKt", d1, d2);
-    let function = package_functions(&ci)
+    let function = ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .package_functions
         .iter()
         .find(|function| function.kotlin_name == "identity")
         .expect("identity metadata");
@@ -605,7 +671,6 @@ fn package_function_type_parameter_bound_round_trips() {
 
 #[test]
 fn package_extension_receiver_round_trips() {
-    use krusty::jvm::metadata::package_functions;
     use krusty::metadata::builder::{build_package, FnMeta as PkgFnMeta};
     // An extension `fun NavGraphBuilder.composable(route: String): Unit` — the receiver must be recorded
     // as `Function.receiver_type`, NOT a value parameter, so the decoded LOGICAL arity is 1 (just
@@ -643,7 +708,10 @@ fn package_extension_receiver_round_trips() {
     let (d1, d2) = build_package(&funcs, &[], &[], (None, &[]), true);
     let ci = class_info("com/example/NavGraphBuilderKt", d1, d2);
 
-    let f = package_functions(&ci)
+    let f = ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .package_functions
         .iter()
         .find(|f| f.kotlin_name == "composable")
         .expect("the decoded package metadata must list `composable`");
@@ -669,7 +737,6 @@ fn package_extension_receiver_round_trips() {
 
 #[test]
 fn package_receiver_function_type_param_round_trips() {
-    use krusty::jvm::metadata::package_functions;
     use krusty::metadata::builder::{build_package, FnMeta as PkgFnMeta};
     // `fun NavHost(builder: NGB.() -> Unit)` — the `builder` param is a RECEIVER function type. Its
     // metadata Type must carry @ExtensionFunctionType + the receiver as the first type argument, so a
@@ -715,7 +782,10 @@ fn package_receiver_function_type_param_round_trips() {
     let (d1, d2) = build_package(&funcs, &[], &[], (None, &[]), true);
     let ci = class_info("com/example/NavHostKt", d1, d2);
 
-    let f = package_functions(&ci)
+    let f = ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .package_functions
         .iter()
         .find(|f| f.kotlin_name == "NavHost")
         .expect("the decoded package metadata must list `NavHost`");

@@ -312,8 +312,10 @@ impl BodyLowering<'_, '_, '_> {
             ("mutableMapOf" | "hashMapOf", [], []) => {
                 Some(self.runtime_call("kt_map_new", &[], any(), &[]))
             }
+            // `emptySet()` and `setOf()` answer the one shared `EmptySet`, as Kotlin's do and as
+            // a library body's read of that object does.
             ("emptySet" | "setOf", [], []) => {
-                Some(self.runtime_call("kt_set_new", &[], any(), &[]))
+                Some(self.runtime_call("kt_set_empty", &[], any(), &[]))
             }
             ("setOf" | "mutableSetOf" | "hashSetOf", [_], []) if packs_a_vararg => {
                 Some(self.runtime_call("kt_set_new", &[], any(), &[]))
@@ -446,13 +448,14 @@ impl BodyLowering<'_, '_, '_> {
             .map(|signature| signature.ret)
             .or(getter.declared_ret)
             .unwrap_or(getter.ret);
-        let name = getter.reflection_name.as_deref().unwrap_or(&getter.name);
+        // The selected property's normalized name, not its accessor's target spelling (a KLIB
+        // getter is `<get-size>`), as a list's getter is read.
         let signature = super::super::super::intrinsics::FunctionSignature::new(
             super::super::super::intrinsics::DeclarationOwner::callable(
                 getter.physical_owner,
                 getter.declaration_owner,
             ),
-            name,
+            &property.name,
             params,
             result,
         );

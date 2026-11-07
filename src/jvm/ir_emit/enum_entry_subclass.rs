@@ -8,6 +8,9 @@ use super::bridge_emission::emit_bridges;
 use super::frame_map::FrameKey;
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 /// Emit a synthesized enum-entry subclass (`Enum$ENTRY extends Enum`) for an entry with a body: a
 /// package-private `final` class with one constructor `(String name, int ordinal)V` that evaluates
 /// the constant's arguments and calls the enum's constructor with them, plus the entry's overriding
@@ -27,9 +30,26 @@ pub(super) fn emit_enum_entry_subclass(
     env.inner_classes.register(&mut cw);
 
     // Entry-body PROPERTIES are private backing fields (read via synthesized getters, like kotlinc).
-    for field in c.fields.iter() {
+    for (field_index, field) in c.fields.iter().enumerate() {
         let acc = 0x0002 | if field.is_final() { 0x0010 } else { 0 };
-        cw.add_field(acc, &field.name, &ir_type_desc(&field.ty));
+        let type_parameter = ir
+            .field_signatures(&fq_name)
+            .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
+            .map(|(_, parameter)| parameter.as_str())
+            .or(field.type_param.as_deref());
+        let signature = signature_formatter
+            .field_signature(
+                &field.ty,
+                type_parameter,
+                field_visibility::backs_var_property(c, field_index),
+            )
+            .filter(|_| !field.is_property_delegate());
+        cw.add_field_sig(
+            acc,
+            &field.name,
+            &ir_type_desc(&field.ty),
+            signature.as_deref(),
+        );
     }
 
     // Constructor: `(String, int)V` → `super(name, ordinal, <the constant's arguments>)`, then the
@@ -52,7 +72,25 @@ pub(super) fn emit_enum_entry_subclass(
     if let Some(signature) = &ctor_signature {
         cw.reserve_descriptor(signature);
     }
+    // The constructor maps to its entry's line: the superclass call is a constructor call at the
+    // entry's offsets, so, as for any constructor call, its arguments mark their own lines and the
+    // entry's line goes back into effect for the default-argument operands and the call itself.
+    let entry_line = ir
+        .class_id_by_name(c.superclass)
+        .and_then(|enum_class| {
+            ir.classes[enum_class as usize]
+                .enum_entries
+                .iter()
+                .find(|entry| entry.subclass == Some(c.fq_name))
+        })
+        .map_or(0, |entry| entry.decl_line);
+    let mark_entry = |code: &mut CodeBuilder| {
+        if entry_line != 0 {
+            code.mark_line(entry_line);
+        }
+    };
     let mut ctor = CodeBuilder::new(1 + prefix_words);
+    mark_entry(&mut ctor);
     let ctor_max = {
         let mut e = Emitter::new(
             ir,
@@ -93,6 +131,7 @@ pub(super) fn emit_enum_entry_subclass(
             .unwrap_or_default();
         let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
         if !super_defaults.is_empty() {
+            mark_entry(&mut ctor);
             for mask in constructor_default_masks(super_defaults, c.super_ctor_params.len()) {
                 ctor.push_int(mask, e.cw);
                 super_params.push(Ty::Int);
@@ -113,6 +152,7 @@ pub(super) fn emit_enum_entry_subclass(
             &method_descriptor(&super_params, Ty::Unit),
         );
         let argw: i32 = super_params.iter().map(|t| slot_words(*t) as i32).sum();
+        mark_entry(&mut ctor);
         ctor.invokespecial(super_init, argw, 0);
         e.this_uninitialized = false;
         if let Some(init_body) = c.init_body {
@@ -122,6 +162,11 @@ pub(super) fn emit_enum_entry_subclass(
         }
         e.frame.max()
     };
+    let ctor_lines: Vec<(u16, u32)> = ctor
+        .line_marks()
+        .iter()
+        .map(|&(pc, line)| (pc, u32::from(line)))
+        .collect();
     ctor.ret_void();
     ctor.ensure_locals(ctor_max);
     ctor.link();
@@ -142,83 +187,25 @@ pub(super) fn emit_enum_entry_subclass(
         ),
         ("$enum$ordinal".to_string(), "I".to_string(), 2),
     ];
-    let line = ir
-        .class_id_by_name(c.superclass)
-        .and_then(|enum_class| {
-            ir.classes[enum_class as usize]
-                .enum_entries
-                .iter()
-                .find(|entry| entry.subclass == Some(c.fq_name))
-        })
-        .map(|entry| entry.decl_line)
-        .filter(|&line| line != 0)
-        .map(|line| (0, line));
-    cw.set_method_debug("<init>", &ctor_desc, line, &locals);
+    cw.set_method_debug("<init>", &ctor_desc, None, &locals);
+    cw.set_method_lines("<init>", &ctor_desc, &ctor_lines);
 
-    // The overriding methods + synthesized property getters.
-    emit_declared_property_accessors(
-        ir,
-        c,
-        &mut cw,
-        &PropertyAccessorEmit {
-            fq_name: &fq_name,
-            facade,
-            formatter: &signature_formatter,
-            param_assertions: opts.param_assertions,
-            env,
-        },
-    );
+    // Source properties own both their default and custom accessors, so neither can overtake
+    // another declaration. Use the same member schedule and emitter as ordinary classes.
     let markers = member_schedule::property_annotation_marker_fids(ir, c);
-    for &fid in &c.methods {
-        if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) {
-            continue; // already emitted beside its property's accessors
-        }
-        // Lambda implementation helpers reparented into an enum-entry subclass remain static; only
-        // source member overrides consume an instance receiver. The ordinary class/enum writers
-        // already honor this IR bit, and entry subclasses must use the same rule.
-        let function = &ir.functions[fid as usize];
-        emit_method(
-            ir,
-            fid,
-            StaticOwner::Class(c.fq_name),
-            &fq_name,
-            facade,
-            &mut cw,
-            !function.is_static,
-            env,
-        );
-        if ir.function_reference_access_bridges.contains(&fid) {
-            super::access_bridges::emit_function_reference_access_bridge(
-                ir,
-                fid,
-                &fq_name,
-                &mut cw,
-                false,
-                c.decl_line,
-            );
-        }
-        if let Some(defaults) = ir.declared_param_defaults(fid) {
-            if function.is_static {
-                emit_facade_default_stub(
-                    DefaultStubSource { ir, fid, defaults },
-                    StaticOwner::Class(c.fq_name),
-                    &fq_name,
-                    &mut cw,
-                    env,
-                    Ty::obj("java/lang/Object"),
-                );
-            } else {
-                emit_default_stub(
-                    DefaultStubSource { ir, fid, defaults },
-                    Some(StaticOwner::Class(c.fq_name)),
-                    &fq_name,
-                    facade,
-                    &mut cw,
-                    env,
-                    false,
-                );
-            }
-        }
+    let members = ScheduledMemberEmission {
+        ir,
+        class: c,
+        fq_name: &fq_name,
+        facade,
+        signature_formatter: &signature_formatter,
+        param_assertions: opts.param_assertions,
+        env,
+        markers: &markers,
+        byte_parity: false,
+    };
+    for member in source_ordered_members(ir, c, None) {
+        emit_scheduled_member(&members, member, &mut cw);
     }
     // Entry-body override edges are checked and frozen in Pass 1 like ordinary class overrides.
     // Their anonymous subclass still needs the JVM descriptor adapters derived from those edges

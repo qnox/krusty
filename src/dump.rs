@@ -396,7 +396,7 @@ mod tests {
             span: Span::new(31, 32),
             editor_span: None,
             severity: Severity::Error,
-            warning_name: None,
+            name: None,
             kind: crate::diag::DiagnosticKind::Compiler,
             msg: "type mismatch".to_string(),
             identity: None,

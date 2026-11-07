@@ -27,7 +27,7 @@ pub enum UndeterminedType {
     Error,
 }
 
-/// The only semantic query a representation backend may make after common lowering.
+/// Frozen classifier and declaration-name facts a backend may inspect after common lowering.
 ///
 /// Callable/property lookup, overload sets, and source names are absent deliberately: checked IR
 /// already owns every selected declaration identity and realization. A finalized module contract
@@ -36,6 +36,20 @@ pub enum UndeterminedType {
 /// references, or ordinary source-body payloads.
 pub trait BackendClassifierSource {
     fn classifier(&self, classifier: TypeName) -> Option<Arc<BackendClassifierFact>>;
+
+    /// Own name evidence for an already-bound classifier or alias declaration. An outer `Some`
+    /// preserves selected unknown evidence, rather than consulting another declaration.
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        match declaration {
+            crate::libraries::ClassifierDeclarationKey::Ordinary(identity) => self
+                .classifier(identity)
+                .map(|record| record.declaration_name.clone()),
+            crate::libraries::ClassifierDeclarationKey::TypeAlias(_) => None,
+        }
+    }
 }
 
 /// The exact classifier information representation backends may inspect after semantic checking.
@@ -43,9 +57,13 @@ pub trait BackendClassifierSource {
 /// parser-backed member identities cannot be represented here.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BackendClassifierFact {
+    pub runtime_exception: Option<crate::libraries::RuntimeExceptionLayout>,
     pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub access: crate::libraries::ClassifierAccess,
     pub is_kotlin: bool,
+    /// A Kotlin builtin the platform realizes by a distinct class, as its provider published it
+    /// ([`crate::libraries::LibraryType::mapped_builtin`]).
+    pub mapped_builtin: bool,
     pub source: bool,
     pub outer_instance: Option<TypeName>,
     pub kind: crate::libraries::TypeKind,
@@ -115,9 +133,11 @@ struct SourceDeclaration {
 impl BackendClassifierFact {
     fn from_library(classifier: TypeName, shape: &LibraryType) -> Self {
         Self {
+            runtime_exception: shape.runtime_exception,
             declaration_name: shape.declaration_name.clone(),
             access: shape.access,
             is_kotlin: shape.is_kotlin,
+            mapped_builtin: shape.mapped_builtin,
             source: shape.source_file.is_some(),
             outer_instance: shape.outer_instance,
             kind: shape.kind,
@@ -164,6 +184,10 @@ impl BackendClassifierFact {
 /// Finalized current-module classifier records, frozen before Pass 2 starts.
 pub struct BackendModuleFacts {
     classifiers: HashMap<TypeName, Arc<BackendClassifierFact>>,
+    declaration_names: HashMap<
+        crate::libraries::ClassifierDeclarationKey,
+        Option<crate::types::ClassifierDeclarationName>,
+    >,
     generated_classifiers: Box<[crate::types::GeneratedClassifierFact]>,
     serialization_generated_member_statuses:
         Option<crate::types::SerializationGeneratedMemberStatuses>,
@@ -182,6 +206,9 @@ pub struct BackendModuleFacts {
     file_annotations: HashMap<crate::fir::SourceFileId, Box<[crate::types::ResolvedAnnotation]>>,
     /// The dispatch shape of every named class, for a target that numbers slots itself.
     classes: super::class_tables::module_classes::ModuleClasses,
+    /// The superclass and instance functions of every named source classifier, whichever file
+    /// declares it: exactly the classifiers of [`Self::classifiers`].
+    source_class_members: HashMap<TypeName, super::source_class_members::SourceClassMembers>,
     /// Each dependency classifier the module's own classes stand behind, with the file of every
     /// source class that can be an instance of it, body-local ones included.
     dependency_implementors: HashMap<TypeName, Box<[crate::fir::SourceFileId]>>,
@@ -216,6 +243,7 @@ impl BackendModuleFacts {
         index: &crate::fir::ResolvedModuleIndex,
     ) -> Result<Self, BackendFactError> {
         let mut classifiers = HashMap::default();
+        let mut declaration_names = HashMap::default();
         let mut body_local_classifiers = HashSet::default();
         let mut source_value_classes = HashMap::default();
         let mut metadata_readable_value_classes = HashSet::default();
@@ -223,15 +251,27 @@ impl BackendModuleFacts {
         let mut source_declarations = HashMap::default();
         let mut generated_classifiers = Vec::new();
         let mut source_supertypes = HashMap::default();
+        let mut source_class_members = HashMap::default();
         let mut actualized_expects = HashMap::default();
         let mut actualized_nested_expects = HashMap::default();
         for raw in 0..index.declaration_count() {
             let declaration = crate::fir::DeclarationId::from_raw(
                 u32::try_from(raw).expect("too many stable declarations for a packed id"),
             );
+            if let Some(alias) = index.type_alias_header(declaration) {
+                declaration_names.insert(
+                    crate::libraries::ClassifierDeclarationKey::TypeAlias(alias.identity),
+                    alias.declaration_name.clone(),
+                );
+            }
             let Some(classifier) = index.classifier_header(declaration) else {
                 continue;
             };
+            declaration_names
+                .entry(crate::libraries::ClassifierDeclarationKey::Ordinary(
+                    classifier.classifier,
+                ))
+                .or_insert_with(|| classifier.declaration_name.clone());
             let instantiable = index.declaration_header(declaration).is_some_and(|header| {
                 !header.flags.has(crate::fir::DeclarationFlags::INTERFACE)
                     && !header
@@ -285,6 +325,13 @@ impl BackendModuleFacts {
                         }
                     ),
                     "a generated classifier identity may be published only once"
+                );
+                declaration_names.insert(
+                    crate::libraries::ClassifierDeclarationKey::Ordinary(generated.classifier),
+                    Some(crate::types::ClassifierDeclarationName::Nested {
+                        owner: generated.lexical_owner,
+                        name: generated.source_name.clone(),
+                    }),
                 );
                 generated_classifiers.push(generated.clone());
             }
@@ -377,9 +424,11 @@ impl BackendModuleFacts {
             let companion = source_companion(index, declaration);
             let qualified_name = source_qualified_name(index, declaration);
             let fact = BackendClassifierFact {
+                runtime_exception: None,
                 declaration_name: classifier.declaration_name.clone(),
                 access: declaration_header.visibility.into(),
                 is_kotlin: true,
+                mapped_builtin: false,
                 source: true,
                 outer_instance,
                 kind,
@@ -436,10 +485,21 @@ impl BackendModuleFacts {
                 inherited_defaults
                     .insert(classifier.classifier, defaults.to_vec().into_boxed_slice());
             }
+            source_class_members.insert(
+                classifier.classifier,
+                super::source_class_members::from_resolved_index(
+                    index,
+                    declaration,
+                    classifier
+                        .superclass
+                        .and_then(|superclass| superclass.get().non_null().obj_internal()),
+                ),
+            );
             classifiers.insert(classifier.classifier, Arc::new(fact));
         }
         Ok(Self {
             classifiers,
+            declaration_names,
             generated_classifiers: generated_classifiers.into_boxed_slice(),
             serialization_generated_member_statuses: index
                 .serialization_generated_member_statuses(),
@@ -454,6 +514,7 @@ impl BackendModuleFacts {
                 .map(|(source, applications)| (source, Box::from(applications)))
                 .collect(),
             classes: Default::default(),
+            source_class_members,
             dependency_implementors: dependency_implementors(&source_supertypes),
             actualized_expects,
             actualized_nested_expects,
@@ -483,6 +544,15 @@ impl BackendModuleFacts {
             );
         }
         Ok(Self {
+            declaration_names: classifiers
+                .iter()
+                .map(|(identity, record)| {
+                    (
+                        crate::libraries::ClassifierDeclarationKey::Ordinary(*identity),
+                        record.declaration_name.clone(),
+                    )
+                })
+                .collect(),
             classifiers,
             generated_classifiers: Box::default(),
             serialization_generated_member_statuses: None,
@@ -493,6 +563,7 @@ impl BackendModuleFacts {
             source_declarations: HashMap::default(),
             file_annotations: HashMap::default(),
             classes: Default::default(),
+            source_class_members: HashMap::default(),
             dependency_implementors: HashMap::default(),
             actualized_expects: HashMap::default(),
             actualized_nested_expects: HashMap::default(),
@@ -541,6 +612,15 @@ impl BackendModuleFacts {
     /// The dispatch shape of every named class of the module, when the target asked for it.
     pub(crate) fn classes(&self) -> &super::class_tables::module_classes::ModuleClasses {
         &self.classes
+    }
+
+    /// What the named source classifier `classifier` declares for its subclasses, whichever file
+    /// of the module declares it; `None` for a body-local or dependency classifier.
+    pub fn source_class_members(
+        &self,
+        classifier: TypeName,
+    ) -> Option<&super::source_class_members::SourceClassMembers> {
+        self.source_class_members.get(&classifier)
     }
 
     pub fn source_value_classes(&self) -> &HashMap<TypeName, Ty> {
@@ -660,6 +740,20 @@ impl<'a> CheckedBackendClassifiers<'a> {
 }
 
 impl BackendClassifierSource for CheckedBackendClassifiers<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        if let Some(name) = self.module.declaration_names.get(&declaration) {
+            return Some(name.clone());
+        }
+        if matches!(declaration, crate::libraries::ClassifierDeclarationKey::Ordinary(identity) if self.module.is_body_local(identity))
+        {
+            return Some(None);
+        }
+        self.dependencies.classifier_declaration_name(declaration)
+    }
+
     fn classifier(&self, classifier: TypeName) -> Option<Arc<BackendClassifierFact>> {
         if let Some(shape) = self.module.classifier(classifier) {
             return Some(shape);

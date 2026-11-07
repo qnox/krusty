@@ -136,6 +136,16 @@ pub enum NoArgSuperConstructor {
 }
 
 impl ResolvedModuleIndex {
+    /// Executable-local classifier roots own a checked closure environment. Members of such
+    /// classifiers inherit LOCAL_CLASS for scheduling, but use their declared member/outer ABI.
+    pub(crate) fn owns_local_capture_environment(&self, declaration: DeclarationId) -> bool {
+        self.declaration_header(declaration).is_some_and(|header| {
+            header.kind == DeclarationKind::Classifier
+                && header.flags.has(DeclarationFlags::LOCAL_CLASS)
+                && !header.flags.has(DeclarationFlags::CLASSIFIER_MEMBER)
+        })
+    }
+
     pub fn local_classifier_lexical_root(
         &self,
         declaration: DeclarationId,
@@ -325,14 +335,17 @@ impl ResolvedModuleIndex {
         self.no_arg_constructors.get(&classifier)
     }
 
-    /// The annotations kotlinc's sam-with-receiver plugin is configured with
-    /// ([`crate::symbol_source::SymbolSource::sam_with_receiver_annotations`]).
-    pub fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        &self.sam_with_receiver_annotations
+    /// The annotation-configured conventions of the compilation's frontend plugins
+    /// ([`crate::symbol_source::SymbolSource::annotation_conventions`]).
+    pub fn annotation_conventions(&self) -> &crate::symbol_source::AnnotationConventions {
+        &self.annotation_conventions
     }
 
-    pub fn publish_sam_with_receiver_annotations(&mut self, annotations: &[TypeName]) {
-        self.sam_with_receiver_annotations = annotations.into();
+    pub fn publish_annotation_conventions(
+        &mut self,
+        conventions: &crate::symbol_source::AnnotationConventions,
+    ) {
+        self.annotation_conventions = conventions.clone();
     }
 
     pub fn publish_no_arg_constructor(

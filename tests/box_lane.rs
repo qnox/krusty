@@ -881,6 +881,37 @@ pub fn prepare_sources(
     Ok(sources)
 }
 
+/// Why a case that names its backends with `// TARGET_BACKEND:` does not apply to a lane outside
+/// them.
+pub const TARGETED_AT_ANOTHER_BACKEND: &str = "targeted at another backend";
+
+/// Whether `file` is an owned fixture written only for other backends, as one for a JVM-only
+/// compiler argument is. It is outside the lane rather than one of its not-applicable cases, whose
+/// lists only shrink; every other reason an owned fixture does not apply is fatal.
+fn outside_lane(file: &Path, result: &Outcome) -> bool {
+    super::box_inventory::owned(file)
+        && matches!(result, Outcome::NotApplicable(reason) if *reason == TARGETED_AT_ANOTHER_BACKEND)
+}
+
+/// The selected cases within the lane, and how many owned fixtures were outside it.
+fn within_lane(outcomes: Vec<(&PathBuf, Outcome)>) -> (Vec<(&PathBuf, Outcome)>, usize) {
+    let selected = outcomes.len();
+    let within: Vec<_> = outcomes
+        .into_iter()
+        .filter(|(file, result)| !outside_lane(file, result))
+        .collect();
+    let outside = selected - within.len();
+    (within, outside)
+}
+
+/// The cases a lane's score counts: every scanned case it applies to.
+fn applicable_cases(scanned: &[(&PathBuf, Outcome)]) -> usize {
+    scanned
+        .iter()
+        .filter(|(_, result)| !matches!(result, Outcome::NotApplicable(_)))
+        .count()
+}
+
 fn checked_outcome(file: &Path, result: &Outcome) -> Result<box_ratchet::Outcome, String> {
     if super::box_inventory::owned(file)
         && matches!(
@@ -894,6 +925,47 @@ fn checked_outcome(file: &Path, result: &Outcome) -> Result<box_ratchet::Outcome
         ));
     }
     Ok(ratchet_outcome(result))
+}
+
+#[test]
+fn an_owned_fixture_for_other_backends_is_outside_the_lane() {
+    let owned =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/box_regressions/multimodule/example.kt");
+    let targeted = Outcome::NotApplicable(TARGETED_AT_ANOTHER_BACKEND);
+    assert!(outside_lane(&owned, &targeted));
+    assert!(!outside_lane(&owned, &Outcome::NotApplicable("muted")));
+    assert!(!outside_lane(&owned, &Outcome::Pass));
+    assert!(!outside_lane(Path::new("/upstream/a.kt"), &targeted));
+}
+
+#[test]
+fn cases_outside_the_lane_leave_the_scan_and_the_score() {
+    let regressions = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/box_regressions");
+    let jvm_only = regressions.join("inlineScopes/a.kt");
+    let jvm_only_too = regressions.join("inlineScopes/b.kt");
+    let portable = regressions.join("portable.kt");
+    let upstream_skip = PathBuf::from("/upstream/skip.kt");
+    let upstream = PathBuf::from("/upstream/case.kt");
+    let targeted = || Outcome::NotApplicable(TARGETED_AT_ANOTHER_BACKEND);
+
+    let (scanned, outside) = within_lane(vec![
+        (&jvm_only, targeted()),
+        (&portable, Outcome::Pass),
+        (&upstream_skip, targeted()),
+        (&upstream, Outcome::Declined("unsupported".into())),
+    ]);
+    assert_eq!(outside, 1);
+    assert_eq!(
+        scanned.iter().map(|(file, _)| *file).collect::<Vec<_>>(),
+        [&portable, &upstream_skip, &upstream]
+    );
+    assert_eq!(applicable_cases(&scanned), 2);
+
+    let (scanned, outside) =
+        within_lane(vec![(&jvm_only, targeted()), (&jvm_only_too, targeted())]);
+    assert_eq!(outside, 2);
+    assert!(scanned.is_empty());
+    assert_eq!(applicable_cases(&scanned), 0);
 }
 
 #[test]
@@ -943,18 +1015,22 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
         if let Err(error) = super::box_reference_classes::checked_box(&source, stem) {
             return Outcome::Harness(format!("required JVM oracle: {error}"));
         }
-        if lane.platform() == box_ratchet::Platform::Native && source.contains("// MODULE:") {
-            let answer =
-                super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source);
-            if answer.as_deref() != Some("OK") {
-                return Outcome::Harness(format!(
-                    "required Native oracle must return OK, got {answer:?}"
-                ));
-            }
-        }
     }
+    // A case outside the lane has no lane oracle: kotlinc-native cannot compile a JVM-only module.
     if let Some(reason) = lane.not_applicable(&source) {
         return Outcome::NotApplicable(reason);
+    }
+    if super::box_inventory::owned(file)
+        && lane.platform() == box_ratchet::Platform::Native
+        && source.contains("// MODULE:")
+    {
+        let answer =
+            super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source);
+        if answer.as_deref() != Some("OK") {
+            return Outcome::Harness(format!(
+                "required Native oracle must return OK, got {answer:?}"
+            ));
+        }
     }
     if let Some(reason) = lane.harness_limitation(&source) {
         return Outcome::Harness(reason.to_string());
@@ -998,7 +1074,8 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
 
 /// The report line, in a stable machine-readable shape:
 /// `<lane> conformance: scanned S, passed P, declined D, frontend F, harness H, not-applicable N,
-/// compiler-panics Q, known-failures K, failed X`.
+/// compiler-panics Q, known-failures K, failed X, outside-lane E`. The `E` owned fixtures written
+/// for other backends are not among the `S` scanned cases.
 fn report_line(lane: &str, counts: &[(&str, usize)]) -> String {
     let fields = counts
         .iter()
@@ -1028,6 +1105,20 @@ fn record_program_failure(
     } else {
         failed.push((file.to_path_buf(), reason));
     }
+}
+
+/// Surface complete hidden rejection reasons for exactly the ratchet's unexpected failure keys.
+/// Trace order is the compiler's case order; neither keys nor diagnostic text are reconstructed.
+fn unexpected_failure_reason_report(
+    traced: &[(PathBuf, String)],
+    unexpected: &BTreeSet<String>,
+    relative: impl Fn(&Path) -> String,
+) -> String {
+    traced
+        .iter()
+        .filter(|(file, _)| unexpected.contains(&relative(file)))
+        .map(|(file, reason)| format!("  unexpected {}: {reason}\n", file.display()))
+        .collect()
 }
 
 /// Run the whole corpus through `lane` and hold it to the lane's committed ratchet.
@@ -1135,6 +1226,9 @@ pub fn run(lane: &dyn Lane) {
     let mut known_failures: Vec<(PathBuf, String)> = Vec::new();
     let mut failed: Vec<(PathBuf, String)> = Vec::new();
     let mut current = BTreeMap::new();
+    let (outcomes, outside) = within_lane(outcomes);
+    let scanned = outcomes.len();
+    let applicable = applicable_cases(&outcomes);
     for (file, result) in outcomes {
         let relative = relative(file);
         let observed = checked_outcome(file, &result).unwrap_or_else(|error| panic!("{error}"));
@@ -1160,7 +1254,10 @@ pub fn run(lane: &dyn Lane) {
                 traced.push((file.clone(), reason.clone()));
                 *declined.entry(reason).or_default() += 1;
             }
-            Outcome::Harness(reason) => *harness_reasons.entry(reason).or_default() += 1,
+            Outcome::Harness(reason) => {
+                traced.push((file.clone(), reason.clone()));
+                *harness_reasons.entry(reason).or_default() += 1;
+            }
             Outcome::NotApplicable(reason) => *not_applicable.entry(reason).or_default() += 1,
             Outcome::Failed(reason) => {
                 let expected = baseline
@@ -1180,9 +1277,11 @@ pub fn run(lane: &dyn Lane) {
         box_ratchet::write(platform, version, &current)
             .unwrap_or_else(|error| panic!("failed to write {label} box expectations: {error}"));
     }
+    let mut unexpected_failure_keys = BTreeSet::new();
     if !bless {
         if let Some(baseline) = &baseline {
             let mismatches = box_ratchet::compare(baseline, &current, &corpus_cases);
+            unexpected_failure_keys.extend(mismatches.unexpected_failures.iter().cloned());
             if !mismatches.is_empty() {
                 failed.push((
                     PathBuf::from(format!("<{} box expectations>", platform.name())),
@@ -1198,11 +1297,10 @@ pub fn run(lane: &dyn Lane) {
     let declined_total: usize = declined.values().sum();
     let harness_total: usize = harness_reasons.values().sum();
     let not_applicable_total: usize = not_applicable.values().sum();
-    let applicable = files.len() - not_applicable_total;
     let report = report_line(
         platform.name(),
         &[
-            ("scanned", files.len()),
+            ("scanned", scanned),
             ("passed", passed),
             ("declined", declined_total),
             ("frontend", frontend),
@@ -1211,9 +1309,14 @@ pub fn run(lane: &dyn Lane) {
             ("compiler-panics", compiler_panics.len()),
             ("known-failures", known_failures.len()),
             ("failed", failed.len()),
+            ("outside-lane", outside),
         ],
     );
     eprintln!("{report} ({:.1}s)", started.elapsed().as_secs_f64());
+    eprint!(
+        "{}",
+        unexpected_failure_reason_report(&traced, &unexpected_failure_keys, relative)
+    );
 
     // Triage: name the cases behind one decline reason, so a line in the table below can be
     // followed back to the source that produced it.
@@ -1221,6 +1324,16 @@ pub fn run(lane: &dyn Lane) {
         for (file, reason) in &traced {
             if reason.contains(&pattern) {
                 eprintln!("  traced {}: {reason}", file.display());
+            }
+        }
+    }
+
+    // A changed non-pass needs its case-specific cause, not only the ranked totals. Keep this
+    // separate from `failed`: the ratchet already records the mismatch and owns its accounting.
+    if let Some(baseline) = baseline.as_ref().filter(|_| !bless) {
+        for (file, reason) in &traced {
+            if !baseline.failures.contains(&relative(file)) {
+                eprintln!("  unexpected non-pass {}: {reason}", file.display());
             }
         }
     }
@@ -1350,6 +1463,47 @@ fn an_unexpected_program_failure_preserves_its_case_and_complete_reason() {
     record_program_failure(file, reason.to_string(), true, &mut known, &mut failed);
     assert_eq!(known, [(file.to_path_buf(), reason.to_string())]);
     assert_eq!(failed, Vec::new());
+}
+
+#[test]
+fn unexpected_rejection_reporting_uses_exact_ratchet_keys_and_preserves_diagnostic_order() {
+    let known = "regressions/a.kt.extra".to_string();
+    let first = "regressions/z.kt".to_string();
+    let second = "regressions/a.kt".to_string();
+    let expected = box_ratchet::Baseline {
+        failures: BTreeSet::from([known.clone()]),
+        not_applicable: BTreeSet::new(),
+    };
+    let current = BTreeMap::from([
+        (known.clone(), box_ratchet::Outcome::Fail),
+        (first.clone(), box_ratchet::Outcome::Fail),
+        (second.clone(), box_ratchet::Outcome::Fail),
+    ]);
+    let cases = current.keys().cloned().collect();
+    let mismatches = box_ratchet::compare(&expected, &current, &cases);
+    assert_eq!(
+        mismatches.unexpected_failures,
+        BTreeSet::from([first, second])
+    );
+    let traced = [
+        (
+            PathBuf::from("/corpus/regressions/a.kt.extra"),
+            "known rejection".to_string(),
+        ),
+        (
+            PathBuf::from("/corpus/regressions/z.kt"),
+            "z.kt:2:3: unresolved reference\nz.kt:4:5: second diagnostic".to_string(),
+        ),
+        (
+            PathBuf::from("/corpus/regressions/a.kt"),
+            "the checked operation `SelectedCall`".to_string(),
+        ),
+    ];
+    assert_eq!(
+        unexpected_failure_reason_report(&traced, &mismatches.unexpected_failures, |file|
+            file.strip_prefix("/corpus").unwrap().to_string_lossy().into_owned()),
+        "  unexpected /corpus/regressions/z.kt: z.kt:2:3: unresolved reference\nz.kt:4:5: second diagnostic\n  unexpected /corpus/regressions/a.kt: the checked operation `SelectedCall`\n",
+    );
 }
 
 #[test]

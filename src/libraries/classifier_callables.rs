@@ -19,6 +19,24 @@ pub struct BoundInnerConstructor {
     pub outer: TypeName,
 }
 
+/// The constructor facet of a callable candidate: the classifier it constructs and, for an `inner`
+/// classifier's constructor, the classifier that declares the captured outer instance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConstructorCandidate {
+    pub classifier: TypeName,
+    pub outer: Option<TypeName>,
+}
+
+impl ConstructorCandidate {
+    /// The bound-inner view of a constructor that captures an outer instance.
+    pub fn bound_inner(self) -> Option<BoundInnerConstructor> {
+        self.outer.map(|outer| BoundInnerConstructor {
+            inner: self.classifier,
+            outer,
+        })
+    }
+}
+
 /// The alias declaration and uninstantiated callable shape retained by a selected constructor.
 /// Receiver-specialized inference bounds are call constraints, not bounds declared by the alias.
 #[derive(Clone)]
@@ -26,7 +44,7 @@ pub(crate) struct ConstructorAlias {
     pub(crate) declaration: AliasExpansion,
     pub(crate) signature: GenericSig,
     pub(crate) underlying_signature: GenericSig,
-    pub(crate) rigid_formals: Vec<String>,
+    pub(crate) rigid_formals: Vec<crate::types::TyParamName>,
 }
 
 impl LibraryMember {
@@ -59,10 +77,27 @@ pub(crate) fn constructor_generic_signature(
         return None;
     }
     Some(GenericSig {
-        formals: classifier.type_params().to_vec(),
+        formals: crate::types::TyParamName::all(classifier.type_params()),
         formal_bounds: classifier.type_param_bounds().to_vec(),
         receiver: None,
         params: constructor.params.clone(),
+        ret: classifier_instance_type(internal, classifier),
+        return_policy: GenericReturnPolicy::Exact,
+    })
+}
+
+/// A constructor's complete declared shape, including its logical classifier result before
+/// reference adaptation. The physical nongeneric constructor return may instead be Unit.
+pub(crate) fn constructor_declaration_signature(
+    internal: TypeName,
+    classifier: &LibraryType,
+    constructor: &LibraryMember,
+) -> GenericSig {
+    constructor_generic_signature(internal, classifier, constructor).unwrap_or_else(|| GenericSig {
+        formals: Vec::new(),
+        formal_bounds: Vec::new(),
+        receiver: None,
+        params: constructor.constructor_declaration_params().to_vec(),
         ret: classifier_instance_type(internal, classifier),
         return_policy: GenericReturnPolicy::Exact,
     })
@@ -87,6 +122,12 @@ fn classifier_instance_type(internal: TypeName, classifier: &LibraryType) -> Ty 
 }
 
 impl FunctionInfo {
+    /// The constructor facet when this candidate constructs an `inner` classifier through a value
+    /// of its outer class.
+    pub fn bound_inner_constructor(&self) -> Option<BoundInnerConstructor> {
+        self.constructor.and_then(ConstructorCandidate::bound_inner)
+    }
+
     pub(crate) fn constructor_alias(&self) -> Option<&AliasExpansion> {
         self.constructor_alias
             .as_deref()
@@ -178,7 +219,7 @@ impl FunctionInfo {
     /// Project an already-selected constructor out of its lookup facet. The synthetic enclosing
     /// receiver is a reference binding, not one of the constructor's declared parameters.
     pub(crate) fn selected_constructor_member(&self) -> Option<LibraryMember> {
-        self.bound_inner_constructor?;
+        self.bound_inner_constructor()?;
         let mut member = self.member_with_return(self.callable.ret);
         let mut declared = self.callable.declared_params.as_deref()?.to_vec();
         if let Some(receiver) =
@@ -219,13 +260,15 @@ impl FunctionInfo {
             let captured = &classifier.type_params()[classifier.own_type_parameter_count..];
             let mut ordinal = 0;
             signature.formal_bounds.retain(|_| {
-                let keep = !captured.contains(&signature.formals[ordinal]);
+                let keep = !captured
+                    .iter()
+                    .any(|formal| *formal == signature.formals[ordinal]);
                 ordinal += 1;
                 keep
             });
             signature
                 .formals
-                .retain(|formal| !captured.contains(formal));
+                .retain(|formal| !captured.iter().any(|captured| captured == formal));
             // Source declarations may publish an own-only constructor result. Its instance type
             // always includes the declaration's captured slots before receiver specialization.
             signature.ret = classifier_instance_type(inner, classifier);
@@ -237,7 +280,10 @@ impl FunctionInfo {
         let mut candidate = Self::classifier_member(FnKind::Member, inner, constructor);
         candidate.callable.ret = result;
         candidate.ret = ReturnInfo::new(false, Some(result));
-        candidate.bound_inner_constructor = Some(BoundInnerConstructor { inner, outer });
+        candidate.constructor = Some(ConstructorCandidate {
+            classifier: inner,
+            outer: Some(outer),
+        });
         Some(candidate)
     }
 }
