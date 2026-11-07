@@ -1,6 +1,7 @@
 //! Exact argument mapping and overload diagnostic cases against kotlinc.
 
-use super::diagnostics_parity_support::assert_error_parity;
+use super::common;
+use super::diagnostics_parity_support::{assert_error_parity, complete_errors};
 
 #[test]
 fn argument_mapping_and_overload_errors_match_kotlinc_exactly() {
@@ -30,4 +31,34 @@ fn argument_mapping_and_overload_errors_match_kotlinc_exactly() {
         "fun f(x: Int = \"no\"): Int = x",
     ];
     assert_error_parity(&cases);
+}
+
+#[test]
+fn inapplicable_function_value_diagnostics_match_kotlinc_completely() {
+    let cases = [
+        "fun f(n: Int, label: (String) -> Unit) { label(n) }",
+        "fun label(x: Boolean) {}\nfun f(n: Int, label: (String) -> Unit) { label(n) }",
+        "class R { fun label(x: Boolean) {} }\nfun f(n: Int, label: (String) -> Unit) { with(R()) { label(n) } }",
+    ];
+    let stdlib = common::stdlib_jar();
+    for (index, source) in cases.iter().enumerate() {
+        let file = format!("lexical_value_{index}.kt");
+        let result = common::compiler_diagnostics(
+            &[(file.as_str(), *source)],
+            std::slice::from_ref(&stdlib),
+        );
+        assert_ne!(result.reference_code, 0, "reference accepted {source:?}");
+        assert_ne!(result.krusty_code, 0, "krusty accepted {source:?}");
+        let mut observed = complete_errors(&result.krusty_stderr, false);
+        observed.extend(complete_errors(&result.krusty_stdout, false));
+        let expected = complete_errors(&result.reference_stderr, true);
+        assert!(
+            !expected.is_empty(),
+            "reference emitted no errors for {source:?}"
+        );
+        assert_eq!(
+            observed, expected,
+            "complete diagnostic mismatch for {source:?}"
+        );
+    }
 }
