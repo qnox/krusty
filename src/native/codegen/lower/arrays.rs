@@ -165,25 +165,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // Elements first, then the allocation: an element that allocates must not leave a
         // half-built array for a collection to find. A SPREAD element is the array it spreads,
         // which crosses as a reference whatever the elements are. Its elements are the ones it
-        // holds when it is evaluated, so a spread that a later element follows is copied there:
-        // the later element cannot change what it contributes.
+        // holds when it is reached, so a spread that a later element could still change is
+        // copied there; the copy is complete before the next element runs.
+        let descriptor = self.data_address(shape.descriptor);
         let mut values = Vec::with_capacity(elements.len());
-        for (index, (value, spread)) in elements.iter().zip(spreads).enumerate() {
+        for (position, (value, spread)) in elements.iter().zip(spreads).enumerate() {
             let stored = if *spread { any() } else { shape.stored };
-            let Some(value) = self.coerce(*value, stored)? else {
+            let Some(mut value) = self.coerce(*value, stored)? else {
                 return Err("a `Unit` array element".into());
             };
             if self.terminated {
                 return Ok(None);
             }
-            let value = if *spread && index + 1 < elements.len() {
-                self.snapshot_array(shape.descriptor, value)?
-            } else {
-                value
-            };
+            if *spread && position + 1 < elements.len() {
+                value = self.spread_snapshot(descriptor, value)?;
+            }
             values.push(value);
         }
-        let descriptor = self.data_address(shape.descriptor);
         // With no spread the length is the element count, and every element has a known offset.
         // With one it is not: `f(a, *xs, b)` is as long as `xs` is, which only run time knows, so
         // the length is summed and the elements are placed at a running index rather than at a
@@ -251,13 +249,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(Some(array))
     }
 
-    /// A new array of the `descriptor` type holding the elements `array` holds now.
-    fn snapshot_array(&mut self, descriptor: DataId, array: Value) -> Result<Value, Unsupported> {
+    /// A copy of the array `source` spreads, with the literal's own element layout.
+    fn spread_snapshot(&mut self, descriptor: Value, source: Value) -> Result<Value, Unsupported> {
         let length = self
             .builder
             .ins()
-            .load(types::I32, trusted(), array, LENGTH);
-        let descriptor = self.data_address(descriptor);
+            .load(types::I32, trusted(), source, LENGTH);
         let copy = self
             .runtime_call(
                 "kt_array_new",
@@ -266,12 +263,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 &[descriptor, length],
             )?
             .expect("`kt_array_new` returns the array");
-        let start = self.builder.ins().iconst(types::I32, 0);
+        let zero = self.builder.ins().iconst(types::I32, 0);
         self.runtime_call(
             "kt_array_copy_into",
             &[any(), Ty::Int, any()],
             Ty::Int,
-            &[copy, start, array],
+            &[copy, zero, source],
         )?;
         Ok(copy)
     }

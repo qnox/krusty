@@ -87,3 +87,44 @@ fun box(): String {\n\
 }\n";
     common::expect_box_same_as_kotlinc(SRC, "SameNameSameArityValueClassSam");
 }
+
+/// `LambdaMetafactory` cannot adapt a lambda whose interface slot instantiates a value class over a
+/// non-null reference, or whose implementation must box a value class into a slot the interface
+/// declares as that value class. kotlinc writes such a conversion as a class: it declares the
+/// interface's own type parameters, implements the interface raw, holds the body under the method's
+/// instantiated (mangled) name, and bridges the declared slot to it.
+const FACTORY_CONFLICTS: &str = "\
+@JvmInline value class IC(val v: String)
+@JvmInline value class Boxed(val v: Any)
+fun interface G<A : CharSequence, B> { fun g(a: A): IC }
+fun interface H { fun h(x: Int): Int }
+fun interface K<T> { fun k(x: T): T }
+fun interface Call<T, R> { fun call(ic: T): R }
+fun <X> use(g: G<String, X>) = g.g(\"a\")
+fun <T, R> bar(value: T, f: Call<T, R>): R = f.call(value)
+fun box(): String {
+    val g = use<Int> { IC(it) }
+    val h = H { it + 1 }
+    val k = K<IC> { it }
+    val boxed = bar<Boxed, String>(Boxed(\"b\")) { it.v as String }
+    val result = g.v + h.h(1) + k.k(IC(\"z\")).v + boxed
+    return if (result == \"a2zb\") \"OK\" else result
+}
+";
+
+#[test]
+fn factory_conflicting_conversions_are_kotlincs_classes() {
+    for class in [
+        "FactoryConflictsKt$box$g$1",
+        "FactoryConflictsKt$box$k$1",
+        "FactoryConflictsKt$box$boxed$1",
+        "FactoryConflictsKt",
+    ] {
+        common::assert_class_matches_kotlinc("FactoryConflicts", FACTORY_CONFLICTS, class);
+    }
+}
+
+#[test]
+fn factory_conflicting_conversions_run_like_kotlinc() {
+    common::expect_box_same_as_kotlinc(FACTORY_CONFLICTS, "FactoryConflicts");
+}

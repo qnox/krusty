@@ -16,7 +16,8 @@ impl Classpath {
             .and_then(|realization| {
                 let callable = realization.callable;
                 self.find_name(callable.owner).map(|class| {
-                    crate::jvm::metadata::class_properties(&class)
+                    self.class_members(&class)
+                        .class_properties
                         .iter()
                         .any(|property| {
                             property.is_inline_underlying

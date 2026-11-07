@@ -6,7 +6,6 @@
 
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::{raw_function_header_with_class, FunctionHeader, HeaderPurpose};
-use crate::ir::IrIntrinsic;
 use crate::klib_libraries::KlibDeclarationBodies;
 use crate::libraries::{
     CompilerIntrinsic, KlibBodyCallable, KlibDeclarationSignature, PrimitiveUnaryIntrinsic,
@@ -16,7 +15,9 @@ use crate::types::Ty;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CommonPrimitive {
     Unary(PrimitiveUnaryIntrinsic),
-    Intrinsic(IrIntrinsic),
+    /// A read of a builtin property whose getter is this provider operation (`Array.size`,
+    /// `String.length`). It lowers as the ordinary read of that property; the target realizes it.
+    PropertyRead(CompilerIntrinsic),
     /// A builtin scalar's `rangeTo`/`rangeUntil`, the source range operator over its receiver
     /// and its one argument.
     RangeConstruction(crate::fir::FirRangeOperation),
@@ -29,6 +30,8 @@ pub(crate) struct CommonPrimitiveCall {
     pub(super) params: Vec<Ty>,
     pub(super) ret: Ty,
     pub(super) class_type_parameters: Vec<String>,
+    /// The property a [`CommonPrimitive::PropertyRead`] reads, as its provider identifies it.
+    pub(super) property: Option<crate::fir::ExternalPropertyId>,
 }
 
 fn mismatch(detail: &str) -> KlibBodyDeclineReason {
@@ -41,9 +44,8 @@ pub(super) fn authenticate(
 ) -> Result<Option<CommonPrimitiveCall>, KlibBodyDeclineReason> {
     let operation = match selected.compiler_intrinsic() {
         Some(CompilerIntrinsic::PrimitiveUnary(operation)) => CommonPrimitive::Unary(operation),
-        Some(CompilerIntrinsic::ArraySize) => CommonPrimitive::Intrinsic(IrIntrinsic::ArraySize),
-        Some(CompilerIntrinsic::StringLength) => {
-            CommonPrimitive::Intrinsic(IrIntrinsic::StringLength)
+        Some(operation @ (CompilerIntrinsic::ArraySize | CompilerIntrinsic::StringLength)) => {
+            CommonPrimitive::PropertyRead(operation)
         }
         None => match selected.range_construction() {
             Some(operation) => CommonPrimitive::RangeConstruction(operation),
@@ -54,7 +56,7 @@ pub(super) fn authenticate(
     };
     let arity = match operation {
         CommonPrimitive::RangeConstruction(_) => 1,
-        CommonPrimitive::Unary(_) | CommonPrimitive::Intrinsic(_) => 0,
+        CommonPrimitive::Unary(_) | CommonPrimitive::PropertyRead(_) => 0,
     };
     if !selected.is_member()
         || selected.params().len() != arity
@@ -69,7 +71,7 @@ pub(super) fn authenticate(
         CommonPrimitive::Unary(_) | CommonPrimitive::RangeConstruction(_) => {
             matches!(selected.signature(), KlibDeclarationSignature::Public(_))
         }
-        CommonPrimitive::Intrinsic(_) => {
+        CommonPrimitive::PropertyRead(_) => {
             matches!(selected.signature(), KlibDeclarationSignature::Accessor(_))
         }
     };
@@ -90,8 +92,10 @@ pub(super) fn authenticate(
             Ty::Double => ret == Ty::Double,
             _ => false,
         },
-        CommonPrimitive::Intrinsic(IrIntrinsic::ArraySize) => receiver.is_array() && ret == Ty::Int,
-        CommonPrimitive::Intrinsic(IrIntrinsic::StringLength) => {
+        CommonPrimitive::PropertyRead(CompilerIntrinsic::ArraySize) => {
+            receiver.is_array() && ret == Ty::Int
+        }
+        CommonPrimitive::PropertyRead(CompilerIntrinsic::StringLength) => {
             receiver == Ty::String && ret == Ty::Int
         }
         // The provider proved the exact builtin declaration and its range result; the serialized
@@ -116,12 +120,22 @@ pub(super) fn authenticate(
             "a common primitive has incompatible declared operand and result types",
         ));
     }
+    let property = match operation {
+        CommonPrimitive::PropertyRead(_) => Some(
+            selected
+                .accessor()
+                .ok_or_else(|| mismatch("a common property read has no accessor contract"))?
+                .property,
+        ),
+        CommonPrimitive::Unary(_) | CommonPrimitive::RangeConstruction(_) => None,
+    };
     Ok(Some(CommonPrimitiveCall {
         operation,
         receiver,
         params,
         ret,
         class_type_parameters: formals,
+        property,
     }))
 }
 
