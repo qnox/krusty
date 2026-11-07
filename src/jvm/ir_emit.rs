@@ -2118,7 +2118,7 @@ fn emit_class(
             None => cw.set_enclosing_class(&owner),
         }
     }
-    enclosure::start_inline_body_source_map(ir, c, &mut cw);
+    enclosure::start_inline_body_source_map(ir, env.override_results, c, facade, &mut cw);
     let transformed = env.run.transformed_coroutine(&fq_name);
     let transformed_metadata = env
         .continuation_metadata
