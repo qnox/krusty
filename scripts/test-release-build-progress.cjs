@@ -94,9 +94,101 @@ test('native query failures expose status without raw stderr or partial private 
 });
 
 test('Unix query and process projection remain executable', () => {
-  const result = run(['10 1 100 2048 00:01 /tool/rustc\n11 1 0 1024 00:02 /private/unrelated\n'], 'darwin');
+  const result = run(['10 1 100 2048 00:01 /tool/rustc\n11 1 0 1024 00:02 /private/unrelated\n'], 'linux');
   assert.equal(result.calls[0].file, 'ps');
   assert.deepEqual(result.calls[0].args, ['-A', '-o', 'pid=,ppid=,%cpu=,rss=,etime=,comm=']);
   assert.match(result.text(), /10 1 100 2048 00:01 \/tool\/rustc/);
   assert.doesNotMatch(result.text(), /private|unrelated/);
+});
+
+const memoryFields = {
+  'Pages free': 10, 'Pages active': 20, 'Pages inactive': 30, 'Pages speculative': 40,
+  'Pages wired down': 50, 'Pages purgeable': 60, 'Pages occupied by compressor': 70,
+  Pageouts: 100, Swapouts: 200, Compressions: 300, Decompressions: 400,
+};
+const vmStats = (pageSize = 16384, overrides = {}) =>
+  `Mach Virtual Memory Statistics: (page size of ${pageSize} bytes)\n`
+  + Object.entries({ ...memoryFields, ...overrides }).map(([name, value]) => `${name}: ${value}.\n`).join('')
+  + 'Unselected private detail: PRIVATE_VALUE\n';
+const memoryLines = result => result.logs.filter(line => line.startsWith('release build: vm_stat '));
+
+test('Darwin snapshots preserve native page size and whitelist numeric counts only', () => {
+  const result = run(['', vmStats()], 'darwin');
+  assert.equal(result.calls.length, 2);
+  assert.equal(result.calls[1].file, 'vm_stat');
+  assert.deepEqual(result.calls[1].args, []);
+  assert.equal(result.calls[1].options.timeout, 15000);
+  assert.equal(result.calls[1].options.maxBuffer, 65536);
+  assert.deepEqual(memoryLines(result), [
+    'release build: vm_stat page_size_bytes=16384 free_pages=10 active_pages=20 inactive_pages=30 speculative_pages=40 wired_pages=50 purgeable_pages=60 compressor_pages=70 pageouts_pages_total=100 swapouts_pages_total=200 compressions_pages_total=300 decompressions_pages_total=400 counter_deltas=baseline',
+  ]);
+  assert.doesNotMatch(result.text(), /PRIVATE_|Unselected|_delta=/);
+});
+
+test('Darwin activity deltas use consecutive snapshots on the existing cadence', () => {
+  const result = run(['', vmStats(4096), '', vmStats(4096, {
+    Pageouts: 105, Swapouts: 202, Compressions: 310, Decompressions: 407,
+  })], 'darwin');
+  assert.equal(result.timers.length, 1);
+  assert.equal(result.timers[0].ms, 60000);
+  result.timers[0].callback();
+  assert.deepEqual(result.calls.map(call => call.file), ['ps', 'vm_stat', 'ps', 'vm_stat']);
+  assert.deepEqual(memoryLines(result), [
+    'release build: vm_stat page_size_bytes=4096 free_pages=10 active_pages=20 inactive_pages=30 speculative_pages=40 wired_pages=50 purgeable_pages=60 compressor_pages=70 pageouts_pages_total=100 swapouts_pages_total=200 compressions_pages_total=300 decompressions_pages_total=400 counter_deltas=baseline',
+    'release build: vm_stat page_size_bytes=4096 free_pages=10 active_pages=20 inactive_pages=30 speculative_pages=40 wired_pages=50 purgeable_pages=60 compressor_pages=70 pageouts_pages_total=105 pageouts_pages_delta=5 swapouts_pages_total=202 swapouts_pages_delta=2 compressions_pages_total=310 compressions_pages_delta=10 decompressions_pages_total=407 decompressions_pages_delta=7 counter_deltas=available',
+  ]);
+});
+
+test('a counter reset or page-size change establishes a fresh delta baseline', async t => {
+  for (const [name, second] of [
+    ['counter reset', vmStats(16384, { Pageouts: 1 })],
+    ['page-size change', vmStats(4096)],
+  ]) await t.test(name, () => {
+    const result = run(['', vmStats(), '', second, '', second], 'darwin');
+    result.timers[0].callback();
+    assert.match(memoryLines(result)[1], /counter_deltas=reset$/);
+    assert.doesNotMatch(memoryLines(result)[1], /_delta=/);
+    result.timers[0].callback();
+    assert.match(memoryLines(result)[2], /pageouts_pages_delta=0/);
+    assert.match(memoryLines(result)[2], /counter_deltas=available$/);
+  });
+});
+
+test('malformed Darwin snapshots never emit partial metrics or raw output', async t => {
+  const cases = [
+    '', 'PRIVATE_HEADER', vmStats(0), vmStats(1.5),
+    vmStats().replace('Pageouts: 100.\n', ''),
+    vmStats() + 'Pageouts: 10.\n',
+    vmStats(16384, { Pageouts: -1 }),
+    vmStats(16384, { Pageouts: '9007199254740992' }),
+    vmStats(16384, { 'Pages free': 'PRIVATE_COUNT' }),
+  ];
+  for (const [index, output] of cases.entries()) await t.test(String(index), () => {
+    const result = run(['', output], 'darwin');
+    assert.deepEqual(memoryLines(result), ['release build: vm_stat snapshot unavailable (VMSTAT_DATA)']);
+    assert.doesNotMatch(result.text(), /PRIVATE_|page_size_bytes=/);
+  });
+});
+
+test('Darwin query failure resets deltas without raw exception output', () => {
+  const failure = Object.assign(new Error('PRIVATE_EXCEPTION'), {
+    code: 'ETIMEDOUT', stderr: Buffer.from('PRIVATE_STDERR'), stdout: Buffer.from('PRIVATE_STDOUT'),
+  });
+  const result = run(['', vmStats(), '', failure, '', vmStats()], 'darwin');
+  result.timers[0].callback();
+  result.timers[0].callback();
+  assert.match(memoryLines(result)[1], /snapshot unavailable \(ETIMEDOUT\)$/);
+  assert.match(memoryLines(result)[2], /counter_deltas=baseline$/);
+  assert.doesNotMatch(memoryLines(result)[2], /_delta=/);
+  assert.doesNotMatch(result.text(), /PRIVATE_/);
+});
+
+test('Darwin memory reporting survives a failed process snapshot, and other platforms never run it', () => {
+  const result = run([Object.assign(new Error('process failure'), { status: 5 }), vmStats()], 'darwin');
+  assert.match(memoryLines(result)[0], /counter_deltas=baseline$/);
+  for (const [platform, output] of [['linux', ''], ['win32', csv([headers])]]) {
+    const other = run([output], platform);
+    assert.equal(other.calls.length, 1);
+    assert.notEqual(other.calls[0].file, 'vm_stat');
+  }
 });

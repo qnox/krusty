@@ -64,6 +64,63 @@ function tasklistProcesses(text) {
   return processes;
 }
 
+
+const vmStatPages = {
+  'Pages free': 'free_pages', 'Pages active': 'active_pages',
+  'Pages inactive': 'inactive_pages', 'Pages speculative': 'speculative_pages',
+  'Pages wired down': 'wired_pages', 'Pages purgeable': 'purgeable_pages',
+  'Pages occupied by compressor': 'compressor_pages',
+};
+const vmStatCounters = {
+  Pageouts: 'pageouts', Swapouts: 'swapouts',
+  Compressions: 'compressions', Decompressions: 'decompressions',
+};
+let previousVmStat;
+
+function vmStatSnapshot(text) {
+  const invalid = () => Object.assign(new Error('invalid vm_stat response'), { code: 'VMSTAT_DATA' });
+  const lines = text.trim().split(/\r?\n/);
+  const header = lines.shift().match(/^Mach Virtual Memory Statistics: \(page size of (\d+) bytes\)$/);
+  const pageSize = header && Number(header[1]);
+  if (!Number.isSafeInteger(pageSize) || pageSize <= 0) throw invalid();
+  const fields = { ...vmStatPages, ...vmStatCounters }, values = {};
+  for (const line of lines) {
+    const colon = line.indexOf(':'), name = line.slice(0, colon);
+    if (!Object.hasOwn(fields, name)) continue;
+    const value = line.slice(colon + 1).trim().match(/^(\d+)\.$/);
+    const count = value && Number(value[1]);
+    if (!Number.isSafeInteger(count) || count < 0 || Object.hasOwn(values, name)) throw invalid();
+    values[name] = count;
+  }
+  if (Object.keys(values).length !== Object.keys(fields).length) throw invalid();
+  return { pageSize, values };
+}
+
+function reportDarwinMemory() {
+  try {
+    const sample = vmStatSnapshot(execFileSync('vm_stat', [], {
+      encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+    }));
+    const comparable = previousVmStat && previousVmStat.pageSize === sample.pageSize
+      && Object.keys(vmStatCounters).every(name => sample.values[name] >= previousVmStat.values[name]);
+    const values = [`page_size_bytes=${sample.pageSize}`];
+    for (const [name, key] of Object.entries(vmStatPages)) values.push(`${key}=${sample.values[name]}`);
+    // Native counters count pages since boot; deltas cover consecutive valid snapshots.
+    for (const [name, key] of Object.entries(vmStatCounters)) {
+      values.push(`${key}_pages_total=${sample.values[name]}`);
+      if (comparable) values.push(`${key}_pages_delta=${sample.values[name] - previousVmStat.values[name]}`);
+    }
+    values.push(`counter_deltas=${comparable ? 'available' : previousVmStat ? 'reset' : 'baseline'}`);
+    console.error(`release build: vm_stat ${values.join(' ')}`);
+    previousVmStat = sample;
+  } catch (error) {
+    previousVmStat = undefined;
+    const code = /^[A-Z][A-Z0-9_]{0,31}$/.test(error.code) ? error.code
+      : Number.isSafeInteger(error.status) ? error.status : 'ERROR';
+    console.error(`release build: vm_stat snapshot unavailable (${code})`);
+  }
+}
+
 function report() {
   console.error(`release build: ${new Date().toISOString()}, elapsed ${Math.round((Date.now() - started) / 1000)}s, free RAM ${mib(os.freemem())}/${mib(os.totalmem())} MiB`);
   try {
@@ -90,6 +147,7 @@ function report() {
     const detail = os.platform() === 'win32' ? undefined : error.stderr?.toString().trim();
     if (detail) console.error(detail.slice(0, 2000));
   }
+  if (os.platform() === 'darwin') reportDarwinMemory();
 }
 
 report();
