@@ -56,6 +56,13 @@ impl CallArgKind {
                 ty: map(ty),
                 constant,
             },
+            Self::CollectionLiteral {
+                provisional,
+                factory_classifiers,
+            } => Self::CollectionLiteral {
+                provisional: map(provisional),
+                factory_classifiers,
+            },
             Self::OmittedDefault => Self::OmittedDefault,
         }
     }
