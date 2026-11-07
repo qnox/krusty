@@ -162,6 +162,14 @@ impl Backend for WasmBackend {
         crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables, |function| {
             file.dependency_exports.callable(function).is_some()
         });
+        crate::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
+        if let Err(error) =
+            crate::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)
+        {
+            decline(state, error.to_string());
+            return Vec::new();
+        }
+        crate::backend::dispatch_entries::realize(&mut file.ir, &file.dependency_exports);
         let Ok(properties) = crate::backend::local_properties::realize(&mut file.ir) else {
             decline(state, "a local delegated property".to_string());
             return Vec::new();
@@ -367,6 +375,18 @@ mod tests {
 
     fn compile(target: WasmTarget, source: &str) -> (Vec<Artifact>, Vec<String>) {
         compile_program(target, Entry::Box, &[source])
+    }
+
+    #[test]
+    fn shared_mutable_cells_reach_nested_escaping_function_bodies() {
+        let source = include_str!(
+            "../../tests/box_regressions/regressions/sharedMutableCaptureTransport.kt"
+        );
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
     }
 
     #[test]

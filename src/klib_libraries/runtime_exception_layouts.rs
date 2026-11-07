@@ -19,6 +19,7 @@ pub(super) fn normalize(
         RuntimeExceptionKind::IndexOutOfBounds,
         RuntimeExceptionKind::NullPointer,
         RuntimeExceptionKind::IllegalState,
+        RuntimeExceptionKind::IllegalArgument,
     ]
     .into_iter()
     .find(|kind| kind.classifier() == identity)?;
@@ -114,6 +115,35 @@ mod tests {
             ),
             None
         );
+        shape.supertypes = Default::default();
+        assert_eq!(normalize(identity, true, &shape, false), None);
+    }
+
+    #[test]
+    fn illegal_argument_storage_keeps_exact_archive_and_header_authority() {
+        let kind = RuntimeExceptionKind::IllegalArgument;
+        let identity = kind.classifier();
+        let parent = RuntimeExceptionKind::RuntimeException.classifier();
+        let mut shape = LibraryType::declaration_header();
+        shape.supertypes.push_name(parent);
+        assert_eq!(
+            normalize(identity, true, &shape, false),
+            Some(RuntimeExceptionLayout {
+                kind,
+                parent: Some(parent)
+            })
+        );
+        assert_eq!(normalize(identity, false, &shape, false), None);
+        assert_eq!(normalize(identity, true, &shape, true), None);
+        let mut non_class = shape.clone();
+        non_class.kind = TypeKind::Interface;
+        assert_eq!(normalize(identity, true, &non_class, false), None);
+        assert_eq!(
+            normalize(crate::types::type_name("user/Failure"), true, &shape, false),
+            None
+        );
+        shape.supertypes.push_name(wk::any());
+        assert_eq!(normalize(identity, true, &shape, false), None);
         shape.supertypes = Default::default();
         assert_eq!(normalize(identity, true, &shape, false), None);
     }

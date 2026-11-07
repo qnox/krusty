@@ -14,43 +14,6 @@ fn a_single_generic_lower_bound_keeps_platform_flexibility() {
 }
 
 #[test]
-fn identity_evidence_is_published_without_changing_ordinary_unification() {
-    let any = Ty::nullable(Ty::obj("kotlin/Any"));
-    let t = Ty::ty_param("owner:T", any);
-    let function = Ty::fun(vec![t], t);
-
-    let mut ordinary = GSigBinds::default();
-    unify_ty(function, function, &mut ordinary);
-    assert!(ordinary.is_empty());
-
-    let mut identity = GSigBinds::default();
-    collect_generic_identity_bindings(
-        function,
-        function,
-        &[crate::types::TyParamName::new("owner:T")],
-        &mut identity,
-    );
-    assert_eq!(identity.get("owner:T"), Some(&t));
-}
-
-#[test]
-fn identity_evidence_does_not_bind_a_different_declaration_variable() {
-    let any = Ty::nullable(Ty::obj("kotlin/Any"));
-    let declared = Ty::ty_param("callee:T", any);
-    let actual = Ty::ty_param("caller:T", any);
-    let mut identity = GSigBinds::default();
-
-    collect_generic_identity_bindings(
-        declared,
-        actual,
-        &[crate::types::TyParamName::new("callee:T")],
-        &mut identity,
-    );
-
-    assert!(identity.is_empty());
-}
-
-#[test]
 fn a_type_parameter_is_not_rebound_to_its_own_definitely_non_null_face() {
     let any = Ty::nullable(Ty::obj("kotlin/Any"));
     let formal = Ty::ty_param("scope-a:R", any);

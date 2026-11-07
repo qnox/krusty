@@ -22,14 +22,32 @@ pub(super) fn declarations(
     capabilities: &super::DependencyLeafCapabilities<'_>,
     requires_ordinary: bool,
 ) -> Result<Vec<(crate::fir::ExternalCallableId, ExternalCallableRealization)>, String> {
+    // Each callee, with the value class whose member's body calls it.
     let mut pending = roots
         .iter()
-        .map(|root| root.identity().clone())
+        .map(|root| (root.identity().clone(), None))
         .collect::<VecDeque<_>>();
     let mut visited = HashSet::default();
     let mut declarations = Vec::new();
-    while let Some(identity) = pending.pop_front() {
+    while let Some((identity, value_class)) = pending.pop_front() {
         if !visited.insert(identity.clone()) {
+            continue;
+        }
+        // A private member of a value class has no provider declaration; the member calling it
+        // authenticates its class, and it is emitted as that member is.
+        if let Some(class) = value_class.filter(|class| {
+            platform
+                .external_callable_by_dependency(&identity)
+                .is_none()
+                && !externals.contains_key(&identity)
+                && crate::klib_lowering::is_private_value_member(bodies, &identity, class)
+        }) {
+            pending.extend(
+                bodies
+                    .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+                    .into_iter()
+                    .map(|callee| (callee, Some(class.clone()))),
+            );
             continue;
         }
         // Positive common-lowering capability, never a missing-provider fallback. Earlier emitted
@@ -48,22 +66,25 @@ pub(super) fn declarations(
             .callees
             .target_intrinsic(&identity, bodies, capabilities.target_realizes_intrinsic)
             .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?;
-        let (declaration_target, realization) =
-            match platform.external_callable_by_dependency(&identity) {
-                Some(declaration) => declaration,
-                None if raw_header_capability && known_target.is_none() => {
-                    pending.extend(bodies.emitted_body_callables(
-                        &identity,
-                        crate::klib_lowering::EMITTED_CALL_FORMS,
-                    ));
-                    continue;
-                }
-                None => {
-                    return Err(format!(
+        let (declaration_target, realization) = match platform
+            .external_callable_by_dependency(&identity)
+        {
+            Some(declaration) => declaration,
+            None if raw_header_capability && known_target.is_none() => {
+                pending.extend(
+                    bodies
+                        .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+                        .into_iter()
+                        .map(|callee| (callee, None)),
+                );
+                continue;
+            }
+            None => {
+                return Err(format!(
                     "a KLIB dependency has no required exact provider declaration: {identity:?}"
                 ))
-                }
-            };
+            }
+        };
         if realization.dependency_callable.as_ref() != Some(&identity) {
             return Err("an ordinary KLIB body provider changed its exact identity".to_owned());
         }
@@ -79,7 +100,7 @@ pub(super) fn declarations(
                 .constructor_initialization_callees(&identity, bodies)
                 .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
             {
-                pending.extend(callees);
+                pending.extend(callees.into_iter().map(|callee| (callee, None)));
             }
         }
         let primitive = facts
@@ -108,18 +129,25 @@ pub(super) fn declarations(
             && bodies.function_has_body(&identity) == Some(true);
         if requires_ordinary
             && emits_body
-            && (!matches!(
+            && (!(matches!(
                 realization.kind,
                 ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
-            ) || !realization
-                .klib_body_declaration_modifiers
-                .is_some_and(|modifiers| modifiers.permits_ordinary_body()))
+            ) || is_value_class_member(selected))
+                || !realization
+                    .klib_body_declaration_modifiers
+                    .is_some_and(|modifiers| modifiers.permits_ordinary_body()))
         {
             return Err(format!("a transitive KLIB body has no supported ordinary declaration contract: {identity:?}"));
         }
         if emits_body {
+            let value_class = is_value_class_member(selected)
+                .then(|| selected.class_contract().cloned())
+                .flatten();
             pending.extend(
-                bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
+                bodies
+                    .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+                    .into_iter()
+                    .map(|callee| (callee, value_class.clone())),
             );
         }
         declarations.push((declaration_target, realization));
@@ -133,6 +161,7 @@ pub(super) fn ordinary_roots<'a>(
     intrinsics: &KlibIntrinsicFacts,
     callees: &crate::klib_lowering::KlibCalleeFacts<'a>,
     target_realizes_intrinsic: &dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
+    target_represents_classifier: &dyn Fn(crate::types::TypeName) -> bool,
 ) -> Result<Vec<KlibBodyCallable<'a>>, String> {
     let mut roots = Vec::new();
     let mut seen = HashSet::default();
@@ -146,6 +175,10 @@ pub(super) fn ordinary_roots<'a>(
                 Callee::External { target, .. } => *target,
                 _ => continue,
             },
+            IrExpr::New {
+                external_target: Some(target),
+                ..
+            } => *target,
             IrExpr::Checked(operation) => match &**operation {
                 IrCheckedOperation::ExternalPropertyRead { target, .. } => {
                     source
@@ -168,14 +201,45 @@ pub(super) fn ordinary_roots<'a>(
             .callables
             .callable(target)
             .ok_or("an emitted dependency callable has no frozen fact")?;
-        // Instance dispatch/storage is a different emission capability. This category accepts
-        // declaration-owned top-level and extension frames, not instance-reading member bodies.
-        if !callable.is_top_level() {
-            continue;
-        }
         let Some(selected) = source.callables.klib_body_callable_at(expression, target) else {
             continue;
         };
+        let construction = matches!(source.ir.expr(expression), IrExpr::New { .. });
+        if construction != (callable.kind == ExternalCallableKind::Constructor) {
+            return Err(
+                "an emitted dependency construction disagrees with its selected callable role"
+                    .to_owned(),
+            );
+        }
+        if construction {
+            // A target can already provide a constructor whose KLIB publishes metadata only.
+            // Only an executable serialized declaration asks this phase to realize its body.
+            if bodies.function_has_body(selected.identity()) != Some(true) {
+                continue;
+            }
+            if callees
+                .constructor_initialization_callees(selected.identity(), bodies)
+                .map_err(|reason| format!("an invalid constructor root: {reason:?}"))?
+                .is_some()
+                && seen.insert(selected.identity())
+            {
+                roots.push(selected);
+            }
+            continue;
+        }
+        // Instance dispatch/storage is a different emission capability. This category accepts
+        // declaration-owned top-level and extension frames, and the members of a value class,
+        // which are final and read their receiver only through its one value.
+        if !callable.is_top_level() && !is_value_class_member(selected) {
+            continue;
+        }
+        // A member of a classifier the target represents itself is the target's to realize.
+        if callees
+            .target_member(selected.identity(), target_represents_classifier)
+            .map_err(|reason| format!("an invalid target member declaration: {reason:?}"))?
+        {
+            continue;
+        }
         if callees
             .target_intrinsic(selected.identity(), bodies, target_realizes_intrinsic)
             .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?
@@ -199,4 +263,13 @@ pub(super) fn ordinary_roots<'a>(
         }
     }
     Ok(roots)
+}
+
+/// Whether `callable` is a member of a value class which a support unit emits as a member of the
+/// class it materializes. A builtin type of the common type model is not such a class.
+fn is_value_class_member(callable: KlibBodyCallable<'_>) -> bool {
+    callable.kind() == ExternalCallableKind::Member
+        && callable
+            .class_contract()
+            .is_some_and(|class| class.is_value && !class.is_builtin_type())
 }

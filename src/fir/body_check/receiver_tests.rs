@@ -262,19 +262,17 @@ fn smartcast_this_member_read_keeps_receiver_coordinate_and_checked_conversion()
     else {
         panic!("smart-cast body must remain a checked conditional")
     };
-    let FirExprKind::Call(call) = &body.expr(*then_branch).expect("array size read").kind else {
-        panic!("array size must become a checked intrinsic call")
+    // `size` is the selected `Array.size` declaration, read as an ordinary dependency property.
+    // Only a target backend decides how to realize it.
+    let FirExprKind::PropertyRead {
+        target: FirPropertyTarget::External { .. },
+        dispatch_receiver,
+        ..
+    } = &body.expr(*then_branch).expect("array size read").kind
+    else {
+        panic!("array size must stay a read of the selected dependency property")
     };
-    assert!(matches!(
-        call.target,
-        FirCallTarget::Intrinsic {
-            operation: FirIntrinsic::ArraySize,
-            ..
-        }
-    ));
-    let receiver = call
-        .dispatch_receiver
-        .expect("bare size read must retain its implicit receiver");
+    let receiver = dispatch_receiver.expect("bare size read must retain its implicit receiver");
     assert!(matches!(
         body.expr(receiver.value).map(|expression| &expression.kind),
         Some(FirExprKind::ImplicitReceiver {
