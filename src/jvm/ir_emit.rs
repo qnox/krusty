@@ -4871,6 +4871,14 @@ struct Emitter<'a> {
     /// iteration. This is an emitter control-flow target, not a semantic `continue` manufactured in
     /// common IR. Blocks pass it only to their terminal statement.
     terminal_statement_target: Option<Label>,
+    /// The synthetic trailing `break` of the `Unit` inline-return frame whose body is being
+    /// emitted. It falls into the lambda's closing brace. An earlier break of that frame jumps
+    /// to [`Self::past_lambda_brace`].
+    trailing_unit_return_break: Option<ExprId>,
+    /// Join points just after a spliced `Unit` lambda's closing-brace `nop`, innermost last.
+    /// A labeled return from that lambda lands here, so the fallthrough path keeps the `nop`
+    /// and the return does not.
+    past_lambda_brace: Vec<Label>,
     /// The method an inline call's anonymous objects are regenerated for, when it is one.
     regeneration_site: Option<bytecode_inline_call::RegenerationSite<'a>>,
     /// The named object whose instance value 0 reads in a `@JvmStatic` member's static method.
@@ -4977,6 +4985,8 @@ impl<'a> Emitter<'a> {
             return_finalizers: Vec::new(),
             protected_regions: Vec::new(),
             terminal_statement_target: None,
+            trailing_unit_return_break: None,
+            past_lambda_brace: Vec::new(),
             regeneration_site: None,
             singleton_receiver: None,
         }

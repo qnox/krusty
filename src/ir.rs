@@ -1716,11 +1716,12 @@ pub struct IrFile {
     /// ordinary backend-neutral `IrExpr::Return`; inline expansion consumes/decrements this fact as
     /// lambda bodies cross lexical boundaries, so no source label or AST identity survives.
     pub checked_return_depths: crate::fx_hash::HashMap<ExprId, u32>,
-    /// The result declaration of each inline-return frame, by the frame's label. An inline
-    /// expansion's returns leave through `break` to that label after storing their value. A return
-    /// in the expansion's own body stores it by the declaration's value index; one in a lambda body
-    /// nested in it writes [`IrExpr::SetFrameResult`], which every renumbering of either body
-    /// leaves pointing at the same frame.
+    /// Each inline-return frame's label, keyed by the fact that owns it. A frame that stores a
+    /// result is keyed by that result's declaration. A `Unit` frame has no declaration and is keyed
+    /// by its loop. An inline expansion's returns leave through `break` to that label after storing
+    /// their value. A return in the expansion's own body stores it by the declaration's value
+    /// index; one in a lambda body nested in it writes [`IrExpr::SetFrameResult`], which every
+    /// renumbering of either body leaves pointing at the same frame.
     pub inline_return_frames: crate::fx_hash::HashMap<ExprId, String>,
     /// `try` expressions whose result is the value of a spliced inline lambda protected by the
     /// inline call's cleanup. This is semantic inline-frame provenance: a backend chooses how the

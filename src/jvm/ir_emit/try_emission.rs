@@ -606,7 +606,16 @@ impl Emitter<'_> {
                 return;
             }
         };
-        let target = if brk { end } else { cont };
+        // A `Unit` labeled return (`return@let`) is a `break` of the inline-return frame. The
+        // frame's own trailing break falls into the lambda's closing-brace `nop`. An earlier
+        // break is the return, and kotlinc lands it on the instruction after that `nop`.
+        let target = if brk && self.jumps_past_unit_lambda_brace(transfer, label) {
+            self.past_lambda_brace.last().copied().unwrap_or(end)
+        } else if brk {
+            end
+        } else {
+            cont
+        };
         self.mark_expression_start(transfer, code);
         let transfer_line = code.current_line();
         code.nop();
@@ -669,6 +678,32 @@ impl Emitter<'_> {
             }
         }
         code.goto(target);
+    }
+
+    /// An early `break` of the `Unit` inline-return frame under a spliced lambda brace.
+    ///
+    /// The frame's trailing break still joins that brace. This break is the labeled return.
+    fn jumps_past_unit_lambda_brace(
+        &self,
+        transfer: crate::ir::ExprId,
+        label: &Option<String>,
+    ) -> bool {
+        if self.past_lambda_brace.is_empty() {
+            return false;
+        }
+        let Some(trailing) = self.trailing_unit_return_break else {
+            return false;
+        };
+        if trailing == transfer {
+            return false;
+        }
+        let Some(label) = label.as_deref() else {
+            return false;
+        };
+        matches!(
+            self.ir.expr(trailing),
+            crate::ir::IrExpr::Break { label: Some(frame) } if frame == label
+        )
     }
 }
 

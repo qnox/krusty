@@ -52,6 +52,11 @@ impl Emitter<'_> {
         };
         self.loop_stack
             .push((bottom, end, label.clone(), self.return_finalizers.len()));
+        let trailing_unit_return = self.trailing_unit_return_break(body, label.as_deref());
+        let saved_trailing = self.trailing_unit_return_break;
+        if trailing_unit_return.is_some() {
+            self.trailing_unit_return_break = trailing_unit_return;
+        }
         let enclosing_terminal_target = self.terminal_statement_target.replace(bottom);
         // A lowered `for` loop's body is a transparent scope (kotlinc's `IrComposite`): what it
         // declares itself stays in scope until the loop ends.
@@ -93,6 +98,9 @@ impl Emitter<'_> {
             None
         };
         self.terminal_statement_target = enclosing_terminal_target;
+        if trailing_unit_return.is_some() {
+            self.trailing_unit_return_break = saved_trailing;
+        }
         // A pre-test body's block has restored its slot map. A post-test body's block stays
         // open here because `continue` and the condition are inside that same Kotlin scope.
         if bottom == cont {
@@ -138,6 +146,29 @@ impl Emitter<'_> {
             self.close_scope_locals(code, false);
             self.block_depth -= 1;
             self.restore_slot_scope(saved);
+        }
+    }
+
+    /// The synthetic `break` a `Unit` inline-return frame appends so the closing brace stays
+    /// reachable from the path that does not return.
+    fn trailing_unit_return_break(&self, body: ExprId, label: Option<&str>) -> Option<ExprId> {
+        let label = label?;
+        if self.inline_return_frame_results.contains_key(label)
+            || !self
+                .ir
+                .inline_return_frames
+                .values()
+                .any(|frame| frame == label)
+        {
+            return None;
+        }
+        let IrExpr::Block { stmts, value: None } = self.ir.expr(body) else {
+            return None;
+        };
+        let last = *stmts.last()?;
+        match self.ir.expr(last) {
+            IrExpr::Break { label: Some(found) } if found == label => Some(last),
+            _ => None,
         }
     }
 

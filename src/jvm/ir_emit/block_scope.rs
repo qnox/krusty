@@ -55,6 +55,7 @@ impl Emitter<'_> {
             discarded_frame_result: value
                 .and_then(|value| self.discarded_copied_frame_tail(block, &stmts, value)),
         };
+        let brace_join_depth = self.past_lambda_brace.len();
         let EmittedBlock {
             discard_after_close,
             retains_postfix_temporary,
@@ -62,6 +63,7 @@ impl Emitter<'_> {
             close_lambda_before_locals,
             emit_after_frame_close,
             discard_after_frame,
+            load_after_brace,
             close_discarded_provider_frame,
         } = self.emit_open_block(block, stmts, value, terminal_target, entry, true, code);
         self.mark_initializer_line(block, true, code);
@@ -70,12 +72,21 @@ impl Emitter<'_> {
             self.close_external_inline_frame(block, code);
             if close_lambda_before_locals {
                 self.close_spliced_lambda_frame(block, true, code);
+                self.bind_unit_lambda_brace_join(brace_join_depth, code);
             } else if discard_after_close.is_some() {
                 // A discarded `return this` (`also`/`apply`). A multi-line `}` is a `nop`
                 // while the lambda locals are still open; a one-line brace shares the body's
                 // line and the sweep drops the `nop`. The call-line `nop` still follows the
                 // locals.
                 self.emit_spliced_lambda_brace(block, code);
+                self.bind_unit_lambda_brace_join(brace_join_depth, code);
+            }
+            if let Some(value) = load_after_brace {
+                // After the brace join, so a labeled return discards the same `return this`
+                // the fallthrough does.
+                code.forget_line();
+                self.mark_statement_line(value, code);
+                self.emit_value(value, code);
             }
             if let Some(invocation) = close_discarded_provider_frame {
                 self.close_provider_invocation_frame(invocation, code);
@@ -84,6 +95,11 @@ impl Emitter<'_> {
             if close_discarded_provider_frame.is_none() {
                 anchored = self.close_copied_function_inline_frame(block, code);
             }
+        }
+        // A diverging body never reached the brace close above. The return still names this
+        // join, so it has to be bound before any later instruction.
+        if self.past_lambda_brace.len() > brace_join_depth {
+            self.bind_unit_lambda_brace_join(brace_join_depth, code);
         }
         // kotlinc returns to the call's line once the inlined body ends, before the statement
         // discards its result: the `pop` occupies that line, so the cleanup drops the frame's
@@ -1124,6 +1140,37 @@ impl Emitter<'_> {
     /// Otherwise the locals have already ended. The `nop` returns to the inline body's own line
     /// at the invocation the lambda replaced. The local-end label sits on the `nop`, and the next
     /// debug point (the inline-function frame's end, or the consumer) keeps it.
+    fn bind_unit_lambda_brace_join(&mut self, depth: usize, code: &mut CodeBuilder) {
+        if self.past_lambda_brace.len() > depth {
+            let past = self
+                .past_lambda_brace
+                .pop()
+                .expect("the lambda brace join was pushed");
+            self.bind(past, code);
+        }
+    }
+
+    /// Whether `roots` contain a `Unit` inline-return frame (`return@let` with nothing to store).
+    fn contains_unit_inline_return(&self, roots: &[u32]) -> bool {
+        let mut pending = roots.to_vec();
+        let mut seen = crate::fx_hash::HashSet::default();
+        while let Some(expression) = pending.pop() {
+            if !seen.insert(expression) {
+                continue;
+            }
+            match self.ir.expr(expression) {
+                IrExpr::While { .. } if self.ir.inline_return_frames.contains_key(&expression) => {
+                    return true;
+                }
+                IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
+                _ => crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| {
+                    pending.push(child)
+                }),
+            }
+        }
+        false
+    }
+
     fn close_spliced_lambda_frame(&mut self, block: u32, brace: bool, code: &mut CodeBuilder) {
         let IrExpr::Block { stmts, .. } = self.ir.expr(block) else {
             return;
@@ -1202,6 +1249,13 @@ impl Emitter<'_> {
                     )
                 })
         });
+        if closes_lambda_before_locals
+            || (opens_lambda_frame && self.contains_unit_inline_return(&stmts))
+        {
+            // Bound after this lambda's closing-brace `nop`. An early `Unit` labeled return
+            // targets it; the frame's trailing break still falls into the `nop`.
+            self.past_lambda_brace.push(code.new_label());
+        }
         let InlineBodyEntry {
             mut normalize_at_lambda_frame,
             stack_height: inline_stack_height,
@@ -1295,11 +1349,16 @@ impl Emitter<'_> {
         let mut retains_postfix_temporary = false;
         let mut close_lambda_before_locals = false;
         let mut emit_after_frame_close = None;
+        let mut load_after_brace = None;
         let mut discard_after_frame = unit_switch_value.then_some(1);
         let mut close_discarded_provider_frame = None;
         if !dead && !optimized_postfix {
             if let Some(value) = value {
-                self.mark_statement_line(value, code);
+                let defers_return_this =
+                    opens_lambda_frame && self.contains_unit_inline_return(&stmts);
+                if !defers_return_this {
+                    self.mark_statement_line(value, code);
+                }
                 if let Some(result) = discarded_frame_result {
                     let expression = result.expression();
                     close_discarded_provider_frame = (!result.is_owned()).then_some(expression);
@@ -1319,6 +1378,11 @@ impl Emitter<'_> {
                     self.emit_value(value, code);
                     discard_after_frame_close = Some(value);
                     retains_postfix_temporary = true;
+                } else if opens_lambda_frame && self.contains_unit_inline_return(&stmts) {
+                    // `also`/`apply` load `return this` after the brace, so `return@also` lands
+                    // on that load instead of skipping it.
+                    discard_after_frame_close = Some(value);
+                    load_after_brace = Some(value);
                 } else if opens_lambda_frame {
                     self.emit_value(value, code);
                     discard_after_frame_close = Some(value);
@@ -1355,6 +1419,7 @@ impl Emitter<'_> {
             close_lambda_before_locals,
             emit_after_frame_close,
             discard_after_frame,
+            load_after_brace,
             close_discarded_provider_frame,
         }
     }
@@ -1995,6 +2060,8 @@ pub(super) struct EmittedBlock {
     /// The trailing `Unit` is emitted after the lambda's marker/local range closes. A retained
     /// mapped inline-return line becomes its own `nop`; an ordinary discarded `Unit` emits none.
     pub(super) emit_after_frame_close: Option<u32>,
+    /// A discarded `return this` loaded after the lambda brace join.
+    pub(super) load_after_brace: Option<u32>,
     /// Physical JVM words left by a discarded copied result and popped after its frame ends.
     pub(super) discard_after_frame: Option<u16>,
     /// A provider-owned tail closes on its declaration line while copied-frame locals remain live;
