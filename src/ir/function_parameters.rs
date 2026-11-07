@@ -68,6 +68,13 @@ pub enum IrCapturedDeclaration {
     Variable,
     /// A value parameter of an enclosing callable, or a constructor's capture-prefix value.
     Parameter,
+    /// A receiver transported by the ORIGINAL source class's constructor prefix. The stable
+    /// declaration key is never rebound to a specialized class copy, whose transport may shrink.
+    /// `parameter` is a logical prefix identity, independent of stored fields and emitted order.
+    ConstructorReceiver {
+        owner: crate::fir::DeclarationId,
+        parameter: u32,
+    },
     /// A script's implicit receiver `ordinal`, which a script statement reads from its
     /// constructor parameter.
     ScriptReceiver { ordinal: u32 },
@@ -172,6 +179,21 @@ pub struct IrParameterIdentity {
 }
 
 impl IrParameterIdentity {
+    /// Exact original constructor receiver transported as this callable's captured value.
+    pub(crate) fn constructor_receiver(&self) -> Option<(crate::fir::DeclarationId, u32)> {
+        match self.role {
+            IrParameterRole::CapturedValue {
+                capture:
+                    IrValueCapture {
+                        declaration: IrCapturedDeclaration::ConstructorReceiver { owner, parameter },
+                        ..
+                    },
+                ..
+            } => Some((owner, parameter)),
+            _ => None,
+        }
+    }
+
     /// Convert a frontend-published semantic identity without adding a target spelling.
     pub fn resolved(identity: &crate::fir::ResolvedParameterIdentity) -> Self {
         use crate::fir::ResolvedParameterIdentity as Resolved;

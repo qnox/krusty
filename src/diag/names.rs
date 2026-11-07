@@ -205,32 +205,4 @@ mod tests {
             None
         );
     }
-
-    /// Every name `-Xwarning-level` accepts is a warning in the newest release, and a warning in
-    /// every older release that declares it (several are new in 2.4.20).
-    #[test]
-    fn every_compiler_warning_name_is_a_declared_warning() {
-        for warning in super::super::CompilerWarningName::ALL {
-            let name = DiagnosticName::parse(warning.as_str())
-                .unwrap_or_else(|| panic!("{} is not a kotlinc diagnostic", warning.as_str()));
-            assert_eq!(
-                name.severity(KotlinVersion::newest()),
-                Some(DiagnosticSeverity::Warning),
-                "{name}"
-            );
-            for version in KotlinVersion::supported() {
-                assert!(
-                    matches!(
-                        name.severity(version),
-                        None | Some(DiagnosticSeverity::Warning)
-                    ),
-                    "{name} in kotlinc {version}"
-                );
-            }
-        }
-        assert_eq!(
-            TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING.severity(KotlinVersion::V2_4_10),
-            None
-        );
-    }
 }

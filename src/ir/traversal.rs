@@ -25,9 +25,14 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
             }
             IrCheckedOperation::ConstructorDelegation {
                 outer_receiver,
+                capture_arguments,
                 arguments,
                 ..
             } => {
+                capture_arguments
+                    .iter()
+                    .flatten()
+                    .for_each(|&(value, _)| f(value));
                 outer_receiver.iter().for_each(|&receiver| f(receiver));
                 arguments.iter().for_each(|argument| match argument {
                     IrCheckedArgument::Expression { value, .. } => f(*value),
@@ -147,6 +152,11 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::LateinitCheck { operand: arg, .. }
         | IrExpr::Throw { operand: arg }
         | IrExpr::EnumValueOf { arg, .. }
+        | IrExpr::EnumConstant {
+            construction: arg, ..
+        }
+        | IrExpr::EnumEntriesList { values: arg, .. }
+        | IrExpr::NoSuchEnumConstant { name: arg, .. }
         | IrExpr::EnumSwitchOrdinal { subject: arg, .. }
         | IrExpr::ReifiedTypeOp { arg, .. }
         | IrExpr::RefGet { holder: arg, .. }
@@ -251,6 +261,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumSwitchKey { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumAllocation { .. }
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation

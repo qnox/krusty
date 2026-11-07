@@ -24,12 +24,15 @@ mod compiler_blocks;
 mod conditionals;
 mod constructions;
 mod elvis_blocks;
+mod instance_storage;
 mod loops;
 mod range_membership;
 mod safe_calls;
 mod string_templates;
 mod try_catch;
 mod type_operators;
+
+pub(super) use blocks::publish_parameter_defaults;
 
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::FunctionHeader;
@@ -62,7 +65,7 @@ pub(super) struct LinkedCallee {
     pub(super) singleton_dispatch: Option<TypeName>,
     /// The semantic identities of the callee's own type parameters, which the receiver,
     /// parameters and result name and a call's type arguments bind, in declaration order.
-    pub(super) type_parameters: Vec<String>,
+    pub(super) type_parameters: Vec<crate::types::TyParamName>,
     /// The complete declared upper bounds of each of [`Self::type_parameters`], as the selected
     /// declaration authenticates them (an empty slot is the implicit `Any?`). `None` when the
     /// selection carries no generic signature to read them from.
@@ -71,6 +74,9 @@ pub(super) struct LinkedCallee {
     /// receiver (the class applied to them), parameters and result name and a call binds from its
     /// dispatch receiver's type, in declaration order.
     pub(super) class_type_parameters: Vec<String>,
+    /// Whether each of [`Self::params`] declares a default a call may leave it to, for a function
+    /// this unit lowers; empty for every other callee, which no call may omit an argument of.
+    pub(super) parameter_defaults: Vec<bool>,
 }
 
 pub(super) struct LinkedCallableReference {
@@ -154,7 +160,11 @@ pub(super) trait CallLinker {
     ) -> Lowered<LinkedConstructor>;
 
     /// The dependency property a call of its accessor `callee` reads or writes.
-    fn link_accessor(&mut self, callee: &KlibAccessorIdSignature) -> Lowered<LinkedAccessor>;
+    fn link_accessor(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibAccessorIdSignature,
+    ) -> Lowered<LinkedAccessor>;
 
     /// Proves that `classifier` is a dependency object, whose value a body may read.
     fn singleton(&self, classifier: TypeName) -> Lowered<()>;
@@ -188,7 +198,7 @@ pub(super) struct LinkedConstructor {
 /// and the accessor's dispatch receiver, parameters (context parameters, extension receiver, and a
 /// setter's value) and result.
 pub(super) struct LinkedAccessor {
-    pub(super) property: crate::fir::ExternalPropertyId,
+    pub(super) target: LinkedAccessorTarget,
     pub(super) write: bool,
     pub(super) receiver: Option<Ty>,
     pub(super) params: Vec<Ty>,
@@ -196,6 +206,16 @@ pub(super) struct LinkedAccessor {
     pub(super) context_count: usize,
     /// As [`LinkedCallee::class_type_parameters`].
     pub(super) class_type_parameters: Vec<String>,
+}
+
+/// What an accessor call reaches.
+#[derive(Clone, Copy)]
+pub(super) enum LinkedAccessorTarget {
+    /// The provider's property, read or written through its accessor.
+    External(crate::fir::ExternalPropertyId),
+    /// The getter this unit emits, for a member of a value class: a member function of its
+    /// class, called on the receiver in place of the property read.
+    Local(FunId),
 }
 
 /// The function a body is lowered into: its serialized symbol, the only target its `return`s may
@@ -232,7 +252,7 @@ pub(super) struct BodyLowering<'a> {
     /// The coercions of an erased body's values to their erasure, which a conversion back to the
     /// declared type cancels.
     erasure_coercions: HashSet<ExprId>,
-    initialization: Option<class_initializers::InitializationFrame<'a>>,
+    instance_storage: Option<instance_storage::InstanceStorageFrame<'a>>,
 }
 
 impl<'a> BodyLowering<'a> {
@@ -259,8 +279,23 @@ impl<'a> BodyLowering<'a> {
             loops: Vec::new(),
             breakable_loops: HashSet::default(),
             erasure_coercions: HashSet::default(),
-            initialization: None,
+            instance_storage: None,
         }
+    }
+
+    /// This body as a member of the value class `class`, which reads its value through `field`.
+    pub(super) fn reading_value_through(
+        mut self,
+        class: crate::ir::ClassId,
+        field: &'a crate::metadata::klib_ir::tree::KlibIrField,
+    ) -> Self {
+        self.instance_storage = Some(instance_storage::InstanceStorageFrame::value_member(
+            class,
+            field,
+            self.ir.classes[class as usize].fields[0].ty,
+            self.header.value_receiver(),
+        ));
+        self
     }
 
     fn statement(&mut self, statement: &KlibIrStatement) -> Lowered<ExprId> {

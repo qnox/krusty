@@ -418,6 +418,7 @@ impl BodyLowering<'_> {
                 internal: recovery.classifier,
                 args: vec![value],
                 ctor_params: Some(vec![constructor_parameter.get()]),
+                declared_params: None,
                 ctor_desc: None,
                 external_target: Some(recovery.constructor),
                 defaults: Box::new([]),
@@ -1031,6 +1032,7 @@ impl BodyLowering<'_> {
             default_provider: None,
             receiver_ty: Some(call.receiver),
             declared_receiver: None,
+            declaring_receiver: None,
             parameters: &call.parameters,
             result,
             declared_result: None,
@@ -1159,7 +1161,7 @@ impl BodyLowering<'_> {
         let initial = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let declaration = self.ir.add_expr(IrExpr::Variable {
             index: result_slot,
-            ty: Ty::obj("java/lang/Object"),
+            ty: Ty::nullable(Ty::obj("kotlin/Any")),
             init: Some(initial),
             named: false,
         });

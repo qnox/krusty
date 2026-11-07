@@ -38,6 +38,8 @@ pub enum SkipReason {
     InlineParameters,
     /// A read-only collection superclass lacks the exact semantic declaration its stubs need.
     ReadOnlyCollectionStubs(String),
+    /// A collection class's supertype lacks the declaration facts its `toArray` members need.
+    CollectionToArray(String),
     /// A `suspend inline` callee's compiled body does not say where it places a suspend lambda
     /// passed to it: in the caller's frame, or in an object it constructs.
     SuspendLambdaPlacement(String),
@@ -232,6 +234,7 @@ fn run_backend_passes_after_plugins(
     let facades = file_classes.map(|classes| &classes.containers[..]);
     // Every later pass reads a type parameter's JVM carrier off its occurrences. Select it once,
     // from the declarations' complete bounds, before any of them runs.
+    crate::jvm::enclosing_capture_storage::realize(ir).map_err(SkipReason::CallArguments)?;
     crate::jvm::type_parameter_carriers::realize(ir);
     let module_value_classes = classifiers.module().source_value_classes();
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
@@ -247,6 +250,7 @@ fn run_backend_passes_after_plugins(
     )
     .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
+    crate::jvm::platform_visible_constructors::realize(ir);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
     // declaration that has no class-file form. Before the value-class pass, which renames a marker
     // together with its mangled getter.
@@ -325,6 +329,8 @@ fn run_backend_passes_after_plugins(
         callables,
         &facts.property_realizations,
     )?;
+    facts.override_results.collection_signatures =
+        crate::jvm::collection_override_signatures::select(ir, classpath);
     crate::jvm::bridges::derive_bridges(
         ir,
         classpath,
@@ -349,6 +355,7 @@ fn run_backend_passes_after_plugins(
             classpath,
             classifiers,
         )?,
+        to_array: crate::jvm::collection_to_array::select(ir, classpath, classifiers)?,
     };
     // The value-class pass reads same-module SOURCE value classes (internal name → sole-field
     // underlying) for its erasure/mangle map from the frontend symbols directly, NOT through the
@@ -548,6 +555,9 @@ pub struct JvmBackend {
     /// Whether to emit the `Intrinsics.checkNotNullExpressionValue` guard on a narrowed platform
     /// value (`-Xno-call-assertions` clears this).
     call_assertions: bool,
+    /// Whether to emit that guard on a platform value that reaches an extension receiver
+    /// (`-Xno-receiver-assertions` clears this).
+    receiver_assertions: bool,
     /// `-language-version X.Y`: the `@kotlin.Metadata` `mv` and `.kotlin_module` header version to
     /// stamp; `None` keeps the default ([`crate::jvm::ir_emit::DEFAULT_METADATA_VERSION`]).
     metadata_version: Option<[i32; 3]>,
@@ -572,6 +582,7 @@ impl JvmBackend {
             inline_scopes_numbers: false,
             param_assertions: true,
             call_assertions: true,
+            receiver_assertions: true,
             metadata_version: None,
             annotations_in_metadata: true,
             pre_release_metadata: false,
@@ -619,6 +630,13 @@ impl JvmBackend {
     /// where a platform value is narrowed to a declared non-null type.
     pub fn with_call_assertions(mut self, enabled: bool) -> JvmBackend {
         self.call_assertions = enabled;
+        self
+    }
+
+    /// `-Xno-receiver-assertions` passes `false`: emit no such guard where the narrowed value is an
+    /// extension call's receiver.
+    pub fn with_receiver_assertions(mut self, enabled: bool) -> JvmBackend {
+        self.receiver_assertions = enabled;
         self
     }
 
@@ -1165,8 +1183,15 @@ impl JvmBackend {
         if !self.param_assertions {
             crate::jvm::parameter_assertions::strip(&mut ir);
         }
-        if !self.call_assertions {
-            crate::jvm::ir_emit::strip_call_assertions(&mut ir);
+        let omitted_null_assertions = if !self.call_assertions {
+            Some(crate::jvm::implicit_null_assertions::OmittedNullAssertions::Implicit)
+        } else if !self.receiver_assertions {
+            Some(crate::jvm::implicit_null_assertions::OmittedNullAssertions::ExtensionReceivers)
+        } else {
+            None
+        };
+        if let Some(omitted) = omitted_null_assertions {
+            crate::jvm::implicit_null_assertions::omit(&mut ir, omitted);
         }
         // Suspend lowering can move a catch onto a fresh `try`. Rebuild the marker plan from the
         // declaration parameters so emission names the handler that is actually written.
@@ -1327,6 +1352,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::CollectionToArray(detail) => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("krusty: cannot realize collection toArray members: {detail}"),
+            );
+            return;
+        }
         SkipReason::SuspendLambdaPlacement(detail) => {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1356,6 +1388,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         | SkipReason::CallArguments(_)
         | SkipReason::InlineParameters
         | SkipReason::ReadOnlyCollectionStubs(_)
+        | SkipReason::CollectionToArray(_)
         | SkipReason::SuspendLambdaPlacement(_)
         | SkipReason::MemberDispatch(_) => {
             unreachable!()
@@ -1431,7 +1464,7 @@ impl Backend for JvmBackend {
             &facade,
             &delegate_closures,
             current_source,
-            self.lambda_modes.lambdas,
+            self.lambda_modes,
         ) {
             Ok(methods) => methods,
             Err(()) => {
@@ -2259,14 +2292,17 @@ mod tests {
             Some(metadata.k),
             "a/AKt",
             None,
-            &[],
         )
         .expect("decode generated facade metadata");
 
-        let [property] = decoded.package_properties.as_ref() else {
+        let members = decoded
+            .members
+            .decode(&[], &decoded.type_parameter_scope)
+            .expect("decode generated facade members");
+        let [property] = members.package_properties.as_ref() else {
             panic!(
                 "expected one package property, got {:?}",
-                decoded.package_properties
+                members.package_properties
             );
         };
         assert_eq!(property.name, "topLevel");

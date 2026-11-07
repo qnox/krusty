@@ -117,7 +117,29 @@ pub(super) fn constructor_parameters(ir: &IrFile, class: ClassId) -> Vec<Ty> {
         .ctor_args
         .iter()
         .enumerate()
-        .map(|(index, argument)| captures::physical_ty(ir, class, index as u32, argument.ty))
+        .map(|(index, argument)| captures::prefix_physical_ty(ir, class, index, argument.ty))
+        .collect()
+}
+
+/// The parameters secondary constructor `secondary` of `class` takes, beyond `this`, as they are
+/// carried: the class's prefix, then its own.
+///
+/// The declaration keeps the prefix's SEMANTIC types, which a default-argument entry copies from
+/// the primary — a captured `var n: Int` stays `Int`. What carries it is the class's choice for
+/// that prefix position, so a construction, the constructor itself and a `this(…)` it forwards
+/// the prefix through agree with the primary on the shared cell.
+pub(super) fn secondary_constructor_parameters(
+    ir: &IrFile,
+    class: ClassId,
+    secondary: usize,
+) -> Vec<Ty> {
+    let constructor = &ir.classes[class as usize].secondary_ctors[secondary];
+    constructor
+        .prefix_params
+        .iter()
+        .enumerate()
+        .map(|(index, &ty)| captures::prefix_physical_ty(ir, class, index, ty))
+        .chain(constructor.params.iter().copied())
         .collect()
 }
 
@@ -227,15 +249,9 @@ impl<'a> FileLowering<'a> {
             // Each `constructor(…)` beyond the primary is its own entry point: it delegates to
             // another constructor and then runs its own body.
             let mut secondaries = Vec::new();
-            for (ordinal, secondary) in self.ir.classes[class as usize]
-                .secondary_ctors
-                .clone()
-                .iter()
-                .enumerate()
-            {
+            for ordinal in 0..self.ir.classes[class as usize].secondary_ctors.len() {
                 let mut params = vec![any()];
-                params.extend(secondary.prefix_params.iter().copied());
-                params.extend(secondary.params.iter().copied());
+                params.extend(secondary_constructor_parameters(self.ir, class, ordinal));
                 secondaries.push(self.declare_local_function(
                     &format!("kt_{base}__init_{ordinal}"),
                     &params,
@@ -859,6 +875,8 @@ impl<'a> FileLowering<'a> {
         let declaration = self.ir.classes[class as usize].clone();
         let secondary = declaration.secondary_ctors[ordinal].clone();
         let id = self.classes[class as usize].secondaries[ordinal];
+        // The shared default-argument lowering rewrites every delegation with omitted arguments it
+        // can realize to reach its target's entry; one it left still carries placeholders.
         if !secondary.default_parameters.is_empty() {
             return Err(declined!(
                 "a secondary constructor delegating with omitted arguments (`{}`)",
@@ -866,8 +884,7 @@ impl<'a> FileLowering<'a> {
             ));
         }
         let mut slots = vec![self.object_type(class)];
-        slots.extend(secondary.prefix_params.iter().copied());
-        slots.extend(secondary.params.iter().copied());
+        slots.extend(secondary_constructor_parameters(self.ir, class, ordinal));
         let mut semantic_slots = vec![Ty::obj_name(declaration.fq_name)];
         semantic_slots.extend(secondary.prefix_params.iter().copied());
         semantic_slots.extend(secondary.params.iter().copied());
@@ -894,25 +911,25 @@ impl<'a> FileLowering<'a> {
                 target,
                 ..
             } => {
-                let target = if target.primary() {
-                    self.classes[class as usize].constructor.ok_or_else(|| {
+                // By its exact place: a default-argument entry's parameter list may be one the
+                // class also declares.
+                let target = match target.ordinal.checked_sub(1) {
+                    None => self.classes[class as usize].constructor.ok_or_else(|| {
                         format!(
                             "a delegation to a primary constructor the class does not have (`{}`)",
                             declaration.fq_name()
                         )
-                    })?
-                } else {
-                    let sibling = declaration
-                        .secondary_ctors
-                        .iter()
-                        .position(|candidate| candidate.params == *target_params)
+                    })?,
+                    Some(sibling) => self.classes[class as usize]
+                        .secondaries
+                        .get(sibling as usize)
+                        .copied()
                         .ok_or_else(|| {
                             format!(
                                 "a secondary constructor delegating to no known sibling (`{}`)",
                                 declaration.fq_name()
                             )
-                        })?;
-                    self.classes[class as usize].secondaries[sibling]
+                        })?,
                 };
                 prefix_operands = secondary.prefix_params.len();
                 (Some(target), target_params.clone())
@@ -920,6 +937,7 @@ impl<'a> FileLowering<'a> {
             crate::ir::CtorDelegateTarget::Super {
                 owner,
                 target_params,
+                target,
                 ..
             } => {
                 // A `super(…)` delegation does not reach a primary constructor, so the PREFIX
@@ -931,27 +949,29 @@ impl<'a> FileLowering<'a> {
                     Some(parent) => {
                         // The checker selected an EXACT constructor, and it may be a SECONDARY one:
                         // `class E : A { constructor() : super() }` where `A`'s no-argument
-                        // constructor is secondary. Taking the primary for every `super(…)` called it
-                        // with the wrong arguments, which Cranelift's own verifier caught as a
-                        // mismatched argument count — a decline rather than a wrong answer, and one
-                        // that took every file holding such a constructor with it.
-                        //
-                        // Kotlin admits no two constructors of one class with the same parameter list,
-                        // so a secondary matching `target_params` is the selection and the primary is
-                        // what remains when none does.
-                        let sibling = self.ir.classes[parent as usize]
-                            .secondary_ctors
-                            .iter()
-                            .position(|candidate| candidate.params == *target_params);
+                        // constructor is secondary. It is reached by its place among `A`'s
+                        // constructors: a default-argument entry's parameter list may be one `A`
+                        // also declares.
+                        let sibling = target
+                            .ordinal
+                            .checked_sub(1)
+                            .map(|sibling| sibling as usize);
                         let target = match sibling {
                             Some(sibling) => {
+                                let Some(constructor) = self.ir.classes[parent as usize]
+                                    .secondary_ctors
+                                    .get(sibling)
+                                else {
+                                    return Err(declined!(
+                                        "a delegation to a superclass constructor `{}` does not \
+                                         declare",
+                                        owner.render()
+                                    ));
+                                };
                                 // A secondary carrying a PREFIX — an inner class's outer instance, or
                                 // a local class's captures — takes operands this delegation has no
                                 // way to supply, so it declines rather than calling it one short.
-                                if !self.ir.classes[parent as usize].secondary_ctors[sibling]
-                                    .prefix_params
-                                    .is_empty()
-                                {
+                                if !constructor.prefix_params.is_empty() {
                                     return Err(declined!(
                                         "a delegation to a superclass secondary constructor with \
                                      compiler-supplied parameters (`{}`)",
@@ -1025,9 +1045,11 @@ impl<'a> FileLowering<'a> {
         };
         // A delegation argument may call a companion member (`constructor() : this(foo() + prop)`),
         // and those run before the primary constructor this delegates to would have created the
-        // companion. So this constructor asks for it too; the getter is idempotent.
-        let companion = declaration
-            .companion_class
+        // companion. So this constructor asks for it too; the getter is idempotent. An ENUM's
+        // companion comes after every constant, as `define_constructor` keeps it.
+        let companion = (!model::is_enum(&declaration))
+            .then_some(declaration.companion_class)
+            .flatten()
             .and_then(|companion| self.ir.class_id_by_name(companion))
             .and_then(|companion| self.classes[companion as usize].singleton)
             .map(|(_, getter)| getter);
@@ -1046,14 +1068,13 @@ impl<'a> FileLowering<'a> {
                         .pre_super_param_fields
                         .iter()
                         .any(|(pre, _)| *pre as usize == parameter);
-                    (argument.is_field && !written_early)
-                        .then(|| {
-                            layout
-                                .fields
-                                .get(parameter)
-                                .map(|field| field.offset as i32)
-                        })
-                        .flatten()
+                    // The field the parameter names: a capture kept in its parameter alone
+                    // fills none, so parameter and field positions need not agree.
+                    argument
+                        .field_index
+                        .filter(|_| argument.is_field && !written_early)
+                        .and_then(|field| layout.fields.get(field as usize))
+                        .map(|field| field.offset as i32)
                 })
                 .collect()
         } else {
@@ -1439,6 +1460,28 @@ impl<'a> FileLowering<'a> {
         }
     }
 
+    /// Which constructor of its superclass `class`'s `super(…)` delegation calls: `None` for the
+    /// primary, the secondary's index otherwise, as the checker recorded it or as the shared
+    /// default-argument lowering redirected it to an entry. `Err` when the recorded ordinal names
+    /// no constructor this file declares for the superclass.
+    fn super_constructor(&self, class: ClassId) -> Result<Option<usize>, Unsupported> {
+        let declaration = &self.ir.classes[class as usize];
+        let Some(secondary) = declaration.super_ctor.ordinal.checked_sub(1) else {
+            return Ok(None);
+        };
+        let parent = self
+            .ir
+            .class_id_by_name(declaration.superclass)
+            .map(|parent| &self.ir.classes[parent as usize]);
+        match parent.and_then(|parent| parent.secondary_ctors.get(secondary as usize)) {
+            Some(_) => Ok(Some(secondary as usize)),
+            None => Err(declined!(
+                "a superclass call of `{}` to a constructor its superclass does not declare here",
+                declaration.fq_name()
+            )),
+        }
+    }
+
     /// The constructor: the superclass constructor first, then this class's parameter stores,
     /// then its initializers in source order — Kotlin's order, which a base-class `init` that
     /// prints can observe.
@@ -1460,8 +1503,10 @@ impl<'a> FileLowering<'a> {
                 // SECONDARY one — `sealed class A() { constructor(i: Int) : this() }` is that
                 // shape — and an enum constant's subclass calls the one its constant selected.
                 let sibling = self.super_constructor(class)?;
+                // The operands lead with the superclass's prefix — an inner superclass's outer
+                // instance — whichever of its constructors is called.
                 let params: Vec<Ty> = match sibling {
-                    Some(sibling) => parent_declaration.secondary_ctors[sibling].params.clone(),
+                    Some(sibling) => secondary_constructor_parameters(self.ir, parent, sibling),
                     None => constructor_parameters(self.ir, parent),
                 };
                 if declaration.super_args.len() != params.len() {
@@ -1470,42 +1515,29 @@ impl<'a> FileLowering<'a> {
                         declaration.fq_name()
                     ));
                 }
-                // `class B : A()` where `A` has a defaulted parameter still passes an operand for
-                // it — common IR fills the hole with a zero placeholder so that a target's own
-                // default ABI has something to put a mask against — and the ordinals it actually
-                // omitted are recorded beside the class. So the placeholders are DROPPED here and
-                // the call goes through the same wrapper an `A()` written as an expression would,
-                // because a default belongs to the callee's frame either way.
-                let omitted: Vec<u32> = self
-                    .omitted_super_arguments(class)
-                    .map(|(_, _, omitted)| omitted)
-                    .unwrap_or_default();
-                let parent_constructor = if omitted.is_empty() {
-                    match sibling {
-                        Some(sibling) => self.classes[parent as usize].secondaries[sibling],
-                        None => self.classes[parent as usize].constructor.ok_or_else(|| {
-                            format!(
-                                "a superclass with no primary constructor (`{}`)",
-                                parent_declaration.fq_name()
-                            )
-                        })?,
-                    }
-                } else {
-                    // The wrapper fills whichever constructor's frame the delegation names — a
-                    // secondary's defaults are its own, and the key says which.
-                    let key = defaults::CtorOmission {
-                        class: parent,
-                        secondary: sibling,
-                        omitted: omitted.clone(),
-                    };
-                    *self.default_constructors.get(&key).ok_or_else(|| {
+                // The shared default-argument lowering rewrites every `super(…)` with omitted
+                // arguments it can realize to call its constructor's entry; one it left still
+                // carries a placeholder where the default belongs.
+                if self
+                    .ir
+                    .super_constructor_default_arguments
+                    .contains_key(&declaration.fq_name_id())
+                {
+                    return Err(declined!(
+                        "a superclass constructor call with omitted arguments (`{}`)",
+                        declaration.fq_name()
+                    ));
+                }
+                let parent_constructor = match sibling {
+                    Some(sibling) => self.classes[parent as usize].secondaries[sibling],
+                    None => self.classes[parent as usize].constructor.ok_or_else(|| {
                         format!(
-                            "a superclass constructor call with defaulted arguments (`{}`)",
-                            declaration.fq_name()
+                            "a superclass with no primary constructor (`{}`)",
+                            parent_declaration.fq_name()
                         )
-                    })?
+                    })?,
                 };
-                Some((parent_constructor, params, omitted))
+                Some((parent_constructor, params))
             }
             // A base the runtime owns has no constructor to call: the object is already
             // allocated, and what the base's constructor would have done is store what it was
@@ -1569,14 +1601,9 @@ impl<'a> FileLowering<'a> {
                 let offset = body.file.model.layout(class).fields[field as usize].offset as i32;
                 body.builder.ins().store(trusted(), value, this, offset);
             }
-            if let Some((constructor, parent_params, omitted)) = &parent {
+            if let Some((constructor, parent_params)) = &parent {
                 let mut arguments = vec![this];
-                for (ordinal, (&argument, ty)) in
-                    declaration.super_args.iter().zip(parent_params).enumerate()
-                {
-                    if omitted.contains(&(ordinal as u32)) {
-                        continue;
-                    }
+                for (&argument, ty) in declaration.super_args.iter().zip(parent_params) {
                     let Some(value) = body.coerce(argument, *ty)? else {
                         return Err("a `Unit` superclass constructor argument".into());
                     };
@@ -1652,7 +1679,7 @@ impl<'a> FileLowering<'a> {
                     let field_type =
                         model::field_storage_ty(body.file.values, body.file.ir, class, field)?;
                     let argument_type =
-                        captures::physical_ty(body.file.ir, class, index as u32, argument.ty);
+                        captures::prefix_physical_ty(body.file.ir, class, index, argument.ty);
                     let Some(value) =
                         body.convert(params[index + 1], Some(argument_type), field_type)?
                     else {
@@ -1703,11 +1730,8 @@ impl<'a> FileLowering<'a> {
                     && model::is_enum(candidate)
             })
             .map(|outer| outer as ClassId)
-            .and_then(|outer| {
-                self.enum_entries
-                    .get(&outer)
-                    .map(|items| items.initializer())
-            });
+            .and_then(|outer| self.ir.enum_initializers.get(&outer))
+            .and_then(|&initializer| self.functions[initializer as usize]);
 
         let name = format!("{}.INSTANCE", self.ir.classes[class as usize].fq_name());
         let signature = self.signature_of(&[], any())?;
@@ -2000,7 +2024,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
         }
         let name = internal.render();
-        if let Some(omitted) = defaulted {
+        if defaulted.is_some() {
             // A runtime throwable's declared defaults are the runtime's: it implements the class.
             if let Some(descriptor) =
                 super::super::super::intrinsics::throwable_descriptor(internal)
@@ -2015,8 +2039,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     &[descriptor],
                 );
             }
-            return self.defaulted_construction(internal, args, selected, omitted);
+            // The shared default-argument lowering rewrites every construction with omitted
+            // arguments it can realize to construct through its constructor's entry.
+            return Err(declined!(
+                "a constructor call with omitted arguments (`{name}`)"
+            ));
         }
+        // An enum constant's `kotlin.Enum` storage, taken before the arguments are lowered: an
+        // argument's own construction is not the constant.
+        let enum_base = self.enum_base.take();
         // `Any()` is declared in no file and needs none: the root has no state and no constructor,
         // so the whole of constructing one is an object with its type and nothing after the
         // header. `kt_type_any` is the runtime's, the same descriptor every other type points at
@@ -2042,71 +2073,28 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if declaration.is_abstract || declaration.is_sealed {
             return Err(declined!("construction of the abstract class `{name}`"));
         }
-        // Matching uses the DECLARED list, because that is what the construction node names;
-        // filling the frame uses the physical one, because that is what the constructor declares.
-        let primary_declared: Vec<Ty> = declaration
-            .ctor_args
-            .iter()
-            .map(|argument| argument.ty)
-            .collect();
-        let primary_params: Vec<Ty> = declaration
-            .ctor_args
-            .iter()
-            .enumerate()
-            .map(|(index, argument)| {
-                captures::physical_ty(self.file.ir, class, index as u32, argument.ty)
-            })
-            .collect();
-        // `ctor_params` names a constructor by its parameter list, and is absent only when the
-        // lowering already knows the call goes to the primary one. It is present for a secondary,
-        // and also for a primary the lowering could not recognize as such — an anonymous object's,
-        // whose constructor is not its class's first declaration. So match the secondaries first,
-        // and fall back to the primary when the list is its own.
-        let (constructor, params) = match selected {
-            Some(selected) => {
-                let ordinal = declaration.secondary_ctors.iter().position(|candidate| {
-                    // Either spelling of the same constructor: the declaration's own parameter
-                    // list, or that list behind the PREFIX an inner class's constructors lead
-                    // with. Which one the call node carries depends on whether the outer instance
-                    // was part of the selection it recorded.
-                    if candidate.params == selected {
-                        return true;
-                    }
-                    let mut physical = candidate.prefix_params.clone();
-                    physical.extend(candidate.params.iter().copied());
-                    !candidate.prefix_params.is_empty() && physical == selected
-                });
-                match ordinal {
-                    Some(ordinal) => {
-                        let secondary = &declaration.secondary_ctors[ordinal];
-                        // A PREFIX is what an inner class's constructors all lead with — the outer
-                        // instance — and the construction supplies it as an ordinary argument, the
-                        // same way the primary's is supplied. So the physical list is the prefix
-                        // and then the declaration's own; the arity check below is what says
-                        // whether the call really carries one.
-                        let mut params = secondary.prefix_params.clone();
-                        params.extend(secondary.params.iter().copied());
-                        (
-                            self.file.classes[class as usize].secondaries[ordinal],
-                            params,
-                        )
-                    }
-                    None if primary_declared == selected => (
-                        self.file.classes[class as usize]
-                            .constructor
-                            .ok_or_else(|| {
-                                format!("a call to a primary constructor `{name}` lacks")
-                            })?,
-                        primary_params,
-                    ),
-                    None => return Err(declined!("a call to an unknown constructor (`{name}`)")),
-                }
-            }
+        let Some(ordinal) =
+            crate::backend::selected_constructor(self.file.ir, site, class, selected)
+        else {
+            return Err(declined!("a call to an unknown constructor (`{name}`)"));
+        };
+        let (constructor, params) = match ordinal.checked_sub(1) {
+            // The primary's frame reads each parameter's PHYSICAL type, which a captured `var`'s
+            // holder differs from.
             None => (
                 self.file.classes[class as usize]
                     .constructor
                     .ok_or_else(|| format!("a call to a primary constructor `{name}` lacks"))?,
-                primary_params,
+                constructor_parameters(self.file.ir, class),
+            ),
+            // A PREFIX is what an inner class's constructors all lead with — the outer instance —
+            // and the construction supplies it as an ordinary argument, the same way the
+            // primary's is supplied. So the physical list is the prefix and then the
+            // declaration's own; the arity check below is what says whether the call really
+            // carries one.
+            Some(index) => (
+                self.file.classes[class as usize].secondaries[index as usize],
+                secondary_constructor_parameters(self.file.ir, class, index as usize),
             ),
         };
         if args.len() != params.len() {
@@ -2123,12 +2111,21 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
-        let object = match placement {
-            super::frame_objects::Placement::Heap => self.allocate(descriptor, size)?,
-            super::frame_objects::Placement::Frame { local } => {
+        let object = match (&enum_base, placement) {
+            // A constant published before its construction is constructed in place.
+            (
+                Some(super::enums::EnumBase {
+                    published: Some(slot),
+                    ..
+                }),
+                _,
+            ) => self.published_enum_constant(*slot)?,
+            (_, super::frame_objects::Placement::Heap) => self.allocate(descriptor, size)?,
+            (_, super::frame_objects::Placement::Frame { local }) => {
                 return self.frame_object(class, local, &arguments, &params);
             }
         };
+        self.store_enum_base(enum_base, object)?;
         arguments.insert(0, object);
         let func_ref = self.func_ref(constructor);
         self.emit_call(func_ref, &arguments)?;
@@ -2494,6 +2491,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         if let Some(instance) = self.module_singleton(classifier)? {
             return Ok(Some(instance));
+        }
+        // Another module's object is read through the entry its module exports.
+        if self.file.ir.class_id_by_name(classifier).is_none() {
+            if let Some(symbol) = self.file.dependency_singletons.get(&classifier) {
+                let id = self.file.import(symbol, &[], Ty::obj_name(classifier))?;
+                let func_ref = self.func_ref(id);
+                let call = self.emit_call(func_ref, &[])?;
+                return Ok(Some(self.builder.inst_results(call)[0]));
+            }
         }
         let class = self.file.class_of(classifier, "the object")?;
         let Some((_, getter)) = self.file.classes[class as usize].singleton else {
