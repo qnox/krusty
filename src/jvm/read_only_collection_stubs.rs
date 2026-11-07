@@ -24,8 +24,8 @@ use crate::jvm::jvm_class_map::{
 };
 use crate::jvm::mapped_builtin_declarations::{
     collection_bridge_policy_for_declaration, collection_signature_policy_for_declaration,
-    realization_for_declaration, CollectionBridgeFailure, CollectionSignaturePolicy,
-    MappedBuiltinMemberKind,
+    realization_for_declaration, CollectionBridgeFailure, CollectionBridgePolicy,
+    CollectionSignaturePolicy, MappedBuiltinMemberKind,
 };
 use crate::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
 use crate::jvm::names::method_descriptor;
