@@ -805,11 +805,11 @@ impl Emitter<'_> {
             .ok_or("an inline lambda's code cannot be read back as a method node")?;
         mark_non_local_returns(&mut node, &scratch.bytes, own_return, &jumps)?;
         let return_type = return_unit_as_void(&mut node, return_type);
-        if unit_return_landing && return_type == "V" {
-            // A branch to the join is a real instruction, and the method must not fall off it.
-            // The inliner drops this return and leaves the join on its own end label.
-            close_unit_return_landing(&mut node);
-        }
+        // A branch to the join is a real instruction, and the method must not fall off it.
+        // The return this writes is the generated landing: the lambda inliner removes that
+        // instruction and leaves the join on its own end label.
+        let generated_return_landing =
+            unit_return_landing && return_type == "V" && close_unit_return_landing(&mut node);
         Ok(LambdaArgument {
             lambda: inliner::Lambda {
                 node,
@@ -830,6 +830,7 @@ impl Emitter<'_> {
                 },
                 default_class: None,
                 suspend,
+                generated_return_landing,
             },
             captures: captures
                 .iter()
@@ -1015,17 +1016,19 @@ fn mark_non_local_returns(
 /// The join is that `nop`, so the branch is inside the method. A `nop` falls off the end, which
 /// the inliner rejects; a return does not. Nothing falls through into it: the lambda's own return
 /// is the instruction before the join.
-fn close_unit_return_landing(node: &mut MethodNode) {
+fn close_unit_return_landing(node: &mut MethodNode) -> bool {
     let Some(at) = node
         .nodes
         .iter()
         .rposition(|entry| matches!(entry, Node::Insn(_)))
     else {
-        return;
+        return false;
     };
-    if matches!(node.nodes[at], Node::Insn(Insn::Op(0x00))) {
-        node.nodes[at] = Node::Insn(Insn::Op(RETURN));
+    if !matches!(node.nodes[at], Node::Insn(Insn::Op(0x00))) {
+        return false;
     }
+    node.nodes[at] = Node::Insn(Insn::Op(RETURN));
+    true
 }
 
 /// A `Unit` lambda: krusty's body yields `Unit.INSTANCE` for the `Object` `invoke` returns, where
