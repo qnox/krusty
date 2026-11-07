@@ -644,7 +644,7 @@ fn maven_verify_goal_names_compilations_by_their_full_reactor_identity() {
 /// rate-limited Maven Central): whether it succeeded, and what it printed.
 fn maven(directory: &Path, arguments: &[&str]) -> (bool, String) {
     let mut command = Command::new(mvn());
-    command.current_dir(directory).arg("-B");
+    command.current_dir(directory).arg("-B").arg("-U");
     if let Some(settings) = std::env::var_os("KRUSTY_MAVEN_SETTINGS") {
         command.arg("-s").arg(settings);
     }

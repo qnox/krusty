@@ -2,25 +2,26 @@
 //!
 //! The analysis engine publishes on the same channel that carries client input. A `write` to a
 //! client that is not reading used to run on that loop, so a full pipe stalled both the engine and
-//! the stdin reader. Frames are handed to a writer thread instead. The thread holds at most one
-//! legal LSP frame of unsent bytes ([`MAX_MESSAGE_BYTES`] plus its `Content-Length` header). The
-//! next frame that does not fit, a larger frame, or a writer error fails the transport. Accepted
-//! frames are not discarded to make room.
+//! the stdin reader. Frames are handed to a writer thread instead. The queue holds at most one
+//! legal LSP frame of unsent bytes ([`MAX_MESSAGE_BYTES`] plus its `Content-Length` header), across
+//! the writer channel and a FIFO of frames waiting for it. The byte budget, not the frame count, is
+//! the bound: a burst of small notifications may outrun the channel without failing. A frame that
+//! would exceed the budget, a larger frame, or a writer error fails the transport. Accepted frames
+//! are not discarded to make room.
 
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::implementation::MAX_MESSAGE_BYTES;
 
-/// Frames the writer thread can hold before `pending` stops being delivered.
-///
-/// A flush that finds this channel full leaves the frame in `pending` and returns success.
-/// That frame is not written until a later flush can `try_send` it. Shutdown drops `pending`
-/// when the channel is still full, so a burst is delivered in full only when it fits here.
+/// Frames the writer channel holds. A flush that finds it full leaves frames in `pending` and
+/// returns success; a later flush, or shutdown within its drain grace, hands them on. Shutdown drops
+/// what is still pending when the writer made no room before the grace expired.
 pub(super) const OUTPUT_CHANNEL_FRAMES: usize = 32;
 const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
@@ -46,7 +47,7 @@ static STUCK_WRITER: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 pub(super) struct OutputQueue {
     current: Vec<u8>,
-    pending: Vec<u8>,
+    pending: VecDeque<Vec<u8>>,
     held: Arc<AtomicUsize>,
     staged_limit: usize,
     tx: Option<SyncSender<Vec<u8>>>,
@@ -130,7 +131,7 @@ impl OutputQueue {
         });
         Ok(Self {
             current: Vec::new(),
-            pending: Vec::new(),
+            pending: VecDeque::new(),
             held,
             staged_limit,
             tx: Some(tx),
@@ -155,11 +156,6 @@ impl OutputQueue {
 
     fn accept(&mut self, frame: Vec<u8>) -> io::Result<()> {
         self.poll_writer_failure()?;
-        if !self.pending.is_empty() {
-            let message = "stdout queue exceeded the transport budget";
-            self.failed = Some(message.to_string());
-            return Err(io::Error::new(io::ErrorKind::BrokenPipe, message));
-        }
         let len = frame.len();
         if len > self.staged_limit {
             let message = "stdout frame exceeds the transport budget";
@@ -183,7 +179,7 @@ impl OutputQueue {
                 Err(observed) => held = observed,
             }
         }
-        self.pending = frame;
+        self.pending.push_back(frame);
         Ok(())
     }
 
@@ -191,30 +187,29 @@ impl OutputQueue {
         let Some(tx) = self.tx.as_ref() else {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "stdout closed"));
         };
-        if self.pending.is_empty() {
-            return Ok(());
-        }
-        let frame = std::mem::take(&mut self.pending);
-        let len = frame.len();
-        match tx.try_send(frame) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(frame)) => {
-                self.pending = frame;
-                Ok(())
-            }
-            Err(TrySendError::Disconnected(frame)) => {
-                self.held.fetch_sub(len, Ordering::SeqCst);
-                self.pending = frame;
-                let message = self
-                    .writer_error
-                    .lock()
-                    .expect("writer error")
-                    .clone()
-                    .unwrap_or_else(|| "stdout closed".to_string());
-                self.failed = Some(message.clone());
-                Err(io::Error::new(io::ErrorKind::BrokenPipe, message))
+        while let Some(frame) = self.pending.pop_front() {
+            let len = frame.len();
+            match tx.try_send(frame) {
+                Ok(()) => {}
+                Err(TrySendError::Full(frame)) => {
+                    self.pending.push_front(frame);
+                    return Ok(());
+                }
+                Err(TrySendError::Disconnected(frame)) => {
+                    self.held.fetch_sub(len, Ordering::SeqCst);
+                    self.pending.push_front(frame);
+                    let message = self
+                        .writer_error
+                        .lock()
+                        .expect("writer error")
+                        .clone()
+                        .unwrap_or_else(|| "stdout closed".to_string());
+                    self.failed = Some(message.clone());
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, message));
+                }
             }
         }
+        Ok(())
     }
 
     /// Whether the preceding frame has reached the underlying writer.
@@ -239,17 +234,24 @@ impl OutputQueue {
     }
 
     fn shutdown(&mut self) -> io::Result<()> {
-        let flushed = if self.tx.is_some() {
+        let deadline = Instant::now() + self.drain_grace;
+        let mut flushed = if self.tx.is_some() {
             self.flush()
         } else {
             Ok(())
         };
+        // Frames still waiting for the channel are handed on as the writer makes room.
+        while flushed.is_ok() && !self.pending.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+            flushed = self.pump();
+        }
         self.tx.take();
         let Some(join) = self.join.take() else {
             return flushed;
         };
         let done = self.done.take();
-        match done.and_then(|done| match done.recv_timeout(self.drain_grace) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match done.and_then(|done| match done.recv_timeout(remaining) {
             Ok(()) => Some(()),
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => Some(()),
@@ -631,6 +633,37 @@ mod tests {
 
         open_gate(&gate);
         reclaim_stuck_writer();
+    }
+
+    /// A burst of small frames, such as one index chunk's `publishDiagnostics`, can get ahead of the
+    /// writer thread by more frames than the channel holds. That is a reading client, not a stuck
+    /// one: the burst is far inside the byte budget, so it is delivered whole, in order, rather than
+    /// failing the transport (which made the server exit mid-index).
+    #[test]
+    fn a_burst_beyond_the_channel_within_the_byte_budget_is_delivered_in_order() {
+        let _lock = TEST_LOCK.lock().expect("test lock");
+        let hold = Arc::new((Mutex::new(false), Condvar::new(), AtomicBool::new(false)));
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let mut queue = OutputQueue::spawn_limited_held(
+            SharedWriter(Arc::clone(&captured)),
+            2,
+            64,
+            Duration::from_secs(5),
+            Some(Arc::clone(&hold)),
+        )
+        .unwrap();
+        wait_until(|| hold.2.load(Ordering::SeqCst));
+        for frame in [b"A", b"B", b"C", b"D", b"E"] {
+            queue.write_all(frame).unwrap();
+            queue.flush().unwrap();
+        }
+        {
+            let (lock, cv, _) = &*hold;
+            *lock.lock().expect("release hold") = true;
+            cv.notify_all();
+        }
+        queue.shutdown().unwrap();
+        assert_eq!(&captured.lock().expect("captured")[..], b"ABCDE");
     }
 
     #[test]

@@ -650,6 +650,7 @@ impl BodyLowering<'_> {
                 default_provider,
                 receiver,
                 declared_receiver,
+                declaring_receiver,
                 parameters,
                 result,
                 declared_result,
@@ -669,6 +670,7 @@ impl BodyLowering<'_> {
                     default_provider: *default_provider,
                     receiver_ty: *receiver,
                     declared_receiver: *declared_receiver,
+                    declaring_receiver: *declaring_receiver,
                     parameters,
                     result: *result,
                     declared_result: *declared_result,
@@ -689,6 +691,7 @@ impl BodyLowering<'_> {
                 .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration))
             }
             FirCallTarget::Super {
+                qualifier,
                 owner,
                 dispatch_owner,
                 enclosing_dispatch,
@@ -731,6 +734,7 @@ impl BodyLowering<'_> {
                 // The semantic super target stays explicit through common lowering. A provider may
                 // already have fixed its physical descriptor; source declarations leave it empty.
                 let callee = crate::ir::Callee::Super {
+                    qualifier: *qualifier,
                     owner: *owner,
                     dispatch_owner: *dispatch_owner,
                     enclosing_dispatch: *enclosing_dispatch,
@@ -980,6 +984,17 @@ impl BodyLowering<'_> {
         &mut self,
         call: &FirConstructorCall,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let capture_arguments = call
+            .external_capture_arguments
+            .as_deref()
+            .map(|arguments| {
+                arguments
+                    .iter()
+                    .copied()
+                    .map(|argument| self.constructor_capture_argument(argument))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
         let (target, parameter_types, mut arguments) =
             self.constructor_target_and_arguments(call)?;
         // Like a call's, only supplied operands evaluated out of parameter order are held in
@@ -1029,6 +1044,7 @@ impl BodyLowering<'_> {
                 target,
                 outer_parameter: call.outer_parameter.map(crate::fir::ResolvedTy::get),
                 outer_receiver,
+                capture_arguments,
                 arguments,
                 substitutions: lower_substitutions(&call.substitutions),
             },

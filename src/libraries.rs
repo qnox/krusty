@@ -1,6 +1,7 @@
 //! Library metadata shared by symbol sources.
 
 mod annotation_application;
+mod annotation_argument_provenance;
 mod array_factories;
 pub(crate) mod builtin_declaration;
 pub(crate) mod builtin_member_realization;
@@ -49,6 +50,7 @@ pub use annotation_application::{
     AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
     AnnotationPositionalPolicy,
 };
+pub use annotation_argument_provenance::AnnotationArgumentProvenance;
 pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
 pub use call_realization::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
@@ -118,7 +120,9 @@ pub use inline_body::{
 };
 #[cfg(test)]
 pub(crate) use klib_body_class::test_fixture as klib_body_class_fixture;
-pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters};
+pub(crate) use klib_body_class::{
+    KlibBodyClassContract, KlibBodyClassParameters, KlibClassStorage, KlibStoredField,
+};
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,
@@ -217,6 +221,15 @@ pub enum CollectionBarrierOutcome {
     False,
     NotFound,
     Null,
+}
+
+/// The JVM type-safe collection protocol of one exact declaration: the parameters a call through
+/// the erased declaration checks against the override's types, in declaration order, and the
+/// neutral result when one of them is not. `MutableMap.remove(key, value)` checks both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollectionBarrier {
+    pub checked_parameters: &'static [u16],
+    pub outcome: CollectionBarrierOutcome,
 }
 
 /// One member (constructor, member function/property accessor, or companion member) of a library
@@ -943,7 +956,7 @@ pub struct LibraryCallable {
     /// nothing or was not reached through a hierarchy walk.
     pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
     /// JVM collection barrier role of this exact decoded builtin declaration.
-    pub collection_barrier: Option<CollectionBarrierOutcome>,
+    pub collection_barrier: Option<CollectionBarrier>,
     pub plugin_expression: Option<PluginExpressionDeclaration>,
     /// Structural expansion decoded from this exact declaration's inline body.
     pub inline_body_plan: Option<Box<InlineBodyPlan>>,
@@ -1542,10 +1555,14 @@ impl FunctionInfo {
             return declared.into_owned();
         }
 
-        fn merge_method_arguments(declared: Ty, selected: Ty, formals: &[String]) -> Ty {
+        fn merge_method_arguments(
+            declared: Ty,
+            selected: Ty,
+            formals: &[crate::types::TyParamName],
+        ) -> Ty {
             match (declared.kind(), selected.kind()) {
-                (TyKind::TyParam(formal, _), _)
-                    if formals.iter().any(|candidate| candidate == formal) =>
+                (TyKind::TyParam(formal, _) | TyKind::Var(formal, _), _)
+                    if formals.contains(&formal) =>
                 {
                     selected
                 }
@@ -1933,7 +1950,7 @@ pub struct PropertyInfo {
     /// static storage of a companion `@JvmField`, published in the same namespace, is not.
     pub companion_associated: bool,
     /// The property's own formal type parameters (`val <T> List<T>.foo`); empty for a plain property.
-    pub formals: Vec<String>,
+    pub formals: Vec<crate::types::TyParamName>,
     /// The property's declared type.
     pub ty: Ty,
     /// Number of leading context parameters in each accessor's parameter list.

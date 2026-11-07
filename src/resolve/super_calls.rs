@@ -7,6 +7,8 @@ pub struct ResolvedSuperCall {
     /// Exact dispatch receiver selected by `super` / `super@Label`. A labeled super may target an
     /// enclosing class instance, so the callable target alone is not enough for lowering.
     pub receiver: ImplicitReceiverSelection,
+    /// The selected source qualifier, distinct from a platform-mapped invocation owner.
+    pub qualifier: TypeName,
     pub owner: TypeName,
     pub name: String,
     pub params: Vec<Ty>,
@@ -63,13 +65,6 @@ impl ResolvedSuperCall {
         let vararg_index = member.call_sig.vararg_index;
         let physical_owner = member.owner?;
         let (owner, interface) = match realization {
-            // `kotlin/Any` has no class file. Its provider-normalized members already carry the
-            // `java/lang/Object` declaration owner, and `invokespecial` has to name that class.
-            crate::libraries::MemberRealization::Dispatch
-                if !interface && crate::types::same(dispatch_owner, crate::types::wk::any()) =>
-            {
-                (physical_owner, false)
-            }
             // A dispatched `super` call names the supertype it is qualified with, as kotlinc's
             // `invokespecial` does, and the JVM resolves the declaration from there: an interface
             // declaration through the InterfaceMethodref search path, a class declaration inherited
@@ -90,6 +85,7 @@ impl ResolvedSuperCall {
         };
         Some(Self {
             receiver,
+            qualifier: dispatch_owner,
             owner,
             name: member.physical_name.unwrap_or(member.name),
             params: member.params,
@@ -133,6 +129,7 @@ impl ResolvedSuperCall {
         };
         Some(Self {
             receiver,
+            qualifier: owner,
             owner: physical_owner,
             name: physical_name,
             params: callable.params,
