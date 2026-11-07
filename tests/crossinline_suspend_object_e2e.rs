@@ -186,7 +186,7 @@ fn kotlinx_flow_operators_regenerate_their_objects_like_kotlinc() {
 #[test]
 fn kotlinx_flow_operators_run_through_the_regenerated_objects() {
     let main = format!(
-        "{FLOWS}\nimport kotlinx.coroutines.runBlocking\n\n\
+        "import kotlinx.coroutines.runBlocking\n{FLOWS}\n\n\
 fun box(): String = runBlocking {{\n\
     val bumped = flowOf(1, 2).bump(3).toList()\n\
     if (bumped != listOf(5, 6)) return@runBlocking \"FAIL bump: $bumped\"\n\

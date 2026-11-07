@@ -2,6 +2,8 @@
 
 use crate::diag::Span;
 
+pub(crate) mod file_header;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TokenKind {
     // literals & names
