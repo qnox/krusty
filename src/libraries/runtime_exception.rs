@@ -10,6 +10,10 @@ pub enum RuntimeExceptionKind {
     IndexOutOfBounds,
     NullPointer,
     IllegalState,
+    IllegalArgument,
+    UnsupportedOperation,
+    Arithmetic,
+    NumberFormat,
 }
 
 impl RuntimeExceptionKind {
@@ -23,6 +27,10 @@ impl RuntimeExceptionKind {
             Self::IndexOutOfBounds => "kotlin/IndexOutOfBoundsException",
             Self::NullPointer => "kotlin/NullPointerException",
             Self::IllegalState => "kotlin/IllegalStateException",
+            Self::IllegalArgument => "kotlin/IllegalArgumentException",
+            Self::UnsupportedOperation => "kotlin/UnsupportedOperationException",
+            Self::Arithmetic => "kotlin/ArithmeticException",
+            Self::NumberFormat => "kotlin/NumberFormatException",
         })
     }
 }
