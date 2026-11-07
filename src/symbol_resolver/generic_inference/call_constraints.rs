@@ -134,14 +134,14 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
                 && formal_variance_in_type(source, shape, formal)
                     == Some(crate::types::TypeVariance::Invariant)
             {
-                invariantly_fixed.insert(formal.clone());
+                invariantly_fixed.insert(*formal);
                 let nullable_formal = generic_sig.formal_bounds.get(index).is_none_or(|bounds| {
                     bounds.iter().all(|bound| bound.upper_bound_admits_null())
                 });
                 if formal_fixed_exactly_by(source, shape, formal, nullable_formal) {
                     constraints
                         .invariant_arguments
-                        .entry(formal.clone())
+                        .entry(formal.to_string())
                         .or_default()
                         .push(argument);
                 }
@@ -149,7 +149,7 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
         }
     }
     for (argument, variable, actual) in deferred_flexible_roots {
-        let TyKind::TyParam(formal, _) = variable.kind() else {
+        let (TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) = variable.kind() else {
             unreachable!("deferred flexible root is a declaration variable")
         };
         if invariantly_fixed.contains(formal.as_str()) {
@@ -232,7 +232,7 @@ pub(crate) fn collect_assignability_constraints_from_symbols(
     ) {
         let actual = actual.projection_inner().unwrap_or(actual);
         match actual.kind() {
-            TyKind::TyParam(name, _) => {
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
                 let expected = expected.projection_inner().unwrap_or(expected);
                 constraints.insert(
                     source,
@@ -489,7 +489,8 @@ impl CallInferenceConstraints {
             return false;
         }
         let actual = inference_actual(actual);
-        if matches!(actual.kind(), TyKind::TyParam(actual_name, _) if actual_name == name) {
+        if matches!(actual.kind(), TyKind::TyParam(actual_name, _) | TyKind::Var(actual_name, _) if actual_name == name)
+        {
             return false;
         }
         match position {
@@ -557,8 +558,10 @@ impl CallInferenceConstraints {
                         && crate::types::ty_mentions_param(*bound, &signature.formals)
                         && !crate::types::ty_mentions_param(*bound, std::slice::from_ref(formal))
                     {
-                        for &(actual, origin) in
-                            lower.get(formal).map(Vec::as_slice).unwrap_or_default()
+                        for &(actual, origin) in lower
+                            .get(formal.as_str())
+                            .map(Vec::as_slice)
+                            .unwrap_or_default()
                         {
                             let mut incorporated = CallInferenceConstraints::default();
                             collect_call_inference_constraints(
@@ -600,18 +603,18 @@ impl CallInferenceConstraints {
                         }
                         continue;
                     }
-                    let TyKind::TyParam(bound_formal, _) = bound.non_null().kind() else {
+                    let (TyKind::TyParam(bound_formal, _) | TyKind::Var(bound_formal, _)) =
+                        bound.non_null().kind()
+                    else {
                         continue;
                     };
-                    if !signature
-                        .formals
-                        .iter()
-                        .any(|candidate| candidate == bound_formal)
-                    {
+                    if !signature.formals.contains(&bound_formal) {
                         continue;
                     }
-                    for &(actual, origin) in
-                        lower.get(formal).map(Vec::as_slice).unwrap_or_default()
+                    for &(actual, origin) in lower
+                        .get(formal.as_str())
+                        .map(Vec::as_slice)
+                        .unwrap_or_default()
                     {
                         let actual = if bound.is_nullable() {
                             actual.contributed_through_nullable_formal()
@@ -806,7 +809,7 @@ impl CallInferenceConstraints {
             }
             let lowers = self
                 .lower_inputs
-                .get(formal)
+                .get(formal.as_str())
                 .map(Vec::as_slice)
                 .unwrap_or_default();
             // `lower_inputs` are the contributions collected after nullable-formal absorption, not
@@ -944,7 +947,7 @@ fn collect_call_inference_constraints(
     constraints: &mut CallInferenceConstraints,
 ) {
     match shape.kind() {
-        TyKind::TyParam(name, _) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
             constraints.insert(source, name.as_str(), actual, position, origin);
         }
         TyKind::Nullable(inner) => {
@@ -1036,7 +1039,7 @@ fn collect_call_inference_constraints(
             // definitely-non-null `E & Any` read through a nullable formal reaches the same bound.
             loop {
                 actual = match actual.kind() {
-                    TyKind::TyParam(_, bound) => {
+                    TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
                         bound.projection_inner().unwrap_or(bound).non_null()
                     }
                     TyKind::DefinitelyNotNull(inner) => inner,

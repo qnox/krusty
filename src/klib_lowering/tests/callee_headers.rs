@@ -606,7 +606,7 @@ fn generic_identity_header() -> (KlibIrArena, KlibIrFunction, Record) {
     record.formals = vec![semantic];
     record.ret = semantic;
     record.generic = Some(GenericSig {
-        formals: vec!["declaration-owned-formal".to_owned()],
+        formals: vec![crate::types::TyParamName::new("declaration-owned-formal")],
         formal_bounds: vec![Vec::new()],
         receiver: None,
         params: vec![semantic],
@@ -967,7 +967,7 @@ fn generic_headers_require_distinct_serialized_symbols_and_provider_formal_ident
             "second-owned-formal"
         };
         let signature = record.generic.as_mut().unwrap();
-        signature.formals.push(name.to_owned());
+        signature.formals.push(crate::types::TyParamName::new(name));
         signature.formal_bounds.push(Vec::new());
         record
             .formals
@@ -1508,8 +1508,8 @@ fn stdlib_calls_reach_header_declared_callees() {
     // generic callees. These exact deeper-decline counts are measured on every manifest release;
     // they are not expected-failure allowances for executable conformance tests. Elvis and safe-call
     // blocks, then generic calls and `when` subject blocks, now reach further declared callees;
-    // so do callees that declare parameter defaults, which their headers now carry, and the
-    // body calls that leave an argument to such a default. The same complete inputs were
+    // so do callees that declare parameter defaults, which their headers now carry, and callees
+    // reached past a call that leaves a parameter to its default. The same complete inputs were
     // measured on every release.
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {

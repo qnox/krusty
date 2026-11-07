@@ -146,7 +146,7 @@ pub(super) fn solved_member_extension_type_argument(
     let solution = bindings.get(formal).copied()?;
     (solution != Ty::Error
         && !solution.mentions_pending()
-        && !matches!(solution.non_null().kind(), TyKind::TyParam(identity, _) if identity == formal))
+        && !matches!(solution.non_null().kind(), TyKind::TyParam(identity, _) | TyKind::Var(identity, _) if identity == formal))
     .then_some(solution)
 }
 
@@ -266,7 +266,7 @@ pub(super) fn concrete_receiver_is_more_specific(left_generic: bool, right_gener
 /// retain the applied dispatch bindings supplied by the caller.
 pub(super) fn receiver_domain(
     receiver: Ty,
-    type_params: &[String],
+    type_params: &[crate::types::TyParamName],
     type_param_bounds: &[Ty],
     class_bindings: &crate::types::TyParamBindings,
 ) -> Ty {

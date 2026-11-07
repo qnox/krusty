@@ -6,7 +6,10 @@
 use super::super::ir_builtins::{BuiltinCallDisposition, BuiltinOperator, BuiltinRelation};
 use super::super::klib_types::function_invocation_arity;
 use super::super::klib_types::semantic_type;
-use super::{mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedCallee, Lowered};
+use super::{
+    mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorTarget, LinkedCallee,
+    Lowered,
+};
 use crate::fir::FirTypeParameterRef;
 use crate::ir::{
     Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrPropertyDispatch,
@@ -93,19 +96,18 @@ impl BodyLowering<'_> {
         if !access.type_arguments.is_empty() {
             return Err(mismatch("a common primitive is called with type arguments"));
         }
-        let operands = self
-            .call_operands(
-                access,
-                ty,
-                CalleeShape {
-                    receiver: Some(primitive.receiver),
-                    params: &primitive.params,
-                    ret: primitive.ret,
-                    context_count: 0,
-                    class_type_parameters: &primitive.class_type_parameters,
-                },
-            )?
-            .complete()?;
+        let operands = self.call_operands(
+            access,
+            ty,
+            CalleeShape {
+                receiver: Some(primitive.receiver),
+                params: &primitive.params,
+                ret: primitive.ret,
+                context_count: 0,
+                class_type_parameters: &primitive.class_type_parameters,
+                parameter_defaults: &[],
+            },
+        )?;
         let receiver = operands
             .receiver
             .expect("a validated primitive has dispatch");
@@ -128,14 +130,23 @@ impl BodyLowering<'_> {
                     }
                 }
             }
-            CommonPrimitive::Intrinsic(intrinsic) => self.ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::Intrinsic {
-                    operation: intrinsic,
-                    ret: primitive.ret,
-                }),
-                dispatch_receiver: Some(receiver),
-                args: Vec::new(),
-            }),
+            // The ordinary read of the property, as checked FIR lowers a source read of it.
+            CommonPrimitive::PropertyRead(_) => {
+                let target = primitive
+                    .property
+                    .expect("an authenticated property read names its property");
+                self.ir.add_expr(IrExpr::Checked(Box::new(
+                    IrCheckedOperation::ExternalPropertyRead {
+                        target,
+                        dispatch: IrPropertyDispatch::Ordinary,
+                        receiver: Some(receiver),
+                        arguments: Vec::new(),
+                        parameters: Vec::new(),
+                        result: operands.ret,
+                        source_receiver: operands.receiver_type,
+                    },
+                )))
+            }
             // The source range operator over the receiver and the end bound, as checked FIR
             // lowers `start..end` once the provider's declaration fixed the range it builds.
             CommonPrimitive::RangeConstruction(operation) => {
@@ -464,31 +475,29 @@ impl BodyLowering<'_> {
                 ret: linked.ret,
                 context_count: linked.context_count,
                 class_type_parameters: &linked.class_type_parameters,
+                parameter_defaults: &linked.parameter_defaults,
             },
         )?;
         let mut callee = linked.callee;
+        if let Callee::External { params, ret, .. } = &mut callee {
+            (*params, *ret) = (operands.params, operands.ret);
+        }
+        let declared_ret = match callee {
+            Callee::Local(function) => Some(self.ir.functions[function as usize].ret),
+            _ => None,
+        };
+        // Only a function of this unit is linked with defaults, so only it can be left to them:
+        // the call carries its supplied arguments and the omitted parameters, as a source call
+        // of a function of its own file does.
         if !operands.omitted.is_empty() {
-            // A function this unit lowers publishes its defaults, from which the target's shared
-            // default-argument lowering builds the entry such a call reaches.
             let Callee::Local(function) = callee else {
-                return unsupported(
-                    "a call that leaves a parameter of a callee this unit does not lower to its default",
-                );
+                unreachable!("only a unit function declares defaults a call may leave to");
             };
             callee = Callee::LocalWithDefaults {
                 function,
                 defaults: operands.omitted.into_boxed_slice(),
             };
         }
-        if let Callee::External { params, ret, .. } = &mut callee {
-            (*params, *ret) = (operands.params, operands.ret);
-        }
-        let declared_ret = match callee {
-            Callee::Local(function) | Callee::LocalWithDefaults { function, .. } => {
-                Some(self.ir.functions[function as usize].ret)
-            }
-            _ => None,
-        };
         let (dispatch_receiver, args) = (operands.receiver, operands.args);
         let singleton_dispatch = linked.singleton_dispatch;
         let call = self.ir.add_expr(IrExpr::Call {
@@ -530,32 +539,38 @@ impl BodyLowering<'_> {
         if let Some(primitive) = self.linker.common_primitive(&signature)? {
             return self.primitive_call(primitive, access, ty);
         }
-        let linked = self.linker.link_accessor(accessor)?;
+        let linked = self.linker.link_accessor(self.ir, accessor)?;
         let CallOperands {
             receiver,
             args: arguments,
-            omitted: _,
             receiver_type: source_receiver,
             params: parameters,
             ret: result,
-        } = self
-            .call_operands(
-                access,
-                ty,
-                CalleeShape {
-                    receiver: linked.receiver,
-                    params: &linked.params,
-                    ret: linked.ret,
-                    context_count: linked.context_count,
-                    class_type_parameters: &linked.class_type_parameters,
-                },
-            )?
-            .complete()?;
-        let LinkedAccessor {
-            property: target,
-            write,
-            ..
-        } = linked;
+            omitted: _,
+        } = self.call_operands(
+            access,
+            ty,
+            CalleeShape {
+                receiver: linked.receiver,
+                params: &linked.params,
+                ret: linked.ret,
+                context_count: linked.context_count,
+                class_type_parameters: &linked.class_type_parameters,
+                // An accessor declares no default a call may leave to.
+                parameter_defaults: &[],
+            },
+        )?;
+        let LinkedAccessor { target, write, .. } = linked;
+        let target = match target {
+            LinkedAccessorTarget::External(property) => property,
+            LinkedAccessorTarget::Local(function) => {
+                return Ok(self.ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Local(function)),
+                    dispatch_receiver: receiver,
+                    args: arguments,
+                }));
+            }
+        };
         let dispatch = IrPropertyDispatch::Ordinary;
         Ok(self.ir.add_expr(IrExpr::Checked(Box::new(if write {
             IrCheckedOperation::ExternalPropertyWrite {
@@ -649,10 +664,16 @@ impl BodyLowering<'_> {
             .collect::<Vec<_>>();
         let mut args = Vec::with_capacity(params.len());
         let mut omitted = Vec::new();
-        for (ordinal, (argument, &parameter)) in arguments.zip(&params).enumerate() {
+        for (index, (argument, &parameter)) in arguments.zip(&params).enumerate() {
             match argument {
                 Some(argument) => args.push(self.operand(argument, parameter)?),
-                None => omitted.push(u32::try_from(ordinal).expect("a parameter list fits u32")),
+                // A serialized call leaves out exactly the arguments the callee's defaults supply.
+                None if callee.parameter_defaults.get(index).copied() == Some(true) => {
+                    omitted.push(u32::try_from(index).expect("a parameter list fits u32"));
+                }
+                None => {
+                    return unsupported("a call that leaves a parameter to its default");
+                }
             }
         }
         Ok(CallOperands {
@@ -722,8 +743,9 @@ impl BodyLowering<'_> {
                 ));
             }
         }
-        let bound =
-            |parameter: &String, value: Ty| captured.get(parameter).copied().unwrap_or(value);
+        let bound = |parameter: &crate::types::TyParamName, value: Ty| {
+            captured.get(parameter).copied().unwrap_or(value)
+        };
         if let Callee::Local(_) = linked.callee {
             // A call of a function the unit declares binds its type parameters as checked FIR
             // lowers a source call of a module generic function: the arguments are read at the
@@ -735,7 +757,7 @@ impl BodyLowering<'_> {
                     "a call that leaves a type argument unset",
                 ))?;
                 let value = semantic_type(self.arena, self.header.type_parameters(), argument)?;
-                bindings.insert(parameter.clone(), bound(parameter, value));
+                bindings.insert(*parameter, bound(parameter, value));
             }
             for param in &mut linked.params {
                 *param = param.substitute_erased(&bindings);
@@ -770,7 +792,7 @@ impl BodyLowering<'_> {
                 parameter,
                 semantic_type(self.arena, self.header.type_parameters(), argument)?,
             );
-            bindings.insert(parameter.clone(), value);
+            bindings.insert(*parameter, value);
             substitutions.push(IrCheckedSubstitution {
                 parameter: FirTypeParameterRef::External {
                     callable: *target,
@@ -811,7 +833,7 @@ impl BodyLowering<'_> {
         &self,
         linked: &LinkedCallee,
         access: &KlibIrMemberAccess,
-    ) -> Lowered<crate::fx_hash::HashMap<String, Ty>> {
+    ) -> Lowered<crate::fx_hash::HashMap<crate::types::TyParamName, Ty>> {
         let values = arguments(access)
             .into_iter()
             .skip(usize::from(linked.receiver.is_some()));
@@ -851,8 +873,7 @@ impl BodyLowering<'_> {
                 ) {
                     continue;
                 }
-                let name = name.as_str();
-                let sole = captured.insert(name.to_owned(), projected).is_none()
+                let sole = captured.insert(name, projected).is_none()
                     && formals
                         .iter()
                         .enumerate()
@@ -883,7 +904,12 @@ impl BodyLowering<'_> {
     /// `name`: every bound of `name` admits `read` and names no type parameter, and no bound of
     /// any other type parameter names `name`, since that peer would constrain the capture too. A
     /// selection with no complete ledger is no proof.
-    fn bounds_admit_capture(&self, linked: &LinkedCallee, name: &str, read: Ty) -> bool {
+    fn bounds_admit_capture(
+        &self,
+        linked: &LinkedCallee,
+        name: crate::types::TyParamName,
+        read: Ty,
+    ) -> bool {
         let Some(ledger) = linked
             .type_parameter_bounds
             .as_ref()
@@ -896,7 +922,7 @@ impl BodyLowering<'_> {
             .iter()
             .zip(ledger)
             .all(|(parameter, bounds)| {
-                if parameter != name {
+                if *parameter != name {
                     return bounds.iter().all(|&bound| !names(bound, name));
                 }
                 bounds.iter().all(|&bound| {
@@ -911,18 +937,21 @@ impl BodyLowering<'_> {
 
 /// Whether `ty` names the type parameter `name` anywhere, including through the declared bound
 /// of another type parameter it names.
-fn names(ty: Ty, name: &str) -> bool {
-    fn walk(ty: Ty, name: &str, seen: &mut Vec<String>) -> bool {
+fn names(ty: Ty, name: crate::types::TyParamName) -> bool {
+    fn walk(
+        ty: Ty,
+        name: crate::types::TyParamName,
+        seen: &mut Vec<crate::types::TyParamName>,
+    ) -> bool {
         match ty.kind() {
             TyKind::TyParam(parameter, bound) => {
-                let parameter = parameter.as_str();
                 if parameter == name {
                     return true;
                 }
-                if seen.iter().any(|visited| visited == parameter) {
+                if seen.contains(&parameter) {
                     return false;
                 }
-                seen.push(parameter.to_owned());
+                seen.push(parameter);
                 walk(bound, name, seen)
             }
             TyKind::Nullable(inner)
@@ -955,6 +984,8 @@ struct CalleeShape<'a> {
     ret: Ty,
     context_count: usize,
     class_type_parameters: &'a [String],
+    /// Whether each parameter declares a default a call may leave it to.
+    parameter_defaults: &'a [bool],
 }
 
 /// A call's lowered dispatch receiver and arguments, with the receiver type, parameters and
@@ -963,23 +994,11 @@ struct CallOperands {
     receiver: Option<ExprId>,
     /// The supplied arguments, in parameter order.
     args: Vec<ExprId>,
-    /// The ordinals of the parameters the call leaves to their defaults, ascending.
+    /// The parameters the call leaves to their defaults, in order.
     omitted: Vec<u32>,
     receiver_type: Option<Ty>,
     params: Vec<Ty>,
     ret: Ty,
-}
-
-impl CallOperands {
-    /// The operands of a call that must pass every parameter: a callee this unit does not lower
-    /// has no default-argument entry here to fill one in.
-    fn complete(self) -> Lowered<Self> {
-        if self.omitted.is_empty() {
-            Ok(self)
-        } else {
-            unsupported("a call that leaves a parameter of a callee this unit does not lower to its default")
-        }
-    }
 }
 
 /// A call's arguments in the order of its callee's parameters: dispatch receiver, context

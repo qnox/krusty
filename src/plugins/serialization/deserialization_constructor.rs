@@ -355,6 +355,7 @@ pub(super) fn declare_deserialization_constructor(
                 default_masks: vec![],
             },
             synthetic: true,
+            platform_visible: false,
             vc_params: false,
             param_checks: Vec::new(),
         });

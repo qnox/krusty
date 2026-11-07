@@ -285,7 +285,13 @@ mod tests {
             fs::read_to_string("crates/krusty-lsp/src/worker.rs").expect("read LSP worker");
         assert!(worker.contains("DEFAULT_ANALYSES_PER_WORKER"));
         assert!(worker.contains("self.analyses >= self.max_analyses"));
-        assert!(worker.contains("ANALYSIS_TIMEOUT"));
+        // Every response read is bounded; `worker/deadline.rs` owns the bounds.
+        assert!(worker.contains("self.read_response(deadline::analysis("));
+        assert!(!worker.contains("fn read_response(&mut self) "));
+        let deadline = fs::read_to_string("crates/krusty-lsp/src/worker/deadline.rs")
+            .expect("read LSP worker deadlines");
+        assert!(deadline.contains("pub(super) const INTERACTIVE: Duration"));
+        assert!(deadline.contains("pub(super) const INDEX_CHUNK: Duration"));
         assert!(worker.contains("MAX_SOURCE_SET_BYTES"));
     }
 

@@ -16,8 +16,8 @@
 //! template leaves the file as it was.
 
 use super::body_lowering::{
-    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor, LinkedCallableReference,
-    LinkedCallee, LinkedConstructor, LoweredFunction,
+    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor, LinkedAccessorTarget,
+    LinkedCallableReference, LinkedCallee, LinkedConstructor, LoweredFunction,
 };
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::function_header;
@@ -38,7 +38,7 @@ use crate::libraries::{
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::KlibIrBody;
 use crate::types::SemanticCallableOwner;
-use crate::types::{InlineExpansionMode, InlineParameterModifier, Ty};
+use crate::types::{InlineExpansionMode, InlineParameterModifier, Ty, TyKind};
 
 /// An inline dependency function's template in a file.
 #[derive(Clone, Debug)]
@@ -46,7 +46,10 @@ pub struct KlibInlineTemplate {
     /// The inline-only function holding the template.
     pub function: FunId,
     /// The semantic identities of the function's type parameters, in declaration order.
-    pub type_parameters: Vec<String>,
+    pub type_parameters: Vec<crate::types::TyParamName>,
+    /// The semantic identities of the type parameters of a member's generic class, in
+    /// declaration order: a call binds them from its dispatch receiver's type arguments.
+    pub class_type_parameters: Vec<crate::types::TyParamName>,
 }
 
 /// The functions a template's body may call.
@@ -93,9 +96,10 @@ pub fn lower_inline_template(
     let checkpoint = LoweringCheckpoint::of(ir);
     Some(
         lower(ir, declaration, prepared, callees)
-            .map(|function| KlibInlineTemplate {
+            .map(|(function, class_type_parameters)| KlibInlineTemplate {
                 function,
                 type_parameters,
+                class_type_parameters,
             })
             .map_err(|reason| {
                 checkpoint.restore(ir);
@@ -122,7 +126,7 @@ fn lower(
     declaration: Declaration<'_>,
     bodies: &KlibDeclarationBodies,
     callees: TemplateCallees<'_>,
-) -> Result<FunId, KlibBodyDeclineReason> {
+) -> Result<(FunId, Vec<crate::types::TyParamName>), KlibBodyDeclineReason> {
     let callable = declaration.callable;
     let mut calls = TemplateCalls {
         module: &callable.identity().module,
@@ -141,6 +145,25 @@ fn lower(
         Some(KlibIrBody::Synthetic(_)) => return Err(KlibBodyDeclineReason::SyntheticBody),
         Some(KlibIrBody::Block(statements)) => statements,
     };
+    // A member of a generic class reads the class's type parameters at their erasures; the call
+    // binds them from its dispatch receiver.
+    let class_type_parameters = callable
+        .class_contract()
+        .map(|class| {
+            class
+                .parameters
+                .formals
+                .iter()
+                .map(|formal| match formal.kind() {
+                    TyKind::TyParam(name, _) => Ok(name),
+                    _ => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                        "a class type parameter is selected as {formal:?}"
+                    ))),
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     let header = prepared_inline_header(callable, declaration.formals, arena, function)?;
     let modes = expansion_modes(
         header.params(),
@@ -189,7 +212,7 @@ fn lower(
     )?;
     ir.inline_fns.insert(template);
     ir.inline_only_fns.insert(template);
-    Ok(template)
+    Ok((template, class_type_parameters))
 }
 
 /// How a call expands each parameter, as checked FIR publishes it for a source inline function:
@@ -361,6 +384,7 @@ impl CallLinker for TemplateCalls<'_> {
 
     fn link_accessor(
         &mut self,
+        _: &mut IrFile,
         callee: &KlibAccessorIdSignature,
     ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
         let signature = KlibDeclarationSignature::Accessor(callee.clone());
@@ -411,7 +435,7 @@ impl CallLinker for TemplateCalls<'_> {
         .map(|receiver| {
             let (receiver, class_type_parameters) = receiver.unzip();
             LinkedAccessor {
-                property,
+                target: LinkedAccessorTarget::External(property),
                 write: accessors.setter == Some(target),
                 receiver,
                 params: realization.callable.params.clone(),
@@ -508,6 +532,7 @@ impl CallLinker for TemplateCalls<'_> {
             type_parameters: Vec::new(),
             type_parameter_bounds: Some(Vec::new()),
             class_type_parameters: Vec::new(),
+            parameter_defaults: Vec::new(),
         })
     }
 
@@ -549,7 +574,7 @@ fn generic_call(
     declaration: &crate::metadata::klib_ir::tree::KlibIrFunction,
     target: ExternalCallableId,
     realization: &ExternalCallableRealization,
-    formals: Vec<String>,
+    formals: Vec<crate::types::TyParamName>,
 ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
     if declaration.type_parameters.len() != formals.len() {
         return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
@@ -600,6 +625,7 @@ fn generic_call(
             .as_ref()
             .map(|signature| signature.formal_bounds.clone()),
         class_type_parameters: Vec::new(),
+        parameter_defaults: Vec::new(),
     })
 }
 
@@ -688,6 +714,7 @@ fn member_call(
         type_parameters: Vec::new(),
         type_parameter_bounds: Some(Vec::new()),
         class_type_parameters,
+        parameter_defaults: Vec::new(),
     })
 }
 

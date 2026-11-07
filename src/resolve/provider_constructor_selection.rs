@@ -288,7 +288,7 @@ impl Checker<'_> {
                             let mut carries_enclosing_context = false;
                             for formal in &signature.formals {
                                 if ty_mentions_param(declared, std::slice::from_ref(formal)) {
-                                    enclosing_context_formals.insert(formal.clone());
+                                    enclosing_context_formals.insert(*formal);
                                     carries_enclosing_context = true;
                                 }
                             }
@@ -298,7 +298,8 @@ impl Checker<'_> {
                         }
                         let mut actual = kind.ty();
                         let mut bounded = declared.non_null();
-                        while let TyKind::TyParam(_, bound) = bounded.kind() {
+                        while let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = bounded.kind()
+                        {
                             let value_bound = self.integer_literal_semantic_type(bound);
                             if kind.adapts_integer_literal_to(value_bound) {
                                 actual = value_bound;
@@ -309,9 +310,8 @@ impl Checker<'_> {
                         Some((source, parameter, actual, whole_array))
                     })
                     .collect::<Vec<_>>();
-                // Inside the constructed class (or an inner class that sees its formals), the
-                // class's own `T` is a fixed type, while this call infers a fresh `T`.
-                let lexical = scope.lexical_tparam_identities();
+                // The call infers its own `T`, distinct from the class's `T` when that is in
+                // scope as a fixed type (inside the class or an inner class).
                 let source = self.fed_source();
                 let inference_actuals = actuals
                     .iter()
@@ -338,7 +338,7 @@ impl Checker<'_> {
                     .collect::<Vec<_>>();
                 let constraints = crate::symbol_resolver::CallSiteVariables::solve(
                     signature,
-                    |formal| lexical.iter().any(|identity| identity == formal),
+                    self.call_site(call),
                     |signature| {
                         crate::symbol_resolver::infer_generic_call_constraints_with_argument_ordinals(
                             &source,
@@ -419,7 +419,7 @@ impl Checker<'_> {
                             let Some(index) = signature
                                 .formals
                                 .iter()
-                                .position(|candidate| candidate == &formal)
+                                .position(|candidate| candidate == formal)
                             else {
                                 continue;
                             };
@@ -497,7 +497,7 @@ impl Checker<'_> {
                 // postponed producer completes from its declared upper bound. Substitute preceding
                 // solutions so dependent bounds (`U : Base<T>`) retain their semantic application.
                 for (index, formal) in classifier.type_params().iter().enumerate() {
-                    if !enclosing_context_formals.contains(formal)
+                    if !enclosing_context_formals.contains(&crate::types::TyParamName::new(formal))
                         || bindings
                             .get(formal.as_str())
                             .is_some_and(|binding| *binding != Ty::Error)
@@ -776,7 +776,7 @@ impl Checker<'_> {
         self.check_selected_constructor_lambdas(scope, args, &selected.argument_types);
         let publication =
             constructor_commitment::ConstructorDeclarationShape::provider(classifier, &member);
-        self.commit_constructor(call, target.clone(), publication);
+        self.commit_constructor(scope, call, target.clone(), publication);
         if let Some(Some(bindings)) = member_bindings.get(candidate_index) {
             self.record_library_constructor_type_arguments(call, internal, classifier, bindings);
         }
