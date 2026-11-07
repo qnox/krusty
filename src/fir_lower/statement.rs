@@ -307,6 +307,18 @@ impl BodyLowering<'_> {
         if self.local_class_captures.contains_key(&classifier) {
             return Err(FirLoweringFailure::MissingLocalClass(declaration));
         }
+        if let (
+            Some(crate::ir::IrClassDeclarationContext::Executable),
+            Some(crate::ir::IrEnclosure::ClassInitializer(owner)),
+        ) = (
+            self.ir.classes[class as usize].declaration_context,
+            self.enclosure,
+        ) {
+            self.ir.classes[class as usize].declaration_context =
+                Some(crate::ir::IrClassDeclarationContext::ClassInitializer {
+                    owner: self.ir.classes[owner as usize].fq_name,
+                });
+        }
         self.ir.classes[class as usize].enclosure = self.enclosure;
         let mut values = Vec::with_capacity(captures.len());
         let mut fields = Vec::with_capacity(captures.len());
@@ -459,6 +471,13 @@ impl BodyLowering<'_> {
         let prefix = u32::try_from(captures.len()).expect("too many captured class fields");
         let shifted = u32::try_from(fields.len()).expect("too many captured class fields");
         for argument in &mut class.ctor_args {
+            if let crate::ir::IrCtorParameterProvenance::InterfaceDelegate { field, .. } =
+                &mut argument.provenance
+            {
+                *field = field
+                    .checked_add(shifted)
+                    .expect("captured class field index overflow");
+            }
             if let Some(field) = &mut argument.field_index {
                 *field = field
                     .checked_add(shifted)

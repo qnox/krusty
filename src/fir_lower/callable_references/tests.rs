@@ -65,6 +65,12 @@ fn unadapted_local_function_reference_keeps_structural_identity_and_capture() {
         panic!("one semantic local function reference")
     };
     assert_eq!(reference.captures.len(), 1);
+    let body = ir.functions[reference.adapter as usize]
+        .body
+        .expect("local callable-reference adapter body");
+    let call = ir.callable_reference_adapter_results[&body];
+    assert!(matches!(ir.expr(call), IrExpr::Call { .. }));
+    assert_eq!(ir.call_declared_ret.get(&call), Some(&Ty::Int));
     assert!(matches!(
         &reference.target,
         crate::ir::IrCallableReferenceTarget::Local { name, .. } if name.as_ref() == "add"
@@ -272,6 +278,30 @@ fn suspend_converted_source_reference_becomes_suspend_wrapper() {
         .exprs
         .iter()
         .all(|expression| !matches!(expression, IrExpr::Checked(_))));
+}
+
+/// A suspend-converted reference's inline template has a suspend literal's arity: the function
+/// type's parameters and the continuation its adapter takes after them. A reference whose selected
+/// declaration suspends has no inline template.
+#[test]
+fn a_suspend_function_type_reference_template_counts_the_continuation() {
+    let ir = lower_single_source(
+        r#"
+            fun increment(value: Int): Int = value + 1
+            suspend fun fetch(value: Int): Int = value
+            fun converted(): suspend (Int) -> Int = ::increment
+            fun declared(): suspend (Int) -> Int = ::fetch
+        "#,
+        "SuspendReferenceTemplates",
+    );
+    let templates = (0..ir.exprs.len() as u32)
+        .filter(|&expression| matches!(ir.expr(expression), IrExpr::CallableReference(_)))
+        .map(|expression| {
+            ir.callable_reference_inline_template(expression)
+                .map(|(_, captures, _, arity)| (captures.len(), arity))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(templates, [Some((0, 2)), None]);
 }
 
 #[test]
@@ -1231,7 +1261,8 @@ fn ordinary_inner_constructor_keeps_source_property_after_physical_outer_prefix(
     assert_eq!(ir.checked_type(*outer), Some(Ty::obj("Outer")));
     assert_eq!(ir.checked_type(*value), Some(Ty::String));
     assert_eq!(
-        ir.construction_declared_params[&construction.0].as_ref(),
+        ir.construction_declared_params(construction.0)
+            .expect("declared parameters"),
         [Ty::obj("Outer"), Ty::String]
     );
 }
@@ -1383,6 +1414,7 @@ fn external_inner_constructor_prepends_the_checked_outer_receiver() {
             internal,
             args,
             ctor_params: Some(parameters),
+            declared_params: _,
             ctor_desc: None,
             external_target: Some(target),
             defaults,
@@ -1417,6 +1449,12 @@ fn external_annotation_construction_reaches_common_ir_without_provider_lookup() 
                 parameters: Box::new([resolved(Ty::String)]),
                 declared_parameters: Box::new([resolved(Ty::String)]),
                 annotation: Some(Box::new(FirAnnotationConstruction {
+                    arguments: crate::libraries::AnnotationArgumentProvenance::from_selected(
+                        1,
+                        &[0],
+                        &[],
+                    )
+                    .unwrap(),
                     members: Box::new([("name".into(), resolved(Ty::String))]),
                     defaults: Box::new([None]),
                 })),
@@ -1543,7 +1581,7 @@ fn reflective_unbound_inner_constructor_reference_keeps_structural_identity() {
     assert!(reference.captures.is_empty());
     assert!(matches!(
         reference.target,
-        crate::ir::IrCallableReferenceTarget::Constructor { classifier }
+        crate::ir::IrCallableReferenceTarget::Constructor { classifier, .. }
             if classifier == crate::types::type_name("Outer$Inner")
     ));
     assert!(

@@ -195,6 +195,16 @@ pub(super) fn declare(
         descriptor_order,
     ));
     let serializer_identity = ser.fq_name_id();
+    ir.record_declared_class_self_type(
+        serializer_identity,
+        Ty::obj_args_name(
+            serializer_identity,
+            &serializer_type_parameters
+                .iter()
+                .map(crate::ir::IrTypeParameter::ty)
+                .collect::<Vec<_>>(),
+        ),
+    );
     ir.mark_synthetic_class(serializer_identity);
     ir.mark_deprecated_class(serializer_identity);
     let serializer_class = ir.add_class(ser);
@@ -482,6 +492,7 @@ pub(super) fn complete(
             internal: ser_internal,
             args,
             ctor_params: Some(type_serializers.clone()),
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),
@@ -717,6 +728,7 @@ fn add_write_self(
             bounds: vec![(any, false)],
             variance: crate::types::TypeVariance::Invariant,
             reified: false,
+            captured_from_enclosing: false,
         })
         .collect();
     let type_arguments: Vec<Ty> = type_parameters
@@ -840,6 +852,7 @@ fn declare_type_serializer_constructor(
             default_masks: vec![],
         },
         synthetic: false,
+        platform_visible: false,
         vc_params: false,
     });
 }
@@ -911,7 +924,7 @@ fn add_type_serializer_getters(ir: &mut IrFile, serializer: ClassId, n_tp: usize
 
 /// The source span of `class_id`'s companion: a declared companion's own lines, else the class's,
 /// which a plugin-generated companion takes.
-fn companion_lines(ir: &IrFile, class_id: ClassId) -> (u32, u32) {
+pub(super) fn companion_lines(ir: &IrFile, class_id: ClassId) -> (u32, u32) {
     let class = &ir.classes[class_id as usize];
     class
         .companion_class

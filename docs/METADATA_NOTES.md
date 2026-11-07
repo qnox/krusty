@@ -147,6 +147,20 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
 - Metadata annotation arguments serialize written values first and any materialized unwritten
   values afterward, recursively through nested annotations and arrays. Applications without source
   provenance keep their stored order. JVM annotation attributes instead retain declaration order.
+
+  Closed nested annotation constructions used as another annotation element's default retain
+  validated declaration ordinals, checked written member order and omitted declaration defaults
+  through closed values, checked FIR and common IR, including folding and replay. Capture written
+  membership before implicit argument synthesis; provider normalization preserves sparse
+  membership before filling complete runtime defaults.
+
+  Runtime replay consumes the complete construction operands independently of metadata membership.
+  Only publication projects the retained declaration ordinals to compact `Annotation` argument
+  indices. Metadata omits declared defaults even when replay supplies their runtime values;
+  synthesized empty varargs remain supplied but unwritten and present in the metadata payload.
+  `annotation_constructions::tests::argument_provenance` compares both retained and replayed
+  constructions with the complete official Native nested-annotation message.
+  No wire schema or protocol version changes.
 - The PRIMARY constructor's flags word is written whenever it differs from the proto default 6
   (visibility PUBLIC). krusty carries the real word (6 for a public primary ctor) and omits it only
   at 6, so the bit takes a public ctor to an explicit 7, and an `internal constructor`, whose
@@ -624,3 +638,9 @@ The type-annotation adapter accepts exactly `IS_UNSIGNED` on BYTE, SHORT, INT an
 valid signed carriers; other flags and incompatible kinds are rejected. KSP protocol 16 transports
 `UByte`, `UShort`, `UInt` and `ULong` value tags, whose JVM adapter boxes the matching Kotlin unsigned
 wrappers. Class-reader constants and build ABI fingerprints retain their physical JVM carriers.
+
+Retained capture signatures carry `CAPTURE_STORAGE` into `IrPropertyOrigin::CaptureStorage`.
+The class metadata projection excludes only that role, after retaining each property's original IR
+index; ordinary and plugin-generated declarations remain properties. Physical fields and capture
+storage demand remain separate facts, owned by the current declaration-keyed capture plan.
+Tests: `tests/capture_storage_metadata_e2e.rs` and the FIR local-class owner tests.

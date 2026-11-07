@@ -51,6 +51,9 @@ pub(super) struct ObjectRoot {
     pub(super) any_table: u32,
     /// `$Object`: the dispatch table, and nothing else yet.
     pub(super) object: u32,
+    /// `$Enum`: `$Object`, then `kotlin.Enum`'s `name` and `ordinal`, which every enum class's
+    /// struct extends.
+    pub(super) enum_base: u32,
     /// The function types of `kotlin.Any`'s three slots, in slot order.
     pub(super) any_slot_types: [u32; 3],
     /// `kotlin.Any.equals`'s default: identity.
@@ -87,6 +90,15 @@ impl ObjectRoot {
             supertype: None,
             open: true,
         });
+        let enum_base = module.subtype(SubType {
+            composite: CompositeType::Struct(vec![
+                immutable(ValType::reference(any_table)),
+                immutable(string),
+                immutable(ValType::I32),
+            ]),
+            supertype: Some(object),
+            open: true,
+        });
         let identity_equals = module.declare();
         let mut code = super::encode::Code::default();
         code.local_get(0).local_get(1).ref_eq();
@@ -102,6 +114,7 @@ impl ObjectRoot {
             itable,
             any_table,
             object,
+            enum_base,
             any_slot_types,
             identity_equals,
             traps: HashMap::default(),

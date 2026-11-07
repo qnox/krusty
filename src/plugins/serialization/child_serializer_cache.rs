@@ -375,8 +375,10 @@ pub(super) fn add_child_serializer_cache(
             visibility: crate::types::Visibility::Private,
             erased_declared_ty: None,
             accessors: crate::ir::IrStaticAccessors::ABSENT,
-            // kotlinc's `<clinit>` maps the cache's array construction to the same declaration line.
-            line: owner_decl_line,
+            // kotlinc declares the cache on the companion, at the companion's offsets, so the
+            // `<clinit>` store opens on the companion's first line (the class's, for a companion the
+            // plugin generates).
+            line: super::serializer_class::companion_lines(ir, class_id).0,
             accessor_lines: crate::ir::IrAccessorLines::default(),
             source_order: u32::MAX,
             property_delegate: false,

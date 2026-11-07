@@ -419,6 +419,7 @@ pub(super) fn materialize_member_delegate(
     }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {
+        origin: crate::ir::IrPropertyOrigin::Declaration,
         name: property.name.clone(),
         diagnostic_span: property.diagnostic_span,
         getter_diagnostic_span: property.getter_diagnostic_span,
