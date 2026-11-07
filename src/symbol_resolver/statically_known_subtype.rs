@@ -166,14 +166,19 @@ fn replace_projected(projection: Ty, ty: Ty) -> Ty {
 }
 
 impl Unification<'_> {
-    fn unify(&self, original: Ty, with_parameters: Ty, result: &mut HashMap<String, Ty>) -> bool {
+    fn unify(
+        &self,
+        original: Ty,
+        with_parameters: Ty,
+        result: &mut crate::types::TyParamBindings,
+    ) -> bool {
         let original_type = projected_type(original);
         let parameters_type = projected_type(with_parameters);
         if parameters_type == Some(Ty::Error) {
             return true;
         }
         if let Some(TyKind::Intersection(parts)) = original_type.map(Ty::kind) {
-            let mut merged = HashMap::<String, Ty>::default();
+            let mut merged = crate::types::TyParamBindings::default();
             for &part in parts {
                 let mut local = HashMap::default();
                 if !self.unify(part, with_parameters, &mut local) {
@@ -229,7 +234,8 @@ impl Unification<'_> {
         if original_kind != ProjectionKind::Star && !original_nullable && parameters_nullable {
             return true;
         }
-        if let Some(TyKind::TyParam(name, _)) = parameters_type.map(Ty::kind) {
+        if let Some(TyKind::TyParam(name, _) | TyKind::Var(name, _)) = parameters_type.map(Ty::kind)
+        {
             if self.variables.contains(&name.as_str()) {
                 if result
                     .get(name.as_str())
@@ -237,7 +243,7 @@ impl Unification<'_> {
                 {
                     return false;
                 }
-                result.insert(name.to_string(), original);
+                result.insert(crate::types::TyParamName::new(&name), original);
                 return true;
             }
         }

@@ -35,27 +35,40 @@ pub(super) fn jvm_type_params(
     formatter: &JvmSignatureFormatter<'_>,
     g: &crate::ir::IrGenericSig,
 ) -> Option<String> {
-    if g.type_params.is_empty() {
+    jvm_type_parameter_declarations(
+        formatter,
+        g.type_params
+            .iter()
+            .map(|parameter| (parameter.name.as_str(), parameter.bounds.as_slice())),
+    )
+}
+
+/// The `<T:bound…>` section for each `(source name, bounds)` declaration, or `""` for none. Each
+/// bound carries whether it is an interface.
+pub(super) fn jvm_type_parameter_declarations<'p>(
+    formatter: &JvmSignatureFormatter<'_>,
+    parameters: impl ExactSizeIterator<Item = (&'p str, &'p [(Ty, bool)])>,
+) -> Option<String> {
+    if parameters.len() == 0 {
         return Some(String::new());
     }
     let mut s = String::from("<");
-    for parameter in &g.type_params {
-        s.push_str(&parameter.name);
-        if parameter.bounds.is_empty() {
+    for (name, declared_bounds) in parameters {
+        s.push_str(name);
+        if declared_bounds.is_empty() {
             s.push_str(":Ljava/lang/Object;");
             continue;
         }
         // kotlinc's `writeFormalTypeParameter`: the class bound leads, whatever position the
         // declaration wrote it in, and the remaining bounds follow in written order. Kotlin
         // metadata keeps the written order itself.
-        let class_bound = parameter
-            .bounds
+        let class_bound = declared_bounds
             .iter()
             .position(|(bound, is_interface)| !*is_interface && !bound.non_null().is_ty_param());
         let bounds = class_bound
             .into_iter()
-            .chain((0..parameter.bounds.len()).filter(|&index| Some(index) != class_bound))
-            .map(|index| &parameter.bounds[index]);
+            .chain((0..declared_bounds.len()).filter(|&index| Some(index) != class_bound))
+            .map(|index| &declared_bounds[index]);
         if bounds.clone().all(|(_, is_interface)| *is_interface) {
             s.push(':');
         }

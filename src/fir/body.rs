@@ -7,7 +7,9 @@ use super::local_delegated_properties::{
 };
 use crate::fx_hash::{HashMap, HashSet};
 
+mod annotation_constructions;
 mod context_parameters;
+pub use annotation_constructions::{FirAnnotationConstruction, FirAnnotationDefaultValue};
 pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
@@ -37,7 +39,11 @@ pub use ranges::{
 };
 mod indexed_iteration;
 pub use indexed_iteration::{FirBuiltinIterableKind, FirCharSequenceIndexing};
+mod conversions;
+mod source_forms;
 mod with_index;
+pub use conversions::{FirConversion, FirConversionKind};
+pub use source_forms::FirSourceForm;
 pub use with_index::{FirIndexedValueComponent, FirWithIndexLoop};
 mod callable_dispatch;
 pub use callable_dispatch::{
@@ -64,40 +70,6 @@ use super::inline_body::FirInlineBodyPlan;
 use super::local_class_capture::FirLocalClassCapture;
 use super::signature::ResolvedTy;
 use super::source_lambda::FirSourceLambda;
-
-/// A checked implicit conversion selected by the frontend. Lowering applies this decision and does
-/// not decide assignability, boxing, coercion, or smart-cast eligibility again.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirConversionKind {
-    NumericWidening {
-        to: ResolvedTy,
-    },
-    NumericConversion {
-        to: ResolvedTy,
-    },
-    NullabilityWidening {
-        to: ResolvedTy,
-    },
-    SmartCast {
-        to: ResolvedTy,
-    },
-    Sam(FirSamConversionId),
-    /// A Java/platform value committed to Kotlin's non-null type. The checker records both the
-    /// boundary and the source expression text used by Kotlin's failure; common lowering merely
-    /// realizes the already-selected yields-or-throws operation.
-    PlatformNarrowing {
-        narrowing: FirPlatformNarrowingId,
-        to: ResolvedTy,
-    },
-    /// A regular function value converted to a suspend and/or `Unit`-returning function type, both
-    /// shapes selected by the frontend; `ordinal` is its source-order place in its innermost callable.
-    FunctionValue {
-        from: ResolvedTy,
-        to: ResolvedTy,
-        ordinal: u32,
-    },
-    CoerceToUnit,
-}
 
 /// Exact semantic SAM declaration selected by the ordinary checker. Backend descriptors and holder
 /// classes are deliberately absent; the classifier, method declaration shape, and source function
@@ -131,6 +103,15 @@ pub struct FirSamConversion {
     pub kotlin_interface: bool,
     /// Provider-normalized semantic identities parallel to `declared_parameters`.
     pub parameter_identities: Box<[super::ResolvedParameterIdentity]>,
+    /// The interface's own type parameters in declaration order, which the declared shape names.
+    pub type_parameters: Box<[FirSamTypeParameter]>,
+}
+
+/// One type parameter a functional interface declares, with every declared upper bound.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirSamTypeParameter {
+    pub name: Box<str>,
+    pub bounds: Box<[super::ResolvedTypeParameterBound]>,
 }
 
 /// The abstract method a SAM conversion implements.
@@ -150,12 +131,18 @@ pub enum FirSamMethod {
 pub struct FirPlatformNarrowing {
     /// The checked producer's name; `None` for a value kotlinc cannot name, such as a block's.
     pub message: Option<Box<str>>,
+    /// The consumer the narrowed value reaches.
+    pub site: FirPlatformNarrowingSite,
 }
 
+/// Where a narrowed platform value is consumed. kotlinc's `-Xno-receiver-assertions` removes the
+/// checks of exactly the values that reach an extension receiver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FirConversion {
-    pub origin: OriginId,
-    pub kind: FirConversionKind,
+pub enum FirPlatformNarrowingSite {
+    /// An argument, an assignment, a returned value or any other non-receiver consumer.
+    Value,
+    /// The receiver of an extension call, written or through an operator convention.
+    ExtensionReceiver,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,7 +239,6 @@ pub enum FirIntrinsic {
     },
     ArrayGet,
     ArraySet,
-    ArraySize,
     StringGet,
     StringLength,
     StringPlus,
@@ -314,6 +300,11 @@ pub enum FirCallTarget {
         default_provider: Option<ExternalCallableId>,
         receiver: Option<ResolvedTy>,
         declared_receiver: Option<ResolvedTy>,
+        /// A member's dispatch receiver applied as the member's declaring class, when the
+        /// receiver's own classifier is a subclass of a generic declaring class: `Base<String>`
+        /// for `Derived : Base<String>`. A call binds the declaring class's type parameters from
+        /// its arguments. `None` when the receiver already names the declaring class.
+        declaring_receiver: Option<ResolvedTy>,
         parameters: Box<[ResolvedTy]>,
         result: ResolvedTy,
         declared_result: Option<ResolvedTy>,
@@ -356,6 +347,8 @@ pub enum FirCallTarget {
     /// express "this declaration, bypassing overriding" — the same source declaration is an ordinary
     /// virtual target at every other call site.
     Super {
+        /// The original selected qualifier, before a target maps the invocation owner.
+        qualifier: crate::types::TypeName,
         owner: crate::types::TypeName,
         /// Classifier whose instance supplies `this` for this selected super dispatch.
         dispatch_owner: crate::types::TypeName,
@@ -473,37 +466,6 @@ impl DelegateStorage {
 /// A constructor declaration identity after overload selection. Module constructors use their
 /// stable callable identity. Dependency constructors retain a backend-neutral classifier and
 /// semantic parameter signature; a backend maps that exact declaration to physical linkage.
-/// Compact declaration default retained only for an annotation-construction plan. Ordinary source
-/// defaults remain checked retained bodies; dependency metadata contributes only these closed values.
-#[derive(Clone, Debug, PartialEq)]
-pub enum FirAnnotationDefaultValue {
-    Constant(FirConstant),
-    Singleton(TypeName),
-    EnumEntry {
-        classifier: TypeName,
-        name: Box<str>,
-    },
-    KClass(Ty),
-    Array {
-        array_type: Ty,
-        elements: Vec<Self>,
-    },
-    Annotation {
-        classifier: TypeName,
-        members: Vec<(String, Ty)>,
-        values: Vec<Self>,
-    },
-}
-
-/// Complete checked declaration shape needed to realize an annotation value. This is Kotlin
-/// semantics rather than a platform implementation detail: a backend may allocate a concrete value,
-/// synthesize an implementation, or use a native annotation representation without new lookup.
-#[derive(Clone, Debug, PartialEq)]
-pub struct FirAnnotationConstruction {
-    pub members: Box<[(Box<str>, ResolvedTy)]>,
-    pub defaults: Box<[Option<FirAnnotationDefaultValue>]>,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum FirConstructorTarget {
     Module {
@@ -526,16 +488,9 @@ pub enum FirConstructorTarget {
 impl FirConstructorTarget {
     fn storage_payload_bytes(&self) -> usize {
         match self {
-            Self::Module { annotation, .. } => annotation.as_ref().map_or(0, |annotation| {
-                annotation.members.len() * std::mem::size_of::<(Box<str>, ResolvedTy)>()
-                    + annotation
-                        .members
-                        .iter()
-                        .map(|(name, _)| name.len())
-                        .sum::<usize>()
-                    + annotation.defaults.len()
-                        * std::mem::size_of::<Option<FirAnnotationDefaultValue>>()
-            }),
+            Self::Module { annotation, .. } => annotation
+                .as_ref()
+                .map_or(0, |annotation| annotation.storage_payload_bytes()),
             Self::External {
                 parameters,
                 declared_parameters,
@@ -543,16 +498,9 @@ impl FirConstructorTarget {
                 ..
             } => {
                 (parameters.len() + declared_parameters.len()) * std::mem::size_of::<ResolvedTy>()
-                    + annotation.as_ref().map_or(0, |annotation| {
-                        annotation.members.len() * std::mem::size_of::<(Box<str>, ResolvedTy)>()
-                            + annotation
-                                .members
-                                .iter()
-                                .map(|(name, _)| name.len())
-                                .sum::<usize>()
-                            + annotation.defaults.len()
-                                * std::mem::size_of::<Option<FirAnnotationDefaultValue>>()
-                    })
+                    + annotation
+                        .as_ref()
+                        .map_or(0, |annotation| annotation.storage_payload_bytes())
             }
         }
     }
@@ -1812,10 +1760,8 @@ pub struct FirBody {
     /// Naming provenance of each expression the reference compiler realizes as a class of its own
     /// (a callable reference). A naming fact, not a lowering decision.
     generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
-    /// Constants that are the selected value of a `const val` or a Java constant field, as opposed
-    /// to a literal. Both are `FirExprKind::Constant`; metadata's constant-initializer rule
-    /// tells them apart.
-    constant_reads: HashSet<FirExprId>,
+    /// Source forms checking normalized away, which metadata's constant-initializer rule reads.
+    source_forms: HashMap<FirExprId, FirSourceForm>,
     /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
     /// old value.
     postfix_updates: HashSet<FirExprId>,
@@ -1843,6 +1789,9 @@ pub struct FirBody {
     /// each parameter is bound. The contract above is in physical order and also lists context
     /// receivers that bind no value, so it does not pair positionally with `parameters`.
     spliced_inline_parameters: Vec<LocalValueId>,
+    /// The bound values of the parameters declared `crossinline`. A capture of one of them is a
+    /// crossinline capture wherever it is moved, which the target's inline ABI depends on.
+    crossinline_parameters: Vec<LocalValueId>,
     parameters: Vec<FirValueParameter>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
@@ -1896,7 +1845,7 @@ impl FirBody {
             destructuring_loop_containers: HashSet::default(),
             debug_lines: Default::default(),
             generated_class_provenance: HashMap::default(),
-            constant_reads: HashSet::default(),
+            source_forms: HashMap::default(),
             postfix_updates: HashSet::default(),
             inlined_call_conversions: HashSet::default(),
             lifting_site: None,
@@ -1910,6 +1859,7 @@ impl FirBody {
             inline_parameter_modifiers: Vec::new(),
             inline_expansion_modes: Vec::new(),
             spliced_inline_parameters: Vec::new(),
+            crossinline_parameters: Vec::new(),
             parameters: Vec::new(),
             default_values: Vec::new(),
             captures: Vec::new(),
@@ -2179,6 +2129,15 @@ impl FirBody {
         &self.spliced_inline_parameters
     }
 
+    pub(crate) fn add_crossinline_parameter(&mut self, value: LocalValueId) {
+        self.crossinline_parameters.push(value);
+    }
+
+    /// Whether `value` is the bound value of a parameter this body declares `crossinline`.
+    pub(crate) fn is_crossinline_parameter(&self, value: LocalValueId) -> bool {
+        self.crossinline_parameters.contains(&value)
+    }
+
     pub fn add_default_value(&mut self, default: FirDefaultValue) {
         assert!(
             !self
@@ -2237,6 +2196,19 @@ impl FirBody {
 
     pub fn platform_narrowing(&self, id: FirPlatformNarrowingId) -> Option<&FirPlatformNarrowing> {
         self.platform_narrowings.get(id.raw() as usize)
+    }
+
+    /// The number of narrowings recorded so far, which [`Self::consume_narrowings_at`] reads as
+    /// the start of the narrowings one guard records.
+    pub fn platform_narrowing_count(&self) -> usize {
+        self.platform_narrowings.len()
+    }
+
+    /// Record that every narrowing from `start` on guards a value consumed at `site`.
+    pub fn consume_narrowings_at(&mut self, start: usize, site: FirPlatformNarrowingSite) {
+        for narrowing in &mut self.platform_narrowings[start..] {
+            narrowing.site = site;
+        }
     }
 
     /// Finalize the complete capture ABI of every nested callable. A body must forward both values
@@ -2571,15 +2543,6 @@ impl FirBody {
         id
     }
 
-    pub(crate) fn record_constant_read(&mut self, expression: FirExprId) {
-        self.constant_reads.insert(expression);
-    }
-
-    /// Whether this constant is a read of a constant declaration rather than a literal.
-    pub fn is_constant_read(&self, expression: FirExprId) -> bool {
-        self.constant_reads.contains(&expression)
-    }
-
     pub(crate) fn record_postfix_update(&mut self, block: FirExprId) {
         self.postfix_updates.insert(block);
     }
@@ -2840,6 +2803,7 @@ impl FirBody {
             + self.inline_expansion_modes.len()
                 * std::mem::size_of::<crate::types::InlineExpansionMode>()
             + self.spliced_inline_parameters.len() * std::mem::size_of::<LocalValueId>()
+            + self.crossinline_parameters.len() * std::mem::size_of::<LocalValueId>()
             + self
                 .property_delegate
                 .as_ref()

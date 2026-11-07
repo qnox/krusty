@@ -58,6 +58,7 @@ pub(in super::super) fn initializer_header(
         extension_receiver: false,
         dispatch_receiver: None,
         receiver_slot: Some(plan.header.contract.classifier),
+        value_receiver: None,
         singleton_extension_unread_receiver: None,
         values,
         defaults: vec![None; count],

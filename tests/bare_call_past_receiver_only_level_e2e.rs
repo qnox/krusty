@@ -1,13 +1,16 @@
-//! A bare call passes over a same-package extension, which needs a receiver, to the default
-//! import of the same name. The program runs on the JVM against kotlinc; the KLIB lanes decline
-//! the stdlib `check` body's exception, and the portable form is the box regression
-//! `bareCallPastReceiverOnlyLevel.kt`.
+//! Bare-call lookup retains the default-imported function's contract past an extension-only
+//! scope level. Both complete lookup regressions also run through the shared portable inventory.
 use super::common;
-
-const PROGRAM: &str =
-    include_str!("fixtures/bare_call_past_receiver_only_level/BareCallPastReceiverOnlyLevel.kt");
 
 #[test]
 fn a_bare_call_reaches_the_default_import_past_a_same_package_extension() {
-    common::expect_box_same_as_kotlinc(PROGRAM, "BareCallPastReceiverOnlyLevel");
+    let (sources, java) = krusty::conformance::split_files(include_str!(
+        "box_regressions/bareCallPastReceiverOnlyLevelContracts.kt"
+    ));
+    assert!(java.is_empty());
+    let [(stem, program)] = sources.as_slice() else {
+        panic!("the complete bare-call contract regression")
+    };
+    assert_eq!(stem, "BareCallPastReceiverOnlyLevel");
+    common::expect_box_same_as_kotlinc(program, "BareCallPastReceiverOnlyLevel");
 }

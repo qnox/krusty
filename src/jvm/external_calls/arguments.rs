@@ -48,10 +48,8 @@ pub(super) fn copy_call_facts(
     }
     copy!(fir_origins);
     copy!(expr_lines);
-    copy!(expr_source_lines);
-    copy!(expr_end_lines);
-    copy!(logical_types);
-    copy!(physical_types);
+    ir.copy_position(source, target);
+    ir.copy_types(source, target);
     copy!(ext_call_source_receiver);
     copy!(dispatch_classes);
     copy!(call_declared_ret);
