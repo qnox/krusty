@@ -8,7 +8,7 @@
 
 use super::common;
 
-const SOURCE: &str = include_str!("fixtures/lambda_argument_call_line/LambdaArgumentCallLine.kt");
+const SOURCE: &str = include_str!("box_regressions/LambdaArgumentCallLine.kt");
 
 #[test]
 fn lambda_argument_lines_match_every_class_artifact() {
@@ -21,6 +21,7 @@ fn lambda_arguments_keep_their_behavior() {
     common::expect_box_same_as_kotlinc(SOURCE, "LambdaArgumentCallLine");
 }
 
+// PLATFORM-SPECIFIC: This complete counterprogram imports a Java field holder and checks JVM class artifacts.
 const JAVA_FIELD: &str = "\
 package fixtures;
 import kotlin.jvm.functions.Function0;
