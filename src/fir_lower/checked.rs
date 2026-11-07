@@ -984,6 +984,17 @@ impl BodyLowering<'_> {
         &mut self,
         call: &FirConstructorCall,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let capture_arguments = call
+            .external_capture_arguments
+            .as_deref()
+            .map(|arguments| {
+                arguments
+                    .iter()
+                    .copied()
+                    .map(|argument| self.constructor_capture_argument(argument))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
         let (target, parameter_types, mut arguments) =
             self.constructor_target_and_arguments(call)?;
         // Like a call's, only supplied operands evaluated out of parameter order are held in
@@ -1033,6 +1044,7 @@ impl BodyLowering<'_> {
                 target,
                 outer_parameter: call.outer_parameter.map(crate::fir::ResolvedTy::get),
                 outer_receiver,
+                capture_arguments,
                 arguments,
                 substitutions: lower_substitutions(&call.substitutions),
             },
@@ -1145,13 +1157,11 @@ impl BodyLowering<'_> {
                 property: target,
                 inline_splice,
             } => {
-                self.index
-                    .property(*target)
-                    .ok_or(FirLoweringFailure::MissingProperty(*target))?;
-                let dispatch_class = self.dispatch_class(dispatch_receiver);
+                let (dispatch_receiver, dispatch_class) =
+                    self.module_property_receiver(*target, dispatch_receiver)?;
                 let operation = IrCheckedOperation::PropertyRead {
                     target: *target,
-                    dispatch_receiver: self.receiver(dispatch_receiver)?,
+                    dispatch_receiver,
                     extension_receiver: self.receiver(extension_receiver)?,
                     context_arguments: context_arguments
                         .iter()
@@ -1225,13 +1235,11 @@ impl BodyLowering<'_> {
                 property: target,
                 inline_splice,
             } => {
-                self.index
-                    .property(*target)
-                    .ok_or(FirLoweringFailure::MissingProperty(*target))?;
-                let dispatch_class = self.dispatch_class(dispatch_receiver);
+                let (dispatch_receiver, dispatch_class) =
+                    self.module_property_receiver(*target, dispatch_receiver)?;
                 let operation = IrCheckedOperation::PropertyWrite {
                     target: *target,
-                    dispatch_receiver: self.receiver(dispatch_receiver)?,
+                    dispatch_receiver,
                     extension_receiver: self.receiver(extension_receiver)?,
                     context_arguments: context_arguments
                         .iter()

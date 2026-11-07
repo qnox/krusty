@@ -1,7 +1,9 @@
 //! Function-value and checker-selected `invoke` convention FIR.
 
 use super::*;
-use crate::resolve::{ReceiverFnValueOrigin, ResolvedCall, ResolvedContextArgument};
+use crate::resolve::{
+    ReceiverFnValueOrigin, ReceiverFunctionPropertyCallee, ResolvedCall, ResolvedContextArgument,
+};
 use crate::types::TyKind;
 
 impl BodyFirChecker<'_> {
@@ -168,9 +170,13 @@ impl BodyFirChecker<'_> {
                     ));
                 }
             }
-            ReceiverFnValueOrigin::ClassStorage(field)
-            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
-                let kind = self.direct_class_storage_read_kind(field, function_ty, origin_id)?;
+            ReceiverFnValueOrigin::ClassStorage(storage) => {
+                let span = self
+                    .file
+                    .expr_span(expression)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+                let binding = self.selected_class_capture_binding(storage, span)?;
+                let kind = self.capture_read_kind(expression, binding)?;
                 self.body.add_expr(FirExpr {
                     origin: origin_id,
                     ty: function_ty,
@@ -178,13 +184,54 @@ impl BodyFirChecker<'_> {
                 })
             }
             ReceiverFnValueOrigin::DispatchProperty { .. }
+            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
             | ReceiverFnValueOrigin::TopLevelProperty => {
-                self.expression(property_callee.ok_or_else(|| {
+                match property_callee.ok_or_else(|| {
                     self.failure(
                         self.file.expr_span(expression),
                         BodyCheckFailureKind::MissingStablePropertyTarget,
                     )
-                })?)?
+                })? {
+                    ReceiverFunctionPropertyCallee::Expression(callee) => {
+                        self.expression(callee)?
+                    }
+                    ReceiverFunctionPropertyCallee::EnumEntry {
+                        property,
+                        declared_ty,
+                        receiver,
+                    } => {
+                        let span = self.file.expr_span(expression);
+                        let target =
+                            self.selected_enum_entry_property(property).ok_or_else(|| {
+                                self.failure(
+                                    span,
+                                    BodyCheckFailureKind::MissingStablePropertyTarget,
+                                )
+                            })?;
+                        let dispatch_receiver = self
+                            .materialize_implicit_receiver(origin_id, span, &receiver)?
+                            .ok_or_else(|| {
+                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                            })?;
+                        let ty = self.resolved_type(
+                            span.ok_or_else(|| {
+                                self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
+                            })?,
+                            declared_ty,
+                        )?;
+                        self.body.add_expr(FirExpr {
+                            origin: origin_id,
+                            ty,
+                            kind: FirExprKind::PropertyRead {
+                                target: FirPropertyTarget::of_module(target),
+                                dispatch_receiver: Some(dispatch_receiver),
+                                extension_receiver: None,
+                                context_arguments: Box::new([]),
+                                substitutions: Box::new([]),
+                            },
+                        })
+                    }
+                }
             }
         };
         let receiver = match explicit_receiver {

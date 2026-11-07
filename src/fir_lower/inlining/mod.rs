@@ -2039,6 +2039,7 @@ fn specialize_checked_operation(
         IrCheckedOperation::ConstructorDelegation {
             target,
             outer_parameter,
+            capture_arguments,
             arguments,
             substitutions,
             ..
@@ -2049,6 +2050,9 @@ fn specialize_checked_operation(
                 specialize_tys(parameters, bindings);
             }
             specialize_optional_ty(outer_parameter, bindings);
+            for (_, ty) in capture_arguments.iter_mut().flatten() {
+                specialize_ty(ty, bindings);
+            }
             for argument in arguments {
                 specialize_checked_argument(argument, bindings);
             }

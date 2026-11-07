@@ -136,6 +136,16 @@ pub enum NoArgSuperConstructor {
 }
 
 impl ResolvedModuleIndex {
+    /// Executable-local classifier roots own a checked closure environment. Members of such
+    /// classifiers inherit LOCAL_CLASS for scheduling, but use their declared member/outer ABI.
+    pub(crate) fn owns_local_capture_environment(&self, declaration: DeclarationId) -> bool {
+        self.declaration_header(declaration).is_some_and(|header| {
+            header.kind == DeclarationKind::Classifier
+                && header.flags.has(DeclarationFlags::LOCAL_CLASS)
+                && !header.flags.has(DeclarationFlags::CLASSIFIER_MEMBER)
+        })
+    }
+
     pub fn local_classifier_lexical_root(
         &self,
         declaration: DeclarationId,

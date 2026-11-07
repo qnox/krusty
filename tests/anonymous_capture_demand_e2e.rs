@@ -78,3 +78,23 @@ fn an_enum_entry_property_keeps_its_owner_through_an_anonymous_inner_class() {
         source,
     )]));
 }
+
+#[test]
+fn an_enum_entry_capture_calls_its_declared_custom_setter() {
+    let source = include_str!("box_regressions/enumEntryPropertyCustomSetter.kt");
+    common::expect_box_same_as_kotlinc(source, "enumEntryPropertyCustomSetter");
+    assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
+        "enumEntryPropertyCustomSetter.kt",
+        source,
+    )]));
+}
+
+#[test]
+fn an_enum_entry_function_property_keeps_its_selected_receiver() {
+    let source = include_str!("box_regressions/enumEntryReceiverFunctionProperty.kt");
+    common::expect_box_same_as_kotlinc(source, "enumEntryReceiverFunctionProperty");
+    assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
+        "enumEntryReceiverFunctionProperty.kt",
+        source,
+    )]));
+}

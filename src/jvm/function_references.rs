@@ -327,7 +327,7 @@ fn realize_adapter_reference(
             module_reflection = Some(module_declaration_reflection(declaration)?);
             (owner, declaration.name.to_string(), top_level, None)
         }
-        crate::ir::IrCallableReferenceTarget::Constructor { classifier } => {
+        crate::ir::IrCallableReferenceTarget::Constructor { classifier, .. } => {
             (Some(classifier), "<init>".to_string(), false, None)
         }
         crate::ir::IrCallableReferenceTarget::Classifier {

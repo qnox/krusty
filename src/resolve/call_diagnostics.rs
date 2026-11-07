@@ -4,6 +4,9 @@ use super::*;
 
 mod argument_completion;
 mod rejection_plan;
+mod top_level_rejections;
+
+pub(super) use top_level_rejections::report_inapplicable_callable_candidates;
 
 use rejection_plan::{
     MappedRejectionCandidate, MappedRejectionPlan, RejectedArgumentInput, RejectedArgumentSite,

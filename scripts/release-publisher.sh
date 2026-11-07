@@ -120,15 +120,37 @@ check_promotion() {
 }
 
 bind_tag() {
-  local tag_ref=refs/tags/$1 existing
+  local tag_ref=refs/tags/$1 existing push_status push_output
   git check-ref-format "$tag_ref"
   eligible || return $?
   existing=$(remote_ref "$tag_ref") || return 2
   if [ -z "$existing" ]; then
-    if git push --quiet --force-with-lease="$tag_ref:" "$remote" "$sha:$tag_ref" 2>/dev/null; then
+    push_output=$(mktemp)
+    if git push --quiet --force-with-lease="$tag_ref:" "$remote" "$sha:$tag_ref" >"$push_output" 2>&1; then
+      rm -f "$push_output"
+      return
+    else
+      push_status=$?
+    fi
+    if ! existing=$(remote_ref "$tag_ref"); then
+      echo "release-publisher: cannot verify $tag_ref after git push exit $push_status" >&2
+      head -c 4096 "$push_output" >&2
+      printf '\n' >&2
+      rm -f "$push_output"
+      return 2
+    fi
+    if [ "$existing" = "$sha" ]; then
+      rm -f "$push_output"
       return
     fi
-    existing=$(remote_ref "$tag_ref") || return 2
+    echo "release-publisher: git push for $tag_ref failed (exit $push_status):" >&2
+    head -c 4096 "$push_output" >&2
+    printf '\n' >&2
+    rm -f "$push_output"
+    if [ -z "$existing" ]; then
+      echo "release-publisher: cannot create $tag_ref; ref remains absent" >&2
+      return 1
+    fi
   fi
   if [ "$existing" != "$sha" ]; then
     echo "release-publisher: $tag_ref belongs to ${existing:-nothing}, not $sha" >&2

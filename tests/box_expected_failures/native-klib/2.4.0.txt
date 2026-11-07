@@ -254,13 +254,10 @@ companionBlocksAndExtensions/callableReferences.kt
 companionBlocksAndExtensions/companionBlock.kt
 companionBlocksAndExtensions/lateinit.kt
 compileKotlinAgainstKotlin/adaptedSuspendFunctionReference.kt
-compileKotlinAgainstKotlin/classInObject.kt
 compileKotlinAgainstKotlin/companionObjectInEnum.kt
-compileKotlinAgainstKotlin/companionObjectMember.kt
 compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
-compileKotlinAgainstKotlin/doublyNestedClass.kt
 compileKotlinAgainstKotlin/enum.kt
 compileKotlinAgainstKotlin/genericSetter.kt
 compileKotlinAgainstKotlin/inlineClasses/callDeserializedPropertyOnInlineClassType.kt
@@ -268,7 +265,6 @@ compileKotlinAgainstKotlin/inlineClasses/constructorWithInlineClassParametersInB
 compileKotlinAgainstKotlin/inlineClasses/defaultWithInlineClassAndReceivers.kt
 compileKotlinAgainstKotlin/inlineClasses/extensionPropertyWithSameName.kt
 compileKotlinAgainstKotlin/inlineClasses/funInterface.kt
-compileKotlinAgainstKotlin/inlineClasses/inlineClassFakeOverrideMangling.kt
 compileKotlinAgainstKotlin/inlineClasses/inlineClassFromBinaryDependencies.kt
 compileKotlinAgainstKotlin/inlineClasses/inlineClassInlineFunctionCall.kt
 compileKotlinAgainstKotlin/inlineClasses/inlineClassInlineProperty.kt
@@ -276,11 +272,9 @@ compileKotlinAgainstKotlin/inlineClasses/internalWithInlineClass.kt
 compileKotlinAgainstKotlin/inlineClasses/oldMangling/useOldMangling.kt
 compileKotlinAgainstKotlin/inlineClasses/privateConstructor.kt
 compileKotlinAgainstKotlin/inlineClasses/privateConstructorWithPrivateField.kt
-compileKotlinAgainstKotlin/inlineClasses/privateConstructorWithPrivateFieldUsingTypeTable.kt
 compileKotlinAgainstKotlin/inlineClasses/suspendFunWithDefaultMangling.kt
 compileKotlinAgainstKotlin/innerClassConstructor.kt
 compileKotlinAgainstKotlin/interfaceDelegationAndBridgesProcessing.kt
-compileKotlinAgainstKotlin/internalSetterOverridden.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superCall.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superCallFromInterface.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superCallFromInterface2.kt
@@ -299,10 +293,7 @@ compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleCallWithHierarchy.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleProp.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simplePropWithHierarchy.kt
 compileKotlinAgainstKotlin/kt14012.kt
-compileKotlinAgainstKotlin/nestedClass.kt
-compileKotlinAgainstKotlin/nestedClassAsBound.kt
 compileKotlinAgainstKotlin/nestedEnum.kt
-compileKotlinAgainstKotlin/nestedObject.kt
 compileKotlinAgainstKotlin/privateSuperType.kt
 compileKotlinAgainstKotlin/privateSuperType2.kt
 compileKotlinAgainstKotlin/privateSuperTypeDefaults.kt
@@ -310,7 +301,6 @@ compileKotlinAgainstKotlin/privateSuperTypeDefaults2.kt
 compileKotlinAgainstKotlin/propertyReference.kt
 compileKotlinAgainstKotlin/sealedClass.kt
 compileKotlinAgainstKotlin/secondaryConstructors.kt
-compileKotlinAgainstKotlin/simpleValAnonymousObject.kt
 compileKotlinAgainstKotlin/starImportEnum.kt
 compileKotlinAgainstKotlin/typeAliasesKt13181.kt
 compileKotlinAgainstKotlin/useDeserializedFunInterface.kt
@@ -1128,7 +1118,6 @@ initializers/initializers7.kt
 initializers/initializers9.kt
 initializers/multipleModules1.kt
 initializers/object.kt
-initializers/sharedVarInInitBlock.kt
 initializers/static_arrays.kt
 initializers/static_list.kt
 initializers/static_smallIntIdentity.kt
@@ -1432,7 +1421,6 @@ ir/enumClass2.kt
 ir/enumClass3.kt
 ir/fileClassInitializers.kt
 ir/kt41765.kt
-ir/kt52677.kt
 ir/kt55318.kt
 ir/privateSignatures/enumEntryArguments.kt
 ir/serializationRegressions/anonFakeOverride.kt
@@ -1537,8 +1525,6 @@ multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflict.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
-multiplatform/k2/hmpp/expectActualExtensions2-3.kt
-multiplatform/k2/hmpp/expectActualExtensions3-3.kt
 multiplatform/k2/hmpp/expectActualGeneric2-2.kt
 multiplatform/k2/hmpp/expectActualGeneric3-3.kt
 multiplatform/k2/hmpp/expectActualGenericTwoLibs.kt
@@ -1631,7 +1617,6 @@ properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
 properties/backingField/backingFieldWithSmartTypeParameters.kt
 properties/backingField/equalsHashCodeWithValueClassExplicitBackingFieldAndSupertype.kt
 properties/complexPropertyInitializer.kt
-properties/const/intermoduleInlineConst.kt
 properties/eagerInitializationGlobal1.kt
 properties/eagerInitializationGlobal2.kt
 properties/eagerInitializationGlobal3.kt
@@ -1648,7 +1633,6 @@ properties/lazyInitializationMultiModule.kt
 properties/lazyInitializationOrder.kt
 properties/lazyInitializationSplitPerModule.kt
 propertyCallableReference/dynamicReceiver.kt
-propertyCallableReference/multipleModules.kt
 propertyCallableReference/valClass.kt
 propertyCallableReference/valExtension.kt
 propertyCallableReference/valModule.kt
@@ -2562,7 +2546,6 @@ typeErasure/twoFunWithTypeParametersInlineFunWithReifiedTypeParameters.kt
 typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParameters.kt
 typealias/abbreviationWithCapturedType.kt
 typealias/deserializedAbbreviationWithRedundantArgument.kt
-typealias/importNestedTypealiasFromAnotherModule.kt
 typealias/incorrectTypeOfTypealiasForSuspendFTMM.kt
 typealias/localTypeAliases.kt
 typealias/privateInKlib.kt

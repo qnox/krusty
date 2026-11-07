@@ -854,6 +854,12 @@ impl Emitter<'_> {
                     return Some("receiver".to_string());
                 }
                 let identity = identities?.get(index)?;
+                if let Some((owner, parameter)) = identity.constructor_receiver() {
+                    return Some(
+                        crate::jvm::capture_names::constructor_receiver(self.ir, owner, parameter)?
+                            .field,
+                    );
+                }
                 match identity.role {
                     crate::ir::IrParameterRole::CapturedValue { .. } => {
                         Some(format!("${}", identity.source_name.as_ref()?))

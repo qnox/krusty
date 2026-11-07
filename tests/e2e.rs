@@ -43,8 +43,6 @@ mod class_comparison_e2e;
 mod classfile_low_priority_annotation_e2e;
 #[path = "common/mod.rs"]
 mod common_core;
-#[path = "jvm_conformance_deadline_e2e.rs"]
-mod jvm_conformance_deadline_e2e;
 #[cfg(test)]
 pub(crate) use common_core::server_pool::Pool as ServerPool;
 #[path = "common/compiler_plugin_fixture.rs"]
@@ -1534,6 +1532,8 @@ mod metadata_return_value_status_e2e;
 #[path = "metadata_synthetic_classes_e2e.rs"]
 mod metadata_synthetic_classes_e2e;
 mod metadata_type_modules;
+#[path = "nullable_function_field_signature_e2e.rs"]
+mod nullable_function_field_signature_e2e;
 metadata_type_modules::declare!();
 #[path = "e2e/line_breaks.rs"]
 mod line_breaks;
@@ -1565,8 +1565,6 @@ mod mpp_expect_actual_e2e;
 mod mpp_requires_the_feature_e2e;
 #[path = "multifile_inline_part_splice_e2e.rs"]
 mod multifile_inline_part_splice_e2e;
-#[path = "native_conformance_deadline_e2e.rs"]
-mod native_conformance_deadline_e2e;
 #[path = "nested_block_comment_e2e.rs"]
 mod nested_block_comment_e2e;
 #[path = "e2e/nested_classifiers.rs"]

@@ -65,6 +65,26 @@ impl Body<'_> {
                 };
                 self.string_of(value)
             }
+            IrIntrinsic::GeneratedPropertyHash { ty } => {
+                let (None, [value]) = (receiver, args) else {
+                    return Err("a malformed generated property hash".to_string());
+                };
+                self.generated_property_hash(*value, ty)
+            }
+            IrIntrinsic::GeneratedPropertyEquals { ty } => {
+                let (None, [left, right]) = (receiver, args) else {
+                    return Err("a malformed generated property comparison".to_string());
+                };
+                self.generated_property_equals(*left, *right, ty)
+            }
+            // The frontend publishes the exact `kotlin.Enum.name` declaration as an intrinsic
+            // after ordinary property selection; it reads the same `$Enum` field.
+            IrIntrinsic::EnumName => {
+                let (Some(receiver), []) = (receiver, args) else {
+                    return Err("a malformed `Enum.name` read".to_string());
+                };
+                self.enum_member(crate::backend::enums::BaseMember::Name, receiver)
+            }
             other => Err(format!("a call to the intrinsic {other:?}")),
         }
     }

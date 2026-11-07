@@ -85,6 +85,18 @@ pub(super) fn module_constructor_symbol(
     Some(symbol)
 }
 
+/// Program-wide identity of a selected source constructor declaration.
+pub(super) fn constructor_reference_symbol(
+    module_name: &str,
+    declaration: crate::fir::DeclarationId,
+) -> String {
+    format!(
+        "kt_constructor_reference_{}_{}",
+        module_namespace(module_name),
+        declaration.raw()
+    )
+}
+
 /// Symbols of the entry points that box a value of a module value class and read one back, which
 /// the file declaring the class defines for every other file of the module. Named from the exact
 /// source module and class's qualified name, which both files hold, and not from anything either
@@ -409,6 +421,21 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
             functions[index] = unique(base, &|name| vec![name.to_string()]);
             continue;
         }
+        // Generated members can have a declared receiver without being source methods in the
+        // class inventory. Their owner, not the generated name alone, keeps independent files of
+        // one module from exporting the same symbol.
+        if let Some(class) = function
+            .dispatch_receiver
+            .and_then(|owner| ir.class_id_by_name(owner))
+        {
+            let base = format!(
+                "kt_{}_{}",
+                classes[class as usize],
+                c_identifier(&function.name)
+            );
+            functions[index] = unique(base, &|name| vec![name.to_string()]);
+            continue;
+        }
         // Local and compiler-generated functions have no checked callable identity. They still
         // belong to one source module: independently analyzed dependencies restart their local
         // function ids and may otherwise export identical strong symbols at the final link.
@@ -447,6 +474,32 @@ mod tests {
             param_checks: Vec::new(),
         });
         ir
+    }
+
+    #[test]
+    fn generated_members_use_their_declared_class_across_source_files() {
+        let member = |owner: &str| {
+            let mut ir = fallback_function("<generated>$entry");
+            let owner = crate::types::type_name(owner);
+            ir.classes.push(crate::ir::IrClass::synthetic(owner));
+            ir.functions[0].is_static = false;
+            ir.functions[0].dispatch_receiver = Some(owner);
+            ir
+        };
+        let mut first_file = member("sample/First");
+        let second_file = member("sample/Second");
+        assert!(first_file.classes[0].methods.is_empty());
+        assert!(second_file.classes[0].methods.is_empty());
+        let first = symbols(&first_file, "shared-module", HashSet::default());
+        let second = symbols(&second_file, "shared-module", HashSet::default());
+        assert_ne!(
+            first.functions[0], second.functions[0],
+            "generated member names must not collide across files of the same module"
+        );
+        // Multiple generated entries of the same class still use the shared collision allocator.
+        first_file.functions.push(first_file.functions[0].clone());
+        let repeated = symbols(&first_file, "shared-module", HashSet::default());
+        assert_ne!(repeated.functions[0], repeated.functions[1]);
     }
 
     #[test]

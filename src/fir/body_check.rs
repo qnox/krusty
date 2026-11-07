@@ -21,6 +21,7 @@ mod capture_order;
 #[cfg(test)]
 mod collection_literal_tests;
 mod compiler_intrinsics;
+mod constructor_capture_bindings;
 #[cfg(test)]
 mod constructor_tests;
 mod constructors;
@@ -802,82 +803,15 @@ impl BodyFirChecker<'_> {
             .enclosing_classifier(DeclarationId::from_raw(owner.raw()))
             .is_some();
         let enclosing_classifier = index.enclosing_classifier(DeclarationId::from_raw(owner.raw()));
-        let constructor_capture_parameter_count = index
-            .declaration_anchor(declaration)
-            .filter(|anchor| {
-                matches!(
-                    anchor.kind,
-                    crate::fir::DeclarationKind::Constructor
-                        | crate::fir::DeclarationKind::Initializer
-                        | crate::fir::DeclarationKind::Property
-                )
-            })
-            .and(enclosing_classifier)
-            .map(|classifier| {
-                let transient = session
-                    .active_source
-                    .as_ref()
-                    .and_then(|active| {
-                        active
-                            .class(file, classifier.declaration)
-                            .map(|(declaration, _)| declaration)
-                    })
-                    .or_else(|| {
-                        let range = index.declaration_range(classifier.declaration)?;
-                        file.decl_arena.iter().enumerate().find_map(|(raw, declaration)| {
-                            if matches!(declaration, crate::ast::Decl::Class(class) if class.span == range)
-                            {
-                                Some(crate::ast::DeclId(u32::try_from(raw).ok()?))
-                            } else {
-                                None
-                            }
-                        })
-                    });
-                let captures = transient
-                    .and_then(|declaration| {
-                        info.local_class_captures_by_class
-                            .get(&declaration)
-                            .or_else(|| info.anonymous_object_captures_by_class.get(&declaration))
-                    })
-                    .map_or(0, Vec::len);
-                let implicit_outer = index
-                    .declaration_header(classifier.declaration)
-                    .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::INNER));
-                u32::try_from(captures)
-                    .expect("too many checked classifier captures")
-                    .checked_add(u32::from(implicit_outer))
-                    .expect("too many constructor prefix parameters")
-            })
-            .unwrap_or(0);
-        if constructor_capture_parameter_count != 0 {
-            body.set_constructor_capture_parameter_count(constructor_capture_parameter_count);
-        }
-        let constructor_context_parameter_count = index
-            .declaration_anchor(declaration)
-            .filter(|anchor| {
-                matches!(
-                    anchor.kind,
-                    crate::fir::DeclarationKind::Constructor
-                        | crate::fir::DeclarationKind::Initializer
-                        | crate::fir::DeclarationKind::Property
-                )
-            })
-            .and(enclosing_classifier)
-            // A script's implicit receivers follow its template's constructor parameters instead.
-            .filter(|classifier| {
-                !index
-                    .declaration_header(classifier.declaration)
-                    .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::SCRIPT))
-            })
-            .and_then(|classifier| index.classifier_header(classifier.declaration))
-            .map(|classifier| {
-                u32::try_from(classifier.context_parameters.len())
-                    .expect("too many classifier context parameters")
-            })
-            .unwrap_or(0);
-        if constructor_context_parameter_count != 0 {
-            body.set_constructor_context_parameter_count(constructor_context_parameter_count);
-        }
+        constructor_capture_bindings::bind_constructor_prefix_shape(
+            &mut body,
+            file,
+            info,
+            index,
+            session,
+            declaration,
+            enclosing_classifier,
+        );
         let mut class_context = enclosing_classifier
             .and_then(|classifier| session.class_bodies.get(&classifier.declaration))
             .cloned()
@@ -1112,23 +1046,6 @@ impl BodyFirChecker<'_> {
             .find_map(|scope| scope.get(name).copied())
     }
 
-    fn binding_source_at_shadow_depth(
-        &self,
-        name: &str,
-        shadow_depth: usize,
-    ) -> Option<(Option<u32>, LocalBinding)> {
-        self.scopes
-            .iter()
-            .rev()
-            .filter_map(|scope| scope.get(name).copied().map(|binding| (None, binding)))
-            .chain(
-                self.outer_values
-                    .shadowed(name)
-                    .map(|(depth, binding)| (Some(*depth), *binding)),
-            )
-            .nth(shadow_depth)
-    }
-
     fn selected_operator(&self, expression: ExprId, name: &str) -> bool {
         self.info.resolved_operator_call(expression, name).is_some()
     }
@@ -1257,11 +1174,13 @@ impl BodyFirChecker<'_> {
                     Some(self.info.semantic_ty(expression))
                 }
                 Some(
-                    ExprLowering::BuiltinUnaryCall { .. }
+                    ExprLowering::ConstructorCaptures(_)
+                    | ExprLowering::BuiltinUnaryCall { .. }
                     | ExprLowering::RuntimeTypeTest { .. }
                     | ExprLowering::ExtensionFunctionBinding { .. }
                     | ExprLowering::PluginExpression(_)
-                    | ExprLowering::ClassStorageRead { .. }
+                    | ExprLowering::ClassStorageRead(_)
+                    | ExprLowering::EnumEntryStorageRead { .. }
                     | ExprLowering::BackingFieldRead
                     | ExprLowering::ImplicitPropertyIncDec(_)
                     | ExprLowering::LateinitInitialized { .. }
@@ -1465,15 +1384,7 @@ impl BodyFirChecker<'_> {
                             target,
                             dispatch_receiver,
                         }
-                    } else if let Some(field) = self.active_class_storage_read(expression) {
-                        let binding = match self.class_values.get(name).copied() {
-                            Some(binding) => binding,
-                            None => {
-                                let field = *field;
-                                let ty = self.expression_type(expression)?;
-                                self.direct_class_capture_binding(field, ty)?
-                            }
-                        };
+                    } else if let Some(binding) = self.active_class_storage_read(expression)? {
                         self.capture_read_kind(expression, binding)?
                     } else if let Some(ExprLowering::SingletonValue(singleton)) =
                         self.info.expr_lowers.get(&expression)
@@ -2453,24 +2364,61 @@ impl BodyFirChecker<'_> {
                     // A deferred `val` assigned from an `init` block or a constructor body. The
                     // checker already committed the owner and type; the write is a direct backing
                     // field store, exactly as an initializer would have been.
-                    let target = enum_entry_property
-                        .and_then(|sibling| self.enum_entry_property(sibling))
-                        .or_else(|| self.classifier_property_named(name))
-                        .ok_or_else(|| {
-                            self.failure(
-                                self.file.stmt_spans.get(statement.0 as usize).copied(),
-                                BodyCheckFailureKind::MissingStablePropertyTarget,
-                            )
-                        })?;
-                    FirExprKind::BackingFieldWrite {
-                        target,
-                        dispatch_receiver: self.backing_field_dispatch_receiver(
-                            target,
-                            origin,
+                    let target = match enum_entry_property {
+                        Some(selected) => self.selected_enum_entry_property(*selected),
+                        None => self.classifier_property_named(name),
+                    }
+                    .ok_or_else(|| {
+                        self.failure(
                             self.file.stmt_spans.get(statement.0 as usize).copied(),
-                        )?,
-                        value: self.expression(*value)?,
-                        conversion: None,
+                            BodyCheckFailureKind::MissingStablePropertyTarget,
+                        )
+                    })?;
+                    let dispatch_receiver = self.backing_field_dispatch_receiver(
+                        target,
+                        origin,
+                        self.file.stmt_spans.get(statement.0 as usize).copied(),
+                    )?;
+                    let header = self.index.property(target).ok_or_else(|| {
+                        self.failure(
+                            self.file.stmt_spans.get(statement.0 as usize).copied(),
+                            BodyCheckFailureKind::MissingStablePropertyTarget,
+                        )
+                    })?;
+                    if enum_entry_property.is_some() && header.mutable {
+                        let value_target = self
+                            .index
+                            .signature(header.declaration)
+                            .map(|signature| signature.result)
+                            .ok_or_else(|| {
+                                self.failure(
+                                    self.file.stmt_spans.get(statement.0 as usize).copied(),
+                                    BodyCheckFailureKind::MissingStablePropertyTarget,
+                                )
+                            })?;
+                        let checked_value = self.expression(*value)?;
+                        let conversion = self.selected_value_conversion(
+                            *value,
+                            checked_value,
+                            value_target,
+                            origin,
+                        )?;
+                        FirExprKind::PropertyWrite {
+                            target: FirPropertyTarget::of_module(target),
+                            dispatch_receiver,
+                            extension_receiver: None,
+                            context_arguments: Box::new([]),
+                            value: checked_value,
+                            conversion,
+                            substitutions: Box::new([]),
+                        }
+                    } else {
+                        FirExprKind::BackingFieldWrite {
+                            target,
+                            dispatch_receiver,
+                            value: self.expression(*value)?,
+                            conversion: None,
+                        }
                     }
                 } else if let Some(property) =
                     self.source_property_write(statement, None, *value)?

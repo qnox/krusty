@@ -60,6 +60,54 @@ impl SelectedInvokePlan {
 }
 
 impl Checker<'_> {
+    pub(super) fn record_implicit_callable_property_read(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        name: &str,
+        receiver: ImplicitReceiver,
+    ) -> Result<Option<Ty>, ()> {
+        if let Some(binding) = self.lookup(scope, name) {
+            if let ReceiverFnValueOrigin::DispatchProperty {
+                owner,
+                receiver_identity,
+                enum_entry_property: Some(property),
+                ..
+            } = binding.origin
+            {
+                if receiver_identity == receiver.identity {
+                    if !self.value_type_claims_call(scope, binding.ty) {
+                        return Ok(None);
+                    }
+                    if !self.publish_enum_entry_property_read(
+                        scope,
+                        expression,
+                        owner,
+                        property,
+                        receiver_identity,
+                    ) {
+                        self.diags.error(
+                            self.span(expression),
+                            "selected enum-entry property has no declaring receiver",
+                        );
+                        return Err(());
+                    }
+                    return Ok(Some(self.set(expression, binding.ty)));
+                }
+            }
+        }
+        let Ok(Some(selection)) = self.select_property_read(scope, receiver.ty, name) else {
+            return Ok(None);
+        };
+        if !self.value_type_claims_call(scope, selection.ty()) {
+            return Ok(None);
+        }
+        let ty = self.record_property_read(scope, Some(expression), selection);
+        self.set(expression, ty);
+        self.mark_implicit_receiver_selection(expression, receiver);
+        Ok(Some(ty))
+    }
+
     pub(super) fn invoke_operator_candidates(
         &self,
         receiver_ty: Ty,

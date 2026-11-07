@@ -6,7 +6,7 @@ use crate::ast::DeclId;
 use crate::fir::FirAnonymousSuperArgument;
 use crate::resolve::{AnonymousObjectCaptureSource, AnonymousObjectReceiverSource};
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum ConstructorCaptureOperand {
     Class(ClassCaptureBinding),
     Local(LocalBinding),
@@ -14,40 +14,155 @@ enum ConstructorCaptureOperand {
         enclosing_depth: u32,
         binding: LocalBinding,
     },
-    ImplicitReceiver {
-        receiver_depth: u32,
-    },
-}
-
-enum RequiredConstructorCapture {
-    Value(String, ClassCaptureBinding),
-    Delegate(String, ClassCaptureBinding),
-    Receiver(ClassCaptureBinding),
+    ImplicitReceiver(crate::resolve::ImplicitReceiverSelection),
 }
 
 /// The storage receiver for an outer-class capture: the receiver expression plus the capture path
 /// that remains to be walked from it.
 type StorageReceiver = Result<Option<(FirExprId, Box<[DeclarationId]>)>, BodyCheckFailure>;
 
-impl RequiredConstructorCapture {
-    fn binding(&self) -> ClassCaptureBinding {
-        match self {
-            Self::Value(_, binding) | Self::Delegate(_, binding) | Self::Receiver(binding) => {
-                *binding
+impl BodyFirChecker<'_> {
+    pub(super) fn binding_source_at_shadow_depth(
+        &self,
+        name: &str,
+        shadow_depth: usize,
+    ) -> Option<(Option<u32>, LocalBinding)> {
+        let mut seen = crate::fx_hash::HashSet::default();
+        self.scopes
+            .iter()
+            .rev()
+            .filter_map(|scope| scope.get(name).copied().map(|binding| (None, binding)))
+            .chain(
+                self.outer_values
+                    .shadowed(name)
+                    .map(|(depth, binding)| (Some(*depth), *binding)),
+            )
+            .filter(|(depth, binding)| seen.insert((*depth, binding.value)))
+            .nth(shadow_depth)
+    }
+
+    /// A construction-site super forward cannot use the anonymous constructor's capture field.
+    pub(super) fn active_class_storage_read(
+        &self,
+        expression: ExprId,
+    ) -> Result<Option<ClassCaptureBinding>, BodyCheckFailure> {
+        if self.hoist_anonymous_super_argument {
+            return Ok(None);
+        }
+        let selected = match self.info.expr_lowers.get(&expression) {
+            Some(
+                selected @ (ExprLowering::ClassStorageRead(_)
+                | ExprLowering::EnumEntryStorageRead { .. }),
+            ) => selected,
+            _ => return Ok(None),
+        };
+        let span = self
+            .file
+            .expr_span(expression)
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        let binding = match selected {
+            ExprLowering::ClassStorageRead(storage) => {
+                self.selected_class_capture_binding(*storage, span)?
             }
+            ExprLowering::EnumEntryStorageRead { owner, field } => self
+                .enum_entry_storage_binding(
+                    *owner,
+                    *field,
+                    self.expression_type(expression)?,
+                    span,
+                )?,
+            _ => unreachable!("matched storage lowering"),
+        };
+        Ok(Some(binding))
+    }
+
+    pub(super) fn selected_storage_owner(
+        &self,
+        storage: crate::resolve::ClassStorageSource,
+        span: Option<Span>,
+    ) -> Result<DeclarationId, BodyCheckFailure> {
+        self.index
+            .classifier_declaration(storage.owner)
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))
+    }
+
+    // The existing storage channel carries an entry-local ordinal; keep its declaration-ancestry
+    // projection here. Explicit selected-property reads use their recorded entry declaration.
+    fn enum_entry_property(&self, sibling: u32) -> Option<PropertyId> {
+        let mut owner = crate::fir::DeclarationId::from_raw(self.body.owner().raw());
+        loop {
+            let anchor = self.index.declaration_anchor(owner)?;
+            if anchor.kind == crate::fir::DeclarationKind::EnumEntry {
+                break;
+            }
+            owner = anchor.owner?;
+        }
+        let declaration =
+            self.index
+                .owned_declaration(owner, crate::fir::DeclarationKind::Property, sibling)?;
+        self.index.property_for_declaration(declaration)
+    }
+
+    pub(super) fn selected_enum_entry_storage_owner(
+        &self,
+        expected: crate::types::TypeName,
+        field: u32,
+        span: Option<Span>,
+    ) -> Result<DeclarationId, BodyCheckFailure> {
+        let property = self
+            .enum_entry_property(field)
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
+        let declaration = self
+            .index
+            .property_declaration(property)
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
+        let owner = self
+            .index
+            .declaration_anchor(declaration)
+            .and_then(|anchor| anchor.owner)
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
+        if !crate::resolve::enum_entry_storage_owner_matches(self.index, owner, expected)
+            || self
+                .index
+                .declaration_anchor(owner)
+                .map(|anchor| anchor.kind)
+                != Some(DeclarationKind::EnumEntry)
+            || self
+                .index
+                .owned_declaration(owner, DeclarationKind::Property, field)
+                != Some(declaration)
+        {
+            return Err(self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget));
+        }
+        Ok(owner)
+    }
+
+    pub(super) fn enum_entry_storage_binding(
+        &self,
+        expected: crate::types::TypeName,
+        field: u32,
+        ty: ResolvedTy,
+        span: Span,
+    ) -> Result<ClassCaptureBinding, BodyCheckFailure> {
+        let owner = self.selected_enum_entry_storage_owner(expected, field, Some(span))?;
+        match self.selected_storage_capture_binding(owner, field, span)? {
+            Some(binding) => Ok(binding),
+            None => self.declared_class_storage_binding(owner, field, ty),
         }
     }
-}
 
-impl BodyFirChecker<'_> {
-    /// A construction-site super forward cannot use the anonymous constructor's capture field.
-    pub(super) fn active_class_storage_read(&self, expression: ExprId) -> Option<&u32> {
-        (!self.hoist_anonymous_super_argument)
-            .then(|| match self.info.expr_lowers.get(&expression) {
-                Some(ExprLowering::ClassStorageRead { field }) => Some(field),
-                _ => None,
-            })
-            .flatten()
+    pub(super) fn selected_class_capture_binding(
+        &self,
+        storage: crate::resolve::ClassStorageSource,
+        span: Span,
+    ) -> Result<ClassCaptureBinding, BodyCheckFailure> {
+        self.selected_storage_owner(storage, Some(span))?;
+        let binding = self
+            .class_capture_binding(storage.identity)
+            .ok_or_else(|| {
+                self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+            })?;
+        Ok(binding)
     }
 
     /// Publish the capture prefix for a local-class construction that crosses a streamed body
@@ -58,159 +173,224 @@ impl BodyFirChecker<'_> {
         &mut self,
         constructor: DeclarationId,
         origin: OriginId,
+        span: Span,
+        plan: Option<&crate::resolve::ConstructorCapturePlan>,
     ) -> Result<Option<Box<[FirConstructorCaptureArgument]>>, BodyCheckFailure> {
         let Some(classifier) = self.index.enclosing_classifier(constructor) else {
             return Ok(None);
         };
-        if self.body.owns_class_body_context(classifier.declaration) {
+        if !self
+            .index
+            .owns_local_capture_environment(classifier.declaration)
+            || self.body.owns_class_body_context(classifier.declaration)
+        {
             return Ok(None);
         }
-        let Some(context) = self
+        let context = self
             .session
             .class_bodies
             .get(&classifier.declaration)
             .cloned()
-        else {
-            return Ok(None);
-        };
+            .ok_or_else(|| {
+                self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+            })?;
+        let plan = plan.ok_or_else(|| {
+            self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+        })?;
         let value_captures = if context.capture_values.is_empty() {
             context.values.into_iter().collect::<Vec<_>>()
         } else {
             context.capture_values
         };
-        let mut required = value_captures
-            .into_iter()
-            .map(|(name, binding)| RequiredConstructorCapture::Value(name, binding))
-            .chain(
-                context
-                    .delegates
-                    .into_iter()
-                    .filter_map(|(name, delegate)| {
-                        let DelegateStorage::ClassField(binding) = delegate.storage else {
-                            return None;
-                        };
-                        Some(RequiredConstructorCapture::Delegate(name, binding))
-                    }),
-            )
-            .chain(
-                context
-                    .receivers
-                    .into_iter()
-                    .map(RequiredConstructorCapture::Receiver),
-            )
-            .collect::<Vec<_>>();
-        required.sort_unstable_by_key(|capture| capture.binding().field);
+        let mut required =
+            value_captures
+                .into_iter()
+                .map(|(_, binding)| binding)
+                .chain(context.delegates.into_values().filter_map(
+                    |delegate| match delegate.storage {
+                        DelegateStorage::ClassField(binding) => Some(binding),
+                        _ => None,
+                    },
+                ))
+                .chain(context.receivers)
+                .collect::<Vec<_>>();
+        required.sort_by_key(|capture| capture.field);
         for pair in required.windows(2) {
-            let left = pair[0].binding();
-            let right = pair[1].binding();
-            if left.owner == right.owner
-                && left.field == right.field
-                && (left.ty != right.ty || left.shared_cell != right.shared_cell)
+            if pair[0].owner == pair[1].owner
+                && pair[0].field == pair[1].field
+                && !pair[0].same_storage(pair[1])
             {
-                return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
+                return Err(self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape));
             }
         }
-        required.dedup_by_key(|capture| {
-            let binding = capture.binding();
-            (binding.owner, binding.field)
-        });
+        required.dedup_by(|left, right| left.same_storage(*right));
+        let mut identities = crate::fx_hash::HashSet::default();
+        for binding in &required {
+            if !binding
+                .capture_identity
+                .is_some_and(|identity| identities.insert(identity))
+            {
+                return Err(self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget));
+            }
+        }
+        use crate::resolve::{ConstructorCapturePlan as Plan, ConstructorCaptureSource as Source};
+        let operands = match plan {
+            Plan::OwnStorage(owner) => {
+                if *owner != classifier.classifier
+                    || self.current_storage_owner() != Some(classifier.declaration)
+                {
+                    return Err(
+                        self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    );
+                }
+                required
+                    .iter()
+                    .map(|required| {
+                        let identity = required.capture_identity.ok_or_else(|| {
+                            self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                        })?;
+                        self.class_capture_binding(identity)
+                            .map(ConstructorCaptureOperand::Class)
+                            .ok_or_else(|| {
+                                self.failure(
+                                    Some(span),
+                                    BodyCheckFailureKind::MissingStableCallTarget,
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+            Plan::Selected(projected) => {
+                if projected.len() != required.len() {
+                    return Err(
+                        self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    );
+                }
+                required
+                    .iter()
+                    .map(|required| {
+                        let identity = required.capture_identity.ok_or_else(|| {
+                            self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                        })?;
+                        let mut selected = projected
+                            .iter()
+                            .filter(|projection| projection.required == identity);
+                        let projection = selected
+                            .next()
+                            .filter(|_| selected.next().is_none())
+                            .ok_or_else(|| {
+                                self.failure(
+                                    Some(span),
+                                    BodyCheckFailureKind::MissingStableCallTarget,
+                                )
+                            })?;
+                        match &projection.source {
+                            Source::Captured => self
+                                .class_capture_binding(identity)
+                                .map(ConstructorCaptureOperand::Class)
+                                .ok_or_else(|| {
+                                    self.failure(
+                                        Some(span),
+                                        BodyCheckFailureKind::MissingStableCallTarget,
+                                    )
+                                }),
+                            Source::ClassStorage(storage) => self
+                                .selected_class_capture_binding(*storage, span)
+                                .map(ConstructorCaptureOperand::Class),
+                            Source::EnumEntryProperty { owner, ordinal } => {
+                                if identity
+                                    != (ClassCaptureIdentity::DeclaredProperty {
+                                        owner: *owner,
+                                        ordinal: *ordinal,
+                                    })
+                                {
+                                    return Err(self.failure(
+                                        Some(span),
+                                        BodyCheckFailureKind::MissingStableCallTarget,
+                                    ));
+                                }
+                                self.enum_entry_storage_binding(*owner, *ordinal, required.ty, span)
+                                    .map(ConstructorCaptureOperand::Class)
+                            }
+                            Source::Receiver(receiver) => Ok(
+                                ConstructorCaptureOperand::ImplicitReceiver(receiver.clone()),
+                            ),
+                            Source::Lexical {
+                                name,
+                                shadow_depth,
+                                delegated: false,
+                            } => {
+                                let (depth, binding) = self
+                                    .binding_source_at_shadow_depth(name, *shadow_depth as usize)
+                                    .ok_or_else(|| {
+                                        self.failure(
+                                            Some(span),
+                                            BodyCheckFailureKind::MissingStableCallTarget,
+                                        )
+                                    })?;
+                                Ok(match depth {
+                                    None => ConstructorCaptureOperand::Local(binding),
+                                    Some(enclosing_depth) => ConstructorCaptureOperand::Captured {
+                                        enclosing_depth,
+                                        binding,
+                                    },
+                                })
+                            }
+                            Source::Lexical {
+                                name,
+                                shadow_depth,
+                                delegated: true,
+                            } => {
+                                let (depth, delegate) = self
+                                    .delegate_scopes
+                                    .iter()
+                                    .rev()
+                                    .filter_map(|scope| {
+                                        scope.get(name).cloned().map(|binding| (None, binding))
+                                    })
+                                    .chain(
+                                        self.outer_delegates
+                                            .get(name)
+                                            .cloned()
+                                            .map(|(depth, binding)| (Some(depth), binding)),
+                                    )
+                                    .nth(*shadow_depth as usize)
+                                    .ok_or_else(|| {
+                                        self.failure(
+                                            Some(span),
+                                            BodyCheckFailureKind::MissingStableCallTarget,
+                                        )
+                                    })?;
+                                Ok(match delegate.storage {
+                                    DelegateStorage::ClassField(binding) => {
+                                        ConstructorCaptureOperand::Class(binding)
+                                    }
+                                    DelegateStorage::Local(binding) => match depth {
+                                        None => ConstructorCaptureOperand::Local(binding),
+                                        Some(enclosing_depth) => {
+                                            ConstructorCaptureOperand::Captured {
+                                                enclosing_depth,
+                                                binding,
+                                            }
+                                        }
+                                    },
+                                })
+                            }
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+        };
         if required.is_empty() {
             return Ok(None);
-        }
-
-        let operands = required
-            .iter()
-            .map(|required| {
-                let binding = required.binding();
-                let class = self
-                    .class_capture_values
-                    .iter()
-                    .map(|(_, binding)| *binding)
-                    .chain(self.class_values.values().copied())
-                    .chain(self.class_delegates.values().filter_map(|delegate| {
-                        if let DelegateStorage::ClassField(binding) = delegate.storage {
-                            Some(binding)
-                        } else {
-                            None
-                        }
-                    }))
-                    .chain(self.class_receivers.iter().copied())
-                    .find(|available| {
-                        (available.owner == binding.owner && available.field == binding.field)
-                            || binding.capture_identity.is_some()
-                                && available.capture_identity == binding.capture_identity
-                    })
-                    .or_else(|| match required {
-                        RequiredConstructorCapture::Value(name, _) => {
-                            self.class_values.get(name).copied()
-                        }
-                        RequiredConstructorCapture::Delegate(name, _) => self
-                            .class_delegates
-                            .get(name)
-                            .and_then(|delegate| match delegate.storage {
-                                DelegateStorage::ClassField(binding) => Some(binding),
-                                DelegateStorage::Local(_) => None,
-                            }),
-                        RequiredConstructorCapture::Receiver(required) => {
-                            self.class_receivers.iter().copied().find(|available| {
-                                available.semantic_receiver_depth
-                                    == required.semantic_receiver_depth
-                                    && available.ty == required.ty
-                            })
-                        }
-                    })
-                    .map(ConstructorCaptureOperand::Class);
-                class.or_else(|| match required {
-                    RequiredConstructorCapture::Value(name, _) => self
-                        .local_binding(name)
-                        .map(ConstructorCaptureOperand::Local)
-                        .or_else(|| {
-                            self.outer_values.get(name).copied().map(
-                                |(enclosing_depth, binding)| ConstructorCaptureOperand::Captured {
-                                    enclosing_depth,
-                                    binding,
-                                },
-                            )
-                        }),
-                    RequiredConstructorCapture::Delegate(name, _) => self
-                        .local_delegate(name)
-                        .and_then(|delegate| delegate.storage.local())
-                        .map(ConstructorCaptureOperand::Local)
-                        .or_else(|| {
-                            self.outer_delegates.get(name).and_then(
-                                |(enclosing_depth, delegate)| {
-                                    delegate.storage.local().map(|binding| {
-                                        ConstructorCaptureOperand::Captured {
-                                            enclosing_depth: *enclosing_depth,
-                                            binding,
-                                        }
-                                    })
-                                },
-                            )
-                        }),
-                    RequiredConstructorCapture::Receiver(binding) => binding
-                        .semantic_receiver_depth
-                        .and_then(|depth| depth.checked_sub(1))
-                        .map(
-                            |receiver_depth| ConstructorCaptureOperand::ImplicitReceiver {
-                                receiver_depth,
-                            },
-                        ),
-                })
-            })
-            .collect::<Vec<_>>();
-        if operands.iter().any(Option::is_none) {
-            return Err(self.failure(None, BodyCheckFailureKind::MissingStableCallTarget));
         }
 
         required
             .into_iter()
             .zip(operands)
             .map(|(required, operand)| {
-                let required = required.binding();
-                let operand = operand.expect("complete checked capture operand set");
-                let available = match operand {
-                    ConstructorCaptureOperand::Class(binding) => binding,
+                let available = match &operand {
+                    ConstructorCaptureOperand::Class(binding) => *binding,
                     ConstructorCaptureOperand::Local(binding)
                     | ConstructorCaptureOperand::Captured { binding, .. } => ClassCaptureBinding {
                         owner: required.owner,
@@ -224,7 +404,7 @@ impl BodyFirChecker<'_> {
                         capture_identity: required.capture_identity,
                         lexical_binding: required.lexical_binding,
                     },
-                    ConstructorCaptureOperand::ImplicitReceiver { .. } => required,
+                    ConstructorCaptureOperand::ImplicitReceiver(_) => required,
                 };
                 if available.ty != required.ty
                     || available.shared_cell != required.shared_cell
@@ -265,22 +445,13 @@ impl BodyFirChecker<'_> {
                             required.shared_cell,
                         )
                     }
-                    ConstructorCaptureOperand::ImplicitReceiver { receiver_depth } => {
+                    ConstructorCaptureOperand::ImplicitReceiver(selection) => {
+                        if selection.ty != required.ty.get() {
+                            return Err(self
+                                .failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape));
+                        }
                         let receiver = self
-                            .materialize_implicit_receiver(
-                                origin,
-                                None,
-                                &crate::resolve::ImplicitReceiverSelection {
-                                    ty: required.ty.get(),
-                                    current: receiver_depth == 0,
-                                    receiver_depth: receiver_depth as usize,
-                                    classifier: None,
-                                    context_binding: None,
-                                    singleton: None,
-                                    context_parameter: false,
-                                    construction_sites: Vec::new(),
-                                },
-                            )?
+                            .materialize_implicit_receiver(origin, Some(span), &selection)?
                             .ok_or_else(|| {
                                 self.failure(None, BodyCheckFailureKind::MissingStableCallTarget)
                             })?;
@@ -362,11 +533,21 @@ impl BodyFirChecker<'_> {
     /// can share a source spelling while denoting different fields, so this lookup deliberately
     /// has no name-based recovery path.
     fn class_capture_binding(&self, identity: ClassCaptureIdentity) -> Option<ClassCaptureBinding> {
-        self.class_capture_values
+        let candidates = self
+            .class_capture_values
             .iter()
             .map(|(_, binding)| *binding)
-            .filter(|binding| binding.capture_identity == Some(identity))
-            .min_by_key(|binding| binding.enclosing_depth)
+            .chain(self.class_receivers.iter().copied())
+            .filter(|binding| binding.capture_identity == Some(identity));
+        let depth = candidates
+            .clone()
+            .map(|binding| binding.enclosing_depth)
+            .min()?;
+        let mut nearest = candidates.filter(|binding| binding.enclosing_depth == depth);
+        let selected = nearest.next()?;
+        nearest
+            .all(|binding| binding == selected)
+            .then_some(selected)
     }
 
     /// The nearest class field that stores the binding whose lexical identity is `identity`.
@@ -593,27 +774,12 @@ impl BodyFirChecker<'_> {
             })
     }
 
-    /// Publish a resolver-selected direct storage read with its stable owner and, inside a local
-    /// callable, the exact lifted dispatch receiver that supplies that storage.
-    pub(super) fn direct_class_storage_read_kind(
-        &mut self,
-        field: u32,
-        ty: ResolvedTy,
-        origin: OriginId,
-    ) -> Result<FirExprKind, BodyCheckFailure> {
-        let binding = self.direct_class_capture_binding(field, ty)?;
-        self.class_storage_read_kind(binding, origin)
-    }
-
-    /// The binding of field `field` of the class whose storage this body reads directly.
-    pub(super) fn direct_class_capture_binding(
+    fn declared_class_storage_binding(
         &self,
+        owner: DeclarationId,
         field: u32,
         ty: ResolvedTy,
     ) -> Result<ClassCaptureBinding, BodyCheckFailure> {
-        let owner = self
-            .current_storage_owner()
-            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingStableCallTarget))?;
         let receiver_source = if self.body.local_callable().is_some() {
             Some(
                 self.enclosing_storage_receiver_source(owner)
@@ -1001,20 +1167,12 @@ impl BodyFirChecker<'_> {
         };
         for (field, capture) in captures.iter().enumerate() {
             let field = u32::try_from(field).expect("too many local-class captures");
-            let field_identity = ClassCaptureIdentity::Field {
-                owner: capture_owner,
-                field,
-            };
-            // A receiver rung is normalized once, at capture publication, into the closure id.
-            // Hoisting an anonymous super argument still stores an enclosing class instance as
-            // this classifier's own field; that instance has no closure id.
-            let capture_identity = if let Some(receiver) = capture.receiver_capture {
-                Some(ClassCaptureIdentity::Receiver(receiver))
-            } else if self.hoist_anonymous_super_argument && capture.semantic_receiver.is_some() {
-                Some(field_identity)
-            } else {
-                capture.capture_dependency.or(Some(field_identity))
-            };
+            let logical_identity = capture.logical_identity(capture_owner).ok_or_else(|| {
+                self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+            })?;
+            // Transport the selected value identity independently of this declaration's final
+            // constructor-prefix position, retaining the complete binding's physical role below.
+            let capture_identity = Some(logical_identity);
             let mut ty = self.resolved_type(span, capture.ty)?;
             // A captured delegated property is its delegate's variable, named as such.
             let mut name = capture.name.clone();
@@ -1149,21 +1307,41 @@ impl BodyFirChecker<'_> {
                         return Err(self.failure(Some(span), BodyCheckFailureKind::UnknownLocal));
                     }
                 }
-                AnonymousObjectCaptureSource::ClassStorage {
-                    field: source_field,
-                } => {
-                    let source_owner = self.current_storage_owner().ok_or_else(|| {
-                        self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
-                    })?;
-                    let source_binding =
-                        self.selected_storage_capture_binding(source_owner, source_field, span)?;
+                source @ (AnonymousObjectCaptureSource::ClassStorage(_)
+                | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. }) => {
+                    let (source_binding, declared_property) = match source {
+                        AnonymousObjectCaptureSource::ClassStorage(storage) => (
+                            Some(self.selected_class_capture_binding(storage, span)?),
+                            None,
+                        ),
+                        AnonymousObjectCaptureSource::EnumEntryPropertyStorage {
+                            owner: expected,
+                            field,
+                        } => {
+                            let owner = self.selected_enum_entry_storage_owner(
+                                expected,
+                                field,
+                                Some(span),
+                            )?;
+                            (
+                                self.selected_storage_capture_binding(owner, field, span)?,
+                                Some((owner, field)),
+                            )
+                        }
+                        _ => unreachable!("matched storage source"),
+                    };
                     instance_owner =
                         source_binding.and_then(|binding| binding.enclosing_instance_owner);
                     let hoisted_receiver = self
                         .hoist_anonymous_super_argument
                         .then_some(capture.semantic_receiver)
                         .flatten();
-                    if hoisted_receiver.is_none() {
+                    if hoisted_receiver.is_none()
+                        && matches!(
+                            source,
+                            AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. }
+                        )
+                    {
                         if let Some(identity) = capture.capture_dependency {
                             let Some(binding) = source_binding else {
                                 return Err(self.failure(
@@ -1230,11 +1408,8 @@ impl BodyFirChecker<'_> {
                         } else if let Some((receiver, path)) =
                             self.captured_class_storage_receiver(binding, origin)?
                         {
-                            // The receiver walk `captured_class_storage_receiver` builds lands on
-                            // `binding.owner`, so the field index must be that binding's own, as
-                            // both sibling outcomes use. `source_field` numbers the capture in the
-                            // anonymous object being DECLARED, and reading it from the enclosing
-                            // class addresses a field that class may not even have.
+                            // The selected logical value's realized binding owns both the receiver
+                            // walk and its finalized constructor-capture coordinate.
                             FirLocalClassCaptureSource::CapturedClassStorage {
                                 owner: binding.owner,
                                 receiver,
@@ -1249,6 +1424,8 @@ impl BodyFirChecker<'_> {
                             }
                         }
                     } else {
+                        let (source_owner, source_field) = declared_property
+                            .expect("only declared property storage can have no capture binding");
                         if self.reads_constructor_prefix_capture(source_owner, 0) {
                             FirLocalClassCaptureSource::ConstructorCapture {
                                 owner: source_owner,
@@ -1355,6 +1532,37 @@ impl BodyFirChecker<'_> {
             {
                 binding.enclosing_instance_owner = instance_owner;
             }
+            // A resolved forward and each constructor demand retain lookup views of this same
+            // physical operand. Never change the canonical capture or introduce another ABI slot.
+            let mut views = capture.constructor_projections.clone();
+            if let Some(source) = capture.source_identity(capture_owner) {
+                if !views.contains(&source) {
+                    views.push(source);
+                }
+            }
+            if views.iter().any(|view| Some(*view) != capture_identity) {
+                let binding = context
+                    .capture_values
+                    .iter()
+                    .map(|(_, binding)| *binding)
+                    .chain(context.receivers.iter().copied())
+                    .find(|binding| binding.owner == declaration && binding.field == field)
+                    .ok_or_else(|| {
+                        self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    })?;
+                for view in views
+                    .into_iter()
+                    .filter(|view| Some(*view) != capture_identity)
+                {
+                    context.capture_values.push((
+                        capture.name.clone(),
+                        ClassCaptureBinding {
+                            capture_identity: Some(view),
+                            ..binding
+                        },
+                    ));
+                }
+            }
             checked.push(FirLocalClassCapture {
                 origin,
                 name: name.into_boxed_str(),
@@ -1366,32 +1574,26 @@ impl BodyFirChecker<'_> {
                 stored: true,
             });
         }
-        if !context.values.is_empty()
-            || !context.delegates.is_empty()
-            || !context.callables.is_empty()
-            || !context.receivers.is_empty()
-            || context.enclosing_property.is_some()
-        {
-            crate::trace_compiler!(
-                "fir",
-                "record class capture context declaration={declaration:?} values={} delegates={} callables={} receivers={}",
-                context.values.len(),
-                context.delegates.len(),
-                context.callables.len(),
-                context.receivers.len(),
-            );
-            // This is part of the checked FIR fragment's closure semantics. If the surrounding
-            // body is inline or a default expression, it survives only as payload of that retained
-            // body. The session copy serves sibling body callbacks in the current pass and is
-            // always transient.
-            self.body
-                .record_class_body_context(declaration, context.clone());
-            self.session
-                .class_bodies
-                .entry(declaration)
-                .or_default()
-                .merge(context);
-        }
+        // Retain a positive checked-empty environment too: absence means unavailable, not zero.
+        crate::trace_compiler!(
+            "fir",
+            "record class capture context declaration={declaration:?} values={} delegates={} callables={} receivers={}",
+            context.values.len(),
+            context.delegates.len(),
+            context.callables.len(),
+            context.receivers.len(),
+        );
+        // This is part of the checked FIR fragment's closure semantics. If the surrounding
+        // body is inline or a default expression, it survives only as payload of that retained
+        // body. The session copy serves sibling body callbacks in the current pass and is
+        // always transient.
+        self.body
+            .record_class_body_context(declaration, context.clone());
+        self.session
+            .class_bodies
+            .entry(declaration)
+            .or_default()
+            .merge(context);
         Ok(checked.into_boxed_slice())
     }
 
@@ -1710,7 +1912,8 @@ impl BodyFirChecker<'_> {
                     depth == source_depth
                 }
                 AnonymousObjectCaptureSource::LexicalValue
-                | AnonymousObjectCaptureSource::ClassStorage { .. } => false,
+                | AnonymousObjectCaptureSource::ClassStorage(_)
+                | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. } => false,
             }
         }) else {
             return Ok(None);

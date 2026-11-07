@@ -140,3 +140,74 @@ fn enum_entry_initialization_retains_the_selected_entry_owner() {
         })
     );
 }
+
+#[test]
+fn selected_enum_properties_apply_their_registered_entry_receiver() {
+    let ir = lower_single_source_with_jvm_stdlib(
+        include_str!("../../../tests/box_regressions/enumEntryReceiverFunctionProperty.kt"),
+        "EnumEntryReceiverFunctionProperty",
+    );
+    let entries = ir
+        .checked_enum_entry_classes
+        .values()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(entries.len(), 1, "one complete-program entry subclass");
+    let mut selected_reads = 0;
+    for expression in &ir.exprs {
+        let IrExpr::Checked(operation) = expression else {
+            continue;
+        };
+        let (target, receiver) = match &**operation {
+            crate::ir::IrCheckedOperation::PropertyRead {
+                target,
+                dispatch_receiver,
+                ..
+            }
+            | crate::ir::IrCheckedOperation::PropertyWrite {
+                target,
+                dispatch_receiver,
+                ..
+            }
+            | crate::ir::IrCheckedOperation::BackingFieldRead {
+                target,
+                dispatch_receiver,
+            }
+            | crate::ir::IrCheckedOperation::BackingFieldWrite {
+                target,
+                dispatch_receiver,
+                ..
+            }
+            | crate::ir::IrCheckedOperation::LateinitFieldRead {
+                target,
+                dispatch_receiver,
+            } => (target, dispatch_receiver),
+            _ => continue,
+        };
+        let property = ir
+            .checked_properties
+            .get(target)
+            .expect("selected property declaration");
+        let Some(class) = property.class.filter(|class| entries.contains(class)) else {
+            continue;
+        };
+        let receiver = receiver.expect("an entry-owned property needs its selected instance");
+        let IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::Cast,
+            type_operand,
+            ..
+        } = ir.expr(receiver)
+        else {
+            panic!("the selected entry's receiver application must precede property use")
+        };
+        assert_eq!(
+            *type_operand,
+            Ty::obj_name(ir.classes[class as usize].fq_name_id())
+        );
+        selected_reads += 1;
+    }
+    assert!(
+        selected_reads > 0,
+        "the whole program must exercise entry-owned operations"
+    );
+}

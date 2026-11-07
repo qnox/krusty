@@ -546,21 +546,19 @@ impl BodyFirChecker<'_> {
         })
     }
 
-    /// The checker has already selected an enum-entry property by its owner-local structural
-    /// ordinal. Convert that transient coordinate to the stable module property identity before
-    /// publishing FIR; neither common lowering nor the backend sees the ordinal or source name.
-    pub(super) fn enum_entry_property(&self, sibling: u32) -> Option<PropertyId> {
-        let mut owner = crate::fir::DeclarationId::from_raw(self.body.owner().raw());
-        loop {
-            let anchor = self.index.declaration_anchor(owner)?;
-            if anchor.kind == crate::fir::DeclarationKind::EnumEntry {
-                break;
-            }
-            owner = anchor.owner?;
+    pub(super) fn selected_enum_entry_property(
+        &self,
+        selected: crate::resolve::EnumEntryProperty,
+    ) -> Option<PropertyId> {
+        let owner = selected.owner?;
+        if self.index.declaration_anchor(owner)?.kind != crate::fir::DeclarationKind::EnumEntry {
+            return None;
         }
-        let declaration =
-            self.index
-                .owned_declaration(owner, crate::fir::DeclarationKind::Property, sibling)?;
+        let declaration = self.index.owned_declaration(
+            owner,
+            crate::fir::DeclarationKind::Property,
+            selected.sibling,
+        )?;
         self.index.property_for_declaration(declaration)
     }
 
@@ -1020,13 +1018,15 @@ impl BodyFirChecker<'_> {
                 property,
             }));
         }
-        if let Some(ExprLowering::EnumEntryPropertyRead { sibling }) = selected.as_ref() {
-            let target = self.enum_entry_property(*sibling).ok_or_else(|| {
-                self.failure(
-                    self.file.expr_span(expression),
-                    BodyCheckFailureKind::MissingStablePropertyTarget,
-                )
-            })?;
+        if let Some(ExprLowering::EnumEntryPropertyRead { property }) = selected.as_ref() {
+            let target = self
+                .selected_enum_entry_property(*property)
+                .ok_or_else(|| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::MissingStablePropertyTarget,
+                    )
+                })?;
             let dispatch_receiver = self.implicit_receiver(expression)?.ok_or_else(|| {
                 self.failure(
                     self.file.expr_span(expression),
@@ -1465,11 +1465,13 @@ impl BodyFirChecker<'_> {
                 return Ok(None);
             }
             Some(
-                ExprLowering::BuiltinUnaryCall { .. }
+                ExprLowering::ConstructorCaptures(_)
+                | ExprLowering::BuiltinUnaryCall { .. }
                 | ExprLowering::RuntimeTypeTest { .. }
                 | ExprLowering::ExtensionFunctionBinding { .. }
                 | ExprLowering::PluginExpression(_)
-                | ExprLowering::ClassStorageRead { .. }
+                | ExprLowering::ClassStorageRead(_)
+                | ExprLowering::EnumEntryStorageRead { .. }
                 | ExprLowering::EnumEntryPropertyRead { .. }
                 | ExprLowering::BackingFieldRead
                 | ExprLowering::ImplicitPropertyIncDec(_)

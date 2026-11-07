@@ -85,7 +85,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
       # `java -version`.
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: temurin
           java-version: '17'
@@ -107,7 +107,7 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: temurin
           java-version: '17'
@@ -154,7 +154,7 @@ jobs:
       # krusty-toolchain's oracle builds the Build Tools API implementation with its Gradle
       # wrapper, which does not run on JDK 25; the coverage gate points it at JDK 21. The last
       # version listed stays JAVA_HOME.
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
           java-version: |
@@ -275,7 +275,7 @@ jobs:
       # Reuse coverage's exact compiler e2e executable for its ignored plugin/KSP controls.
       # This pass runs after the coverage report and does not change its measured workload.
       - *plugin-host-runtime-cache
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: temurin
           java-version: '17'
@@ -308,7 +308,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
       # `java -version`.
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: temurin
           java-version: '17'
@@ -342,7 +342,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
       # `java -version`.
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: temurin
           java-version: '17'
@@ -379,7 +379,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
       # `java -version`.
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: temurin
           java-version: '17'
@@ -435,7 +435,7 @@ jobs:
       # Kotlin's CLI corpus names JDK 8, 11, 17 and 21 homes; kotlin_cli_jvm_conformance finds them
       # through the JAVA_HOME_<release>_X64 variables this exports and fails a case it cannot run.
       # The last version listed stays JAVA_HOME.
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
           java-version: |
@@ -465,11 +465,11 @@ jobs:
           # serialization/KSP inputs exist. Every key still identifies one exact compiler version.
           key: kotlin-${{ matrix.target }}-conformance-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       - name: cache Wasm target KLIB dependencies (${{ matrix.version }})
-        if: matrix.target == 'wasm'
+        if: startsWith(matrix.target, 'wasm-')
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/krusty-deps
-          key: wasm-target-klibs-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          key: wasm-target-klibs-v1-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       # Native cases are analyzed against this version's Kotlin/Native stdlib KLIB.
       # `scripts/kotlin-native.sh` re-downloads a restored root whose stdlib payload is incomplete.
       - name: cache Kotlin/Native distribution (${{ matrix.version }})
@@ -671,21 +671,20 @@ jobs:
       # lane analyzes against its exact wasm-js or wasm-wasi stdlib KLIB before target
       # emission. They remain separate because Kotlin publishes different platform surfaces.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: matrix.target == 'wasm'
+        if: startsWith(matrix.target, 'wasm-')
         with:
           node-version: '22'
       - name: run wasm box conformance ${{ matrix.version }}
-        if: matrix.target == 'wasm'
+        if: startsWith(matrix.target, 'wasm-')
         env:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: |
           set -euo pipefail
           chmod +x conformance-bin
-          for lane in wasm-js wasm-wasi; do
-            just wasm-conformance-run "$lane" "$PWD/conformance-bin" "${{ matrix.version }}"
-          done
+          just wasm-conformance-run "${{ matrix.target }}" "$PWD/conformance-bin" "${{ matrix.version }}"
+      # Focused Wasm checks exercise both targets; run that complete inventory once per version.
       - name: run focused Wasm conformance ${{ matrix.version }}
-        if: matrix.target == 'wasm'
+        if: matrix.target == 'wasm-js'
         env:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: just wasm-conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
@@ -693,11 +692,11 @@ jobs:
         # The maximum Native row already runs every focused KLIB unit test above. The remaining
         # Native rows and every Wasm row run this one provider-owned ratchet against their exact
         # selected stdlib, so no version or target can hide a newly bodyless declaration.
-        if: matrix.target == 'wasm' || (matrix.target == 'native' && matrix.version != needs.build-tool-bins.outputs.max)
+        if: startsWith(matrix.target, 'wasm-') || (matrix.target == 'native' && matrix.version != needs.build-tool-bins.outputs.max)
         env:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_REQUIRE_KLIB: "1"
-          KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS: ${{ matrix.target == 'native' && 'native' || 'wasm-js,wasm-wasi' }}
+          KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS: ${{ matrix.target }}
           KRUSTY_TEST_TIMEOUT_SECONDS: "600"
         run: |
           set -euo pipefail
@@ -754,10 +753,10 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
-        target: [native, wasm]
-    # Native corpus rows use hosted capacity; Wasm keeps its existing self-hosted route.
-    # Fork pull requests continue to use hosted runners for both targets.
-    runs-on: ${{ (matrix.target == 'native' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+        target: [native, wasm-js, wasm-wasi]
+    # Independent Wasm targets use scaling hosted capacity, as Native does. A JS ratchet failure
+    # cannot suppress WASI measurement or occupy the same runner before WASI can start.
+    runs-on: ubuntu-latest
     steps: *conformance-steps
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
@@ -821,11 +820,11 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
           cache-provider: basic
       - name: build portable local-Maven distribution
@@ -859,11 +858,11 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
           cache-provider: basic
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -906,7 +905,7 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
           java-version: '17'
@@ -919,9 +918,14 @@ jobs:
       - name: provision the Android integration SDK
         if: steps.android.outputs.enabled == 'true'
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        # SDK installation and downloader state belong to one matrix job, including reruns.
+        env:
+          ANDROID_SDK_ROOT: ${{ runner.temp }}/krusty-android/${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/sdk
+          ANDROID_HOME: ${{ runner.temp }}/krusty-android/${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/sdk
+          ANDROID_USER_HOME: ${{ runner.temp }}/krusty-android/${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/user
         with:
           packages: 'platforms;android-36'
-      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
           gradle-version: ${{ matrix.gradle }}
           # The integration harness deliberately uses an isolated user home below. Do not restore
@@ -951,6 +955,8 @@ jobs:
           echo "KRUSTY_GRADLE_PLUGIN_PROJECT=$PWD/dist-gradle/unpacked/krusty-gradle-plugin-$version" >> "$GITHUB_ENV"
       - name: run Gradle ${{ matrix.gradle }} integration with Kotlin ${{ matrix.kotlin }}
         env:
+          # setup-android exports both SDK aliases; retain its isolated user state here too.
+          ANDROID_USER_HOME: ${{ runner.temp }}/krusty-android/${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/user
           KRUSTY_GRADLE_TEST_BIN: ${{ github.workspace }}/krusty
           KRUSTY_GRADLE_KGP_VERSION: ${{ matrix.kotlin }}
           KRUSTY_GRADLE_VERSION: ${{ matrix.gradle }}
@@ -990,7 +996,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - uses: actions/setup-java@v6.1.0
+      - uses: actions/setup-java@v6.2.0
         with:
           distribution: zulu
           java-version: '17'
@@ -1025,7 +1031,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - uses: actions/setup-java@v6.1.0
+      - uses: actions/setup-java@v6.2.0
         with:
           distribution: zulu
           java-version: '17'
@@ -1102,13 +1108,11 @@ jobs:
           scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
 
   # Every covered master commit builds its own immutable release artifacts, even after master
-  # advances. Cap each matrix at two runners so release packaging shares capacity with PR gates.
+  # advances. All six platforms can build concurrently on their hosted runners.
   build-release:
-    needs: [ci]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
         target:
           - { triple: x86_64-unknown-linux-gnu,  os: ubuntu-latest }
@@ -1155,7 +1159,23 @@ jobs:
           echo "KRUSTY_RUNTIME_CC=$clang" >> "$GITHUB_ENV"
       - name: build
         shell: bash
-        run: just build-release "${{ matrix.target.triple }}"
+        env:
+          CARGO_TERM_VERBOSE: 'true'
+        run: |
+          set -euo pipefail
+          rustc --version --verbose
+          cargo --version
+          node scripts/release-build-progress.cjs &
+          progress_pid=$!
+          trap 'kill "$progress_pid" 2>/dev/null || true; wait "$progress_pid" 2>/dev/null || true' EXIT
+          time just build-release "${{ matrix.target.triple }}"
+      - name: upload release build timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-build-timings-${{ matrix.target.triple }}
+          path: target/cargo-timings/
+          if-no-files-found: warn
       - name: package compiler
         id: compiler_pkg
         shell: bash
@@ -1266,6 +1286,27 @@ jobs:
       - name: package Bazel module
         if: steps.tip.outputs.publish == 'true'
         run: scripts/package-bazel-module.sh "${{ steps.v.outputs.ver }}" dist
+      # The validated max-version reports travel with each immutable release.
+      - name: download max-version pct
+        if: steps.tip.outputs.publish == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pct-${{ needs.build-tool-bins.outputs.max }}
+      - name: download max-version JVM byte equality
+        if: steps.tip.outputs.publish == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: jvm-byte-equality-${{ needs.build-tool-bins.outputs.max }}
+      - name: download max-version Native conformance
+        if: steps.tip.outputs.publish == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: native-pct-${{ needs.build-tool-bins.outputs.max }}
+      - name: package release badge data
+        if: steps.tip.outputs.publish == 'true'
+        env:
+          MAX_VERSION: ${{ needs.build-tool-bins.outputs.max }}
+        run: bash scripts/package-release-badges.sh "$MAX_VERSION" . dist
       # SLSA build provenance for every published file, so `gh attestation verify <file> -R qnox/krusty`
       # ties it to this workflow run and commit.
       - name: attest build provenance
@@ -1298,13 +1339,18 @@ jobs:
               *) echo "cannot determine draft state of $TAG" >&2; exit 1 ;;
             esac
           else
+            notes_file="$RUNNER_TEMP/krusty-release-notes.md"
+            trap 'rm -f "$notes_file"' EXIT
+            gh api --method POST "repos/$GH_REPO/releases/generate-notes" \
+              -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" |
+              python3 scripts/format-release-notes.py > "$notes_file"
             gh release create "$TAG" --target "$GITHUB_SHA" --draft --latest=false \
-              --title "krusty $VER: Kotlin compiler written in Rust" --generate-notes "${assets[@]}"
+              --title "krusty $VER: Kotlin compiler written in Rust" --notes-file "$notes_file" "${assets[@]}"
             gh release edit "$TAG" --draft=false --latest=false
           fi
       # Each exact version keeps its existing Maven Central deployment journal. The Plugin Portal
       # also checks its immutable marker before retrying a previously successful upload.
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         if: steps.tip.outputs.publish == 'true'
         with:
           distribution: zulu
@@ -1333,6 +1379,9 @@ jobs:
           fi
           echo "signing key: ${id:-none}"
           echo "id=$id" >> "$GITHUB_OUTPUT"
+      - name: make the public signing subkey retrievable for Maven Central
+        if: steps.tip.outputs.publish == 'true'
+        run: scripts/publish-release-signing-key.sh "${{ steps.v.outputs.ver }}" dist
       # Maven Central goes first: it skips a version it already has, so a rerun after a failed
       # Plugin Portal upload does not trip over Central's immutable versions.
       - name: publish the Gradle plugin to Maven Central
@@ -1380,24 +1429,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run pages.yml --ref master
-      # Badges: the max version's JVM case/byte reports and Native case report, each published to
-      # its own gist file.
-      - name: download max-version pct
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: pct-${{ needs.build-tool-bins.outputs.max }}
-      - name: download max-version JVM byte equality
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: jvm-byte-equality-${{ needs.build-tool-bins.outputs.max }}
-      - name: download max-version Native conformance
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: native-pct-${{ needs.build-tool-bins.outputs.max }}
-      # The global lock is held only while promoting latest, badges and the released ref.
+      # The global lock is held only while promoting latest and the released ref.
       - name: take the latest promotion lock
         if: steps.tip.outputs.publish == 'true'
         id: latest_lock
@@ -1421,25 +1453,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.v.outputs.tag }}
         run: gh release edit "$TAG" --latest
-      # One gist update with every badge's shields.io endpoint JSON, through the gh CLI.
-      - name: publish badges → gist
-        if: ${{ steps.latest.outputs.promote == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.GIST_TOKEN }}
-          GIST_ID: ${{ vars.CONFORMANCE_GIST_ID }}
-          MAX_VERSION: ${{ needs.build-tool-bins.outputs.max }}
-        run: |
-          set -euo pipefail
-          conformance=$(bash scripts/conformance-badge.sh json conformance pct.txt "$MAX_VERSION")
-          bytes=$(bash scripts/conformance-badge.sh json jvm-byte-equality jvm-byte-equality.txt "$MAX_VERSION")
-          native=$(bash scripts/conformance-badge.sh json native-conformance native-pct.txt "$MAX_VERSION")
-          kotlin=$(jq -cn --arg v "$MAX_VERSION" '{schemaVersion: 1, label: "Kotlin", message: $v, color: "blue"}')
-          jq -n --arg c "$conformance" --arg b "$bytes" --arg n "$native" --arg k "$kotlin" '{files: {
-            "krusty-conformance.json": {content: $c},
-            "krusty-jvm-byte-equality.json": {content: $b},
-            "krusty-native-conformance.json": {content: $n},
-            "krusty-kotlin.json": {content: $k}}}' |
-            gh api --method PATCH "gists/$GIST_ID" --input - >/dev/null
       - name: drop the latest promotion lock
         if: always() && steps.latest_lock.outputs.lock != ''
         run: scripts/release-publisher.sh release-latest "${{ steps.latest_lock.outputs.lock }}"

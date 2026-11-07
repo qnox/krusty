@@ -97,6 +97,12 @@ impl ReferencedDependencies {
                 external_target, ..
             } => self.callables.extend(*external_target),
             IrExpr::CallableReference(reference) => match &reference.target {
+                IrCallableReferenceTarget::Constructor {
+                    declaration: crate::ir::IrConstructorReferenceDeclaration::External(declaration),
+                    ..
+                } => {
+                    self.callables.insert(*declaration);
+                }
                 IrCallableReferenceTarget::External { declaration, .. } => {
                     self.callables.insert(*declaration);
                 }
