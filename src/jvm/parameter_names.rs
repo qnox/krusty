@@ -269,6 +269,13 @@ fn function_local_variable(
     identity: &IrParameterIdentity,
     spelling: ReceiverSpelling,
 ) -> Option<String> {
+    if let Some((owner, parameter)) = identity.constructor_receiver() {
+        return Some(
+            super::capture_names::constructor_receiver(ir, owner, parameter)
+                .expect("a captured constructor receiver keeps its exact original prefix")
+                .field,
+        );
+    }
     if let IrParameterRole::CapturedReceiver { ordinal } = identity.role {
         let (name, _) = super::capture_names::lifted_receiver(ir, function, ordinal as usize)
             .expect("a lifted callable publishes the origin of each captured receiver");
@@ -849,6 +856,12 @@ pub(super) fn dependency_access_bridge_local_variables(
 /// The bridge plan supplies the metadata declaration's complete arity and records this generated
 /// identity before emission; classfile emission never recovers it from a descriptor.
 pub(super) fn inherited_collection_specialized_local(ordinal: usize) -> String {
+    format!("p{ordinal}")
+}
+
+/// The name kotlinc's Java class reader gives a parameter of a Java method compiled without
+/// parameter names (a JDK interface's default member): `p` and its ordinal.
+pub(super) fn unnamed_java_parameter(ordinal: usize) -> String {
     format!("p{ordinal}")
 }
 

@@ -10,7 +10,7 @@ use crate::libraries::FnKind;
 use crate::plugins::runtime_declarations::{
     BoundRuntimeFunction, PluginClassifier, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
 };
-use crate::plugins::{CheckedSourceFacts, DependencyDeclaration};
+use crate::plugins::{CheckedSourceFacts, DependencyCallableShape, DependencyDeclaration};
 use crate::symbol_resolver::declared_member_callables;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName};
@@ -54,6 +54,15 @@ impl CheckedSourceFacts for HandoffSourceFacts<'_> {
         Some(DependencyDeclaration {
             owner: fact.owner,
             name: &fact.name,
+        })
+    }
+
+    fn dependency_shape(&self, callable: ExternalCallableId) -> Option<DependencyCallableShape> {
+        let fact = self.callables.callable(callable)?;
+        Some(DependencyCallableShape {
+            inline: fact.inline != crate::libraries::InlineKind::None,
+            receiver: fact.source_receiver.is_some() || fact.context_count > 0,
+            defaults: fact.declares_parameter_defaults,
         })
     }
 }
@@ -132,6 +141,10 @@ impl PluginRuntime for HandoffRuntime<'_> {
             params: function.params.clone(),
             ret: function.ret,
         })
+    }
+
+    fn appended_parameters(&mut self, target: ExternalCallableId, appended: Vec<Ty>) {
+        self.bound.push((target, appended.into_boxed_slice()));
     }
 
     fn classifier(&self, classifier: TypeName) -> Option<PluginClassifier> {

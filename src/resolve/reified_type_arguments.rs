@@ -255,7 +255,7 @@ impl Checker<'_> {
         }
         let features = &self.file.reified_type_arguments;
         match argument.kind() {
-            TyKind::TyParam(name, _) => {
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
                 if !reified_type_parameter(scope, name.as_str()) {
                     problems.push(ReifiedProblem::TypeParameter {
                         name: name.as_str(),
@@ -265,7 +265,7 @@ impl Checker<'_> {
                 }
             }
             TyKind::Nullable(inner) if inner.is_ty_param() => {
-                if let TyKind::TyParam(name, _) = inner.kind() {
+                if let TyKind::TyParam(name, _) | TyKind::Var(name, _) = inner.kind() {
                     if !reified_type_parameter(scope, name.as_str()) {
                         problems.push(ReifiedProblem::TypeParameter {
                             name: name.as_str(),

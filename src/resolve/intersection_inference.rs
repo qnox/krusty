@@ -181,22 +181,25 @@ fn reified_provenance_of_ty_with_declaration(
         | TyKind::StarProjection(inner) => {
             reified_provenance_of_ty_with_declaration(inner, declaration)
         }
-        TyKind::TyParam(identity, occurrence_bound) => ReifiedArgumentProvenance {
-            through_definitely_non_null: declaration(identity.as_str())
-                .and_then(|declared| match declared.non_null().kind() {
-                    TyKind::TyParam(declared_identity, declared_bound)
-                        if declared_identity == identity =>
-                    {
-                        Some(declared_bound)
-                    }
-                    _ => None,
-                })
-                .is_some_and(|declared_bound| {
-                    declared_bound.upper_bound_admits_null()
-                        && !occurrence_bound.upper_bound_admits_null()
-                }),
-            ..Default::default()
-        },
+        TyKind::TyParam(identity, occurrence_bound) | TyKind::Var(identity, occurrence_bound) => {
+            ReifiedArgumentProvenance {
+                through_definitely_non_null: declaration(identity.as_str())
+                    .and_then(|declared| match declared.non_null().kind() {
+                        TyKind::TyParam(declared_identity, declared_bound)
+                        | TyKind::Var(declared_identity, declared_bound)
+                            if declared_identity == identity =>
+                        {
+                            Some(declared_bound)
+                        }
+                        _ => None,
+                    })
+                    .is_some_and(|declared_bound| {
+                        declared_bound.upper_bound_admits_null()
+                            && !occurrence_bound.upper_bound_admits_null()
+                    }),
+                ..Default::default()
+            }
+        }
         TyKind::Obj(_, arguments) => ReifiedArgumentProvenance {
             arguments: arguments
                 .iter()
@@ -226,7 +229,7 @@ fn constrain_reified_argument_provenance(
     provenance: &ReifiedArgumentProvenance,
     facts: &mut HashMap<String, Vec<ReifiedArgumentProvenance>>,
 ) {
-    if let TyKind::TyParam(formal, _) = declared.non_null().kind() {
+    if let TyKind::TyParam(formal, _) | TyKind::Var(formal, _) = declared.non_null().kind() {
         if formals.contains(&formal) {
             facts
                 .entry(formal.to_string())
@@ -965,7 +968,7 @@ impl Checker<'_> {
         );
 
         let result_formal = match signature.ret.kind() {
-            TyKind::TyParam(formal, _) => Some(formal.as_str()),
+            TyKind::TyParam(formal, _) | TyKind::Var(formal, _) => Some(formal.as_str()),
             TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
             | TyKind::MutabilityFlexible(inner) => inner.ty_param_name(),

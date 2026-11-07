@@ -31,7 +31,6 @@ pub use external_serializer::ExternalSerializer;
 pub(crate) use external_serializer::{custom_class_serializer, generated_external_serializer};
 mod generated_classifier;
 mod generated_members;
-mod plugin_release;
 mod program_order_metadata;
 mod property_default;
 mod runtime_abi;
@@ -56,6 +55,7 @@ use crate::plugins::{
 };
 use crate::types::{type_name, Ty, TyKind, TypeName};
 
+pub use super::PluginRelease;
 use crate::fx_hash::HashMap;
 use constructed_standard_serializers::constructed_standard_serializer;
 use declared_serializer::build_field_serializer_instance;
@@ -70,7 +70,6 @@ use generated_members::{
     add_serializer_members, descriptor_property, install_inherited_type_parameter_serializers,
     publish_write_self, write_self_is_public, write_self_visibility, GeneratedSerializerMembers,
 };
-pub use plugin_release::PluginRelease;
 pub use runtime_abi::SerializationAbi;
 use serial_elements::{SerialElements, SerializedProperties, WireElement};
 use serialize_body::SerializeBody;
@@ -1051,13 +1050,12 @@ impl SerializationPlugin {
                 internal: construction.serializer,
                 args,
                 ctor_params: (!declared_here).then(|| construction.parameters.to_vec()),
+                declared_params: Some(construction.parameters.clone()),
                 ctor_desc: None,
                 external_target,
                 defaults: Box::new([]),
                 default_prefix_count: 0,
             });
-            ir.construction_declared_params
-                .insert(new, construction.parameters.clone());
             if let Some(target) = target {
                 ir.construction_targets.insert(new, target);
             }
@@ -2355,6 +2353,15 @@ mod tests {
                 crate::ir::IrGeneratedClassRole::SerializationSerializer,
             )
             .expect("generic serializer class");
+        let serializer = ir.classes[ser_id as usize].fq_name_id();
+        assert_eq!(
+            ir.declared_class_self_type(serializer),
+            Some(Ty::obj_args_name(
+                serializer,
+                &[Ty::ty_param("T", Ty::nullable(class_ty("kotlin/Any")))],
+            )),
+            "the generated declaration retains its full applied receiver type"
+        );
         let tps_fid =
             GeneratedSerializerMembers::declared(&ir, ir.classes[ser_id as usize].fq_name_id())
                 .type_parameter_serializers;

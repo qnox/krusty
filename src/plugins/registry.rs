@@ -38,8 +38,8 @@ use crate::plugins::cli::{
 use crate::plugins::compose::{ComposeOptions, ComposePlugin};
 use crate::plugins::noarg::NoArgPlugin;
 use crate::plugins::sam_with_receiver::SamWithReceiverPlugin;
-use crate::plugins::serialization::{PluginRelease, SerializationAbi, SerializationPlugin};
-use crate::plugins::{IrPlugin, PluginHost};
+use crate::plugins::serialization::{SerializationAbi, SerializationPlugin};
+use crate::plugins::{IrPlugin, PluginHost, PluginRelease};
 
 /// Per-compilation context handed to a native extension's builder.
 pub struct Activation<'a> {
@@ -406,10 +406,10 @@ fn build_sam_with_receiver(
 /// no options.
 fn build_atomicfu(
     _act: &Activation,
-    _release: Option<&str>,
+    release: Option<&str>,
     _options: &[PluginOption],
 ) -> Box<dyn IrPlugin> {
-    Box::new(AtomicfuPlugin)
+    Box::new(AtomicfuPlugin::new(release.and_then(PluginRelease::parse)))
 }
 
 /// Build the native assignment plugin from the compilation's options for it.

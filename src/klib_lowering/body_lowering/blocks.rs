@@ -103,6 +103,15 @@ impl BodyLowering<'_> {
 
     /// A source block of `statements`, typed as checked FIR lowering types it.
     pub(super) fn block(&mut self, statements: &[KlibIrStatement]) -> Lowered<ExprId> {
+        self.block_with_prefix(Vec::new(), statements)
+    }
+
+    /// A source block after bindings the enclosing form has already lowered, in the same scope.
+    pub(super) fn block_with_prefix(
+        &mut self,
+        mut stmts: Vec<ExprId>,
+        statements: &[KlibIrStatement],
+    ) -> Lowered<ExprId> {
         if let Some((_, leading)) = statements.split_last() {
             // The checker erases what follows a jump, so a block that keeps it has no source.
             if leading
@@ -122,10 +131,9 @@ impl BodyLowering<'_> {
             Some(_) => &statements[..statements.len() - 1],
             None => statements,
         };
-        let stmts = leading
-            .iter()
-            .map(|statement| self.statement(statement))
-            .collect::<Lowered<Vec<_>>>()?;
+        for statement in leading {
+            stmts.push(self.statement(statement)?);
+        }
         let value = trailing
             .map(|trailing| self.discarded(trailing))
             .transpose()?;

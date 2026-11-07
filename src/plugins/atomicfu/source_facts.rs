@@ -12,8 +12,8 @@ use crate::ir::{for_each_child, Callee, ClassId, ExprId, IrCheckedOperation, IrE
 use crate::plugins::runtime_declarations::{
     BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
 };
-use crate::plugins::{PluginRejection, PluginSourceView};
-use crate::types::{type_name, Ty, TypeName};
+use crate::plugins::{PluginRejection, PluginRelease, PluginSourceView};
+use crate::types::{type_name, wk, Ty, TypeName, Visibility};
 
 const PACKAGE: &str = "kotlinx/atomicfu";
 const FIELD_UPDATERS: &str = "java/util/concurrent/atomic";
@@ -149,12 +149,14 @@ pub(super) fn record(
     source: &PluginSourceView<'_>,
     runtime: &mut dyn PluginRuntime,
     rejections: &mut Vec<PluginRejection>,
+    release: Option<PluginRelease>,
 ) {
     let mut recorder = Recorder {
         ir,
         source,
         runtime,
         rejections,
+        release,
         updaters: Vec::new(),
         by_property: HashMap::default(),
         bound: HashMap::default(),
@@ -176,6 +178,7 @@ struct Recorder<'a, 'b> {
     source: &'a PluginSourceView<'b>,
     runtime: &'a mut dyn PluginRuntime,
     rejections: &'a mut Vec<PluginRejection>,
+    release: Option<PluginRelease>,
     updaters: Vec<FieldUpdater>,
     /// Each lowered atomic by its checked identity.
     by_property: HashMap<crate::ir::PropertyId, usize>,
@@ -189,6 +192,82 @@ impl Recorder<'_, '_> {
             span: span.unwrap_or(Span::new(0, 0)),
             message: unsupported(what),
         });
+    }
+
+    fn reject_published(&mut self, id: crate::ir::PropertyId) -> bool {
+        let property = &self.ir.checked_properties[&id];
+        if property
+            .flags
+            .has(crate::fir::DeclarationFlags::SCRIPT_RESULT)
+        {
+            return false;
+        }
+        let published = wk::published_api();
+        let (owner_public, owner_published) = property.class.map_or((true, false), |class| {
+            let class = &self.ir.classes[class as usize];
+            let local = matches!(
+                class.declaration_context,
+                Some(
+                    crate::ir::IrClassDeclarationContext::Executable
+                        | crate::ir::IrClassDeclarationContext::ClassInitializer { .. }
+                )
+            ) || class.is_anonymous_object
+                || class.is_enum_entry;
+            (
+                !local
+                    && self
+                        .ir
+                        .class_visibilities
+                        .get(&class.fq_name_id())
+                        .copied()
+                        .unwrap_or(Visibility::Public)
+                        .is_public_api(),
+                class.applied_annotations.declares(published),
+            )
+        });
+        let public = property.visibility.is_public_api();
+        if !(public && owner_public
+            || (public || property.annotations.contains(&published))
+                && (owner_public || owner_published))
+        {
+            return false;
+        }
+        let source = property
+            .declaration_source
+            .expect("a checked source property retains its declaration coordinates");
+        let declaration = self
+            .source
+            .text
+            .get(source.declaration.lo as usize..source.declaration.hi as usize)
+            .expect("checked declaration coordinates belong to the handoff source");
+        self.rejections.push(PluginRejection {
+            span: source.visibility_modifier.unwrap_or(source.name),
+            message: publication_error(declaration, self.release),
+        });
+        // The official checker reports mutability independently, after publication.
+        if property.flags.has(crate::fir::DeclarationFlags::MUTABLE) {
+            let consider = if self
+                .release
+                .is_some_and(|release| release < PluginRelease::V2_4_20)
+            {
+                "Please consider"
+            } else {
+                "Consider"
+            };
+            self.rejections.push(PluginRejection {
+                span: source.keyword,
+                message: format!(
+                    "{consider} declaring `'{declaration}'` as a private val or internal val.\n\
+                     If you need to declare a variable with accessors delegated to the atomic \
+                     property value, you can use a delegated property declared within the same scope, e.g:\n\
+                     ```\n\
+                     private val _a = atomic<T>(initial) \n\
+                     public var a: T by _a \n\
+                     ```\n"
+                ),
+            });
+        }
+        true
     }
 
     /// Classify every atomic property the file declares.
@@ -210,6 +289,11 @@ impl Recorder<'_, '_> {
             let Some(atomic) = atomic_type(ty) else {
                 continue;
             };
+            // Publication is a source-language error even for an atomic representation this
+            // partial transform does not lower. Do not replace it with a capability diagnostic.
+            if self.reject_published(id) {
+                continue;
+            }
             let value = match atomic {
                 AtomicType::Lowered(value) => value,
                 AtomicType::Unsupported(what) => {
@@ -543,4 +627,28 @@ impl Recorder<'_, '_> {
             .get(target)
             .is_some_and(|property| atomic_type(property.ty).is_some())
     }
+}
+
+/// The official atomicfu publication diagnostic renders the complete written declaration.
+fn publication_error(declaration: &str, release: Option<PluginRelease>) -> String {
+    let (requirement, consider) = if release.is_some_and(|release| release < PluginRelease::V2_4_20)
+    {
+        ("should", "Please consider")
+    } else {
+        ("must", "Consider")
+    };
+    format!(
+        "\nTo prevent atomic properties from being referenced outside the current Kotlin module, \
+         they {requirement} be declared as either private or internal. Note, that `@kotlin.PublishedApi` \
+         annotation, when applied to a class or a member with internal visibility, makes it \
+         effectively public.\n\
+         {consider} setting the visibility of the property `'{declaration}'` to private or internal \
+         or limit the scope of the containing class. \n\
+         Alternatively, if you need to expose the atomic property value to the public, you can \
+         use a delegated property declared within the same scope, e.g:\n\
+         ```\n\
+         private val _a = atomic<T>(initial) \n\
+         public val a: T by _a \n\
+         ```\n"
+    )
 }

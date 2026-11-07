@@ -461,9 +461,9 @@ fn optional_and_upstream_capture_identities_are_separate_from_physical_fields() 
     ir.classes[class as usize].ctor_args[parameter as usize].capture_identity = None;
     ir.class_capture_identities.remove(&(class, parameter));
     assert_eq!(check_supported(&ir, class), Ok(()));
-    let upstream = ClassCaptureIdentity::Field {
+    let upstream = ClassCaptureIdentity::Value {
         owner: type_name("Upstream"),
-        field: 42,
+        binding: 42,
     };
     ir.classes[class as usize].ctor_args[parameter as usize].capture_identity = Some(upstream);
     ir.class_capture_identities
@@ -693,9 +693,9 @@ fn enclosing_receiver_owner_type_and_identity_must_agree() {
         ("mismatched registry identity", |ir, class, parameter| {
             ir.class_capture_identities.insert(
                 (class, parameter),
-                ClassCaptureIdentity::Field {
+                ClassCaptureIdentity::Value {
                     owner: ir.classes[class as usize].fq_name_id(),
-                    field: u32::MAX,
+                    binding: u32::MAX,
                 },
             );
         }),

@@ -427,6 +427,7 @@ impl Parser<'_> {
             &keys,
             DeclarationPrefix {
                 start: prefix.first_modifier.unwrap_or(after),
+                keyword: after,
                 visibility: prefix.visibility,
                 declaration_start: start,
                 classifier_keyword,

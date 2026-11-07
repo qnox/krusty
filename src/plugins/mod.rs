@@ -23,6 +23,8 @@ pub mod cli;
 pub mod compose;
 pub mod deps;
 pub mod noarg;
+mod plugin_release;
+pub use plugin_release::PluginRelease;
 pub mod registry;
 pub mod runtime_declarations;
 pub mod sam_with_receiver;
@@ -883,6 +885,11 @@ pub trait CheckedSourceFacts {
         &self,
         property: crate::ir::ExternalPropertyId,
     ) -> Option<DependencyDeclaration<'_>>;
+    /// The declaration shape of the dependency function a call selected by `callable`.
+    fn dependency_shape(
+        &self,
+        callable: crate::ir::ExternalCallableId,
+    ) -> Option<DependencyCallableShape>;
 }
 
 /// A dependency declaration a checked call or property access selected: the package or classifier
@@ -891,6 +898,17 @@ pub trait CheckedSourceFacts {
 pub struct DependencyDeclaration<'a> {
     pub owner: TypeName,
     pub name: &'a str,
+}
+
+/// What a plugin reads of a dependency function's declaration besides its parameter types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DependencyCallableShape {
+    /// An `inline` function, whose body a call splices.
+    pub inline: bool,
+    /// An extension or a function with context parameters, which takes a receiver value.
+    pub receiver: bool,
+    /// A source parameter declares a default value.
+    pub defaults: bool,
 }
 
 /// A construct a native plugin does not implement, reported as an error at `span`.

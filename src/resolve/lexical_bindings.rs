@@ -40,3 +40,34 @@ impl Checker<'_> {
             .then_some((name, local))
     }
 }
+
+impl super::Checker<'_> {
+    pub(super) fn capture_lexical_identity(
+        &mut self,
+        origin: super::ReceiverFnValueOrigin,
+    ) -> Option<u32> {
+        match origin {
+            super::ReceiverFnValueOrigin::Local => Some(self.allocate_lexical_capture_identity()),
+            super::ReceiverFnValueOrigin::ClassStorage(storage) => match storage.identity {
+                crate::fir::ClassCaptureIdentity::Value { binding, .. } => Some(binding),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    pub(super) fn allocate_flow_identity(&mut self) -> u32 {
+        let identity = self.next_flow_identity;
+        self.next_flow_identity = identity
+            .checked_add(1)
+            .expect("too many lexical bindings in one bounded checker");
+        identity
+    }
+
+    pub(super) fn allocate_lexical_capture_identity(&mut self) -> u32 {
+        let identity = self.next_lexical_capture_identity;
+        self.next_lexical_capture_identity = identity
+            .checked_add(1)
+            .expect("too many lexical bindings in one bounded checker");
+        identity
+    }
+}

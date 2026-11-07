@@ -149,12 +149,24 @@ pub struct IrAccessorLines {
     pub declaration_end: u32,
 }
 
+/// Written declaration coordinates retained before bounded source syntax is released.
+#[derive(Clone, Copy, Debug)]
+pub struct IrPropertyDeclarationSource {
+    pub declaration: crate::diag::Span,
+    pub name: crate::diag::Span,
+    pub keyword: crate::diag::Span,
+    pub visibility_modifier: Option<crate::diag::Span>,
+}
+
 /// One source property declaration and the checked bodies that realize its language semantics.
 /// Storage and accessor naming remain backend choices; stable property/class identities and final
 /// types are already fixed here.
 #[derive(Clone, Debug)]
 pub struct IrCheckedProperty {
     pub declaration: crate::fir::DeclarationId,
+    pub declaration_source: Option<IrPropertyDeclarationSource>,
+    /// Resolved declaration annotations, including those with binary retention.
+    pub annotations: Box<[TypeName]>,
     /// Exact source name span retained for diagnostics that can only be classified after a backend
     /// has selected the declaration's physical representation.
     pub diagnostic_span: Option<crate::diag::Span>,
@@ -361,6 +373,42 @@ pub struct IrProperty {
 }
 
 impl IrProperty {
+    /// A public `val` stored in field `field` of its class, with no source declaration: the
+    /// storage a dependency class's declaration records.
+    pub(crate) fn stored_value(name: String, ty: Ty, field: u32) -> Self {
+        Self {
+            name,
+            diagnostic_span: None,
+            getter_diagnostic_span: None,
+            setter_diagnostic_span: None,
+            context_params: Vec::new(),
+            source_order: 0,
+            decl_line: 0,
+            accessor_lines: super::IrAccessorLines::default(),
+            ty,
+            type_params: Vec::new(),
+            visibility: crate::types::Visibility::Public,
+            return_value_status: Default::default(),
+            annotations: Box::new([]),
+            initializer: None,
+            has_constant_initializer: false,
+            storage_ty: None,
+            backing_field: Some(field),
+            is_var: false,
+            is_open: false,
+            modifiers: Default::default(),
+            delegate_field: None,
+            is_private: false,
+            setter_visibility: crate::types::Visibility::Public,
+            getter: None,
+            setter: None,
+            getter_jvm_name: None,
+            setter_jvm_name: None,
+            needs_access_bridge: false,
+            accessor_annotations: Default::default(),
+        }
+    }
+
     /// Whether this mutable declaration has a compiler-default setter whose resolved visibility is
     /// private. This is a stable Kotlin declaration fact: it does not depend on whether a backend has
     /// materialized an accessor function.

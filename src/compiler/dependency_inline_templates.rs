@@ -58,6 +58,7 @@ impl DependencyInlineTemplates for KlibInlineTemplates {
             function: template.function,
             name: realization.callable.name.clone(),
             type_parameters: template.type_parameters,
+            class_type_parameters: template.class_type_parameters,
         })
     }
 

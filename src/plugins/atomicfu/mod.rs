@@ -21,7 +21,15 @@ use crate::ir::IrFile;
 use crate::plugins::runtime_declarations::PluginRuntime;
 use crate::plugins::{IrPlugin, PluginContext, PluginRejection, PluginSourceView};
 
-pub struct AtomicfuPlugin;
+pub struct AtomicfuPlugin {
+    release: Option<crate::plugins::PluginRelease>,
+}
+
+impl AtomicfuPlugin {
+    pub fn new(release: Option<crate::plugins::PluginRelease>) -> Self {
+        Self { release }
+    }
+}
 
 impl IrPlugin for AtomicfuPlugin {
     fn name(&self) -> &str {
@@ -35,7 +43,7 @@ impl IrPlugin for AtomicfuPlugin {
         runtime: &mut dyn PluginRuntime,
         rejections: &mut Vec<PluginRejection>,
     ) {
-        source_facts::record(ir, source, runtime, rejections);
+        source_facts::record(ir, source, runtime, rejections, self.release);
     }
 
     fn transform_bodies(&self, ir: &mut IrFile, _ctx: &PluginContext) {

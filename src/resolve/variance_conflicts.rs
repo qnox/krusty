@@ -525,7 +525,7 @@ impl Checker<'_> {
         if !vararg
             || !matches!(
                 element.non_null().kind(),
-                TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Fun(_)
+                TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Var(..) | TyKind::Fun(_)
             )
         {
             return Occurrence {
@@ -614,7 +614,7 @@ impl Checker<'_> {
                     self.walk_variance(walk, *part, site, conflicts);
                 }
             }
-            TyKind::TyParam(parameter, _) => {
+            TyKind::TyParam(parameter, _) | TyKind::Var(parameter, _) => {
                 // A written `T & Any` resolves to the formal with its bound made non-null; it is
                 // still kotlinc's definitely-non-null type.
                 if written_definitely_non_null(site.origin) && !walk.dnn_and_flexible {
@@ -704,7 +704,7 @@ impl Checker<'_> {
     /// definitely-non-null type it declares.
     fn displayed_type(&self, walk: &Walk<'_, '_>, ty: Ty, origin: &Origin<'_>) -> Ty {
         match ty.kind() {
-            TyKind::TyParam(..) if written_definitely_non_null(origin) => {
+            TyKind::TyParam(..) | TyKind::Var(..) if written_definitely_non_null(origin) => {
                 Ty::from(TyKind::DefinitelyNotNull(ty))
             }
             TyKind::Nullable(inner) => Ty::nullable(self.displayed_type(walk, inner, origin)),
@@ -828,7 +828,8 @@ impl Checker<'_> {
 /// The written argument an alias right-hand-side level stands for, when the level is one of the
 /// alias's formals (`X`, `X?`, a projected `out X`).
 fn alias_formal<'a>(template: Ty, alias: &AliasUse<'a>) -> Option<&'a TypeRef> {
-    let TyKind::TyParam(parameter, _) = unwrapped(template).kind() else {
+    let (TyKind::TyParam(parameter, _) | TyKind::Var(parameter, _)) = unwrapped(template).kind()
+    else {
         return None;
     };
     let index = alias
