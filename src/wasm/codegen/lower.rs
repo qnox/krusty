@@ -1366,6 +1366,25 @@ impl<'a> Body<'a> {
             {
                 self.throwable_message(*receiver, arguments, *result)?;
             }
+            // `size` on a reference array is the length of the backing storage its object holds.
+            // The provider marks that getter `ArraySize`; another property keeps its own path.
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    result,
+                    source_receiver: Some(source_receiver),
+                } = &**checked_op
+                    && arguments.is_empty()
+                    && parameters.is_empty()
+                    && *result == Ty::Int
+                    && self.is_reference_array_size(*target, *source_receiver) =>
+            {
+                self.reference_array_size(*receiver)?;
+            }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::PropertyWrite {
                     target,

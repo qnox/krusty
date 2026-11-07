@@ -174,6 +174,44 @@ impl Body<'_> {
             .struct_get(object, crate::wasm::reference_arrays::STORAGE_FIELD);
     }
 
+    /// `array.size` for a reference array: the length of its backing storage.
+    ///
+    /// The getter is the provider's `ArraySize` operation on `kotlin.Array`. Primitive arrays are
+    /// a different representation and stay declined.
+    pub(super) fn is_reference_array_size(
+        &self,
+        target: crate::fir::ExternalPropertyId,
+        receiver: Ty,
+    ) -> bool {
+        receiver.non_null().is_reference_array()
+            && self.callables.property(target).is_some_and(|property| {
+                self.callables
+                    .callable(property.getter)
+                    .is_some_and(|getter| {
+                        getter.compiler_operation()
+                            == Some(crate::backend::BackendCompilerIntrinsic::ArraySize)
+                    })
+            })
+    }
+
+    pub(super) fn reference_array_size(&mut self, receiver: u32) -> Result<(), Unsupported> {
+        let array = self
+            .type_of(receiver)?
+            .ok_or_else(|| "an array receiver without a checked type".to_string())?;
+        if !array.non_null().is_reference_array() {
+            return Err(format!("`Array.size` on `{}`", describe(array)));
+        }
+        let object = self.local(ValType::nullable(self.runtime.arrays.object));
+        self.value(receiver, array)?;
+        self.code
+            .ref_cast(true, HeapType::Concrete(self.runtime.arrays.object))
+            .local_set(object);
+        self.code.local_get(object);
+        self.reference_array_storage();
+        self.code.array_len();
+        Ok(())
+    }
+
     pub(super) fn reference_array_get(
         &mut self,
         receiver: u32,
