@@ -1,6 +1,6 @@
 //! Allocation entries remain distinct from both instance initialization and ordinary bodies.
 
-use super::demo_package::{demo, operator, T};
+use super::demo_package::{assert_unit_is_empty, demo, operator, T};
 use super::*;
 use crate::backend::{DependencyExportSignatures, ExportedConstructor};
 use crate::libraries::{KlibBodyClassContract, KlibBodyClassParameters, TypeKind};
