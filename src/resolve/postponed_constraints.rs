@@ -916,7 +916,9 @@ impl Checker<'_> {
     /// may use the answer, but only the ordinary argument-commit path may publish the constraints.
     pub(super) fn postponed_assignability_trial(&self, expected: Ty, actual: Ty) -> bool {
         if !(self.postponed_call_mentions(expected) || self.postponed_call_mentions(actual))
-            || !self.postponed_argument_constraint_is_satisfiable(expected, actual)
+            || !call_constraints::postponed_argument_constraint_is_satisfiable(
+                self, expected, actual,
+            )
         {
             return false;
         }

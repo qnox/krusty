@@ -19,6 +19,7 @@ pub(crate) mod enums;
 pub(crate) mod interface_identity;
 pub(crate) mod local_properties;
 mod module_facts;
+pub(crate) mod property_entries;
 mod source_class_members;
 pub(crate) mod value_classes;
 
@@ -40,7 +41,9 @@ pub use dependency_metadata::{
     DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata,
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
-pub(crate) use dependency_metadata::{ExportedConstructor, KlibDependencyCallable};
+pub(crate) use dependency_metadata::{
+    ExportedConstructor, ExportedPropertyAccessor, KlibDependencyCallable,
+};
 pub(crate) use dependency_signature::{
     instantiate_dependency_signature, DependencyFunctionSignature,
 };

@@ -718,6 +718,7 @@ impl Checker<'_> {
             let member = selected.member_with_return(ret);
             let access_probe = crate::symbol_resolver::ResolvedMember {
                 receiver: receiver_ty,
+                declaring_receiver: None,
                 physical_params: selected.callable.physical_params.clone(),
                 context_args: shape.context_sources.clone(),
                 ret,
@@ -1191,6 +1192,7 @@ impl Checker<'_> {
                     let member = selected.member_with_return(ret);
                     let access_probe = crate::symbol_resolver::ResolvedMember {
                         receiver: receiver_ty,
+                        declaring_receiver: None,
                         member: member.clone(),
                         physical_params: physical_params.clone(),
                         context_args: shape.context_sources.clone(),

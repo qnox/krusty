@@ -337,6 +337,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
         IrCheckedOperation::ConstructorDelegation {
             target,
             outer_parameter,
+            capture_arguments,
             arguments,
             substitutions,
             ..
@@ -354,6 +355,9 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             }
             if let Some(outer) = outer_parameter {
                 *outer = ty(*outer, names);
+            }
+            for (_, capture) in capture_arguments.iter_mut().flatten() {
+                *capture = ty(*capture, names);
             }
             checked_arguments(arguments, names);
             substitutions
@@ -569,7 +573,7 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
         IrExpr::Checked(operation) => checked_operation(operation, names),
         IrExpr::CallableReference(reference) => {
             match &mut reference.target {
-                IrCallableReferenceTarget::Constructor { classifier }
+                IrCallableReferenceTarget::Constructor { classifier, .. }
                 | IrCallableReferenceTarget::Classifier { classifier, .. } => {
                     name(classifier, names)
                 }
@@ -682,10 +686,14 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
         IrExpr::New {
             internal,
             ctor_params,
+            declared_params,
             ..
         } => {
             name(internal, names);
             if let Some(parameters) = ctor_params {
+                tys(parameters, names);
+            }
+            if let Some(parameters) = declared_params {
                 tys(parameters, names);
             }
         }
@@ -1332,6 +1340,11 @@ impl super::IrFile {
                 default.result = ty(default.result, names);
                 tys(&mut default.applied_parameters, names);
                 default.applied_result = ty(default.applied_result, names);
+                for parameter in default.type_parameters.iter_mut() {
+                    for bound in parameter.bounds.iter_mut() {
+                        resolved_ty(&mut bound.ty, names);
+                    }
+                }
             }
         }
         for overrides in self.function_overrides.values_mut() {
@@ -1563,9 +1576,6 @@ impl super::IrFile {
         for values in self.call_declared_params.values_mut() {
             tys(values, names);
         }
-        for values in self.construction_declared_params.values_mut() {
-            tys(values, names);
-        }
         for (_, value) in self.property_selected_accessors.values_mut() {
             *value = ty(*value, names);
         }
@@ -1680,9 +1690,6 @@ fn remap_expression_facts(ir: &mut super::IrFile, expression: ExprId, names: &Id
         *value = ty(*value, names);
     }
     if let Some(parameters) = ir.call_declared_params.get_mut(&expression) {
-        tys(parameters, names);
-    }
-    if let Some(parameters) = ir.construction_declared_params.get_mut(&expression) {
         tys(parameters, names);
     }
     if let Some(parameters) = ir.physical_call_parameters.get_mut(&expression) {

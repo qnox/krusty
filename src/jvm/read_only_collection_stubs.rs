@@ -112,6 +112,11 @@ pub(super) struct ReadOnlyStub {
     /// kotlinc's `forceBoxedReturnTypeOnOverride`: a scalar result over the mutable declaration's
     /// reference result is the scalar's wrapper on the JVM (`set(II)Ljava/lang/Integer;`).
     pub(super) boxed_result: bool,
+    /// The parameters a JDK method declares as references that the face's arguments make scalars:
+    /// the JVM slot stays the scalar's wrapper (`putIfAbsent(Integer, Integer)` for `Map<Int,
+    /// Int>`). A physical fact only: the semantic parameter keeps its own nullability. A builtin
+    /// member's scalar parameters are unboxed (`put(String, int)`), so it has none.
+    pub(super) boxed_parameters: Vec<bool>,
     /// The generic signature writes every declaration-site variance of the parameters (kotlinc's
     /// methods with declaration-site wildcards).
     pub(super) declaration_site_wildcards: bool,
@@ -158,7 +163,28 @@ pub(super) enum StubBody {
 
 impl ReadOnlyStub {
     pub(super) fn descriptor(&self) -> String {
-        method_descriptor(&jvm_tys(&self.parameters), self.physical_result())
+        method_descriptor(&self.physical_parameters(), self.physical_result())
+    }
+
+    /// The JVM parameters of the stub's own descriptor.
+    pub(super) fn physical_parameters(&self) -> Vec<Ty> {
+        jvm_tys(&self.signature_parameters())
+    }
+
+    /// The semantic parameters the generic signature is written from: the wrapper where a
+    /// reference slot holds a scalar.
+    pub(super) fn signature_parameters(&self) -> Vec<Ty> {
+        self.parameters
+            .iter()
+            .zip(&self.boxed_parameters)
+            .map(|(&parameter, &boxed)| {
+                if boxed {
+                    Ty::nullable(parameter)
+                } else {
+                    parameter
+                }
+            })
+            .collect()
     }
 
     /// The mutable declaration's erased JVM descriptor: its bridge's, or the stub's own.
@@ -334,7 +360,7 @@ fn class_stubs(
             let erased = stub
                 .bridge
                 .clone()
-                .unwrap_or_else(|| (jvm_tys(&stub.parameters), stub.physical_result()));
+                .unwrap_or_else(|| (stub.physical_parameters(), stub.physical_result()));
             let bridge = (method_descriptor(&erased.0, erased.1)
                 != method_descriptor(&implementation.parameters, implementation.physical_result))
             .then_some(erased);
@@ -369,12 +395,13 @@ fn replaced_by_value_classes(ir: &IrFile, class: &IrClass, stub: ReadOnlyStub) -
         stub.is_renamed(),
         &stub.physical_name,
         &stub.parameters,
+        &stub.boxed_parameters,
         stub.signature_result(),
     );
     let erased = stub
         .bridge
         .clone()
-        .unwrap_or_else(|| (jvm_tys(&stub.parameters), stub.physical_result()));
+        .unwrap_or_else(|| (stub.physical_parameters(), stub.physical_result()));
     let moved = realized.name != stub.physical_name
         || method_descriptor(&realized.parameters, realized.result)
             != method_descriptor(&erased.0, erased.1);
@@ -572,6 +599,7 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
                 physical_name,
                 realized,
                 body: StubBody::Throwing,
+                boxed_parameters: vec![false; parameters.len()],
                 parameters,
                 override_parameters,
                 parameter_names: member.parameter_names,
@@ -782,7 +810,9 @@ fn superclass_bindings(
     if formals.len() != arguments.len() {
         return Err(SkipReason::ReadOnlyCollectionStubs(format!(
             "superclass {} declares {} type parameters but its checked application has {} arguments",
-            owner.render(), formals.len(), arguments.len()
+            owner.render(),
+            formals.len(),
+            arguments.len()
         )));
     }
     Ok(formals.into_iter().zip(arguments.iter().copied()).collect())
@@ -959,8 +989,8 @@ fn superclass_chain(
                         method.descriptor
                     ))
                 };
-                let declaration = info
-                    .meta
+                let declaration = classpath
+                    .class_members(&info)
                     .class_functions
                     .iter()
                     .find(|declaration| {
@@ -1012,17 +1042,19 @@ fn superclass_chain(
                 // does not tell. A generated member has no declaration and only its descriptor.
                 // A suspend declaration's continuation is a real parameter its metadata signature
                 // omits, so it keeps its physical key and implements no non-suspend member.
-                let declaration = (is_kotlin
-                    && candidates.iter().any(|stub| stub.name == method.name))
-                .then(|| {
-                    info.meta.class_functions.iter().find(|declaration| {
-                        declaration.jvm_name == method.name
-                            && declaration.jvm_desc == Some(method.descriptor.as_str())
-                    })
-                })
-                .flatten()
-                .filter(|declaration| !declaration.is_suspend())
-                .and_then(|declaration| declaration.generic_sig.as_ref());
+                let declaration =
+                    (is_kotlin && candidates.iter().any(|stub| stub.name == method.name))
+                        .then(|| {
+                            classpath.class_members(&info).class_functions.iter().find(
+                                |declaration| {
+                                    declaration.jvm_name == method.name
+                                        && declaration.jvm_desc == Some(method.descriptor.as_str())
+                                },
+                            )
+                        })
+                        .flatten()
+                        .filter(|declaration| !declaration.is_suspend())
+                        .and_then(|declaration| declaration.generic_sig.as_ref());
                 let (key, result) = match declaration {
                     Some(signature) => {
                         let bindings = superclass_bindings(

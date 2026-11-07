@@ -15,7 +15,6 @@
 
 use super::common;
 use krusty::jvm::classreader::parse_class;
-use krusty::jvm::metadata::class_functions;
 
 /// krusty's emitted bytes for `class_internal`, compiled in-process with class metadata on. A `None`
 /// from the compile conflates "unavailable" with "rejected", so it panics with diagnostics instead.
@@ -236,7 +235,10 @@ fn private_ctor_copy_deltas_hold_in_krustys_own_output() {
         copy_default.access, 0x1008,
         "`copy$default` must be package-private ACC_STATIC|ACC_SYNTHETIC"
     );
-    let meta_copy = class_functions(&ci)
+    let meta_copy = ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|f| f.kotlin_name == "copy")
         .expect("@Metadata must list `copy`");
@@ -278,7 +280,10 @@ data class E internal constructor(val x: Int)
         copy_default.access, 0x1009,
         "internal-ctor `copy$default` stays ACC_PUBLIC|ACC_STATIC|ACC_SYNTHETIC"
     );
-    let meta_copy = class_functions(&ci)
+    let meta_copy = ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|f| f.kotlin_name == "copy")
         .expect("@Metadata must list `copy`");
@@ -432,7 +437,10 @@ data class D private constructor(val s: String, val n: Int) {
     assert_copy_sections_match(src, "D", "demo/D", &[]);
     let bytes = krusty_bytes(src, "D", "demo/D");
     let ci = parse_class(&bytes).expect("krusty's class parses back");
-    let meta_copy = class_functions(&ci)
+    let meta_copy = ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|function| function.kotlin_name == "copy")
         .expect("@Metadata must list `copy`");

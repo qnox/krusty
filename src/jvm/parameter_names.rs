@@ -269,6 +269,13 @@ fn function_local_variable(
     identity: &IrParameterIdentity,
     spelling: ReceiverSpelling,
 ) -> Option<String> {
+    if let Some((owner, parameter)) = identity.constructor_receiver() {
+        return Some(
+            super::capture_names::constructor_receiver(ir, owner, parameter)
+                .expect("a captured constructor receiver keeps its exact original prefix")
+                .field,
+        );
+    }
     if let IrParameterRole::CapturedReceiver { ordinal } = identity.role {
         let (name, _) = super::capture_names::lifted_receiver(ir, function, ordinal as usize)
             .expect("a lifted callable publishes the origin of each captured receiver");
