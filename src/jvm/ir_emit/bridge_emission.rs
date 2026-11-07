@@ -419,9 +419,15 @@ fn emit_planned_bridge(
             None,
             BridgeRealization::Planned,
         );
-    } else if narrower_result
-        && (b.kind == crate::ir::BridgeKind::PropertyGetter
-            || (b.kind == crate::ir::BridgeKind::Function && b.collection_barrier.is_none()))
+    } else if class
+        .adaptations
+        .renamed_special_result(
+            class.class.fq_name_id(),
+            u32::try_from(bridge_index).expect("bridge ordinals fit u32"),
+            class.class.is_interface,
+            b,
+        )
+        .is_some()
     {
         emit_bridge(
             class,

@@ -27,7 +27,6 @@ pub(super) fn derive_bridges(
     override_results: &crate::jvm::override_results::OverrideResults,
     argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
-    abstract_overrides: &crate::jvm::abstract_builtin_overrides::AbstractBuiltinOverrides,
 ) -> Result<(), SkipReason> {
     for cid in 0..ir.classes.len() {
         // Source-declared classes, declaration-owned enum-entry subclasses, and anonymous classes
@@ -62,7 +61,6 @@ pub(super) fn derive_bridges(
         ir.classes[cid].bridges.extend(inherited);
         declaration_order(&mut ir.classes[cid].bridges[first..], order);
     }
-    finalize_special_collection_bridges(ir, classpath, abstract_overrides);
     Ok(())
 }
 
@@ -75,10 +73,11 @@ pub(super) fn derive_bridges(
 /// The erased bridge (`Object remove(int)`) stays overridable, and every override of the member
 /// writes it again, calling its own implementation. A subclass that already inherited the final
 /// bridge must not declare another one beside it.
-fn finalize_special_collection_bridges(
+pub(super) fn finalize_special_collection_bridges(
     ir: &mut IrFile,
     classpath: &crate::jvm::classpath::Classpath,
     abstract_overrides: &crate::jvm::abstract_builtin_overrides::AbstractBuiltinOverrides,
+    adaptations: &mut crate::jvm::bridge_adaptations::BridgeAdaptations,
 ) {
     for class in &mut ir.classes {
         for bridge in &mut class.bridges {
@@ -93,102 +92,123 @@ fn finalize_special_collection_bridges(
         }
     }
 
-    let module_specials = ir
-        .classes
-        .iter()
-        .map(|class| {
-            let methods = class
+    // Publish only realized final methods of an already-finalized superclass. A class may be
+    // declared before its superclass, and clearing a special bridge must not leave a phantom final
+    // descriptor visible to grandchildren.
+    let mut module_specials: crate::fx_hash::HashMap<
+        crate::types::TypeName,
+        Vec<(String, String)>,
+    > = crate::fx_hash::HashMap::default();
+    let mut finalized = vec![false; ir.classes.len()];
+    let mut remaining = ir.classes.len();
+    while remaining != 0 {
+        let ready = (0..ir.classes.len())
+            .filter(|&cid| {
+                !finalized[cid]
+                    && ir
+                        .class_id_by_name(ir.classes[cid].superclass)
+                        .is_none_or(|parent| finalized[parent as usize])
+            })
+            .collect::<Vec<_>>();
+        assert!(!ready.is_empty(), "checked class inheritance is acyclic");
+        for cid in ready {
+            let owner = ir.classes[cid].fq_name_id();
+            let mut inherited = crate::fx_hash::HashSet::default();
+            let mut next = ir.classes[cid].superclass;
+            while let Some(superclass) = ir.classes.iter().find(|class| class.fq_name == next) {
+                if let Some(methods) = module_specials.get(&superclass.fq_name) {
+                    inherited.extend(methods.iter().cloned());
+                }
+                next = superclass.superclass;
+            }
+            let keep = ir.classes[cid]
                 .bridges
                 .iter()
-                .filter(|bridge| bridge.special)
                 .map(|bridge| {
-                    (
-                        bridge.name.clone(),
-                        method_descriptor(&bridge.erased_params, published_special_result(bridge)),
+                    let descriptor = method_descriptor(
+                        &crate::jvm::method_descriptors::jvm_tys(&bridge.erased_params),
+                        crate::jvm::physical_type::ir_ty_to_jvm(&bridge.erased_ret),
+                    );
+                    !inherited.contains(&(bridge.name.clone(), descriptor.clone()))
+                        && !inherits_final_special_bridge(
+                            ir,
+                            cid,
+                            classpath,
+                            &bridge.name,
+                            &descriptor,
+                        )
+                })
+                .collect::<Vec<_>>();
+            adaptations.retain(owner, &keep);
+            let mut keep = keep.into_iter();
+            ir.classes[cid]
+                .bridges
+                .retain(|_| keep.next().expect("one verdict per bridge"));
+            let class_is_interface = ir.classes[cid].is_interface;
+            let clear_special = ir.classes[cid]
+                .bridges
+                .iter()
+                .enumerate()
+                .map(|(ordinal, bridge)| {
+                    if adaptations
+                        .renamed_special_result(
+                            owner,
+                            u32::try_from(ordinal).expect("bridge ordinals fit u32"),
+                            class_is_interface,
+                            bridge,
+                        )
+                        .is_none()
+                    {
+                        return false;
+                    }
+                    let descriptor = method_descriptor(
+                        &crate::jvm::method_descriptors::jvm_tys(&bridge.erased_params),
+                        crate::jvm::physical_type::ir_ty_to_jvm(&bridge.erased_ret),
+                    );
+                    inherited_narrower_special_bridge(
+                        ir,
+                        cid,
+                        classpath,
+                        &inherited,
+                        &bridge.name,
+                        &descriptor,
                     )
                 })
-                .chain(abstract_overrides.final_bridges(class.fq_name_id()))
                 .collect::<Vec<_>>();
-            (class.fq_name, methods)
-        })
-        .collect::<crate::fx_hash::HashMap<_, _>>();
-
-    for cid in 0..ir.classes.len() {
-        let mut inherited = crate::fx_hash::HashSet::default();
-        let mut next = ir.classes[cid].superclass;
-        while let Some(superclass) = ir.classes.iter().find(|class| class.fq_name == next) {
-            if let Some(methods) = module_specials.get(&superclass.fq_name) {
-                inherited.extend(methods.iter().cloned());
-            }
-            next = superclass.superclass;
-        }
-        let keep = ir.classes[cid]
-            .bridges
-            .iter()
-            .map(|bridge| {
-                let descriptor = method_descriptor(&bridge.erased_params, bridge.erased_ret);
-                !inherited.contains(&(bridge.name.clone(), descriptor.clone()))
-                    && !inherits_final_special_bridge(ir, cid, classpath, &bridge.name, &descriptor)
-            })
-            .collect::<Vec<_>>();
-        let mut keep = keep.into_iter();
-        ir.classes[cid]
-            .bridges
-            .retain(|_| keep.next().expect("one verdict per bridge"));
-        let class_is_interface = ir.classes[cid].is_interface;
-        let clear_special = ir.classes[cid]
-            .bridges
-            .iter()
-            .map(|bridge| {
-                if class_is_interface || !narrower_renamed_special(bridge) {
-                    return false;
+            for (bridge, clear) in ir.classes[cid].bridges.iter_mut().zip(clear_special) {
+                if clear {
+                    bridge.special = false;
                 }
-                let descriptor = method_descriptor(&bridge.erased_params, bridge.erased_ret);
-                inherited_narrower_special_bridge(
-                    ir,
-                    cid,
-                    classpath,
-                    &inherited,
-                    &bridge.name,
-                    &descriptor,
-                )
-            })
-            .collect::<Vec<_>>();
-        for (bridge, clear) in ir.classes[cid].bridges.iter_mut().zip(clear_special) {
-            if clear {
-                bridge.special = false;
             }
+            let methods = ir.classes[cid]
+                .bridges
+                .iter()
+                .enumerate()
+                .filter(|(_, bridge)| !class_is_interface && bridge.special)
+                .map(|(ordinal, bridge)| {
+                    let result = adaptations
+                        .renamed_special_result(
+                            owner,
+                            u32::try_from(ordinal).expect("bridge ordinals fit u32"),
+                            class_is_interface,
+                            bridge,
+                        )
+                        .unwrap_or(bridge.erased_ret);
+                    (
+                        bridge.name.clone(),
+                        method_descriptor(
+                            &crate::jvm::method_descriptors::jvm_tys(&bridge.erased_params),
+                            crate::jvm::physical_type::ir_ty_to_jvm(&result),
+                        ),
+                    )
+                })
+                .chain(abstract_overrides.final_bridges(owner))
+                .collect::<Vec<_>>();
+            module_specials.insert(owner, methods);
+            finalized[cid] = true;
+            remaining -= 1;
         }
     }
-}
-
-/// The descriptor a special bridge actually makes final. A renamed member with a narrower
-/// reference result finalizes that result (`(I)Ljava/lang/String;`); every other special bridge
-/// finalizes the erased descriptor.
-fn published_special_result(bridge: &Bridge) -> Ty {
-    if narrower_renamed_special(bridge) {
-        crate::jvm::physical_type::ir_ty_to_jvm(&bridge.concrete_ret)
-    } else {
-        bridge.erased_ret
-    }
-}
-
-/// `emit_planned_bridge` splits this bridge into a final method at the implementation result and
-/// an ordinary erased bridge. The final method is the renamed JVM signature, so its result is not
-/// the erased return recorded on the bridge.
-fn narrower_renamed_special(bridge: &Bridge) -> bool {
-    if !bridge.special || bridge.target_ret.is_some() || bridge.collection_barrier.is_some() {
-        return false;
-    }
-    if !matches!(
-        bridge.kind,
-        BridgeKind::Function | BridgeKind::PropertyGetter
-    ) {
-        return false;
-    }
-    let concrete = crate::jvm::physical_type::ir_ty_to_jvm(&bridge.concrete_ret);
-    let erased = crate::jvm::physical_type::ir_ty_to_jvm(&bridge.erased_ret);
-    concrete.is_reference() && erased.is_reference() && concrete != erased
 }
 
 /// A superclass already published the final renamed bridge at a different result
@@ -849,14 +869,6 @@ fn property_bridges(
         {
             continue;
         }
-        // Same as a renamed function: the superclass owns the final special getter, and this
-        // class keeps only an erased bridge whose descriptor is not that final method.
-        let getter_special = matches!(
-            edge.overridden,
-            crate::fir::ResolvedPropertyOverrideTarget::External(_)
-        ) && bridge_getter != source_getter
-            && !overridden_getter_internal
-            && !edge.has_kotlin_superclass_override;
         let bridge_descriptor = method_descriptor(
             &declared_receiver.into_iter().collect::<Vec<_>>(),
             bridge_erasure(getter_results.declared),
@@ -1211,8 +1223,117 @@ fn bridge_erasure_visiting(ty: Ty, visiting: &mut crate::fx_hash::HashSet<&'stat
 
 #[cfg(test)]
 mod tests {
-    use super::bridge_erasure;
+    use super::{bridge_erasure, finalize_special_collection_bridges};
+    use crate::ir::{Bridge, BridgeKind, BridgeParameter, IrFile};
     use crate::types::Ty;
+
+    fn renamed_bridge(name: &str, concrete_ret: Ty, special: bool) -> Bridge {
+        Bridge {
+            kind: BridgeKind::Function,
+            target_function: None,
+            overridden_owner: None,
+            collection_barrier: None,
+            parameters: vec![BridgeParameter {
+                identity: crate::fir::ResolvedParameterIdentity::Source("index".into()),
+                semantic: Ty::Int,
+            }],
+            name: name.into(),
+            erased_params: vec![Ty::Int],
+            erased_ret: Ty::obj("kotlin/Any"),
+            concrete_params: vec![Ty::Int],
+            concrete_ret,
+            target_ret: None,
+            barrier_plan: None,
+            special,
+            module_name_bridge: false,
+            target_name: Some("removeAt".into()),
+            property_implementation: None,
+        }
+    }
+
+    #[test]
+    fn adapted_inherited_renamed_bridges_use_the_emitted_final_slot_and_move_survivors() {
+        use crate::jvm::bridge_adaptations::{
+            BridgeAdaptations, BridgeAdapter, BridgeResultAdapter, ValueClassAdapter,
+        };
+        let parent = crate::types::type_name("p/Parent");
+        let child = crate::types::type_name("p/Child");
+        let token = crate::types::type_name("p/Token");
+        let survivor = crate::types::type_name("p/Survivor");
+        let mut ir = IrFile::default();
+        let mut parent_class = crate::ir::IrClass::synthetic(parent);
+        parent_class.bridges = vec![renamed_bridge("remove", Ty::Int, true)];
+        let mut child_class = crate::ir::IrClass::synthetic(child);
+        child_class.superclass = parent;
+        child_class.bridges = vec![
+            renamed_bridge("remove", Ty::Int, false),
+            renamed_bridge("other", Ty::Int, false),
+        ];
+        // Source order does not determine superclass order.
+        ir.classes = vec![child_class, parent_class];
+        let boxing = |owner| BridgeAdapter {
+            result: Some(BridgeResultAdapter::Box(ValueClassAdapter::new(
+                owner, false,
+            ))),
+            parameters: Vec::new(),
+        };
+        let mut adaptations = BridgeAdaptations::default();
+        adaptations.extend([
+            ((parent, 0), boxing(token)),
+            ((child, 0), boxing(token)),
+            ((child, 1), boxing(survivor)),
+        ]);
+        finalize_special_collection_bridges(
+            &mut ir,
+            &crate::jvm::classpath::Classpath::new(Vec::new()),
+            &crate::jvm::abstract_builtin_overrides::AbstractBuiltinOverrides::default(),
+            &mut adaptations,
+        );
+        assert_eq!(
+            ir.classes[0]
+                .bridges
+                .iter()
+                .map(|bridge| bridge.name.as_str())
+                .collect::<Vec<_>>(),
+            ["other"]
+        );
+        assert_eq!(ir.classes[1].bridges.len(), 1);
+        assert_eq!(adaptations.get(parent, 0), Some(&boxing(token)));
+        assert_eq!(adaptations.get(child, 0), Some(&boxing(survivor)));
+        assert_eq!(adaptations.get(child, 1), None);
+    }
+
+    #[test]
+    fn a_parameter_only_adapter_keeps_the_planned_erased_final_result() {
+        use crate::jvm::bridge_adaptations::{BridgeAdaptations, BridgeAdapter, ValueClassAdapter};
+        let owner = crate::types::type_name("p/Owner");
+        let value = crate::types::type_name("p/Value");
+        let mut bridge = renamed_bridge("read", Ty::String, true);
+        bridge.erased_params = vec![Ty::obj("kotlin/Any")];
+        bridge.parameters[0].semantic = Ty::ty_param("E", Ty::obj("kotlin/Any"));
+        let mut adaptations = BridgeAdaptations::default();
+        assert_eq!(
+            adaptations.renamed_special_result(owner, 0, false, &bridge),
+            Some(Ty::String)
+        );
+        bridge.concrete_ret = Ty::nullable(Ty::Int);
+        assert_eq!(
+            adaptations.renamed_special_result(owner, 0, false, &bridge),
+            Some(Ty::obj("java/lang/Integer"))
+        );
+        bridge.concrete_ret = Ty::String;
+        adaptations.extend([(
+            (owner, 0),
+            BridgeAdapter {
+                result: None,
+                parameters: vec![Some(ValueClassAdapter::new(value, false))],
+            },
+        )]);
+        assert_eq!(
+            adaptations.renamed_special_result(owner, 0, false, &bridge),
+            None
+        );
+    }
 
     #[test]
     fn dependent_type_parameter_erases_to_its_class_bound_for_bridge_descriptors() {

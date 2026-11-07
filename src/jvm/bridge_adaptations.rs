@@ -7,7 +7,7 @@
 
 use crate::fx_hash::HashMap;
 
-use crate::types::TypeName;
+use crate::types::{Ty, TypeName};
 
 /// One value class a bridge boxes or unboxes, and whether a null goes past the adapter: a nullable
 /// value class whose carrier holds the null itself.
@@ -63,6 +63,34 @@ pub(crate) struct BridgeAdaptations {
 }
 
 impl BridgeAdaptations {
+    /// The final result a renamed special bridge emits instead of its erased one.
+    /// This is queried only after value-class realization: any adapter keeps the single planned
+    /// erased bridge, including a bridge that adapts only its parameters.
+    pub(crate) fn renamed_special_result(
+        &self,
+        owner: TypeName,
+        ordinal: u32,
+        owner_is_interface: bool,
+        bridge: &crate::ir::Bridge,
+    ) -> Option<Ty> {
+        if owner_is_interface
+            || !bridge.special
+            || self.get(owner, ordinal).is_some()
+            || bridge.target_ret.is_some()
+            || bridge.collection_barrier.is_some()
+            || !matches!(
+                bridge.kind,
+                crate::ir::BridgeKind::Function | crate::ir::BridgeKind::PropertyGetter
+            )
+            || (bridge.kind == crate::ir::BridgeKind::Function && bridge.barrier_plan.is_some())
+        {
+            return None;
+        }
+        let concrete = crate::jvm::physical_type::ir_ty_to_jvm(&bridge.concrete_ret);
+        let erased = crate::jvm::physical_type::ir_ty_to_jvm(&bridge.erased_ret);
+        (concrete.is_reference() && erased.is_reference() && concrete != erased).then_some(concrete)
+    }
+
     /// Record the plans of one class's bridges. A bridge is planned exactly once; a bridge with
     /// nothing to adapt records nothing.
     pub(crate) fn extend(

@@ -345,7 +345,6 @@ fn run_backend_passes_after_plugins(
         &facts.override_results,
         &mut facts.function_argument_arrays,
         facts.jvm_default,
-        &abstract_overrides,
     )?;
     crate::jvm::collection_barriers::select(
         ir,
@@ -389,6 +388,14 @@ fn run_backend_passes_after_plugins(
     ) {
         return Err(SkipReason::ValueClasses);
     }
+    // Final bridge identity follows the realized descriptor and any value-class adapter. Pruning
+    // also moves each surviving adapter to its bridge's new ordinal.
+    crate::jvm::bridges::finalize_special_collection_bridges(
+        ir,
+        classpath,
+        &facts.collection_members.abstract_overrides,
+        &mut facts.bridge_adaptations,
+    );
     crate::jvm::companion::finalize_hoisted_static_field_names(
         ir,
         &facts.property_reference_realizations.delegated_arrays,

@@ -279,3 +279,19 @@ fun box(): String {{
     );
     common::expect_box_same_as_kotlinc(&program, "abstract_builtin_overrides_boxed_remove_at");
 }
+
+// PLATFORM-SPECIFIC: complete JVM bridge descriptors, access flags, and class ABI.
+#[test]
+fn an_adapted_renamed_override_inherits_the_realized_final_bridge_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "AdaptedInheritedRename",
+        include_str!("box_regressions/adaptedInheritedCollectionRename.kt"),
+        &[
+            "BridgeToken",
+            "TokenParent",
+            "TokenChild",
+            "TokenLeaf",
+            "AdaptedInheritedRenameKt",
+        ],
+    );
+}
