@@ -54,4 +54,14 @@ impl KlibIrArena {
         self.functions.push(function);
         KlibIrFunctionId(next_id(self.functions.len() - 1))
     }
+
+    /// A decoded function, to rewrite one serialized fact for a malformed-header control.
+    pub(crate) fn function_mut(&mut self, id: KlibIrFunctionId) -> &mut KlibIrFunction {
+        &mut self.functions[id.index()]
+    }
+
+    /// A decoded class, to rewrite one serialized fact for a malformed-header control.
+    pub(crate) fn class_mut(&mut self, id: KlibIrClassId) -> &mut KlibIrClass {
+        &mut self.classes[id.index()]
+    }
 }

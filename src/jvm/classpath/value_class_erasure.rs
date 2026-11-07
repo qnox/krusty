@@ -364,7 +364,10 @@ mod tests {
 
     fn signature(formals: &[(&str, Vec<Ty>)]) -> crate::libraries::GenericSig {
         crate::libraries::GenericSig {
-            formals: formals.iter().map(|(name, _)| (*name).to_owned()).collect(),
+            formals: formals
+                .iter()
+                .map(|(name, _)| crate::types::TyParamName::new(name))
+                .collect(),
             formal_bounds: formals.iter().map(|(_, bounds)| bounds.clone()).collect(),
             receiver: None,
             params: Vec::new(),

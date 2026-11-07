@@ -399,3 +399,6 @@ fun box(): String = mixed(1, 2, 3).toString()
         "InterfaceDelegateOrderKt$mixed$E",
     );
 }
+
+#[path = "anonymous_capture_demand_e2e.rs"]
+mod anonymous_capture_demand;

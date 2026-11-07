@@ -178,3 +178,68 @@ fun box(): String = Outer().Inner().run().text
 
     common::expect_box_ok_with_stdlib(SRC, "Main");
 }
+
+#[test]
+fn enclosing_super_accessor_names_match_the_complete_class_inventory() {
+    assert_super_accessor_classes(
+        include_str!("fixtures/labeled_super_accessors/BareLabeled.kt"),
+        "BareLabeled",
+    );
+}
+
+#[test]
+fn enclosing_super_accessor_names_keep_the_reference_runtime() {
+    common::expect_box_same_as_kotlinc(
+        include_str!("fixtures/labeled_super_accessors/BareLabeled.kt"),
+        "BareLabeled",
+    );
+}
+
+#[test]
+fn enclosing_super_accessor_names_use_the_declared_nested_segment_and_reuse_targets() {
+    assert_super_accessor_classes(
+        include_str!("fixtures/labeled_super_accessors/PackagedRepeated.kt"),
+        "PackagedRepeated",
+    );
+}
+
+#[test]
+fn enclosing_super_accessor_names_preserve_repeated_method_and_property_runtime() {
+    let source = include_str!("fixtures/labeled_super_accessors/PackagedRepeated.kt");
+    let reference = common::kotlinc_box_files_result(
+        &[("PackagedRepeated.kt", source)],
+        "bridge.names.PackagedRepeatedKt",
+    );
+    assert_eq!(reference, "OK", "packaged kotlinc fixture must succeed");
+    assert_eq!(
+        common::expect_box_run_with_stdlib(source, "PackagedRepeated"),
+        reference,
+    );
+}
+
+fn assert_super_accessor_classes(source: &str, stem: &str) {
+    let file = format!("{stem}.kt");
+    let classes = common::classes_against_kotlinc_module(&[(&file, source)]);
+    let inventory = |classes: &std::collections::BTreeMap<String, Vec<u8>>| {
+        classes
+            .iter()
+            .map(|(name, bytes)| {
+                let class = krusty::jvm::classreader::parse_class(bytes).expect("readable class");
+                let header = format!(
+                    "{:?}",
+                    (
+                        class.major,
+                        class.access,
+                        class.this_class,
+                        class.super_class,
+                        class.interfaces(),
+                        class.signature,
+                        class.inner_classes
+                    )
+                );
+                (name.clone(), (header, common::member_table(bytes)))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(inventory(&classes.krusty), inventory(&classes.reference));
+}

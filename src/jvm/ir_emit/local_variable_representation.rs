@@ -363,12 +363,7 @@ impl Emitter<'_> {
                     self.emit_consumed_operand(initializer, code)
                 }
             };
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&initializer)
-            .copied()
-            .unwrap_or(source);
+        let semantic = self.ir.logical_type(initializer).unwrap_or(source);
         // An inlined body forgets the caller's line. kotlinc's `visitVariable` marks the
         // declaration before it narrows the erased result, so the `checkcast` — not the store
         // after it — starts that line (`val value = fetch(slot)`). An unsigned
@@ -400,7 +395,7 @@ impl Emitter<'_> {
         initializer: ExprId,
         code: &mut CodeBuilder,
     ) {
-        self.mark_expression_start(initializer, code);
+        self.mark_initializer_end(initializer, code);
         match self.ir.external_frame_lines.get(&declaration).cloned() {
             Some(frame) => {
                 let line = self.map_external_frame_line(&frame);

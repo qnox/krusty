@@ -809,6 +809,9 @@ static KRef kt_reference_receiver(KRef self) {
 }
 
 kt_boolean kt_reference_equals(KRef self, KRef other) {
+    if (self == other) {
+        return true;
+    }
     if (other == NULL) {
         return false;
     }
