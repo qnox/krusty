@@ -8,7 +8,6 @@
 
 use krusty::fx_hash::{HashMap, HashSet};
 
-use crate::value_classes::boxed_value_class_underlying;
 use krusty::ir::IrFile;
 use krusty::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors;
 use krusty::jvm::names::type_descriptor;
@@ -17,7 +16,8 @@ use krusty::types::Ty;
 use super::ir_ty_to_jvm;
 
 pub(super) fn of(ir: &IrFile) -> ValueClassDescriptors {
-    let descriptors: HashMap<String, String> = crate::value_classes::boxed_value_class_names(ir)
+    let descriptors: HashMap<String, String> = ir
+        .value_class_names()
         .filter_map(|name| {
             let unboxed = unboxed_type(ir, Ty::obj_name(name))?;
             Some((name.render(), type_descriptor(ir_ty_to_jvm(&unboxed))))

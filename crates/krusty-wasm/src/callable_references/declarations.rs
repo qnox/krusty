@@ -7,7 +7,7 @@ use krusty::ir::{FunId, IrFile};
 use krusty::types::{Ty, TypeName};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(in krusty::wasm) enum Declaration {
+pub(crate) enum Declaration {
     Source {
         module: String,
         callable: CallableId,

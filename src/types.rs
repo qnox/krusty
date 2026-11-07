@@ -2045,7 +2045,7 @@ pub fn ty_mentions_param<F: TyParamKey>(ty: Ty, names: &[F]) -> bool {
 /// Whether `ty` mentions ANY type parameter, whatever its identity. Semantic type-parameter names
 /// are checker-generated (`\0tp:…`), so a source-name list cannot match them — use this where the
 /// only question is "does a type variable appear at all".
-pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
+pub fn ty_mentions_any_param(ty: Ty) -> bool {
     match ty.kind() {
         TyKind::TyParam(..) | TyKind::Var(..) => true,
         TyKind::Intersection(parts) => parts.iter().any(|part| ty_mentions_any_param(*part)),

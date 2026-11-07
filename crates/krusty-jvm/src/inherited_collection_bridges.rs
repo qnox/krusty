@@ -318,7 +318,7 @@ fn kotlin_supertypes(info: &ClassInfo, applied: Ty) -> Vec<Ty> {
     let bindings: HashMap<String, Ty> = info
         .meta
         .class_type_parameters
-        .type_params
+        .type_params()
         .iter()
         .cloned()
         .zip(applied.non_null().type_args().iter().copied())
