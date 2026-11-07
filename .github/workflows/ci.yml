@@ -128,10 +128,10 @@ jobs:
       # Coverage mappings are compiler-version dependent. Keep the committed baseline and the
       # instrumenting compiler on the same immutable nightly.
       KRUSTY_COVERAGE_TOOLCHAIN: nightly-2026-09-05
-      # The instrumented build compiles krusty's lib and test targets side by side, and every
-      # extra job token also lets rustc run more LLVM threads. Four jobs fit in 16 GB, which is
-      # what GitHub's four-core runners use; eight do not.
-      CARGO_BUILD_JOBS: "4"
+      # Serialize the instrumented build on 8 GB self-hosted runners, including each rustc's
+      # frontend work. Forks retain the hosted runner's four-job, four-thread build budget.
+      CARGO_BUILD_JOBS: &rust-build-budget ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '4' || '1' }}
+      KRUSTY_COVERAGE_FRONTEND_THREADS: *rust-build-budget
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -334,6 +334,8 @@ jobs:
 
   build-klib-test-bins:
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    env:
+      CARGO_BUILD_JOBS: *rust-build-budget
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1

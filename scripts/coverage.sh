@@ -93,11 +93,20 @@ source <("${coverage_cargo[@]}" llvm-cov show-env --sh --branch 2>/dev/null)
 # The frontend of one rustc is otherwise single-threaded. Asking for one frontend job per core
 # sped the instrumented CLI and language-server build; the same `-C instrument-coverage` and
 # `-Z coverage-options=branch` flags are still what the wrapper passes through.
-frontend_threads="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
-case "$frontend_threads" in
-  ''|*[!0-9]*) frontend_threads=1 ;;
-esac
-if [ "$frontend_threads" -gt 1 ]; then
+if [ "${KRUSTY_COVERAGE_FRONTEND_THREADS+x}" = x ]; then
+  frontend_threads="$KRUSTY_COVERAGE_FRONTEND_THREADS"
+  if [[ ! "$frontend_threads" =~ ^[1-9][0-9]*$ ]]; then
+    echo "coverage: KRUSTY_COVERAGE_FRONTEND_THREADS must be a positive integer" >&2
+    exit 2
+  fi
+else
+  frontend_threads="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
+  case "$frontend_threads" in
+    ''|*[!0-9]*) frontend_threads=1 ;;
+  esac
+fi
+# An explicit one also overrides a thread flag inherited through RUSTFLAGS.
+if [ "${KRUSTY_COVERAGE_FRONTEND_THREADS+x}" = x ] || [ "$frontend_threads" -gt 1 ]; then
   if [ -n "${RUSTFLAGS:-}" ]; then
     export RUSTFLAGS="$RUSTFLAGS -Z threads=${frontend_threads}"
   else
