@@ -25,6 +25,16 @@ impl<'u, 's> Linker<'u, 's> {
             ));
         }
         let header = super::super::function_lowering::initializer_header(&plan)?;
+        let self_type = super::super::klib_types::semantic_type(
+            plan.header.arena,
+            &plan.header.types,
+            plan.header
+                .class
+                .this_receiver
+                .as_ref()
+                .expect("the plan authenticated its receiver")
+                .ty,
+        )?;
         let mut class = IrClass::synthetic(classifier);
         class.supertypes.push(plan.storage.superclass);
         class.fields = plan
@@ -65,6 +75,7 @@ impl<'u, 's> Linker<'u, 's> {
         class.ctor_param_count = 0;
         class.explicit_param_stores = true;
         let class = ir.add_class(class);
+        ir.record_declared_class_self_type(classifier, self_type);
         let function = declare_function(ir, &header);
         ir.functions[function as usize].is_static = false;
         ir.functions[function as usize].dispatch_receiver = Some(classifier);
