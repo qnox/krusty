@@ -1466,6 +1466,16 @@ impl CallLinker for Linker<'_, '_> {
                 None => false,
             };
             if !value_class_member {
+                // A member reached from a same-library body is not in the root's checked call
+                // set. Its provider record is the external declaration a source call would use.
+                if selected.is_none() {
+                    if let Some(linked) = self
+                        .link_provider_member(&identity, arena, declaration)
+                        .map_err(callee_declined)?
+                    {
+                        return Ok(linked);
+                    }
+                }
                 return Err(KlibBodyDeclineReason::UnsupportedOperation(
                     "a call of a member function",
                 ));
@@ -1482,6 +1492,17 @@ impl CallLinker for Linker<'_, '_> {
             return self
                 .value_member(ir, &identity, selected, arena, declaration)
                 .map_err(callee_declined);
+        }
+        // A reached generic callee is not in the root's checked call set. Its provider record
+        // is the same declaration header a checked call would authenticate, so the formals are
+        // not recovered from the serialized source spelling.
+        if selected.is_none() && !declaration.type_parameters.is_empty() {
+            if let Some(linked) = self
+                .link_generic_provider(ir, &identity, arena, declaration)
+                .map_err(callee_declined)?
+            {
+                return Ok(linked);
+            }
         }
         let selected = selected_callable_for_header(selected, None, arena, declaration)
             .map_err(callee_declined)?;
@@ -1520,6 +1541,187 @@ impl CallLinker for Linker<'_, '_> {
 }
 
 impl<'s> Linker<'_, 's> {
+    /// An unselected member call, realized through the provider's external declaration.
+    ///
+    /// Returns `None` when this provider has no member record for `identity`. The record is not
+    /// stored: the call leaves this unit as an external edge, the way a checked member call does.
+    fn link_provider_member(
+        &self,
+        identity: &KlibDependencyCallable,
+        arena: &'s KlibIrArena,
+        declaration: &'s KlibIrFunction,
+    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
+        let Some((target, realization)) = self
+            .sources
+            .declarations
+            .external_callable_by_dependency(identity)
+        else {
+            return Ok(None);
+        };
+        let Some(callable) = realization.klib_body_callable() else {
+            return Ok(None);
+        };
+        if !callable.is_member() {
+            return Ok(None);
+        }
+        let Some(selected) = selected_callable_for_header_purpose(
+            Some(SelectedKlibCallables::One(callable)),
+            HeaderPurpose::External,
+            arena,
+            declaration,
+            Some(self.sources.bodies),
+        )?
+        else {
+            return Ok(None);
+        };
+        let class = if selected
+            .class_contract()
+            .is_some_and(|class| !class.parameters.formals.is_empty())
+        {
+            Some(super::class_headers::authenticate(
+                selected,
+                self.sources.bodies,
+            )?)
+        } else {
+            None
+        };
+        let (header, class_type_parameters) = match class {
+            Some(class) => {
+                super::class_headers::authenticate_receiver(
+                    class.contract,
+                    class.arena,
+                    class.function,
+                )?;
+                let header = super::function_lowering::raw_function_header_with_class(
+                    Some(selected),
+                    HeaderPurpose::External,
+                    class.arena,
+                    class.function,
+                    class.types,
+                )?;
+                (header, class.formals)
+            }
+            None => (
+                raw_function_header(Some(selected), HeaderPurpose::External, arena, declaration)?,
+                Vec::new(),
+            ),
+        };
+        let (params, ret, context_count, extension_receiver, receiver) = header.linked_signature();
+        Ok(Some(LinkedCallee {
+            callee: Callee::External {
+                target,
+                default_provider: None,
+                params: params.to_vec(),
+                ret,
+                substitutions: Vec::new(),
+                defaults: Vec::new(),
+                extension_receiver_parameter: extension_receiver.then_some(context_count as u32),
+            },
+            receiver,
+            params: params.to_vec(),
+            ret,
+            context_count,
+            singleton_dispatch: selected.singleton_classifier(),
+            type_parameters: selected
+                .generic_signature()
+                .map_or_else(Vec::new, |signature| signature.formals.clone()),
+            type_parameter_bounds: selected
+                .generic_signature()
+                .map(|signature| signature.formal_bounds.clone()),
+            class_type_parameters,
+            parameter_defaults: Vec::new(),
+        }))
+    }
+
+    /// Lower a reached generic function from the provider record of `identity`.
+    ///
+    /// Returns `None` when this provider has no record for that exact declaration. The record
+    /// lives only for this call, so a value-class member, whose class contract has to stay with
+    /// the unit, is left for the selected path.
+    fn link_generic_provider(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        arena: &'s KlibIrArena,
+        declaration: &'s KlibIrFunction,
+    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
+        let Some((_, realization)) = self
+            .sources
+            .declarations
+            .external_callable_by_dependency(identity)
+        else {
+            return Ok(None);
+        };
+        let Some(callable) = realization.klib_body_callable() else {
+            return Ok(None);
+        };
+        let Some(selected) = selected_callable_for_header(
+            Some(SelectedKlibCallables::One(callable)),
+            None,
+            arena,
+            declaration,
+        )?
+        else {
+            return Ok(None);
+        };
+        let function = match self.functions.get(identity).copied() {
+            Some(function) => {
+                function_header(Some(selected), arena, declaration)?;
+                function
+            }
+            None => {
+                let header = body_header(Some(selected), arena, declaration, self.sources.bodies)?;
+                if header.value_receiver().is_some() {
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "a value class member body has no selected declaration".to_owned(),
+                    ));
+                }
+                let singleton = selected.singleton_dispatch();
+                let classifier = selected.singleton_classifier();
+                let function = self.queue(
+                    ir,
+                    identity,
+                    None,
+                    arena,
+                    declaration,
+                    BodyHeader {
+                        header,
+                        value_member: None,
+                    },
+                )?;
+                if let Some(singleton) = singleton {
+                    self.authenticated_singleton_dispatches
+                        .insert(identity.clone(), singleton);
+                }
+                if let Some(classifier) = classifier {
+                    self.authenticated_singleton_classifiers
+                        .insert(identity.clone(), classifier);
+                }
+                function
+            }
+        };
+        let type_parameters = selected
+            .generic_signature()
+            .map_or_else(Vec::new, |signature| signature.formals.clone());
+        let type_parameter_bounds = selected
+            .generic_signature()
+            .map(|signature| signature.formal_bounds.clone());
+        let parameter_defaults = parameter_defaults(declaration);
+        let declared = &ir.functions[function as usize];
+        Ok(Some(LinkedCallee {
+            callee: Callee::Local(function),
+            receiver: None,
+            params: declared.params.clone(),
+            ret: declared.ret,
+            context_count: ir.fn_context_counts.get(&function).copied().unwrap_or(0),
+            singleton_dispatch: None,
+            type_parameters,
+            type_parameter_bounds,
+            class_type_parameters: Vec::new(),
+            parameter_defaults,
+        }))
+    }
+
     /// The type parameters of the generic class declaring `selected`, which a call of the member
     /// binds from its dispatch receiver; none for a top-level function or a non-generic class.
     /// The getter of a value class's property, when this unit emits its body.
