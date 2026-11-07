@@ -4,15 +4,27 @@
 //! the slot's erased type straight to the consumer and emits neither call. The coercion is then an
 //! identity over the box. A nullable generic slot (`shelf[0]` of a `Shelf<X?>`) is the same
 //! identity: its null-safe unbox and null-safe box each keep `null` as it is.
+//!
+//! When nothing consumes the coerced value at all (`id(ic)` as a statement), kotlinc's codegen
+//! discards the call's own result as it is: `PromisedValue.discard` pops the callee's erased
+//! result type and never coerces it, so neither the `checkcast` to the box nor `unbox-impl` is
+//! emitted. The coercion is then the call itself.
 
 use super::BoxOp;
-use crate::fx_hash::HashSet;
+use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
+
+/// Drop every value-class conversion of a coercion kotlinc never materializes: an `unbox-impl`
+/// its consumer boxes straight back, and one of a value nothing consumes.
+pub(super) fn drop_unmaterialized(ops: &mut Vec<(ExprId, BoxOp)>, ir: &mut IrFile) {
+    drop_rebox_round_trips(ops, ir);
+    drop_discarded_unboxes(ops, ir);
+}
 
 /// Drop each `unbox-impl` of a coercion's operand that the coercion's consumer immediately boxes
 /// back into the same value class, together with that `box-impl`, and make the coercion the
 /// operand itself: it no longer converts to the carrier it was retargeted to.
-pub(super) fn drop_rebox_round_trips(ops: &mut Vec<(ExprId, BoxOp)>, ir: &mut IrFile) {
+fn drop_rebox_round_trips(ops: &mut Vec<(ExprId, BoxOp)>, ir: &mut IrFile) {
     let unboxes: HashSet<(ExprId, BoxOp)> = ops
         .iter()
         .copied()
@@ -50,6 +62,64 @@ pub(super) fn drop_rebox_round_trips(ops: &mut Vec<(ExprId, BoxOp)>, ir: &mut Ir
         }
     }
     ops.retain(|operation| !identities.contains(operation));
+}
+
+/// Drop each `unbox-impl` of a coercion whose value is discarded, and make that coercion its
+/// operand: the discarded value is the operand's own result, popped as it is.
+fn drop_discarded_unboxes(ops: &mut Vec<(ExprId, BoxOp)>, ir: &mut IrFile) {
+    let discarded = discarded_coercions(ir);
+    let mut identities = Vec::new();
+    ops.retain(|&(operand, op)| {
+        let coercion = matches!(op, BoxOp::Unbox(_) | BoxOp::UnboxNull(_))
+            .then(|| discarded.get(&operand))
+            .flatten();
+        if let Some(&coercion) = coercion {
+            identities.push((coercion, operand));
+        }
+        coercion.is_none()
+    });
+    for (coercion, operand) in identities {
+        ir.exprs[coercion as usize] = IrExpr::Block {
+            stmts: vec![],
+            value: Some(operand),
+        };
+        ir.take_physical_type(coercion);
+    }
+}
+
+/// The implicit coercions whose value nothing reads, by their operand: a block's statements, and
+/// the value of a block that is itself discarded.
+fn discarded_coercions(ir: &IrFile) -> HashMap<ExprId, ExprId> {
+    let mut pending: Vec<ExprId> = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Block { stmts, .. } => Some(stmts.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let mut visited = HashSet::default();
+    let mut coercions = HashMap::default();
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        match ir.exprs[id as usize] {
+            IrExpr::Block {
+                value: Some(value), ..
+            } => pending.push(value),
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => {
+                coercions.insert(arg, id);
+            }
+            _ => {}
+        }
+    }
+    coercions
 }
 
 #[cfg(test)]

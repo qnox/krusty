@@ -2810,6 +2810,8 @@ mod value_class_property_reference_e2e;
 mod value_class_receiver_capture_debug_names_e2e;
 #[path = "value_class_reference_return_e2e.rs"]
 mod value_class_reference_return_e2e;
+#[path = "e2e/value_class_representation.rs"]
+mod value_class_representation;
 #[path = "value_class_structural_bodies_e2e.rs"]
 mod value_class_structural_bodies_e2e;
 #[path = "value_class_template_lambda_e2e.rs"]
