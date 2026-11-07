@@ -185,6 +185,7 @@ mod inner_constructor_calls;
 mod member_call_bindings;
 mod member_slot_calls;
 mod nested_producer_bindings;
+mod try_expression;
 use inner_constructor_calls::BoundInnerConstruction;
 mod import_diagnostics;
 mod inspection_analysis;
@@ -30414,6 +30415,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         iteration_plans: IterationPlans::default(),
         resolved_constructors: HashMap::default(),
         call_owned_conditional_branches: HashMap::default(),
+        joined_branch_values: crate::fx_hash::HashSet::default(),
         resolved_enum_entry_constructors: HashMap::default(),
         resolved_ctor_delegations: HashMap::default(),
         resolved_primary_ctor_delegations: HashMap::default(),
@@ -32956,6 +32958,9 @@ struct Checker<'a> {
     /// shaped its lambda argument. Selection consumes each obligation exactly once after its
     /// functional result is fixed or remains call-owned.
     call_owned_conditional_branches: HashMap<ExprId, Vec<ExprId>>,
+    /// Terminal values of conditional branches checked in statement position. Their enclosing
+    /// conditional completes an open result after sibling rebinding, not the statement itself.
+    joined_branch_values: crate::fx_hash::HashSet<ExprId>,
     resolved_enum_entry_constructors: HashMap<(u32, u32), ResolvedConstructor>,
     resolved_ctor_delegations: HashMap<(DeclId, usize), ResolvedCtorDelegation>,
     resolved_primary_ctor_delegations: HashMap<DeclId, ResolvedCtorDelegation>,
@@ -49065,7 +49070,9 @@ impl<'a> Checker<'a> {
     fn expr_statement(&mut self, scope: &CheckerScope<'_>, e: ExprId) -> Ty {
         self.discarded_exprs.insert(e);
         let ty = self.expr_with_context(scope, e, false);
-        if self.report_unbound_call_result_type_parameter(scope, e) {
+        if !self.joined_branch_values.contains(&e)
+            && self.report_unbound_call_result_type_parameter(scope, e)
+        {
             Ty::Error
         } else {
             ty
@@ -51577,155 +51584,6 @@ impl<'a> Checker<'a> {
                 },
             );
             Ty::Error
-        };
-        self.set(e, t)
-    }
-
-    fn expr_inner_try(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        e: ExprId,
-        wanted: Wanted,
-        body: ExprId,
-        catches: Vec<CatchClause>,
-        finally: Option<ExprId>,
-    ) -> Ty {
-        let t = {
-            let joined = !catches.is_empty();
-            // A catch begins on an exceptional edge from any point of the try body: it gets the
-            // entry facts minus every narrowing the body writes. Normal exits keep only the facts
-            // common to all of them. No syntax coordinate or body survives FIR.
-            let entry_flow = scope.flow_snapshot();
-            let (bt, written) = self.try_body_written_bindings(|checker| {
-                checker.joined_branch_result(scope, body, wanted, joined)
-            });
-            let mut all_exit_writes = catch_flow::TryBodyWrites::default();
-            let mut exit_flows = self
-                .normal_completion(body)
-                .then(|| scope.flow_snapshot())
-                .into_iter()
-                .collect::<Vec<_>>();
-            let mut result = bt;
-            let mut branch_types = vec![(body, bt)];
-            for c in &catches {
-                scope.restore_flow(&entry_flow);
-                self.clear_narrowings_a_try_body_writes(scope, &written);
-                let resolved_catch = self.type_ref_ty(scope, &c.ty);
-                let catch_is_throwable = std::iter::once(resolved_catch)
-                    .chain(resolved_catch.ty_param_bound())
-                    .chain(self.semantic_tparam_extra_bounds(scope, resolved_catch))
-                    .any(|candidate| {
-                        crate::assignable::is_subtype(
-                            &crate::assignable::TyCtx::new(),
-                            self,
-                            candidate,
-                            Ty::obj("kotlin/Throwable"),
-                        )
-                    });
-                crate::trace_compiler!(
-                    "resolve",
-                    "catch type resolved={resolved_catch:?} primary={:?} extra={:?} throwable={catch_is_throwable}",
-                    resolved_catch.ty_param_bound(),
-                    self.semantic_tparam_extra_bounds(scope, resolved_catch),
-                );
-                let cty = if resolved_catch.contains_error() {
-                    self.report_unresolved_type_ref(&c.ty);
-                    Ty::Error
-                } else if !c.ty.nullable() && catch_is_throwable {
-                    resolved_catch
-                } else {
-                    self.diags.error(
-                        c.param_span,
-                        format!(
-                            "throwable type mismatch: actual type is '{}'.",
-                            resolved_catch.source_name()
-                        ),
-                    );
-                    Ty::Error
-                };
-                let (ht, catch_writes) = self.try_body_written_bindings(|checker| {
-                    let catch_scope = scope.child(ScopeKind::Block);
-                    let scope = &catch_scope;
-                    checker.declare(scope, &c.name, cty, false);
-                    checker.joined_branch_result(scope, c.body, wanted, joined)
-                });
-                all_exit_writes.extend(catch_writes);
-                if self.normal_completion(c.body) {
-                    exit_flows.push(scope.flow_snapshot());
-                }
-                branch_types.push((c.body, ht));
-                // In VALUE position, REFERENCE branches use the same full join as other conditional
-                // expressions: `try { x } catch { null }` is `T?`, and different reference classes
-                // join to `Any`. Two primitive branches deliberately do not take it: an integer
-                // constant is adapted to a sibling primitive after this loop, and a non-constant
-                // primitive disagreement (`Int` versus `Long`) keeps `try_branch_join`.
-                let reference_like =
-                    |ty: Ty| ty.is_reference() || matches!(ty, Ty::Nothing | Ty::Error);
-                // A primitive beside a REAL reference joins the same way: `try { s.length } catch
-                // (e: Exception) { null }` is `Int?`, as `if (c) s.length else null` is.
-                let joins = (reference_like(result) && reference_like(ht))
-                    || result.is_reference()
-                    || ht.is_reference();
-                result = if wanted.value_required && joins {
-                    // Join against the EXPECTATION, exactly as `if`/`when` do: a `try` in value
-                    // position is a conditional expression like any other. A blind join of two
-                    // generic branches invents an out-projection (`R<out Any>`) that no INVARIANT
-                    // declared type can take, rejecting source kotlinc accepts.
-                    conditional_branch::join_types(self, scope, wanted.expected, result, ht, e)
-                } else {
-                    conditional_branch::try_branch_join(self, wanted.value_required, result, ht)
-                };
-            }
-            result = conditional_branch::adapted_try_result(
-                self,
-                wanted.value_required,
-                &branch_types,
-                result,
-            );
-            self.complete_conditional_branches(
-                scope,
-                e,
-                wanted.expected,
-                result,
-                branch_types.iter().copied(),
-            );
-            self.record_flexible_join(
-                e,
-                branch_types.iter().map(|(expression, _)| *expression),
-                result,
-                false,
-            );
-            self.publish_conditional_intersection(e, branch_types.iter().copied(), result);
-            scope.restore_common_flow(&exit_flows);
-            let normal_continuation = scope.flow_snapshot();
-            all_exit_writes.extend(written);
-            if let Some(f) = finally {
-                // A finalizer runs after every try/catch exit, including an abrupt return, throw,
-                // break, or continue. Start it from the try entry with every binding written on
-                // any reachable exit cleared; branch-only facts from a normal exit are not valid
-                // on an abrupt one. Then project the finalizer's single checked flow delta onto
-                // the normal-only continuation instead of checking its body a second time.
-                scope.restore_flow(&entry_flow);
-                self.clear_narrowings_a_try_body_writes(scope, &all_exit_writes);
-                let finalizer_entry = scope.flow_snapshot();
-                let (_, finalizer_writes) =
-                    self.try_body_written_bindings(|checker| checker.expr_statement(scope, f));
-                let finalizer_local_flow = self.written_local_flow(scope, &finalizer_writes);
-                let finalizer_exit = scope.flow_snapshot();
-                scope.restore_flow_with_delta(
-                    &normal_continuation,
-                    &finalizer_entry,
-                    &finalizer_exit,
-                );
-                // The delta carries every flow facet established by the finalizer: local read
-                // types, path/intersection facts, exclusions, and saved Boolean implications.
-                // Reapply exact local write results as well: a finalizer assignment dominates the
-                // normal continuation even when it left the same fact as the conservative entry.
-                for (name, narrowing) in finalizer_local_flow {
-                    scope.narrow_local(&name, narrowing);
-                }
-            }
-            result
         };
         self.set(e, t)
     }
@@ -54896,19 +54754,13 @@ impl<'a> Checker<'a> {
             let fixed = self.expectation_fixes_branches(scope, e, expected);
             if arm_results.len() >= 2 {
                 for i in 0..arm_results.len() {
-                    let sibling = arm_results
+                    let branches = arm_results
                         .iter()
-                        .enumerate()
-                        .filter(|(j, _)| *j != i)
-                        .map(|(_, record)| self.branch_sibling_type(record.body, record.ty))
-                        .filter(|ty| *ty != Ty::Error && !ty.mentions_pending())
-                        .fold(None, |acc: Option<Ty>, ty| {
-                            Some(match acc {
-                                Some(a) => self.semantic_common_supertype(a, ty).unwrap_or(a),
-                                None => ty,
-                            })
-                        });
-                    let Some(sibling) = sibling else { continue };
+                        .map(|record| (record.body, record.ty))
+                        .collect::<Vec<_>>();
+                    let Some(sibling) = self.conditional_sibling_evidence(&branches, i) else {
+                        continue;
+                    };
                     let record = &arm_results[i];
                     let body = record.body;
                     let current = record.ty;
