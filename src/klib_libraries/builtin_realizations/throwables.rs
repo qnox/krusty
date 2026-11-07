@@ -283,26 +283,49 @@ mod tests {
 
     #[test]
     fn selected_exception_constructors_keep_their_declaring_class_authority() {
-        let owner = type_name("kotlin/IllegalStateException");
-        let layout = Some(RuntimeExceptionLayout {
-            kind: RuntimeExceptionKind::IllegalState,
-            parent: Some(RuntimeExceptionKind::RuntimeException.classifier()),
-        });
-        for (params, message) in [(Vec::new(), false), (vec![Ty::nullable(Ty::String)], true)] {
-            let mut trusted = constructor(params.clone());
-            trusted.owner = Some(owner);
-            realize_constructor(owner, true, layout, &mut trusted);
-            assert!(matches!(
-                trusted.realization,
-                MemberRealization::Intrinsic(CompilerIntrinsic::ThrowableConstructor {
-                    kind: RuntimeExceptionKind::IllegalState,
-                    message: actual,
-                }) if actual == message
-            ));
-            let mut untrusted = constructor(params);
-            untrusted.owner = Some(owner);
-            realize_constructor(owner, false, layout, &mut untrusted);
-            assert_eq!(untrusted.realization, MemberRealization::Dispatch);
+        for (kind, parent) in [
+            (
+                RuntimeExceptionKind::IllegalState,
+                RuntimeExceptionKind::RuntimeException,
+            ),
+            (
+                RuntimeExceptionKind::IllegalArgument,
+                RuntimeExceptionKind::RuntimeException,
+            ),
+            (
+                RuntimeExceptionKind::UnsupportedOperation,
+                RuntimeExceptionKind::RuntimeException,
+            ),
+            (
+                RuntimeExceptionKind::Arithmetic,
+                RuntimeExceptionKind::RuntimeException,
+            ),
+            (
+                RuntimeExceptionKind::NumberFormat,
+                RuntimeExceptionKind::IllegalArgument,
+            ),
+        ] {
+            let owner = kind.classifier();
+            let layout = Some(RuntimeExceptionLayout {
+                kind,
+                parent: Some(parent.classifier()),
+            });
+            for (params, message) in [(Vec::new(), false), (vec![Ty::nullable(Ty::String)], true)] {
+                let mut trusted = constructor(params.clone());
+                trusted.owner = Some(owner);
+                realize_constructor(owner, true, layout, &mut trusted);
+                assert!(matches!(
+                    trusted.realization,
+                    MemberRealization::Intrinsic(CompilerIntrinsic::ThrowableConstructor {
+                        kind: actual_kind,
+                        message: actual,
+                    }) if actual_kind == kind && actual == message
+                ));
+                let mut untrusted = constructor(params);
+                untrusted.owner = Some(owner);
+                realize_constructor(owner, false, layout, &mut untrusted);
+                assert_eq!(untrusted.realization, MemberRealization::Dispatch);
+            }
         }
     }
 
