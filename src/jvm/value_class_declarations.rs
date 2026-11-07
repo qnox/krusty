@@ -21,7 +21,7 @@ pub(super) fn from_class_info(class: &ClassInfo) -> Option<ValueClassDeclaration
     let parameter_carrier = metadata.declaration.as_ref().and_then(|declaration| {
         let declared = declaration.underlying.non_null();
         (declared.is_ty_param() || declared.is_reference_array())
-            .then(|| declared.substitute_erased(&crate::fx_hash::HashMap::default()))
+            .then(|| declared.substitute_erased(&crate::types::TyParamBindings::default()))
     });
     let underlying = match (parameter_carrier, metadata.underlying_class.as_deref()) {
         (Some(carrier), _) => carrier,

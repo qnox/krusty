@@ -17,7 +17,7 @@ fn recorded_results(source: &str, stem: &str, op: IrBinOp) -> Vec<Option<Ty>> {
         .filter(
             |(_, node)| matches!(node, IrExpr::PrimitiveBinOp { op: found, .. } if *found == op),
         )
-        .map(|(id, _)| ir.logical_types.get(&(id as u32)).copied())
+        .map(|(id, _)| ir.logical_type(id as u32))
         .collect()
 }
 

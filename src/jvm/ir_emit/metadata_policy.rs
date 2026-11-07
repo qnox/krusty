@@ -70,6 +70,28 @@ pub(super) fn lambda_class_xi(
     }
 }
 
+/// `@Metadata.xi` of continuation class `class`: public when a method's `$$forInline` copy
+/// constructs it, package-private otherwise, and part of the public ABI when the function it
+/// re-enters is in a public inline function's scope.
+pub(super) fn continuation_class_xi(ir: &crate::ir::IrFile, class: &crate::ir::IrClass) -> i32 {
+    let class = ir
+        .class_id_by_name(class.fq_name_id())
+        .expect("a written continuation class is in the file");
+    let visibility = if crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, class)
+    {
+        SYNTHETIC_PUBLIC
+    } else {
+        SYNTHETIC_PROTECTED
+    };
+    let function = ir.jvm_continuation_functions.get(&class).copied();
+    let enclosure = function.map(crate::ir::IrEnclosure::Function);
+    if enclosure.is_some() && in_public_inline_scope(ir, enclosure) {
+        synthetic_class_xi(visibility) | METADATA_PUBLIC_ABI_FLAG
+    } else {
+        synthetic_class_xi(visibility)
+    }
+}
+
 fn in_public_inline_scope(
     ir: &crate::ir::IrFile,
     enclosure: Option<crate::ir::IrEnclosure>,

@@ -53,6 +53,7 @@ impl BodyLowering<'_> {
                         IrValueCapture {
                             declaration: IrCapturedDeclaration::Variable,
                             capturer,
+                            crossinline_parameter: None,
                         },
                     ),
                     receiver: None,
@@ -82,6 +83,7 @@ impl BodyLowering<'_> {
                         IrValueCapture {
                             declaration: IrCapturedDeclaration::Variable,
                             capturer,
+                            crossinline_parameter: None,
                         },
                     ),
                     receiver: None,
@@ -140,7 +142,10 @@ impl BodyLowering<'_> {
             self.ir,
             self.linker,
         );
-        lowering.initialization = self.initialization;
+        lowering.instance_storage = self
+            .instance_storage
+            .as_ref()
+            .and_then(super::instance_storage::InstanceStorageFrame::nested_initializer);
         let body = lowering.body(statements)?;
         self.ir.functions[implementation as usize].body = Some(body);
         Ok(self.ir.add_expr(IrExpr::Lambda {

@@ -8,6 +8,32 @@ use crate::resolve::{
     ResolvedCtorDelegation, ResolvedCtorDelegationTarget,
 };
 
+struct SourceConstructorRequest<'a> {
+    expression: ExprId,
+    arguments: &'a [ExprId],
+    owner: crate::types::TypeName,
+    primary: bool,
+    context_args: Vec<ResolvedContextArgument>,
+    parameters: Vec<Ty>,
+    stable_declaration: Option<DeclarationId>,
+    outer: Option<ExprId>,
+    argument_slots: Vec<usize>,
+    omitted: Vec<usize>,
+    vararg: Option<usize>,
+}
+
+struct ExternalConstructorRequest<'a> {
+    expression: ExprId,
+    arguments: &'a [ExprId],
+    owner: crate::types::TypeName,
+    outer: Option<ExprId>,
+    member: LibraryMember,
+    context_args: Vec<ResolvedContextArgument>,
+    argument_slots: Vec<usize>,
+    omitted: Vec<usize>,
+    annotation: Option<ResolvedAnnotationConstruction>,
+}
+
 fn annotation_default_value(default: crate::libraries::DefaultValue) -> FirAnnotationDefaultValue {
     use crate::libraries::DefaultValue;
 
@@ -43,10 +69,12 @@ fn annotation_default_value(default: crate::libraries::DefaultValue) -> FirAnnot
             classifier,
             members,
             values,
+            arguments,
         } => FirAnnotationDefaultValue::Annotation {
             classifier,
             members,
             values: values.into_iter().map(annotation_default_value).collect(),
+            arguments,
         },
     }
 }
@@ -84,19 +112,19 @@ impl BodyFirChecker<'_> {
                 omitted,
                 vararg,
                 ..
-            } => self.source_constructor_call(
+            } => self.source_constructor_call(SourceConstructorRequest {
                 expression,
                 arguments,
                 owner,
                 primary,
                 context_args,
-                params,
+                parameters: params,
                 stable_declaration,
                 outer,
                 argument_slots,
                 omitted,
                 vararg,
-            ),
+            }),
             ResolvedConstructor::Plain {
                 owner,
                 outer,
@@ -128,31 +156,31 @@ impl BodyFirChecker<'_> {
                         .stable_declaration
                         .and_then(|declaration| self.index.declaration_anchor(declaration))
                         .is_none_or(|anchor| anchor.sibling == 0);
-                    return self.source_constructor_call(
+                    return self.source_constructor_call(SourceConstructorRequest {
                         expression,
-                        &args,
+                        arguments: &args,
                         owner,
                         primary,
                         context_args,
-                        member.params.clone(),
-                        member.stable_declaration,
+                        parameters: member.params.clone(),
+                        stable_declaration: member.stable_declaration,
                         outer,
                         argument_slots,
-                        Vec::new(),
-                        member.call_sig.vararg_index,
-                    );
+                        omitted: Vec::new(),
+                        vararg: member.call_sig.vararg_index,
+                    });
                 }
-                self.external_constructor_call(
+                self.external_constructor_call(ExternalConstructorRequest {
                     expression,
-                    &args,
+                    arguments: &args,
                     owner,
                     outer,
                     member,
                     context_args,
                     argument_slots,
-                    Vec::new(),
+                    omitted: Vec::new(),
                     annotation,
-                )
+                })
             }
             ResolvedConstructor::PlainSlots {
                 owner,
@@ -198,21 +226,21 @@ impl BodyFirChecker<'_> {
                         .stable_declaration
                         .and_then(|declaration| self.index.declaration_anchor(declaration))
                         .is_none_or(|anchor| anchor.sibling == 0);
-                    return self.source_constructor_call(
+                    return self.source_constructor_call(SourceConstructorRequest {
                         expression,
                         arguments,
                         owner,
                         primary,
                         context_args,
-                        member.params.clone(),
-                        member.stable_declaration,
+                        parameters: member.params.clone(),
+                        stable_declaration: member.stable_declaration,
                         outer,
                         argument_slots,
                         omitted,
                         vararg,
-                    );
+                    });
                 }
-                self.external_constructor_call(
+                self.external_constructor_call(ExternalConstructorRequest {
                     expression,
                     arguments,
                     owner,
@@ -222,7 +250,7 @@ impl BodyFirChecker<'_> {
                     argument_slots,
                     omitted,
                     annotation,
-                )
+                })
             }
             ResolvedConstructor::Synthetic {
                 owner,
@@ -260,36 +288,38 @@ impl BodyFirChecker<'_> {
                     vararg,
                     &ctor.declaration.call_sig,
                 );
-                self.external_constructor_call(
+                self.external_constructor_call(ExternalConstructorRequest {
                     expression,
-                    &args,
+                    arguments: &args,
                     owner,
                     outer,
-                    ctor.declaration,
+                    member: ctor.declaration,
                     context_args,
                     argument_slots,
                     omitted,
                     annotation,
-                )
+                })
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn source_constructor_call(
         &mut self,
-        expression: ExprId,
-        arguments: &[ExprId],
-        owner: crate::types::TypeName,
-        primary: bool,
-        context_args: Vec<ResolvedContextArgument>,
-        parameters: Vec<Ty>,
-        stable_declaration: Option<DeclarationId>,
-        outer: Option<ExprId>,
-        argument_slots: Vec<usize>,
-        omitted: Vec<usize>,
-        vararg: Option<usize>,
+        request: SourceConstructorRequest<'_>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let SourceConstructorRequest {
+            expression,
+            arguments,
+            owner,
+            primary,
+            context_args,
+            parameters,
+            stable_declaration,
+            outer,
+            argument_slots,
+            omitted,
+            vararg,
+        } = request;
         let context_parameter_count = u32::try_from(context_args.len())
             .map_err(|_| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?;
         if argument_slots.len() != arguments.len() {
@@ -320,6 +350,14 @@ impl BodyFirChecker<'_> {
                 )
             })?
             .id;
+        let annotation = self.module_annotation_construction(
+            self.file
+                .expr_span(expression)
+                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
+            target,
+            &argument_slots,
+            &omitted,
+        )?;
         let checked_arguments = self.checked_constructor_arguments(
             expression,
             arguments,
@@ -336,8 +374,18 @@ impl BodyFirChecker<'_> {
         )?;
         let outer_receiver = self.constructor_outer_receiver(expression, outer)?;
         let origin = self.expression_origin(expression)?;
-        let external_capture_arguments =
-            self.external_constructor_capture_arguments(declaration, origin)?;
+        let capture_plan = match self.info.expr_lowers.get(&expression) {
+            Some(ExprLowering::ConstructorCaptures(plan)) => Some(plan.as_ref().clone()),
+            _ => None,
+        };
+        let external_capture_arguments = self.external_constructor_capture_arguments(
+            declaration,
+            origin,
+            self.file
+                .expr_span(expression)
+                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
+            capture_plan.as_ref(),
+        )?;
         let outer_parameter =
             if outer_receiver.is_some() {
                 let outer = self
@@ -362,12 +410,7 @@ impl BodyFirChecker<'_> {
         Ok(FirExprKind::ConstructorCall(FirConstructorCall {
             target: FirConstructorTarget::Module {
                 declaration: target,
-                annotation: self.module_annotation_construction(
-                    self.file.expr_span(expression).ok_or_else(|| {
-                        self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
-                    })?,
-                    target,
-                )?,
+                annotation,
             },
             context_parameter_count,
             outer_parameter,
@@ -380,19 +423,21 @@ impl BodyFirChecker<'_> {
         }))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn external_constructor_call(
         &mut self,
-        expression: ExprId,
-        arguments: &[ExprId],
-        owner: crate::types::TypeName,
-        outer: Option<ExprId>,
-        member: LibraryMember,
-        context_args: Vec<ResolvedContextArgument>,
-        argument_slots: Vec<usize>,
-        omitted: Vec<usize>,
-        annotation: Option<ResolvedAnnotationConstruction>,
+        request: ExternalConstructorRequest<'_>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let ExternalConstructorRequest {
+            expression,
+            arguments,
+            owner,
+            outer,
+            member,
+            context_args,
+            argument_slots,
+            omitted,
+            annotation,
+        } = request;
         let context_parameter_count = u32::try_from(context_args.len())
             .map_err(|_| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?;
         if argument_slots.len() != arguments.len() {
@@ -401,6 +446,16 @@ impl BodyFirChecker<'_> {
                 BodyCheckFailureKind::UnsupportedCallShape,
             ));
         }
+        let span = self
+            .file
+            .expr_span(expression)
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        let annotation = annotation
+            .map(|annotation| {
+                self.checked_annotation_construction(span, annotation, &argument_slots, &omitted)
+            })
+            .transpose()?
+            .map(Box::new);
         let vararg = member.call_sig.vararg_index;
         let checked_arguments = self.checked_constructor_arguments(
             expression,
@@ -416,10 +471,6 @@ impl BodyFirChecker<'_> {
             &context_args,
             checked_arguments,
         )?;
-        let span = self
-            .file
-            .expr_span(expression)
-            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
         let parameters = member
             .params
             .iter()
@@ -456,10 +507,7 @@ impl BodyFirChecker<'_> {
                 classifier: owner,
                 parameters: parameters.clone().into_boxed_slice(),
                 declared_parameters,
-                annotation: annotation
-                    .map(|annotation| self.checked_annotation_construction(span, annotation))
-                    .transpose()?
-                    .map(Box::new),
+                annotation,
             },
             context_parameter_count,
             outer_parameter,
@@ -475,10 +523,18 @@ impl BodyFirChecker<'_> {
         &self,
         span: Span,
         annotation: ResolvedAnnotationConstruction,
+        argument_slots: &[usize],
+        omitted: &[usize],
     ) -> Result<FirAnnotationConstruction, BodyCheckFailure> {
         if annotation.members.len() != annotation.defaults.len() {
             return Err(self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape));
         }
+        let arguments = crate::libraries::AnnotationArgumentProvenance::from_selected(
+            annotation.members.len(),
+            argument_slots,
+            omitted,
+        )
+        .ok_or_else(|| self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape))?;
         let members = annotation
             .members
             .into_iter()
@@ -493,6 +549,7 @@ impl BodyFirChecker<'_> {
             .map(|default| default.map(annotation_default_value))
             .collect::<Vec<_>>();
         Ok(FirAnnotationConstruction {
+            arguments,
             members: members.into_boxed_slice(),
             defaults: defaults.into_boxed_slice(),
         })
@@ -502,6 +559,8 @@ impl BodyFirChecker<'_> {
         &self,
         span: Span,
         target: crate::fir::CallableId,
+        argument_slots: &[usize],
+        omitted: &[usize],
     ) -> Result<Option<Box<FirAnnotationConstruction>>, BodyCheckFailure> {
         let callable = self.index.callable(target).ok_or_else(|| {
             self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
@@ -555,6 +614,8 @@ impl BodyFirChecker<'_> {
                 members,
                 defaults: defaults.to_vec(),
             },
+            argument_slots,
+            omitted,
         )
         .map(Box::new)
         .map(Some)
@@ -1132,10 +1193,50 @@ fn add_constructor_delegation(
             })
             .transpose()?
             .flatten();
-        Ok::<_, BodyCheckFailure>((arguments, outer_receiver))
+        let external_capture_arguments = match (&resolved.target, &target) {
+            (
+                ResolvedCtorDelegationTarget::Super { .. },
+                FirConstructorTarget::Module { declaration, .. },
+            ) => {
+                let declaration = checker
+                    .index
+                    .callable(*declaration)
+                    .ok_or_else(|| {
+                        checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    })?
+                    .declaration;
+                let owner = checker
+                    .index
+                    .enclosing_classifier(declaration)
+                    .ok_or_else(|| {
+                        checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    })?
+                    .declaration;
+                if checker.index.owns_local_capture_environment(owner) {
+                    if !checker.session.class_bodies.contains_key(&owner) {
+                        return Err(checker
+                            .failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget));
+                    }
+                    Some(
+                        checker
+                            .external_constructor_capture_arguments(
+                                declaration,
+                                origin,
+                                span,
+                                resolved.capture_plan.as_ref(),
+                            )?
+                            .unwrap_or_default(),
+                    )
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        Ok::<_, BodyCheckFailure>((arguments, outer_receiver, external_capture_arguments))
     })();
     checker.constructor_prefix_capture_access = previous_capture_access;
-    let (checked_arguments, outer_receiver) = checked_sources?;
+    let (checked_arguments, outer_receiver, external_capture_arguments) = checked_sources?;
     if resolved.outer_receiver.is_some() != outer_receiver.is_some() {
         return Err(checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget));
     }
@@ -1163,7 +1264,7 @@ fn add_constructor_delegation(
             })?,
             outer_parameter,
             outer_receiver,
-            external_capture_arguments: None,
+            external_capture_arguments,
             parameter_types: checker
                 .published_parameter_types(Some(span), resolved.target.params())?,
             arguments: checked_arguments,
@@ -1311,6 +1412,9 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
     let owner = BodyOwnerId::from_raw(work.target.raw());
     let mut checker = BodyFirChecker::new(unit, owner, span, origins, session);
     checker.constructor_prefix_capture_access = true;
+    checker
+        .bind_signature_constructor_capture_prefix(active, work.target, span)
+        .map_err(CheckedBodyDriverFailure::Check)?;
     bind_parameters_and_check_defaults(
         &mut checker,
         &parameters,

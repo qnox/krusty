@@ -300,6 +300,8 @@ pub fn corpus_key(box_dir: &Path, file: &Path) -> String {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Mismatches {
     pub outcome_changes: Vec<String>,
+    /// Exact scheduled keys whose actual failure differs from the committed outcome.
+    pub unexpected_failures: BTreeSet<String>,
     pub overlapping: Vec<String>,
     pub unknown: Vec<String>,
 }
@@ -355,6 +357,9 @@ pub fn compare(
             Outcome::Pass
         };
         if *actual != expected_outcome {
+            if *actual == Outcome::Fail {
+                mismatches.unexpected_failures.insert(path.clone());
+            }
             mismatches.outcome_changes.push(format!(
                 "{path}: expected {}, got {}",
                 expected_outcome.label(),

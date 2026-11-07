@@ -4,7 +4,9 @@
 //! `final class X extends Object implements FunctionN<…>`, in kotlinc's member order: the
 //! constructor, which stores each captured value in its final synthetic field before `Object()`;
 //! the lambda's body as the class's specialized `invoke`; the erased `FunctionN.invoke` bridge to
-//! it; and, for a lambda that captures nothing, the `<clinit>` of its `INSTANCE`.
+//! it; and, for a lambda that captures nothing, the `<clinit>` of its `INSTANCE`. A SAM-converted
+//! lambda's class implements its functional interface instead, raw, declaring the interface's type
+//! parameters, and bridges the interface method's declared slot.
 
 use super::*;
 use crate::types::TyKind;
@@ -51,12 +53,12 @@ pub(super) fn emit_lambda_class(
     } else {
         OBJECT
     };
-    let signature = if lambda.raw_supertype {
-        None
-    } else {
-        formatter
+    let signature = match &lambda.sam {
+        Some(target) => sam_class_signature(&formatter, target),
+        None if lambda.raw_supertype => None,
+        None => formatter
             .ty_at(&lambda.function_type, Wildcards::Supertype)
-            .map(|function| format!("L{superclass};{function}"))
+            .map(|function| format!("L{superclass};{function}")),
     };
     let mut cw = new_writer_generic(&class, signature.as_deref(), superclass, opts);
     if let Some(signature) = &signature {
@@ -103,7 +105,10 @@ pub(super) fn emit_lambda_class(
         }
     }
     env.inner_classes.register(&mut cw);
-    cw.add_interface(&jvm_function_interface(arity));
+    match &lambda.sam {
+        Some(target) => cw.add_interface(&target.classifier.render()),
+        None => cw.add_interface(&jvm_function_interface(arity)),
+    }
     if let Some((owner, Some((name, descriptor)))) = replaced_declaration_enclosure {
         cw.retain_replaced_enclosing_method(&owner, &name, &descriptor);
     }
@@ -272,15 +277,18 @@ pub(super) fn emit_lambda_class(
             );
         }
     }
-    function_reference_invoke::emit_reference_invoke_bridge(
-        ir,
-        &mut cw,
-        &class,
-        &lambda.bridge,
-        false,
-        lambda.invoke,
-        arity,
-    );
+    match &lambda.sam {
+        Some(target) => emit_sam_bridge(ir, &mut cw, &class, lambda, target),
+        None => function_reference_invoke::emit_reference_invoke_bridge(
+            ir,
+            &mut cw,
+            &class,
+            &lambda.bridge,
+            false,
+            lambda.invoke,
+            arity,
+        ),
+    }
     // A transferred inline capture preserves per-expansion closure identity even when transfer
     // leaves no fields. Other capture-free specializations retain kotlinc's singleton shape.
     let fresh_instance = ir
@@ -292,7 +300,17 @@ pub(super) fn emit_lambda_class(
         emit_initialization(ir, c, &class, facade, env, &mut cw, singleton);
     }
     if singleton {
-        add_singleton_instance_field(&mut cw, &class);
+        match lambda
+            .sam
+            .as_deref()
+            .and_then(sam_instance_signature(&class))
+        {
+            // The instance of a class declaring the interface's type parameters is typed by them.
+            Some(signature) => {
+                cw.add_field_sig(0x0019, "INSTANCE", &format!("L{class};"), Some(&signature))
+            }
+            None => add_singleton_instance_field(&mut cw, &class),
+        }
     }
     if regenerated_inline_class {
         // AnonymousObjectTransformer visits the copied class's InnerClasses rows before it writes
@@ -459,6 +477,204 @@ struct Capture {
     parameter_signature: Option<String>,
 }
 
+/// The class `Signature` of a SAM lambda class: kotlinc declares the interface's own type
+/// parameters on the class and implements the interface raw (`<T:Ljava/lang/Object;>…LK;`). A
+/// class over a non-generic interface has no `Signature`.
+fn sam_class_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    target: &crate::ir::IrSamTarget,
+) -> Option<String> {
+    if target.type_parameters.is_empty() {
+        return None;
+    }
+    let generic = crate::ir::IrGenericSig {
+        type_params: target
+            .type_parameters
+            .iter()
+            .map(|parameter| crate::ir::IrTypeParameter {
+                name: crate::types::type_parameter_source_name(&parameter.name).to_string(),
+                semantic_name: parameter.name.clone(),
+                bounds: parameter.bounds.clone(),
+                variance: crate::types::TypeVariance::Invariant,
+                reified: false,
+                captured_from_enclosing: false,
+            })
+            .collect(),
+        params: Vec::new(),
+        ret: None,
+        supers: Vec::new(),
+    };
+    let mut signature = super::type_parameter_signatures::jvm_type_params(formatter, &generic)?;
+    signature.push_str("Ljava/lang/Object;");
+    signature.push_str(&format!("L{};", target.classifier.render()));
+    Some(signature)
+}
+
+/// The `Signature` of a SAM lambda class's `INSTANCE`, which applies the class to its own type
+/// parameters (`LX<TT;>;`).
+fn sam_instance_signature(class: &str) -> impl Fn(&crate::ir::IrSamTarget) -> Option<String> + '_ {
+    move |target| {
+        (!target.type_parameters.is_empty()).then(|| {
+            let arguments = target
+                .type_parameters
+                .iter()
+                .map(|parameter| {
+                    format!(
+                        "T{};",
+                        crate::types::type_parameter_source_name(&parameter.name)
+                    )
+                })
+                .collect::<String>();
+            format!("L{class}<{arguments}>;")
+        })
+    }
+}
+
+/// The interface method's erased JVM slots for a SAM conversion: its declared parameters and
+/// result as the value-class pass published them, a suspend method's continuation and `Object`
+/// result, and a scalar result boxed where the method overrides a reference one.
+fn erased_sam_slots(ir: &IrFile, impl_fn: u32, target: &crate::ir::IrSamTarget) -> (Vec<Ty>, Ty) {
+    let (parameters, result) = ir
+        .lambda_sam_jvm_signature
+        .get(&impl_fn)
+        .map(|(parameters, result)| (parameters.as_slice(), *result))
+        .unwrap_or((
+            target.declared_parameters.as_slice(),
+            target.declared_result,
+        ));
+    let mut parameters = crate::jvm::method_descriptors::jvm_tys(parameters);
+    let result = if target.suspend {
+        parameters.push(Ty::obj("kotlin/coroutines/Continuation"));
+        Ty::obj("java/lang/Object")
+    } else if crate::jvm::override_results::boxes_sam_result(target) {
+        crate::jvm::method_descriptors::jvm_declared_ty(&Ty::nullable(result))
+    } else {
+        crate::jvm::method_descriptors::jvm_declared_ty(&result)
+    };
+    (parameters, result)
+}
+
+/// A SAM lambda class's bridge from the interface method, under its declared (mangled) name and
+/// erased descriptor, to the class's specialized method. Each argument whose erased slot differs
+/// from the specialized one is cast, or unboxed (a value class through its `unbox-impl`); a result
+/// is boxed back where the erased slot is a reference. Nothing bridges when the specialized
+/// method already is the interface slot.
+fn emit_sam_bridge(
+    ir: &IrFile,
+    cw: &mut ClassWriter,
+    class: &str,
+    lambda: &crate::ir::IrLambdaClass,
+    target: &crate::ir::IrSamTarget,
+) {
+    let invoke = lambda.invoke;
+    let bridge = &lambda.bridge;
+    let function = &ir.functions[invoke as usize];
+    let parameters = jvm_function_params(ir, invoke);
+    let result = jvm_declared_ty(&function.ret);
+    let specialized = method_descriptor(&parameters, result);
+    let (erased_parameters, erased_result) = erased_sam_slots(ir, invoke, target);
+    let erased = method_descriptor(&erased_parameters, erased_result);
+    if target.method == function.name && erased == specialized {
+        return;
+    }
+    let erased_words: u16 = erased_parameters.iter().map(|ty| slot_words(*ty)).sum();
+    cw.seed_utf8(&target.method);
+    cw.seed_utf8(&erased);
+    let mut code = CodeBuilder::new(1 + erased_words);
+    code.aload(0);
+    let mut slot = 1u16;
+    for (index, (&parameter, &slot_ty)) in parameters.iter().zip(&erased_parameters).enumerate() {
+        load(slot_ty, slot, &mut code);
+        slot += slot_words(slot_ty);
+        // A slot the interface declares as the value class itself already carries its carrier.
+        let boxed_value_class =
+            bridge
+                .unbox_params
+                .get(index)
+                .copied()
+                .flatten()
+                .filter(|&value_class| {
+                    declares_other_than(target.declared_parameters.get(index), value_class)
+                });
+        if let Some(value_class) = boxed_value_class {
+            emit_value_class_unbox_adapter(
+                cw,
+                &mut code,
+                value_class,
+                parameter,
+                bridge.unbox_param_nullable[index],
+            );
+        } else if type_descriptor(slot_ty) != type_descriptor(parameter) {
+            if parameter.is_jvm_scalar() {
+                let semantic = bridge.param_tys.get(index).copied().unwrap_or(parameter);
+                unbox_prim_from(
+                    cw,
+                    &mut code,
+                    slot_ty,
+                    semantic_scalar_adapter(semantic, parameter),
+                );
+            } else if let Some(internal) = checkcast_internal(parameter) {
+                let class_ref = cw.class_ref(&internal);
+                code.checkcast(class_ref);
+            }
+        }
+    }
+    let argument_words: u16 = parameters.iter().map(|ty| slot_words(*ty)).sum();
+    let method = cw.methodref(class, &function.name, &specialized);
+    code.invokevirtual(method, argument_words as i32, slot_words(result) as i32);
+    let void = |ty: Ty| matches!(ty, Ty::Unit | Ty::Nothing);
+    if void(result) && !void(erased_result) {
+        let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+        code.getstatic(unit, 1);
+    } else if let Some(value_class) = bridge
+        .box_ret
+        .filter(|&value_class| declares_other_than(Some(&target.declared_result), value_class))
+    {
+        emit_value_class_box_adapter(
+            cw,
+            &mut code,
+            value_class,
+            result,
+            bridge.ret_ty.is_nullable(),
+        );
+    } else if type_descriptor(result) != type_descriptor(erased_result) && result.is_jvm_scalar() {
+        box_prim_free(
+            cw,
+            &mut code,
+            semantic_scalar_adapter(bridge.ret_ty, result),
+        );
+    }
+    emit_return(erased_result, &mut code);
+    // The bridge's table names the interface method's declared parameters.
+    let identities = crate::jvm::parameter_names::resolved_local_variables(
+        &target.parameter_identities,
+        &target.declared_parameters,
+        &target.method,
+    );
+    let mut locals = vec![("this".to_string(), format!("L{class};"), 0u16)];
+    let mut slot = 1u16;
+    for (index, &slot_ty) in erased_parameters.iter().enumerate() {
+        if let Some(Some(name)) = identities.get(index) {
+            locals.push((name.clone(), type_descriptor(slot_ty), slot));
+        }
+        slot += slot_words(slot_ty);
+    }
+    cw.reserve_method_lvt(&locals);
+    finish_code::<0x1041>(cw, &target.method, &erased, &mut code, 1 + erased_words);
+    let line = ir
+        .fn_decl_lines
+        .get(&invoke)
+        .copied()
+        .filter(|&line| line != 0);
+    cw.set_method_debug(&target.method, &erased, line.map(|line| (0, line)), &locals);
+}
+
+/// Whether an interface slot declared as `declared` carries `value_class` boxed: any declaration
+/// but the value class itself, which erases to its carrier.
+fn declares_other_than(declared: Option<&Ty>, value_class: crate::types::TypeName) -> bool {
+    declared.is_none_or(|declared| declared.non_null().obj_internal() != Some(value_class))
+}
+
 /// The error for a lambda that requires a real class but whose exact shape the lambda-class pass
 /// could not realize. Emission must fail rather than silently selecting indy or the legacy shim.
 pub(super) fn unrealized(ir: &IrFile, lambda: u32) -> String {
@@ -490,23 +706,7 @@ pub(super) fn sam_bootstrap_descriptors(
         .ok_or("lambda implementation has fewer parameters than captured values")?;
     let impl_ret =
         crate::jvm::method_descriptors::jvm_declared_ty(&ir.functions[impl_fn as usize].ret);
-    let (sam_parameters, sam_result) = ir
-        .lambda_sam_jvm_signature
-        .get(&impl_fn)
-        .map(|(parameters, result)| (parameters.as_slice(), *result))
-        .unwrap_or((
-            target.declared_parameters.as_slice(),
-            target.declared_result,
-        ));
-    let mut sam_parameters = crate::jvm::method_descriptors::jvm_tys(sam_parameters);
-    let sam_result = if target.suspend {
-        sam_parameters.push(Ty::obj("kotlin/coroutines/Continuation"));
-        Ty::obj("java/lang/Object")
-    } else if crate::jvm::override_results::boxes_sam_result(target) {
-        crate::jvm::method_descriptors::jvm_declared_ty(&Ty::nullable(sam_result))
-    } else {
-        crate::jvm::method_descriptors::jvm_declared_ty(&sam_result)
-    };
+    let (sam_parameters, sam_result) = erased_sam_slots(ir, impl_fn, target);
     let erased_method = crate::jvm::names::method_descriptor(&sam_parameters, sam_result);
     let (sam_params, sam_ret) = crate::jvm::names::parse_method_descriptor(&erased_method)
         .ok_or("selected SAM descriptor is malformed")?;

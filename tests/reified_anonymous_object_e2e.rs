@@ -212,7 +212,8 @@ fn accessor_identity(
         .collect::<Vec<_>>();
     methods.sort();
     let mut properties = info
-        .meta
+        .kotlin_members()
+        .expect("member metadata decodes")
         .class_properties
         .iter()
         .filter_map(|property| {
