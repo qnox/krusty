@@ -28,6 +28,7 @@ pub mod diagnostic_wording;
 pub mod dump;
 pub mod enclosing_declarations;
 pub mod features;
+mod file_header;
 pub mod fir;
 pub mod fir_lower;
 pub mod frontend;
