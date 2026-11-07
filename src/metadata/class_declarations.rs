@@ -896,21 +896,6 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .iter()
         .map(|(&callable, &function)| (function, callable))
         .collect();
-    let class_type_arguments = ir
-        .class_signature(&c.fq_name())
-        .map(|signature| {
-            signature
-                .type_params
-                .iter()
-                .map(crate::ir::IrTypeParameter::ty)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let class_ty = if class_type_arguments.is_empty() {
-        Ty::obj_name(c.fq_name)
-    } else {
-        Ty::obj_args_name(c.fq_name, &class_type_arguments)
-    };
     let declared_method_list = declared_fids
         .iter()
         .filter_map(|&fid| {
@@ -925,12 +910,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
     let declared_method_count = declared_method_list.len();
     let inferred_methods = if c.is_data {
         let mut methods = declared_method_list;
-        methods.extend(data_class_functions(
-            ir,
-            c,
-            &data_component_properties,
-            class_ty,
-        )?);
+        methods.extend(data_class_functions(ir, c, &data_component_properties)?);
         methods
     } else if c.is_value {
         let mut declared = declared_method_list;
@@ -1328,7 +1308,6 @@ fn data_class_functions(
     ir: &IrFile,
     c: &IrClass,
     components: &[&IrProperty],
-    class_ty: Ty,
 ) -> Option<Vec<(FnMeta, FunctionOrigin)>> {
     let owner = c.fq_name_id();
     let mut methods = Vec::new();
@@ -1348,6 +1327,12 @@ fn data_class_functions(
     // there is nothing to copy from and no primary-constructor property to destructure.
     if c.is_data && !c.is_singleton() {
         ir.data_class_member(owner, IrDataClassMemberRole::Copy)?;
+        // The class signature declares only this classifier's own parameters. Its checked self
+        // application also retains lexical captures, which the metadata encoder validates before
+        // applying the carrier's declaration policy.
+        let class_ty = ir
+            .declared_class_self_type(owner)
+            .expect("generated copy metadata requires the class's checked self application");
         let mut record = FnMeta::plain(
             "copy".into(),
             components
@@ -1757,6 +1742,9 @@ fn secondary_constructor_flags(visibility: Visibility) -> u64 {
     const IS_SECONDARY: u64 = 16;
     IS_SECONDARY | (declaration_visibility_bits(visibility) << 1)
 }
+
+#[cfg(test)]
+mod copy_self_type_tests;
 
 #[cfg(test)]
 mod tests {
