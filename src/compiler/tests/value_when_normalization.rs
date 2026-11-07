@@ -1,5 +1,6 @@
-use super::*;
-use crate::ir::IrTypeOp;
+use crate::backend::coroutines::normalize_value_when_for_test as normalize_value_when;
+use crate::ir::{ExprId, IrExpr, IrTypeOp};
+use crate::types::Ty;
 
 #[test]
 fn converting_a_checked_exhaustive_when_without_else_preserves_its_proof() {
