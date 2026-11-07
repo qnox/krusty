@@ -6,6 +6,7 @@
 //! are then compared in source-argument order, through each one's own mapping. A top-level family
 //! and a receiver family (the members and extensions at one tower rank) are both selected here.
 
+use super::declaration_specificity::discriminate_generics;
 use super::overload_selection::select_by_priority_tier;
 use super::postponed_lambda_selection::{select_with_postponed_lambda_results, LambdaResults};
 use super::*;
@@ -187,26 +188,39 @@ fn most_specific_separately_mapped(
     let distinct_declarations = |left: &usize, right: &usize| {
         !std::ptr::eq(entries[*left].function, entries[*right].function)
     };
-    match integer_literal_overload_with_ties(
-        preferred.iter().cloned(),
-        source,
-        |_, param, arg| fits(param, arg),
-        |_position, left, right, arg| {
-            parameter_at_least_as_specific(src, left, right, arg)
-                || resolution_subtype(src, left, right)
-        },
-        distinct_declarations,
+    let generic = |index: usize| {
+        !entries[index]
+            .function
+            .semantic_signature()
+            .formals
+            .is_empty()
+    };
+    match discriminate_generics(
+        integer_literal_overload_with_ties(
+            preferred.iter().cloned(),
+            source,
+            |_, param, arg| fits(param, arg),
+            |_position, left, right, arg| {
+                parameter_at_least_as_specific(src, left, right, arg)
+                    || resolution_subtype(src, left, right)
+            },
+            distinct_declarations,
+        ),
+        generic,
     ) {
         CandidateSelectionWithTies::None => {}
         selection => return selection,
     }
-    unique_most_specific_with_conflicts_and_ties(
-        preferred,
-        |position, left, right| {
-            source.get(position).is_some_and(|argument| {
-                parameter_at_least_as_specific(src, left, right, argument.clone())
-            })
-        },
-        distinct_declarations,
+    discriminate_generics(
+        unique_most_specific_with_conflicts_and_ties(
+            preferred,
+            |position, left, right| {
+                source.get(position).is_some_and(|argument| {
+                    parameter_at_least_as_specific(src, left, right, argument.clone())
+                })
+            },
+            distinct_declarations,
+        ),
+        generic,
     )
 }

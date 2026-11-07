@@ -218,6 +218,8 @@ pub struct FileInput<'a> {
     /// KLIB identity the dependency provider attaches to `Callee::External`.
     pub dependency_symbols:
         &'a HashMap<crate::backend::KlibDependencyCallable, super::DependencyExport>,
+    /// The exported instance entry of each preceding source module's object, by its classifier.
+    pub dependency_singletons: &'a HashMap<crate::types::TypeName, String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::native::dependency_references`].
     pub dependency_properties:
@@ -252,6 +254,7 @@ pub fn lower_file(
         dependency_exports,
         dependency_signatures,
         dependency_symbols,
+        dependency_singletons,
         value_classes,
         slot_plan,
         module_facts,
@@ -341,6 +344,7 @@ pub fn lower_file(
         unit_kind,
         dependency_signatures,
         dependency_symbols,
+        dependency_singletons,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
     // receivers have a runtime-walkable representation and which shapes still decline; both are read while
@@ -521,6 +525,8 @@ struct FileLowering<'a> {
     /// modules.
     dependency_symbols:
         &'a HashMap<crate::backend::KlibDependencyCallable, super::DependencyExport>,
+    /// The exported instance entry of each preceding source module's object, by its classifier.
+    dependency_singletons: &'a HashMap<crate::types::TypeName, String>,
 }
 
 impl<'a> FileLowering<'a> {
@@ -1784,10 +1790,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 internal,
                 args,
                 ctor_params,
+                external_target,
                 defaults,
                 default_prefix_count,
                 ..
             } => {
+                if let Some(constructed) = external_target
+                    .filter(|_| defaults.is_empty())
+                    .and_then(|target| self.dependency_construction(target, internal, &args))
+                {
+                    return constructed;
+                }
                 // A construction's `defaults` name SOURCE-value ordinals, which begin after the
                 // compiler's leading operands; the generator works in the constructor's physical
                 // frame, so they are shifted once, here, rather than at each use.

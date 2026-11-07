@@ -149,7 +149,7 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
         }
     }
     for (argument, variable, actual) in deferred_flexible_roots {
-        let TyKind::TyParam(formal, _) = variable.kind() else {
+        let (TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) = variable.kind() else {
             unreachable!("deferred flexible root is a declaration variable")
         };
         if invariantly_fixed.contains(formal.as_str()) {
@@ -232,7 +232,7 @@ pub(crate) fn collect_assignability_constraints_from_symbols(
     ) {
         let actual = actual.projection_inner().unwrap_or(actual);
         match actual.kind() {
-            TyKind::TyParam(name, _) => {
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
                 let expected = expected.projection_inner().unwrap_or(expected);
                 constraints.insert(
                     source,
@@ -489,7 +489,8 @@ impl CallInferenceConstraints {
             return false;
         }
         let actual = inference_actual(actual);
-        if matches!(actual.kind(), TyKind::TyParam(actual_name, _) if actual_name == name) {
+        if matches!(actual.kind(), TyKind::TyParam(actual_name, _) | TyKind::Var(actual_name, _) if actual_name == name)
+        {
             return false;
         }
         match position {
@@ -602,7 +603,9 @@ impl CallInferenceConstraints {
                         }
                         continue;
                     }
-                    let TyKind::TyParam(bound_formal, _) = bound.non_null().kind() else {
+                    let (TyKind::TyParam(bound_formal, _) | TyKind::Var(bound_formal, _)) =
+                        bound.non_null().kind()
+                    else {
                         continue;
                     };
                     if !signature.formals.contains(&bound_formal) {
@@ -944,7 +947,7 @@ fn collect_call_inference_constraints(
     constraints: &mut CallInferenceConstraints,
 ) {
     match shape.kind() {
-        TyKind::TyParam(name, _) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
             constraints.insert(source, name.as_str(), actual, position, origin);
         }
         TyKind::Nullable(inner) => {
@@ -1036,7 +1039,7 @@ fn collect_call_inference_constraints(
             // definitely-non-null `E & Any` read through a nullable formal reaches the same bound.
             loop {
                 actual = match actual.kind() {
-                    TyKind::TyParam(_, bound) => {
+                    TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
                         bound.projection_inner().unwrap_or(bound).non_null()
                     }
                     TyKind::DefinitelyNotNull(inner) => inner,

@@ -283,7 +283,7 @@ impl Checker<'_> {
             AssociatedCall::Inapplicable(candidates) => candidates,
             AssociatedCall::Absent => return None,
         };
-        let reported = self.report_inapplicable_callable_candidates(
+        let reported = call_diagnostics::report_inapplicable_callable_candidates(
             InapplicableTopLevelCall {
                 call,
                 name,
@@ -294,6 +294,7 @@ impl Checker<'_> {
                 explicit_type_args,
             },
             candidates,
+            self,
         );
         if !reported {
             self.diags.error(

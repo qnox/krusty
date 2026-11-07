@@ -11,7 +11,7 @@ fn equality_operand_type(ty: Ty) -> Ty {
     {
         let ty = ty.canonical_semantic();
         match ty.kind() {
-            TyKind::TyParam(_, bound) => equality_operand_type(bound),
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => equality_operand_type(bound),
             _ => ty,
         }
     }

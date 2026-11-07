@@ -122,6 +122,8 @@ fn initializer(
                 internal: subclass,
                 args: Vec::new(),
                 ctor_params: None,
+                // The bare generated subclass constructor has no checked source declaration.
+                declared_params: None,
                 ctor_desc: None,
                 external_target: None,
                 defaults: Box::default(),
@@ -135,6 +137,9 @@ fn initializer(
                     args: entry.args.clone(),
                     ctor_params: (!entry.constructor.primary())
                         .then(|| entry.constructor_parameter_types.clone()),
+                    declared_params: Some(
+                        entry.constructor_parameter_types.clone().into_boxed_slice(),
+                    ),
                     ctor_desc: None,
                     external_target: None,
                     defaults: defaults.into(),
