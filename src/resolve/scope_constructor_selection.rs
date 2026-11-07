@@ -203,7 +203,9 @@ impl Checker<'_> {
             Some(CallableCandidateSelection::Selected(selected)) => {
                 ScopeConstructorSelection::Selected(Box::new(selected.info))
             }
-            Some(CallableCandidateSelection::Ambiguous(_)) => ScopeConstructorSelection::Ambiguous,
+            Some(CallableCandidateSelection::Ambiguous(_, _)) => {
+                ScopeConstructorSelection::Ambiguous
+            }
             Some(CallableCandidateSelection::MissingContext(_)) | None => {
                 ScopeConstructorSelection::Inapplicable(candidates)
             }
