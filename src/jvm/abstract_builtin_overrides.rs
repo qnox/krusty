@@ -11,9 +11,10 @@
 //! the builtin inherits what that superclass already wrote, so only the first class writes them.
 //! The plans remain backend facts; common IR never carries a fake override.
 
-use crate::backend::BackendClassifierSource;
+use crate::backend::{BackendClassifierSource, CheckedBackendClassifiers, SourceClassMembers};
 use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{IrAppliedClassifier, IrClass, IrFile};
+use crate::jvm::backend::SkipReason;
 use crate::jvm::classpath::mapped_builtin_realizations::DecodedBuiltinMember;
 use crate::jvm::classpath::Classpath;
 use crate::jvm::jvm_class_map::to_jvm_type_name;
@@ -27,7 +28,7 @@ use crate::jvm::read_only_collection_stubs::{
     stub_barrier, StubBarrier,
 };
 use crate::names::property_getter_name;
-use crate::types::{ty_subst, Ty, TypeName};
+use crate::types::{ty_subst, Ty, TypeName, Visibility};
 
 #[derive(Default)]
 pub(super) struct AbstractBuiltinOverrides {
@@ -116,8 +117,8 @@ pub(super) enum SpecialBridge {
 pub(super) fn select(
     ir: &IrFile,
     classpath: &Classpath,
-    classifiers: &dyn BackendClassifierSource,
-) -> AbstractBuiltinOverrides {
+    classifiers: &CheckedBackendClassifiers<'_>,
+) -> Result<AbstractBuiltinOverrides, SkipReason> {
     let mut result = AbstractBuiltinOverrides::default();
     for class_index in 0..ir.classes.len() {
         if !crate::jvm::override_results::realizes_overrides(ir, class_index) {
@@ -128,22 +129,22 @@ pub(super) fn select(
         if class.is_interface || class.is_annotation || !(class.is_abstract || class.is_sealed) {
             continue;
         }
-        let members = class_overrides(ir, classpath, classifiers, class);
+        let members = class_overrides(ir, classpath, classifiers, class)?;
         if !members.is_empty() {
             result.by_class.insert(class.fq_name_id(), members);
         }
     }
-    result
+    Ok(result)
 }
 
 fn class_overrides(
     ir: &IrFile,
     classpath: &Classpath,
-    classifiers: &dyn BackendClassifierSource,
+    classifiers: &CheckedBackendClassifiers<'_>,
     class: &IrClass,
-) -> Vec<AbstractBuiltinOverride> {
+) -> Result<Vec<AbstractBuiltinOverride>, SkipReason> {
     let Some(hierarchy) = ir.classifier_hierarchies.get(&class.fq_name_id()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let through_superclass = superclass_classifiers(ir, classpath, classifiers, class);
     let builtins: Vec<&IrAppliedClassifier> = hierarchy
@@ -171,7 +172,8 @@ fn class_overrides(
             }
         }
     }
-    seen.into_iter()
+    let candidates = seen
+        .into_iter()
         .filter(|member| member.is_abstract)
         .filter_map(|member| {
             let applied = hierarchy
@@ -179,9 +181,15 @@ fn class_overrides(
                 .find(|entry| entry.classifier == member.declaration_owner)?
                 .applied;
             materialization(classpath, &member, applied)
-        })
-        .filter(|candidate| !implemented(ir, classpath, class, candidate))
-        .collect()
+        });
+    let ancestors = superclass_chain(ir, classifiers, classpath, class)?;
+    let mut members = Vec::new();
+    for candidate in candidates {
+        if !implemented(ir, &ancestors, class, &candidate)? {
+            members.push(candidate);
+        }
+    }
+    Ok(members)
 }
 
 /// The classifiers a non-builtin superclass reaches, by JVM name: that superclass, or one above
@@ -322,15 +330,94 @@ fn materialization(
     })
 }
 
+/// The one source that owns a superclass's declaration.
+enum Declaring<'a> {
+    /// A named source classifier of the module, whichever file declares it.
+    Module(&'a SourceClassMembers),
+    /// A body-local class of the active file.
+    File(&'a IrClass),
+    /// A dependency class file.
+    Dependency(std::sync::Arc<crate::jvm::classreader::ClassInfo>),
+}
+
+/// A class of the superclass chain and its application in the materializing class.
+struct Ancestor<'a> {
+    classifier: TypeName,
+    applied: Option<Ty>,
+    declaring: Declaring<'a>,
+}
+
+/// The superclass chain above `class`, each class read from the source that declares it: the
+/// module's declaration record for a named source class, so the answer is the same whichever
+/// file declares it.
+fn superclass_chain<'a>(
+    ir: &'a IrFile,
+    classifiers: &'a CheckedBackendClassifiers<'_>,
+    classpath: &Classpath,
+    class: &IrClass,
+) -> Result<Vec<Ancestor<'a>>, SkipReason> {
+    let hierarchy = ir.classifier_hierarchies.get(&class.fq_name_id());
+    let mut chain = Vec::new();
+    let mut seen = HashSet::default();
+    let mut current = Some(class.superclass);
+    while let Some(classifier) = current
+        .filter(|&classifier| {
+            classifier != crate::types::wk::java_object() && classifier != crate::types::wk::any()
+        })
+        .filter(|&classifier| seen.insert(classifier))
+    {
+        let declaring = if let Some(members) = classifiers.module().source_class_members(classifier)
+        {
+            Declaring::Module(members)
+        } else {
+            match ir
+                .classes
+                .iter()
+                .find(|class| class.fq_name_id() == classifier)
+            {
+                Some(source) if source.enclosure.is_some() => Declaring::File(source),
+                Some(_) => {
+                    return Err(SkipReason::AbstractBuiltinOverrides(format!(
+                        "missing module declaration record for source superclass {}",
+                        classifier.render()
+                    )))
+                }
+                None => match classpath.find_name(classifier) {
+                    Some(info) => Declaring::Dependency(info),
+                    None => break,
+                },
+            }
+        };
+        current = match &declaring {
+            Declaring::Module(members) => members.superclass,
+            Declaring::File(source) => Some(source.superclass),
+            Declaring::Dependency(info) => info.super_class,
+        };
+        let applied = hierarchy
+            .and_then(|hierarchy| {
+                hierarchy
+                    .iter()
+                    .find(|entry| entry.classifier == classifier)
+            })
+            .map(|entry| entry.applied);
+        chain.push(Ancestor {
+            classifier,
+            applied,
+            declaring,
+        });
+    }
+    Ok(chain)
+}
+
 /// kotlinc's effective-override check for a materialization: a member of the class, of a
 /// superclass, or an inherited interface default with the same JVM name and parameters already
 /// stands for it, abstract or not.
 fn implemented(
     ir: &IrFile,
-    classpath: &Classpath,
+    ancestors: &[Ancestor<'_>],
     class: &IrClass,
     candidate: &AbstractBuiltinOverride,
-) -> bool {
+) -> Result<bool, SkipReason> {
     let parameters = parameter_descriptor(&candidate.parameters);
     let declares = |class: &IrClass| {
         class.methods.iter().any(|&function| {
@@ -345,7 +432,7 @@ fn implemented(
                 .any(|property| property_getter_name(&property.name) == candidate.name))
     };
     if declares(class) {
-        return true;
+        return Ok(true);
     }
     let defaulted = ir
         .inherited_defaults
@@ -359,35 +446,98 @@ fn implemented(
                 && parameter_descriptor(&default.applied_parameters) == parameters
         });
     if defaulted {
-        return true;
+        return Ok(true);
     }
     let jvm_parameters = &parameters[..parameters.len() - 1];
-    let mut next = class.superclass;
-    loop {
-        if let Some(superclass) = ir.classes.iter().find(|class| class.fq_name == next) {
-            if declares(superclass) {
-                return true;
+    for ancestor in ancestors {
+        let found = match &ancestor.declaring {
+            Declaring::Module(members) => {
+                module_declares(ancestor.classifier, members, ancestor.applied, candidate)?
             }
-            next = superclass.superclass;
-            continue;
-        }
-        let Some(info) = classpath.find_name(next) else {
-            return false;
+            Declaring::File(source) => declares(source),
+            Declaring::Dependency(info) => info.methods.iter().any(|method| {
+                !method.is_static()
+                    && !method.is_private()
+                    && method.name == candidate.name
+                    && method
+                        .descriptor
+                        .split_once(')')
+                        .is_some_and(|(own, _)| format!("{own})") == jvm_parameters)
+            }),
         };
-        if info.methods.iter().any(|method| {
-            !method.is_static()
-                && !method.is_private()
-                && method.name == candidate.name
-                && method
-                    .descriptor
-                    .split_once(')')
-                    .is_some_and(|(own, _)| format!("{own})") == jvm_parameters)
-        }) {
-            return true;
-        }
-        match info.super_class {
-            Some(superclass) => next = superclass,
-            None => return false,
+        if found {
+            return Ok(true);
         }
     }
+    Ok(false)
+}
+
+/// Whether a named source superclass declares a member that stands for `candidate`: a visible
+/// non-extension function whose parameters, applied in the materializing class, erase to the
+/// candidate's (`fun contains(element: T)` of `Base<T>` under `Base<String>`), or, for a getter,
+/// a visible property without receivers.
+fn module_declares(
+    owner: TypeName,
+    members: &SourceClassMembers,
+    applied: Option<Ty>,
+    candidate: &AbstractBuiltinOverride,
+) -> Result<bool, SkipReason> {
+    let refuse = |what: &str| {
+        SkipReason::AbstractBuiltinOverrides(format!(
+            "missing checked {what} of {}.{}",
+            owner.render(),
+            candidate.name
+        ))
+    };
+    let formals = members
+        .type_parameters
+        .as_deref()
+        .ok_or_else(|| refuse("type parameters"))?;
+    let bindings: HashMap<String, Ty> = formals
+        .iter()
+        .map(|formal| formal.to_string())
+        .zip(
+            applied
+                .map(|applied| applied.non_null().type_args().to_vec())
+                .unwrap_or_default(),
+        )
+        .collect();
+    let parameters = parameter_descriptor(&candidate.parameters);
+    for function in members.functions.iter() {
+        if *function.name != *candidate.name || function.visibility == Visibility::Private {
+            continue;
+        }
+        let signature = function
+            .signature
+            .as_ref()
+            .ok_or_else(|| refuse("signature"))?;
+        if signature.extension {
+            continue;
+        }
+        let applied_parameters: Vec<Ty> = signature
+            .parameters
+            .iter()
+            .map(|&parameter| ty_subst(parameter, &bindings))
+            .collect();
+        if parameter_descriptor(&applied_parameters) == parameters {
+            return Ok(true);
+        }
+    }
+    if !candidate.parameters.is_empty() {
+        return Ok(false);
+    }
+    for property in members.properties.iter() {
+        if property.visibility == Visibility::Private
+            || property_getter_name(&property.name) != candidate.name
+        {
+            continue;
+        }
+        let receivers = property
+            .receivers
+            .ok_or_else(|| refuse("property receivers"))?;
+        if !receivers.extension && receivers.context_parameters == 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
