@@ -1,0 +1,16 @@
+compiler/fir/fir2ir/testFixtures/org/jetbrains/kotlin/test/TestGeneratorForFir2IrTests.kt
+compiler/tests-common-new/testFixtures/org/jetbrains/kotlin/test/TestGeneratorForTestCommonNew.kt
+native/native.tests/codegen-box/testFixtures/org/jetbrains/kotlin/generators/tests/GenerateNativeCodegenBoxTests.kt
+native/native.tests/klib-ir-inliner/testFixtures/org/jetbrains/kotlin/generators/tests/GenerateKlibNativeTests.kt
+wasm/wasm.tests/testFixtures/org/jetbrains/kotlin/generators/tests/GenerateWasmTests.kt
+generators/test-generator/testFixtures/org/jetbrains/kotlin/generators/dsl/TestGenerationDSL.kt
+generators/test-generator/testFixtures/org/jetbrains/kotlin/generators/util/TestGeneratorUtil.kt
+compiler/test-infrastructure-utils.common/testFixtures/org/jetbrains/kotlin/test/TargetBackend.kt
+compiler/test-infrastructure-utils/testFixtures/org/jetbrains/kotlin/test/InTextDirectivesUtils.java
+compiler/tests-common-new/testFixtures/org/jetbrains/kotlin/test/directives/CodegenTestDirectives.kt
+native/native.tests/testFixtures/org/jetbrains/kotlin/konan/test/blackbox/support/group/ExtTestCaseGroupProvider.kt
+wasm/wasm.tests/testFixtures/org/jetbrains/kotlin/wasm/test/AbstractFirWasmTest.kt
+wasm/wasm.tests/testFixtures/org/jetbrains/kotlin/wasm/test/utils/DirectiveTestUtils.kt
+compiler/tests-spec/testFixtures/org/jetbrains/kotlin/spec/utils/tasks/GenerateSpecTestsUtils.kt
+compiler/tests-spec/testFixtures/org/jetbrains/kotlin/spec/utils/GeneralConfiguration.kt
+compiler/test-infrastructure-utils/testFixtures/org/jetbrains/kotlin/test/utils/CustomTestDataUtils.kt

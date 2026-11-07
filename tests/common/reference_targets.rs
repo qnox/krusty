@@ -9,7 +9,7 @@
 //! kotlinc-js and kotlinc-wasm ship in the kotlinc distribution every test run provisions.
 //! kotlinc-native is its own distribution (`just kotlin-native`), named by `KRUSTY_KOTLIN_NATIVE`.
 //! Without it a recorded answer still replays; an unrecorded one is unavailable. The
-//! maximum-version Native CI row and focused local `just klib-semantics` recipe turn that into a
+//! normal CI integration suite and focused local `just klib-semantics` recipe turn that into a
 //! failure with `KRUSTY_REQUIRE_KOTLIN_NATIVE`.
 
 use std::collections::BTreeMap;

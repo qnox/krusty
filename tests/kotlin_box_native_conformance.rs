@@ -47,8 +47,8 @@ fn not_applicable(src: &str) -> Option<&'static str> {
     if krusty::conformance::backend_muted(src, &["NATIVE"]) {
         return Some("muted on the native backend");
     }
-    if krusty::conformance::directive(src, "FULL_JDK") {
-        return Some("requires the JDK runtime");
+    if !krusty::conformance::native_box_configuration_applicable(src) {
+        return Some("excluded by upstream Native box configuration");
     }
     None
 }
@@ -70,7 +70,7 @@ fn native_applicability_uses_native_directives_not_jvm_mutes() {
     );
     assert_eq!(
         not_applicable("// TARGET_BACKEND: ANY\nfun box() = \"OK\""),
-        None
+        Some(box_lane::TARGETED_AT_ANOTHER_BACKEND)
     );
     assert_eq!(
         not_applicable("// IGNORE_BACKEND: ANY\nfun box() = \"OK\""),
@@ -78,8 +78,8 @@ fn native_applicability_uses_native_directives_not_jvm_mutes() {
     );
     assert_eq!(
         not_applicable("// KJS_WITH_FULL_RUNTIME\n// JVM_TARGET: 1.8\nfun box() = \"OK\""),
-        None,
-        "another backend's runner options do not remove Native coverage"
+        Some("excluded by upstream Native box configuration"),
+        "Kotlin's Native provider explicitly excludes JVM_TARGET"
     );
     assert_eq!(
         not_applicable("import kotlin.experimental.ExperimentalTypeInference\nfun box() = \"OK\""),

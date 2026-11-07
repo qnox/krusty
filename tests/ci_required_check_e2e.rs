@@ -8,6 +8,70 @@ use std::process::{Command, Stdio};
 
 const AGGREGATE: &str = "ci-and-conformance";
 
+#[test]
+fn every_klib_box_lane_scores_and_caches_its_exact_version() {
+    let workflow = workflow();
+    let conformance = job(&workflow, "conformance");
+    for knob in [
+        "KRUSTY_NATIVE_BYTE_REPORT:",
+        "KRUSTY_WASM_JS_BYTE_REPORT:",
+        "KRUSTY_WASM_WASI_BYTE_REPORT:",
+        "KRUSTY_CLASS_DUMP_COMPILE_MISSING: \"1\"",
+        "name: klib-byte-equality-${{ matrix.version }}-${{ matrix.target }}",
+        "path: target/cache/klib-references",
+        "box-klib-references-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-",
+        "github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.klib-recordings.outputs.cache-hit != 'true'",
+    ] {
+        assert!(conformance.contains(knob), "missing KLIB matrix contract {knob}");
+    }
+    assert!(!workflow.contains("build-klib-test-bins"));
+    assert!(conformance.contains("target: [jvm, native, wasm-js, wasm-wasi]"));
+}
+
+#[test]
+fn exact_klib_coverage_reuses_normal_units_in_every_platform_version() {
+    let workflow = workflow();
+    let producer = job(&workflow, "build-tool-bins");
+    assert!(producer.contains("bin=$(just compiler-unit-tests)"));
+    assert!(producer.contains("            compiler-unit-tests\n"));
+    let matrix = job(&workflow, "conformance");
+    let coverage = matrix
+        .split_once("- name: enforce exact KLIB implementation coverage")
+        .unwrap()
+        .1
+        .split("\n      - name:")
+        .next()
+        .unwrap();
+    for required in [
+        "if: always() && matrix.target != 'jvm'",
+        "KRUSTY_REQUIRE_KLIB: \"1\"",
+        "KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS: ${{ matrix.target }}",
+        "export KRUSTY_LANGUAGE_VERSION=\"${{ matrix.version }}\"",
+        "timeout 600s ./compiler-unit-tests",
+        "klib_libraries::tests::implementation_coverage:: --nocapture",
+    ] {
+        assert!(
+            coverage.contains(required),
+            "missing exact-version unit coverage contract {required}"
+        );
+    }
+    assert!(
+        !coverage.contains("matrix.version !="),
+        "the maximum Native version is checked too"
+    );
+    let recipe =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("justfile"))
+            .unwrap();
+    let recipe = recipe
+        .split_once("\ncompiler-unit-tests:\n")
+        .unwrap()
+        .1
+        .split("\n\n")
+        .next()
+        .unwrap();
+    assert!(recipe.contains("scripts/cargo-test-binary.sh krusty -p krusty --lib"));
+}
+
 fn workflow() -> String {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci workflow")
@@ -54,12 +118,11 @@ fn run_script(job: &str) -> String {
 }
 
 /// The aggregate's result variables, in the order its log names them.
-const RESULT_VARIABLES: [&str; 10] = [
+const RESULT_VARIABLES: [&str; 9] = [
     "CI_RESULT",
     "LINT_RESULT",
     "PLUGIN_HOST_RESULT",
     "CONFORMANCE_RESULT",
-    "KLIB_CONFORMANCE_RESULT",
     "GRADLE_PLUGIN_RESULT",
     "GRADLE_RESULT",
     "MAVEN_RESULT",
@@ -67,7 +130,7 @@ const RESULT_VARIABLES: [&str; 10] = [
     "BAZEL_RESULT",
 ];
 
-fn run_predicate(script: &str, results: [&str; 10]) -> std::process::Output {
+fn run_predicate(script: &str, results: [&str; 9]) -> std::process::Output {
     let mut child = Command::new("bash")
         .arg("-s")
         .env_clear()
@@ -91,8 +154,8 @@ fn run_predicate(script: &str, results: [&str; 10]) -> std::process::Output {
 fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     let workflow = workflow();
     let script = run_script(job(&workflow, AGGREGATE));
-    let run = |results: [&str; 10]| run_predicate(&script, results);
-    let success = ["success"; 10];
+    let run = |results: [&str; 9]| run_predicate(&script, results);
+    let success = ["success"; 9];
     let output = run(success);
     assert!(
         output.status.success(),
@@ -101,7 +164,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "ci: success\nlint: success\nplugin-host: success\nconformance: success\nKLIB conformance: success\nbuild-gradle-plugin: success\ngradle: success\nmaven: success\nbuild-tools: success\nbazel: success\n",
+        "ci: success\nlint: success\nplugin-host: success\nconformance: success\nbuild-gradle-plugin: success\ngradle: success\nmaven: success\nbuild-tools: success\nbazel: success\n",
         "the log names every dependency result"
     );
 
@@ -110,7 +173,6 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
         "lint",
         "plugin-host",
         "conformance",
-        "KLIB conformance",
         "build-gradle-plugin",
         "gradle",
         "maven",

@@ -4,15 +4,21 @@
 
 use std::path::{Path, PathBuf};
 
+mod backend_selection;
 mod box_jdk;
 mod codegen_modes;
 mod compiler_arguments;
 mod reference_jvm;
 
+pub use backend_selection::{
+    backend_applicable, backend_muted, backend_targeted, dont_targets_exact_backend,
+    native_box_configuration_applicable, target_backend_applicable,
+};
 pub use box_jdk::{box_jdk_kind, BoxJdk, BoxJdkKind, BoxJdkRoots};
 pub use codegen_modes::{unsupported_codegen_mode_directive, UnitCodegenModes};
 pub use compiler_arguments::{
-    case_kotlinc_arguments, reference_only_kotlinc_arguments, unit_compiler_configuration,
+    case_kotlinc_arguments, platform_compiler_configuration, reference_only_kotlinc_arguments,
+    reference_only_kotlinc_arguments_for_target, unit_compiler_configuration,
     unit_kotlinc_arguments, UnitCompilerConfiguration,
 };
 pub use reference_jvm::{
@@ -74,25 +80,6 @@ pub fn evenly_sample<T>(items: Vec<T>, limit: usize) -> Vec<T> {
 
 /// Backend tokens krusty identifies as — it emits the JVM (IR) backend's bytecode.
 pub const BACKENDS: &[&str] = &["JVM", "JVM_IR"];
-
-fn mentions_backend(payload: &str, names: &[&str]) -> bool {
-    payload
-        .split(',')
-        .any(|token| token.trim() == "ANY" || names.contains(&token.trim()))
-}
-
-/// Whether the corpus explicitly declines the selected exact backend.
-///
-/// This fact can select a backend/applicability path, but it is not itself evidence that the source
-/// is invalid for the JVM frontend. The frontend census asks the reference JVM compiler for that
-/// verdict when krusty rejects such a case.
-pub fn dont_targets_exact_backend(src: &str, names: &[&str]) -> bool {
-    src.lines().any(|line| {
-        line.trim_start()
-            .strip_prefix("// DONT_TARGET_EXACT_BACKEND:")
-            .is_some_and(|payload| mentions_backend(payload.trim(), names))
-    })
-}
 
 /// Whether the source declares the line directive `// <name>` (e.g. `WITH_REFLECT`). Matches the first
 /// `//`-comment whose first token (split on space/colon) is exactly `name`.
@@ -218,32 +205,6 @@ pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
     prepared
 }
 
-/// Whether a box test applies to the backend tokens `names`, per kotlinc's test-runner directives, for
-/// krusty's configuration: **Kotlin 2.4.0 (K2) frontend + JVM_IR backend**.
-/// - `// TARGET_BACKEND:` restricts the test to the listed backends (absent = all).
-/// - `// IGNORE_BACKEND:` mutes the test on the listed backends for ALL frontends → exclude.
-/// - `// IGNORE_BACKEND_K2[_MULTI_MODULE]:` mutes it under the K2 frontend → exclude (krusty is K2).
-/// - `// DONT_TARGET_EXACT_BACKEND:` the test doesn't target that backend → exclude.
-/// - `// IGNORE_BACKEND_K1:` mutes it under the OLD K1 frontend ONLY → krusty is NOT K1, so this must
-///   NOT exclude (excluding it under-counts: the test is valid for krusty's K2 semantics).
-/// Whether a box test's SOURCE targets a backend krusty's front end can even read. Unlike the
-/// `IGNORE_BACKEND` family — which mutes a test because of a BACKEND defect and therefore says
-/// nothing about the front end — `// TARGET_BACKEND: JS_IR` / `NATIVE` marks a test whose source
-/// uses declarations that exist only on that platform (`dynamic`, `js("…")`, `@JsName`,
-/// `asDynamic`). kotlinc's own JVM front end rejects those too, so scoring them as JVM frontend
-/// failures measures the wrong thing.
-pub fn target_backend_applicable(src: &str, names: &[&str]) -> bool {
-    if let Some(line) = src
-        .lines()
-        .find(|line| line.starts_with("// TARGET_BACKEND:"))
-    {
-        if !mentions_backend(line.trim_start_matches("// TARGET_BACKEND:").trim(), names) {
-            return false;
-        }
-    }
-    !dont_targets_exact_backend(src, names)
-}
-
 /// Whether a source program belongs to the platform universe a JVM frontend can analyze.
 ///
 /// `DONT_TARGET_EXACT_BACKEND` is intentionally absent. It commonly records a runtime/codegen
@@ -252,18 +213,8 @@ pub fn target_backend_applicable(src: &str, names: &[&str]) -> bool {
 /// a FIR/common-lowering census. Explicit `TARGET_BACKEND` and HMPP metadata-platform declarations,
 /// by contrast, select a source universe whose platform declarations may not exist on JVM at all.
 fn frontend_target_applicable(src: &str, names: &[&str]) -> bool {
-    let mentions_backend = |payload: &str| {
-        payload
-            .split(',')
-            .any(|token| token.trim() == "ANY" || names.contains(&token.trim()))
-    };
-    if let Some(line) = src
-        .lines()
-        .find(|line| line.starts_with("// TARGET_BACKEND:"))
-    {
-        if !mentions_backend(line.trim_start_matches("// TARGET_BACKEND:").trim()) {
-            return false;
-        }
+    if !backend_targeted(src, names) {
+        return false;
     }
     if let Some(line) = src
         .lines()
@@ -304,8 +255,8 @@ pub fn frontend_applicable(src: &str, names: &[&str]) -> bool {
         return false;
     }
     let mentions = |line: &str| {
-        line.split(',')
-            .any(|token| token.trim() == "ANY" || names.contains(&token.trim()))
+        line.split(|character: char| character == ',' || character.is_whitespace())
+            .any(|token| token == "ANY" || names.last().copied() == Some(token))
     };
     let ignored = |prefix: &str| {
         src.lines().any(|line| {
@@ -314,8 +265,7 @@ pub fn frontend_applicable(src: &str, names: &[&str]) -> bool {
         })
     };
     let ignored_k1 = ignored("// IGNORE_BACKEND_K1:");
-    let ignored_k2 =
-        ignored("// IGNORE_BACKEND_K2:") || ignored("// IGNORE_BACKEND_K2_MULTI_MODULE:");
+    let ignored_k2 = ignored("// IGNORE_BACKEND_K2:");
     !(ignored_k1 && ignored_k2)
 }
 
@@ -348,44 +298,6 @@ fn k2_language_configuration_applicable(src: &str) -> bool {
             .flat_map(|payload| payload.split(','))
             .any(unsupported)
     })
-}
-
-pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
-    backend_targeted(src, names) && !backend_muted(src, names)
-}
-
-/// `ANY` names every backend (kotlinc's test runner uses it for red-code tests kept only for their
-/// diagnostic half), so it always mentions ours.
-fn mentions(line: &str, names: &[&str]) -> bool {
-    line.split(',')
-        .any(|token| token.trim() == "ANY" || names.contains(&token.trim()))
-}
-
-/// Whether `// TARGET_BACKEND:` admits one of `names` — a case that names backends and none of
-/// ours is a case written for a platform this one is not.
-///
-/// Split from the mute half because the two ask different questions and a lane may answer them
-/// with different backend sets. A native lane targets `NATIVE` alone: a case marked JVM-only is
-/// JVM-only, and compiling it means compiling `java.lang.Runnable` against a target that has no
-/// JDK. Its mute query likewise names only `NATIVE`: a JVM mute may describe a JVM representation
-/// defect and is not evidence that Native should skip the shared frontend program.
-pub fn backend_targeted(src: &str, names: &[&str]) -> bool {
-    match src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
-        Some(line) => mentions(line.trim_start_matches("// TARGET_BACKEND:").trim(), names),
-        None => true,
-    }
-}
-
-/// Whether any mute directive names one of `names`.
-pub fn backend_muted(src: &str, names: &[&str]) -> bool {
-    src.lines()
-        .filter(|l| {
-            l.starts_with("// IGNORE_BACKEND:")
-                || l.starts_with("// IGNORE_BACKEND_K2:")
-                || l.starts_with("// IGNORE_BACKEND_K2_MULTI_MODULE:")
-                || l.starts_with("// DONT_TARGET_EXACT_BACKEND:")
-        })
-        .any(|l| mentions(l.split_once(':').map(|x| x.1).unwrap_or("").trim(), names))
 }
 
 /// Whether the test applies to krusty's backend (the common case of [`backend_applicable`]).
@@ -1122,7 +1034,7 @@ mod tests {
     #[test]
     fn backend_applicable_ignore_backend_excludes() {
         assert!(!backend_applicable("// IGNORE_BACKEND: JVM_IR", BACKENDS));
-        assert!(!backend_applicable("// IGNORE_BACKEND: JVM", BACKENDS));
+        assert!(backend_applicable("// IGNORE_BACKEND: JVM", BACKENDS));
     }
 
     #[test]
@@ -1137,7 +1049,7 @@ mod tests {
             "// IGNORE_BACKEND_K2: JVM_IR",
             BACKENDS
         ));
-        assert!(!backend_applicable(
+        assert!(backend_applicable(
             "// IGNORE_BACKEND_K2_MULTI_MODULE: JVM_IR",
             BACKENDS
         ));
@@ -1244,8 +1156,8 @@ mod tests {
     fn backend_applicable_any_token_names_every_backend() {
         // Red-code tests kept for their diagnostic half: excluded everywhere.
         assert!(!backend_applicable("// IGNORE_BACKEND: ANY", BACKENDS));
-        // A test targeting ANY targets ours too.
-        assert!(backend_applicable("// TARGET_BACKEND: ANY", BACKENDS));
+        // ANY is the end of the compatibility chain, not a concrete target.
+        assert!(!backend_applicable("// TARGET_BACKEND: ANY", BACKENDS));
     }
 
     #[test]
