@@ -127,7 +127,7 @@ impl<'a> RegenerationSite<'a> {
         let declaration = &ir.functions[function as usize];
         let name = &declaration.name;
         // Another file's inline function, compiled here for its callers, is declared there.
-        let declared = (ir.fn_decl_lines.contains_key(&function)
+        let declared = (ir.function_position(function).decl_line.is_some()
             && ir.fn_source_names.get(&function) == Some(name))
             || ir.foreign_inline_templates.contains(&function);
         let suspend_lambda_body = declaration

@@ -293,7 +293,7 @@ impl BodyLowering<'_> {
         malformed_anonymous: &mut Option<super::FirLoweringFailure>,
     ) -> Option<ExprId> {
         let template = self.ir.functions.get(function as usize)?.body?;
-        let close_line = self.ir.fn_close_lines.get(&function).copied();
+        let close_line = self.ir.function_position(function).close_line;
         let frame = inline_callee.frame(self.index)?;
         // The name its inline frames are opened under.
         let callee = frame.name.clone();
