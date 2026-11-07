@@ -1835,50 +1835,17 @@ fn enum_entry_property_anonymous_object_captures_prior_entry_storage() {
         abstract val value: String
     }
 "#;
-    let mut diagnostics = DiagSink::new();
-    let mut analysis = crate::frontend::analyze_source_set_with_features(
-        &[SourceInput::kotlin(source).with_file_stem("EnumEntryAnonymousCapture")],
-        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+    let inputs = [SourceInput::kotlin(source).with_file_stem("EnumEntryAnonymousCapture")];
+    let mut prepared = super::test_support::prepare_fir_source(
+        &inputs,
+        0,
+        Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        &mut diagnostics,
     );
-    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-
-    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
-    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
-    let (mut index, mut inline_bodies, _default_arguments, mut sources) =
-        streamed.module.into_parts();
-    crate::resolve::publish_discovered_local_capture_declarations(
-        &analysis.files[0],
-        SourceFileId::from_raw(0),
-        &mut analysis.symbols,
-        &mut index,
-    );
-    let info = analysis.types[0].as_ref().expect("checked source");
-    crate::resolve::publish_checked_local_signatures(
-        &analysis.files[0],
-        SourceFileId::from_raw(0),
-        &analysis.symbols,
-        info,
-        &mut index,
-    )
-    .expect("checked local signatures must publish before FIR body checking");
     let mut sink = RecordingSink::default();
-    for work in ordinary {
-        check_and_dispatch_body(
-            crate::fir::BodyCheckUnit {
-                file: &analysis.files[0],
-                info,
-                source: SourceFileId::from_raw(0),
-                index: &index,
-            },
-            work,
-            sources.origins_mut(),
-            &mut inline_bodies,
-            &mut sink,
-        )
+    prepared
+        .check_all_bodies(&mut sink)
         .expect("enum-entry anonymous capture must become checked FIR");
-    }
 }
 
 #[test]

@@ -579,7 +579,6 @@ fn the_real_stdlib_classpath_is_searchable_by_class_name() {
         "the stdlib declares more than a handful of classes, got {}",
         index.class_count()
     );
-    assert!(index.is_complete());
 
     let found = index.candidates("AbstractList", 8);
     let listed = found

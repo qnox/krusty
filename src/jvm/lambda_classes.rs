@@ -33,6 +33,9 @@
 //! it fieldless: the expansion created that closure value rather than reading a declaration
 //! singleton.
 
+#[cfg(test)]
+mod constructor_prefix_tests;
+
 mod factory_adaptation;
 mod inline_scope;
 
@@ -994,17 +997,22 @@ fn captures(ir: &IrFile, fid: FunId, body: ExprId, site: &Site) -> Option<Vec<Ca
         .iter()
         .enumerate()
         .map(|(parameter, identity)| {
-            let capture = match identity.role {
-                IrParameterRole::CapturedValue { .. } => crate::ir::IrLambdaCapture::Value {
-                    source_name: identity.source_name.as_deref()?.into(),
-                    inlined: identity.provenance
-                        == crate::ir::IrParameterProvenance::InlinedCapture,
-                },
-                IrParameterRole::CapturedReceiver { ordinal } => {
-                    parameter_info.captured_receivers.get(ordinal as usize)?;
-                    crate::ir::IrLambdaCapture::Receiver(ordinal)
+            let capture = if let Some((owner, parameter)) = identity.constructor_receiver() {
+                super::capture_names::constructor_receiver(ir, owner, parameter)?;
+                crate::ir::IrLambdaCapture::ConstructorReceiver { owner, parameter }
+            } else {
+                match identity.role {
+                    IrParameterRole::CapturedValue { .. } => crate::ir::IrLambdaCapture::Value {
+                        source_name: identity.source_name.as_deref()?.into(),
+                        inlined: identity.provenance
+                            == crate::ir::IrParameterProvenance::InlinedCapture,
+                    },
+                    IrParameterRole::CapturedReceiver { ordinal } => {
+                        parameter_info.captured_receivers.get(ordinal as usize)?;
+                        crate::ir::IrLambdaCapture::Receiver(ordinal)
+                    }
+                    _ => return None,
                 }
-                _ => return None,
             };
             let (ty, shared_holder) =
                 match ir.shared_capture_parameters.get(&(fid, parameter as u32)) {
@@ -1280,7 +1288,8 @@ fn declare_class(
         // `IrLambdaClass::captures`.
         let source = match &capture.capture {
             crate::ir::IrLambdaCapture::Value { source_name, .. } => source_name.to_string(),
-            crate::ir::IrLambdaCapture::Receiver(_) => "this".to_string(),
+            crate::ir::IrLambdaCapture::Receiver(_)
+            | crate::ir::IrLambdaCapture::ConstructorReceiver { .. } => "this".to_string(),
         };
         class
             .fields

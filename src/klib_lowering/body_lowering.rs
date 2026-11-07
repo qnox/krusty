@@ -24,6 +24,7 @@ mod compiler_blocks;
 mod conditionals;
 mod constructions;
 mod elvis_blocks;
+mod instance_storage;
 mod loops;
 mod range_membership;
 mod safe_calls;
@@ -230,12 +231,7 @@ pub(super) struct BodyLowering<'a> {
     /// The coercions of an erased body's values to their erasure, which a conversion back to the
     /// declared type cancels.
     erasure_coercions: HashSet<ExprId>,
-    initialization: Option<class_initializers::InitializationFrame<'a>>,
-    /// The value class whose member this body is, and the field it reads the value through.
-    value_member: Option<(
-        crate::ir::ClassId,
-        &'a crate::metadata::klib_ir::tree::KlibIrField,
-    )>,
+    instance_storage: Option<instance_storage::InstanceStorageFrame<'a>>,
 }
 
 impl<'a> BodyLowering<'a> {
@@ -262,8 +258,7 @@ impl<'a> BodyLowering<'a> {
             loops: Vec::new(),
             breakable_loops: HashSet::default(),
             erasure_coercions: HashSet::default(),
-            initialization: None,
-            value_member: None,
+            instance_storage: None,
         }
     }
 
@@ -273,7 +268,12 @@ impl<'a> BodyLowering<'a> {
         class: crate::ir::ClassId,
         field: &'a crate::metadata::klib_ir::tree::KlibIrField,
     ) -> Self {
-        self.value_member = Some((class, field));
+        self.instance_storage = Some(instance_storage::InstanceStorageFrame::value_member(
+            class,
+            field,
+            self.ir.classes[class as usize].fields[0].ty,
+            self.header.value_receiver(),
+        ));
         self
     }
 

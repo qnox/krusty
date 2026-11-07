@@ -984,6 +984,17 @@ impl BodyLowering<'_> {
         &mut self,
         call: &FirConstructorCall,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let capture_arguments = call
+            .external_capture_arguments
+            .as_deref()
+            .map(|arguments| {
+                arguments
+                    .iter()
+                    .copied()
+                    .map(|argument| self.constructor_capture_argument(argument))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
         let (target, parameter_types, mut arguments) =
             self.constructor_target_and_arguments(call)?;
         // Like a call's, only supplied operands evaluated out of parameter order are held in
@@ -1033,6 +1044,7 @@ impl BodyLowering<'_> {
                 target,
                 outer_parameter: call.outer_parameter.map(crate::fir::ResolvedTy::get),
                 outer_receiver,
+                capture_arguments,
                 arguments,
                 substitutions: lower_substitutions(&call.substitutions),
             },
@@ -1423,7 +1435,6 @@ pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate
         crate::fir::FirIntrinsic::Assert { mode } => crate::ir::IrIntrinsic::Assert { mode: *mode },
         crate::fir::FirIntrinsic::ArrayGet => crate::ir::IrIntrinsic::ArrayGet,
         crate::fir::FirIntrinsic::ArraySet => crate::ir::IrIntrinsic::ArraySet,
-        crate::fir::FirIntrinsic::ArraySize => crate::ir::IrIntrinsic::ArraySize,
         crate::fir::FirIntrinsic::StringGet => crate::ir::IrIntrinsic::StringGet,
         crate::fir::FirIntrinsic::StringLength => crate::ir::IrIntrinsic::StringLength,
         crate::fir::FirIntrinsic::EnumName => crate::ir::IrIntrinsic::EnumName,

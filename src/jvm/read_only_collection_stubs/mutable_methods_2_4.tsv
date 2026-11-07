@@ -1,24 +1,21 @@
-# Kotlin's org.jetbrains.kotlin.builtins.jvm.JvmBuiltInsSignatures.MUTABLE_METHOD_SIGNATURES:
-# the JDK members of a mapped collection interface that only its mutable Kotlin face declares,
-# with the top-level qualifiers kotlinc's PREDEFINED_FUNCTION_ENHANCEMENT_INFO_BY_SIGNATURE gives
-# each value parameter and the result. `declared` is NOT_PLATFORM (the declared type, no longer
-# flexible), `not-null` is NOT_NULL, `nullable` is NULLABLE, and `platform` marks a position the
-# table does not enhance. Type-argument qualifiers are omitted: no JVM stub position carries them.
-# Read from the supported Kotlin 2.4.21 compiler; checked-in policy data, not generated.
-# physical JVM owner<TAB>method name<TAB>descriptor<TAB>parameter qualifiers<TAB>result qualifier
-java/util/Collection	removeIf	(Ljava/util/function/Predicate;)Z	declared	platform
-java/util/List	replaceAll	(Ljava/util/function/UnaryOperator;)V	declared	platform
-java/util/List	sort	(Ljava/util/Comparator;)V	platform	platform
-java/util/List	addFirst	(Ljava/lang/Object;)V	declared	platform
-java/util/List	addLast	(Ljava/lang/Object;)V	declared	platform
-java/util/List	removeFirst	()Ljava/lang/Object;	-	declared
-java/util/List	removeLast	()Ljava/lang/Object;	-	declared
-java/util/Map	computeIfAbsent	(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;	declared,declared	declared
-java/util/Map	computeIfPresent	(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;	declared,declared	nullable
-java/util/Map	compute	(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;	declared,declared	nullable
-java/util/Map	merge	(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;	declared,not-null,declared	nullable
-java/util/Map	putIfAbsent	(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;	declared,declared	nullable
-java/util/Map	remove	(Ljava/lang/Object;Ljava/lang/Object;)Z	platform,platform	platform
-java/util/Map	replaceAll	(Ljava/util/function/BiFunction;)V	declared	platform
-java/util/Map	replace	(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;	declared,declared	nullable
-java/util/Map	replace	(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z	declared,declared,declared	platform
+# Kotlin's org.jetbrains.kotlin.builtins.jvm.JvmBuiltInsSignatures.MUTABLE_METHOD_SIGNATURES: the
+# JDK methods of a mapped collection interface that only its mutable Kotlin face carries.
+# Mirrors the Kotlin 2.4 `JvmBuiltInsSignatures` source.
+# This is checked-in policy data; it is not generated during the build.
+# physical JVM owner<TAB>physical method name<TAB>descriptor
+java/util/Collection	removeIf	(Ljava/util/function/Predicate;)Z
+java/util/List	replaceAll	(Ljava/util/function/UnaryOperator;)V
+java/util/List	sort	(Ljava/util/Comparator;)V
+java/util/List	addFirst	(Ljava/lang/Object;)V
+java/util/List	addLast	(Ljava/lang/Object;)V
+java/util/List	removeFirst	()Ljava/lang/Object;
+java/util/List	removeLast	()Ljava/lang/Object;
+java/util/Map	computeIfAbsent	(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;
+java/util/Map	computeIfPresent	(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;
+java/util/Map	compute	(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;
+java/util/Map	merge	(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;
+java/util/Map	putIfAbsent	(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+java/util/Map	remove	(Ljava/lang/Object;Ljava/lang/Object;)Z
+java/util/Map	replaceAll	(Ljava/util/function/BiFunction;)V
+java/util/Map	replace	(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+java/util/Map	replace	(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z
