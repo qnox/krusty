@@ -86,9 +86,9 @@ fn every_tail_call_forwards_its_continuation_like_kotlinc() {
 #[test]
 fn forwarded_tail_calls_still_resume() {
     let main = format!(
-        "{SOURCE}\
-         import kotlin.coroutines.*\n\
+        "import kotlin.coroutines.*\n\
          import kotlin.coroutines.intrinsics.*\n\
+         {SOURCE}\
          var parked: Continuation<Answer>? = null\n\
          class Parking : Engine {{\n\
          \x20   override suspend fun named(id: String): Answer =\n\

@@ -805,7 +805,7 @@ impl<'a> Parser<'a> {
             src,
             t,
             newline_before,
-            file_import_starts: crate::file_header::from_tokens(src, tokens).import_starts,
+            file_import_starts: crate::token::file_header::from_tokens(src, tokens).import_starts,
             i: 0,
             file,
             diags,

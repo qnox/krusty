@@ -65,9 +65,9 @@ fn a_tail_call_to_a_dependency_forwards_its_continuation_like_kotlinc() {
 #[test]
 fn a_forwarded_suspension_still_resumes() {
     let main = format!(
-        "{SOURCE}\
-         import kotlin.coroutines.*\n\
+        "import kotlin.coroutines.*\n\
          import kotlin.coroutines.intrinsics.*\n\
+         {SOURCE}\
          var parked: Continuation<Answer>? = null\n\
          class Parking : Engine {{\n\
          \x20   override suspend fun diff(config: String): Answer =\n\
