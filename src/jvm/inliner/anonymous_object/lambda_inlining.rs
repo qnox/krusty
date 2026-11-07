@@ -12,6 +12,7 @@ use crate::fx_hash::HashMap;
 
 use crate::jvm::bytecode_passes::fix_stack::fix_stack;
 use crate::jvm::bytecode_passes::insn_list::EditableMethod;
+use crate::jvm::class_node::ClassNode;
 use crate::jvm::method_node::{Category, Insn, MethodNode, Node};
 use crate::jvm::source_map::SourceMap;
 
@@ -19,6 +20,7 @@ use super::super::class_roles::RegeneratedClass;
 use super::super::lambda_expansion::{self, Lambda, SourceLines};
 use super::super::{functional_arguments, object_regeneration, preparation, returns, try_blocks};
 use super::super::{Binding, ClassRoles, InlineError, Parameter, Parameters};
+use super::constructor::{self, DeclaredCapture};
 use super::{CopiedLines, NestedObjects, RegenerationError};
 
 const ALOAD: u8 = 0x19;
@@ -41,6 +43,101 @@ pub(super) fn reads_lambda(method: &MethodNode, lambdas: &[FieldLambda<'_>]) -> 
     })
 }
 
+/// Whether a method of the anonymous object `class`, constructed through `constructor_desc` with
+/// one of a call's lambdas as each argument at `arguments`, keeps that lambda as a value once a copy
+/// of it inlines the lambda: [`functional_arguments::keeps_lambda_through_objects`] over each
+/// method that reads the lambda's field, as [`inline_into`] prepares it. `enclosing` holds the
+/// objects whose methods construct this one, outermost first.
+///
+/// A class this cannot plan (no class file, a constructor this shape does not split) is no such
+/// fact: its regeneration reports why it cannot be copied.
+pub(in crate::jvm::inliner) fn keeps_passed_lambda_as_value(
+    class: &str,
+    constructor_desc: &str,
+    arguments: &[usize],
+    classes: &dyn ClassRoles,
+    enclosing: &[&str],
+) -> Result<bool, InlineError> {
+    let Some(original) = classes
+        .class_file(class)
+        .and_then(|bytes| ClassNode::read(&bytes).ok())
+    else {
+        return Ok(false);
+    };
+    let Ok((constructor, methods)) = super::split_constructor(&original) else {
+        return Ok(false);
+    };
+    let Some(code) = constructor
+        .code
+        .as_ref()
+        .filter(|_| constructor.desc == constructor_desc)
+    else {
+        return Ok(false);
+    };
+    let declared: Vec<DeclaredCapture<'_>> = original
+        .fields
+        .iter()
+        .filter(|field| super::is_captured_field_name(&field.name))
+        .map(|field| DeclaredCapture {
+            name: &field.name,
+            desc: &field.desc,
+        })
+        .collect();
+    let Ok(plan) = constructor::extract(code, class, &declared, constructor_desc) else {
+        return Ok(false);
+    };
+    let Some(fields) = arguments
+        .iter()
+        .map(|&argument| plan.field_of_argument(constructor_desc, argument))
+        .collect::<Option<Vec<&str>>>()
+    else {
+        return Ok(false);
+    };
+    let mut enclosing = enclosing.to_vec();
+    enclosing.push(class);
+    for method in methods {
+        let Some(code) = &method.code else { continue };
+        let reads = code.instructions().any(|insn| {
+            matches!(insn, Insn::Field { op: GETFIELD, name, .. } if fields.contains(&name.as_str()))
+        });
+        if !reads {
+            continue;
+        }
+        let parameters = own_parameters(code, fields.len()).map_err(InlineError::Regeneration)?;
+        let node =
+            prepared_body(code, class, &fields, &parameters).map_err(InlineError::Regeneration)?;
+        if functional_arguments::keeps_lambda_through_objects(
+            &node,
+            &parameters,
+            classes,
+            &enclosing,
+        )? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `method` of `owner` as the inliner analyzes it with `fields`' lambdas bound in `parameters`:
+/// each read of one of the fields is a load of the lambda's slot, and the body is preprocessed as
+/// any inlined body is.
+fn prepared_body(
+    method: &MethodNode,
+    owner: &str,
+    fields: &[&str],
+    parameters: &Parameters,
+) -> Result<MethodNode, RegenerationError> {
+    let inlining = |error: InlineError| RegenerationError::Inlining(Box::new(error));
+    let mut node = method.clone();
+    preparation::add_captured_parameters(&mut node, parameters);
+    replace_lambda_reads(&mut node, owner, fields, parameters.real_size())?;
+    try_blocks::move_try_starts_to_their_first_instruction(&mut node).map_err(inlining)?;
+    let mut node = super::super::preprocess_node_before_inline(node).map_err(inlining)?;
+    preparation::remove_fake_variable_initializations(&mut node);
+    returns::normalize_local_returns(&mut node).map_err(inlining)?;
+    Ok(node)
+}
+
 /// `method` of the copy `owner`, its types already renamed, with every `invoke` of one of `lambdas`
 /// replaced by the lambda's body. Its own lines are mapped through `lines`; the lambdas' lines are
 /// lines of the caller, resolved through `caller` and mapped into the copy's map. `for_inline` says
@@ -59,14 +156,8 @@ pub(super) fn inline_into(
 ) -> Result<MethodNode, RegenerationError> {
     let inlining = |error: InlineError| RegenerationError::Inlining(Box::new(error));
     let (parameters, placed) = method_parameters(method, owner, lambdas)?;
-    let mut node = method.clone();
-    preparation::add_captured_parameters(&mut node, &parameters);
     let fields: Vec<&str> = lambdas.iter().map(|lambda| lambda.field.as_str()).collect();
-    replace_lambda_reads(&mut node, owner, &fields, parameters.real_size())?;
-    try_blocks::move_try_starts_to_their_first_instruction(&mut node).map_err(inlining)?;
-    let mut node = super::super::preprocess_node_before_inline(node).map_err(inlining)?;
-    preparation::remove_fake_variable_initializations(&mut node);
-    returns::normalize_local_returns(&mut node).map_err(inlining)?;
+    let mut node = prepared_body(method, owner, &fields, &parameters)?;
     let classes = WithOwnCopy {
         classes: objects.regeneration.classes,
         copy: owner,
@@ -74,7 +165,8 @@ pub(super) fn inline_into(
     let constructors =
         object_regeneration::regenerate_objects(&mut node, &parameters, &placed, &classes, objects)
             .map_err(inlining)?;
-    let invokes = functional_arguments::mark_places(&mut node, &parameters).map_err(inlining)?;
+    let invokes = functional_arguments::mark_places(&mut node, &parameters, &constructors)
+        .map_err(inlining)?;
     if !for_inline
         && invokes
             .iter()
