@@ -2468,6 +2468,34 @@ fun box(): String = invoked.values.greeting() + invoked.values.suffix()
     assert_accepted_and_runs(src, "ResolverPackageQualifiedPropertyInvoke");
 }
 
+/// An invariant nullable formal (`Column<E?>`) is a candidate for the receiver's classifier, and
+/// applicability rejects a non-null argument (`Column<EntityID<U>>`) or a caller variable whose
+/// bound admits null with kotlinc's receiver mismatch, not an unresolved reference.
+#[test]
+fn an_invariant_nullable_receiver_variable_rejects_a_non_null_argument_like_kotlinc() {
+    let sources = [(
+        "Receiver.kt",
+        r#"open class EntityID<T : Any>(val value: T)
+class Column<T>(val name: String)
+
+fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T? = null
+
+fun <U : Any> nonNullColumn(column: Column<EntityID<U>>) = column.invariantTable()
+fun <V : EntityID<String>?> boundedColumn(column: Column<V>) = column.invariantTable()
+fun <U : Any> nullableColumn(column: Column<EntityID<U>?>) = column.invariantTable()
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Receiver.kt:6:67: candidate 'fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T?' is inapplicable because of a receiver type mismatch.",
+            "Receiver.kt:7:71: candidate 'fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T?' is inapplicable because of a receiver type mismatch.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
 #[test]
 fn a_callable_import_keeps_the_default_imported_classifier_in_type_positions() {
     let sources = [
@@ -2551,16 +2579,26 @@ fun <T : CharSequence> plainName(): T = 1
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
 
+/// Only a formal constrained from above meets its declared bound. `S` of `put` also occurs in an
+/// ordinary value parameter here, so its binding is exact and `T`'s mismatch is kotlinc's error.
 #[test]
-fn conditional_argument_branches_leave_bounded_overloads_ambiguous() {
-    // Each branch is a lower bound on `T`, and `Long` and `Int` satisfy both bounds, so neither
-    // overload is more specific.
-    let source = r#"
-fun <T : Number> pick(x: T): String = "number"
-fun <T : Comparable<*>> pick(x: T): String = "comparable"
-fun use(c: Boolean): String = pick(if (c) 1L else 2)
-"#;
-    assert_rejection_same_as_kotlinc("ConditionalArgumentOverloadAmbiguity", source);
+fn an_in_projected_formal_with_an_ordinary_occurrence_keeps_its_exact_binding() {
+    let sources = [(
+        "Sink.kt",
+        r#"class Sink<T>
+fun <T, S : T?> Sink<in S>.put(value: T, extra: S): Int = 1
+
+fun <T : Number?, S : T> both(sink: Sink<T>, t: S, n: Int): Int = sink.put(t, n)
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Sink.kt:4:79: argument type mismatch: actual type is 'Int', but 'T (of fun <T : Number?, S : T> both)' was expected.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
 
 /// The builder shape from a SQL library: a member extension's defaulted `separator` rejects the
@@ -2762,6 +2800,140 @@ fun construct(): KeepAll<*> = KeepAll(listOf(shape()))
 }
 
 #[test]
+fn one_structural_argument_rejects_each_formal_it_contradicts() {
+    // kotlinc reports every formal the one argument leaves uninferred, then the argument once.
+    let source = r#"
+class Duo<A, B>
+fun <A : Number, B : CharSequence> take(value: Duo<A, B>) {}
+class Sink<A : Number, B : CharSequence>(value: Duo<A, B>)
+fun test(value: Duo<String, Int>) {
+    take(value)
+    Sink(value)
+}
+"#;
+    assert_rejection_same_as_kotlinc("StructuralArgumentRejectsEachFormal", source);
+}
+
+/// An invariant receiver (`Inv<T>`) fixes a member extension's formal exactly; only a covariant
+/// receiver joins it with an argument's type (`box_regressions/memberExtensionCovariantReceiverJoin.kt`).
+#[test]
+fn an_invariant_member_extension_receiver_keeps_its_exact_binding() {
+    let source = "open class Base\n\
+                  class Sub : Base()\n\
+                  class Inv<T>(val v: T)\n\
+                  class K {\n    \
+                  fun <T : Any> Inv<T>.same(expected: T): Boolean = v == expected\n    \
+                  fun c(i: Inv<Sub>, x: Base): Boolean = i.same(x)\n\
+                  }\n";
+    assert_rejection_same_as_kotlinc("InvariantMemberExtensionReceiver", source);
+}
+
+/// A member extension's formal reached only through another formal's bound is the receiver's own
+/// type argument, so a conflicting expected result is reported against that argument
+/// (`Table<U>`), not against the bound's fallback (`Table<Any>`), as kotlinc reports.
+#[test]
+fn a_member_extension_bound_only_formal_reports_the_receiver_argument_like_kotlinc() {
+    let sources = [(
+        "Tables.kt",
+        r#"class Column<T>(val name: String)
+class Table<T : Any>(val name: String)
+open class Entity<T : Any>(val id: T)
+
+class Tables {
+    fun <T : Any, E : Entity<T>> Column<out E>.table(): Table<T> = Table(name)
+
+    fun <U : Any> wrongTable(column: Column<Entity<U>>): Table<String> = column.table()
+}
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Tables.kt:8:74: return type mismatch: expected 'Table<String>', actual 'Table<U (of fun <U : Any> wrongTable)>'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+#[test]
+fn a_member_extension_nothing_argument_takes_the_expected_result_like_kotlinc() {
+    // `T` of `value: T` holds a lower bound (`Nothing`, `String`), which the expected result raises
+    // to `String` or `CharSequence`. A slot that fixes `T` as an equality (`MutableList<T>`) keeps
+    // its own solution and the call reports the result mismatch. (The Wasm lanes decline the
+    // widened argument, so this stays a JVM comparison.)
+    let sources = [(
+        "Invoke.kt",
+        r#"class Box<T>(val value: T)
+
+class Host {
+    operator fun <T> String.invoke(value: T): Box<T> = Box(value)
+    fun <T> String.fromList(list: MutableList<T>): Box<T> = Box(list[0])
+
+    fun fromNothing(value: Nothing): Box<String> = ""(value)
+    fun widened(): Box<CharSequence> = "prefix"("ab")
+    fun fromList(list: MutableList<String>): Box<CharSequence> = "".fromList(list)
+}
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Invoke.kt:9:66: return type mismatch: expected 'Box<CharSequence>', actual 'Box<String>'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+/// A safe cast proves its operand only where its result is known non-null: an elvis whose right
+/// side completes normally, an `if` that only guards a statement, and a chain compared with
+/// `false` leave the operand unnarrowed, as kotlinc reports.
+#[test]
+fn a_safe_cast_without_a_non_null_proof_does_not_smart_cast_like_kotlinc() {
+    let sources = [(
+        "Cast.kt",
+        r#"fun fallsThrough(value: Any?): Int {
+    (value as? String) ?: println("miss")
+    return value.length
+}
+
+fun checksOtherwise(value: Any?): Int {
+    if ((value as? String) != null) println("hit")
+    return value.length
+}
+
+fun comparesFalse(value: Any): Int {
+    if ((value as? String)?.isEmpty() == false) println("hit")
+    return value.length
+}
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Cast.kt:3:18: unresolved reference 'length' on receiver of type 'Any?'.",
+            "Cast.kt:8:18: unresolved reference 'length' on receiver of type 'Any?'.",
+            "Cast.kt:13:18: unresolved reference 'length' on receiver of type 'Any'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+#[test]
+fn conditional_argument_branches_leave_bounded_overloads_ambiguous() {
+    // Each branch is a lower bound on `T`, and `Long` and `Int` satisfy both bounds, so neither
+    // overload is more specific.
+    let source = r#"
+fun <T : Number> pick(x: T): String = "number"
+fun <T : Comparable<*>> pick(x: T): String = "comparable"
+fun use(c: Boolean): String = pick(if (c) 1L else 2)
+"#;
+    assert_rejection_same_as_kotlinc("ConditionalArgumentOverloadAmbiguity", source);
+}
+
+#[test]
 fn a_bound_violating_conditional_branch_rejects_the_whole_argument() {
     // kotlinc constrains the formal by the conditional as one argument: the `Circle` branch puts
     // the conditional's `Shape` outside the bound, and no other argument is left to infer `T`.
@@ -2789,19 +2961,4 @@ fun call(c: Boolean): Int = same(mutableListOf<Square>(), if (c) Square() else C
 fun construct(c: Boolean): Same<*> = Same(mutableListOf<Square>(), if (c) Square() else Circle())
 "#;
     assert_rejection_same_as_kotlinc("InvariantFormalBeforeConditional", source);
-}
-
-#[test]
-fn one_structural_argument_rejects_each_formal_it_contradicts() {
-    // kotlinc reports every formal the one argument leaves uninferred, then the argument once.
-    let source = r#"
-class Duo<A, B>
-fun <A : Number, B : CharSequence> take(value: Duo<A, B>) {}
-class Sink<A : Number, B : CharSequence>(value: Duo<A, B>)
-fun test(value: Duo<String, Int>) {
-    take(value)
-    Sink(value)
-}
-"#;
-    assert_rejection_same_as_kotlinc("StructuralArgumentRejectsEachFormal", source);
 }

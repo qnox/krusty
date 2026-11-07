@@ -3,7 +3,8 @@
 
 use super::{
     classifier_callable_signature, declared_function_type, direct_supertypes,
-    ty_subst_keep_unbound, unify_ty_from_symbols, GSigBinds, SourceOracle,
+    ty_subst_keep_unbound, unify_receiver_from_symbols, unify_ty_from_symbols, GSigBinds,
+    SourceOracle,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind};
@@ -27,7 +28,7 @@ fn receiver_type_args_match(
     src: &dyn SymbolSource,
     decl_recv: Ty,
     recv: Ty,
-    type_variables: &[String],
+    type_variables: &[crate::types::TyParamName],
 ) -> bool {
     let recv = bind_receiver_type_variables(src, decl_recv, recv, type_variables);
     // Each actual argument must be assignable to the declared one under Kotlin's covariant receiver
@@ -39,7 +40,8 @@ fn receiver_type_args_match(
     let oracle = SourceOracle(src);
     if decl_recv.mentions_ty_param() {
         let mut bindings = GSigBinds::default();
-        unify_ty_from_symbols(src, decl_recv, recv, &mut bindings);
+        unify_receiver_from_symbols(src, decl_recv, recv, &mut bindings);
+        contravariant_formals_read_nothing(decl_recv, recv, &mut bindings);
         let specialized = ty_subst_keep_unbound(decl_recv, &bindings);
         // A callee-owned receiver variable may bind to a still-symbolic variable owned by the
         // caller: `Flow<Flow<T@flattenMerge>>` against `Flow<Flow<R@flatMapMerge>>`. The
@@ -71,12 +73,19 @@ fn receiver_type_args_match(
     // `Iterable<Double>`, so it is checked through its bounds like any other argument.
     let declared_wildcard =
         |t: Ty| t.projection_inner().unwrap_or(t).is_ty_param() || erased_top(t);
+    // A nullable formal (`E?`) is the same wildcard as `E` here. Whether the receiver admits the
+    // call (`Column<out E?>` takes `Column<EntityID<U>>`, an invariant `Column<E?>` does not) is
+    // decided by applicability once `E` is bound, which reports the receiver type mismatch.
+    let nullable_declared_wildcard = |d: Ty| {
+        let inner = d.projection_inner().unwrap_or(d);
+        inner.is_nullable() && inner.non_null().is_ty_param()
+    };
     decl_recv
         .type_args()
         .iter()
         .zip(recv.type_args().iter())
         .all(|(&d, &r)| {
-            if declared_wildcard(d) || erased_top(r) {
+            if declared_wildcard(d) || nullable_declared_wildcard(d) || erased_top(r) {
                 return true;
             }
             match d.kind() {
@@ -89,6 +98,25 @@ fn receiver_type_args_match(
                 _ => crate::assignable::is_assignable(&cx, &oracle, r, d),
             }
         })
+}
+
+/// A formal written `in S` takes only an upper constraint from an `out`-projected or star
+/// argument: `Expr<out Any>` is an `Expr<in S>` for `S = Nothing`, never for `S = Any`.
+fn contravariant_formals_read_nothing(decl_recv: Ty, recv: Ty, bindings: &mut GSigBinds) {
+    for (&declared, &actual) in decl_recv.type_args().iter().zip(recv.type_args().iter()) {
+        let TyKind::InProjection(inner) = declared.kind() else {
+            continue;
+        };
+        if !matches!(
+            actual.kind(),
+            TyKind::OutProjection(_) | TyKind::StarProjection(_)
+        ) {
+            continue;
+        }
+        if let TyKind::TyParam(name, _) | TyKind::Var(name, _) = inner.non_null().kind() {
+            bindings.insert(name, Ty::Nothing);
+        }
+    }
 }
 
 /// The rung of `decl_recv` in `recv`'s SOURCE-type supertype closure (0 = same class), or `None` if the
@@ -111,22 +139,23 @@ pub(crate) struct ReceiverMro {
     ranks: Vec<(Ty, u32)>,
     /// Type variables of enclosing postponed calls that the receiver may mention; see
     /// [`receiver_type_args_match`].
-    type_variables: Vec<String>,
+    type_variables: Vec<crate::types::TyParamName>,
 }
 
 fn bind_receiver_type_variables(
     src: &dyn SymbolSource,
     decl_recv: Ty,
     recv: Ty,
-    type_variables: &[String],
+    type_variables: &[crate::types::TyParamName],
 ) -> Ty {
     if !crate::types::ty_mentions_param(recv, type_variables) {
         return recv;
     }
     let mut bindings = GSigBinds::default();
     unify_ty_from_symbols(src, recv, decl_recv, &mut bindings);
-    bindings
-        .retain(|variable, value| type_variables.contains(variable) && !value.mentions_ty_param());
+    bindings.retain(|variable, value| {
+        type_variables.iter().any(|formal| formal == variable) && !value.mentions_ty_param()
+    });
     ty_subst_keep_unbound(recv, &bindings)
 }
 
@@ -193,7 +222,10 @@ impl ReceiverMro {
         }
     }
 
-    pub(crate) fn with_type_variables(mut self, type_variables: &[String]) -> Self {
+    pub(crate) fn with_type_variables(
+        mut self,
+        type_variables: &[crate::types::TyParamName],
+    ) -> Self {
         self.type_variables = type_variables.to_vec();
         self
     }
@@ -223,7 +255,7 @@ impl ReceiverMro {
         // A generic receiver may bind its parameter to a nullable type even though a bare T is not
         // itself a nullable value occurrence. An explicit non-null upper bound closes that route.
         let accepts_nullable = decl_recv.admits_null()
-            || matches!(decl_recv.kind(), TyKind::TyParam(_, bound) if bound.upper_bound_admits_null());
+            || matches!(decl_recv.kind(), TyKind::TyParam(_, bound) | TyKind::Var(_, bound) if bound.upper_bound_admits_null());
         // The null literal has no classifier hierarchy of its own, but it is a valid receiver for
         // every nullable extension receiver. Candidate specificity is decided after this applicability
         // rung; inventing a class key for `Null` would incorrectly make it a member of `Any`'s MRO.

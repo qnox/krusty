@@ -15,7 +15,7 @@ pub(super) struct ConstructionExpectations {
     /// declaration provides them. This is the template call-site type arguments substitute into.
     pub(super) symbolic: Vec<Option<Ty>>,
     /// The constructed classifier's type parameters, in declaration order.
-    pub(super) type_params: Vec<String>,
+    pub(super) type_params: Vec<crate::types::TyParamName>,
     /// Declaration bounds parallel to `type_params`, used when an expected applied supertype
     /// supplies the classifier arguments before a contextual constructor argument is checked.
     pub(super) type_param_bounds: Vec<Vec<Ty>>,
@@ -98,7 +98,7 @@ impl Checker<'_> {
             return Some(ConstructionExpectations {
                 params: vec![Some((function, false))],
                 symbolic: vec![Some(function)],
-                type_params: classifier.type_params.clone(),
+                type_params: crate::types::TyParamName::all(&classifier.type_params),
                 type_param_bounds: classifier.type_param_bounds().to_vec(),
                 signatures: Vec::new(),
             });
@@ -126,7 +126,7 @@ impl Checker<'_> {
                         .flatten()
                 })
                 .collect(),
-            type_params: classifier.type_params.clone(),
+            type_params: crate::types::TyParamName::all(&classifier.type_params),
             type_param_bounds: classifier.type_param_bounds().to_vec(),
             signatures,
         })
@@ -165,7 +165,9 @@ impl Checker<'_> {
         }
         // Written and expected applications are fixed independently of argument inference.
         binds.extend(fixed);
-        binds.retain(|name, ty| plan.type_params.contains(name) && *ty != Ty::Error);
+        binds.retain(|name, ty| {
+            plan.type_params.iter().any(|formal| formal == name) && *ty != Ty::Error
+        });
         binds
     }
 
@@ -199,7 +201,7 @@ impl Checker<'_> {
             for (name, type_ref) in plan.type_params.iter().zip(refs.iter()) {
                 let ty = self.type_ref_ty_silent(scope, type_ref);
                 if ty != Ty::Error {
-                    explicit.insert(name.clone(), ty);
+                    explicit.insert(crate::types::TyParamName::new(name), ty);
                 }
             }
         }
@@ -224,7 +226,7 @@ impl Checker<'_> {
         let Some(arguments) = plan
             .type_params
             .iter()
-            .map(|formal| fixed.get(formal).copied())
+            .map(|formal| fixed.get(formal.as_str()).copied())
             .collect::<Option<Vec<_>>>()
         else {
             // An open application still needs ordinary argument inference and selection.

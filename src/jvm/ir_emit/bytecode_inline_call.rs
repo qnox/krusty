@@ -648,9 +648,9 @@ impl Emitter<'_> {
             return None;
         }
         let parameters = self.call_parameters(
+            call,
             &supplies,
             &physical,
-            args,
             &lambda_bindings,
             captured,
             &lambdas,
@@ -712,6 +712,11 @@ impl Emitter<'_> {
         let supplies = self
             .parameter_supplies(call, &physical, callee, &declared)
             .ok_or("a function-typed argument has no published crossinline/noinline modifier")?;
+        let callee_suspends = self.ir.suspend_calls.contains_key(&call_expression)
+            || self
+                .ir
+                .compiled_inline_call(call_expression)
+                .is_some_and(|function| self.ir.suspend_funs.contains(&function));
         let mut lambdas = Vec::new();
         let mut captured = Vec::new();
         let mut captures = Vec::new();
@@ -726,7 +731,7 @@ impl Emitter<'_> {
             )? {
                 continue;
             }
-            let argument = self.inline_lambda_node(argument, target.name)?;
+            let argument = self.inline_lambda_node(argument, target.name, callee_suspends)?;
             let start = captured.len();
             for &(capture, ty) in &argument.captures {
                 captured.push(Parameter {
@@ -778,9 +783,9 @@ impl Emitter<'_> {
             }
         }
         let parameters = self.call_parameters(
+            call,
             &supplies,
             &physical,
-            args,
             &lambda_bindings,
             captured,
             &lambdas,
@@ -804,16 +809,24 @@ impl Emitter<'_> {
     }
 
     /// Each parameter's binding: a lambda the callee invokes, a caller local, or a temporary. A
-    /// default bridge call's masks and method handle are none of the body's parameters.
+    /// default bridge call's masks and method handle are none of the body's parameters. A function
+    /// value the call passes for an inline suspend parameter is recorded as such (kotlinc's
+    /// `NonInlineArgumentForInlineSuspendParameter.OTHER`).
     fn call_parameters(
         &self,
+        call: &ClasspathInlineCall<'_, '_>,
         supplies: &[Supply],
         physical: &[Ty],
-        args: &[u32],
         lambda_bindings: &HashMap<usize, usize>,
         captured: Vec<Parameter>,
         lambdas: &[inliner::Lambda],
     ) -> Parameters {
+        let ClasspathInlineCall {
+            call_expression,
+            args,
+            leading_non_argument_operands,
+            ..
+        } = *call;
         let capture_owners = (0..captured.len())
             .map(|capture| {
                 lambdas
@@ -822,31 +835,43 @@ impl Emitter<'_> {
                     .expect("every captured value belongs to a lambda")
             })
             .collect();
+        let mut parameters = Vec::with_capacity(args.len());
+        let mut non_inline_suspend = Vec::new();
+        for (index, ((supply, &ty), &argument)) in
+            supplies.iter().zip(physical).zip(args).enumerate()
+        {
+            let binding = match (lambda_bindings.get(&index), supply) {
+                (_, Supply::MaskOperand) => continue,
+                (Some(&lambda), Supply::Omitted) => Binding::DefaultLambda(lambda),
+                (Some(&lambda), _) => Binding::Lambda(lambda),
+                (None, Supply::CallerLocal) => self.caller_local_binding(argument, ty),
+                (None, Supply::Unread) => Binding::Unread,
+                (None, Supply::Stored | Supply::InPlace | Supply::Omitted) => Binding::Temporary,
+            };
+            let suspend_value = !matches!(binding, Binding::Lambda(_) | Binding::DefaultLambda(_))
+                && index
+                    .checked_sub(leading_non_argument_operands)
+                    .and_then(|parameter| {
+                        crate::jvm::inline_parameters::is_inline_suspend_parameter(
+                            self.ir,
+                            call_expression,
+                            parameter,
+                        )
+                    })
+                    == Some(true);
+            if suspend_value {
+                non_inline_suspend.push(parameters.len());
+            }
+            parameters.push(Parameter {
+                category: Category::of_descriptor(&type_descriptor(ty)),
+                binding,
+            });
+        }
         Parameters {
-            parameters: supplies
-                .iter()
-                .zip(physical)
-                .zip(args)
-                .enumerate()
-                .filter(|(_, ((supply, _), _))| **supply != Supply::MaskOperand)
-                .map(|(index, ((supply, &ty), &argument))| Parameter {
-                    category: Category::of_descriptor(&type_descriptor(ty)),
-                    binding: match (lambda_bindings.get(&index), supply) {
-                        (Some(&lambda), Supply::Omitted) => Binding::DefaultLambda(lambda),
-                        (Some(&lambda), _) => Binding::Lambda(lambda),
-                        (None, Supply::CallerLocal) => self.caller_local_binding(argument, ty),
-                        (None, Supply::Unread) => Binding::Unread,
-                        (None, Supply::Stored | Supply::InPlace | Supply::Omitted) => {
-                            Binding::Temporary
-                        }
-                        (None, Supply::MaskOperand) => {
-                            unreachable!("a mask operand is filtered out above")
-                        }
-                    },
-                })
-                .collect(),
+            parameters,
             captured,
             capture_owners,
+            non_inline_suspend,
         }
     }
 
@@ -1005,6 +1030,12 @@ impl Emitter<'_> {
         };
         let claimable = self.claimable_lines();
         let bodies = self.bodies;
+        // The body is numbered from the method's scopes so far, its own scope at the call's line
+        // (`currentCallSiteLineNumber = lastLineNumber`).
+        let mut scopes = self.inline_scopes.take().map(|mut scopes| {
+            scopes.call_site_line = caller_line.map_or(-1, i32::from);
+            scopes
+        });
         let mut lines = CallLines {
             emitter: self,
             body,
@@ -1042,8 +1073,10 @@ impl Emitter<'_> {
                 classes: &bodies,
                 objects: &mut objects,
                 enum_entries: &mut enum_entries,
+                scopes: scopes.as_mut(),
             },
         );
+        self.inline_scopes = scopes;
         let inlined = match inlined {
             Ok(inlined) => inlined,
             Err(error) => {
@@ -1211,9 +1244,7 @@ impl Emitter<'_> {
         let function_typed = |argument: u32| {
             let semantic = self
                 .ir
-                .logical_types
-                .get(&argument)
-                .copied()
+                .logical_type(argument)
                 .unwrap_or_else(|| self.value_ty(argument));
             semantic.non_null().is_fun()
         };

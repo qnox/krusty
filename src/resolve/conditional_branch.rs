@@ -261,12 +261,10 @@ pub(super) fn terminal_value_expressions(file: &File, expression: ExprId, out: &
     }
 }
 
-/// The branch value expressions of a conditional used as a call argument, or `None` when
-/// `argument` is not an `if` with an `else`. Each branch is its own lower bound on the formal, as
-/// kotlinc's constraint system sees it: `mk(if (c) 1L else 2)` against `<T : Number>` solves `T`
-/// from `Long` and `Int` rather than from the branches' approximated join `Any`. Nested
-/// conditionals flatten in source order into the same source-argument ordinal, so a later bound
-/// failure is still reported on that argument.
+/// The value expressions contributing independent lower bounds for one conditional argument.
+/// Nested conditionals flatten in source order but retain their caller's source-argument ordinal.
+/// Call inference gives each value its normal argument view; expected-type admission reads its
+/// checked nominal type. The caller keeps every branch at its original source-argument ordinal.
 pub(super) fn conditional_argument_branches(file: &File, argument: ExprId) -> Option<Vec<ExprId>> {
     let Expr::If {
         then_branch,
@@ -288,9 +286,7 @@ pub(super) fn conditional_argument_branches(file: &File, argument: ExprId) -> Op
 }
 
 impl Checker<'_> {
-    /// Nominal branch types of a conditional, flattened like [`conditional_argument_branches`];
-    /// any other expression contributes its own type. Expected-type admission reads these, while
-    /// call inference normalizes each branch through its own argument view.
+    /// Checked nominal branch types for provider inference and expected-type admission.
     pub(super) fn conditional_inference_inputs(&self, expression: ExprId) -> Vec<Ty> {
         conditional_argument_branches(self.file, expression)
             .unwrap_or_else(|| vec![expression])

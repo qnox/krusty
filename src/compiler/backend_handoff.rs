@@ -11,7 +11,6 @@ use crate::backend::{
 };
 use crate::diag::{DiagSink, Span};
 use crate::fir::SourceFileId;
-use crate::ir::IrFile;
 use crate::resolve::PassTwoSymbols;
 
 mod plugin_handoff;
@@ -32,13 +31,14 @@ pub(super) struct ModuleEmission<'a> {
 /// Freeze `ir`'s backend view, or report an internal error when a dependency identity the IR holds
 /// has no provider answer.
 pub(super) fn checked_ir_file<'a>(
-    mut ir: IrFile,
+    completed: super::CompletedSourceIr,
     source: SourceFileId,
     module_facts: &'a BackendModuleFacts,
     symbols: &'a PassTwoSymbols,
     module: ModuleEmission<'a>,
     diags: &mut DiagSink,
 ) -> Option<CheckedIrFile<'a>> {
+    let mut ir = completed.ir;
     let classifiers = CheckedBackendClassifiers::new(module_facts, symbols.semantic_platform());
     // Plugin-generated declarations are part of the file every target receives.
     crate::plugins::declare_enabled(
@@ -63,7 +63,8 @@ pub(super) fn checked_ir_file<'a>(
         .get(source.raw() as usize)
         .map(|stem| format!("{}.kt", stem.rsplit(['/', '\\']).next().unwrap_or(stem)))
         .unwrap_or_default();
-    let mut runtime = plugin_handoff::HandoffRuntime::new(symbols.semantic_platform());
+    let mut runtime =
+        plugin_handoff::HandoffRuntime::new(symbols.semantic_platform(), &classifiers);
     let rejections = crate::plugins::record_enabled_source_facts(
         &mut ir,
         symbols.native_plugins(),
@@ -99,6 +100,11 @@ pub(super) fn checked_ir_file<'a>(
         );
         return None;
     }
+    super::capture_storage::retire(
+        &mut ir,
+        symbols.native_plugins(),
+        &completed.local_storage_owners,
+    );
     // Each class's declarations are recorded here, before any target lowers them.
     crate::metadata::class_declarations::record_all(&mut ir);
     // Common code typed an `expect` classifier as its own; every target realizes the classifier

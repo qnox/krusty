@@ -5,12 +5,47 @@ use super::{ExprId, IrClass, IrFile, IrGenericSig, IrTypeParameter};
 use crate::types::{Ty, TypeName};
 
 impl IrFile {
+    pub(crate) fn record_declared_class_self_type(&mut self, classifier: TypeName, self_type: Ty) {
+        assert_eq!(self_type.kotlin_class_internal(), Some(classifier));
+        let previous = self.declared_class_self_types.insert(classifier, self_type);
+        assert!(
+            previous.is_none_or(|previous| previous == self_type),
+            "a class declaration cannot change its checked self application"
+        );
+    }
+
+    /// A lowering checkpoint retains immutable declaration facts, including owners whose class
+    /// storage has not been materialized in this file yet.
+    pub(crate) fn declared_class_self_type_owners(&self) -> crate::fx_hash::HashSet<TypeName> {
+        self.declared_class_self_types.keys().copied().collect()
+    }
+
+    pub(crate) fn restore_declared_class_self_type_owners(
+        &mut self,
+        owners: &crate::fx_hash::HashSet<TypeName>,
+    ) {
+        self.declared_class_self_types
+            .retain(|owner, _| owners.contains(owner));
+    }
+
+    pub(crate) fn declared_class_self_type(&self, classifier: TypeName) -> Option<Ty> {
+        self.declared_class_self_types.get(&classifier).copied()
+    }
+
     pub fn mark_synthetic_class(&mut self, internal: TypeName) {
         self.synthetic_classes.insert(internal);
     }
 
     pub fn is_synthetic_class(&self, internal: TypeName) -> bool {
         self.synthetic_classes.contains(&internal)
+    }
+
+    pub(crate) fn mark_declarationless_class(&mut self, internal: TypeName) {
+        self.declarationless_classes.insert(internal);
+    }
+
+    pub(crate) fn is_declarationless_class(&self, internal: TypeName) -> bool {
+        self.declarationless_classes.contains(&internal)
     }
 
     pub fn mark_deprecated_class(&mut self, internal: TypeName) {
@@ -103,6 +138,13 @@ impl IrFile {
     pub fn insert_field_signatures(&mut self, internal: &str, sigs: Vec<(String, String)>) {
         self.field_signatures
             .insert(crate::types::type_name(internal), sigs);
+    }
+
+    /// Whether this exact owner retains field-signature records whose declaration roles are opaque.
+    pub(crate) fn has_field_signatures(&self, owner: crate::types::TypeName) -> bool {
+        self.field_signatures
+            .get(&owner)
+            .is_some_and(|records| !records.is_empty())
     }
 
     pub fn field_signatures(&self, internal: &str) -> Option<&Vec<(String, String)>> {

@@ -41,7 +41,7 @@ pub(super) fn function_type(
     // parameter's diagnostic owner wording do.
     let receiver = receiver
         .map(|receiver| match receiver.kind() {
-            TyKind::TyParam(parameter, _) => {
+            TyKind::TyParam(parameter, _) | TyKind::Var(parameter, _) => {
                 let rendered = render(receiver);
                 if rendered == type_parameter_source_name(parameter.as_str()) {
                     format!("{rendered}.")
@@ -71,7 +71,7 @@ pub(super) fn qualified_type_parameter(
     nullable: bool,
     render: &dyn Fn(&str) -> String,
 ) -> String {
-    let TyKind::TyParam(parameter, _) = parameter.kind() else {
+    let (TyKind::TyParam(parameter, _) | TyKind::Var(parameter, _)) = parameter.kind() else {
         unreachable!("caller only delegates type parameters")
     };
     let marker = if nullable { "?" } else { "!" };
@@ -142,7 +142,7 @@ pub(super) fn platform_type(
             let flexible = {
                 let argument = *argument;
                 match argument.kind() {
-                    TyKind::TyParam(..) | TyKind::Obj(..) | TyKind::Fun(_) => {
+                    TyKind::TyParam(..) | TyKind::Var(..) | TyKind::Obj(..) | TyKind::Fun(_) => {
                         Ty::platform_nullable(argument)
                     }
                     _ => argument,

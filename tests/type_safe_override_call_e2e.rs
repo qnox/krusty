@@ -151,3 +151,22 @@ fn a_dependency_override_is_called_through_the_erased_signature() {
         Some("OK")
     );
 }
+
+/// The consumer of that dependency calls its overrides exactly as kotlinc does, each compiler
+/// over its own build of the dependency.
+#[test]
+fn a_consumer_of_dependency_overrides_is_byte_identical_to_kotlinc() {
+    let library = common::compile_libs_build("TypeSafeOverrideCallLibrary", &[("Lib.kt", LIBRARY)])
+        .expect("krusty builds the dependency");
+    let reference = library
+        .reference_out()
+        .expect("reference kotlinc builds the dependency")
+        .to_path_buf();
+    common::assert_classes_identical_to_kotlinc_over_own_libraries(
+        "TypeSafeOverrideCallConsumer",
+        CONSUMER,
+        &["TypeSafeOverrideCallConsumerKt"],
+        &[reference],
+        &[library.krusty_out().to_path_buf()],
+    );
+}

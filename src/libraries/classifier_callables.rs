@@ -44,7 +44,7 @@ pub(crate) struct ConstructorAlias {
     pub(crate) declaration: AliasExpansion,
     pub(crate) signature: GenericSig,
     pub(crate) underlying_signature: GenericSig,
-    pub(crate) rigid_formals: Vec<String>,
+    pub(crate) rigid_formals: Vec<crate::types::TyParamName>,
 }
 
 impl LibraryMember {
@@ -77,10 +77,27 @@ pub(crate) fn constructor_generic_signature(
         return None;
     }
     Some(GenericSig {
-        formals: classifier.type_params().to_vec(),
+        formals: crate::types::TyParamName::all(classifier.type_params()),
         formal_bounds: classifier.type_param_bounds().to_vec(),
         receiver: None,
         params: constructor.params.clone(),
+        ret: classifier_instance_type(internal, classifier),
+        return_policy: GenericReturnPolicy::Exact,
+    })
+}
+
+/// A constructor's complete declared shape, including its logical classifier result before
+/// reference adaptation. The physical nongeneric constructor return may instead be Unit.
+pub(crate) fn constructor_declaration_signature(
+    internal: TypeName,
+    classifier: &LibraryType,
+    constructor: &LibraryMember,
+) -> GenericSig {
+    constructor_generic_signature(internal, classifier, constructor).unwrap_or_else(|| GenericSig {
+        formals: Vec::new(),
+        formal_bounds: Vec::new(),
+        receiver: None,
+        params: constructor.constructor_declaration_params().to_vec(),
         ret: classifier_instance_type(internal, classifier),
         return_policy: GenericReturnPolicy::Exact,
     })
@@ -268,13 +285,15 @@ impl FunctionInfo {
             let captured = &classifier.type_params()[classifier.own_type_parameter_count..];
             let mut ordinal = 0;
             signature.formal_bounds.retain(|_| {
-                let keep = !captured.contains(&signature.formals[ordinal]);
+                let keep = !captured
+                    .iter()
+                    .any(|formal| *formal == signature.formals[ordinal]);
                 ordinal += 1;
                 keep
             });
             signature
                 .formals
-                .retain(|formal| !captured.contains(formal));
+                .retain(|formal| !captured.iter().any(|captured| captured == formal));
             // Source declarations may publish an own-only constructor result. Its instance type
             // always includes the declaration's captured slots before receiver specialization.
             signature.ret = classifier_instance_type(inner, classifier);

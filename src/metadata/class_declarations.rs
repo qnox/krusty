@@ -423,6 +423,18 @@ impl ClassDeclarationRecord {
             .collect()
     }
 
+    /// Re-record the annotations of the secondary constructor at `ordinal` after a target pass
+    /// attached a metadata-visible application to it.
+    pub(crate) fn refresh_secondary_constructor_annotations(
+        &mut self,
+        ordinal: usize,
+        annotations: &crate::ir::DeclarationAnnotations,
+    ) {
+        if let Some(index) = self.secondary_ordinals.iter().position(|&o| o == ordinal) {
+            self.secondary_ctors[index].annotations = MetadataAnnotations::of(annotations);
+        }
+    }
+
     /// The nested classifier names as the class builder takes them.
     pub(crate) fn nested(&self) -> Vec<&str> {
         self.nested.iter().map(String::as_str).collect()
@@ -983,7 +995,14 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         &prop_source_orders,
         &declared_fids,
         MemberRanges {
-            synthesized: declared_method_count..inferred_method_count,
+            synthesized: member_order::generated_function_order(
+                ir,
+                &declared_fids,
+                &methods,
+                &method_origins,
+                declared_method_count.min(inferred_method_count)..inferred_method_count,
+            ),
+            published_functions: inferred_method_count,
             delegation_functions,
             delegation_properties,
         },
@@ -1771,6 +1790,7 @@ mod tests {
                 default_masks: Vec::new(),
             },
             synthetic: true,
+            platform_visible: false,
             vc_params: false,
             param_checks: Vec::new(),
         }

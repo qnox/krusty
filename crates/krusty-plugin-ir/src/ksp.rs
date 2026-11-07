@@ -395,6 +395,10 @@ pub enum KspValue {
     Short(i16),
     Int(i32),
     Long(i64),
+    UByte(u8),
+    UShort(u16),
+    UInt(u32),
+    ULong(u64),
     Char(u16),
     /// The value's bits, so that every NaN and `-0.0` survive.
     Float(u32),

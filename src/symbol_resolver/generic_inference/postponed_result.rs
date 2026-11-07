@@ -27,7 +27,7 @@ pub(crate) fn unconstrained_result_bindings(signature: &GenericSig) -> GSigBinds
                     })
                 })
                 .unwrap_or(Ty::Nothing);
-            (formal.clone(), completion)
+            (crate::types::TyParamName::from(formal), completion)
         })
         .collect()
 }
@@ -51,20 +51,20 @@ fn complete_self_bounded_formals(
         let Some(bound) = self_type_bound(owner, formal, formals, bounds) else {
             continue;
         };
-        if binds.contains_key(formal) {
+        if binds.contains_key(formal.as_str()) {
             continue;
         }
         // The star carries the bound it reads as, exactly as a written `Box<*>` does.
         let unbounded_star = GSigBinds::from_iter([(
-            formal.clone(),
+            crate::types::TyParamName::from(formal),
             Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
         )]);
         let star = GSigBinds::from_iter([(
-            formal.clone(),
+            crate::types::TyParamName::from(formal),
             Ty::star_projection(super::ty_subst_keep_unbound(bound, &unbounded_star)),
         )]);
         let completion = Ty::out_projection(super::ty_subst_keep_unbound(bound, &star));
-        binds.insert(formal.clone(), completion);
+        binds.insert(crate::types::TyParamName::new(formal), completion);
     }
 }
 
@@ -101,7 +101,7 @@ pub(crate) fn completed_constructor_result_arguments(
         .iter()
         .enumerate()
         .map(|(index, formal)| {
-            completed.get(formal).copied().unwrap_or_else(|| {
+            completed.get(formal.as_str()).copied().unwrap_or_else(|| {
                 formal_bounds
                     .get(index)
                     .and_then(|bounds| bounds.first())
@@ -136,7 +136,7 @@ pub(crate) fn solved_constructor_type_arguments(
         .zip(completed)
         .map(|((formal, bounds), completed)| {
             (bindings
-                .get(formal)
+                .get(formal.as_str())
                 .is_some_and(|binding| *binding != Ty::Error)
                 || self_type_bound(owner, formal, formals, bounds).is_some())
             .then_some(completed)
@@ -161,7 +161,7 @@ pub(crate) fn solved_constructor_type_arguments(
 pub(crate) fn nested_result_from_concrete_parameter(
     nested: &GenericSig,
     parameter: Ty,
-    outer_formals: &[String],
+    outer_formals: &[crate::types::TyParamName],
     mut admits: impl FnMut(Ty, Ty) -> bool,
 ) -> Result<Option<Ty>, ()> {
     let mut binds = GSigBinds::default();
@@ -174,7 +174,7 @@ pub(crate) fn nested_result_from_concrete_parameter(
             continue;
         }
         solved_a_result_variable = true;
-        if !binds.contains_key(formal) {
+        if !binds.contains_key(formal.as_str()) {
             return Ok(None);
         }
     }
@@ -196,9 +196,11 @@ fn bind_concrete_parameter(
     nested: &GenericSig,
     shape: Ty,
     actual: Ty,
-    outer_formals: &[String],
+    outer_formals: &[crate::types::TyParamName],
     binds: &mut GSigBinds,
 ) -> bool {
+    // `T?` matched against `S?` says only `T = S & Any`: `S` itself may admit null.
+    let through_nullable = shape.is_nullable();
     let shape = shape.non_null();
     let actual = actual.non_null();
     match shape.kind() {
@@ -210,8 +212,13 @@ fn bind_concrete_parameter(
             outer_formals,
             binds,
         ),
-        TyKind::TyParam(name, _) if nested.formals.iter().any(|formal| formal == name) => {
-            let constraint = actual.projection_inner().unwrap_or(actual).non_null();
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) if nested.formals.contains(&name) => {
+            let constraint = actual.projection_inner().unwrap_or(actual);
+            let constraint = if through_nullable {
+                constraint.contributed_through_nullable_formal()
+            } else {
+                constraint.non_null()
+            };
             if !is_concrete_constraint(constraint, &nested.formals, outer_formals) {
                 return true;
             }
@@ -219,7 +226,7 @@ fn bind_concrete_parameter(
                 Some(existing) if *existing != constraint => false,
                 Some(_) => true,
                 None => {
-                    binds.insert(name.to_string(), constraint);
+                    binds.insert(crate::types::TyParamName::new(&name), constraint);
                     true
                 }
             }
@@ -243,7 +250,11 @@ fn bind_concrete_parameter(
     }
 }
 
-fn is_concrete_constraint(ty: Ty, nested_formals: &[String], outer_formals: &[String]) -> bool {
+fn is_concrete_constraint(
+    ty: Ty,
+    nested_formals: &[crate::types::TyParamName],
+    outer_formals: &[crate::types::TyParamName],
+) -> bool {
     !matches!(ty.kind(), TyKind::StarProjection(_) | TyKind::Error)
         && !crate::types::ty_mentions_param(ty, nested_formals)
         && !crate::types::ty_mentions_param(ty, outer_formals)
@@ -271,7 +282,11 @@ mod tests {
 
     fn signature(formals: &[&str], bounds: Vec<Vec<Ty>>, ret: Ty) -> GenericSig {
         GenericSig {
-            formals: formals.iter().map(|formal| (*formal).to_string()).collect(),
+            formals: formals
+                .iter()
+                .copied()
+                .map(crate::types::TyParamName::new)
+                .collect(),
             formal_bounds: bounds,
             receiver: None,
             params: Vec::new(),
@@ -374,9 +389,9 @@ mod tests {
                 &generic,
                 parameter,
                 &[
-                    "gather:T".to_string(),
-                    "gather:A".to_string(),
-                    "gather:R".to_string()
+                    crate::types::TyParamName::new("gather:T"),
+                    crate::types::TyParamName::new("gather:A"),
+                    crate::types::TyParamName::new("gather:R")
                 ],
                 |actual, bound| actual == bound || bound == any,
             ),
@@ -403,7 +418,7 @@ mod tests {
             nested_result_from_concrete_parameter(
                 &generic,
                 parameter,
-                &["take:T".to_string()],
+                &[crate::types::TyParamName::new("take:T")],
                 |actual, bound| actual == bound,
             ),
             Ok(None)
@@ -472,7 +487,7 @@ mod tests {
             &[Ty::ty_param("T", any), Ty::ty_param("SELF", any)],
         );
         let formals = ["T".to_string(), "SELF".to_string()];
-        let inferred = GSigBinds::from_iter([("T".to_string(), Ty::obj("kotlin/String"))]);
+        let inferred = GSigBinds::from_iter([("T".into(), Ty::obj("kotlin/String"))]);
 
         assert_eq!(
             completed_constructor_result_arguments(

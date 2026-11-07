@@ -119,7 +119,9 @@ fn reference_identity(
     file: &FileLowering<'_>,
     reference: &crate::ir::IrCallableReference,
 ) -> Result<ReferenceIdentity, Unsupported> {
-    use crate::ir::IrCallableReferenceTarget as Target;
+    use crate::ir::{
+        IrCallableReferenceTarget as Target, IrConstructorReferenceDeclaration as Constructor,
+    };
     let bound = if reference.bound_receiver.is_some() {
         "b"
     } else {
@@ -132,11 +134,20 @@ fn reference_identity(
                 declaration.marker(reference.bound_receiver.is_some()),
             ));
         }
-        Target::Constructor { classifier } => {
-            format!(
-                "c{}",
-                super::super::super::symbols::c_identifier(&classifier.render())
-            )
+        Target::Constructor { declaration, .. } => {
+            let declaration = match declaration {
+                Constructor::Module(declaration) => {
+                    ReferenceDeclaration::constructor(file.module_name, *declaration)
+                }
+                Constructor::External(declaration) => {
+                    dependency_reference_declaration(file, *declaration)?.ok_or(
+                        "a constructor reference without its module-qualified dependency identity",
+                    )?
+                }
+            };
+            return Ok(ReferenceIdentity::Program(
+                declaration.marker(reference.bound_receiver.is_some()),
+            ));
         }
         Target::Local {
             owner,
@@ -153,18 +164,7 @@ fn reference_identity(
         // The provider's own identity for the declaration, which is what two `Boolean::not`
         // written in two files share — and the only thing about it this side is entitled to read.
         Target::External { declaration, .. } => {
-            let fact = file.callables.callable(*declaration).ok_or_else(|| {
-                Unsupported::from("a callable reference without frozen declaration facts")
-            })?;
-            if let Some(identity) = &fact.dependency_callable {
-                let declaration = match file.dependency_symbols.get(identity) {
-                    Some(export) => export.reference_declaration.clone().ok_or_else(|| {
-                        Unsupported::from("an emitted dependency reference without its declaration marker identity")
-                    })?,
-                    // An authenticated KLIB declaration without a retained source export owns
-                    // its module-qualified serialized identity, including runtime declarations.
-                    None => ReferenceDeclaration::dependency(identity),
-                };
+            if let Some(declaration) = dependency_reference_declaration(file, *declaration)? {
                 return Ok(ReferenceIdentity::Program(
                     declaration.marker(reference.bound_receiver.is_some()),
                 ));
@@ -194,12 +194,43 @@ fn reference_identity(
     )))
 }
 
+fn dependency_reference_declaration(
+    file: &FileLowering<'_>,
+    declaration: crate::ir::ExternalCallableId,
+) -> Result<Option<ReferenceDeclaration>, Unsupported> {
+    let fact = file
+        .callables
+        .callable(declaration)
+        .ok_or("a callable reference without frozen declaration facts")?;
+    let Some(identity) = &fact.dependency_callable else {
+        return Ok(None);
+    };
+    let declaration = match file.dependency_symbols.get(identity) {
+        Some(export) => export
+            .reference_declaration
+            .clone()
+            .ok_or("an emitted dependency reference without its declaration marker identity")?,
+        // An authenticated KLIB declaration without a retained source export owns its exact
+        // module-qualified serialized identity, including runtime declarations.
+        None => ReferenceDeclaration::dependency(identity),
+    };
+    Ok(Some(declaration))
+}
+
+/// Physical fields of a closure. A reference's equality receiver is always a semantic object,
+/// even when the adapter passes its unboxed primitive or value-class carrier to the target.
+#[derive(Clone)]
+struct CaptureStorage {
+    stored_types: Vec<Ty>,
+    offsets: Vec<u32>,
+}
+
 /// The emitted pieces of one lambda site.
 pub(super) struct LambdaItems {
     descriptor: DataId,
     instance_size: u32,
     /// Byte offset of each capture, parallel to the site's `captures`.
-    capture_offsets: Vec<u32>,
+    captures: CaptureStorage,
     /// A lambda that captures nothing is ONE object, not one per evaluation: `{}` has the same
     /// `hashCode` every time it is written, which a program can see. With no fields to hold there
     /// is nothing to allocate, so the instance is static storage — the collector never sees it,
@@ -211,7 +242,7 @@ pub(super) struct LambdaItems {
 /// model applies to fields, for the same reason: the collector is told where the references are
 /// and must be told the truth.
 fn layout(
-    values: &super::super::super::value_classes::NativeValueClasses,
+    values: &crate::backend::value_classes::ValueClassInventory,
     types: &[Ty],
 ) -> (Vec<u32>, u32, Vec<u32>) {
     let mut offsets = Vec::with_capacity(types.len());
@@ -332,13 +363,25 @@ impl<'a> FileLowering<'a> {
                 receiver_capture = Some(0);
             }
             let identity = identity.or(sam_identity);
-            let capture_types: Vec<Ty> =
+            let mut capture_types: Vec<Ty> =
                 carried_parameters(self.ir, impl_fn)[..captures.len()].to_vec();
+            if let Some(receiver) = receiver_capture {
+                let stored = capture_types.get_mut(receiver).ok_or_else(|| {
+                    Unsupported::from("a bound reference without its receiver capture")
+                })?;
+                // Runtime reference equality/hash reads this exact field as KRef. The semantic
+                // box matters even for a value class whose unboxed machine carrier is Ref.
+                *stored = any();
+            }
             let (capture_offsets, instance_size, references) = layout(self.values, &capture_types);
+            let storage = CaptureStorage {
+                stored_types: capture_types,
+                offsets: capture_offsets,
+            };
             // Where the value equality reads lands, or 0 for a reference that binds nothing. No
             // field can sit at offset 0 — the header is there — so 0 says "none" unambiguously.
             let receiver_offset = receiver_capture
-                .and_then(|capture| capture_offsets.get(capture).copied())
+                .and_then(|capture| storage.offsets.get(capture).copied())
                 .unwrap_or(0);
 
             let base = format!("kt_fn_{index}");
@@ -363,7 +406,7 @@ impl<'a> FileLowering<'a> {
                         itable,
                         interfaces,
                         kotlin_name,
-                    } = self.sam_table(target, &base, impl_fn, &capture_offsets)?;
+                    } = self.sam_table(target, &base, impl_fn, &storage)?;
                     let marker = match &identity {
                         Some(name) => {
                             let marker = self.scoped_reference_identity_marker(name)?;
@@ -466,7 +509,7 @@ impl<'a> FileLowering<'a> {
                             class_names: 0,
                         },
                     )?;
-                    self.define_thunk(thunk, &base, impl_fn, &capture_offsets, arity)?;
+                    self.define_thunk(thunk, &base, impl_fn, &storage, arity)?;
                 }
             }
             let singleton = if captures.is_empty() {
@@ -490,7 +533,7 @@ impl<'a> FileLowering<'a> {
                 LambdaItems {
                     descriptor,
                     instance_size,
-                    capture_offsets,
+                    captures: storage,
                     singleton,
                 },
             );
@@ -513,7 +556,7 @@ impl<'a> FileLowering<'a> {
         target: &crate::ir::IrSamTarget,
         base: &str,
         impl_fn: u32,
-        capture_offsets: &[u32],
+        captures: &CaptureStorage,
     ) -> Result<SamTables, Unsupported> {
         if target.suspend {
             return Err("a suspend functional interface".into());
@@ -560,7 +603,7 @@ impl<'a> FileLowering<'a> {
         let mut signature = vec![any()];
         signature.extend(parameters.iter().copied());
         let thunk = self.declare_local_function(&format!("{base}_invoke"), &signature, result)?;
-        self.define_sam_thunk(thunk, base, impl_fn, capture_offsets, &parameters, result)?;
+        self.define_sam_thunk(thunk, base, impl_fn, captures, &parameters, result)?;
 
         // Start from the tables the interface itself defines — its default methods, and any
         // `kotlin.Any` member it overrides — so a SAM object answers `result()` or `toString()`
@@ -656,7 +699,7 @@ impl<'a> FileLowering<'a> {
         thunk: FuncId,
         base: &str,
         impl_fn: u32,
-        capture_offsets: &[u32],
+        captures: &CaptureStorage,
         parameters: &[Ty],
         result: Ty,
     ) -> Result<(), Unsupported> {
@@ -665,26 +708,37 @@ impl<'a> FileLowering<'a> {
         let produced = body.ret;
         let target =
             self.functions[impl_fn as usize].ok_or_else(|| self.missing_body_reason(impl_fn))?;
-        if declared.len() != capture_offsets.len() + parameters.len() {
+        if declared.len() != captures.offsets.len() + parameters.len() {
             return Err("a functional interface method of a different arity".into());
         }
         let mut signature = vec![any()];
         signature.extend(parameters.iter().copied());
         let signature = self.signature_of(&signature, result)?;
-        let capture_offsets = capture_offsets.to_vec();
+        let captures = captures.clone();
         let incoming = parameters.to_vec();
         let name = format!("{base}_invoke");
         self.emit_function(thunk, signature, result, &name, &mut |body, params| {
             let mut arguments = Vec::with_capacity(declared.len());
-            for (offset, ty) in capture_offsets.iter().zip(&declared) {
-                let clif = body.carrier(*ty).clif().expect("a capture is never `Unit`");
+            for ((offset, stored), passed) in captures
+                .offsets
+                .iter()
+                .zip(&captures.stored_types)
+                .zip(&declared)
+            {
+                let clif = body
+                    .carrier(*stored)
+                    .clif()
+                    .expect("a capture is never `Unit`");
+                let value = body
+                    .builder
+                    .ins()
+                    .load(clif, trusted(), params[0], *offset as i32);
                 arguments.push(
-                    body.builder
-                        .ins()
-                        .load(clif, trusted(), params[0], *offset as i32),
+                    body.convert(value, Some(*stored), *passed)?
+                        .ok_or_else(|| Unsupported::from("a `Unit` capture"))?,
                 );
             }
-            for (index, ty) in declared[capture_offsets.len()..].iter().enumerate() {
+            for (index, ty) in declared[captures.offsets.len()..].iter().enumerate() {
                 let Some(value) = body.convert(params[index + 1], Some(incoming[index]), *ty)?
                 else {
                     return Err("a `Unit` argument to a functional interface".into());
@@ -725,7 +779,7 @@ impl<'a> FileLowering<'a> {
         thunk: FuncId,
         base: &str,
         impl_fn: u32,
-        capture_offsets: &[u32],
+        captures: &CaptureStorage,
         arity: usize,
     ) -> Result<(), Unsupported> {
         let body = &self.ir.functions[impl_fn as usize];
@@ -734,20 +788,31 @@ impl<'a> FileLowering<'a> {
         let target =
             self.functions[impl_fn as usize].ok_or_else(|| self.missing_body_reason(impl_fn))?;
         let signature = self.signature_of(&vec![any(); arity + 1], any())?;
-        let capture_offsets = capture_offsets.to_vec();
+        let captures = captures.clone();
         let name = format!("{base}_invoke");
 
         self.emit_function(thunk, signature, any(), &name, &mut |body, params| {
             let mut arguments = Vec::with_capacity(parameters.len());
-            for (offset, ty) in capture_offsets.iter().zip(&parameters) {
-                let clif = body.carrier(*ty).clif().expect("a capture is never `Unit`");
+            for ((offset, stored), passed) in captures
+                .offsets
+                .iter()
+                .zip(&captures.stored_types)
+                .zip(&parameters)
+            {
+                let clif = body
+                    .carrier(*stored)
+                    .clif()
+                    .expect("a capture is never `Unit`");
+                let value = body
+                    .builder
+                    .ins()
+                    .load(clif, trusted(), params[0], *offset as i32);
                 arguments.push(
-                    body.builder
-                        .ins()
-                        .load(clif, trusted(), params[0], *offset as i32),
+                    body.convert(value, Some(*stored), *passed)?
+                        .ok_or_else(|| Unsupported::from("a `Unit` capture"))?,
                 );
             }
-            for (index, ty) in parameters[capture_offsets.len()..].iter().enumerate() {
+            for (index, ty) in parameters[captures.offsets.len()..].iter().enumerate() {
                 let Some(value) = body.convert(params[index + 1], Some(any()), *ty)? else {
                     return Err("a `Unit` lambda parameter".into());
                 };
@@ -831,9 +896,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// Build the object a closure site makes: its captures, then the allocation that holds them.
     fn wrap_closure(&mut self, site: u32) -> Result<Option<Value>, Unsupported> {
-        let Site {
-            impl_fn, captures, ..
-        } = closure_site(self.file, self.file.ir.expr(site))
+        let Site { captures, .. } = closure_site(self.file, self.file.ir.expr(site))
             .expect("only a closure site reaches here")?;
         let items = self
             .file
@@ -843,17 +906,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if let Some(instance) = items.singleton {
             return Ok(Some(self.data_address(instance)));
         }
-        let (descriptor, instance_size, offsets) = (
+        let (descriptor, instance_size, storage) = (
             items.descriptor,
             items.instance_size,
-            items.capture_offsets.clone(),
+            items.captures.clone(),
         );
-        let parameters = carried_parameters(self.file.ir, impl_fn);
 
         // Captures first, then the allocation: a capture that allocates must not leave a
         // half-built object for a collection to find.
         let mut values = Vec::with_capacity(captures.len());
-        for (capture, ty) in captures.iter().zip(&parameters) {
+        for (capture, ty) in captures.iter().zip(&storage.stored_types) {
             let Some(value) = self.coerce(*capture, *ty)? else {
                 return Err("a `Unit` capture".into());
             };
@@ -863,7 +925,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             values.push(value);
         }
         let object = self.allocate(descriptor, instance_size)?;
-        for (value, offset) in values.into_iter().zip(&offsets) {
+        for (value, offset) in values.into_iter().zip(&storage.offsets) {
             self.builder
                 .ins()
                 .store(trusted(), value, object, *offset as i32);

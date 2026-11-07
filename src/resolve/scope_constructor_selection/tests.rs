@@ -45,3 +45,49 @@ fn a_rejected_family_filtered_to_one_publishes_no_constructor_commitment() {
     assert!(!info.resolved_constructors.contains_key(&call));
     assert!(!info.resolved_call_arg_slots.contains_key(&call));
 }
+
+#[test]
+fn conditional_bounds_reach_function_scope_and_bound_inner_constructor_selection() {
+    let source = r#"
+class Pick<T : Number>(value: T)
+class Owner {
+    inner class Picked<T : Number>(value: T)
+}
+fun <T : Number> choose(value: T): T = value
+fun selections(flag: Boolean, long: Long, int: Int) {
+    val direct = Pick(if (flag) long else int)
+    val bound = Owner().Picked(if (flag) long else int)
+    val function = choose(if (flag) long else int)
+}
+"#;
+    let mut diagnostics = DiagSink::new();
+    let (file, _, info) = crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let info = info.expect("complete checked source");
+    let direct = calls_named(&file, "Pick");
+    let function = calls_named(&file, "choose");
+    assert_eq!(direct.len(), 1);
+    assert_eq!(function.len(), 1);
+    assert!(info.resolved_constructors.contains_key(&direct[0]));
+    assert!(info.resolved_call_arg_slots.contains_key(&direct[0]));
+    let bound = info
+        .resolved_constructors
+        .iter()
+        .filter_map(|(call, selected)| {
+            matches!(
+                selected,
+                crate::resolve::ResolvedConstructor::Plain { outer: Some(_), .. }
+            )
+            .then_some(*call)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(bound.len(), 1);
+    assert!(info.resolved_call_arg_slots.contains_key(&bound[0]));
+    let direct_arguments = info.semantic_ty(direct[0]).type_args();
+    let provider_arguments = info.semantic_ty(bound[0]).type_args();
+    assert_eq!(direct_arguments.len(), 1);
+    assert_eq!(provider_arguments, direct_arguments);
+    assert_eq!(info.semantic_ty(function[0]), direct_arguments[0]);
+    assert_ne!(direct_arguments[0], crate::types::Ty::Error);
+    assert!(!direct_arguments[0].mentions_pending());
+}

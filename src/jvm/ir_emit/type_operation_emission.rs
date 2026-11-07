@@ -59,12 +59,12 @@ impl Emitter<'_> {
                 .record_deferred_result(expression, physical);
             return;
         }
-        let inline_stack_block = (op == IrTypeOp::ImplicitCoercion)
-            .then(|| self.inline_stack_coercion_block(arg, code.stack_height()))
+        let coercion_owner = (op == IrTypeOp::ImplicitCoercion)
+            .then(|| self.inline_result_coercion_owner(arg, code.stack_height()))
             .flatten();
-        let enclosing = self.inline_coercions.replace_pending(inline_stack_block);
+        let enclosing = self.inline_coercions.replace_pending(coercion_owner);
         self.emit_type_operation_now(expression, op, arg, type_operand, jvm_ty, &internal, code);
-        if inline_stack_block.is_some()
+        if coercion_owner.is_some()
             && !self.finish_pending_inline_stack_coercion(code)
             && !code.is_dead()
         {
@@ -183,7 +183,7 @@ impl Emitter<'_> {
                     crate::jvm::names::instanceof_internal_name(physical_arg) == internal
                 };
                 if !redundant {
-                    let class = self.cw.class_ref(internal);
+                    let class = self.cast_class_ref(expression, internal);
                     code.checkcast(class);
                 }
             }
@@ -272,7 +272,7 @@ impl Emitter<'_> {
                 }
             },
             None => {
-                let class = self.cw.class_ref(internal);
+                let class = self.cw.type_operand_class_ref(internal);
                 code.instance_of(class);
             }
         }
@@ -311,6 +311,16 @@ impl Emitter<'_> {
     }
 
     /// The `TypeIntrinsics` cast a written `as` of `expression` to `type_operand` needs, if any.
+    /// A cast's class constant: the operand of a written `as`, or a compiler-inserted narrowing
+    /// that kotlinc maps as an implicit cast.
+    fn cast_class_ref(&mut self, expression: ExprId, internal: &str) -> u16 {
+        if self.ir.written_casts.contains(&expression) {
+            self.cw.type_operand_class_ref(internal)
+        } else {
+            self.cw.class_ref(internal)
+        }
+    }
+
     fn written_cast_intrinsic(
         &self,
         expression: ExprId,
@@ -333,7 +343,7 @@ impl Emitter<'_> {
             CastCheck::Call { call, checkcast } => {
                 self.emit_type_intrinsic_call(&call, code);
                 if checkcast {
-                    let class = self.cw.class_ref(internal);
+                    let class = self.cw.type_operand_class_ref(internal);
                     code.checkcast(class);
                 }
             }
@@ -426,7 +436,7 @@ impl Emitter<'_> {
         if let Some(intrinsic) = self.written_cast_intrinsic(expression, type_operand) {
             self.emit_intrinsic_cast(internal, intrinsic, code);
         } else if physical_internal.as_deref() != Some(internal) {
-            let class = self.cw.class_ref(internal);
+            let class = self.cast_class_ref(expression, internal);
             code.checkcast(class);
         }
         // A successful non-null cast to a Kotlin scalar produces its value representation.
@@ -472,39 +482,56 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) -> (Ty, Ty) {
         let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
-        if reference_target && self.erased_reference_result(arg).is_some() {
+        if let Some(read) = self.trailing_value_read(arg).filter(|_| reference_target) {
+            // A boxed inlined value reaches a reference consumer as the box its slot holds.
+            self.boxed_scalar_reads.insert(read);
+            let produced = self.emit_implicit_coercion_reference_operand(arg, type_operand, code);
+            self.boxed_scalar_reads.remove(&read);
+            return produced;
+        }
+        if reference_target {
+            return self.emit_implicit_coercion_reference_operand(arg, type_operand, code);
+        }
+        let arg = self.unboxed_reference_source(arg, type_operand);
+        self.emit_type_op_operand(arg, code)
+    }
+
+    /// A reference target's operand, as [`Self::emit_implicit_coercion_operand`] emits it.
+    fn emit_implicit_coercion_reference_operand(
+        &mut self,
+        arg: ExprId,
+        type_operand: Ty,
+        code: &mut CodeBuilder,
+    ) -> (Ty, Ty) {
+        if self.erased_reference_result(arg).is_some() {
             // A reference target materializes an erased result at its own type, so the result's
             // narrowing to the substituted type is not written first.
             let source = self.emit_consumed_operand(arg, code);
             return (source, source);
         }
-        if reference_target {
-            // A reference target reads an erased result narrowed to a scalar as the callee returned
-            // it: kotlinc coerces the `Object` slot straight to the consumer and never unboxes it.
-            return match self.erased_scalar_result(arg) {
-                Some((call, slot)) => {
-                    self.emit_value(call, code);
-                    (slot, slot)
-                }
-                None => match self.emit_boxed_call_reference(arg, code) {
-                    Some(wrapper) => (wrapper, wrapper),
-                    // A smart cast reaches this coercion unnarrowed; it materializes the value at
-                    // its own type.
-                    None => match self.consumed_implicit_cast_operand(arg) {
-                        Some(operand) => {
-                            let source = self.emit_consumed_operand(operand, code);
-                            (source, source)
-                        }
-                        None => {
-                            let arg = self.unboxed_reference_source(arg, type_operand);
-                            self.emit_type_op_operand(arg, code)
-                        }
-                    },
+        // A reference target reads an erased result narrowed to a scalar as the callee returned
+        // it: kotlinc coerces the `Object` slot straight to the consumer and never unboxes it.
+        match self.erased_scalar_result(arg) {
+            Some((call, slot)) => {
+                self.emit_value(call, code);
+                (slot, slot)
+            }
+            None => match self.emit_boxed_call_reference(arg, code) {
+                Some(wrapper) => (wrapper, wrapper),
+                // A smart cast reaches this coercion unnarrowed; it materializes the value at
+                // its own type.
+                None => match self.consumed_implicit_cast_operand(arg) {
+                    Some(operand) => {
+                        let source = self.emit_consumed_operand(operand, code);
+                        (source, source)
+                    }
+                    None => {
+                        let arg = self.unboxed_reference_source(arg, type_operand);
+                        self.emit_type_op_operand(arg, code)
+                    }
                 },
-            };
+            },
         }
-        let arg = self.unboxed_reference_source(arg, type_operand);
-        self.emit_type_op_operand(arg, code)
     }
 
     fn emit_implicit_coercion(
@@ -543,12 +570,7 @@ impl Emitter<'_> {
             let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
             code.getstatic(unit, 1);
         } else if physical_arg.is_jvm_scalar() && target.is_reference() {
-            let semantic = self
-                .ir
-                .logical_types
-                .get(&arg)
-                .copied()
-                .unwrap_or(physical_arg);
+            let semantic = self.ir.logical_type(arg).unwrap_or(physical_arg);
             crate::trace_compiler!(
                 "value_classes",
                 "box coercion arg={arg} physical={physical_arg:?} semantic={semantic:?}"
@@ -560,7 +582,7 @@ impl Emitter<'_> {
             let checked_platform_value = matches!(
                 self.ir.expr(arg),
                 IrExpr::NotNullAssert {
-                    check: crate::ir::NullCheck::Named(_),
+                    check: crate::ir::NullCheck::Named { .. },
                     ..
                 }
             );
@@ -614,9 +636,8 @@ impl Emitter<'_> {
         };
         let source_is_reference = self
             .ir
-            .physical_types
-            .get(source)
-            .map(ir_ty_to_jvm)
+            .physical_type(*source)
+            .map(|ty| ir_ty_to_jvm(&ty))
             .unwrap_or_else(|| self.value_ty(*source))
             .is_reference();
         if source_is_reference && ir_ty_to_jvm(&stored_value_ty(*intermediate)).is_reference() {
@@ -668,9 +689,7 @@ impl Emitter<'_> {
                     && self.erased_reference_result(arg).is_none()
                     && !self
                         .ir
-                        .logical_types
-                        .get(&arg)
-                        .copied()
+                        .logical_type(arg)
                         .unwrap_or_else(|| self.value_ty(arg))
                         .admits_null()
             }
@@ -692,9 +711,7 @@ impl Emitter<'_> {
             };
             let source = self
                 .ir
-                .logical_types
-                .get(&operand)
-                .copied()
+                .logical_type(operand)
                 .unwrap_or_else(|| self.value_ty(operand));
             if self.is_carried_value(type_operand) || self.is_carried_value(source) {
                 break;
@@ -716,17 +733,11 @@ impl Emitter<'_> {
             Some(_) => self.value_ty(operand),
             None => self
                 .ir
-                .physical_types
-                .get(&operand)
-                .map(ir_ty_to_jvm)
+                .physical_type(operand)
+                .map(|ty| ir_ty_to_jvm(&ty))
                 .unwrap_or_else(|| self.value_ty(operand)),
         };
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&operand)
-            .copied()
-            .unwrap_or(physical);
+        let semantic = self.ir.logical_type(operand).unwrap_or(physical);
         self.emit_value(operand, code);
         (physical, semantic)
     }

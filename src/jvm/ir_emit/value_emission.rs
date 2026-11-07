@@ -116,6 +116,9 @@ impl super::Emitter<'_> {
                     );
                 };
                 self.load_constructor_value(*i, jt, slot, code);
+                if let Some(primitive) = self.unboxed_scalar_read(e, *i) {
+                    super::scalar_coercion::unbox_prim_from(self.cw, code, jt, primitive);
+                }
             }
             IrExpr::PropertyRead {
                 receiver,
@@ -214,11 +217,28 @@ impl super::Emitter<'_> {
                 internal,
                 args,
                 ctor_params,
+                declared_params: _,
                 ctor_desc,
                 external_target: _,
                 defaults: default_parameters,
                 default_prefix_count,
             } => {
+                // A dependency construction realized through its `$default` constructor carries
+                // its placeholders, masks and marker as operands; the realization recorded which.
+                let synthesized: Vec<bool> = self
+                    .default_call_operands
+                    .matching(e, args)
+                    .map(|plan| {
+                        plan.iter()
+                            .map(|operand| {
+                                operand.origin
+                                    == crate::jvm::default_call_operands::DefaultOperandOrigin::Synthesized
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let synthesized_operand =
+                    |parameter: usize| synthesized.get(parameter).copied().unwrap_or(false);
                 // A local class takes its captures, which lead its arguments, in its physical order.
                 let args = capture_order::physical_for(self.ir, *internal, args.clone());
                 if self.emit_nullable_sam_wrapper_new(e, *internal, &args, code) {
@@ -239,7 +259,7 @@ impl super::Emitter<'_> {
                         // Every parameter of a verbatim descriptor is a supplied operand; the
                         // descriptor, not the argument count, says how many there are.
                         let parameters = self.constructor_physical_params(e, d).len();
-                        (d.clone(), false, parameters, parameters)
+                        (d.to_string(), false, parameters, parameters)
                     } else {
                         let mut field_tys: Vec<Ty> = match ctor_params {
                             Some(ps) => jvm_tys(&capture_order::physical_for(
@@ -351,7 +371,12 @@ impl super::Emitter<'_> {
                         .enumerate()
                     {
                         let omitted = omitted_parameter(parameter);
-                        self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
+                        self.mark_synthesized_run_start(
+                            e,
+                            omitted || synthesized_operand(parameter),
+                            &mut inside_run,
+                            code,
+                        );
                         if omitted {
                             push_zero(physical, code, self.cw);
                         } else {
@@ -404,7 +429,12 @@ impl super::Emitter<'_> {
                         .enumerate()
                     {
                         let omitted = omitted_parameter(parameter);
-                        self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
+                        self.mark_synthesized_run_start(
+                            e,
+                            omitted || synthesized_operand(parameter),
+                            &mut inside_run,
+                            code,
+                        );
                         if omitted {
                             push_zero(physical, code, self.cw);
                         } else {
@@ -749,7 +779,7 @@ impl super::Emitter<'_> {
                         return;
                     }
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                    let owner = self.facade.clone();
+                    let owner = self.file_function_owner(*fid);
                     let m = self
                         .cw
                         .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
@@ -791,6 +821,7 @@ impl super::Emitter<'_> {
                     | crate::ir::IrIntrinsic::StringGet
                     | crate::ir::IrIntrinsic::StringLength
                     | crate::ir::IrIntrinsic::EnumName
+                    | crate::ir::IrIntrinsic::EnumOrdinal
                     | crate::ir::IrIntrinsic::NullableAnyToString) => {
                         self.emit_builtin_member(e, op, dispatch_receiver.unwrap(), args, code)
                     }
@@ -964,6 +995,7 @@ impl super::Emitter<'_> {
                     self.guard_private_lateinit_read(e, code);
                 }
                 Callee::Module { .. }
+                | Callee::ModuleDefaultEntry { .. }
                 | Callee::ModuleWithDefaults { .. }
                 | Callee::LocalWithDefaults { .. }
                 | Callee::ClassStaticWithDefaults { .. }
@@ -1109,15 +1141,11 @@ impl super::Emitter<'_> {
                             return;
                         }
                         let owner_identity = *owner;
-                        // Array `clone` names the JVM array type. That decision reads the receiver's
-                        // type; the dispatch classifier still selects every other owner.
-                        let semantic_receiver = self.value_ty(recv);
-                        let Some((owner, interface)) = self.source_virtual_call_owner(
-                            e,
-                            owner_identity,
-                            interface,
-                            semantic_receiver,
-                        ) else {
+                        // A member an array inherits names the erased JVM array type. That decision
+                        // reads the receiver's type; the dispatch classifier selects every other owner.
+                        let Some((owner, interface)) =
+                            self.source_virtual_call_owner(e, owner_identity, interface, recv)
+                        else {
                             return;
                         };
                         let mut name = name.clone();
@@ -1590,7 +1618,7 @@ impl super::Emitter<'_> {
                 // first, as kotlinc's `-value as T` boxes the negated `Double`.
                 let physical = self.value_ty(*arg);
                 if physical.is_jvm_scalar() {
-                    let semantic = self.ir.logical_types.get(arg).copied().unwrap_or(physical);
+                    let semantic = self.ir.logical_type(*arg).unwrap_or(physical);
                     super::box_prim_free(
                         self.cw,
                         code,
@@ -1914,7 +1942,7 @@ impl super::Emitter<'_> {
                 // An inlined operand leaves the caller's line forgotten. kotlinc marks the checked
                 // expression's line again at the implicit check, so the check owns an entry even
                 // though the restored caller line is already in effect.
-                if matches!(check, NullCheck::Named(_)) && code.line_forgotten() {
+                if matches!(check, NullCheck::Named { .. }) && code.line_forgotten() {
                     if let Some(line) = code.current_line() {
                         code.mark_line(line.into());
                     }
@@ -1924,7 +1952,7 @@ impl super::Emitter<'_> {
                 // in its failure (`getenv(...) must not be null`); `x!!` has no such name and uses the
                 // one-argument form. Both consume the duplicate and leave the value in place.
                 let m = match check {
-                    NullCheck::Named(message) => {
+                    NullCheck::Named { message, .. } => {
                         code.push_string(message, self.cw);
                         self.cw.methodref(
                             "kotlin/jvm/internal/Intrinsics",
@@ -1932,13 +1960,13 @@ impl super::Emitter<'_> {
                             "(Ljava/lang/Object;Ljava/lang/String;)V",
                         )
                     }
-                    NullCheck::Source | NullCheck::Unnamed => self.cw.methodref(
+                    NullCheck::Source | NullCheck::Unnamed { .. } => self.cw.methodref(
                         "kotlin/jvm/internal/Intrinsics",
                         "checkNotNull",
                         "(Ljava/lang/Object;)V",
                     ),
                 };
-                let arguments = if matches!(check, NullCheck::Named(_)) {
+                let arguments = if matches!(check, NullCheck::Named { .. }) {
                     2
                 } else {
                     1

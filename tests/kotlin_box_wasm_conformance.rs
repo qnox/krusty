@@ -137,7 +137,7 @@ impl Lane for WasmLane {
 
     fn not_applicable(&self, src: &str) -> Option<&'static str> {
         if !krusty::conformance::backend_targeted(src, &self.tokens()) {
-            return Some("targeted at another backend");
+            return Some(box_lane::TARGETED_AT_ANOTHER_BACKEND);
         }
         if krusty::conformance::backend_muted(src, &self.tokens()) {
             return Some("muted on this wasm target");
@@ -182,7 +182,12 @@ impl Lane for WasmLane {
         modules: &[krusty::conformance::ModuleUnit],
         directive_source: &str,
     ) -> Outcome {
-        let backend = WasmBackend::new(self.target).with_entry(Entry::Box);
+        let Some(entry_module) = modules.last() else {
+            return Outcome::Harness("a module graph has no final source module".to_string());
+        };
+        let backend = WasmBackend::new(self.target)
+            .with_entry(Entry::Box)
+            .with_entry_module(entry_module.name.clone());
         let features = krusty::features::LangFeatures::from_source(directive_source);
         let platform = match self.target {
             WasmTarget::Js => krusty::klib::write::KlibPlatform::WasmJs,
@@ -254,7 +259,7 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
     assert_eq!(wasi.not_applicable(wasm_only), None);
     assert_eq!(
         js.not_applicable("// TARGET_BACKEND: JVM\nfun box() = \"OK\""),
-        Some("targeted at another backend")
+        Some(box_lane::TARGETED_AT_ANOTHER_BACKEND)
     );
     assert_eq!(
         js.not_applicable("// IGNORE_BACKEND: JVM\nfun box() = \"OK\""),
@@ -592,6 +597,63 @@ fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
     }
 }
 
+// PLATFORM-SPECIFIC: exercise the shared box representation at Wasm's dependency call boundary.
+#[test]
+fn wasm_nested_source_and_dependency_arguments_share_boxing() {
+    let src = include_str!("box_regressions/genericDependencyNestedSource.kt");
+    super::box_reference_classes::checked_box(src, "numericDependencyNestedSource")
+        .expect("the exact Kotlin compiler must run the nested source-call fixture");
+    let modules = krusty::conformance::split_modules(src).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(
+            focused_wasm_lane_available(&lane, "numericDependencyNestedSource"),
+            "the owned nested source-call fixture requires its Wasm lane"
+        );
+        assert_eq!(
+            lane.compile_modules_and_run(
+                &std::env::temp_dir(),
+                "numericDependencyNestedSource",
+                &units,
+                src,
+            ),
+            Outcome::Pass,
+            "nested source argument on {}",
+            target.name(),
+        );
+    }
+}
+
+#[test]
+fn wasm_class_properties_export_their_checked_accessors() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/classPropertyDependencyExports.kt"),
+            "classPropertyDependencyExports",
+        ),
+        (
+            include_str!("box_regressions/delegatedPropertyDependencyExports.kt"),
+            "delegatedPropertyDependencyExports",
+        ),
+    ] {
+        super::box_reference_classes::checked_box(source, stem)
+            .expect("pinned kotlinc must run the whole property export module graph");
+        let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+        let units = krusty::conformance::module_units(&modules);
+        for target in WasmTarget::ALL {
+            let lane = WasmLane { target };
+            assert!(focused_wasm_lane_available(&lane, stem));
+            assert_eq!(
+                lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+                Outcome::Pass,
+                "{stem} on {}",
+                target.name()
+            );
+        }
+    }
+}
+
 // PLATFORM-SPECIFIC: Wasm's checked-access default and host trap are independent of the portable
 // reference-array value/identity/effect-order case in the shared box inventory.
 const REFERENCE_ARRAY_BOUNDS: &str = r#"fun captured(index: Int): Throwable? {
@@ -623,9 +685,58 @@ fun box(): String {
 }
 "#;
 
+// PLATFORM-SPECIFIC: an out-of-range store whose value has side effects reaches the bounds check
+// only after the receiver, the index and the value ran. With range checks, that check throws
+// `IndexOutOfBoundsException`; without them (the 2.4.0 and 2.4.10 default) the store is a host trap.
+// A throwing value at an out-of-range index, and the in-range order, are portable and stay in
+// `tests/box_regressions/referenceArrayStoreEvaluatesValueBeforeBoundsCheck.kt`.
+const REFERENCE_ARRAY_STORE_BOUNDS: &str = r#"class Tag(val text: String)
+
+var trace = ""
+
+fun slots(): Array<Tag> {
+    trace += "a"
+    return arrayOf(Tag("0"))
+}
+
+fun at(index: Int): Int {
+    trace += "i"
+    return index
+}
+
+fun stored(text: String): Tag {
+    trace += "v"
+    return Tag(text)
+}
+
+fun box(): String {
+    try {
+        slots()[at(1)] = stored("y")
+        return "out of range stored"
+    } catch (expected: Throwable) {
+        if (expected !is IndexOutOfBoundsException) return "out of range threw another exception"
+        if (trace != "aiv") return "out of range: $trace"
+    }
+    return "OK"
+}
+"#;
+
 // PLATFORM-SPECIFIC: both the Kotlin exception and the unchecked host trap are observable here.
 #[test]
 fn wasm_reference_array_bounds_preserve_reference_defaults_and_explicit_options() {
+    expect_reference_array_bounds(REFERENCE_ARRAY_BOUNDS, "referenceArrayBounds");
+}
+
+// PLATFORM-SPECIFIC: see `REFERENCE_ARRAY_STORE_BOUNDS`.
+#[test]
+fn wasm_reference_array_store_bounds_follow_the_value_under_every_bounds_policy() {
+    expect_reference_box(REFERENCE_ARRAY_STORE_BOUNDS, "referenceArrayStoreBounds");
+    expect_reference_array_bounds(REFERENCE_ARRAY_STORE_BOUNDS, "referenceArrayStoreBounds");
+}
+
+/// Run `source` under the release's default bounds policy and both explicit ones: a checked access
+/// must run `box()` to `OK`, and an unchecked one must stop at the exact host trap.
+fn expect_reference_array_bounds(source: &str, name: &str) {
     use krusty::kotlin_version::{KotlinVersion, ReleaseRecords};
     const DEFAULTS: ReleaseRecords<bool> = ReleaseRecords::new(&[
         (KotlinVersion::V2_4_0, false),
@@ -635,10 +746,9 @@ fn wasm_reference_array_bounds_preserve_reference_defaults_and_explicit_options(
     let default = *DEFAULTS
         .get(krusty::kotlin_version::target())
         .expect("supported release");
-    let source = REFERENCE_ARRAY_BOUNDS;
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
-        if !focused_wasm_lane_available(&lane, "referenceArrayBounds") {
+        if !focused_wasm_lane_available(&lane, name) {
             return;
         }
         for requested in [None, Some(false), Some(true)] {
@@ -647,7 +757,7 @@ fn wasm_reference_array_bounds_preserve_reference_defaults_and_explicit_options(
             if let Some(requested) = requested {
                 backend = backend.with_array_range_checks(requested);
             }
-            let stem = format!("referenceArrayBounds{requested:?}");
+            let stem = format!("{name}{requested:?}");
             let mut program = box_lane::compile(
                 &[("Bounds.kt".to_owned(), source.to_owned())],
                 source,
@@ -687,7 +797,7 @@ fn wasm_reference_array_bounds_preserve_reference_defaults_and_explicit_options(
 }
 
 // PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
-fn expect_reference_assertion_box(src: &str, stem: &str) {
+fn expect_reference_box(src: &str, stem: &str) {
     let jdk = super::common::jdk_modules();
     let classpath = super::common::classpath_jars_for(src);
     let reference = super::box_reference_classes::reference_compile(
@@ -697,13 +807,13 @@ fn expect_reference_assertion_box(src: &str, stem: &str) {
         krusty::conformance::BoxJdk::Full { root: Some(&jdk) },
         krusty::conformance::COROUTINE_HELPERS,
     )
-    .expect("the exact Kotlin compiler must compile the nullable assertion fixture");
+    .expect("the exact Kotlin compiler must compile the fixture");
     let classes = reference.flatten().into_iter().collect::<Vec<_>>();
     let entry = super::common::find_box_class(&classes).expect("reference fixture must emit box()");
     assert_eq!(
         super::common::run_box(&classes, &entry, &classpath),
         Some("OK".to_string()),
-        "{stem}: the exact Kotlin compiler must run the nullable assertion fixture"
+        "{stem}: the exact Kotlin compiler must run the fixture"
     );
 }
 
@@ -718,7 +828,7 @@ fn wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract() {
     ] {
         let src =
             format!("fun read(value: {scalar}?): {scalar} = value!!\nfun box(): String = \"OK\"");
-        expect_reference_assertion_box(&src, stem);
+        expect_reference_box(&src, stem);
         expect_wasm_decline(
             &src,
             stem,
@@ -727,11 +837,36 @@ fn wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract() {
     }
 }
 
+// PLATFORM-SPECIFIC: function values are non-suspend objects called through their arity's entry;
+// a suspend function value has no Wasm representation yet and must decline, not run as a plain one.
+#[test]
+fn wasm_suspend_function_values_decline() {
+    let src = "fun take(f: suspend () -> Int): Int = 1\nfun box(): String = if (take { 2 } == 1) \"OK\" else \"fail\"";
+    expect_reference_box(src, "suspendFunctionValue");
+    expect_wasm_decline(src, "suspendFunctionValue", "a suspend function value");
+}
+
+// PLATFORM-SPECIFIC: a lambda or callable reference converted to a `fun interface` is not a
+// function value; until SAM conversion lands, both forms must decline.
+#[test]
+fn wasm_sam_converted_function_values_decline() {
+    for (stem, argument) in [
+        ("samConvertedLambda", "{ 1 }"),
+        ("samConvertedReference", "(::one)"),
+    ] {
+        let src = format!(
+            "fun interface Source {{ fun get(): Int }}\nfun one(): Int = 1\nfun read(source: Source): Int = source.get()\nfun box(): String = if (read {argument} == 1) \"OK\" else \"fail\""
+        );
+        expect_reference_box(&src, stem);
+        expect_wasm_decline(&src, stem, "a lambda converted to a `fun interface`");
+    }
+}
+
 // PLATFORM-SPECIFIC: the scalar boundary guard must preserve existing reference assertions.
 #[test]
 fn wasm_nullable_reference_assertions_keep_their_existing_carrier() {
     let src = "fun read(value: String?): String = value!!\nfun box(): String = read(\"OK\")";
-    expect_reference_assertion_box(src, "nullableReferenceAssertion");
+    expect_reference_box(src, "nullableReferenceAssertion");
     expect_wasm_box(src, "nullableReferenceAssertion");
 }
 
@@ -881,6 +1016,120 @@ fn wasm_declines_kotlin_any_rendering_it_has_no_body_for() {
     );
 }
 
+// A generated hash dispatches a property's value through its table's `hashCode` slot. A class
+// that keeps `kotlin.Any`'s identity hash has no body there, whether the property names that class
+// or erases it to `Any`, which can hold an instance of every class in the file. Each `Holder`
+// renders itself, since its generated `toString` would reach `Any`'s rendering first.
+#[test]
+fn wasm_declines_a_generated_hash_that_can_reach_the_identity_hash() {
+    let reason = "`kotlin.Any.hashCode`'s identity hash";
+    expect_wasm_decline(
+        "class Plain\ndata class Holder(val value: Plain) { override fun toString() = \"Holder\" }\n\
+         fun box(): String = if (Holder(Plain()).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfAClassProperty",
+        reason,
+    );
+    expect_wasm_decline(
+        "class Plain\ndata class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
+         fun box(): String = if (Holder(Plain()).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfAnErasedProperty",
+        reason,
+    );
+}
+
+#[test]
+fn wasm_generated_members_keep_the_whole_portable_scalar_and_reference_control() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassEqualsAndHashCode.kt"),
+        "wasmDataClassEqualsAndHashCode",
+    );
+}
+
+#[test]
+fn wasm_generated_members_preserve_closure_identity() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassClosureIdentity.kt"),
+        "wasmDataClassClosureIdentity",
+    );
+}
+
+#[test]
+fn wasm_generated_members_keep_erased_array_hashes_stable_through_mutation() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassErasedArrayIdentityHash.kt"),
+        "wasmDataClassErasedArrayIdentityHash",
+    );
+}
+
+#[test]
+fn wasm_generated_members_compare_callable_declarations_and_receivers() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/dataClassErasedClosureIdentity.kt"),
+            "wasmDataClassErasedClosureIdentity",
+        ),
+        (
+            include_str!("box_regressions/dataClassCallableReferenceEquality.kt"),
+            "wasmDataClassCallableReferenceEquality",
+        ),
+        (
+            include_str!("box_regressions/dataClassCallableReferenceSelfEquality.kt"),
+            "wasmDataClassCallableReferenceSelfEquality",
+        ),
+        (
+            include_str!("box_regressions/dataClassOverloadedConstructorReferences.kt"),
+            "wasmDataClassOverloadedConstructorReferences",
+        ),
+        (
+            include_str!("box_regressions/constructorReferenceDeclaredSignature.kt"),
+            "wasmConstructorReferenceDeclaredSignature",
+        ),
+        (
+            include_str!("box_regressions/dataClassNullableBoundReference.kt"),
+            "wasmDataClassNullableBoundReference",
+        ),
+    ] {
+        expect_wasm_box(source, stem);
+    }
+}
+
+#[test]
+fn wasm_callable_references_share_identity_across_independent_module_analyses() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/dataClassReferenceAcrossModules.kt"),
+            "wasmDataClassReferenceAcrossModules",
+        ),
+        (
+            include_str!("box_regressions/constructorReferenceAcrossModules.kt"),
+            "wasmConstructorReferenceAcrossModules",
+        ),
+    ] {
+        super::box_reference_classes::checked_box(source, stem)
+            .expect("the exact Kotlin compiler must run the whole reference-identity fixture");
+        let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+        let units = krusty::conformance::module_units(&modules);
+        for target in WasmTarget::ALL {
+            let lane = WasmLane { target };
+            assert!(focused_wasm_lane_available(&lane, stem));
+            assert_eq!(
+                lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+                Outcome::Pass,
+                "{stem} on {}",
+                target.name(),
+            );
+        }
+    }
+}
+
+#[test]
+fn wasm_a_generated_hash_of_an_erased_property_dispatches_when_every_class_has_a_body() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassErasedPropertyHash.kt"),
+        "wasmGeneratedHashOfAnErasedPropertyWithBodies",
+    );
+}
+
 #[test]
 fn wasm_declines_an_enum_class_by_name() {
     expect_wasm_decline(
@@ -889,3 +1138,9 @@ fn wasm_declines_an_enum_class_by_name() {
         "an enum class (`Color`)",
     );
 }
+
+#[path = "wasm_value_hash.rs"]
+mod value_hash;
+
+#[path = "wasm_dependency_constructor_exports.rs"]
+mod dependency_constructor_exports;

@@ -25,6 +25,7 @@ pub(crate) fn class_file_annotations(class: &IrClass) -> Cow<'_, DeclarationAnno
     let implied = RetainedAnnotation {
         retention: AnnotationRetention::Runtime,
         annotation: AppliedAnnotation {
+            written_order: None,
             internal: jvm_inline,
             values: Vec::new(),
         },

@@ -40,7 +40,7 @@ fn not_applicable(src: &str) -> Option<&'static str> {
     // "when the native target grows its own frontend semantics (klib ingestion, phase 7)" — which
     // is what the klib provider is.
     if !krusty::conformance::backend_targeted(src, &["NATIVE"]) {
-        return Some("targeted at another backend");
+        return Some(box_lane::TARGETED_AT_ANOTHER_BACKEND);
     }
     // Backend mutes are target-specific. A JVM mute cannot hide a shared-frontend or common-IR
     // failure from the Native lane; that failure belongs in this lane's exact outcome ratchet.
@@ -66,7 +66,7 @@ fn native_applicability_uses_native_directives_not_jvm_mutes() {
     );
     assert_eq!(
         not_applicable("// TARGET_BACKEND: JVM\nfun box() = \"OK\""),
-        Some("targeted at another backend")
+        Some(box_lane::TARGETED_AT_ANOTHER_BACKEND)
     );
     assert_eq!(
         not_applicable("// TARGET_BACKEND: ANY\nfun box() = \"OK\""),
@@ -238,9 +238,13 @@ impl Lane for NativeLane {
         modules: &[krusty::conformance::ModuleUnit],
         directive_source: &str,
     ) -> Outcome {
+        let Some(entry_module) = modules.last() else {
+            return Outcome::Harness("a module graph has no final source module".to_string());
+        };
         let target = self.target.expect("checked by `unavailable`");
         let backend = CraneliftBackend::new(target)
             .with_entry(Entry::Box)
+            .with_entry_module(entry_module.name.clone())
             .verified();
         let features = krusty::features::LangFeatures::from_source(directive_source);
         let metadata = match krusty::klib::backend::KlibBackend::new(
@@ -309,6 +313,43 @@ fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
         &units,
         source,
     )
+}
+
+// PLATFORM-SPECIFIC: This checks the Native oracle's generated module runner. The whole portable
+// program is also selected by every backend from the shared box inventory.
+#[test]
+fn native_reference_runner_calls_the_packaged_final_module_box() {
+    let source = include_str!("box_regressions/multimodule/packagedFinalModuleBox.kt");
+    let stem = "packagedFinalModuleBox";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole packaged module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "the Native oracle and product must both call the final module's declared box"
+    );
+}
+
+#[test]
+fn native_class_properties_export_their_checked_accessors() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/classPropertyDependencyExports.kt"),
+            "classPropertyDependencyExports",
+        ),
+        (
+            include_str!("box_regressions/delegatedPropertyDependencyExports.kt"),
+            "delegatedPropertyDependencyExports",
+        ),
+    ] {
+        super::box_reference_classes::checked_box(source, stem)
+            .expect("pinned kotlinc must run the whole property export module graph");
+        assert_eq!(
+            run_native_abi_case(source, stem),
+            Outcome::Pass,
+            "property accessor declarations must retain their module export identities"
+        );
+    }
 }
 
 /// A required inline dependency function whose body cannot become a template rejects its caller:
@@ -416,5 +457,18 @@ fun box(): String {
         run_native_abi_case(source, stem),
         Outcome::Pass,
         "Native reference identity must use the source declaration across its KLIB export"
+    );
+}
+
+#[test]
+fn native_generic_class_members_instantiate_their_declared_dependency_exports() {
+    let source = include_str!("box_regressions/multimodule/multimoduleGenericClassMembers.kt");
+    let stem = "multimoduleGenericClassMembers";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete generic-member module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "class and method formals must instantiate independently without changing the export ABI"
     );
 }

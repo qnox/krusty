@@ -1,6 +1,7 @@
 //! Compiler orchestration.
 
 mod backend_handoff;
+mod capture_storage;
 mod checked_body_observer;
 mod declaration_metadata;
 mod dependency_body_emission;
@@ -84,6 +85,13 @@ pub fn emit_analyzed_to<B: Backend>(
             .into_iter()
             .for_each(sink);
     }
+}
+
+/// Only the successful complete-source path below creates this handoff value. Header-only or
+/// manually unfinished IR cannot enter the storage-retirement handoff API.
+struct CompletedSourceIr {
+    local_storage_owners: crate::fx_hash::HashSet<crate::ir::ClassId>,
+    ir: crate::ir::IrFile,
 }
 
 /// What a caller of [`emit_analyzed_into`] sees of Pass 2.
@@ -414,7 +422,10 @@ fn emit_analyzed_into<B: Backend>(
             continue;
         }
         let Some(mut file) = backend_handoff::checked_ir_file(
-            ir,
+            CompletedSourceIr {
+                local_storage_owners: capture_storage::source_owners(&ir, &index, source_id),
+                ir,
+            },
             source_id,
             &backend_module_facts,
             &symbols,
@@ -585,24 +596,15 @@ fn active_body_check_groups(
     index: &crate::fir::ResolvedModuleIndex,
 ) -> Vec<BodyCheckGroup> {
     fn ordinary_root(
-        mut declaration: crate::fir::DeclarationId,
+        declaration: crate::fir::DeclarationId,
         index: &crate::fir::ResolvedModuleIndex,
     ) -> crate::fir::DeclarationId {
-        loop {
-            let Some(anchor) = index.declaration_anchor(declaration) else {
-                return declaration;
-            };
-            let local_classifier = anchor.kind == crate::fir::DeclarationKind::Classifier
-                && index.declaration_header(declaration).is_some_and(|header| {
-                    header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-                });
-            if (anchor.kind == crate::fir::DeclarationKind::Classifier && !local_classifier)
-                || anchor.owner.is_none()
-            {
-                return declaration;
-            }
-            declaration = anchor.owner.expect("a non-root declaration has an owner");
-        }
+        crate::fir::checker_root(
+            index,
+            declaration,
+            |declaration| index.declaration_anchor(declaration),
+            |declaration| index.local_classifier_lexical_root(declaration),
+        )
     }
 
     // Parser hoisting may enumerate a local classifier before the executable declaration that
@@ -654,12 +656,22 @@ fn active_body_check_groups(
     let mut groups = body_check_groups(rooted);
     // Declaration annotations and other checked header metadata are consumed during this same
     // bounded Pass-2 reparse. A classifier with no executable body (most notably an interface or
-    // annotation class) still needs one semantic group; tying metadata handoff to body presence
-    // silently dropped it. This group selects no body and retains no syntax/FIR after the callback.
+    // annotation class) still needs one semantic group, and so does a top-level property or
+    // function without one (a `lateinit var`, an `external fun`); tying metadata handoff to body
+    // presence silently dropped their annotations, `@set:JvmName` among them. This group selects
+    // no body and retains no syntax/FIR after the callback.
     for declaration in active.stable_declarations().filter(|declaration| {
         index
             .declaration_header(*declaration)
-            .is_some_and(|header| header.kind == crate::fir::DeclarationKind::Classifier)
+            .is_some_and(|header| match header.kind {
+                crate::fir::DeclarationKind::Classifier => true,
+                crate::fir::DeclarationKind::Property | crate::fir::DeclarationKind::Function => {
+                    index
+                        .declaration_anchor(*declaration)
+                        .is_some_and(|anchor| anchor.owner.is_none())
+                }
+                _ => false,
+            })
     }) {
         if groups.iter().any(|group| group.root == declaration) {
             continue;

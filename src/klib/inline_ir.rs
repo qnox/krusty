@@ -338,6 +338,7 @@ fn supported_type(ty: Ty, parameters: &[IrTypeParameter]) -> bool {
         TyKind::Null
         | TyKind::Error
         | TyKind::Pending
+        | TyKind::Var(..)
         | TyKind::Fun(_)
         | TyKind::DefinitelyNotNull(_)
         | TyKind::PlatformNullable(_)

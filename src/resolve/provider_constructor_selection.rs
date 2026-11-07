@@ -18,32 +18,6 @@ pub(super) enum ConstructorPreselection<'a> {
 }
 
 impl Checker<'_> {
-    /// The constructor path's view of one checked argument expression: its call-argument kind,
-    /// with an integer literal typed by its semantic (not runtime) type.
-    fn constructor_argument_kind(&self, argument: ExprId) -> CallArgKind {
-        let nominal = self.expr_types[argument.0 as usize];
-        match call_arg_kind(self.file, argument, nominal) {
-            CallArgKind::IntegerLiteral { ty, constant } => {
-                CallArgKind::integer_constant(self.integer_literal_semantic_type(ty), constant)
-            }
-            kind => kind,
-        }
-    }
-
-    /// The inference input `kind` contributes to `declared`: an integer literal adapts to the
-    /// first scalar bound along the declared type-parameter chain that can hold it.
-    fn constructor_inference_input(&self, kind: &CallArgKind, declared: Ty) -> Ty {
-        let mut bounded = declared.non_null();
-        while let TyKind::TyParam(_, bound) = bounded.kind() {
-            let value_bound = self.integer_literal_semantic_type(bound);
-            if kind.adapts_integer_literal_to(value_bound) {
-                return value_bound;
-            }
-            bounded = bound.non_null();
-        }
-        kind.ty()
-    }
-
     /// Select one provider constructor tier through the same argument mapper and specificity
     /// operation used by source primary/secondary constructors. Every provider declaration already
     /// owns its source call shape in `LibraryMember::call_sig`; no detached parameter inventory or
@@ -226,7 +200,7 @@ impl Checker<'_> {
                                     signature.clone(),
                                 )
                             }),
-                            self.rejected_constructor_lambdas(
+                            self.rejected_constructor_function_arguments(
                                 args,
                                 &argument_slots,
                                 signature,
@@ -301,7 +275,16 @@ impl Checker<'_> {
                         {
                             return None;
                         }
-                        let kind = self.constructor_argument_kind(argument);
+                        let nominal = self.expr_types[argument.0 as usize];
+                        let kind = match call_arg_kind(self.file, argument, nominal) {
+                            CallArgKind::IntegerLiteral { ty, constant } => {
+                                CallArgKind::integer_constant(
+                                    self.integer_literal_semantic_type(ty),
+                                    constant,
+                                )
+                            }
+                            kind => kind,
+                        };
                         let mut declared = symbolic;
                         if call_sig.vararg_index == Some(parameter) && !whole_array {
                             declared = declared.array_read_elem().unwrap_or(declared);
@@ -320,7 +303,7 @@ impl Checker<'_> {
                             let mut carries_enclosing_context = false;
                             for formal in &signature.formals {
                                 if ty_mentions_param(declared, std::slice::from_ref(formal)) {
-                                    enclosing_context_formals.insert(formal.clone());
+                                    enclosing_context_formals.insert(*formal);
                                     carries_enclosing_context = true;
                                 }
                             }
@@ -328,41 +311,40 @@ impl Checker<'_> {
                                 return None;
                             }
                         }
-                        let actual = self.constructor_inference_input(&kind, declared);
+                        let mut actual = kind.ty();
+                        let mut bounded = declared.non_null();
+                        while let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = bounded.kind()
+                        {
+                            let value_bound = self.integer_literal_semantic_type(bound);
+                            if kind.adapts_integer_literal_to(value_bound) {
+                                actual = value_bound;
+                                break;
+                            }
+                            bounded = bound.non_null();
+                        }
                         Some((source, parameter, actual, whole_array))
                     })
                     .collect::<Vec<_>>();
-                // Inside the constructed class (or an inner class that sees its formals), the
-                // class's own `T` is a fixed type, while this call infers a fresh `T`.
-                let lexical = scope.lexical_tparam_identities();
+                // The call infers its own `T`, distinct from the class's `T` when that is in
+                // scope as a fixed type (inside the class or an inner class).
                 let source = self.fed_source();
                 let inference_actuals = actuals
                     .iter()
                     .flat_map(|&(source_argument, parameter, actual, whole_array)| {
-                        // `actual` has already applied source argument semantics such as
-                        // integer-literal adaptation to a final scalar bound. A conditional's
-                        // branches get the same view one by one, so re-reading their nominal
-                        // expression slots cannot undo that decision (`R<T: Long>(if (c) 0 else 1)`).
-                        let inputs = match conditional_branch::conditional_argument_branches(
-                            self.file,
-                            args[source_argument],
-                        ) {
-                            Some(branches) if !whole_array => {
-                                let mut declared = signature.params[parameter];
-                                if call_sig.vararg_index == Some(parameter) {
-                                    declared = declared.array_read_elem().unwrap_or(declared);
-                                }
-                                branches
-                                    .into_iter()
-                                    .map(|branch| {
-                                        self.constructor_inference_input(
-                                            &self.constructor_argument_kind(branch),
-                                            declared,
-                                        )
-                                    })
-                                    .collect()
+                        let expression = args[source_argument];
+                        let inputs = if matches!(
+                            self.file.expr(expression),
+                            Expr::If {
+                                else_branch: Some(_),
+                                ..
                             }
-                            _ => vec![actual],
+                        ) {
+                            self.conditional_inference_inputs(expression)
+                        } else {
+                            // `actual` has already applied source argument semantics such as
+                            // integer-literal adaptation to a final scalar bound. Re-reading the
+                            // nominal expression slot here would undo that decision (`R<T: Long>(0)`).
+                            vec![actual]
                         };
                         inputs
                             .into_iter()
@@ -371,7 +353,7 @@ impl Checker<'_> {
                     .collect::<Vec<_>>();
                 let constraints = crate::symbol_resolver::CallSiteVariables::solve(
                     signature,
-                    |formal| lexical.iter().any(|identity| identity == formal),
+                    self.call_site(call),
                     |signature| {
                         crate::symbol_resolver::infer_generic_call_constraints_with_argument_ordinals(
                             &source,
@@ -452,7 +434,7 @@ impl Checker<'_> {
                             let Some(index) = signature
                                 .formals
                                 .iter()
-                                .position(|candidate| candidate == &formal)
+                                .position(|candidate| candidate == formal)
                             else {
                                 continue;
                             };
@@ -462,14 +444,16 @@ impl Checker<'_> {
                             {
                                 continue;
                             }
-                            let Some(&fixed) = expected_bindings.get(&formal).filter(|&&fixed| {
-                                fixed.non_null().is_ty_param()
-                                    && Self::type_is_lexically_fixed(scope, fixed)
-                            }) else {
+                            let Some(&fixed) =
+                                expected_bindings.get(formal.as_str()).filter(|&&fixed| {
+                                    fixed.non_null().is_ty_param()
+                                        && Self::type_is_lexically_fixed(scope, fixed)
+                                })
+                            else {
                                 continue;
                             };
                             let mut trial = bindings.clone();
-                            trial.insert(formal.clone(), fixed);
+                            trial.insert(crate::types::TyParamName::new(&formal), fixed);
                             if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
                                 signature,
                                 &trial,
@@ -528,9 +512,9 @@ impl Checker<'_> {
                 // postponed producer completes from its declared upper bound. Substitute preceding
                 // solutions so dependent bounds (`U : Base<T>`) retain their semantic application.
                 for (index, formal) in classifier.type_params().iter().enumerate() {
-                    if !enclosing_context_formals.contains(formal)
+                    if !enclosing_context_formals.contains(&crate::types::TyParamName::new(formal))
                         || bindings
-                            .get(formal)
+                            .get(formal.as_str())
                             .is_some_and(|binding| *binding != Ty::Error)
                     {
                         continue;
@@ -541,7 +525,7 @@ impl Checker<'_> {
                         .take(index)
                         .filter_map(|known_formal| {
                             bindings
-                                .get(known_formal)
+                                .get(known_formal.as_str())
                                 .copied()
                                 .filter(|binding| *binding != Ty::Error)
                                 .map(|binding| (known_formal.clone(), binding))
@@ -555,7 +539,7 @@ impl Checker<'_> {
                         .filter(|bound| *bound != Ty::Error)
                     {
                         bindings.insert(
-                            formal.clone(),
+                            crate::types::TyParamName::new(formal),
                             crate::symbol_resolver::ty_subst_keep_unbound(bound, &known),
                         );
                     }
@@ -580,7 +564,7 @@ impl Checker<'_> {
                     .zip(explicit_type_arguments.iter().copied())
                 {
                     if !explicit.mentions_error() && !explicit.mentions_pending() {
-                        bindings.insert(formal.clone(), explicit);
+                        bindings.insert(crate::types::TyParamName::new(formal), explicit);
                     }
                 }
                 // Expected-result inference runs after argument inference and may replace a class
@@ -701,7 +685,7 @@ impl Checker<'_> {
                             (expected, actual),
                             constructor,
                             bound_constructor,
-                            postponed_lambdas,
+                            postponed_arguments,
                         )) = type_argument_bound_failure
                         {
                             return Err(LibraryConstructorFailure::TypeArgumentMismatch {
@@ -711,7 +695,7 @@ impl Checker<'_> {
                                 explicit: explicit_type_arguments,
                                 constructor,
                                 bound_constructor,
-                                postponed_lambdas,
+                                postponed_arguments,
                             });
                         }
                         if let Some((failure, (params, call_sig))) =
@@ -821,7 +805,7 @@ impl Checker<'_> {
         self.check_selected_constructor_lambdas(scope, args, &selected.argument_types);
         let publication =
             constructor_commitment::ConstructorDeclarationShape::provider(classifier, &member);
-        self.commit_constructor(call, target.clone(), publication);
+        self.commit_constructor(scope, call, target.clone(), publication);
         if let Some(Some(bindings)) = member_bindings.get(candidate_index) {
             self.record_library_constructor_type_arguments(call, internal, classifier, bindings);
         }

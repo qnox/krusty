@@ -269,6 +269,13 @@ fn function_local_variable(
     identity: &IrParameterIdentity,
     spelling: ReceiverSpelling,
 ) -> Option<String> {
+    if let Some((owner, parameter)) = identity.constructor_receiver() {
+        return Some(
+            super::capture_names::constructor_receiver(ir, owner, parameter)
+                .expect("a captured constructor receiver keeps its exact original prefix")
+                .field,
+        );
+    }
     if let IrParameterRole::CapturedReceiver { ordinal } = identity.role {
         let (name, _) = super::capture_names::lifted_receiver(ir, function, ordinal as usize)
             .expect("a lifted callable publishes the origin of each captured receiver");
@@ -852,6 +859,12 @@ pub(super) fn inherited_collection_specialized_local(ordinal: usize) -> String {
     format!("p{ordinal}")
 }
 
+/// The name kotlinc's Java class reader gives a parameter of a Java method compiled without
+/// parameter names (a JDK interface's default member): `p` and its ordinal.
+pub(super) fn unnamed_java_parameter(ordinal: usize) -> String {
+    format!("p{ordinal}")
+}
+
 fn resolved_anonymous_context_labels(
     identities: &[crate::fir::ResolvedParameterIdentity],
     semantic_types: &[crate::types::Ty],
@@ -1341,12 +1354,14 @@ mod suspend_lambda_member_tests {
             IrValueCapture {
                 declaration: IrCapturedDeclaration::Variable,
                 capturer: IrCapturingCallable::Lambda,
+                crossinline_parameter: None,
             },
         );
         let lambda = SuspendLambdaParameters::new(
             vec![captured, IrParameterIdentity::captured_receiver(0)],
             1,
             vec![IrCapturedReceiver::Enclosing {
+                owner: None,
                 classifier: crate::types::type_name("Outer"),
             }],
             None,

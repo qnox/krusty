@@ -650,6 +650,7 @@ impl BodyLowering<'_> {
                 default_provider,
                 receiver,
                 declared_receiver,
+                declaring_receiver,
                 parameters,
                 result,
                 declared_result,
@@ -669,6 +670,7 @@ impl BodyLowering<'_> {
                     default_provider: *default_provider,
                     receiver_ty: *receiver,
                     declared_receiver: *declared_receiver,
+                    declaring_receiver: *declaring_receiver,
                     parameters,
                     result: *result,
                     declared_result: *declared_result,
@@ -689,6 +691,7 @@ impl BodyLowering<'_> {
                 .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration))
             }
             FirCallTarget::Super {
+                qualifier,
                 owner,
                 dispatch_owner,
                 enclosing_dispatch,
@@ -731,6 +734,7 @@ impl BodyLowering<'_> {
                 // The semantic super target stays explicit through common lowering. A provider may
                 // already have fixed its physical descriptor; source declarations leave it empty.
                 let callee = crate::ir::Callee::Super {
+                    qualifier: *qualifier,
                     owner: *owner,
                     dispatch_owner: *dispatch_owner,
                     enclosing_dispatch: *enclosing_dispatch,
@@ -765,6 +769,13 @@ impl BodyLowering<'_> {
                 // continuation and must not infer suspendness from the realized descriptor.
                 if *suspend {
                     self.ir.suspend_calls.insert(call, result.get());
+                }
+                // A generic super declaration leaves its physical result on the call; the logical
+                // result is the coercion the caller wraps around it, as at any selected call.
+                if physical_result.get() != result.get() {
+                    self.ir
+                        .call_declared_ret
+                        .insert(call, physical_result.get());
                 }
                 Ok(self.wrap_call_statements(statements, call))
             }
@@ -973,6 +984,17 @@ impl BodyLowering<'_> {
         &mut self,
         call: &FirConstructorCall,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let capture_arguments = call
+            .external_capture_arguments
+            .as_deref()
+            .map(|arguments| {
+                arguments
+                    .iter()
+                    .copied()
+                    .map(|argument| self.constructor_capture_argument(argument))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
         let (target, parameter_types, mut arguments) =
             self.constructor_target_and_arguments(call)?;
         // Like a call's, only supplied operands evaluated out of parameter order are held in
@@ -1022,6 +1044,7 @@ impl BodyLowering<'_> {
                 target,
                 outer_parameter: call.outer_parameter.map(crate::fir::ResolvedTy::get),
                 outer_receiver,
+                capture_arguments,
                 arguments,
                 substitutions: lower_substitutions(&call.substitutions),
             },
@@ -1412,7 +1435,6 @@ pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate
         crate::fir::FirIntrinsic::Assert { mode } => crate::ir::IrIntrinsic::Assert { mode: *mode },
         crate::fir::FirIntrinsic::ArrayGet => crate::ir::IrIntrinsic::ArrayGet,
         crate::fir::FirIntrinsic::ArraySet => crate::ir::IrIntrinsic::ArraySet,
-        crate::fir::FirIntrinsic::ArraySize => crate::ir::IrIntrinsic::ArraySize,
         crate::fir::FirIntrinsic::StringGet => crate::ir::IrIntrinsic::StringGet,
         crate::fir::FirIntrinsic::StringLength => crate::ir::IrIntrinsic::StringLength,
         crate::fir::FirIntrinsic::EnumName => crate::ir::IrIntrinsic::EnumName,

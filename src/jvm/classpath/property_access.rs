@@ -15,7 +15,9 @@ pub(super) fn companion_owner_field_access(
     writable: bool,
 ) -> Option<super::super::inline::PropertyAccess> {
     let companion = classpath.find_name(owner)?;
-    let declared = super::super::metadata::class_properties(&companion)
+    let declared = classpath
+        .class_members(&companion)
+        .class_properties
         .iter()
         .find(|candidate| candidate.name == property && !candidate.is_extension)?;
     let accessor = if writable {
@@ -62,7 +64,11 @@ pub(super) fn inherited_property_access(
     classpath: &Classpath,
     owner: TypeName,
     property: &str,
-    declared_access: fn(&ClassInfo, &str) -> Option<super::super::inline::PropertyAccess>,
+    declared_access: fn(
+        &Classpath,
+        &ClassInfo,
+        &str,
+    ) -> Option<super::super::inline::PropertyAccess>,
 ) -> Option<super::super::inline::PropertyAccess> {
     let mut queue = std::collections::VecDeque::new();
     let mut seen = crate::fx_hash::HashSet::default();
@@ -74,7 +80,7 @@ pub(super) fn inherited_property_access(
         let Some(class) = classpath.find_name(current) else {
             continue;
         };
-        if let Some(access) = declared_access(&class, property) {
+        if let Some(access) = declared_access(classpath, &class, property) {
             return Some(access);
         }
         queue.extend(class.super_class);
@@ -86,6 +92,7 @@ pub(super) fn inherited_property_access(
 /// The setter metadata names for `property`, else the bean setter of a Java class, else a public
 /// non-final field. `None` for a read-only property.
 pub(super) fn class_property_write_access(
+    classpath: &Classpath,
     class: &ClassInfo,
     property: &str,
 ) -> Option<super::super::inline::PropertyAccess> {
@@ -132,7 +139,9 @@ pub(super) fn class_property_write_access(
             })
             .cloned()
     };
-    if let Some(declared) = super::super::metadata::class_properties(class)
+    if let Some(declared) = classpath
+        .class_members(class)
+        .class_properties
         .iter()
         .find(|candidate| candidate.name == property && !candidate.is_extension)
     {
@@ -162,6 +171,7 @@ pub(super) fn class_property_write_access(
 
 /// The getter metadata names for `property`, else the Java realization, else a public field.
 pub(super) fn class_property_read_access(
+    classpath: &Classpath,
     class: &ClassInfo,
     property: &str,
 ) -> Option<super::super::inline::PropertyAccess> {
@@ -189,7 +199,9 @@ pub(super) fn class_property_read_access(
             })
             .cloned()
     };
-    if let Some(declared) = super::super::metadata::class_properties(class)
+    if let Some(declared) = classpath
+        .class_members(class)
+        .class_properties
         .iter()
         .find(|candidate| candidate.name == property && !candidate.is_extension)
     {
