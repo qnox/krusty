@@ -262,9 +262,11 @@ fn emit_analyzed_into<B: Backend>(
             }
         }
         if let Err(error) = sink.accept_inline_bodies(&index, &mut inline_bodies) {
-            diags.error(
-                Span::new(0, 0),
-                format!("internal error: cannot consume inline FIR: {error:?}"),
+            report_fir_lowering_failure(
+                diags,
+                "cannot consume inline FIR",
+                &error,
+                symbols.shared_semantic_platform().as_ref(),
             );
             default_arguments.take_for_source(&index, source_id);
             continue;
@@ -987,9 +989,11 @@ fn consume_body_group(
                     body: &body,
                 });
                 if let Err(error) = sink.accept_streamed_body(index, inline_bodies, owner, body) {
-                    diags.error(
-                        Span::new(0, 0),
-                        format!("internal error: checked FIR lowering failed: {error:?}"),
+                    report_fir_lowering_failure(
+                        diags,
+                        "checked FIR lowering failed",
+                        &error,
+                        symbols.shared_semantic_platform().as_ref(),
                     );
                     return false;
                 }
@@ -1377,6 +1381,33 @@ pub fn check_frontend_only(
     }
     assert!(default_arguments.is_empty());
     census
+}
+
+/// Preserve the lowering failure while identifying an external declaration through the same
+/// live provider that selected it. Diagnostic presentation never reconstructs a target.
+fn report_fir_lowering_failure(
+    diags: &mut DiagSink,
+    context: &str,
+    error: &crate::fir_lower::FirFileLoweringFailure,
+    platform: &dyn crate::libraries::SemanticPlatform,
+) {
+    let mut message = format!("internal error: {context}: {error:?}");
+    let selected = match error {
+        crate::fir_lower::FirFileLoweringFailure::Body(
+            crate::fir_lower::FirLoweringFailure::UnsupportedExternalCall(target),
+        ) => platform.external_callable(*target),
+        _ => None,
+    };
+    if let Some(selected) = selected {
+        message = format!(
+            "{message}; selected dependency owner={:?}, name={:?}, declaration={:?}, dependency={:?}",
+            selected.declaration_owner,
+            selected.callable.name,
+            selected.declaration_signature,
+            selected.dependency_callable,
+        );
+    }
+    diags.error(Span::new(0, 0), message);
 }
 
 #[cfg(test)]
