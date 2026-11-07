@@ -23,6 +23,7 @@ mod arrays;
 mod boxing;
 mod callable_reference_identity;
 mod dependency_exports;
+mod enums;
 mod exceptions;
 mod function_values;
 mod generated_members;
@@ -629,6 +630,9 @@ struct Body<'a> {
     /// singleton, or the file's static initializer. Only the template ownership of a reified
     /// type operation reads it.
     scope: crate::ir::IrEnclosure,
+    /// `kotlin.Enum`'s `name` and `ordinal` for the enum constant whose construction is being
+    /// lowered, taken by that construction's allocation.
+    enum_base: Option<(Box<str>, u32)>,
 }
 
 impl<'a> Body<'a> {
@@ -681,6 +685,7 @@ impl<'a> Body<'a> {
             depth: 0,
             loops: Vec::new(),
             scope: crate::ir::IrEnclosure::File,
+            enum_base: None,
         }
     }
 
@@ -1257,6 +1262,16 @@ impl<'a> Body<'a> {
                     &defaults,
                 )?;
             }
+            IrExpr::EnumConstant {
+                name,
+                ordinal,
+                construction,
+                published: None,
+                ..
+            } => self.enum_constant(&name, ordinal, construction)?,
+            IrExpr::NoSuchEnumConstant { classifier, name } => {
+                self.no_such_enum_constant(classifier, name)?
+            }
             IrExpr::Throw { operand } => self.throw_value(operand)?,
             IrExpr::Vararg {
                 array_type,
@@ -1322,6 +1337,19 @@ impl<'a> Body<'a> {
                     && context_arguments.is_empty() =>
             {
                 self.property_read(*target, *dispatch_receiver)?
+            }
+            // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from
+            // the `$Enum` fields its struct leads with.
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && let Some(member) =
+                        crate::backend::enums::base_member(self.callables, *target) =>
+            {
+                self.enum_member(member, *receiver)?
             }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
