@@ -98,7 +98,8 @@ fn original_prefix_identity_survives_copy_transport_removal() {
     ir.fn_params
         .insert(function, FnParamInfo::identities(vec![identity(owner, 0)]));
     let shape = ir.functions[function as usize].clone();
-    let cloned = krusty::ir::clone_class_method(&mut ir, function, shape, &Default::default());
+    let cloned =
+        krusty::ir::test_support::clone_class_method(&mut ir, function, shape, &Default::default());
     let mut copy = ir.classes[class as usize].clone();
     copy.fq_name = krusty::types::type_name("SpecializedCopy");
     copy.ctor_args.remove(0);

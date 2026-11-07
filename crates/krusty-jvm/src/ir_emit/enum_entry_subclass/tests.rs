@@ -1,6 +1,6 @@
 use crate::ir_emit::invariant_tests::emit_for_test;
 use crate::ir_emit::EmitRun;
-use krusty::ir::{IrClass, IrConst, IrExpr, IrField, IrFile, IrFunction, IrProperty};
+use krusty::ir::{IrClass, IrConst, IrExpr, IrField, IrFile, IrFunction};
 use krusty::jvm::classreader::parse_class;
 use krusty::types::{type_name, ClassifierDeclarationName, Ty};
 
@@ -57,12 +57,12 @@ fn entry_fields_and_accessors_use_their_declared_types_and_source_positions() {
         IrField::new("first".into(), Ty::String),
         IrField::new("optional".into(), optional_ty),
     ];
-    let mut first = IrProperty::stored_value("first".into(), Ty::String, 0);
+    let mut first = krusty::ir::test_support::stored_property("first".into(), Ty::String, 0);
     first.source_order = 10;
     first.getter = Some(getter);
     first.setter = Some(setter);
     first.is_var = true;
-    let mut optional = IrProperty::stored_value("optional".into(), optional_ty, 1);
+    let mut optional = krusty::ir::test_support::stored_property("optional".into(), optional_ty, 1);
     optional.source_order = 30;
     subclass.properties = vec![first, optional];
     subclass.methods = vec![getter, setter, middle];
