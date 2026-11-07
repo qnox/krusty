@@ -10,9 +10,10 @@
 //! (`Integer removeAt(int)` of `MutableList<Int>`): the final `remove(int)` bridge returns the
 //! scalar and unboxes the call, and the erased bridge returns the wrapper. A value-class result
 //! finalizes the carrier (`final int remove(int)` for `Token`) and boxes only the erased bridge.
-//! A subclass that implements the method inherits that final bridge and publishes only
-//! `Object remove(int)`, calling its own `removeAt`. `MutableCollection.remove` of `Int` is
-//! `remove(Integer)`. A
+//! Its element members are mangled: `contains`, `indexOf`, and `lastIndexOf` take the carrier,
+//! and `remove` of an `Int` carrier stays the box. A subclass that implements the method inherits
+//! that final bridge and publishes only `Object remove(int)`, calling its own `removeAt`.
+//! `MutableCollection.remove` of `Int` is `remove(Integer)`. A
 //! type-safe member's bridge tests its argument (`final boolean contains(Object)`), as two methods
 //! when the member's result is a narrower reference (`Object
 //! get(Object)`, then `Integer get(Object)`). A member whose type parameter erases like the
@@ -283,75 +284,17 @@ fun box(): String {{
 }
 
 // PLATFORM-SPECIFIC: complete JVM bridge descriptors, access flags, and class ABI.
-// `TokenParent`'s element members (`contains`, `indexOf`, `lastIndexOf`, `remove(BridgeToken)`)
-// still use the boxed value-class descriptor. The index bridges are compared on their own; the
-// subclass and grandchild are the whole class, including the inherited final carrier they must
-// not redeclare.
 #[test]
 fn an_adapted_renamed_override_inherits_the_realized_final_bridge_like_kotlinc() {
-    let source = include_str!("box_regressions/adaptedInheritedCollectionRename.kt");
     common::assert_classes_identical_to_kotlinc(
         "AdaptedInheritedRename",
-        source,
+        include_str!("box_regressions/adaptedInheritedCollectionRename.kt"),
         &[
             "BridgeToken",
+            "TokenParent",
             "TokenChild",
             "TokenLeaf",
             "AdaptedInheritedRenameKt",
         ],
     );
-    assert_index_remove_matches_kotlinc(source, &["TokenParent", "TokenChild", "TokenLeaf"]);
-}
-
-fn assert_index_remove_matches_kotlinc(source: &str, classes: &[&str]) {
-    let tag = "AdaptedInheritedRenameBridges";
-    let dir = common::scratch_dir().expect("scratch directory");
-    let reference = dir.join("reference");
-    std::fs::create_dir_all(&reference).expect("create reference directory");
-    let path = dir.join(format!("{tag}.kt"));
-    std::fs::write(&path, source).expect("write fixture");
-    let (status, stderr) = common::kotlinc_compile(&[
-        "-d".to_string(),
-        reference.to_string_lossy().into_owned(),
-        path.to_string_lossy().into_owned(),
-    ])
-    .expect("reference kotlinc is provisioned");
-    assert_eq!(status, 0, "{tag}: kotlinc failed: {stderr}");
-    let jdk = common::jdk_modules();
-    let ours =
-        common::compile_in_process(source, tag, &[common::stdlib_jar()], Some(jdk.as_path()))
-            .unwrap_or_else(|| panic!("{tag}: krusty failed to compile"));
-    let index_remove = |bytes: &[u8], who: &str, class: &str| {
-        krusty::jvm::classreader::parse_class(bytes)
-            .unwrap_or_else(|_| panic!("{tag}: parse {who} {class}.class"))
-            .methods
-            .into_iter()
-            .filter(|method| {
-                (method.name == "remove" || method.name.starts_with("removeAt"))
-                    && method.descriptor.starts_with("(I)")
-            })
-            .map(|method| {
-                (
-                    method.name,
-                    method.descriptor,
-                    method.access,
-                    method.signature,
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    for class in classes {
-        let expected = std::fs::read(reference.join(format!("{class}.class")))
-            .unwrap_or_else(|_| panic!("{tag}: kotlinc did not emit {class}"));
-        let (_, actual) = ours
-            .iter()
-            .find(|(name, _)| name == class)
-            .unwrap_or_else(|| panic!("{tag}: krusty did not emit {class}"));
-        assert_eq!(
-            index_remove(actual, "krusty", class),
-            index_remove(&expected, "kotlinc", class),
-            "{tag}: {class} index remove bridges differ from kotlinc"
-        );
-    }
-    let _ = std::fs::remove_dir_all(dir);
 }

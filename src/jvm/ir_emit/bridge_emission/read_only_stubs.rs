@@ -10,7 +10,9 @@
 //! follows the stub; an implementation of it gets kotlinc's final special bridge under the JVM
 //! name, `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE`, and the erased bridge forwards to that.
 
-use super::super::value_class_adapters::emit_value_class_box_adapter;
+use super::super::value_class_adapters::{
+    emit_value_class_box_adapter, emit_value_class_unbox_adapter,
+};
 use super::super::{
     box_prim_free, discard, emit_return, finish_code_sig, load, local_variable_desc,
     method_descriptor, slot_words, unbox_prim_from, ClassWriter, CodeBuilder, EmitEnv,
@@ -138,6 +140,7 @@ fn emit_stub_bridge(
             parameters: target,
             result: *target_result,
             result_box: None,
+            parameter_unbox: &[],
         };
         if stub.is_renamed() {
             // kotlinc's special bridge: the implementation under the builtin's JVM name.
@@ -214,6 +217,7 @@ fn emit_stub_bridge(
             parameters: &stub.realized.parameters,
             result: stub.realized.result,
             result_box: stub.realized.result_box,
+            parameter_unbox: &[],
         };
         // A stub renamed by its value-class result leaves the declaration's special bridges to
         // kotlinc's bridge lowering, which checks each argument against the stub's own `Any?`.
@@ -305,6 +309,9 @@ pub(super) struct Target<'a> {
     pub(super) parameters: &'a [Ty],
     pub(super) result: Ty,
     pub(super) result_box: Option<ValueClassAdapter>,
+    /// Parallel to [`Self::parameters`]: unbox this value class from the erased slot into the
+    /// carrier the target declares. Empty when no parameter is a value class.
+    pub(super) parameter_unbox: &'a [Option<ValueClassAdapter>],
 }
 
 /// The bridge of an implemented member: each erased argument is cast or unboxed to the
@@ -332,33 +339,50 @@ pub(super) fn emit_forwarding<const ACCESS: u16>(
                 .iter()
                 .map(|ty| slot_words(*ty))
                 .sum::<u16>();
+            let checked = target
+                .parameter_unbox
+                .get(index)
+                .copied()
+                .flatten()
+                .map(|adapter| Ty::obj_name(adapter.owner))
+                .unwrap_or(targets[index]);
             emit_type_check(
                 cw,
                 &mut code,
                 slot,
                 declared[index],
-                targets[index],
+                checked,
                 barrier.outcome,
             );
         }
     }
     code.aload(0);
     let mut slot = 1u16;
-    for (&erased, &target) in bridge.parameters.iter().zip(targets) {
+    for (index, (&erased, &physical)) in bridge.parameters.iter().zip(targets).enumerate() {
         load(erased, slot, &mut code);
         slot += slot_words(erased);
-        if erased == target {
+        if let Some(adapter) = target.parameter_unbox.get(index).copied().flatten() {
+            emit_value_class_unbox_adapter(
+                cw,
+                &mut code,
+                adapter.owner,
+                physical,
+                adapter.null_preserving,
+            );
+            continue;
+        }
+        if erased == physical {
             continue;
         }
         assert!(
             erased.is_reference(),
             "a read-only collection bridge receives erased reference arguments, got {erased:?}"
         );
-        if target.is_reference() {
-            let cast = cw.class_ref(&crate::jvm::names::instanceof_internal_name(target));
+        if physical.is_reference() {
+            let cast = cw.class_ref(&crate::jvm::names::instanceof_internal_name(physical));
             code.checkcast(cast);
         } else {
-            unbox_prim_from(cw, &mut code, erased, target);
+            unbox_prim_from(cw, &mut code, erased, physical);
         }
     }
     let result = target.result;

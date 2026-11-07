@@ -7,7 +7,9 @@
 //! class inherits such a member as an abstract fake override, kotlinc's bridge lowering
 //! materializes it: an abstract method under its Kotlin JVM signature with the class's substituted
 //! types (`abstract boolean contains(String)`, `abstract int getSize()`), followed by the final
-//! special bridge under the JVM signature that calls it. A scalar substituted for the builtin's
+//! special bridge under the JVM signature that calls it. A value class in that signature is
+//! kotlinc's mangled member at the carrier (`contains-<hash>(int)`); `MutableCollection.remove`
+//! of an `Int` carrier stays the box, so it does not collide with `remove(int)`. A scalar substituted for the builtin's
 //! generic return keeps that slot's reference representation (`abstract Integer removeAt(int)` of
 //! `MutableList<Int>`), the same wrapper an explicit override of the slot declares. A class below
 //! a superclass that reaches the builtin inherits what that superclass already wrote, so only the
@@ -18,6 +20,7 @@ use crate::backend::{BackendClassifierSource, CheckedBackendClassifiers, SourceC
 use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{IrAppliedClassifier, IrClass, IrFile};
 use crate::jvm::backend::SkipReason;
+use crate::jvm::bridge_adaptations::ValueClassAdapter;
 use crate::jvm::classpath::mapped_builtin_realizations::DecodedBuiltinMember;
 use crate::jvm::classpath::Classpath;
 use crate::jvm::jvm_class_map::to_jvm_type_name;
@@ -30,6 +33,9 @@ use crate::jvm::override_results::scalar_over_reference;
 use crate::jvm::read_only_collection_stubs::{
     builtin_extends, classifier_closure, overridden_declaration_policy, parameter_descriptor,
     stub_barrier, StubBarrier,
+};
+use crate::jvm::value_classes::collection_stub_replacements::{
+    erased_jvm_type, mangled_substituted_name,
 };
 use crate::names::property_getter_name;
 use crate::types::{ty_subst, Ty, TypeName, Visibility};
@@ -83,8 +89,15 @@ impl AbstractBuiltinOverrides {
 pub(super) struct AbstractBuiltinOverride {
     /// The Kotlin JVM name: the function's own name, or the property's getter.
     pub(super) name: String,
+    /// The name the abstract method is emitted under. A value-class signature mangles it.
+    pub(super) jvm_name: String,
     /// The declaration's parameter types, substituted in the class's context.
     pub(super) parameters: Vec<Ty>,
+    /// The abstract method's JVM parameter types: carriers, or the value-class box when
+    /// `remove` must not take `int`.
+    realized_parameters: Vec<Ty>,
+    /// Parallel to [`Self::realized_parameters`]: unbox this value class before the bridge call.
+    pub(super) parameter_unbox: Vec<Option<ValueClassAdapter>>,
     pub(super) parameter_names: Vec<String>,
     /// The declaration's result type, substituted in the class's context.
     pub(super) result: Ty,
@@ -96,7 +109,7 @@ pub(super) struct AbstractBuiltinOverride {
 
 impl AbstractBuiltinOverride {
     pub(super) fn physical_parameters(&self) -> Vec<Ty> {
-        jvm_tys(&self.parameters)
+        self.realized_parameters.clone()
     }
 
     /// The result the generic signature is written from: the wrapper when the builtin slot is a
@@ -212,7 +225,7 @@ fn class_overrides(
                 .iter()
                 .find(|entry| entry.classifier == member.declaration_owner)?
                 .applied;
-            materialization(classpath, &member, applied)
+            materialization(ir, classpath, &member, applied)
         });
     let ancestors = superclass_chain(ir, classifiers, classpath, class)?;
     let mut members = Vec::new();
@@ -307,6 +320,7 @@ fn boxes_collection_remove_int(
 /// The materialization of an abstract builtin member in the substitution context `applied` of its
 /// declaring builtin, or `None` when Java reaches it at its Kotlin signature already.
 fn materialization(
+    ir: &IrFile,
     classpath: &Classpath,
     member: &DecodedBuiltinMember,
     applied: Ty,
@@ -383,14 +397,76 @@ fn materialization(
             erased: (erased_parameters, erased_result),
         }
     };
+    let jvm_name = mangled_substituted_name(ir, &name, &parameters, &result);
+    let keep_box = keep_remove_value_class_box(ir, classpath, member, &parameters);
+    let realized_parameters = parameters
+        .iter()
+        .enumerate()
+        .map(|(index, parameter)| {
+            if keep_box && index == 0 {
+                jvm_declared_ty(parameter)
+            } else {
+                erased_jvm_type(ir, *parameter)
+            }
+        })
+        .collect::<Vec<_>>();
+    let parameter_unbox = parameters
+        .iter()
+        .zip(&realized_parameters)
+        .map(|(&semantic, &physical)| value_class_unbox(ir, semantic, physical))
+        .collect();
     Some(AbstractBuiltinOverride {
         name,
+        jvm_name,
         parameters,
+        realized_parameters,
+        parameter_unbox,
         parameter_names: member.parameter_names.clone(),
         result,
         boxed_result,
         bridge,
     })
+}
+
+/// `MutableCollection.remove` of a non-null value class whose carrier is `Int` stays the box.
+/// `remove(int)` is already `removeAt`, and the mangled name still hashes the non-null value class.
+fn keep_remove_value_class_box(
+    ir: &IrFile,
+    classpath: &Classpath,
+    member: &DecodedBuiltinMember,
+    parameters: &[Ty],
+) -> bool {
+    if member.source_name != "remove"
+        || member.descriptor != "(Ljava/lang/Object;)Z"
+        || parameters.len() != 1
+    {
+        return false;
+    }
+    let parameter = parameters[0];
+    if parameter.is_nullable() {
+        return false;
+    }
+    let Some(classifier) = parameter.obj_internal() else {
+        return false;
+    };
+    if !ir.is_value_class_name(classifier) || erased_jvm_type(ir, parameter) != Ty::Int {
+        return false;
+    }
+    overridden_declaration_policy(classpath, member.declaration_owner, |owner| {
+        (owner == crate::types::type_name("kotlin/collections/MutableCollection")).then_some(())
+    })
+    .is_some()
+}
+
+/// The value class a bridge unboxes into `physical`, when that slot is the carrier rather than the box.
+fn value_class_unbox(ir: &IrFile, semantic: Ty, physical: Ty) -> Option<ValueClassAdapter> {
+    let classifier = semantic.non_null().obj_internal()?;
+    if !ir.is_value_class_name(classifier) {
+        return None;
+    }
+    let boxed = jvm_declared_ty(&semantic.non_null());
+    (physical != boxed && physical != jvm_declared_ty(&semantic))
+        .then_some(ValueClassAdapter::new(classifier, semantic.is_nullable()))
 }
 
 /// The one source that owns a superclass's declaration.

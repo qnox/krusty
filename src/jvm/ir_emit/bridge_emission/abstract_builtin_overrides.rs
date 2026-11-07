@@ -38,20 +38,24 @@ fn emit_member(
     let parameters = member.physical_parameters();
     let result = member.physical_result();
     let descriptor = method_descriptor(&parameters, result);
-    let signature = formatter
-        .method_positions(&member.parameters, &member.signature_result())
-        .filter(|signature| *signature != descriptor);
+    // A mangled value-class member carries no generic signature. The carrier descriptor is not
+    // the substituted Kotlin type (`(I)Z` beside `contains(BridgeToken)`).
+    let signature = (member.jvm_name == member.name)
+        .then(|| formatter.method_positions(&member.parameters, &member.signature_result()))
+        .flatten()
+        .filter(|signature| signature != &descriptor);
     cw.add_abstract_method_sig(
         ACC_PUBLIC | ACC_ABSTRACT,
-        &member.name,
+        &member.jvm_name,
         &descriptor,
         signature.as_deref(),
     );
     let target = Target {
-        name: &member.name,
+        name: &member.jvm_name,
         parameters: &parameters,
         result,
         result_box: None,
+        parameter_unbox: &member.parameter_unbox,
     };
     match &member.bridge {
         SpecialBridge::Renamed { jvm_name, erased } => {

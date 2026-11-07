@@ -77,3 +77,21 @@ pub(crate) fn collection_stub_realization(
         result_box,
     }
 }
+
+/// The JVM name of a substituted member. A value class in the signature appends kotlinc's hash;
+/// anything else keeps `name`.
+pub(crate) fn mangled_substituted_name(
+    ir: &IrFile,
+    name: &str,
+    parameters: &[Ty],
+    result: &Ty,
+) -> String {
+    super::vc_mangle(name, parameters, result, ir, false, false)
+}
+
+/// The JVM type of `ty` after value-class erasure. A non-null `Token(Int)` is `int`; a nullable
+/// one stays the box, because the carrier cannot hold the outer null.
+pub(crate) fn erased_jvm_type(ir: &IrFile, ty: Ty) -> Ty {
+    let under = super::representation::known_underlyings(ir);
+    jvm_declared_ty(&super::erase(&ty, &under))
+}
