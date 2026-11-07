@@ -35,9 +35,9 @@ use declared_capabilities::{
     declares_its_own_comparable, implemented_collections, implemented_dependencies,
     overrides_a_throwable_accessor,
 };
+mod atomic_fields;
 mod functions;
 mod implementor_dispatch;
-mod atomic_fields;
 mod imported_functions;
 mod interface_records;
 pub(super) use imported_functions::ImportedAbis;
