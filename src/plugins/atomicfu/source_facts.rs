@@ -6,6 +6,7 @@
 //! that uses an atomic in any form this implementation does not lower is rejected here, with the
 //! construct's position, so it is never compiled to a different program than kotlinc's.
 
+use crate::compilation_target::CompilationTarget;
 use crate::diag::Span;
 use crate::fx_hash::HashMap;
 use crate::ir::{for_each_child, Callee, ClassId, ExprId, IrCheckedOperation, IrExpr, IrFile};
@@ -150,6 +151,7 @@ pub(super) fn record(
     runtime: &mut dyn PluginRuntime,
     rejections: &mut Vec<PluginRejection>,
     release: Option<PluginRelease>,
+    target: Option<CompilationTarget>,
 ) {
     let mut recorder = Recorder {
         ir,
@@ -157,6 +159,7 @@ pub(super) fn record(
         runtime,
         rejections,
         release,
+        target,
         updaters: Vec::new(),
         by_property: HashMap::default(),
         bound: HashMap::default(),
@@ -179,6 +182,7 @@ struct Recorder<'a, 'b> {
     runtime: &'a mut dyn PluginRuntime,
     rejections: &'a mut Vec<PluginRejection>,
     release: Option<PluginRelease>,
+    target: Option<CompilationTarget>,
     updaters: Vec<FieldUpdater>,
     /// Each lowered atomic by its checked identity.
     by_property: HashMap<crate::ir::PropertyId, usize>,
@@ -187,6 +191,13 @@ struct Recorder<'a, 'b> {
 }
 
 impl Recorder<'_, '_> {
+    /// The JVM field-updater representation: the compilation is for the JVM and
+    /// `java.util.concurrent.atomic` provides `value`'s updater class.
+    fn jvm_field_updaters(&self, value: AtomicValue) -> bool {
+        self.target == Some(CompilationTarget::Jvm)
+            && self.runtime.classifier(value.updater()).is_some()
+    }
+
     fn reject(&mut self, span: Option<Span>, what: &str) {
         self.rejections.push(PluginRejection {
             span: span.unwrap_or(Span::new(0, 0)),
@@ -334,17 +345,16 @@ impl Recorder<'_, '_> {
                 self.reject(span, "an atomic property not initialized by atomic(value)");
                 continue;
             };
-            let updater = value.updater();
-            // Field updaters are the only representation this plugin lowers. Absence of
-            // `java.util.concurrent.atomic` does not mean plain loads and stores implement the
-            // target's atomic operations.
-            if self.runtime.classifier(updater).is_none() {
+            // Field updaters are selected for a JVM compilation that has them. Every other
+            // compilation is rejected with a diagnostic.
+            if !self.jvm_field_updaters(value) {
                 self.reject(
                     span,
                     "an atomic property without the JVM field-updater representation",
                 );
                 continue;
             }
+            let updater = value.updater();
             let Some(new_updater) = self.bind(
                 RuntimeDeclaration::Static(updater),
                 "newUpdater",

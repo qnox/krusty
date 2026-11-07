@@ -27,6 +27,7 @@
 //!   - an `-Xplugin` jar krusty neither reimplements nor can host (any third-party FIR/IR plugin)
 //!     → ERROR. Silently ignoring it would emit wrong bytecode, so a drop-in must fail loudly.
 
+use crate::compilation_target::CompilationTarget;
 use crate::plugins::allopen::AllOpenPlugin;
 use crate::plugins::assignment::AssignmentPlugin;
 use crate::plugins::atomicfu::AtomicfuPlugin;
@@ -55,7 +56,8 @@ pub struct Activation<'a> {
 /// Builds the native `IrPlugin` for an extension, configured from the activation context and the
 /// release of the compiler-plugin jar that activated it (see [`declared_release`]), when one did.
 /// The options are the ones configuring that extension, from either syntax.
-type NativeBuilder = fn(&Activation, Option<&str>, &[PluginOption]) -> Box<dyn IrPlugin>;
+type NativeBuilder =
+    fn(&Activation, Option<&str>, &[PluginOption], Option<CompilationTarget>) -> Box<dyn IrPlugin>;
 
 /// What a registered extension *is* to krusty.
 pub enum ExtensionKind {
@@ -275,6 +277,9 @@ pub struct NativePlugins {
     /// The reference compiler's release, which is the release of every plugin it bundles. It
     /// stands in for an extension activated without a jar that declares its own release.
     reference_release: Option<String>,
+    /// The compilation these extensions were stamped for. A plugin reads it when it selects a
+    /// target representation.
+    compilation_target: Option<CompilationTarget>,
 }
 
 #[derive(Clone, Debug)]
@@ -295,6 +300,16 @@ impl NativePlugins {
             config: PluginConfig::none(),
             classpath: Vec::new(),
             reference_release: None,
+            compilation_target: None,
+        }
+    }
+
+    /// Record the compilation these extensions run in, so a plugin can select its target
+    /// representation.
+    pub fn with_compilation_target(self, target: CompilationTarget) -> Self {
+        Self {
+            compilation_target: Some(target),
+            ..self
         }
     }
 
@@ -334,6 +349,7 @@ impl NativePlugins {
                     .as_deref()
                     .or(self.reference_release.as_deref()),
                 &native.options,
+                self.compilation_target,
             ));
         }
         host
@@ -359,6 +375,7 @@ fn build_compose(
     _act: &Activation,
     _release: Option<&str>,
     options: &[PluginOption],
+    _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     Box::new(ComposePlugin::new(ComposeOptions::from_options(options)))
 }
@@ -367,6 +384,7 @@ fn build_serialization(
     act: &Activation,
     release: Option<&str>,
     _options: &[PluginOption],
+    _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     let abi = SerializationAbi::from_classpath(act.classpath).unwrap_or_default();
     Box::new(
@@ -380,6 +398,7 @@ fn build_allopen(
     _act: &Activation,
     _release: Option<&str>,
     options: &[PluginOption],
+    _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     Box::new(AllOpenPlugin::from_options(options))
 }
@@ -389,6 +408,7 @@ fn build_noarg(
     _act: &Activation,
     _release: Option<&str>,
     options: &[PluginOption],
+    _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     Box::new(NoArgPlugin::from_options(options))
 }
@@ -398,6 +418,7 @@ fn build_sam_with_receiver(
     _act: &Activation,
     _release: Option<&str>,
     options: &[PluginOption],
+    _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     Box::new(SamWithReceiverPlugin::from_options(options))
 }
@@ -408,8 +429,12 @@ fn build_atomicfu(
     _act: &Activation,
     release: Option<&str>,
     _options: &[PluginOption],
+    target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(AtomicfuPlugin::new(release.and_then(PluginRelease::parse)))
+    Box::new(AtomicfuPlugin::new(
+        release.and_then(PluginRelease::parse),
+        target,
+    ))
 }
 
 /// Build the native assignment plugin from the compilation's options for it.
@@ -417,6 +442,7 @@ fn build_assignment(
     _act: &Activation,
     _release: Option<&str>,
     options: &[PluginOption],
+    _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     Box::new(AssignmentPlugin::from_options(options))
 }
@@ -566,6 +592,7 @@ impl PluginRegistry {
             config: act.config.clone(),
             classpath: act.classpath.to_vec(),
             reference_release: None,
+            compilation_target: None,
         };
         let mut ksp_active = false;
         let mut diagnostics = Vec::new();
@@ -1391,7 +1418,12 @@ mod tests {
     fn third_party_native_extension_can_be_registered() {
         // The registry is OPEN: registering a new native extension makes krusty honor its plugin —
         // proving registration is general, not hardcoded to the two builtins.
-        fn build_noop(_: &Activation, _: Option<&str>, _: &[PluginOption]) -> Box<dyn IrPlugin> {
+        fn build_noop(
+            _: &Activation,
+            _: Option<&str>,
+            _: &[PluginOption],
+            _: Option<CompilationTarget>,
+        ) -> Box<dyn IrPlugin> {
             struct NoOp;
             impl IrPlugin for NoOp {
                 fn name(&self) -> &str {

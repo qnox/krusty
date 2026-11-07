@@ -7,29 +7,34 @@
 //!
 //! The work is split at the frontend/backend handoff. [`source_facts`] classifies the file's
 //! atomics and the operations on them while their checked identities are still at hand, rejects
-//! every form this implementation does not cover yet, and selects the JVM field-updater
-//! declarations the generated code calls. That is the only representation this plugin lowers. A
-//! compilation that does not have it is rejected; missing `java.util.concurrent.atomic` classes
-//! are not rewritten to plain field reads and writes. [`field_updaters`] then rewrites the JVM
-//! backend's IR. The class's Kotlin metadata is recorded before either runs, so it keeps the
-//! declared atomic property, as kotlinc's does.
+//! every form this implementation does not cover yet, and selects the representation the
+//! compilation's target supports. A JVM compilation whose `java.util.concurrent.atomic` field
+//! updaters are present lowers through those. Any other target is rejected with a diagnostic.
+//! [`field_updaters`] then rewrites the JVM backend's IR. The
+//! class's Kotlin metadata is recorded before either runs, so it keeps the declared atomic
+//! property, as kotlinc's does.
 
 mod field_updaters;
 mod source_facts;
 
 pub use source_facts::AtomicfuFileFacts;
 
+use crate::compilation_target::CompilationTarget;
 use crate::ir::IrFile;
 use crate::plugins::runtime_declarations::PluginRuntime;
 use crate::plugins::{IrPlugin, PluginContext, PluginRejection, PluginSourceView};
 
 pub struct AtomicfuPlugin {
     release: Option<crate::plugins::PluginRelease>,
+    target: Option<CompilationTarget>,
 }
 
 impl AtomicfuPlugin {
-    pub fn new(release: Option<crate::plugins::PluginRelease>) -> Self {
-        Self { release }
+    pub fn new(
+        release: Option<crate::plugins::PluginRelease>,
+        target: Option<CompilationTarget>,
+    ) -> Self {
+        Self { release, target }
     }
 }
 
@@ -45,7 +50,7 @@ impl IrPlugin for AtomicfuPlugin {
         runtime: &mut dyn PluginRuntime,
         rejections: &mut Vec<PluginRejection>,
     ) {
-        source_facts::record(ir, source, runtime, rejections, self.release);
+        source_facts::record(ir, source, runtime, rejections, self.release, self.target);
     }
 
     fn transform_bodies(&self, ir: &mut IrFile, _ctx: &PluginContext) {

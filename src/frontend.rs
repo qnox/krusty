@@ -936,7 +936,7 @@ impl PlatformProvider {
     /// Run `native_plugins` in this analysis and in the emission that consumes it.
     pub fn with_native_plugins(self, native_plugins: NativePlugins) -> Self {
         Self {
-            native_plugins,
+            native_plugins: native_plugins.with_compilation_target(self.target),
             ..self
         }
     }
