@@ -40,7 +40,29 @@ fn function(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum RootCase {
+    Known,
+    Absent,
+    Ambiguous,
+    BadKnownReturn,
+    BadKnownKind,
+    PrivateKnown,
+    InterfaceKnown,
+    ValueKnown,
+    BadSignature,
+    BadMask,
+    BadKind,
+    Argument,
+    TypeArgument,
+    ForeignInitializer,
+}
+
 fn fixture(bad_initializer: bool) -> Fixture {
+    fixture_with_root(bad_initializer, RootCase::Known)
+}
+
+fn fixture_with_root(bad_initializer: bool, root: RootCase) -> Fixture {
     let prototype = demo(&[("seed", &[T::Int, T::Int], T::Unit)], |_, _| {
         Some(Vec::new())
     });
@@ -131,18 +153,70 @@ fn fixture(bad_initializer: bool) -> Fixture {
             })
         })
         .collect::<Vec<_>>();
+    let mut access = KlibIrMemberAccess {
+        symbol: public_symbol(KlibIrSymbolKind::Constructor, any_signature.clone()),
+        arguments: KlibIrArguments::Flat(Vec::new()),
+        type_arguments: Vec::new(),
+        origin: None,
+    };
+    match root {
+        RootCase::BadSignature => {
+            access.symbol.signature = KlibIrSignature::Public(
+                operator(&["kotlin"], Some("Any"), "<init>", &[T::Int.kotlin()]).0,
+            )
+        }
+        RootCase::BadMask => {
+            use crate::metadata::id_signature::{
+                callable_signature, CallableShape, ClassScope, DeclarationContainer, Placement,
+            };
+            access.symbol.signature = KlibIrSignature::Public(
+                callable_signature(
+                    DeclarationContainer::<crate::metadata::semantic::KotlinType> {
+                        package: &["kotlin".into()],
+                        classes: &[ClassScope {
+                            name: "Any",
+                            type_parameters: Vec::new(),
+                            expect: true,
+                        }],
+                        native_interop_library: false,
+                    },
+                    &CallableShape {
+                        name: "<init>",
+                        contexts: Vec::new(),
+                        receiver: None,
+                        params: Vec::new(),
+                        vararg: None,
+                        type_parameters: Vec::new(),
+                        expect: false,
+                        placement: Placement::Ordinary,
+                    },
+                )
+                .unwrap(),
+            );
+        }
+        RootCase::BadKind => access.symbol.kind = KlibIrSymbolKind::Function,
+        RootCase::Argument => {
+            access.arguments = KlibIrArguments::Flat(vec![Some(
+                arena.push_expr(Some(int), KlibIrExprKind::Const(KlibIrConstant::Int(1))),
+            )])
+        }
+        RootCase::TypeArgument => access.type_arguments.push(Some(int)),
+        _ => {}
+    }
     let delegate = arena.push_expr(
         Some(unit),
-        KlibIrExprKind::DelegatingConstructorCall(KlibIrMemberAccess {
-            symbol: public_symbol(KlibIrSymbolKind::Constructor, any_signature.clone()),
-            arguments: KlibIrArguments::Flat(Vec::new()),
-            type_arguments: Vec::new(),
-            origin: None,
-        }),
+        KlibIrExprKind::DelegatingConstructorCall(access),
     );
     let initialize = arena.push_expr(
         Some(unit),
-        KlibIrExprKind::InstanceInitializerCall(class_symbol.clone()),
+        KlibIrExprKind::InstanceInitializerCall(if matches!(root, RootCase::ForeignInitializer) {
+            public_symbol(
+                KlibIrSymbolKind::Class,
+                KlibPublicIdSignature::classifier(type_name("demo/Other")),
+            )
+        } else {
+            class_symbol.clone()
+        }),
     );
     let constructor_function = arena.push_function(function(
         public_symbol(KlibIrSymbolKind::Constructor, signature),
@@ -182,32 +256,6 @@ fn fixture(bad_initializer: bool) -> Fixture {
     let class_tree = KlibIrDeclarationTree {
         arena,
         declaration: KlibIrMember::Class(class),
-    };
-    let mut any_arena = KlibIrArena::default();
-    let any_type = any_arena.push_type(T::Any.klib());
-    let any_constructor = any_arena.push_function(function(
-        public_symbol(KlibIrSymbolKind::Constructor, any_signature),
-        "<init>",
-        Vec::new(),
-        any_type,
-        None,
-    ));
-    let any_class = any_arena.push_class(KlibIrClass {
-        base: base(public_symbol(
-            KlibIrSymbolKind::Class,
-            KlibPublicIdSignature::classifier(crate::types::wk::any()),
-        )),
-        name: "Any".into(),
-        this_receiver: None,
-        type_parameters: Vec::new(),
-        supertypes: Vec::new(),
-        members: vec![KlibIrMember::Function(any_constructor)],
-        value_class_representation: None,
-        sealed_subclasses: Vec::new(),
-    });
-    let any_tree = KlibIrDeclarationTree {
-        arena: any_arena,
-        declaration: KlibIrMember::Class(any_class),
     };
     let mut arena = KlibIrArena::default();
     let int = arena.push_type(T::Int.klib());
@@ -298,16 +346,281 @@ fn fixture(bad_initializer: bool) -> Fixture {
         .dependency_callable
         .as_ref()
         .map(|i| i.declaration.clone());
-    let bodies = KlibDeclarationBodies::from_libraries(vec![(
+    let mut trees = vec![class_tree, factory_tree];
+    if !matches!(root, RootCase::Absent | RootCase::Ambiguous) {
+        trees.push(root_tree(any_signature.clone(), root));
+    }
+    let mut libraries = vec![crate::klib_libraries::KlibBodyLibrary::new(
         "demo".into(),
-        KlibIrModuleTrees::from_trees(vec![class_tree, any_tree, factory_tree]).unwrap(),
-    )])
-    .unwrap();
+        if matches!(root, RootCase::Ambiguous) {
+            vec!["first".into(), "second".into()]
+        } else {
+            Vec::new()
+        },
+        KlibIrModuleTrees::from_trees(trees).unwrap(),
+    )];
+    if matches!(root, RootCase::Ambiguous) {
+        for module in ["first", "second"] {
+            libraries.push(crate::klib_libraries::KlibBodyLibrary::new(
+                module.into(),
+                Vec::new(),
+                KlibIrModuleTrees::from_trees(vec![root_tree(
+                    any_signature.clone(),
+                    RootCase::Known,
+                )])
+                .unwrap(),
+            ));
+        }
+    }
+    let bodies = KlibDeclarationBodies::from_body_libraries(libraries).unwrap();
     Fixture {
         constructor,
         factory,
         bodies,
     }
+}
+
+fn root_tree(signature: KlibPublicIdSignature, case: RootCase) -> KlibIrDeclarationTree {
+    let mut arena = KlibIrArena::default();
+    let any = arena.push_type(T::Any.klib());
+    let result = if matches!(case, RootCase::BadKnownReturn) {
+        arena.push_type(T::Unit.klib())
+    } else {
+        any
+    };
+    let mut header = function(
+        public_symbol(KlibIrSymbolKind::Constructor, signature),
+        "<init>",
+        Vec::new(),
+        result,
+        None,
+    );
+    if matches!(case, RootCase::BadKnownKind) {
+        header.constructor = false;
+    }
+    if matches!(case, RootCase::PrivateKnown) {
+        header.base.flags = 2;
+        assert_eq!(
+            crate::metadata::semantic::declaration_visibility(header.base.flags),
+            Visibility::Private
+        );
+    }
+    let constructor = arena.push_function(header);
+    let mut class_base = base(public_symbol(
+        KlibIrSymbolKind::Class,
+        KlibPublicIdSignature::classifier(crate::types::wk::any()),
+    ));
+    if matches!(case, RootCase::InterfaceKnown) {
+        class_base.flags = 1 << 6;
+    }
+    if matches!(case, RootCase::ValueKnown) {
+        class_base.flags = 1 << 13;
+    }
+    let class = arena.push_class(KlibIrClass {
+        base: class_base,
+        name: "Any".into(),
+        this_receiver: None,
+        type_parameters: Vec::new(),
+        supertypes: Vec::new(),
+        members: vec![KlibIrMember::Function(constructor)],
+        value_class_representation: None,
+        sealed_subclasses: Vec::new(),
+    });
+    KlibIrDeclarationTree {
+        arena,
+        declaration: KlibIrMember::Class(class),
+    }
+}
+
+#[test]
+fn compiler_root_construction_needs_no_serialized_body_and_keeps_the_initializer_plan() {
+    let f = fixture_with_root(false, RootCase::Absent);
+    let selected = f.constructor.klib_body_callable().unwrap();
+    let facts = KlibCalleeFacts::new([selected]);
+    assert_eq!(
+        facts
+            .constructor_initialization_callees(selected.identity(), &f.bodies)
+            .unwrap(),
+        Some(Vec::new())
+    );
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_root_with_intrinsics_and_externals(
+        selected,
+        &f.bodies,
+        &facts,
+        crate::klib_libraries::KlibIntrinsicFacts::empty(),
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(unit.allocating_constructors().count(), 1);
+    let fields = unit
+        .ir()
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::SetField {
+                index,
+                receiver,
+                value,
+                ..
+            } => Some((*index, *receiver, *value)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fields.len(), 2);
+    for (slot, (field, receiver, value)) in fields.iter().enumerate() {
+        assert_eq!(*field, slot as u32);
+        assert!(matches!(unit.ir().expr(*receiver), IrExpr::GetValue(0)));
+        assert!(
+            matches!(unit.ir().expr(*value), IrExpr::GetValue(index) if *index == slot as u32 + 1)
+        );
+    }
+}
+
+#[test]
+fn root_construction_rejects_ambiguous_origins_bad_headers_and_noncanonical_call_sites() {
+    for case in [
+        RootCase::Ambiguous,
+        RootCase::BadKnownReturn,
+        RootCase::BadKnownKind,
+        RootCase::PrivateKnown,
+        RootCase::InterfaceKnown,
+        RootCase::ValueKnown,
+        RootCase::BadSignature,
+        RootCase::BadMask,
+        RootCase::BadKind,
+        RootCase::Argument,
+        RootCase::TypeArgument,
+        RootCase::ForeignInitializer,
+    ] {
+        let f = fixture_with_root(false, case);
+        let selected = f.constructor.klib_body_callable().unwrap();
+        let facts = KlibCalleeFacts::new([selected]);
+        assert!(
+            facts
+                .constructor_initialization_callees(selected.identity(), &f.bodies)
+                .is_err(),
+            "{case:?}"
+        );
+        let mut unit = DependencyBodyUnit::default();
+        assert!(
+            unit.lower_root_with_intrinsics_and_externals(
+                selected,
+                &f.bodies,
+                &facts,
+                crate::klib_libraries::KlibIntrinsicFacts::empty(),
+                &Default::default()
+            )
+            .is_err(),
+            "{case:?}"
+        );
+        assert_unit_is_empty(&unit);
+    }
+}
+
+fn frozen_root(fixture: &Fixture) -> BackendCallableFact {
+    let mut root = fixture.constructor.clone();
+    let signature = operator(&["kotlin"], Some("Any"), "<init>", &[]).0;
+    let owner = crate::types::wk::any();
+    root.params.clear();
+    root.physical_params.clear();
+    root.parameter_identities = Box::default();
+    root.klib_body_parameter_defaults = Some(crate::libraries::ParamFlags::new());
+    root.declaration_owner = Some(crate::types::SemanticCallableOwner::Classifier(owner));
+    root.dependency_callable = Some(KlibDependencyCallable {
+        module: "demo".into(),
+        declaration: KlibDeclarationSignature::Public(signature.clone()),
+    });
+    root.declaration_signature = Some(KlibDeclarationSignature::Public(signature.clone()));
+    let class = root.klib_body_class_contract.as_mut().unwrap();
+    class.classifier = owner;
+    class.signature = KlibPublicIdSignature::classifier(owner);
+    class.primary_constructor = Some(signature);
+    class.modality = KotlinModality::Open;
+    root
+}
+
+#[test]
+fn frozen_root_headers_remain_validated_without_becoming_call_or_export_obligations() {
+    let f = fixture_with_root(false, RootCase::Absent);
+    let selected = f.constructor.klib_body_callable().unwrap();
+    let root = frozen_root(&f);
+    let declaration = root.klib_body_callable().unwrap();
+    let facts = KlibCalleeFacts::with_declarations([selected], [declaration]);
+    assert!(!facts.is_selected(declaration.identity()));
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_root_with_intrinsics_and_externals(
+        selected,
+        &f.bodies,
+        &facts,
+        crate::klib_libraries::KlibIntrinsicFacts::empty(),
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(unit.allocating_constructors().count(), 1);
+    assert_eq!(unit.ir().classes.len(), 1);
+    assert_eq!(unit.ir().classes[0].fq_name_id(), type_name("demo/Act"));
+    assert_eq!(unit.callable_functions().count(), 0);
+    for case in 0..8 {
+        let mut invalid = root.clone();
+        match case {
+            0 => invalid.ret = Ty::Int,
+            1 => invalid.kind = ExternalCallableKind::TopLevel,
+            2 => {
+                invalid.declaration_owner = Some(crate::types::SemanticCallableOwner::Classifier(
+                    type_name("demo/Other"),
+                ))
+            }
+            3 => {
+                invalid.klib_body_parameter_defaults =
+                    Some(crate::libraries::ParamFlags::repeat(false, 1))
+            }
+            4 => invalid.context_count = 1,
+            5 => invalid.klib_body_class_contract.as_mut().unwrap().module = "other".into(),
+            6 => {
+                invalid
+                    .klib_body_declaration_modifiers
+                    .as_mut()
+                    .unwrap()
+                    .is_suspend = true
+            }
+            _ => invalid.compiler_intrinsic = Some(crate::libraries::CompilerIntrinsic::StringPlus),
+        }
+        let bad = invalid.klib_body_callable().unwrap();
+        for declarations in [vec![bad], vec![declaration, bad]] {
+            let facts = KlibCalleeFacts::with_declarations([selected], declarations);
+            assert!(
+                facts
+                    .constructor_initialization_callees(selected.identity(), &f.bodies)
+                    .is_err(),
+                "case {case}"
+            );
+            let mut unit = DependencyBodyUnit::default();
+            assert!(
+                unit.lower_root_with_intrinsics_and_externals(
+                    selected,
+                    &f.bodies,
+                    &facts,
+                    crate::klib_libraries::KlibIntrinsicFacts::empty(),
+                    &Default::default()
+                )
+                .is_err(),
+                "case {case}"
+            );
+            assert_unit_is_empty(&unit);
+        }
+    }
+    let mut unrelated = root.clone();
+    unrelated.dependency_callable.as_mut().unwrap().module = "unrelated".into();
+    unrelated.ret = Ty::Int;
+    let facts =
+        KlibCalleeFacts::with_declarations([selected], [unrelated.klib_body_callable().unwrap()]);
+    assert_eq!(
+        facts
+            .constructor_initialization_callees(selected.identity(), &f.bodies)
+            .unwrap(),
+        Some(Vec::new())
+    );
 }
 
 #[test]

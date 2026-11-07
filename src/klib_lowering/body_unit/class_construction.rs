@@ -14,7 +14,11 @@ impl<'u, 's> Linker<'u, 's> {
         if self.classes.contains_key(identity) {
             return Ok(());
         }
-        let Some(plan) = super::super::class_initialization::plan(selected, self.sources.bodies)?
+        let Some(plan) = super::super::class_initialization::plan(
+            selected,
+            self.sources.bodies,
+            self.sources.callees,
+        )?
         else {
             return Ok(());
         };
