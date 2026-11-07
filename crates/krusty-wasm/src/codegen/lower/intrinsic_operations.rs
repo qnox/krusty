@@ -5,6 +5,30 @@
 
 use super::*;
 
+/// A closed target operation, shared by dependency-root admission and ordinary-call emission.
+/// Frozen provider facts, not a callable spelling, grant this realization.
+pub(super) fn member_operation(
+    operation: krusty::libraries::CompilerIntrinsic,
+) -> Option<IrIntrinsic> {
+    match operation {
+        krusty::libraries::CompilerIntrinsic::StringGet => Some(IrIntrinsic::StringGet),
+        _ => None,
+    }
+}
+
+pub(super) fn string_get_frame(
+    params: &[Ty],
+    ret: Ty,
+    defaults: &[u32],
+    extension: Option<u32>,
+) -> Result<(), Unsupported> {
+    if params == [Ty::Int] && ret == Ty::Char && defaults.is_empty() && extension.is_none() {
+        Ok(())
+    } else {
+        Err("an authenticated string read with a mismatched call frame".into())
+    }
+}
+
 impl Body<'_> {
     pub(super) fn intrinsic(
         &mut self,
@@ -168,3 +192,6 @@ impl Body<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;
