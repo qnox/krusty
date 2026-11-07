@@ -64,3 +64,79 @@ impl IrLocalPropertyLayout {
         getter.into_iter().chain(setter)
     }
 }
+
+impl super::IrFile {
+    /// The selected declaration's layout at this operation's recorded dispatch classifier.
+    /// An anonymous-class specialization preserves property order and clones its accessors;
+    /// its source chain authenticates that projection without resolving a property by spelling.
+    pub(crate) fn property_layout_at(
+        &self,
+        operation: super::ExprId,
+        target: crate::fir::PropertyId,
+    ) -> Result<Option<IrLocalPropertyLayout>, crate::fir::PropertyId> {
+        let Some(mut layout) = self.local_property_layouts.get(&target).cloned() else {
+            return Ok(None);
+        };
+        let IrLocalPropertyLayout::Member {
+            class, property, ..
+        } = &layout
+        else {
+            return Ok(Some(layout));
+        };
+        let (declared, index) = (*class, *property);
+        let Some(dispatch) = self.dispatch_classes.get(&operation) else {
+            return Ok(Some(layout));
+        };
+        let actual = self.class_id_by_name(*dispatch).ok_or(target)?;
+        if actual != declared && !self.specialized_anonymous_classes.contains_key(&actual) {
+            // An ordinary inherited property retains its selected declaration's layout.
+            return Ok(Some(layout));
+        }
+        let mut current = actual;
+        let mut seen = crate::fx_hash::HashSet::default();
+        while current != declared {
+            if !seen.insert(current) {
+                return Err(target);
+            }
+            let copy = self
+                .specialized_anonymous_classes
+                .get(&current)
+                .ok_or(target)?;
+            self.classes.get(copy.source as usize).ok_or(target)?;
+            current = copy.source;
+        }
+        if actual == declared {
+            return Ok(Some(layout));
+        }
+        let class = self.classes.get(actual as usize).ok_or(target)?;
+        let copied = class.properties.get(index as usize).ok_or(target)?;
+        let IrLocalPropertyLayout::Member {
+            class: owner_class,
+            owner,
+            backing_field,
+            getter,
+            setter,
+            name,
+            ty,
+            mutable,
+            private,
+            ..
+        } = &mut layout
+        else {
+            unreachable!()
+        };
+        *owner_class = actual;
+        *owner = class.fq_name;
+        *backing_field = copied.backing_field;
+        *getter = copied.getter;
+        *setter = copied.setter;
+        *name = copied.name.clone();
+        *ty = copied.ty;
+        *mutable = copied.is_var;
+        *private = copied.is_private;
+        Ok(Some(layout))
+    }
+}
+
+#[cfg(test)]
+mod tests;

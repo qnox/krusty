@@ -11,17 +11,22 @@ impl Emitter<'_> {
     /// consume that backend table directly instead of recovering the property from its spelling.
     pub(super) fn local_property_read_access(
         &self,
+        operation: crate::ir::ExprId,
         target: crate::fir::PropertyId,
         selected_accessor: Option<&str>,
         selected_interface: bool,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
+        let layout = self
+            .ir
+            .property_layout_at(operation, target)
+            .expect("a realized property retains its checked specialization")?;
         let crate::ir::IrLocalPropertyLayout::Member {
             class,
             owner,
             name,
             property,
             ..
-        } = self.ir.local_property_layouts.get(&target)?
+        } = &layout
         else {
             return None;
         };
@@ -323,15 +328,20 @@ impl Emitter<'_> {
 
     pub(super) fn local_property_write_access(
         &self,
+        operation: crate::ir::ExprId,
         target: crate::fir::PropertyId,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
+        let layout = self
+            .ir
+            .property_layout_at(operation, target)
+            .expect("a realized property retains its checked specialization")?;
         let crate::ir::IrLocalPropertyLayout::Member {
             class,
             owner,
             name,
             property,
             ..
-        } = self.ir.local_property_layouts.get(&target)?
+        } = &layout
         else {
             return None;
         };
@@ -612,4 +622,38 @@ fn annotation_member_descriptor(
     let stored =
         crate::jvm::annotation_kclass::annotation_member_jvm_type(jvm_declared_ty(&result));
     method_descriptor(&crate::jvm::method_descriptors::jvm_tys(parameters), stored)
+}
+
+impl Emitter<'_> {
+    pub(super) fn property_realization_read_access(
+        &self,
+        realization: &crate::jvm::property_realizations::PropertyRealization,
+        operation: crate::ir::ExprId,
+        selected_accessor: Option<&str>,
+        interface: bool,
+    ) -> Option<crate::jvm::inline::PropertyAccess> {
+        match realization {
+            crate::jvm::property_realizations::PropertyRealization::Physical(access) => {
+                Some(access.clone())
+            }
+            crate::jvm::property_realizations::PropertyRealization::Local(target) => {
+                self.local_property_read_access(operation, *target, selected_accessor, interface)
+            }
+        }
+    }
+
+    pub(super) fn property_realization_write_access(
+        &self,
+        realization: &crate::jvm::property_realizations::PropertyRealization,
+        operation: crate::ir::ExprId,
+    ) -> crate::jvm::inline::PropertyAccess {
+        match realization {
+            crate::jvm::property_realizations::PropertyRealization::Physical(access) => {
+                access.clone()
+            }
+            crate::jvm::property_realizations::PropertyRealization::Local(target) => self
+                .local_property_write_access(operation, *target)
+                .expect("a realized local member property write has exact JVM access"),
+        }
+    }
 }
