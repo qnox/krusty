@@ -303,7 +303,7 @@ pub(super) fn emit_bridges(
     stub_bridges.emit_rest(c, cw);
     let inherited = &env.collection_members.inherited_bridges;
     for bridge in inherited.for_class(c.fq_name_id()) {
-        emit_inherited_collection_bridge(ir, c, cw, bridge);
+        emit_inherited_collection_bridge(ir, c, cw, env, bridge);
     }
 }
 
@@ -967,23 +967,33 @@ impl EntryHeader {
     ) -> Self {
         // The entry stands for the lowered member less its leading carrier: its signature is the
         // member's declared whole-frame shape (a vararg at its position in that frame, a boxed
-        // override result as its wrapper) without the carrier's element.
-        let signature = super::override_result_emission::declared_method_signature_parts(
+        // override result as its wrapper) without the carrier's element. The entry is the
+        // override the member backs, so a collection declaration's signature policy shapes it.
+        let signature = super::override_result_emission::value_class_entry_collection_signature(
             formatter,
             ir,
             env.override_results,
             member,
+            descriptor,
         )
-        .map(|mut parts| {
-            assert_eq!(
-                parts.parameters.len(),
-                entry.erased_params.len() + 1,
-                "a lowered value-class member signs its carrier ahead of the entry's parameters"
-            );
-            parts.parameters.remove(0);
-            parts.render()
-        })
-        .filter(|signature| signature != descriptor);
+        .unwrap_or_else(|| {
+            super::override_result_emission::declared_method_signature_parts(
+                formatter,
+                ir,
+                env.override_results,
+                member,
+            )
+            .map(|mut parts| {
+                assert_eq!(
+                    parts.parameters.len(),
+                    entry.erased_params.len() + 1,
+                    "a lowered value-class member signs its carrier ahead of the entry's parameters"
+                );
+                parts.parameters.remove(0);
+                parts.render()
+            })
+            .filter(|signature| signature != descriptor)
+        });
         let nullability = super::override_result_emission::declared_nullability(ir, env, member);
         let reflected = if env.java_parameters {
             crate::jvm::method_parameters::value_class_interface_entry(
@@ -1050,6 +1060,7 @@ fn emit_inherited_collection_bridge(
     ir: &IrFile,
     class: &crate::ir::IrClass,
     cw: &mut ClassWriter,
+    env: &EmitEnv<'_>,
     bridge: &crate::jvm::inherited_collection_bridges::InheritedCollectionBridge,
 ) {
     let params = jvm_tys(&bridge.parameters);
@@ -1069,9 +1080,13 @@ fn emit_inherited_collection_bridge(
         | crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Checked {
             signature,
             ..
-        } => signature.as_deref(),
+        } => signature.as_ref(),
     }
+    .and_then(|signature| {
+        JvmSignatureFormatter::new(ir, env).method_positions(&signature.parameters, &signature.result)
+    })
     .filter(|signature| *signature != descriptor);
+    let signature = signature.as_deref();
     if let crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Abstract {
         ..
     } = &bridge.body

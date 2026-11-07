@@ -22,22 +22,20 @@ use crate::jvm::jvm_class_map::{
     jvm_collection_to_kotlin_mutable_type_name, jvm_collection_to_kotlin_type_name,
     mapped_collection, to_jvm_type_name,
 };
-use crate::jvm::jvm_libraries::{declared_desc_to_ty, parse_method_gsig, signature_formals};
 use crate::jvm::mapped_builtin_declarations::{
     collection_bridge_policy_for_declaration, collection_signature_policy_for_declaration,
-    enhance_jdk_signature, is_mutable_only_jdk_method, realization_for_declaration,
-    CollectionBridgeFailure, CollectionBridgePolicy, CollectionSignaturePolicy,
+    realization_for_declaration, CollectionBridgeFailure, CollectionSignaturePolicy,
     MappedBuiltinMemberKind,
 };
 use crate::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
-use crate::jvm::names::{method_descriptor, parse_method_descriptor};
+use crate::jvm::names::method_descriptor;
 use crate::jvm::override_results::scalar_over_reference;
 use crate::jvm::value_classes::collection_stub_replacements::{
     collection_stub_realization, StubRealization,
 };
-use crate::types::{
-    ty_subst, ty_subst_applied_arguments, wk, CollectionKind, Ty, TypeName, Visibility,
-};
+use crate::types::{ty_subst, wk, CollectionKind, Ty, TypeName, Visibility};
+
+mod jdk_mutable_members;
 
 /// kotlinc's `preComputedStubs` order: a class's applicable faces contribute their stubs in this
 /// order.
@@ -52,7 +50,7 @@ const FACE_ORDER: [CollectionKind; 8] = [
     CollectionKind::ListIterator,
 ];
 
-/// The faces whose stubs are realized. `Iterable` has no mutable member of its own.
+/// The faces whose stubs are realized. The `toArray` lowering is not yet realized for any face.
 const REALIZED_FACES: [CollectionKind; 7] = [
     CollectionKind::Collection,
     CollectionKind::Set,
@@ -203,6 +201,14 @@ impl ReadOnlyStub {
                 }
             })
             .collect()
+    }
+
+    /// The mutable declaration's erased JVM descriptor: its bridge's, or the stub's own.
+    fn erased_descriptor(&self) -> String {
+        self.bridge.as_ref().map_or_else(
+            || self.descriptor(),
+            |(parameters, result)| method_descriptor(parameters, *result),
+        )
     }
 
     /// The JVM result of the stub's own descriptor.
@@ -620,117 +626,9 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
         }
     }
     stubs.sort_by_key(|stub| names.iter().position(|name| *name == stub.name));
-    let jdk_stubs = mutable_jdk_stubs(classpath, face, arguments, &stubs);
-    stubs.extend(jdk_stubs);
+    let jdk = jdk_mutable_members::jdk_mutable_stubs(classpath, face, arguments, &stubs);
+    stubs.extend(jdk);
     stubs
-}
-
-/// kotlinc's candidates from the mutable face's JDK interface: each method that interface declares
-/// which only the mutable face carries (`List.sort`, `Map.putIfAbsent`), in classfile order after
-/// the builtin members, unless a builtin member already stands for it (`MutableMap.remove(K, V)`).
-/// The declared signature takes kotlinc's predefined enhancement of each position before the face's
-/// arguments are substituted (`merge` of a `Map<String, S?>` takes an `S` and returns an `S?`).
-/// Apart from that, a reference slot holding a scalar stays its wrapper on the JVM
-/// (`putIfAbsent(K, V)` is `(Integer, Integer)` for `Map<Int, Int>`), and the stub's bridge is the
-/// JDK method's own descriptor when that differs.
-fn mutable_jdk_stubs(
-    classpath: &Classpath,
-    face: Face,
-    arguments: &[Ty],
-    builtin: &[ReadOnlyStub],
-) -> Vec<ReadOnlyStub> {
-    let jvm_owner = to_jvm_type_name(face.mutable);
-    let Some(interface) = classpath.find_name(jvm_owner) else {
-        return Vec::new();
-    };
-    let formals = interface
-        .signature
-        .as_deref()
-        .map(signature_formals)
-        .unwrap_or_default();
-    if formals.len() != arguments.len() {
-        return Vec::new();
-    }
-    let bindings: HashMap<String, Ty> =
-        formals.into_iter().zip(arguments.iter().copied()).collect();
-    interface
-        .methods
-        .iter()
-        .filter(|method| {
-            method.access & ACC_STATIC == 0
-                && is_mutable_only_jdk_method(jvm_owner, &method.name, &method.descriptor)
-                && !builtin.iter().any(|stub| {
-                    stub.physical_name == method.name
-                        && (stub.descriptor() == method.descriptor
-                            || stub.bridge.as_ref().is_some_and(|(parameters, result)| {
-                                method_descriptor(parameters, *result) == method.descriptor
-                            }))
-                })
-        })
-        .filter_map(|method| {
-            let (erased_parameters, erased_result) = parse_method_descriptor(&method.descriptor)?;
-            let erased_parameters: Vec<Ty> = erased_parameters
-                .into_iter()
-                .map(declared_desc_to_ty)
-                .collect();
-            let erased_result = declared_desc_to_ty(erased_result);
-            let (declared_parameters, declared_result) = match method.signature.as_deref() {
-                Some(signature) => {
-                    let declared = parse_method_gsig(signature)?;
-                    (declared.params, declared.ret)
-                }
-                None => (erased_parameters.clone(), erased_result),
-            };
-            let (enhanced_parameters, enhanced_result) = enhance_jdk_signature(
-                jvm_owner,
-                &method.name,
-                &method.descriptor,
-                &declared_parameters,
-                declared_result,
-            );
-            let parameters: Vec<Ty> = enhanced_parameters
-                .iter()
-                .map(|ty| ty_subst_applied_arguments(*ty, &bindings))
-                .collect();
-            let result = ty_subst_applied_arguments(enhanced_result, &bindings);
-            let boxed_parameters = parameters
-                .iter()
-                .zip(&declared_parameters)
-                .map(|(&parameter, &declared)| scalar_over_reference(parameter, declared))
-                .collect();
-            let boxed_result = scalar_over_reference(result, declared_result);
-            let erased_parameters = jvm_tys(&erased_parameters);
-            let erased_result = jvm_declared_ty(&erased_result);
-            let mut stub = ReadOnlyStub {
-                name: method.name.clone(),
-                physical_name: method.name.clone(),
-                realized: StubRealization {
-                    name: method.name.clone(),
-                    parameters: Vec::new(),
-                    result: Ty::Unit,
-                    result_box: None,
-                },
-                body: StubBody::Throwing,
-                parameter_names: (0..parameters.len())
-                    .map(crate::jvm::parameter_names::unnamed_java_parameter)
-                    .collect(),
-                override_parameters: parameters.clone(),
-                parameters,
-                boxed_parameters,
-                result,
-                boxed_result,
-                declaration_site_wildcards: false,
-                bridge: None,
-                type_safe: false,
-                barrier: None,
-            };
-            stub.realized.parameters = stub.physical_parameters();
-            stub.realized.result = stub.physical_result();
-            stub.bridge = (method.descriptor != stub.descriptor())
-                .then_some((erased_parameters, erased_result));
-            Some(stub)
-        })
-        .collect()
 }
 
 /// Whether the JDK on the classpath declares a `@PlatformDependent` member of the face's mutable
@@ -1096,8 +994,8 @@ fn superclass_chain(
                         method.descriptor
                     ))
                 };
-                let declaration = info
-                    .meta
+                let declaration = classpath
+                    .class_members(&info)
                     .class_functions
                     .iter()
                     .find(|declaration| {
@@ -1149,17 +1047,19 @@ fn superclass_chain(
                 // does not tell. A generated member has no declaration and only its descriptor.
                 // A suspend declaration's continuation is a real parameter its metadata signature
                 // omits, so it keeps its physical key and implements no non-suspend member.
-                let declaration = (is_kotlin
-                    && candidates.iter().any(|stub| stub.name == method.name))
-                .then(|| {
-                    info.meta.class_functions.iter().find(|declaration| {
-                        declaration.jvm_name == method.name
-                            && declaration.jvm_desc == Some(method.descriptor.as_str())
-                    })
-                })
-                .flatten()
-                .filter(|declaration| !declaration.is_suspend())
-                .and_then(|declaration| declaration.generic_sig.as_ref());
+                let declaration =
+                    (is_kotlin && candidates.iter().any(|stub| stub.name == method.name))
+                        .then(|| {
+                            classpath.class_members(&info).class_functions.iter().find(
+                                |declaration| {
+                                    declaration.jvm_name == method.name
+                                        && declaration.jvm_desc == Some(method.descriptor.as_str())
+                                },
+                            )
+                        })
+                        .flatten()
+                        .filter(|declaration| !declaration.is_suspend())
+                        .and_then(|declaration| declaration.generic_sig.as_ref());
                 let (key, result) = match declaration {
                     Some(signature) => {
                         let bindings = superclass_bindings(

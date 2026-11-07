@@ -355,12 +355,8 @@ fn a_narrower_remove_at_keeps_its_erased_remove_bridge_like_kotlinc() {
             "public final java.lang.String remove(int);",
             "public java.lang.Object remove(int);",
         ],
-        // The `Any` spellings of the later realizations.
-        &[
-            "public boolean containsAll(java.util.Collection<? extends java.lang.Object>);",
-            "public void replaceAll(java.util.function.UnaryOperator<java.lang.Object>);",
-            "public void sort(java.util.Comparator<? super java.lang.Object>);",
-        ],
+        // The `Any` spelling of a later realization.
+        &["public boolean containsAll(java.util.Collection<? extends java.lang.Object>);"],
     );
     let expected = "add: UnsupportedOperationException; add: UnsupportedOperationException; \
         remove: UnsupportedOperationException; addAll: UnsupportedOperationException; \

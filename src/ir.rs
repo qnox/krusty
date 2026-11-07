@@ -167,7 +167,7 @@ pub use module_records::{
     IrModuleClassifier, IrModuleConstructions, IrModuleConstructor, IrModuleMemberAccess,
     IrModuleSource, IrOverriddenFunction,
 };
-pub use null_checks::NullCheck;
+pub use null_checks::{NullCheck, NullCheckSite};
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use package_declarations::{
@@ -181,8 +181,8 @@ pub use properties::{
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
-    FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable, PropRef,
-    ReflectedCallable,
+    FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable,
+    IrConstructorReferenceDeclaration, PropRef, ReflectedCallable,
 };
 pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
@@ -559,7 +559,13 @@ pub enum IrExpr {
         /// absent; `defaults` identifies their source-value ordinals.
         args: Vec<ExprId>,
         ctor_params: Option<Vec<Ty>>,
-        ctor_desc: Option<String>,
+        /// The selected constructor declaration's own parameter types, operand for operand with
+        /// `args` (an inner class's outer instance and the leading context parameters included),
+        /// before any call-site substitution: `Holder<T>(T)` called as `Holder(Money(7))` keeps
+        /// `T` here while `ctor_params` says `Money`. `None` for a construction a phase
+        /// synthesized without a checked declaration, which carries only its `ctor_params`.
+        declared_params: Option<Box<[Ty]>>,
+        ctor_desc: Option<Box<str>>,
         /// Exact dependency constructor declaration awaiting target realization. Mutually exclusive
         /// with `ctor_desc`; source/module constructions leave it absent.
         external_target: Option<crate::fir::ExternalCallableId>,
@@ -1869,6 +1875,9 @@ pub struct IrFile {
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each entry another module constructs a class of this file, or reads its object, through,
+    /// by the entry's `FunId`: the class it answers. See [`crate::backend::construction_entries`].
+    pub(crate) construction_entries: crate::fx_hash::HashMap<FunId, ClassId>,
     /// Each exported overridable member's dispatching entry, by the member's `FunId`: the function
     /// another module's call reaches it through, which dispatches on the receiver.
     pub(crate) dispatch_entries: crate::fx_hash::HashMap<FunId, FunId>,
@@ -2470,11 +2479,6 @@ pub struct IrFile {
     /// stay the Kotlin types; this plan is only the physical slot a selected argument edge is
     /// adapted to. Mask and marker operands are not entries.
     pub physical_call_parameters: crate::fx_hash::HashMap<ExprId, Box<[Ty]>>,
-    /// Construction `ExprId` → the selected constructor's declared semantic parameter types in
-    /// argument order. A generic constructor can consume a value-class box through bare `T` even
-    /// when its physical descriptor and that value class's carrier are both `Object`; JVM emission
-    /// consumes this identity-backed fact instead of reinterpreting the descriptor.
-    pub(crate) construction_declared_params: crate::fx_hash::HashMap<ExprId, Box<[Ty]>>,
     /// Construction `ExprId` → the selected module constructor.
     pub(crate) construction_targets: crate::fx_hash::HashMap<ExprId, IrConstructorTarget>,
     /// Realized static call `ExprId` → the operand index its extension receiver was placed at. A
@@ -2733,7 +2737,8 @@ impl IrFile {
             internal,
             args,
             ctor_params: None,
-            ctor_desc: Some(ctor_desc.into()),
+            declared_params: None,
+            ctor_desc: Some(ctor_desc.into().into_boxed_str()),
             external_target: None,
             defaults: Box::new([]),
             default_prefix_count: 0,
@@ -2746,6 +2751,7 @@ impl IrFile {
             internal,
             args,
             ctor_params: Some(params),
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),
@@ -2789,6 +2795,17 @@ impl IrFile {
     }
     pub fn expr(&self, id: ExprId) -> &IrExpr {
         &self.exprs[id as usize]
+    }
+
+    /// The selected constructor declaration's own parameter types a construction carries; `None`
+    /// for a construction synthesized without a checked declaration, or for another node.
+    pub(crate) fn construction_declared_params(&self, construction: ExprId) -> Option<&[Ty]> {
+        match self.expr(construction) {
+            IrExpr::New {
+                declared_params, ..
+            } => declared_params.as_deref(),
+            _ => None,
+        }
     }
     pub fn add_expr(&mut self, mut e: IrExpr) -> ExprId {
         let id = self.exprs.len() as u32;

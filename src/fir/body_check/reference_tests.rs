@@ -1932,3 +1932,29 @@ fn private_setter_outside_its_class_publishes_a_read_only_property_reference() {
         "an inaccessible setter cannot make the reference mutable"
     );
 }
+
+#[test]
+fn root_package_library_reference_retains_its_selected_external_identity() {
+    let (body, _) = checked_function_body_with_platform(
+        "fun reference(): (Int) -> Int = ::read\n",
+        "reference",
+        super::test_support::root_external_function_source(),
+    );
+    let FirExprKind::CallableReference {
+        target: FirCallableReferenceTarget::External { declaration, .. },
+        binding,
+        dispatch_receiver,
+        extension_receiver,
+        ..
+    } = &body
+        .expr(root_expression(&body))
+        .expect("root-package external callable reference")
+        .kind
+    else {
+        panic!("the selected external identity must survive checked FIR construction")
+    };
+    assert_eq!(*declaration, crate::fir::ExternalCallableId::from_raw(703));
+    assert_eq!(*binding, FirCallableReferenceBinding::Static);
+    assert_eq!(*dispatch_receiver, None);
+    assert_eq!(*extension_receiver, None);
+}

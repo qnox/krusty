@@ -1247,16 +1247,7 @@ impl<'a> SymbolResolver<'a> {
         ret: Ty,
     ) -> ResolvedMember {
         let member = selected.member_with_return(ret);
-        ResolvedMember {
-            receiver,
-            ret,
-            member,
-            physical_params: selected.callable.physical_params.clone(),
-            context_args: Vec::new(),
-            projected_return_hazard: selected.projected_return_hazard,
-            suspend: selected.flags.suspend,
-            origin: selected.callable.origin.clone(),
-        }
+        ResolvedMember::from_function(receiver, &selected, member, ret)
     }
 
     /// Select the nearest in-scope extension property, rejecting equal-rank candidates.
@@ -1536,36 +1527,6 @@ impl<'a> SymbolResolver<'a> {
             return None;
         };
         Some(self.commit_selected_member_function_result(receiver, selected, result))
-    }
-
-    pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
-        let functions = self.nearest_top_level_functions(&self.symbol_levels_in_scope(name));
-        crate::trace_compiler!(
-            "resolve",
-            "top-level candidate inventory {name}: {:?}",
-            functions
-                .overloads
-                .iter()
-                .map(|function| (
-                    function.kind,
-                    function.callable.owner.render(),
-                    function.callable.name.as_str(),
-                    function.semantic_params(),
-                    function.semantic_receiver(),
-                    function
-                        .generic_sig
-                        .as_ref()
-                        .map(|signature| signature.formal_bounds.as_slice()),
-                ))
-                .collect::<Vec<_>>()
-        );
-        functions
-            .into_top_level()
-            // `$default` is a physical realization attached to its source declaration, never a
-            // source-level overload candidate. Letting it into this family can select a synthetic
-            // by declaration order and later append `$default` a second time.
-            .filter(|function| !function.callable.default_call)
-            .collect()
     }
 
     /// Select from a caller-provided projection of one top-level callable family.
@@ -3059,16 +3020,7 @@ fn resolved_member_from_info_tracking(
     );
     let member = o.member_with_return(o.callable.ret);
     (
-        ResolvedMember {
-            receiver: recv,
-            ret,
-            member,
-            physical_params: o.callable.physical_params.clone(),
-            context_args: Vec::new(),
-            projected_return_hazard: o.projected_return_hazard,
-            suspend: o.flags.suspend,
-            origin: o.callable.origin.clone(),
-        },
+        ResolvedMember::from_function(recv, &o, member, ret),
         bindings,
     )
 }

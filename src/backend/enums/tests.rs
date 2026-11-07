@@ -108,8 +108,12 @@ fn colors() -> IrFile {
     ir
 }
 
-fn lowered(mut ir: IrFile) -> IrFile {
-    super::realize(&mut ir);
+fn lowered(ir: IrFile) -> IrFile {
+    lowered_for(ir, super::Contract::KotlinNative)
+}
+
+fn lowered_for(mut ir: IrFile, contract: super::Contract) -> IrFile {
+    super::realize(&mut ir, contract);
     ir
 }
 
@@ -589,4 +593,158 @@ fn defaults_reading_a_constant_are_realized() {
             ir.expr(default)
         );
     }
+}
+
+/// No use of this file reads `Shade.entries`, and no other file can read this file's slots, so
+/// the list is never built.
+#[test]
+fn entries_no_use_reads_are_not_built() {
+    let ir = lowered(colors());
+    let lists = |initializer: &str| {
+        let (build, reset, _) = initializer_parts(&ir, function(&ir, initializer));
+        let built = build
+            .iter()
+            .filter(|&&statement| {
+                matches!(
+                    ir.expr(statement),
+                    IrExpr::SetStatic { value, .. }
+                        if matches!(ir.expr(*value), IrExpr::EnumEntriesList { .. })
+                )
+            })
+            .count();
+        (built, reset.len())
+    };
+    // Color: flag, three constants and entries cleared, then the rethrow.
+    assert_eq!(lists("Color$initEntries"), (1, 6));
+    // Shade: flag and two constants cleared, then the rethrow.
+    assert_eq!(lists("Shade$initEntries"), (0, 4));
+}
+
+/// A constant's argument is the only read of another enum's `entries`
+/// (`enum class Kind(val n: Int) { A(Shade.entries.size) }`): the list is still kept and built,
+/// under either contract.
+#[test]
+fn entries_read_only_by_a_constant_argument_are_built() {
+    for contract in [super::Contract::KotlinNative, super::Contract::KotlinWasm] {
+        let mut ir = IrFile::default();
+        shade(&mut ir);
+        let entries = ir.add_expr(IrExpr::EnumEntries {
+            classifier: type_name("Shade"),
+        });
+        enum_class(&mut ir, "Kind", vec![entry("A", vec![entries], Vec::new())]);
+        let ir = lowered_for(ir, contract);
+
+        let IrExpr::Block {
+            value: Some(value), ..
+        } = ir.expr(entries)
+        else {
+            panic!("the argument is realized in place: {:?}", ir.expr(entries));
+        };
+        assert!(
+            matches!(ir.expr(*value), IrExpr::GetStatic(_)),
+            "{contract:?}: {:?}",
+            ir.expr(*value)
+        );
+    }
+}
+
+/// kotlinc-js/wasm publish each constant once it is constructed, a constant with a body from its
+/// subclass's constructor right after the super call, and build `entries` on its first read.
+#[test]
+fn the_wasm_contract_publishes_each_constant_once_constructed() {
+    let ir = lowered_for(colors(), super::Contract::KotlinWasm);
+    let (build, ..) = initializer_parts(&ir, function(&ir, "Color$initEntries"));
+    assert!(build
+        .iter()
+        .all(|&statement| !matches!(ir.expr(statement), IrExpr::SetStatic { value, .. }
+            if matches!(ir.expr(*value), IrExpr::EnumAllocation { .. } | IrExpr::EnumEntriesList { .. }))));
+    let published: Vec<(u32, String)> = build
+        .iter()
+        .filter_map(|&statement| match ir.expr(statement) {
+            IrExpr::SetStatic { index, value } => match ir.expr(*value) {
+                IrExpr::EnumConstant {
+                    name,
+                    published: None,
+                    ..
+                } => Some((*index, name.to_string())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let names: Vec<&str> = published.iter().map(|(_, name)| name.as_str()).collect();
+    assert_eq!(names, ["RED", "GREEN", "BLUE"]);
+
+    // BLUE's subclass publishes it first thing after its super call.
+    let blue = class(&ir, "Color$BLUE");
+    let body = ir.classes[blue as usize]
+        .init_body
+        .expect("the subclass publishes the constant");
+    let first = statements(&ir, body)[0];
+    assert!(matches!(
+        ir.expr(first),
+        IrExpr::SetStatic { index, value }
+            if *index == published[2].0 && matches!(ir.expr(*value), IrExpr::GetValue(0))
+    ));
+
+    // `values()` answers the slots as they stand.
+    let values = statements(&ir, body_of(&ir, "Color$values"));
+    let IrExpr::Return(Some(array)) = ir.expr(values[1]) else {
+        panic!("values() answers the array");
+    };
+    let slots: Vec<u32> = published.iter().map(|(slot, _)| *slot).collect();
+    assert_eq!(array_slots(&ir, *array), slots);
+
+    // `Color.entries` fills the list on its first read.
+    let read = crate::ir::emitted_body_roots(&ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(&ir, root))
+        .find_map(|expression| match ir.expr(expression) {
+            IrExpr::Block {
+                stmts,
+                value: Some(_),
+            } if stmts.len() == 2 => Some(stmts[1]),
+            _ => None,
+        })
+        .expect("the entries read");
+    let IrExpr::When { branches } = ir.expr(read) else {
+        panic!("the list is built when missing");
+    };
+    let [(Some(_), store)] = branches[..] else {
+        panic!("one branch");
+    };
+    assert!(matches!(ir.expr(store), IrExpr::SetStatic { value, .. }
+        if matches!(ir.expr(*value), IrExpr::EnumEntriesList { values, .. } if array_slots(&ir, *values) == slots)));
+}
+
+fn body_of(ir: &IrFile, name: &str) -> ExprId {
+    body(ir, function(ir, name))
+}
+
+/// `name` and `ordinal` are `kotlin.Enum`'s only when the getter's checked semantic owner is
+/// `kotlin.Enum`; a package, another classifier, or an unpublished owner is not, whatever class
+/// realizes the getter.
+#[test]
+fn base_members_are_recognized_by_their_semantic_owner() {
+    use super::BaseMember;
+    use crate::types::SemanticCallableOwner::{Classifier, Package};
+    let enum_owner = Some(Classifier(crate::types::wk::kotlin_enum()));
+    assert_eq!(
+        super::declared_base_member(enum_owner, "name"),
+        Some(BaseMember::Name)
+    );
+    assert_eq!(
+        super::declared_base_member(enum_owner, "ordinal"),
+        Some(BaseMember::Ordinal)
+    );
+    assert_eq!(super::declared_base_member(enum_owner, "hashCode"), None);
+    assert_eq!(super::declared_base_member(None, "name"), None);
+    assert_eq!(
+        super::declared_base_member(Some(Package(type_name("kotlin"))), "name"),
+        None
+    );
+    assert_eq!(
+        super::declared_base_member(Some(Classifier(type_name("java/lang/Enum"))), "ordinal"),
+        None
+    );
 }
