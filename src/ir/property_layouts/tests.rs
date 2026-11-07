@@ -251,22 +251,29 @@ fn an_ordinary_inherited_property_keeps_its_declaration_layout() {
 }
 
 #[test]
-fn an_explicit_unknown_or_unrelated_specialization_cannot_use_the_source_layout() {
-    for unrelated in [false, true] {
-        let (mut ir, read) = fixture();
-        let owner = if unrelated {
-            let mut other = ir.classes[0].clone();
-            other.fq_name = "p/OtherDeclaration".into();
-            let other = ir.add_class(other);
-            let copied = copy(&mut ir, other, "p/UnrelatedCopy", 2);
-            ir.classes[copied as usize].fq_name
-        } else {
-            "p/MissingCopy".into()
-        };
-        ir.dispatch_classes.insert(read, owner);
-        assert!(matches!(ir.property_layout_at(read, TARGET), Err(target) if target == TARGET));
-        assert!(matches!(ir.expr(read), IrExpr::Checked(_)));
-    }
+fn a_receiver_from_another_source_keeps_the_selected_declaration_layout() {
+    let (mut ir, read) = fixture();
+    ir.classes[0].is_anonymous_object = false;
+    ir.dispatch_classes.insert(read, "p/ForeignChild".into());
+    assert_eq!(
+        member(ir.property_layout_at(read, TARGET).unwrap()),
+        (0, 0, Some(0), None, None)
+    );
+    assert!(crate::backend::local_properties::realize(&mut ir).is_ok());
+    assert!(matches!(ir.expr(read), IrExpr::PropertyRead { .. }));
+}
+
+#[test]
+fn an_unrelated_specialization_cannot_use_the_source_layout() {
+    let (mut ir, read) = fixture();
+    let mut other = ir.classes[0].clone();
+    other.fq_name = "p/OtherDeclaration".into();
+    let other = ir.add_class(other);
+    let copied = copy(&mut ir, other, "p/UnrelatedCopy", 2);
+    let owner = ir.classes[copied as usize].fq_name;
+    ir.dispatch_classes.insert(read, owner);
+    assert!(matches!(ir.property_layout_at(read, TARGET), Err(target) if target == TARGET));
+    assert!(matches!(ir.expr(read), IrExpr::Checked(_)));
 }
 
 #[test]

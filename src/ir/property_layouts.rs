@@ -83,7 +83,11 @@ impl super::IrFile {
         let Some(dispatch) = self.dispatch_classes.get(&operation) else {
             return Ok(Some(layout));
         };
-        let actual = self.class_id_by_name(*dispatch).ok_or(target)?;
+        let Some(actual) = self.class_id_by_name(*dispatch) else {
+            // A receiver declared in another source file has no class in this IR. It cannot be
+            // a specialization made here, so retain the checked declaration's layout.
+            return Ok(Some(layout));
+        };
         self.property_layout_for_class(target, actual)
     }
 
