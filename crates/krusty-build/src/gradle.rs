@@ -1788,6 +1788,8 @@ fun main() {
         pub(super) log: PathBuf,
         /// The recording proxy's log of support checks, apart from the compiles in `log`.
         probes: PathBuf,
+        /// The recording proxy's log of classpath fingerprints, the compile tasks' input key.
+        pub(super) fingerprints: PathBuf,
         proxy: PathBuf,
         plugin_project: PathBuf,
         plugin_version: String,
@@ -1820,12 +1822,22 @@ fun main() {
             let root = root.canonicalize().expect("canonicalize fixture root");
             let log = root.join("krusty-invocations.txt");
             let probes = root.join("krusty-plugin-checks.txt");
+            let fingerprints = root.join("krusty-classpath-fingerprints.txt");
             let diagnostics = root.join("krusty-diagnostics.txt");
             let proxy = root.join("recording-krusty");
             let actual = std::env::var_os("KRUSTY_GRADLE_TEST_BIN")
                 .map(PathBuf::from)
                 .expect("KRUSTY_GRADLE_TEST_BIN must name the built krusty CLI");
-            write_krusty_proxy(&proxy, &log, &probes, &diagnostics, &actual);
+            write_krusty_proxy(
+                &proxy,
+                ProxyRecords {
+                    compiles: &log,
+                    probes: &probes,
+                    fingerprints: &fingerprints,
+                },
+                &diagnostics,
+                &actual,
+            );
             let wrapper = root.join("gradlew");
             std::fs::write(
                 &wrapper,
@@ -1861,6 +1873,7 @@ fun main() {
                 root,
                 log,
                 probes,
+                fingerprints,
                 proxy,
                 plugin_project,
                 plugin_version,
@@ -2146,24 +2159,31 @@ fun main() {
         out
     }
 
+    /// Where the recording proxy logs each kind of call: the compiles, the support checks, and
+    /// the classpath fingerprints that key the compile tasks.
+    pub(super) struct ProxyRecords<'a> {
+        pub(super) compiles: &'a Path,
+        pub(super) probes: &'a Path,
+        pub(super) fingerprints: &'a Path,
+    }
+
     pub(super) fn write_krusty_proxy(
         path: &Path,
-        log: &Path,
-        probes: &Path,
+        records: ProxyRecords<'_>,
         diagnostics: &Path,
         actual: &Path,
     ) {
         let quote = |value: &Path| value.display().to_string().replace('\'', "'\\''");
         let script = r#"#!/bin/sh
 WRITE_INVOCATION
-if [ "$1" = refusals ]; then
-  KRUSTY_RECORD='PROBESPATH'
-else
-  KRUSTY_RECORD='LOGPATH'
-fi
+case "$1" in
+  refusals) KRUSTY_RECORD='PROBESPATH' ;;
+  classpath-fingerprint) KRUSTY_RECORD='FINGERPRINTSPATH' ;;
+  *) KRUSTY_RECORD='LOGPATH' ;;
+esac
 if ! mkdir -p "$KRUSTY_RECORD"; then exit 7; fi
 record_invocation "$@"
-if [ "$1" = refusals ]; then
+if [ "$1" = refusals ] || [ "$1" = classpath-fingerprint ]; then
   exec 'ACTUAL' "$@"
 fi
 diagnostics="DIAGNOSTICSPATH.$$"
@@ -2174,8 +2194,9 @@ mv "$diagnostics" "DIAGNOSTICSPATH"
 exit "$status"
 "#
         .replace("WRITE_INVOCATION", krusty_test_support::WRITE_INVOCATION)
-        .replace("LOGPATH", &quote(log))
-        .replace("PROBESPATH", &quote(probes))
+        .replace("LOGPATH", &quote(records.compiles))
+        .replace("PROBESPATH", &quote(records.probes))
+        .replace("FINGERPRINTSPATH", &quote(records.fingerprints))
         .replace("DIAGNOSTICSPATH", &quote(diagnostics))
         .replace("ACTUAL", &quote(actual));
         std::fs::write(path, script).expect("write recording krusty");

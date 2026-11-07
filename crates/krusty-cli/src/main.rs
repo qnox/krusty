@@ -46,6 +46,35 @@ fn main() {
         }
         return;
     }
+    // `krusty classpath-fingerprint [--view-cache <dir>] <kotlinc arguments>` prints the digest of
+    // what that compilation observes of its classpath; a build tool keys a dependent on it so a
+    // body-only edit upstream leaves the dependent's previous output in place.
+    if argv
+        .first()
+        .is_some_and(|command| command == "classpath-fingerprint")
+    {
+        let (view_cache, arguments) = match argv.get(1).map(String::as_str) {
+            Some("--view-cache") => match argv.get(2) {
+                Some(directory) => (Some(std::path::PathBuf::from(directory)), &argv[3..]),
+                None => {
+                    eprintln!("error: --view-cache needs a directory");
+                    std::process::exit(1);
+                }
+            },
+            _ => (None, &argv[1..]),
+        };
+        match krusty_cli::compilation_fingerprint::classpath_fingerprint(
+            arguments.to_vec(),
+            view_cache.as_deref(),
+        ) {
+            Ok(fingerprint) => println!("{fingerprint}"),
+            Err(error) => {
+                eprintln!("error: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // `krusty refusals <kotlinc arguments>` says whether krusty compiles a compilation with those
     // arguments itself; a build tool hands a refused one to kotlinc instead.
     if argv.first().is_some_and(|command| command == "refusals") {

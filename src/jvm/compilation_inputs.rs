@@ -50,6 +50,13 @@ pub(crate) fn classify_classpath_entry(
     }
 }
 
+/// Whether the compilation reads the classpath entry at `path` as a zip archive (a jar), as it
+/// reads it with no JDK release selected. A build key that reads an archive's entries the way the
+/// compilation does asks here rather than repeating the convention.
+pub fn is_archive_entry(path: &Path) -> bool {
+    classify_classpath_entry(path, None) == JvmClasspathEntryKind::Archive
+}
+
 /// Exact JVM classpath roots plus target-owned files selected implicitly from them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmCompilationInputInventory {
