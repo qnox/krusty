@@ -2354,6 +2354,15 @@ mod tests {
                 crate::ir::IrGeneratedClassRole::SerializationSerializer,
             )
             .expect("generic serializer class");
+        let serializer = ir.classes[ser_id as usize].fq_name_id();
+        assert_eq!(
+            ir.declared_class_self_type(serializer),
+            Some(Ty::obj_args_name(
+                serializer,
+                &[Ty::ty_param("T", Ty::nullable(class_ty("kotlin/Any")))],
+            )),
+            "the generated declaration retains its full applied receiver type"
+        );
         let tps_fid =
             GeneratedSerializerMembers::declared(&ir, ir.classes[ser_id as usize].fq_name_id())
                 .type_parameter_serializers;

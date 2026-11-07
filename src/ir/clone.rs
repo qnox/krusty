@@ -347,9 +347,13 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
             }
             IrCheckedOperation::ConstructorDelegation {
                 outer_receiver,
+                capture_arguments,
                 arguments,
                 ..
             } => {
+                for (value, _) in capture_arguments.iter_mut().flatten() {
+                    *value = map(*value);
+                }
                 map_option(outer_receiver, &mut map);
                 arguments
                     .iter_mut()

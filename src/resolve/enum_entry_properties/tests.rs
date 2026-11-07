@@ -15,10 +15,18 @@ fun value() = 1";
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
 
+fn stale_storage() -> super::super::ClassStorageSource {
+    let owner = type_name("Storage");
+    super::super::ClassStorageSource {
+        owner,
+        identity: crate::fir::ClassCaptureIdentity::Value { owner, binding: 0 },
+    }
+}
+
 fn stale_capture_read(checker: &mut Checker<'_>, expression: ExprId, local: Local) {
     checker
         .expr_lowers
-        .insert(expression, ExprLowering::ClassStorageRead { field: 0 });
+        .insert(expression, ExprLowering::ClassStorageRead(stale_storage()));
     checker
         .read_flow_roots
         .insert(expression, scope::PathRoot::Value(local.flow_identity));
@@ -154,7 +162,7 @@ fn wrong_owner_sibling_or_receiver_does_not_publish_or_erase_prior_facts() {
             ));
             assert!(matches!(
                 checker.expr_lowers.get(&expression),
-                Some(ExprLowering::ClassStorageRead { field: 0 })
+                Some(ExprLowering::ClassStorageRead(storage)) if *storage == stale_storage()
             ));
             assert_eq!(checker.read_flow_roots.get(&expression), Some(&flow));
             assert!(!checker

@@ -206,6 +206,8 @@ pub struct DependencyExportSignatures {
     /// constructs through. A target realizes each as an ordinary exported callable (see
     /// `super::construction_entries`), since constructing an object needs its layout.
     constructors: Vec<(ExportedConstructor, KlibDependencyCallable)>,
+    /// Concrete default property accessors whose checked operations a target exports as bodies.
+    property_accessors: Vec<(ExportedPropertyAccessor, KlibDependencyCallable)>,
     /// Every object declaration of this file another module may read as a value, and, once a
     /// target realized it, the entry answering its instance (see `super::construction_entries`).
     singletons: Vec<crate::ir::ClassId>,
@@ -221,7 +223,34 @@ pub struct ExportedConstructor {
     pub secondary: Option<usize>,
 }
 
+/// The selected property and accessor operation; declaration signatures remain metadata-owned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExportedPropertyAccessor {
+    Getter(crate::fir::PropertyId),
+    Setter(crate::fir::PropertyId),
+}
+
 impl DependencyExportSignatures {
+    pub(crate) fn property_accessors(
+        &self,
+    ) -> &[(ExportedPropertyAccessor, KlibDependencyCallable)] {
+        &self.property_accessors
+    }
+
+    pub(crate) fn record_property_accessor(
+        &mut self,
+        accessor: ExportedPropertyAccessor,
+        identity: KlibDependencyCallable,
+    ) {
+        assert!(
+            !self
+                .property_accessors
+                .iter()
+                .any(|(prior, _)| *prior == accessor),
+            "one property accessor exports one declaration identity"
+        );
+        self.property_accessors.push((accessor, identity));
+    }
     /// The public dependency identity exported for `callable`, when the declaration is visible to
     /// another module and has a callable realization.
     pub fn callable(&self, callable: FunId) -> Option<&KlibDependencyCallable> {

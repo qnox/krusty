@@ -170,8 +170,12 @@ impl BodyFirChecker<'_> {
                     ));
                 }
             }
-            ReceiverFnValueOrigin::ClassStorage(field) => {
-                let binding = self.direct_class_capture_binding(field, function_ty)?;
+            ReceiverFnValueOrigin::ClassStorage(storage) => {
+                let span = self
+                    .file
+                    .expr_span(expression)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+                let binding = self.selected_class_capture_binding(storage, span)?;
                 let kind = self.capture_read_kind(expression, binding)?;
                 self.body.add_expr(FirExpr {
                     origin: origin_id,

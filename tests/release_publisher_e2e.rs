@@ -327,6 +327,114 @@ fn immutable_tag_retries_accept_only_the_same_commit() {
     }
 }
 
+// PLATFORM-SPECIFIC: the real local Git receive hook rejects only the immutable tag write.
+#[cfg(unix)]
+#[test]
+fn failed_tag_creation_retains_the_native_reason_and_distinguishes_an_absent_ref() {
+    use std::os::unix::fs::PermissionsExt;
+    for long_reason in [false, true] {
+        let remote = Remote::new(if long_reason {
+            "tag-create-bounded"
+        } else {
+            "tag-create-rejected"
+        });
+        let sha = remote.push_commit("source");
+        let hook = remote.root.join("remote.git/hooks/update");
+        let reason = if long_reason {
+            "rejected ".repeat(1000)
+        } else {
+            "intentional server rejection".to_owned()
+        };
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\nprintf '%s\\n' '{reason}' >&2\nexit 1\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let native = isolated_command("git")
+            .args([
+                "push",
+                "--quiet",
+                "--force-with-lease=refs/tags/v1:",
+                "origin",
+                &format!("{sha}:refs/tags/v1"),
+            ])
+            .current_dir(remote.root.join("work"))
+            .output()
+            .unwrap();
+        assert_eq!(native.status.code(), Some(1), "{native:?}");
+        assert!(native.stdout.is_empty());
+        let output = remote.publisher(&sha, &["bind-tag", "v1"], &[]);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert_eq!(output.stdout, b"");
+        let mut expected =
+            b"release-publisher: git push for refs/tags/v1 failed (exit 1):\n".to_vec();
+        expected.extend_from_slice(&native.stderr[..native.stderr.len().min(4096)]);
+        expected.extend_from_slice(
+            b"\nrelease-publisher: cannot create refs/tags/v1; ref remains absent\n",
+        );
+        assert_eq!(output.stderr, expected);
+        assert_eq!(remote.remote_ref("refs/tags/v1"), None);
+    }
+}
+
+// PLATFORM-SPECIFIC: a rejected client hook lets a concurrent publisher win before revalidation.
+#[cfg(unix)]
+#[test]
+fn a_failed_tag_push_accepts_only_a_racing_exact_binding() {
+    use std::os::unix::fs::PermissionsExt;
+    for same_source in [true, false] {
+        let remote = Remote::new(if same_source {
+            "tag-race-same"
+        } else {
+            "tag-race-other"
+        });
+        let first = remote.push_commit("first");
+        let second = remote.push_commit("second");
+        let raced = if same_source { &second } else { &first };
+        let hook = remote.root.join("work/.git/hooks/pre-push");
+        fs::write(&hook, format!("#!/bin/sh\ngit --git-dir=../remote.git update-ref refs/tags/v1 {raced}\nprintf 'racing tag creation\\n' >&2\nexit 1\n")).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let native = isolated_command("git")
+            .args([
+                "push",
+                "--quiet",
+                "--force-with-lease=refs/tags/v1:",
+                "origin",
+                &format!("{second}:refs/tags/v1"),
+            ])
+            .current_dir(remote.root.join("work"))
+            .output()
+            .unwrap();
+        assert_eq!(native.status.code(), Some(1), "{native:?}");
+        assert!(native.stdout.is_empty());
+        remote.git_in("remote.git", &["update-ref", "-d", "refs/tags/v1"]);
+        let output = remote.publisher(&second, &["bind-tag", "v1"], &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(!same_source)),
+            "{output:?}"
+        );
+        assert_eq!(output.stdout, b"");
+        let mut expected = Vec::new();
+        if !same_source {
+            expected.extend_from_slice(
+                b"release-publisher: git push for refs/tags/v1 failed (exit 1):\n",
+            );
+            expected.extend_from_slice(&native.stderr);
+            expected.extend_from_slice(
+                format!("\nrelease-publisher: refs/tags/v1 belongs to {first}, not {second}\n")
+                    .as_bytes(),
+            );
+        }
+        assert_eq!(output.stderr, expected);
+        assert_eq!(
+            remote.remote_ref("refs/tags/v1").as_deref(),
+            Some(raced.as_str())
+        );
+    }
+}
+
 #[test]
 fn a_held_lock_blocks_another_publisher_until_it_is_dropped() {
     let remote = Remote::new("held");

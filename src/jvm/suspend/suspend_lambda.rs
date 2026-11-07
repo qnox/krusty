@@ -27,6 +27,9 @@ use crate::ir::{
 use crate::jvm::lambda_classes::{site, Site};
 use crate::types::{Ty, TyKind, TypeName};
 
+#[cfg(test)]
+mod constructor_prefix_tests;
+
 const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 
 /// The value a captured field holds.
@@ -359,15 +362,18 @@ fn layout(
         return None;
     }
     let captured_receivers = &parameter_info.captured_receivers;
-    let recorded = identities[..own_from]
-        .iter()
-        .all(|identity| match identity.role {
+    let recorded = identities[..own_from].iter().all(|identity| {
+        if let Some((owner, parameter)) = identity.constructor_receiver() {
+            return crate::jvm::capture_names::constructor_receiver(ir, owner, parameter).is_some();
+        }
+        match identity.role {
             IrParameterRole::CapturedValue { .. } => identity.source_name.is_some(),
             IrParameterRole::CapturedReceiver { ordinal } => {
                 (ordinal as usize) < captured_receivers.len()
             }
             _ => false,
-        });
+        }
+    });
     if !recorded {
         return None;
     }

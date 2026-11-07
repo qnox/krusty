@@ -60,6 +60,7 @@ use anonymous_object_capture::{
 };
 pub use anonymous_object_capture::{
     AnonymousObjectCapture, AnonymousObjectCaptureSource, AnonymousObjectReceiverSource,
+    ClassStorageSource,
 };
 mod anonymous_receiver_labels;
 mod applied_hierarchy;
@@ -122,6 +123,8 @@ mod conditional_branch;
 mod constant_evaluation;
 mod constructor_arguments;
 mod constructor_commitment;
+pub(crate) use constructor_commitment::ConstructorCaptureSource;
+pub use constructor_commitment::{ConstructorCapturePlan, ResolvedAnnotationConstruction};
 mod context_argument_selection;
 mod context_capture;
 mod context_receiver_priority;
@@ -154,6 +157,7 @@ mod enum_entry_properties;
 pub use enum_entry_properties::EnumEntryProperty;
 use enum_entry_properties::{EnumEntryPropertyBinding, EnumEntryStorage};
 mod enum_entry_method_owner;
+pub(crate) use enum_entry_method_owner::owns_storage as enum_entry_storage_owner_matches;
 mod explicit_backing_fields;
 mod explicit_property_write;
 mod explicit_receiver_levels;
@@ -7685,16 +7689,6 @@ impl ResolvedCall {
 }
 
 #[derive(Clone, Debug)]
-pub struct ResolvedAnnotationConstruction {
-    /// Annotation members in declaration/constructor order. Providers normalize Kotlin and Java
-    /// declarations into this same semantic shape before constructor selection.
-    pub members: Vec<(String, Ty)>,
-    /// File-independent declaration defaults, parallel to `members`. These are declaration values,
-    /// not evaluated call operands; checked FIR converts them into its compact retained form.
-    pub defaults: Vec<Option<CtorDefaultValue>>,
-}
-
-#[derive(Clone, Debug)]
 pub enum ResolvedConstructor {
     Source {
         owner: TypeName,
@@ -7814,6 +7808,7 @@ impl ResolvedCtorDelegationTarget {
 #[derive(Clone, Debug)]
 pub struct ResolvedCtorDelegation {
     pub target: ResolvedCtorDelegationTarget,
+    pub(crate) capture_plan: Option<constructor_commitment::ConstructorCapturePlan>,
     /// Exact lexical receiver selected for an `inner` superclass constructor. `this(...)` and an
     /// ordinary superclass constructor leave this unset.
     pub outer_receiver: Option<ImplicitReceiverSelection>,
@@ -8579,10 +8574,13 @@ pub enum CallableReferenceTarget {
 
 #[derive(Clone, Debug)]
 pub enum ExprLowering {
+    ConstructorCaptures(Box<constructor_commitment::ConstructorCapturePlan>),
     /// Explicit call syntax for a compiler-known primitive unary convention. Resolution has already
     /// selected the built-in operation; checked FIR consumes this decision without reinterpreting
     /// the callable spelling or synthesizing a declaration lookup.
-    BuiltinUnaryCall { operation: BuiltinUnaryOperation },
+    BuiltinUnaryCall {
+        operation: BuiltinUnaryOperation,
+    },
     /// Runtime type-test plan selected from declaration facts. `target` carries any normalized
     /// callable shape, and the erased-bound equality is final; lowering never reopens a provider or
     /// reinterprets the source type reference.
@@ -8595,19 +8593,28 @@ pub enum ExprLowering {
     /// parameters, result, and suspend bit); `result` is the same shape with only the extension
     /// receiver bound. Checked FIR materializes that exact value transformation without re-inferring a
     /// function type or looking up `invoke`.
-    ExtensionFunctionBinding { target: Ty, result: Ty },
+    ExtensionFunctionBinding {
+        target: Ty,
+        result: Ty,
+    },
     /// An exact declaration selected by ordinary resolution whose expression implementation belongs
     /// to a compiler plugin. The lowerer only creates the opaque placeholder described by this plan;
     /// it does not inspect source names, annotations, or plugin ABI.
     PluginExpression(Box<crate::plugins::PluginExpressionPlan>),
     /// A bare value read whose storage is a compiler-generated field on the current class (a local
-    /// class capture or an enum-entry body property). The checker records the exact field slot so
-    /// lowering performs no member lookup.
-    ClassStorageRead { field: u32 },
+    /// class capture). The checker records the exact logical value and scope owner; checked FIR
+    /// projects its finalized capture binding without repeating member selection.
+    ClassStorageRead(ClassStorageSource),
+    EnumEntryStorageRead {
+        owner: TypeName,
+        field: u32,
+    },
     /// A property of an enum-entry anonymous subclass selected from a nested classifier. The
     /// owner-local ordinal becomes a stable `PropertyId` while checked FIR is built; the selected
     /// enclosing receiver is recorded independently in `implicit_receiver_selections`.
-    EnumEntryPropertyRead { property: EnumEntryProperty },
+    EnumEntryPropertyRead {
+        property: EnumEntryProperty,
+    },
     /// The accessor soft-keyword `field`, selected only when no lexical value named `field` shadows
     /// it. Lowering consumes the selection in the current accessor or fails cleanly when the access
     /// crosses a closure/class boundary it cannot materialize.
@@ -8683,7 +8690,10 @@ pub enum ExprLowering {
     /// Both shapes are final checker decisions: `target` is the captured value's invocation shape,
     /// while `signature` is the possibly adapted callable-reference shape exposed to the caller.
     /// Later phases synthesize a forwarding closure without looking up a runtime `FunctionN` class.
-    FunctionInvokeReference { target: Ty, signature: Ty },
+    FunctionInvokeReference {
+        target: Ty,
+        signature: Ty,
+    },
     /// A source top-level reference adapted to a shorter function type.
     AdaptedRef {
         target: Box<crate::libraries::LibraryCallable>,
@@ -8716,11 +8726,16 @@ pub enum ExprLowering {
     /// A semantically selected callable whose provider has no physical handle for this backend
     /// (for example a package function declared only in `.kotlin_builtins`). Resolution is complete;
     /// lowering must decline explicitly instead of guessing a facade or re-resolving the name.
-    UnavailableCallableReference { signature: Ty, reason: &'static str },
+    UnavailableCallableReference {
+        signature: Ty,
+        reason: &'static str,
+    },
     /// Resolution completed, but the selected semantic operation needs a lowering capability the
     /// active backend does not implement. Lowering reports this reason directly and never retries
     /// name or overload resolution.
-    Unavailable { reason: &'static str },
+    Unavailable {
+        reason: &'static str,
+    },
     /// A compile-time-only expression whose semantic result is `Unit`. Contracts are represented
     /// this way when they occupy a block's trailing-expression slot; statement-position contracts
     /// use [`StmtLowering::Erased`].
@@ -8817,7 +8832,9 @@ pub enum ExprLowering {
     },
     /// A property-read `recv.name` resolved to an extension property. The complete selected property
     /// is retained for every provider; origin affects only local/cross-file/library linkage.
-    ExtensionPropertyGet { access: Box<ResolvedPropertyAccess> },
+    ExtensionPropertyGet {
+        access: Box<ResolvedPropertyAccess>,
+    },
     /// `recv.name` resolved to a MEMBER EXTENSION PROPERTY (`class C { val Int.x: T }`) — the
     /// read lowers to a call of the owner's `getX(Recv)` accessor: the dispatch receiver comes
     /// from the implicit-receiver scope (like a member extension function call), and `recv` is
@@ -8859,7 +8876,9 @@ pub enum ExprLowering {
     /// reference type name (`String::class`) — lowers to `ldc <ty>.class`. `unbound = None` is a BOUND
     /// literal on a value expression (`x::class`, `this::class`) — lowers to `expr.getClass()`. krusty
     /// models the result as `java/lang/Class` (its identity makes `==` agree with kotlinc's `KClass`).
-    ClassLiteral { unbound: Option<Ty> },
+    ClassLiteral {
+        unbound: Option<Ty>,
+    },
     /// Invocation of a receiver-function value selected after ordinary member resolution.
     ReceiverFnInvoke {
         name: String,
@@ -8902,9 +8921,9 @@ pub enum ReceiverFnValueOrigin {
         /// the getter. Inherited properties leave this false.
         owner_storage: bool,
     },
-    /// A value stored in a compiler-generated field of the class whose body is being checked.
-    /// The index is the exact IR field slot; lowering consumes it without looking up a name.
-    ClassStorage(u32),
+    /// A captured value selected by immutable logical identity. FIR projects it to the complete
+    /// realized binding; provisional constructor-prefix positions stay in capture-layout analysis.
+    ClassStorage(ClassStorageSource),
     /// A source property declared by an enum-entry anonymous subclass. The entry owner is the
     /// selected semantic storage owner and `field` is the property's stable owner-local sibling.
     /// Reads use the same physical storage operation as generated class captures, while writes
@@ -13160,6 +13179,7 @@ impl<'a> Checker<'a> {
             declaration_params.clone(),
         );
         self.commit_constructor(
+            scope,
             call,
             ResolvedConstructor::Source {
                 owner: class.internal_name(),
@@ -13659,15 +13679,15 @@ impl<'a> Checker<'a> {
                         return;
                     }
                     let source = match local.origin {
-                        ReceiverFnValueOrigin::ClassStorage(field)
-                        | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
-                            AnonymousObjectCaptureSource::ClassStorage { field }
+                        ReceiverFnValueOrigin::ClassStorage(storage) => {
+                            AnonymousObjectCaptureSource::ClassStorage(storage)
                         }
-                        ReceiverFnValueOrigin::Local
-                        | ReceiverFnValueOrigin::TopLevelProperty
-                        | ReceiverFnValueOrigin::DispatchProperty { .. } => {
-                            AnonymousObjectCaptureSource::LexicalValue
+                        ReceiverFnValueOrigin::EnumEntryPropertyStorage {
+                            owner, field, ..
+                        } => {
+                            AnonymousObjectCaptureSource::EnumEntryPropertyStorage { owner, field }
                         }
+                        _ => AnonymousObjectCaptureSource::LexicalValue,
                     };
                     let function_local = matches!(local.origin, ReceiverFnValueOrigin::Local);
                     let written_here = self.fn_reassigned.contains(name)
@@ -13739,9 +13759,37 @@ impl<'a> Checker<'a> {
                             .anonymous_lexical_scope
                             .owners
                             .get(&declaration)
-                            .and_then(|owner| self.anonymous_receiver_capture_fields.get(owner))
-                            .and_then(|fields| fields.get(&identity))
-                            .copied();
+                            .and_then(|owner| {
+                                self.anonymous_receiver_capture_fields
+                                    .get(owner)
+                                    .and_then(|fields| fields.get(&identity))
+                                    .map(|field| (*owner, *field))
+                            });
+                        let captured_field = match captured_field {
+                            Some((declaration, field)) => {
+                                let Some(owner) = self.body_class_storage_owner(declaration) else {
+                                    self.diags.error(
+                                        span,
+                                        "class storage has no checked classifier owner",
+                                    );
+                                    return None;
+                                };
+                                let Some(identity) = self
+                                    .discovered_anonymous_captures
+                                    .get(&declaration)
+                                    .and_then(|captures| captures.get(field as usize))
+                                    .and_then(|capture| capture.logical_identity(owner))
+                                else {
+                                    self.diags.error(
+                                        span,
+                                        "class storage has no selected logical capture identity",
+                                    );
+                                    return None;
+                                };
+                                Some(ClassStorageSource { owner, identity })
+                            }
+                            None => None,
+                        };
                         let semantic_receiver = if receiver.class_receiver {
                             AnonymousObjectReceiverSource::EnclosingInstance {
                                 current: receiver.current,
@@ -13770,7 +13818,7 @@ impl<'a> Checker<'a> {
                                     depth,
                                 },
                             },
-                            |field| AnonymousObjectCaptureSource::ClassStorage { field },
+                            AnonymousObjectCaptureSource::ClassStorage,
                         );
                         Some((
                             AnonymousCaptureCandidate {
@@ -13978,7 +14026,10 @@ impl<'a> Checker<'a> {
                             .find(|receiver| receiver.receiver_depth == depth as usize)
                             .map(|receiver| receiver.ty)
                             .unwrap_or(Ty::Error),
-                        AnonymousObjectCaptureSource::ClassStorage { .. } => capture.ty,
+                        AnonymousObjectCaptureSource::ClassStorage(_)
+                        | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. } => {
+                            capture.ty
+                        }
                         AnonymousObjectCaptureSource::LexicalValue => self
                             .lookup(scope, &capture.name)
                             .map(|local| {
@@ -14013,7 +14064,7 @@ impl<'a> Checker<'a> {
                     self.check_class(scope, &class, declaration);
                     self.restore_body_state(saved);
                     if !self.discovers_captures_at_construction {
-                        self.publish_anonymous_capture_layout(scope, declaration, &captures, None);
+                        self.publish_anonymous_capture_layout(scope, declaration, &captures);
                     }
                 }
                 return self.anonymous_object_type(scope, declaration);
@@ -35320,10 +35371,7 @@ impl<'a> Checker<'a> {
             expression,
             type_arguments.iter().copied().map(Some).collect(),
         );
-        if selected.callable.owner.matches("")
-            && selected.source_key.is_none()
-            && selected.stable_declaration.is_none()
-        {
+        if callable_reference_publication::lacks_reference_realization(selected) {
             self.expr_lowers.insert(
                 expression,
                 ExprLowering::UnavailableCallableReference {
@@ -39189,143 +39237,6 @@ impl<'a> Checker<'a> {
         );
     }
 
-    fn declare_scoped_property(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        property: &ScopedProperty,
-        owner_storage_visible: bool,
-    ) {
-        self.declare_scoped_property_with_mutability(
-            scope,
-            property,
-            owner_storage_visible,
-            property.is_var,
-        );
-    }
-
-    fn declare_scoped_property_with_mutability(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        property: &ScopedProperty,
-        owner_storage_visible: bool,
-        is_var: bool,
-    ) {
-        if let Some((selected, span)) = property.enum_entry_property {
-            if self
-                .declare_enum_entry_dispatch_property(
-                    scope,
-                    &property.name,
-                    property.ty,
-                    is_var,
-                    EnumEntryPropertyBinding {
-                        owner: property.owner,
-                        property: selected,
-                        receiver: property.dispatch_receiver_identity,
-                    },
-                )
-                .is_err()
-            {
-                self.diags.error(
-                    span,
-                    "declared enum-entry property has no selected receiver",
-                );
-            }
-            return;
-        }
-        if let Some(field) = property.class_storage {
-            self.declare_class_storage(scope, &property.name, property.ty, is_var, field, false);
-            return;
-        }
-        let error_provenance = if property.ty == Ty::Error
-            && self
-                .source_member_inference_failed(property.source_member, property.stable_declaration)
-        {
-            ErrorProvenance::Diagnosed
-        } else {
-            ErrorProvenance::None
-        };
-        let storage = self.visible_owner_storage_type(scope, property, owner_storage_visible);
-        self.declare_dispatch_property_with_provenance(
-            scope,
-            &property.name,
-            DispatchPropertyBinding {
-                read_ty: storage.unwrap_or(property.ty),
-                declared_ty: property.ty,
-                error_provenance,
-                owner_storage: storage.is_some(),
-            },
-            is_var,
-            property.owner,
-            None,
-            property.dispatch_receiver_identity,
-        );
-    }
-
-    fn declare_class_storage(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        ty: Ty,
-        is_var: bool,
-        field: u32,
-        shared_cell: bool,
-    ) {
-        self.declare_with_origin(
-            scope,
-            name,
-            ty,
-            is_var,
-            ValueBindingDeclaration::ordinary(
-                ReceiverFnValueOrigin::ClassStorage(field),
-                ErrorProvenance::None,
-            )
-            .in_shared_cell(shared_cell),
-        );
-    }
-
-    /// Captures visible as storage inside one local/anonymous classifier body. Capture discovery
-    /// checks that body in the current lexical Pass-2 unit. Legacy whole-file analysis may consume
-    /// its installed parser-keyed record; streamed checking never crosses back into that arena.
-    fn body_class_storage_captures(&self, declaration: DeclId) -> Vec<AnonymousObjectCapture> {
-        if let Some(captures) = self
-            .discovered_local_class_captures
-            .get(&declaration)
-            .or_else(|| self.discovered_anonymous_captures.get(&declaration))
-        {
-            return captures.clone();
-        }
-        let CheckerModuleSymbols::Legacy(source) = &self.module else {
-            return Vec::new();
-        };
-        source
-            .pass_one_symbols()
-            .anonymous_object_captures
-            .get(&(self.file_index, declaration))
-            .or_else(|| {
-                // Retained inline syntax is compacted before its checked FIR is detached, so its
-                // parser-local declaration numbers may differ from the capture-discovery arena.
-                // Both arenas are already bound to the same stable classifier declaration. Follow
-                // that identity back to the still-live Pass-1 capture record; no source range or
-                // spelling is used, and this path disappears with the Pass-1 AST.
-                let active = self.active_declarations?;
-                let stable = active.classifier_declaration(declaration)?;
-                let class = source
-                    .pass_one_symbols()
-                    .class_by_stable_declaration(stable)?;
-                (class.source_file == self.file_index)
-                    .then_some(class.source_decl)
-                    .flatten()
-                    .and_then(|original| {
-                        source
-                            .pass_one_symbols()
-                            .anonymous_object_captures
-                            .get(&(self.file_index, original))
-                    })
-            })
-            .cloned()
-            .unwrap_or_default()
-    }
-
     /// Recreate the labeled receiver rungs captured by a local/anonymous classifier whose body is
     /// checked independently from its lexical construction expression. Capture discovery already
     /// selected the exact receiver coordinate; this projects only its source label back into the
@@ -39549,8 +39460,7 @@ impl<'a> Checker<'a> {
             ReceiverFnValueOrigin::DispatchProperty { declared_ty, .. } => declared_ty,
             _ => ty,
         };
-        let lexical_capture_identity = matches!(origin, ReceiverFnValueOrigin::Local)
-            .then(|| self.allocate_lexical_capture_identity());
+        let lexical_capture_identity = self.capture_lexical_identity(origin);
         let flow_identity = self.allocate_flow_identity();
         scope.rebind(
             name,
@@ -39572,22 +39482,6 @@ impl<'a> Checker<'a> {
             }),
         );
         flow_identity
-    }
-
-    fn allocate_flow_identity(&mut self) -> u32 {
-        let identity = self.next_flow_identity;
-        self.next_flow_identity = identity
-            .checked_add(1)
-            .expect("too many lexical bindings in one bounded checker");
-        identity
-    }
-
-    fn allocate_lexical_capture_identity(&mut self) -> u32 {
-        let identity = self.next_lexical_capture_identity;
-        self.next_lexical_capture_identity = identity
-            .checked_add(1)
-            .expect("too many lexical bindings in one bounded checker");
-        identity
     }
 
     /// Shadow a binding with its flow-narrowed type (`if (x != null) …`). Unlike a fresh
@@ -40920,8 +40814,15 @@ impl<'a> Checker<'a> {
                 default_masks[index / 32] |= (1u32 << (index % 32)) as i32;
             }
         }
+        let capture_plan = match &candidate.target {
+            ResolvedCtorDelegationTarget::Super { owner, .. } => {
+                self.selected_constructor_capture_plan(scope, *owner)
+            }
+            _ => None,
+        };
         Some(ResolvedCtorDelegation {
             target: candidate.target.clone(),
+            capture_plan,
             outer_receiver,
             context_args: contextual.context_sources.into_iter().flatten().collect(),
             argument_slots,
@@ -53279,9 +53180,9 @@ impl<'a> Checker<'a> {
                     );
                     return self.set(e, Ty::Error);
                 }
-                if let ReceiverFnValueOrigin::ClassStorage(field) = l.origin {
+                if let ReceiverFnValueOrigin::ClassStorage(storage) = l.origin {
                     self.expr_lowers
-                        .insert(e, ExprLowering::ClassStorageRead { field });
+                        .insert(e, ExprLowering::ClassStorageRead(storage));
                     self.read_flow_roots
                         .insert(e, scope::PathRoot::Value(l.flow_identity));
                     self.anonymous_super_read_provenance.insert(

@@ -1465,11 +1465,13 @@ impl BodyFirChecker<'_> {
                 return Ok(None);
             }
             Some(
-                ExprLowering::BuiltinUnaryCall { .. }
+                ExprLowering::ConstructorCaptures(_)
+                | ExprLowering::BuiltinUnaryCall { .. }
                 | ExprLowering::RuntimeTypeTest { .. }
                 | ExprLowering::ExtensionFunctionBinding { .. }
                 | ExprLowering::PluginExpression(_)
-                | ExprLowering::ClassStorageRead { .. }
+                | ExprLowering::ClassStorageRead(_)
+                | ExprLowering::EnumEntryStorageRead { .. }
                 | ExprLowering::EnumEntryPropertyRead { .. }
                 | ExprLowering::BackingFieldRead
                 | ExprLowering::ImplicitPropertyIncDec(_)

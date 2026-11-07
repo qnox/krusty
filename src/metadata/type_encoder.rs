@@ -454,6 +454,9 @@ impl<'a> StringTable<'a> {
                 self.local_classifiers.contains(&class.classifier()),
                 "a raw class ID requires local provenance"
             );
+            if class.is_anonymous() {
+                return Ok(self.class_literal(class.classifier().render(), true));
+            }
             return Ok(self.class_id(class.classifier()));
         };
         let package = package.render();
