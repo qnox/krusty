@@ -231,10 +231,6 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     // Stored by-value captures use the same checked pre-super field transport.
     } else if !constructor_prefix::supported(ir, id) {
         "a class capturing its surroundings"
-    } else if class.companion_class.is_some()
-        && companion_construction::requires_initialization(ir, id)
-    {
-        "a class with a companion object"
     } else if class
         .supertypes
         .iter()

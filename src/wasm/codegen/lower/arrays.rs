@@ -1,4 +1,7 @@
-//! Reference-element array storage and checked reads, owned by the Wasm representation boundary.
+//! Array storage and checked reads, owned by the Wasm representation boundary.
+//!
+//! `Array<T>` stores references. `IntArray` stores `i32` elements in its own identity object.
+//! Other primitive arrays stay declined.
 
 use crate::backend::BackendCompilerIntrinsic;
 use crate::ir::{IrCheckedOperation, IrPropertyDispatch};
@@ -11,6 +14,12 @@ use super::*;
 
 const I32_ADD: u8 = 0x6a;
 const I32_GE_U: u8 = 0x4f;
+
+/// `IntArray`: a non-reference array whose element is `Int`.
+pub(super) fn is_int_array(array: Ty) -> bool {
+    let array = array.non_null();
+    !array.is_reference_array() && array.array_elem() == Some(Ty::Int)
+}
 
 fn reference_element(array: Ty) -> Result<Ty, Unsupported> {
     if !array.non_null().is_reference_array() {
@@ -230,6 +239,145 @@ impl Body<'_> {
         self.reference_array_storage();
         self.code.array_len();
         Ok(())
+    }
+
+    pub(super) fn array_get(&mut self, receiver: u32, index: u32) -> Result<(), Unsupported> {
+        let array = self.array_receiver(receiver)?;
+        if is_int_array(array) {
+            self.int_array_get(receiver, index)
+        } else {
+            self.reference_array_get(receiver, index)
+        }
+    }
+
+    pub(super) fn array_set(
+        &mut self,
+        receiver: u32,
+        index: u32,
+        value: u32,
+    ) -> Result<(), Unsupported> {
+        let array = self.array_receiver(receiver)?;
+        if is_int_array(array) {
+            self.int_array_set(receiver, index, value)
+        } else {
+            self.reference_array_set(receiver, index, value)
+        }
+    }
+
+    pub(super) fn array_size(&mut self, receiver: u32) -> Result<(), Unsupported> {
+        let array = self.array_receiver(receiver)?;
+        self.value(receiver, array)?;
+        if is_int_array(array) {
+            self.int_array_storage();
+        } else {
+            reference_element(array)?;
+            self.reference_array_storage();
+        }
+        self.code.array_len();
+        Ok(())
+    }
+
+    fn array_receiver(&mut self, receiver: u32) -> Result<Ty, Unsupported> {
+        self.type_of(receiver)?
+            .ok_or_else(|| "an array receiver without a checked type".to_string())
+    }
+
+    pub(super) fn new_int_array(&mut self, size: u32) -> Result<(), Unsupported> {
+        self.value(size, Ty::Int)?;
+        self.code.array_new_default(self.runtime.ints);
+        self.wrap_int_array();
+        Ok(())
+    }
+
+    pub(super) fn int_array_literal(
+        &mut self,
+        spreads: &[bool],
+        elements: &[u32],
+    ) -> Result<(), Unsupported> {
+        if spreads.len() != elements.len() {
+            return Err("a malformed array literal's spread inventory".into());
+        }
+        if spreads.contains(&true) {
+            return Err("a spread into an IntArray".into());
+        }
+        for &element in elements {
+            self.value(element, Ty::Int)?;
+        }
+        let length = u32::try_from(elements.len())
+            .map_err(|_| "an array literal exceeding Wasm's length space".to_string())?;
+        self.code.array_new_fixed(self.runtime.ints, length);
+        self.wrap_int_array();
+        Ok(())
+    }
+
+    fn wrap_int_array(&mut self) {
+        let storage = self.local(ValType::reference(self.runtime.ints));
+        let object = self.runtime.int_arrays.object;
+        self.code
+            .local_set(storage)
+            .global_get(self.runtime.int_arrays.table)
+            .call(self.runtime.identity.allocate)
+            .local_get(storage)
+            .struct_new(object);
+    }
+
+    fn int_array_storage(&mut self) {
+        let object = self.runtime.int_arrays.object;
+        self.code
+            .ref_cast(false, HeapType::Concrete(object))
+            .struct_get(object, crate::wasm::reference_arrays::STORAGE_FIELD);
+    }
+
+    fn int_array_get(&mut self, receiver: u32, index: u32) -> Result<(), Unsupported> {
+        let (storage, offset) = self.int_slot_operands(receiver, index)?;
+        let storage = self.int_array_backing(storage);
+        self.check_reference_slot(storage, offset)?;
+        self.code
+            .local_get(storage)
+            .ref_as_non_null()
+            .local_get(offset)
+            .array_get(self.runtime.ints);
+        Ok(())
+    }
+
+    fn int_array_set(&mut self, receiver: u32, index: u32, value: u32) -> Result<(), Unsupported> {
+        let (storage, offset) = self.int_slot_operands(receiver, index)?;
+        let stored = self.local(ValType::I32);
+        self.value(value, Ty::Int)?;
+        self.code.local_set(stored);
+        let storage = self.int_array_backing(storage);
+        self.check_reference_slot(storage, offset)?;
+        self.code
+            .local_get(storage)
+            .ref_as_non_null()
+            .local_get(offset)
+            .local_get(stored)
+            .array_set(self.runtime.ints);
+        Ok(())
+    }
+
+    fn int_slot_operands(&mut self, receiver: u32, index: u32) -> Result<(u32, u32), Unsupported> {
+        let array = self.array_receiver(receiver)?;
+        if !is_int_array(array) {
+            return Err(format!("IntArray storage for `{}`", describe(array)));
+        }
+        let storage = self.local(ValType::nullable(self.runtime.int_arrays.object));
+        let offset = self.local(ValType::I32);
+        self.value(receiver, array)?;
+        self.code
+            .ref_cast(true, HeapType::Concrete(self.runtime.int_arrays.object))
+            .local_set(storage);
+        self.value(index, Ty::Int)?;
+        self.code.local_set(offset);
+        Ok((storage, offset))
+    }
+
+    fn int_array_backing(&mut self, array: u32) -> u32 {
+        let storage = self.local(ValType::reference(self.runtime.ints));
+        self.code.local_get(array);
+        self.int_array_storage();
+        self.code.local_set(storage);
+        storage
     }
 
     pub(super) fn reference_array_get(

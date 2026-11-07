@@ -17,13 +17,19 @@ impl Body<'_> {
                 let (Some(receiver), [index]) = (receiver, args) else {
                     return Err("an array read with malformed operands".into());
                 };
-                self.reference_array_get(receiver, *index)
+                self.array_get(receiver, *index)
             }
             IrIntrinsic::ArraySet => {
                 let (Some(receiver), [index, value]) = (receiver, args) else {
                     return Err("an array store with malformed operands".into());
                 };
-                self.reference_array_set(receiver, *index, *value)
+                self.array_set(receiver, *index, *value)
+            }
+            IrIntrinsic::ArraySize => {
+                let (Some(receiver), []) = (receiver, args) else {
+                    return Err("a malformed array length read".into());
+                };
+                self.array_size(receiver)
             }
             IrIntrinsic::ArraySize => {
                 let (Some(receiver), []) = (receiver, args) else {
