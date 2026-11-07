@@ -73,6 +73,8 @@ fn destructured_lambda_parameters_are_guarded_like_kotlinc() {
 }
 
 // PLATFORM-SPECIFIC: the shared whole source fixes each JVM method's guards and debug offsets.
+// `TARGET_BACKEND: JVM_IR` keeps that oracle in the shared inventory and outside the Native and
+// Wasm lanes, which have no parameter-guard pass.
 #[test]
 fn coroutine_owned_lambda_parameters_match_kotlinc_without_changing_ordinary_guards() {
     let source = include_str!("box_regressions/suspendLambdaNestedLambdaParameters.kt");
@@ -82,4 +84,10 @@ fn coroutine_owned_lambda_parameters_match_kotlinc_without_changing_ordinary_gua
     )]);
     assert_eq!(classes.differences(), Vec::<String>::new());
     common::expect_box_same_as_kotlinc(source, "SuspendLambdaNestedLambdaParameters");
+    assert!(krusty::conformance::backend_applicable(
+        source,
+        krusty::conformance::BACKENDS
+    ));
+    assert!(!krusty::conformance::backend_targeted(source, &["NATIVE"]));
+    assert!(!krusty::conformance::backend_targeted(source, &["WASM"]));
 }

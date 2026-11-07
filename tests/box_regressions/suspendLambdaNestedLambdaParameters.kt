@@ -1,3 +1,7 @@
+// TARGET_BACKEND: JVM_IR
+// PLATFORM-SPECIFIC: kotlinc's generateNonNullAssertions is a JVM pass. It skips every method of a
+// suspend-lambda class, and this program pins those class files. Native and Wasm have no parameter
+// guards.
 // WITH_STDLIB
 
 import kotlin.coroutines.Continuation
