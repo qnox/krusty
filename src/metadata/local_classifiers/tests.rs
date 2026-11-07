@@ -1,4 +1,4 @@
-use super::{enum_entry_bodies, names};
+use super::{anonymous_names, enum_entry_bodies, names};
 use crate::ir::{
     IrClass, IrClassDeclarationContext as Context, IrFile, IrLocalClassNameProvenance,
     IrLocalClassOwner, IrModuleSource,
@@ -59,8 +59,13 @@ fn initializer_object(ir: &mut IrFile, owner: TypeName, property: &str) -> TypeN
 
 fn encoded_id(ir: &IrFile, classifier: TypeName) -> String {
     let known_inner = |_| Ok(None);
-    let mut strings =
-        StringTable::with_local_classifiers(&names(ir), &enum_entry_bodies(ir), None, &known_inner);
+    let mut strings = StringTable::with_local_classifiers(
+        &names(ir),
+        &enum_entry_bodies(ir),
+        &anonymous_names(ir),
+        None,
+        &known_inner,
+    );
     let index = strings.class_id(classifier);
     strings.into_strings().remove(index as usize)
 }
@@ -125,5 +130,68 @@ fn an_ordinary_initializer_keeps_its_existing_raw_local_id() {
     ir.add_class(IrClass::synthetic(owner));
     let object = initializer_object(&mut ir, owner, "storage");
     let inner = member(&mut ir, object, "Inner");
+    assert_eq!(encoded_id(&ir, object), "sample/Holder$storage$1");
     assert_eq!(encoded_id(&ir, inner), "sample/Holder$storage$1.Inner");
+}
+
+#[test]
+fn anonymous_references_and_declarations_share_the_raw_id_in_either_order() {
+    use crate::metadata::class_id::{ClassIdError, ResolvedClassId};
+
+    let mut ir = IrFile::default();
+    let entry = entry(&mut ir, "ENTRY");
+    let object = initializer_object(&mut ir, entry, "storage");
+    let inner = member(&mut ir, object, "Inner");
+    let anonymous = ResolvedClassId::anonymous(object);
+    let known_inner = |_| Ok(None);
+    for reference_first in [true, false] {
+        let mut strings = StringTable::with_local_classifiers(
+            &names(&ir),
+            &enum_entry_bodies(&ir),
+            &anonymous_names(&ir),
+            None,
+            &known_inner,
+        );
+        let first = if reference_first {
+            strings.class_id(object)
+        } else {
+            strings.declaration_class_id(&anonymous).unwrap()
+        };
+        assert_eq!(strings.class_id(object), first);
+        assert_eq!(strings.declaration_class_id(&anonymous), Ok(first));
+        assert_eq!(strings.class_id(inner), 1);
+        assert_eq!(strings.class_id(entry), 2);
+        assert_eq!(
+            strings.into_strings(),
+            [
+                "sample/Choice$ENTRY$storage$1",
+                "sample/Choice.ENTRY.storage.1.Inner",
+                "sample/Choice.ENTRY",
+            ]
+        );
+    }
+    let mut klib = StringTable::klib(&known_inner);
+    assert_eq!(
+        klib.declaration_class_id(&anonymous),
+        Err(ClassIdError::LocalInKlib(object))
+    );
+}
+
+#[test]
+fn anonymous_provenance_does_not_classify_named_or_enum_entry_declarations() {
+    let mut ir = IrFile::default();
+    let entry = entry(&mut ir, "ENTRY");
+    // Enum-entry bodies are anonymous IR classes with their own declaration namespace.
+    let entry_id = ir.class_id_by_name(entry).unwrap();
+    ir.classes[entry_id as usize].is_anonymous_object = true;
+    let named = member(&mut ir, entry, "storage");
+    let generated_looking_name = member(&mut ir, named, "1");
+    let object = initializer_object(&mut ir, entry, "other");
+    assert_eq!(anonymous_names(&ir), [object].into_iter().collect());
+    assert_eq!(encoded_id(&ir, entry), "sample/Choice.ENTRY");
+    assert_eq!(
+        encoded_id(&ir, generated_looking_name),
+        "sample/Choice.ENTRY.storage.1"
+    );
+    assert_eq!(encoded_id(&ir, object), "sample/Choice$ENTRY$other$1");
 }
