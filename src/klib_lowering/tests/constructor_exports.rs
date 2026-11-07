@@ -60,6 +60,7 @@ fn fixture(bad_initializer: bool) -> Fixture {
     let mut constructor = prototype.facts["seed"].clone();
     constructor.name = "<init>".into();
     constructor.kind = ExternalCallableKind::Constructor;
+    constructor.generic_sig = None;
     constructor.visibility = Visibility::Public;
     constructor.declaration_owner = Some(crate::types::SemanticCallableOwner::Classifier(owner));
     constructor.declaration_signature = Some(identity.declaration.clone());
@@ -276,6 +277,11 @@ fn fixture(bad_initializer: bool) -> Fixture {
     factory.name = "make".into();
     factory.visibility = Visibility::Public;
     factory.ret = Ty::obj_name(owner);
+    factory
+        .generic_sig
+        .as_mut()
+        .expect("the demo function has a complete selected signature")
+        .ret = factory.ret;
     factory.dependency_callable = Some(KlibDependencyCallable {
         module: "demo".into(),
         declaration: KlibDeclarationSignature::Public(factory_signature),

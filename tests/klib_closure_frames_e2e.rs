@@ -469,7 +469,7 @@ fn assert_official_dependency_sources(
     .expect("read official serialized closure declarations");
     let inputs = consumers
         .iter()
-        .map(|(stem, text)| krusty::source::SourceInput::kotlin(text).with_file_stem(*stem))
+        .map(|(stem, text)| krusty::source::SourceInput::kotlin(text).with_file_stem(stem))
         .collect::<Vec<_>>();
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
