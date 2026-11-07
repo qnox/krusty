@@ -666,7 +666,6 @@ closures/captureInSuperConstructorCall/properValueCapturedByClosure1.kt
 closures/captureInSuperConstructorCall/properValueCapturedByClosure2.kt
 closures/capturedVarsOptimization/capturedVarsOfSize2.kt
 closures/capturedVarsOptimization/closureBoxedVarOptimizations.kt
-closures/capturedVarsOptimization/kt17588.kt
 closures/capturedVarsOptimization/kt44347.kt
 closures/capturedVarsOptimization/kt45446.kt
 closures/capturedVarsOptimization/withCoroutines.kt
@@ -961,7 +960,6 @@ controlStructures/kt15726.kt
 controlStructures/kt1688.kt
 controlStructures/kt1742.kt
 controlStructures/kt2147.kt
-controlStructures/kt2259.kt
 controlStructures/kt2291.kt
 controlStructures/kt237.kt
 controlStructures/kt2416.kt
@@ -983,14 +981,12 @@ controlStructures/returnsNothing/inlineMethod.kt
 controlStructures/returnsNothing/tryCatch.kt
 controlStructures/slowDsl/slowHtmlLikeDsl.kt
 controlStructures/tcbInEliminatedCondition.kt
-controlStructures/tryCatchFinally.kt
 controlStructures/tryCatchFinallyChain.kt
 controlStructures/tryCatchInExpressions/catch.kt
 controlStructures/tryCatchInExpressions/complexChain.kt
 controlStructures/tryCatchInExpressions/deadTryCatch.kt
 controlStructures/tryCatchInExpressions/differentTypes.kt
 controlStructures/tryCatchInExpressions/expectException.kt
-controlStructures/tryCatchInExpressions/finally.kt
 controlStructures/tryCatchInExpressions/inlineTryCatch.kt
 controlStructures/tryCatchInExpressions/inlineTryExpr.kt
 controlStructures/tryCatchInExpressions/inlineTryFinally.kt
@@ -999,7 +995,6 @@ controlStructures/tryCatchInExpressions/kt17572_2.kt
 controlStructures/tryCatchInExpressions/kt17572_2_ext.kt
 controlStructures/tryCatchInExpressions/kt17572_ext.kt
 controlStructures/tryCatchInExpressions/kt17572_nested.kt
-controlStructures/tryCatchInExpressions/kt17573.kt
 controlStructures/tryCatchInExpressions/kt17573_nested.kt
 controlStructures/tryCatchInExpressions/kt8608.kt
 controlStructures/tryCatchInExpressions/kt9644try.kt
@@ -2259,7 +2254,6 @@ inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/TypePa
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSinks/ImmutableExtensionProperties.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSinks/MutableExtensionPropertiesMaterializeCase.kt
 inference/pcla/pcaRootIsDelegatedConstructorCall.kt
-inference/pcla/pclaRootIsTrySyntheticCall.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inference/pcla/posptonedPCLACallInsideStringInterpolation.kt
 inference/pcla/propagateInferenceSessionIntoDeclarationAnalyzers.kt
