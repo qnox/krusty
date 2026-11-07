@@ -454,7 +454,6 @@ callableReference/function/kt32462.kt
 callableReference/function/kt47741.kt
 callableReference/function/local/captureOuter.kt
 callableReference/function/local/enumExtendsTrait.kt
-callableReference/function/local/equalsHashCode.kt
 callableReference/function/local/localFunctionName.kt
 callableReference/function/nestedExtensionInSAMInterface.kt
 callableReference/function/newArray.kt
@@ -1478,7 +1477,6 @@ dataClasses/equals/null.kt
 dataClasses/equals/nullother.kt
 dataClasses/equals/sameinstance.kt
 dataClasses/floatParam.kt
-dataClasses/fromOtherModule.kt
 dataClasses/genericParam.kt
 dataClasses/hashCode/byte.kt
 dataClasses/hashCode/char.kt
