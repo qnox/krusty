@@ -151,55 +151,73 @@ pub(super) fn emit_default_stub(
         &mask_slots,
         signature_line,
     );
-    if let Some(line) = signature_line {
-        code.mark_line(line);
-    }
-    if singleton.is_none() {
-        code.aload(0);
-    }
-    for (index, &(slot, ty)) in param_slots.iter().enumerate() {
-        load(ty, slot, &mut code);
-        emit_adapted_unbox(
-            ir,
-            emitter.cw,
-            &boxed,
-            index,
-            real_params[index],
-            ty,
+    if let Some(copied) = copied_inline_body(ir, fid) {
+        emit_copied_inline_body(
+            &mut emitter,
             &mut code,
+            env,
+            CopiedInlineBody {
+                fid,
+                body: copied,
+                parameters: &real_params,
+                stub_parameter_count: stub_param_tys.len(),
+                mask_count,
+                signature_line,
+                receiver_value: true,
+                receiver: singleton.is_none().then_some(owner_ty),
+            },
         );
-    }
-    let argument_words: i32 = real_params.iter().map(|ty| slot_words(*ty) as i32).sum();
-    let descriptor = method_descriptor(&real_params, ret);
-    if holder_private_dispatch {
-        let holder = format!("{owner}$DefaultImpls");
-        let mut holder_params = vec![owner_ty];
-        holder_params.extend_from_slice(&real_params);
-        let holder_descriptor = method_descriptor(&holder_params, ret);
-        let method = emitter
-            .cw
-            .methodref(&holder, &method_name, &holder_descriptor);
-        // The receiver was loaded first, so the static target's arguments are already in order.
-        code.invokestatic(method, argument_words + 1, slot_words(ret) as i32);
     } else {
-        let method = if is_interface {
-            emitter
-                .cw
-                .interface_methodref(owner, &method_name, &descriptor)
-        } else {
-            emitter.cw.methodref(owner, &method_name, &descriptor)
-        };
-        if is_interface {
-            code.invokeinterface(method, argument_words, slot_words(ret) as i32);
-        } else if singleton.is_some() {
-            code.invokestatic(method, argument_words, slot_words(ret) as i32);
-        } else if ir.method_visibility(fid).is_private() {
-            code.invokespecial(method, argument_words, slot_words(ret) as i32);
-        } else {
-            code.invokevirtual(method, argument_words, slot_words(ret) as i32);
+        if let Some(line) = signature_line {
+            code.mark_line(line);
         }
+        if singleton.is_none() {
+            code.aload(0);
+        }
+        for (index, &(slot, ty)) in param_slots.iter().enumerate() {
+            load(ty, slot, &mut code);
+            emit_adapted_unbox(
+                ir,
+                emitter.cw,
+                &boxed,
+                index,
+                real_params[index],
+                ty,
+                &mut code,
+            );
+        }
+        let argument_words: i32 = real_params.iter().map(|ty| slot_words(*ty) as i32).sum();
+        let descriptor = method_descriptor(&real_params, ret);
+        if holder_private_dispatch {
+            let holder = format!("{owner}$DefaultImpls");
+            let mut holder_params = vec![owner_ty];
+            holder_params.extend_from_slice(&real_params);
+            let holder_descriptor = method_descriptor(&holder_params, ret);
+            let method = emitter
+                .cw
+                .methodref(&holder, &method_name, &holder_descriptor);
+            // The receiver was loaded first, so the static target's arguments are already in order.
+            code.invokestatic(method, argument_words + 1, slot_words(ret) as i32);
+        } else {
+            let method = if is_interface {
+                emitter
+                    .cw
+                    .interface_methodref(owner, &method_name, &descriptor)
+            } else {
+                emitter.cw.methodref(owner, &method_name, &descriptor)
+            };
+            if is_interface {
+                code.invokeinterface(method, argument_words, slot_words(ret) as i32);
+            } else if singleton.is_some() {
+                code.invokestatic(method, argument_words, slot_words(ret) as i32);
+            } else if ir.method_visibility(fid).is_private() {
+                code.invokespecial(method, argument_words, slot_words(ret) as i32);
+            } else {
+                code.invokevirtual(method, argument_words, slot_words(ret) as i32);
+            }
+        }
+        emit_return(ret, &mut code);
     }
-    emit_return(ret, &mut code);
     code.ensure_locals(emitter.frame.max());
     code.link();
     // kotlinc's holder stub for a private member is `public static synthetic` (the private member
@@ -602,7 +620,6 @@ pub(super) fn emit_facade_default_stub(
         marker,
     );
     let _ = emitter.lease_temporary(marker_slot, marker);
-    let inline_default = crate::jvm::lambda_classes::has_inline_default_lambda(ir, fid);
     let mut code = CodeBuilder::new(emitter.frame.size());
     // The stub's first line is the signature. The function method itself does not record that
     // line: its table opens on the body, after the inline-depth marker.
@@ -619,50 +636,22 @@ pub(super) fn emit_facade_default_stub(
         &mask_slots,
         signature_line,
     );
-    let reified_body = function
-        .body
-        .filter(|&body| body_has_reified_markers(ir, body));
-    let inline_body = function.body.filter(|_| inline_default);
-    if let Some(body) = inline_body.or(reified_body) {
-        let inline_marker = inline_default.then(|| {
-            // The mask and marker parameters sit in the slots the body reuses. The default
-            // prefix has already recorded its stack map against the method's entry locals, so
-            // the frame cursor can return to the first of those slots. kotlinc's `$i$f$` marker
-            // then overwrites the mask.
-            release_default_stub_suffix(&mut emitter, stub_param_tys.len(), mask_count);
-            // A default expression may have moved the current line into its own body. The ordinary
-            // method-entry checks resume at the declaration signature; `mark_line` naturally
-            // deduplicates this when the default and signature share one line.
-            if let Some(line) = signature_line {
-                code.mark_line(line);
-            }
-            super::method_entry::emit(fid, &real_params, false, None, env, &mut emitter, &mut code);
-            ir.top_level_inline_functions.contains(&fid).then(|| {
-                let slot = emitter
-                    .frame
-                    .enter_temp(super::frame_map::TempRole::InlineDepthMarker, Ty::Int)
-                    .slot();
-                code.push_int(0, emitter.cw);
-                store(Ty::Int, slot, &mut code);
-                (slot, code.bytes.len() as u16)
-            })
-        });
-        if inline_default {
-            // The signature line is already in effect at pc 0. The body restates that same line
-            // on the expression after the inline-depth marker.
-            code.forget_line();
-        }
-        emitter.emit(body, &mut code);
-        if ret == Ty::Unit && !emitter.discarding_diverges(body) {
-            code.ret_void();
-        }
-        if let Some(Some((slot, start))) = inline_marker {
-            let marker_name = format!("$i$f${}", ir.name_before_part_suffix(fid));
-            code.add_local_entry(start, None, slot, &marker_name, "I");
-        }
-        if inline_body.is_some() {
-            record_stub_parameter_locals(ir, fid, &real_params, &mut code);
-        }
+    if let Some(body) = copied_inline_body(ir, fid) {
+        emit_copied_inline_body(
+            &mut emitter,
+            &mut code,
+            env,
+            CopiedInlineBody {
+                fid,
+                body,
+                parameters: &real_params,
+                stub_parameter_count: stub_param_tys.len(),
+                mask_count,
+                signature_line,
+                receiver_value: false,
+                receiver: None,
+            },
+        );
     } else {
         if let Some(line) = signature_line {
             code.mark_line(line);
@@ -754,12 +743,150 @@ fn release_default_stub_suffix(
     }
 }
 
-/// The real parameters of an inline `$default` stub, covering the whole method. The mask and
-/// marker are not named.
-fn record_stub_parameter_locals(ir: &IrFile, fid: u32, param_tys: &[Ty], code: &mut CodeBuilder) {
-    let function = &ir.functions[fid as usize];
-    let local_names = crate::jvm::parameter_names::function_locals(ir, fid, param_tys);
-    let mut slot = u16::from(!function.is_static);
+/// The body an inline function's `$default` stub carries. kotlinc's stub calls the function
+/// after applying the defaults, and its inliner then copies the body over that call, for every
+/// emitted inline function, whatever its owner, visibility, reified or suspend shape.
+fn copied_inline_body(ir: &IrFile, fid: u32) -> Option<ExprId> {
+    ir.functions[fid as usize]
+        .body
+        .filter(|_| ir.inline_fns.contains(&fid))
+}
+
+/// The stub facts a copied inline body is emitted against.
+struct CopiedInlineBody<'a> {
+    fid: u32,
+    body: ExprId,
+    /// The function's own physical parameters, which the stub's parameters hold.
+    parameters: &'a [Ty],
+    stub_parameter_count: usize,
+    mask_count: usize,
+    signature_line: Option<u32>,
+    /// Whether common IR numbers a receiver as value 0, so the parameters start at value 1. A
+    /// member's stub always does, a `@JvmStatic` singleton member's included, although that stub
+    /// takes no physical receiver.
+    receiver_value: bool,
+    /// The stub's leading physical receiver, in slot 0 and its LocalVariableTable; a static stub
+    /// has none.
+    receiver: Option<Ty>,
+}
+
+/// Emit an inline function's body after the stub's default prefix, as kotlinc's inliner leaves it
+/// in place of the call: the call's arguments are the stub's own parameters, so the body reads
+/// them in place. The function's parameter guards run first, then its `$i$f$` marker, which
+/// overwrites the first mask slot.
+fn emit_copied_inline_body(
+    emitter: &mut Emitter<'_>,
+    code: &mut CodeBuilder,
+    env: &EmitEnv,
+    copied: CopiedInlineBody<'_>,
+) {
+    let ir = emitter.ir;
+    let fid = copied.fid;
+    let receiver_value = copied.receiver_value;
+    // The mask and marker parameters sit in the slots the body reuses. The default prefix has
+    // already recorded its stack map against the method's entry locals, so the frame cursor can
+    // return to the first of those slots.
+    release_default_stub_suffix(emitter, copied.stub_parameter_count, copied.mask_count);
+    // A default expression may have moved the current line into its own body. The ordinary
+    // method-entry checks resume at the declaration signature; `mark_line` naturally deduplicates
+    // this when the default and signature share one line.
+    if let Some(line) = copied.signature_line {
+        code.mark_line(line);
+    }
+    super::method_entry::emit(
+        fid,
+        copied.parameters,
+        receiver_value,
+        None,
+        env,
+        emitter,
+        code,
+    );
+    let inline_marker =
+        super::function_debug::opens_with_inline_depth_marker(ir, fid, receiver_value).then(|| {
+            let slot = emitter
+                .frame
+                .enter_temp(super::frame_map::TempRole::InlineDepthMarker, Ty::Int)
+                .slot();
+            code.push_int(0, emitter.cw);
+            store(Ty::Int, slot, code);
+            (slot, code.bytes.len() as u16)
+        });
+    // The signature line is already in effect at pc 0. The body restates that same line on the
+    // expression after the inline-depth marker.
+    code.forget_line();
+    // From here on the stub writes the function's own body, as its method does: its locals are
+    // described and its `finally` copies marked.
+    emitter.function = Some(fid);
+    emitter.finally_markers = true;
+    let transformed = env.emit_time_machines.transformed(fid);
+    emitter.record_locals =
+        super::function_debug::body_records_locals(ir, fid, transformed.is_some());
+    // A `suspend inline` body is copied as its inlining callers take it, the `$$forInline` shape:
+    // its suspension points pass the stub's `$completion` between their inline markers.
+    if let Some(machine) = transformed {
+        let completion = copied
+            .parameters
+            .len()
+            .checked_sub(1)
+            .and_then(|index| u32::try_from(index).ok())
+            .expect("a transformed suspend function has a physical completion parameter")
+            + u32::from(receiver_value);
+        emitter.arm_transformed_machine(machine, Some(completion));
+        emitter.leave_inlined_invokes_unmarked(
+            crate::jvm::suspend_inline_functions::inlined_invokes(
+                ir,
+                fid,
+                crate::jvm::suspend_inline_functions::for_inline_copy(ir, fid),
+                env.emit_time_machines,
+                machine,
+            ),
+        );
+    }
+    emitter.emit(copied.body, code);
+    if jvm_declared_ty(&ir.functions[fid as usize].ret) == Ty::Unit
+        && !emitter.discarding_diverges(copied.body)
+    {
+        // As in the function's own method, the implicit `return` stands on the closing brace.
+        if let Some(&close) = ir.fn_close_lines.get(&fid) {
+            code.mark_line(close);
+        }
+        code.ret_void();
+    }
+    if let Some((slot, start)) = inline_marker {
+        let marker_name = format!("$i$f${}", ir.name_before_part_suffix(fid));
+        code.add_local_entry(start, None, slot, &marker_name, "I");
+    }
+    // The body's locals still in scope at its end precede the parameters, as in the method.
+    if emitter.record_locals {
+        let locals = std::mem::take(&mut emitter.open_locals);
+        emitter.record_open_locals(locals, |_| None, code);
+    }
+    record_stub_parameter_locals(ir, fid, copied.parameters, copied.receiver, code);
+}
+
+/// The receiver and real parameters of an inline `$default` stub, covering the whole method. The
+/// mask and marker are not named.
+fn record_stub_parameter_locals(
+    ir: &IrFile,
+    fid: u32,
+    param_tys: &[Ty],
+    receiver: Option<Ty>,
+    code: &mut CodeBuilder,
+) {
+    let local_names =
+        crate::jvm::parameter_names::default_stub_locals(ir, fid, param_tys, receiver.is_some());
+    let mut slot = 0;
+    if let Some(receiver) = receiver {
+        code.add_local_entry(
+            0,
+            None,
+            0,
+            "$this",
+            &crate::jvm::names::type_descriptor(receiver),
+        );
+        slot = 1;
+    }
     for (index, ty) in param_tys.iter().enumerate() {
         let name = local_names
             .as_ref()
@@ -917,40 +1044,6 @@ fn calls_default_bridge(ir: &IrFile, expression: crate::ir::ExprId, target: u32)
     }
 }
 
-#[cfg(test)]
-mod catch_marker_tests {
-    use super::body_has_reified_markers;
-    use crate::ir::{IrExpr, IrFile};
-    use crate::types::{type_name, Ty};
-
-    #[test]
-    fn a_recorded_reified_catch_marks_its_try() {
-        let mut ir = IrFile::default();
-        let handler = ir.add_expr(IrExpr::UnitInstance);
-        let thrown = ir.add_expr(IrExpr::UnitInstance);
-        let expression = ir.add_expr(IrExpr::Try {
-            body: thrown,
-            catches: vec![crate::ir::IrCatch::generated(
-                0,
-                type_name("kotlin/Throwable"),
-                handler,
-            )],
-            finally: None,
-            result: Ty::Unit,
-        });
-        assert!(!body_has_reified_markers(&ir, expression));
-        ir.reified_markers
-            .catches
-            .insert(expression, vec![Some("E".to_owned())]);
-        assert!(body_has_reified_markers(&ir, expression));
-        let wrapper = ir.add_expr(IrExpr::Block {
-            stmts: vec![expression],
-            value: None,
-        });
-        assert!(body_has_reified_markers(&ir, wrapper));
-    }
-}
-
 impl Emitter<'_> {
     /// Emit the operands a call of `fid` passes its `$default` stub after any receiver: each
     /// supplied argument (or a zero placeholder for an omitted one, with its mask bit set), the
@@ -1021,5 +1114,39 @@ impl Emitter<'_> {
         code.aconst_null();
         stub_params.push(Ty::obj("java/lang/Object"));
         stub_params
+    }
+}
+
+#[cfg(test)]
+mod catch_marker_tests {
+    use super::body_has_reified_markers;
+    use crate::ir::{IrExpr, IrFile};
+    use crate::types::{type_name, Ty};
+
+    #[test]
+    fn a_recorded_reified_catch_marks_its_try() {
+        let mut ir = IrFile::default();
+        let handler = ir.add_expr(IrExpr::UnitInstance);
+        let thrown = ir.add_expr(IrExpr::UnitInstance);
+        let expression = ir.add_expr(IrExpr::Try {
+            body: thrown,
+            catches: vec![crate::ir::IrCatch::generated(
+                0,
+                type_name("kotlin/Throwable"),
+                handler,
+            )],
+            finally: None,
+            result: Ty::Unit,
+        });
+        assert!(!body_has_reified_markers(&ir, expression));
+        ir.reified_markers
+            .catches
+            .insert(expression, vec![Some("E".to_owned())]);
+        assert!(body_has_reified_markers(&ir, expression));
+        let wrapper = ir.add_expr(IrExpr::Block {
+            stmts: vec![expression],
+            value: None,
+        });
+        assert!(body_has_reified_markers(&ir, wrapper));
     }
 }
