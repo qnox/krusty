@@ -2501,7 +2501,12 @@ fn inline_failure_reports_only_the_exact_selected_provider_identity() {
     ));
     let mut diagnostics = DiagSink::new();
     diagnostics.set_file(3);
-    report_inline_body_failure(&mut diagnostics, &failure, &provider);
+    report_fir_lowering_failure(
+        &mut diagnostics,
+        "cannot consume inline FIR",
+        &failure,
+        |target| crate::frontend::selected_external_call_diagnostic(&provider, target),
+    );
     assert_eq!(provider.queries.borrow().as_slice(), &[provider.selected]);
     assert_eq!(emitted_diagnostics(&diagnostics), [(3, format!(
         "internal error: cannot consume inline FIR: {failure:?}; selected dependency owner={:?}, name=\"chosen\", declaration={:?}, dependency={:?}",
@@ -2516,7 +2521,12 @@ fn inline_failure_reports_only_the_exact_selected_provider_identity() {
     let unknown = ExternalCallableId::from_raw(8);
     let failure =
         FirFileLoweringFailure::Body(FirLoweringFailure::UnsupportedExternalCall(unknown));
-    report_inline_body_failure(&mut diagnostics, &failure, &provider);
+    report_fir_lowering_failure(
+        &mut diagnostics,
+        "cannot consume inline FIR",
+        &failure,
+        |target| crate::frontend::selected_external_call_diagnostic(&provider, target),
+    );
     assert_eq!(
         provider.queries.borrow().as_slice(),
         &[provider.selected, unknown]
@@ -2528,7 +2538,12 @@ fn inline_failure_reports_only_the_exact_selected_provider_identity() {
     );
 
     let unrelated = FirFileLoweringFailure::Body(FirLoweringFailure::UnsupportedIntrinsicCall);
-    report_inline_body_failure(&mut diagnostics, &unrelated, &provider);
+    report_fir_lowering_failure(
+        &mut diagnostics,
+        "cannot consume inline FIR",
+        &unrelated,
+        |target| crate::frontend::selected_external_call_diagnostic(&provider, target),
+    );
     assert_eq!(
         provider.queries.borrow().as_slice(),
         &[provider.selected, unknown]
@@ -2537,5 +2552,35 @@ fn inline_failure_reports_only_the_exact_selected_provider_identity() {
     assert_eq!(
         diagnostics.diags[2].msg,
         format!("internal error: cannot consume inline FIR: {unrelated:?}")
+    );
+
+    let ordinary = FirFileLoweringFailure::Body(FirLoweringFailure::UnsupportedExternalCall(
+        provider.selected,
+    ));
+    report_fir_lowering_failure(
+        &mut diagnostics,
+        "checked FIR lowering failed",
+        &ordinary,
+        |target| crate::frontend::selected_external_call_diagnostic(&provider, target),
+    );
+    assert_eq!(diagnostics.diags.len(), 4);
+    assert_eq!(diagnostics.diags[3].file, 3);
+    assert_eq!(
+        provider.queries.borrow().as_slice(),
+        &[provider.selected, unknown, provider.selected]
+    );
+    assert_eq!(diagnostics.diags[3].msg, format!(
+        "internal error: checked FIR lowering failed: {ordinary:?}; selected dependency owner={:?}, name=\"chosen\", declaration={:?}, dependency={:?}",
+        provider.declaration.declaration_owner,
+        provider.declaration.declaration_signature.as_ref(),
+        provider.declaration.dependency_callable.as_ref(),
+    ));
+    assert_eq!(
+        diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| (diagnostic.file, diagnostic.span, diagnostic.severity))
+            .collect::<Vec<_>>(),
+        vec![(3, Span::new(0, 0), crate::diag::Severity::Error); 4]
     );
 }

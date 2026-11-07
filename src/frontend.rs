@@ -26,6 +26,7 @@ mod published_declarations;
 mod published_overrides;
 pub use published_overrides::OverriddenMember;
 mod retained_syntax;
+mod selected_dependency_diagnostics;
 #[cfg(test)]
 pub(crate) use crate::resolve::collect_signatures;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
@@ -45,6 +46,7 @@ pub use crate::source::{SourceInput, SourceKind};
 pub use crate::spelling::{
     DeclaredSpellings as FrontendDeclaredSpellings, Spelled as FrontendSpelled,
 };
+pub(crate) use selected_dependency_diagnostics::selected_external_call_diagnostic;
 
 /// Analysis result for a jointly compiled source set.
 ///

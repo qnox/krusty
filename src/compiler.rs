@@ -262,7 +262,12 @@ fn emit_analyzed_into<B: Backend>(
             }
         }
         if let Err(error) = sink.accept_inline_bodies(&index, &mut inline_bodies) {
-            report_inline_body_failure(diags, &error, symbols.shared_semantic_platform().as_ref());
+            report_fir_lowering_failure(diags, "cannot consume inline FIR", &error, |target| {
+                crate::frontend::selected_external_call_diagnostic(
+                    symbols.shared_semantic_platform().as_ref(),
+                    target,
+                )
+            });
             default_arguments.take_for_source(&index, source_id);
             continue;
         }
@@ -984,9 +989,16 @@ fn consume_body_group(
                     body: &body,
                 });
                 if let Err(error) = sink.accept_streamed_body(index, inline_bodies, owner, body) {
-                    diags.error(
-                        Span::new(0, 0),
-                        format!("internal error: checked FIR lowering failed: {error:?}"),
+                    report_fir_lowering_failure(
+                        diags,
+                        "checked FIR lowering failed",
+                        &error,
+                        |target| {
+                            crate::frontend::selected_external_call_diagnostic(
+                                symbols.shared_semantic_platform().as_ref(),
+                                target,
+                            )
+                        },
                     );
                     return false;
                 }
@@ -1376,28 +1388,23 @@ pub fn check_frontend_only(
     census
 }
 
-/// Preserve the lowering failure while identifying an external declaration through the same
-/// live provider that selected it. Diagnostic presentation never reconstructs a target.
-fn report_inline_body_failure(
+/// Preserve the lowering failure and ask the frontend to describe its exact selected dependency.
+/// The callback owns declaration presentation; the driver retains the existing error protocol.
+fn report_fir_lowering_failure(
     diags: &mut DiagSink,
+    context: &str,
     error: &crate::fir_lower::FirFileLoweringFailure,
-    platform: &dyn crate::libraries::SemanticPlatform,
+    render_selected: impl FnOnce(crate::fir::ExternalCallableId) -> Option<String>,
 ) {
-    let mut message = format!("internal error: cannot consume inline FIR: {error:?}");
+    let mut message = format!("internal error: {context}: {error:?}");
     let selected = match error {
         crate::fir_lower::FirFileLoweringFailure::Body(
             crate::fir_lower::FirLoweringFailure::UnsupportedExternalCall(target),
-        ) => platform.external_callable(*target),
+        ) => render_selected(*target),
         _ => None,
     };
     if let Some(selected) = selected {
-        message = format!(
-            "{message}; selected dependency owner={:?}, name={:?}, declaration={:?}, dependency={:?}",
-            selected.declaration_owner,
-            selected.callable.name,
-            selected.declaration_signature,
-            selected.dependency_callable,
-        );
+        message = format!("{message}; {selected}");
     }
     diags.error(Span::new(0, 0), message);
 }
