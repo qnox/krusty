@@ -97,6 +97,12 @@ impl ReferencedDependencies {
                 external_target, ..
             } => self.callables.extend(*external_target),
             IrExpr::CallableReference(reference) => match &reference.target {
+                IrCallableReferenceTarget::Constructor {
+                    declaration: crate::ir::IrConstructorReferenceDeclaration::External(declaration),
+                    ..
+                } => {
+                    self.callables.insert(*declaration);
+                }
                 IrCallableReferenceTarget::External { declaration, .. } => {
                     self.callables.insert(*declaration);
                 }
@@ -166,6 +172,10 @@ impl ReferencedDependencies {
             | IrExpr::EnumValues { .. }
             | IrExpr::EnumValueOf { .. }
             | IrExpr::EnumEntries { .. }
+            | IrExpr::EnumConstant { .. }
+            | IrExpr::EnumAllocation { .. }
+            | IrExpr::EnumEntriesList { .. }
+            | IrExpr::NoSuchEnumConstant { .. }
             | IrExpr::EnumSwitchOrdinal { .. }
             | IrExpr::EnumSwitchKey { .. }
             | IrExpr::ReifiedClassMarker { .. }
@@ -175,6 +185,7 @@ impl ReferencedDependencies {
             | IrExpr::Lambda { .. }
             | IrExpr::UnitInstance
             | IrExpr::CurrentContinuation
+            | IrExpr::AbsentArgument { .. }
             | IrExpr::InvokeFunction { .. }
             | IrExpr::NotNullAssert { .. }
             | IrExpr::LateinitCheck { .. }
@@ -219,6 +230,7 @@ impl ReferencedDependencies {
             | Callee::Intrinsic { .. }
             | Callee::CrossFile { .. }
             | Callee::Module { .. }
+            | Callee::ModuleDefaultEntry { .. }
             | Callee::Static { .. }
             | Callee::Virtual { .. }
             | Callee::Super { .. }

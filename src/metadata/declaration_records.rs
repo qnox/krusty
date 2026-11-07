@@ -135,9 +135,19 @@ pub(crate) fn package_property(
         has_backing_field: declaration.has_backing_field,
         modifiers: declaration.modifiers,
         setter_visibility: declaration.setter_visibility,
-        // Suppressed SOURCE provenance retains the JVM marker but does not set metadata's
-        // `HAS_ANNOTATIONS` property flag.
-        declares_annotations: false,
+        annotations: ir
+            .package_property_annotations
+            .get(&declaration.property)
+            .map(|annotations| {
+                crate::metadata::MetadataAnnotations::of(&annotations.property)
+                    .with_declaration_flag(annotations.declares_metadata_annotations)
+            })
+            .unwrap_or_default(),
+        field_annotations: crate::metadata::MetadataAnnotations::of_optional(
+            ir.package_property_annotations
+                .get(&declaration.property)
+                .map(|annotations| &annotations.field),
+        ),
         annotation_method: None,
         companion: declaration.is_companion_extension(),
         accessor_annotations: ir

@@ -156,6 +156,7 @@ impl BodyLowering<'_> {
                                 parameter,
                                 array_type,
                                 elements,
+                                source_line: 0,
                             }
                         }
                     })
@@ -189,6 +190,7 @@ impl BodyLowering<'_> {
             default_provider,
             receiver_ty: receiver,
             declared_receiver,
+            declaring_receiver: None,
             parameters: &parameters,
             result,
             declared_result,

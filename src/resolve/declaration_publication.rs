@@ -292,6 +292,7 @@ impl FlexibleValue {
         match ty.kind() {
             TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::DefinitelyNotNull(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
@@ -340,7 +341,8 @@ impl FlexibleValue {
             TyKind::Nullable(inner) | TyKind::DefinitelyNotNull(inner) => {
                 Self::semantic(inner, upper_bound).without_head()
             }
-            TyKind::InProjection(inner)
+            TyKind::MutabilityFlexible(inner)
+            | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
             | TyKind::StarProjection(inner) => Self::semantic(inner, upper_bound),
             TyKind::Obj(owner, arguments) => FlexibleValue {
@@ -399,6 +401,11 @@ impl FlexibleValue {
                 (declared, selected)
             }
             (TyKind::PlatformNullable(declared), _) => (declared, selected),
+            // Mutability flexibility is the declaration's head; its classifier pairs as is.
+            (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(selected)) => {
+                (declared, selected)
+            }
+            (TyKind::MutabilityFlexible(declared), _) => (declared, selected),
             (TyKind::Nullable(declared), TyKind::Nullable(selected))
             | (TyKind::DefinitelyNotNull(declared), TyKind::DefinitelyNotNull(selected))
             | (TyKind::InProjection(declared), TyKind::InProjection(selected))
@@ -409,7 +416,8 @@ impl FlexibleValue {
             _ => (declared, selected),
         };
 
-        if matches!(declared.kind(), TyKind::TyParam(_, bound) if bound.is_platform_nullable()) {
+        if matches!(declared.kind(), TyKind::TyParam(_, bound) | TyKind::Var(_, bound) if bound.is_platform_nullable())
+        {
             let upper =
                 (!selected.is_nullable()).then(|| upper_bound(selected.platform_lower_bound()));
             // A Java type-parameter occurrence is flexible as a whole, but its selected lower face
@@ -489,13 +497,14 @@ impl FlexibleValue {
         binding: &dyn Fn(&str) -> Option<FlexibleValue>,
     ) -> FlexibleValue {
         match declared.kind() {
-            TyKind::TyParam(name, _) => binding(name.as_str())
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => binding(name.as_str())
                 .map(|argument| self.overlay(&argument))
                 .unwrap_or_else(|| self.clone()),
             TyKind::Nullable(inner) | TyKind::DefinitelyNotNull(inner) => {
                 self.substitute(inner, binding).without_head()
             }
             TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
             | TyKind::StarProjection(inner) => self.substitute(inner, binding),
@@ -729,7 +738,7 @@ impl Checker<'_> {
 
     fn constrain_flexible_parameters(
         &self,
-        formals: &[String],
+        formals: &[crate::types::TyParamName],
         declared: Ty,
         actual: Ty,
         fact: &FlexibleValue,

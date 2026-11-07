@@ -144,9 +144,8 @@ impl Emitter<'_> {
         // branchy or not, runs with the receiver left on the stack, as kotlinc does.
         self.emit_operands(&[receiver, value], code);
         self.coerce_reference_on_stack(self.value_ty(value), field_ty, code);
-        // A value that carried its OWN source line leaves that line in effect; the store belongs to
-        // the statement, so kotlinc marks the statement's line again at the `putfield`. Without it
-        // the property's line stays in effect over everything that follows the store.
+        // kotlinc's `visitFieldAccess` marks the store's line again at the `putfield`, so a value
+        // that ran on another line hands the line back to the statement.
         // A property initializer whose value was inlined forgot the line in effect
         // (`markLineNumberAfterInlineIfNeeded`), so its `putfield` writes that line again: an
         // entry of the inlined call's, which the constructor's curated table keeps.
@@ -156,12 +155,8 @@ impl Emitter<'_> {
                 code,
             );
         }
-        if self.ir.expr_source_lines.contains_key(&value)
-            || super::debug_lines::enters_nested_copied_lambda_frame(self.ir, statement, value)
-        {
-            if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
-                self.mark_expression_line(statement, statement_line, code);
-            }
+        if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
+            self.mark_expression_line(statement, statement_line, code);
         }
         if let Some(method) = cross_class_method {
             code.invokestatic(method, (1 + slot_words(field_ty)) as i32, 0);
@@ -282,6 +277,10 @@ mod tests {
     fn an_effectful_receiver_runs_before_a_value_that_spills() {
         let mut ir = IrFile::default();
         let mut node = blank_class("demo/Node");
+        node.declaration_name = Some(crate::types::ClassifierDeclarationName::TopLevel {
+            package: type_name("demo"),
+            name: "Node".into(),
+        });
         node.fields.push(IrField::new("count".into(), Ty::Int));
         let class = ir.add_class(node);
         let node_ty = Ty::obj("demo/Node");

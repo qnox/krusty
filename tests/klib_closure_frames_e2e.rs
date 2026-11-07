@@ -5,6 +5,9 @@ use krusty::backend::{Artifact, Backend, CheckedIrFile, CheckedIrUnitKind};
 use krusty::diag::DiagSink;
 use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
 
+#[path = "klib_closure_frames_e2e/elvis_blocks.rs"]
+mod elvis_blocks;
+
 const LIBRARY: &str = include_str!("fixtures/klib_closure_frames/Library.kt");
 
 const CONSUMER: &str = include_str!("fixtures/klib_closure_frames/Consumer.kt");
@@ -17,11 +20,46 @@ fun box(): String {
 "#;
 
 #[test]
+fn official_receiver_captures_preserve_values_and_once_only_inputs() {
+    let library = include_str!("fixtures/klib_closure_frames/ReceiverCapture.kt");
+    let consumer = include_str!("fixtures/klib_closure_frames/ReceiverCaptureConsumer.kt");
+    assert_official_dependency_closures(
+        library,
+        consumer,
+        "SerializedReceiverCapture",
+        DependencyConsumer::Native,
+    );
+}
+
+#[test]
 fn official_dependency_closures_preserve_nested_values_and_once_only_operands() {
     assert_official_dependency_closures(
         LIBRARY,
         CONSUMER,
         "SerializedClosure",
+        DependencyConsumer::Native,
+    );
+}
+
+#[test]
+fn dependency_top_level_callable_references_keep_declaration_identity_and_invocation() {
+    let library = include_str!("fixtures/klib_closure_frames/TopLevelReferences.kt");
+    let consumer = include_str!("fixtures/klib_closure_frames/TopLevelReferenceConsumer.kt");
+    let dependency = common::kotlinc_lib_out(&[("Library.kt", library)])
+        .expect("reference compiler required for callable-reference oracle");
+    let packaged_consumer = format!("package fixture\n{consumer}");
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[("Consumer.kt", &packaged_consumer)],
+            "fixture.ConsumerKt",
+            &[dependency],
+        ),
+        "OK"
+    );
+    assert_official_dependency_closures(
+        library,
+        consumer,
+        "SerializedTopLevelReference",
         DependencyConsumer::Native,
     );
 }
@@ -99,6 +137,117 @@ fun box(): String {
     );
 }
 
+#[test]
+fn serialized_runtime_accessor_leaves_preserve_pair_members() {
+    let library = r#"package fixture
+fun pickPair(pair: Pair<String, String>): String = pair.first + pair.second
+"#;
+    let consumer = r#"
+fun box(): String = pickPair(Pair("O", "K"))
+"#;
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[
+                ("Library.kt", library),
+                ("Consumer.kt", &format!("package fixture\n{consumer}")),
+            ],
+            "fixture.ConsumerKt",
+            &[],
+        ),
+        "OK",
+    );
+    assert_official_dependency_closures(
+        library,
+        consumer,
+        "SerializedPairAccessor",
+        DependencyConsumer::Native,
+    );
+}
+
+#[test]
+fn serialized_runtime_accessor_leaves_preserve_applied_scalar_and_nullable_results() {
+    let library = r#"package fixture
+fun pickPairIndex(pair: Pair<Int, String?>): Int = pair.first
+fun pickPairValue(pair: Pair<Int, String?>): String? = pair.second
+"#;
+    let consumer = r#"
+fun box(): String {
+    if (pickPairIndex(Pair(7, null)) != 7) return "scalar first"
+    if (pickPairValue(Pair(7, null)) != null) return "nullable second"
+    return pickPairValue(Pair(7, "OK")) ?: "missing second"
+}
+"#;
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[
+                ("Library.kt", library),
+                ("Consumer.kt", &format!("package fixture\n{consumer}")),
+            ],
+            "fixture.ConsumerKt",
+            &[],
+        ),
+        "OK",
+    );
+    assert_official_dependency_closures(
+        library,
+        consumer,
+        "SerializedAppliedPairAccessor",
+        DependencyConsumer::Native,
+    );
+}
+
+#[test]
+fn official_dependency_constructor_roots_allocate_and_rebind_between_consumer_files() {
+    if std::env::var_os("KRUSTY_KOTLIN_NATIVE").is_none() {
+        assert!(
+            std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
+            "Native distribution required"
+        );
+        return;
+    }
+    let modules = krusty::conformance::split_modules(include_str!(
+        "box_regressions/multimodule/dependencyConstructorAllocationExports.kt"
+    ))
+    .expect("the complete two-module regression");
+    let [producer, consumer] = modules.as_slice() else {
+        panic!("producer and consumer modules")
+    };
+    assert_eq!(consumer.deps, std::slice::from_ref(&producer.name));
+    let [(_, library)] = producer.files.as_slice() else {
+        panic!("one complete producer file")
+    };
+    let consumers = consumer
+        .files
+        .iter()
+        .map(|(stem, text)| (stem.as_str(), text.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        consumers.len(),
+        2,
+        "later source file must reuse the first allocation export"
+    );
+    let oracle_sources = producer
+        .files
+        .iter()
+        .chain(&consumer.files)
+        .map(|(stem, text)| (format!("{stem}.kt"), text.as_str()))
+        .collect::<Vec<_>>();
+    let oracle = oracle_sources
+        .iter()
+        .map(|(name, text)| (name.as_str(), *text))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(&oracle, "fixture.ConsumerKt", &[]),
+        "OK"
+    );
+    assert_official_dependency_sources(
+        library,
+        &consumers,
+        "DependencyConstructorAllocationExports",
+        DependencyConsumer::Native,
+    );
+}
+
 enum DependencyConsumer {
     Native,
     ConstructorIdentity,
@@ -138,6 +287,13 @@ impl Backend for ConstructorIdentityProbe {
         operation: krusty::backend::BackendCompilerIntrinsic,
     ) -> bool {
         self.native.realizes_dependency_intrinsic(operation)
+    }
+
+    fn realizes_dependency_getter(
+        &self,
+        signature: krusty::backend::DependencyGetterSignature<'_>,
+    ) -> bool {
+        self.native.realizes_dependency_getter(signature)
     }
 
     fn same_module_inlining(&self) -> krusty::ir::SameModuleInlining {
@@ -237,7 +393,7 @@ fn assert_official_dependency_closures(
     fixture_name: &str,
     purpose: DependencyConsumer,
 ) {
-    let Some(root) = std::env::var_os("KRUSTY_KOTLIN_NATIVE").map(std::path::PathBuf::from) else {
+    let Some(_) = std::env::var_os("KRUSTY_KOTLIN_NATIVE") else {
         assert!(
             std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
             "Native distribution required"
@@ -264,6 +420,24 @@ fn assert_official_dependency_closures(
             &format!("{fixture_name}Oracle"),
         );
     }
+    assert_official_dependency_sources(
+        library_source,
+        &[("Consumer", consumer_text.as_str())],
+        fixture_name,
+        purpose,
+    );
+}
+
+/// Import only the official producer; each complete consumer file is emitted in the same session.
+fn assert_official_dependency_sources(
+    library_source: &str,
+    consumers: &[(&str, &str)],
+    fixture_name: &str,
+    purpose: DependencyConsumer,
+) {
+    let root = std::env::var_os("KRUSTY_KOTLIN_NATIVE")
+        .map(std::path::PathBuf::from)
+        .expect("the caller requires an official Native distribution");
     let work = common::scratch_dir().expect("allocate serialized closure producer directory");
     let source = work.join("Frames.kt");
     std::fs::write(&source, library_source).unwrap();
@@ -291,10 +465,13 @@ fn assert_official_dependency_closures(
         KlibLibraryInput::dependency(library),
     ])
     .expect("read official serialized closure declarations");
-    let input = krusty::source::SourceInput::kotlin(&consumer_text).with_file_stem("Consumer");
+    let inputs = consumers
+        .iter()
+        .map(|(stem, text)| krusty::source::SourceInput::kotlin(text).with_file_stem(stem))
+        .collect::<Vec<_>>();
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &[input],
+        &inputs,
         krusty::frontend::PlatformProvider::new(
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
@@ -306,7 +483,10 @@ fn assert_official_dependency_closures(
     let backend = krusty::native::CraneliftBackend::new(target)
         .with_entry(krusty::native::Entry::Box)
         .verified();
-    let stems = ["Consumer".to_owned()];
+    let stems = consumers
+        .iter()
+        .map(|(stem, _)| (*stem).to_owned())
+        .collect::<Vec<_>>();
     let artifacts = match purpose {
         DependencyConsumer::Native | DependencyConsumer::SourceClassifierCollision => {
             krusty::compiler::emit_analyzed(analysis, &stems, &backend, "consumer", &mut diags)
@@ -331,7 +511,7 @@ fn assert_official_dependency_closures(
     if matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
         assert_eq!(
             diags.diags.iter().map(|diag| (
-                diag.file, diag.span, diag.editor_span, diag.severity, diag.warning_name,
+                diag.file, diag.span, diag.editor_span, diag.severity, diag.name,
                 diag.kind, diag.identity, diag.msg.as_str(),
             )).collect::<Vec<_>>(),
             vec![(

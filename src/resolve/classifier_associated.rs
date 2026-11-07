@@ -226,7 +226,7 @@ impl Checker<'_> {
                     None,
                 ))
             }
-            Some(CallableCandidateSelection::Ambiguous(ambiguous)) => {
+            Some(CallableCandidateSelection::Ambiguous(ambiguous, _)) => {
                 self.report_callable_ambiguity(call, name, &ambiguous);
                 AssociatedCall::Selected(Ty::Error)
             }
@@ -283,7 +283,7 @@ impl Checker<'_> {
             AssociatedCall::Inapplicable(candidates) => candidates,
             AssociatedCall::Absent => return None,
         };
-        let reported = self.report_inapplicable_callable_candidates(
+        let reported = call_diagnostics::report_inapplicable_callable_candidates(
             InapplicableTopLevelCall {
                 call,
                 name,
@@ -294,6 +294,7 @@ impl Checker<'_> {
                 explicit_type_args,
             },
             candidates,
+            self,
         );
         if !reported {
             self.diags.error(
@@ -521,6 +522,10 @@ impl Checker<'_> {
         match selection {
             TopLevelPropertySelection::Selected(property) => {
                 if property.property.setter.is_none() {
+                    if self.try_overloaded_assignment(scope, statement, property.property.ty, value)
+                    {
+                        return;
+                    }
                     self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
                 }
                 let value_ty = self.expr_expected(scope, value, property.property.ty);

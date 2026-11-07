@@ -104,13 +104,13 @@ impl KspLibraries<'_> {
                     self.analysis,
                     Ty::obj_name(class).canonical_semantic(),
                 ),
+                all_properties: members.all_properties,
+                all_functions: members.all_functions,
             },
             package_name: class.package().replace('/', "."),
             parent: class.nested_owner().map(qualified_name),
             origin,
             annotations_complete: header.annotations.is_some(),
-            all_properties: members.all_properties,
-            all_functions: members.all_functions,
         }
     }
 }

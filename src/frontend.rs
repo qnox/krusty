@@ -20,8 +20,11 @@ mod library_classifiers;
 mod local_class_names;
 pub(crate) use local_class_names::{settle_generated_class_names, SettledGeneratedClassNames};
 mod local_function_names;
+mod modifier_containing_declarations;
 mod no_expect_for_actual;
 mod published_declarations;
+mod published_overrides;
+pub use published_overrides::OverriddenMember;
 mod retained_syntax;
 #[cfg(test)]
 pub(crate) use crate::resolve::collect_signatures;
@@ -89,30 +92,6 @@ impl SourceSetAnalysis {
                     .flags
                     .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
             })
-    }
-
-    /// The functions the member function `declaration` of the classifier `owner` directly
-    /// overrides: each one this module declares, or `None` for one a library declares.
-    pub fn overridden_functions(
-        &self,
-        owner: FrontendDeclarationId,
-        declaration: FrontendDeclarationId,
-    ) -> Vec<Option<FrontendDeclarationId>> {
-        use crate::fir::ResolvedFunctionOverrideTarget as Target;
-        let Some(streamed) = &self.streamed else {
-            return Vec::new();
-        };
-        let index = streamed.module.index();
-        let declared = |target: Target| match target {
-            Target::Module(callable) => index.callable(callable).map(|header| header.declaration),
-            Target::External(_) => None,
-        };
-        index
-            .function_overrides(owner)
-            .iter()
-            .filter(|edge| declared(edge.implementation) == Some(declaration))
-            .map(|edge| declared(edge.overridden))
-            .collect()
     }
 }
 
@@ -1275,6 +1254,7 @@ where
         }
         if source.kind == SourceKind::Kotlin {
             header_validation::validate(&file, diags);
+            modifier_containing_declarations::check(&file, diags);
             explicit_api::check(&file, &features, diags);
             // `expect`/`actual` outside a multiplatform project is an ERROR, not a no-op. Accepting
             // it emitted an artifact that could not link: a call to an unmatched `expect fun` was
@@ -1811,6 +1791,14 @@ where
         // genuine signature error would make every use of an unrelated inferred declaration look
         // unresolved in an editor's steady state. Failed declarations remain absent.
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
+        // File-level policies (`@file:Suppress`, opt-ins) govern the recovery diagnostics too.
+        crate::resolve::publish_file_annotations(
+            &files[..inferred_end],
+            &symbols,
+            target,
+            &mut index,
+            diags,
+        );
         crate::resolve::check_finalized_top_level_type_alias_bounds(
             &files[..inferred_end],
             &index,

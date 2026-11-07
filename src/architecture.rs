@@ -106,6 +106,8 @@ mod tests {
                 "libraries",
                 "symbol_source",
                 "types",
+                // The provider-neutral value-class traversal the KLIB backends' policy runs over.
+                "value_classes",
             ],
         );
         // The class tables every backend lays its objects out from read only the checked IR: no
@@ -283,7 +285,13 @@ mod tests {
             fs::read_to_string("crates/krusty-lsp/src/worker.rs").expect("read LSP worker");
         assert!(worker.contains("DEFAULT_ANALYSES_PER_WORKER"));
         assert!(worker.contains("self.analyses >= self.max_analyses"));
-        assert!(worker.contains("ANALYSIS_TIMEOUT"));
+        // Every response read is bounded; `worker/deadline.rs` owns the bounds.
+        assert!(worker.contains("self.read_response(deadline::analysis("));
+        assert!(!worker.contains("fn read_response(&mut self) "));
+        let deadline = fs::read_to_string("crates/krusty-lsp/src/worker/deadline.rs")
+            .expect("read LSP worker deadlines");
+        assert!(deadline.contains("pub(super) const INTERACTIVE: Duration"));
+        assert!(deadline.contains("pub(super) const INDEX_CHUNK: Duration"));
         assert!(worker.contains("MAX_SOURCE_SET_BYTES"));
     }
 
@@ -336,11 +344,14 @@ mod tests {
                 let mut allowed = allowed.to_vec();
                 allowed.push("java_source");
                 assert_allowed_crate_modules_in_file(&path, &allowed);
-            } else if path.ends_with("src/jvm/array_casts.rs") {
-                // Array-cast realization reuses the core subtype relation over checked types and
-                // the frozen classifier inventory. Its oracle cannot resolve declarations or
-                // infer bindings; keep this dependency local rather than duplicating subtyping
-                // or admitting semantic selection throughout the JVM backend.
+            } else if path.ends_with("src/jvm/array_casts.rs")
+                || path.ends_with("src/jvm/read_only_collection_stubs.rs")
+            {
+                // Array-cast realization and read-only stub result compatibility reuse the core
+                // subtype relation over checked types and the frozen classifier inventory. Their
+                // oracles cannot resolve declarations or infer bindings; keep this dependency
+                // local rather than duplicating subtyping or admitting semantic selection
+                // throughout the JVM backend.
                 let mut allowed = allowed.to_vec();
                 allowed.push("assignable");
                 assert_allowed_crate_modules_in_file(&path, &allowed);
@@ -552,9 +563,10 @@ mod tests {
     #[test]
     fn the_class_model_uses_only_ir_contract_dependencies() {
         assert_allowed_crate_modules("src/native/intrinsics.rs", &["types"]);
-        // `value_classes` is the traversal every backend shares; what this file adds is the policy.
+        // `value_classes` is the traversal every backend shares; what this file adds is the KLIB
+        // backends' policy.
         assert_allowed_crate_modules(
-            "src/native/value_classes.rs",
+            "src/backend/value_classes.rs",
             &["ir", "types", "value_classes"],
         );
     }
@@ -573,7 +585,11 @@ mod tests {
             "src/native/codegen/lower.rs",
             &["backend", "fir", "ir", "types"],
         );
-        assert_allowed_crate_modules("src/native/codegen/lower/functions.rs", &["ir", "types"]);
+        // `backend` supplies the shared value-class inventory a capture layout stores values by.
+        assert_allowed_crate_modules(
+            "src/native/codegen/lower/functions.rs",
+            &["backend", "ir", "types"],
+        );
         assert_allowed_crate_modules("src/native/codegen/lower/arrays.rs", &["types"]);
         for path in rust_files_under("src/native/codegen") {
             let text = fs::read_to_string(&path).expect("read native code generator source");
@@ -928,12 +944,17 @@ mod tests {
                 "diagnostic_wording",
                 "features",
                 "frontend",
+                // Compiler plugins consume this public projection of the module's checked FIR.
+                "hosted_plugin_ir",
                 "ir",
                 "js",
                 "jvm",
                 "klib",
                 "klib_libraries",
                 "kotlin_version",
+                // A KSP driver reads resolved declaration headers through the public round
+                // projection, before asking the compiler to check source bodies.
+                "ksp_round",
                 "language_settings",
                 "language_version",
                 "lexer",
@@ -1024,9 +1045,14 @@ mod tests {
     fn assert_allowed_crate_modules_in_file(path: &Path, allowed: &[&str]) {
         let text = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        // `fx_hash` is the standard hash map and set with a fixed hasher: using one is no more a
-        // dependency on another compiler layer than using `std::collections` is.
-        let allowed: BTreeSet<_> = allowed.iter().copied().chain(["fx_hash"]).collect();
+        // `fx_hash` is the standard hash map and set with a fixed hasher, and `archive` opens a zip
+        // file: using either is no more a dependency on another compiler layer than using
+        // `std::collections` or the `zip` crate is.
+        let allowed: BTreeSet<_> = allowed
+            .iter()
+            .copied()
+            .chain(["fx_hash", "archive"])
+            .collect();
         let actual = crate_modules(&text);
         let offenders: Vec<_> = actual
             .iter()
@@ -1044,7 +1070,12 @@ mod tests {
     fn assert_allowed_external_crate_modules_in_file(path: &Path, allowed: &[&str]) {
         let text = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        let allowed: BTreeSet<_> = allowed.iter().copied().chain(["fx_hash"]).collect();
+        // As in `assert_allowed_crate_modules_in_file`: `fx_hash` and `archive` are leaf modules.
+        let allowed: BTreeSet<_> = allowed
+            .iter()
+            .copied()
+            .chain(["fx_hash", "archive"])
+            .collect();
         let actual = external_crate_modules(&text);
         let offenders: Vec<_> = actual
             .iter()

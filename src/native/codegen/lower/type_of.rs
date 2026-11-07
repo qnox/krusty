@@ -223,7 +223,7 @@ impl FileLowering<'_> {
 
     /// Declare a static reflection object: under its program-wide name as a weak definition the
     /// linker folds, or as this file's own.
-    fn declare_reflection_object(
+    pub(super) fn declare_reflection_object(
         &mut self,
         shared: Option<&str>,
         local: &str,
@@ -238,7 +238,7 @@ impl FileLowering<'_> {
 
     /// Define a static reflection object from its bytes and the addresses written into them. A
     /// program-wide one gets a section of its own, which [`lower_file`] makes its COMDAT group.
-    fn define_reflection_object(
+    pub(super) fn define_reflection_object(
         &mut self,
         object: DataId,
         shared: Option<&str>,

@@ -735,6 +735,7 @@ fn type_reaches_parameter(
                 reaches_itself(parameters, start, identity.as_str(), seen, false)
             }
             TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner) => {
                 type_reaches_parameter(parameters, start, inner, seen)
@@ -781,6 +782,7 @@ fn type_references_recursive_bound(
                 references_recursive_bound(parameters, identity.as_str(), used)
             }
             TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner) => {
                 type_references_recursive_bound(parameters, inner, used)
@@ -959,6 +961,7 @@ mod tests {
                     bounds: vec![(bound, false)],
                     variance: TypeVariance::Invariant,
                     reified: false,
+                    captured_from_enclosing: false,
                 }],
                 params: Vec::new(),
                 ret: Some(Ty::Unit),

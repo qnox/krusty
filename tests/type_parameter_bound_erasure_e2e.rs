@@ -166,3 +166,111 @@ fn calling_through_the_erased_class_bound_returns_the_receiver() {
         "OK"
     );
 }
+
+mod class_formals {
+    //! A class type parameter erases to its primary bound in every physical position the class owns:
+    //! the constructor parameter, the backing field, the getter, and the members of an inner class
+    //! that capture it. For `class Holder<T> where T : Marker, T : Base` that bound is the class
+    //! `Base`, although `Marker` is written first, exactly as kotlinc's `erasedUpperBound` chooses.
+    //! Callers in another file, or in another module, then call those members with the same
+    //! descriptors.
+    use super::common;
+
+    /// The reproduction from the issue, unchanged.
+    const HOLDER: &str = "interface Marker\n\
+                          open class Base\n\
+                          class Holder<T>(val value: T) where T : Marker, T : Base {\n\
+                          \x20   fun <R> echo(value: R): R where R : Marker, R : Base = value\n\
+                          }\n";
+
+    #[test]
+    fn an_interface_first_class_formal_erases_to_its_class_bound_like_kotlinc() {
+        let classes = common::classes_against_kotlinc_module(&[("Holder.kt", HOLDER)]);
+        assert_eq!(classes.differences(), Vec::<String>::new());
+    }
+
+    const DECLARATIONS: &str = "package formals\n\
+                                \n\
+                                interface Marker\n\
+                                \n\
+                                open class Base\n\
+                                \n\
+                                class Both : Base(), Marker\n\
+                                \n\
+                                class Slots<T>(val value: T, var maybe: T?, val items: Array<T>) where T : Marker, T : Base {\n\
+                                \x20   fun first(): T = items[0]\n\
+                                \n\
+                                \x20   fun <R> echo(value: R): R where R : Marker, R : Base = value\n\
+                                \n\
+                                \x20   fun replace(next: T?): T? {\n\
+                                \x20       val old = maybe\n\
+                                \x20       maybe = next\n\
+                                \x20       return old\n\
+                                \x20   }\n\
+                                \n\
+                                \x20   inner class Inner(val extra: T) {\n\
+                                \x20       fun outer(): T = value\n\
+                                \x20   }\n\
+                                }\n";
+
+    /// Each result reaches a `Both` parameter, so both compilers cast it from the erased carrier.
+    const USES: &str = "package formals\n\
+                        \n\
+                        fun same(actual: Both?, expected: Both?): Boolean = actual === expected\n\
+                        \n\
+                        fun box(): String {\n\
+                        \x20   val both = Both()\n\
+                        \x20   val slots = Slots(both, null, arrayOf(both))\n\
+                        \x20   if (!same(slots.value, both)) return \"value\"\n\
+                        \x20   if (!same(slots.first(), both)) return \"first\"\n\
+                        \x20   if (!same(slots.replace(both), null)) return \"replace\"\n\
+                        \x20   if (!same(slots.maybe, both)) return \"maybe\"\n\
+                        \x20   if (!same(slots.items[0], both)) return \"items\"\n\
+                        \x20   if (!same(slots.echo(both), both)) return \"echo\"\n\
+                        \x20   val inner = slots.Inner(both)\n\
+                        \x20   if (!same(inner.extra, both)) return \"extra\"\n\
+                        \x20   return if (same(inner.outer(), both)) \"OK\" else \"outer\"\n\
+                        }\n";
+
+    #[test]
+    fn class_formal_slots_used_from_another_file_match_kotlinc() {
+        let classes = common::classes_against_kotlinc_module(&[
+            ("Declarations.kt", DECLARATIONS),
+            ("Uses.kt", USES),
+        ]);
+        assert_eq!(classes.differences(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn class_formal_slots_used_from_another_file_run() {
+        let result = common::compile_and_run_box_files(
+            &[("Declarations.kt", DECLARATIONS), ("Uses.kt", USES)],
+            &[common::stdlib_jar()],
+            Some(&common::jdk_modules()),
+        );
+        assert_eq!(result.as_deref(), Some("OK"));
+    }
+
+    /// The declarations come from a kotlinc-built dependency: its constructor, field getter and inner
+    /// members take and return `Base`, and the consumer calls them so.
+    #[test]
+    fn class_formal_slots_of_a_kotlinc_dependency_are_called_like_kotlinc() {
+        let consumer = USES.replacen("package formals\n", "import formals.*\n", 1);
+        let results = common::class_bytes_diffs_against_kotlinc(
+            "ClassFormalUses",
+            &[("Declarations.kt", DECLARATIONS)],
+            &consumer,
+            "ClassFormalUsesKt",
+            &["box"],
+        )
+        .expect("reference kotlinc is provisioned");
+        for result in results {
+            result.unwrap_or_else(|diff| panic!("{diff}"));
+        }
+        assert_eq!(
+            common::expect_box_run_against_kotlinc(DECLARATIONS, &consumer)
+                .expect("reference kotlinc is provisioned"),
+            "OK"
+        );
+    }
+}

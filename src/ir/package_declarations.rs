@@ -77,9 +77,6 @@ pub struct IrPackageProperty {
     /// Resolved Kotlin annotation identities. Backends interpret annotations in their own
     /// namespace; common lowering does not turn them into storage or calling-convention choices.
     pub annotations: Box<[TypeName]>,
-    /// A suppressed SOURCE application retained as property-declaration provenance even though no
-    /// annotation payload survives retention. Targets decide how their metadata represents it.
-    pub suppressed_source_annotation_application: bool,
     /// Final Kotlin declaration modifiers copied from the stable header. Representation passes may
     /// inspect these semantic restrictions without reopening FIR or recovering a declaration by
     /// spelling.

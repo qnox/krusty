@@ -273,7 +273,7 @@ impl Checker<'_> {
         }
         let bindings = formals
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(resolved.iter().copied())
             .collect::<crate::symbol_resolver::GSigBinds>();
         let application = AliasApplication {
@@ -482,6 +482,7 @@ impl Checker<'_> {
         explicit: &[Ty],
         bound: &super::library_constructor_failure::BoundConstructorDiagnostic,
         display: &str,
+        report_candidate: bool,
     ) -> bool {
         let Some(written) = self.file.call_type_args.get(&call.0) else {
             return false;
@@ -506,7 +507,9 @@ impl Checker<'_> {
         {
             return false;
         }
-        self.report_bound_inapplicable_candidate(call, display);
+        if report_candidate {
+            self.report_bound_inapplicable_candidate(call, display);
+        }
         true
     }
 
@@ -523,12 +526,9 @@ impl Checker<'_> {
     ) -> bool {
         let mut violated = false;
         let mut bindings = context.clone();
-        bindings.extend(
-            formals
-                .iter()
-                .zip(resolved)
-                .map(|(formal, argument)| (formal.identity.to_string(), *argument)),
-        );
+        bindings.extend(formals.iter().zip(resolved).map(|(formal, argument)| {
+            (crate::types::TyParamName::from(formal.identity), *argument)
+        }));
         for ((formal, argument), span) in formals.iter().zip(resolved).zip(spans) {
             let Some(span) = *span else { continue };
             let actual = {
@@ -1093,7 +1093,7 @@ fn classifier_argument_bindings(
     declaration
         .type_params()
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .zip(resolved.iter().copied())
         .collect()
 }
@@ -1137,7 +1137,7 @@ struct AliasApplication<'a> {
 impl AliasApplication<'_> {
     /// The written use-site argument when the template argument `template` is exactly a formal.
     fn formal_argument(&self, template: Ty) -> Option<&TypeRef> {
-        let TyKind::TyParam(parameter, _) = template.kind() else {
+        let (TyKind::TyParam(parameter, _) | TyKind::Var(parameter, _)) = template.kind() else {
             return None;
         };
         let index = self.formals.iter().position(|formal| formal == parameter)?;

@@ -1,5 +1,8 @@
 use crate::fx_hash::HashMap;
 
+#[cfg(test)]
+mod constructor_capture_tests;
+
 use crate::fir::{
     FirBody, FirCapture, FirImplicitReceiverCapture, FirLocalCallableRef, FirStatementId,
     FirStatementKind, LocalCallableId,
@@ -100,12 +103,7 @@ impl BodyLowering<'_> {
                         external_capture_arguments: None,
                     },
                 ))?;
-            let FirStatementKind::LocalFunction {
-                body,
-                tailrec,
-                suspend,
-                ..
-            } = &self
+            let FirStatementKind::LocalFunction { body, tailrec, .. } = &self
                 .body
                 .statement(statement)
                 .ok_or(FirLoweringFailure::MissingStatement(statement))?
@@ -120,7 +118,6 @@ impl BodyLowering<'_> {
                 unit_as_value: false,
                 retain_inline_template: false,
                 tailrec,
-                suspend_context: *suspend,
             };
             let lowered = self.lower_nested_function(body, function, enclosure, enclosure, form)?;
             self.ir.functions[function as usize].body = Some(lowered.callable);
@@ -142,12 +139,20 @@ impl BodyLowering<'_> {
                 source: crate::fir::FirCaptureSource::Value(source),
             })?;
         let holder = self.ir.add_expr(IrExpr::GetValue(capture.slot));
+        self.record_crossinline_read(holder, capture.crossinline_parameter);
         if capture.shared_cell {
             Ok(self.ir.add_expr(IrExpr::RefGet {
                 elem: capture.ty.get(),
                 holder,
             }))
         } else {
+            // A captured binding no code can reassign is read like the local it copies: kotlinc
+            // re-reads it (a loop bound, a `when` subject) instead of snapshotting it.
+            if capture.stable {
+                self.ir
+                    .binding_read_stability
+                    .insert(holder, crate::ir::IrBindingStability::Stable);
+            }
             Ok(holder)
         }
     }
@@ -269,7 +274,6 @@ impl BodyLowering<'_> {
             &lowered,
         )?;
         let declared = self.ir.functions[realization.function as usize].ret;
-        self.ir.call_declared_ret.insert(call, declared);
         Ok((call, declared))
     }
 
@@ -322,11 +326,14 @@ impl BodyLowering<'_> {
                     array_type,
                     elements,
                     spreads,
-                } => Some(self.ir.add_expr(IrExpr::Vararg {
+                    source_line,
+                } => Some(super::checked_arguments::vararg_value(
+                    self.ir,
                     array_type,
                     elements,
                     spreads,
-                })),
+                    source_line,
+                )),
                 CheckedArgumentSlot::Default(_) | CheckedArgumentSlot::Missing => None,
             })
             .collect::<Vec<_>>();
@@ -395,11 +402,16 @@ impl BodyLowering<'_> {
                     .ok_or_else(|| FirLoweringFailure::MissingLocalCallable(target.clone()))?,
             )
         };
-        Ok(self.ir.add_expr(IrExpr::Call {
+        let call = self.ir.add_expr(IrExpr::Call {
             callee: Box::new(callee),
             dispatch_receiver: None,
             args,
-        }))
+        });
+        // Ordinary calls and callable-reference adapters share this materializer. Both retain
+        // the lifted declaration's result before a checked use applies its own conversion.
+        let declared = self.ir.functions[realization.function as usize].ret;
+        self.ir.call_declared_ret.insert(call, declared);
+        Ok(call)
     }
 
     pub(super) fn checked_lambda(
@@ -467,7 +479,6 @@ impl BodyLowering<'_> {
             unit_as_value,
             retain_inline_template: true,
             tailrec: false,
-            suspend_context: suspend || self.suspend_context,
         };
         let lowered = self.lower_nested_function(
             body,
@@ -719,6 +730,7 @@ impl BodyLowering<'_> {
                         parameter,
                         array_type,
                         elements,
+                        source_line: 0,
                     }
                 }
             });
@@ -1062,8 +1074,18 @@ impl BodyLowering<'_> {
                 );
             }
         }
-        let parameter_identities =
-            local_function_parameter_identities(self.body, &self.capture_slots, body)?;
+        let crossinline = body
+            .captures()
+            .iter()
+            .map(|capture| self.captured_crossinline_parameter(capture))
+            .collect::<Result<Vec<_>, _>>()?;
+        let parameter_identities = local_function_parameter_identities(
+            self.body,
+            &self.capture_slots,
+            self.ir,
+            body,
+            &crossinline,
+        )?;
         let captured_receivers = body
             .implicit_receiver_captures()
             .iter()
@@ -1169,6 +1191,55 @@ impl BodyLowering<'_> {
         }
     }
 
+    /// The `crossinline` parameter `capture` holds, by its slot in the inline function that
+    /// declares it: this body's own, a local class's capture of one, or one an enclosing callable
+    /// captured.
+    fn captured_crossinline_parameter(
+        &self,
+        capture: &crate::fir::FirCapture,
+    ) -> Result<Option<u32>, FirLoweringFailure> {
+        match (capture.enclosing_depth.checked_sub(1), capture.source) {
+            (None, crate::fir::FirCaptureSource::Value(value)) => {
+                Ok(self.crossinline_parameter_slot(value))
+            }
+            (None, crate::fir::FirCaptureSource::ConstructorPrefix { owner, field }) => {
+                self.class_capture_crossinline_parameter(owner, field)
+            }
+            (Some(depth), source) => self
+                .capture_slots
+                .get(&(depth, source))
+                .map(|slot| slot.crossinline_parameter)
+                .ok_or(FirLoweringFailure::MissingCapture {
+                    enclosing_depth: depth,
+                    source,
+                }),
+        }
+    }
+
+    /// The slot of `value` when it is a `crossinline` parameter of this body.
+    pub(super) fn crossinline_parameter_slot(
+        &self,
+        value: crate::fir::LocalValueId,
+    ) -> Option<u32> {
+        self.body
+            .is_crossinline_parameter(value)
+            .then(|| self.value_slot(value))
+    }
+
+    /// Record that `read` yields `parameter`, a `crossinline` parameter by its slot in the inline
+    /// function declaring it.
+    pub(super) fn record_crossinline_read(&mut self, read: ExprId, parameter: Option<u32>) {
+        if let Some(parameter) = parameter {
+            self.crossinline_reads.insert(read, parameter);
+        }
+    }
+
+    /// The `crossinline` parameter an argument expression of this body reads, as recorded where
+    /// the read was produced.
+    pub(super) fn crossinline_read(&self, argument: ExprId) -> Option<u32> {
+        self.crossinline_reads.get(&argument).copied()
+    }
+
     fn lower_nested_function(
         &mut self,
         body: &FirBody,
@@ -1181,7 +1252,6 @@ impl BodyLowering<'_> {
             unit_as_value,
             retain_inline_template,
             tailrec,
-            suspend_context,
         } = form;
         #[cfg(feature = "trace")]
         super::body_trace::trace_checked_body(body, self.index);
@@ -1210,18 +1280,19 @@ impl BodyLowering<'_> {
                         "a lifted callable publishes one captured-value identity per capture"
                     ),
                 };
-                (
+                Ok((
                     (capture.enclosing_depth, capture.source),
                     CaptureSlot {
                         slot: body.value_capture_position(slot),
                         ty: capture.ty,
                         shared_cell: capture.shared_cell,
                         stable: self.capture_source_is_stable(capture),
+                        crossinline_parameter: self.captured_crossinline_parameter(capture)?,
                         declared,
                     },
-                )
+                ))
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<Result<HashMap<_, _>, FirLoweringFailure>>()?;
         let inline_parameter_values = self.inline_parameter_values.nested(body);
         if !inline_parameter_values.is_empty() {
             self.callables_reading_inline_parameters.insert(function);
@@ -1246,7 +1317,6 @@ impl BodyLowering<'_> {
             self.allows_empty_inline_caller_name && body.source_lambda().is_some();
         nested.inline_declaration = self.inline_declaration;
         nested.inline_parameter_values = inline_parameter_values;
-        nested.suspend_context = suspend_context;
         nested.declaration_lambda = if body.source_lambda().is_some() {
             Some(function)
         } else {
@@ -1371,8 +1441,6 @@ struct NestedCallableForm {
     /// The body is also kept as the template its inline call sites splice (a lambda's).
     retain_inline_template: bool,
     tailrec: bool,
-    /// The body runs in a suspend function's or suspend lambda's state machine.
-    suspend_context: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1406,7 +1474,7 @@ fn inline_callable_body(
             stmts: roots.to_vec(),
             value,
         });
-        ir.logical_types.insert(block, Ty::Unit);
+        ir.set_logical_type(block, Ty::Unit);
         return block;
     }
     let mut statements = roots.to_vec();
@@ -1420,8 +1488,8 @@ fn inline_callable_body(
         stmts: statements,
         value: Some(value),
     });
-    if let Some(&ty) = ir.logical_types.get(&value) {
-        ir.logical_types.insert(block, ty);
+    if let Some(ty) = ir.logical_type(value) {
+        ir.set_logical_type(block, ty);
     }
     block
 }
@@ -1478,7 +1546,7 @@ fn reshape_cloned_unit_inline_block(ir: &mut crate::ir::IrFile, block: ExprId) {
         stmts,
         value: Some(unit),
     };
-    ir.logical_types.insert(block, Ty::Unit);
+    ir.set_logical_type(block, Ty::Unit);
 }
 
 /// Where a declaration parameter sits among the logical parameters.
@@ -1527,6 +1595,7 @@ fn local_function_parameters(body: &FirBody) -> Vec<Ty> {
 /// declared in `enclosing` is a parameter there or a variable; one declared further out reaches
 /// `body` through `enclosing`'s own capture slot, which already carries both facts.
 fn captured_declaration(
+    ir: &crate::ir::IrFile,
     enclosing: &FirBody,
     enclosing_slots: &HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
     capture: &crate::fir::FirCapture,
@@ -1564,17 +1633,47 @@ fn captured_declaration(
                 },
             }
         }
-        crate::fir::FirCaptureSource::ConstructorPrefix { .. } => CapturedDeclaration {
-            name: None,
-            declaration: crate::ir::IrCapturedDeclaration::Parameter,
-        },
+        crate::fir::FirCaptureSource::ConstructorPrefix { owner, field } => {
+            let class = ir
+                .checked_classifier_classes
+                .get(&owner)
+                .or_else(|| ir.checked_enum_entry_classes.get(&owner))
+                .copied()
+                .ok_or(FirLoweringFailure::MissingLocalClass(owner))?;
+            let class = &ir.classes[class as usize];
+            let argument = class
+                .ctor_args
+                .get(field as usize)
+                .filter(|_| field < class.constructor_prefix_count)
+                .ok_or(FirLoweringFailure::InvalidConstructorCapture { owner, field })?;
+            let receiver = argument.provenance == crate::ir::IrCtorParameterProvenance::Capture
+                && argument
+                    .capture
+                    .as_ref()
+                    .is_some_and(|capture| capture.receiver.is_some());
+            CapturedDeclaration {
+                name: None,
+                declaration: if receiver {
+                    crate::ir::IrCapturedDeclaration::ConstructorReceiver {
+                        owner,
+                        parameter: field,
+                    }
+                } else {
+                    // Value captures and other legacy prefix roles keep their existing identity.
+                    crate::ir::IrCapturedDeclaration::Parameter
+                },
+            }
+        }
     })
 }
 
+/// `crossinline` holds, for each of `body`'s captures, the `crossinline` parameter it holds.
 fn local_function_parameter_identities(
     enclosing: &FirBody,
     enclosing_slots: &HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
+    ir: &crate::ir::IrFile,
     body: &FirBody,
+    crossinline: &[Option<u32>],
 ) -> Result<Vec<crate::ir::IrParameterIdentity>, FirLoweringFailure> {
     let capturer = match body.source_lambda().map(crate::fir::FirSourceLambda::form) {
         None => crate::ir::IrCapturingCallable::LocalFunction,
@@ -1588,13 +1687,14 @@ fn local_function_parameter_identities(
         .iter()
         .enumerate()
         .map(|(ordinal, capture)| {
-            let declared = captured_declaration(enclosing, enclosing_slots, capture)?;
+            let declared = captured_declaration(ir, enclosing, enclosing_slots, capture)?;
             Ok(crate::ir::IrParameterIdentity::captured_value(
                 declared.name,
                 u32::try_from(ordinal).expect("too many captured parameters"),
                 crate::ir::IrValueCapture {
                     declaration: declared.declaration,
                     capturer,
+                    crossinline_parameter: crossinline[ordinal],
                 },
             ))
         })
@@ -1684,10 +1784,18 @@ fn local_function_debug_line(body: &FirBody) -> Option<u32> {
     if statement_line != 0 {
         return Some(statement_line);
     }
-    let crate::fir::FirStatementKind::Expression(expression) = &body.statement(root)?.kind else {
+    let crate::fir::FirStatementKind::Expression(mut expression) = body.statement(root)?.kind
+    else {
         return None;
     };
-    let source_line = body.expression_debug_lines(*expression).source;
+    // The conversion of the body's result to the callable's result type stands where the value
+    // it converts is yielded; the callable opens on the line of the body it converts.
+    while let Some(crate::fir::FirExprKind::ImplicitConversion { value, .. }) =
+        body.expr(expression).map(|expression| &expression.kind)
+    {
+        expression = *value;
+    }
+    let source_line = body.expression_debug_lines(expression).source;
     (source_line != 0).then_some(source_line)
 }
 

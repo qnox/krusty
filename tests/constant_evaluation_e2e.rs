@@ -73,6 +73,128 @@ fn builtin_operations_over_constants_fold() {
     );
 }
 
+/// A builtin's `toString`, `equals` and `compareTo` are `@IntrinsicConstEvaluation` too, so a call
+/// on constant operands folds: `(1 == 2).toString()` is `"false"`, not `String.valueOf(false)`.
+/// `equals` is the boxed value's (`1.equals(1L)` and `1.0.equals(-0.0)` are false, NaN equals
+/// itself), `String.compareTo` is Java's unit difference, an unsigned `compareTo` orders unsigned
+/// values, and `<` over a selected `compareTo` folds with it. `hashCode` is not intrinsic-const,
+/// and a non-constant operand keeps the call.
+#[test]
+fn builtin_member_calls_over_constants_fold() {
+    assert_matches_kotlinc(
+        "FoldedMemberCalls",
+        "fun sink(value: Any?) {}\n\
+         fun strings(x: Int, s: String) {\n\
+         \x20   sink((1 == 2).toString())\n\
+         \x20   sink((1 + 2).toString())\n\
+         \x20   sink((1 < 2).toString())\n\
+         \x20   sink(2.5.toString())\n\
+         \x20   sink((-0.0).toString())\n\
+         \x20   sink((1.0 / 0.0).toString())\n\
+         \x20   sink(1.5f.toString())\n\
+         \x20   sink('c'.toString())\n\
+         \x20   sink(1L.toString())\n\
+         \x20   sink(3.toShort().toString())\n\
+         \x20   sink(\"ab\".toString())\n\
+         \x20   sink(\"abc\"[1].toString())\n\
+         \x20   sink(null.toString())\n\
+         \x20   sink(1u.toString())\n\
+         \x20   sink(2147483647.toString())\n\
+         \x20   sink(\"x\" + true.toString())\n\
+         \x20   sink(x.toString())\n\
+         \x20   sink(s.toString())\n\
+         }\n\
+         fun equalities(x: Int) {\n\
+         \x20   sink(1.equals(2))\n\
+         \x20   sink(1.equals(1L))\n\
+         \x20   sink(1.equals(\"1\"))\n\
+         \x20   sink(1.toByte().equals(1))\n\
+         \x20   sink(1.0.equals(-0.0))\n\
+         \x20   sink((0.0 / 0.0).equals(0.0 / 0.0))\n\
+         \x20   sink(1.0f.equals(1.0f))\n\
+         \x20   sink('a'.equals('a'))\n\
+         \x20   sink(true.equals(false))\n\
+         \x20   sink(\"a\".equals(\"a\"))\n\
+         \x20   sink(\"a\".equals(null))\n\
+         \x20   sink(1u.equals(1u))\n\
+         \x20   sink(1.hashCode())\n\
+         \x20   sink(x.equals(1))\n\
+         }\n\
+         fun comparisons(s: String) {\n\
+         \x20   sink(\"abc\".compareTo(\"abd\"))\n\
+         \x20   sink(\"b\".compareTo(\"abc\"))\n\
+         \x20   sink(\"ab\".compareTo(\"abc\"))\n\
+         \x20   sink(\"a\" < \"b\")\n\
+         \x20   sink(1u.compareTo(2u))\n\
+         \x20   sink(10L.compareTo(3))\n\
+         \x20   sink('a'.compareTo('b'))\n\
+         \x20   sink(s.compareTo(\"a\"))\n\
+         }\n",
+    );
+}
+
+/// The unsigned value classes' operations and conversions, the signed-to-unsigned conversions,
+/// and `floorDiv`/`mod` are `@IntrinsicConstEvaluation` stdlib declarations, so they fold over
+/// constants like the builtins: `1u + 2u` is `iconst_3`, `3.toUInt()` is `iconst_3`, and
+/// `(7u / 2u).toString()` is `ldc "3"`. Mixed widths compute at the wider operand type and wrap
+/// at the declared result width (`ULong.MAX_VALUE * ULong.MAX_VALUE` is `1uL`), a
+/// floating value converts to an unsigned type saturating, and a division by zero or a
+/// non-constant operand keeps the call.
+#[test]
+fn unsigned_and_floor_operations_over_constants_fold() {
+    assert_matches_kotlinc(
+        "FoldedNumericCalls",
+        "fun sink(value: Any?) {}\n\
+         fun unsigned() {\n\
+         \x20   sink(1u + 2u)\n\
+         \x20   sink((5u - 7u).toString())\n\
+         \x20   sink((7u / 2u).toString())\n\
+         \x20   sink(5u.rem(3u))\n\
+         \x20   sink(2u * 3u - 1u)\n\
+         \x20   sink(1uL + 2uL)\n\
+         \x20   sink(18446744073709551615uL * 18446744073709551615uL)\n\
+         \x20   sink((0uL - 18446744073709551615uL).toString())\n\
+         \x20   sink(18446744073709551615uL * 4294967295u)\n\
+         \x20   sink(3.toUByte() + 4.toUByte())\n\
+         \x20   sink(300u.mod(7.toUByte()))\n\
+         \x20   sink(7u.floorDiv(2u))\n\
+         \x20   sink(1u.compareTo(2.toUByte()))\n\
+         \x20   sink(1u.inv())\n\
+         \x20   sink((0xF0u and 0x3Cu).toString())\n\
+         \x20   sink((1u shl 3).toString())\n\
+         \x20   sink((1u shr 1).toString())\n\
+         }\n\
+         fun conversions() {\n\
+         \x20   sink(3.toUInt())\n\
+         \x20   sink(200.toUByte().toString())\n\
+         \x20   sink(7.toUShort().toString())\n\
+         \x20   sink((-1).toByte().toUInt())\n\
+         \x20   sink(4294967295u.toInt())\n\
+         \x20   sink(5u.toLong())\n\
+         \x20   sink(1u.toULong().toString())\n\
+         \x20   sink((-3.5).toUInt())\n\
+         \x20   sink(1e30.toULong())\n\
+         \x20   sink(18446744073709551615uL.toDouble())\n\
+         \x20   sink(3u.toFloat())\n\
+         }\n\
+         fun floors(x: Int) {\n\
+         \x20   sink(7L.floorDiv(2))\n\
+         \x20   sink((-7).floorDiv(2))\n\
+         \x20   sink((-7).mod(3))\n\
+         \x20   sink(7.mod(-3L))\n\
+         \x20   sink((-7L).mod(3))\n\
+         \x20   sink((-9223372036854775807L - 1L).floorDiv(-1L))\n\
+         \x20   sink((-9223372036854775807L - 1L).mod(-1L))\n\
+         \x20   sink(1.toByte().floorDiv(2.toShort()))\n\
+         \x20   sink(7.5.mod(2.0))\n\
+         \x20   sink((-7.5).mod(2.0))\n\
+         \x20   sink(7.5f.mod(2f))\n\
+         \x20   sink(7.floorDiv(0))\n\
+         \x20   sink(x.floorDiv(2))\n\
+         }\n",
+    );
+}
+
 #[test]
 fn operations_kotlinc_cannot_evaluate_stay_operations() {
     assert_matches_kotlinc(
@@ -194,6 +316,17 @@ fn folded_values_are_kotlin_values() {
                \x20   check(15, 1e20.toInt() == 2147483647)\n\
                \x20   check(16, nan.toLong() == 0L)\n\
                \x20   check(17, \"\\uD83D\\uDE00\".length == 2)\n\
+               \x20   check(18, (1 == 2).toString() == \"false\")\n\
+               \x20   check(19, !1.equals(1L) && (0.0 / 0.0).equals(0.0 / 0.0) && !0.0.equals(-0.0))\n\
+               \x20   check(20, \"b\".compareTo(\"abc\") == 1 && \"ab\".compareTo(\"abcd\") == -2)\n\
+               \x20   check(21, 4294967295u.compareTo(1u) == 1 && 4294967295u.toString() == \"4294967295\")\n\
+               \x20   check(22, null.toString() == \"null\" && (-0.0).toString() == \"-0.0\")\n\
+               \x20   check(23, 5u - 7u == 4294967294u && 300u.mod(7.toUByte()) == 6.toUByte())\n\
+               \x20   check(24, (-7).floorDiv(2) == -4 && (-7).mod(3) == 2 && 7.mod(-3L) == -2L)\n\
+               \x20   check(25, (-1).toByte().toUInt() == 4294967295u && (-3.5).toUInt() == 0u)\n\
+               \x20   check(26, (-7.5).mod(2.0) == 0.5 && 18446744073709551615uL.toDouble() == 1.8446744073709552E19)\n\
+               \x20   check(27, 18446744073709551615uL * 18446744073709551615uL == 1uL && 0uL - 18446744073709551615uL == 1uL)\n\
+               \x20   check(28, (-9223372036854775807L - 1L).floorDiv(-1L) == -9223372036854775807L - 1L && (-9223372036854775807L - 1L).mod(-1L) == 0L)\n\
                \x20   if (failed.length > 0) return \"failed$failed\"\n\
                \x20   return \"${1.0f / 3}|${1e7}|${1e-4}|${100.0}|${'x'}${true}${null}|${7L * 3}\"\n\
                }\n";

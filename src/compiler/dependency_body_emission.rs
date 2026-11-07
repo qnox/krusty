@@ -30,10 +30,15 @@ mod emitted_roots;
 #[derive(Default)]
 pub(super) struct DependencySupportState {
     snapshot: Option<crate::libraries::DependencyBodySnapshot>,
-    emitted: HashMap<KlibDependencyCallable, Option<PublishedSingletonDispatch>>,
-    /// Until constructor exports connect support units, do not emit distinct physical copies of
-    /// one logical class, or alias equal classifier names from different producer modules.
+    emitted: HashMap<KlibDependencyCallable, PublishedDependency>,
+    /// One physical realization per exact logical class; equal names cannot alias producers.
     materialized_classes: HashMap<TypeName, KlibDependencyCallable>,
+}
+
+#[derive(Clone, Copy)]
+enum PublishedDependency {
+    Body(Option<PublishedSingletonDispatch>),
+    AllocatingConstructor,
 }
 
 #[derive(Clone, Copy)]
@@ -102,12 +107,18 @@ pub(super) fn emit_dependencies<B: Backend>(
         }
     }
     let target_realizes_intrinsic = |operation| backend.realizes_dependency_intrinsic(operation);
+    let target_realizes_getter = |signature: crate::backend::DependencyGetterSignature<'_>| {
+        backend.realizes_dependency_getter(signature)
+    };
+    let target_represents_classifier =
+        |classifier| backend.represents_dependency_classifier(classifier);
     let mut ordinary = match emitted_roots::ordinary_roots(
         source,
         bodies,
         intrinsics,
         &callees,
         &target_realizes_intrinsic,
+        &target_represents_classifier,
     ) {
         Ok(roots) => roots,
         Err(error) => {
@@ -145,6 +156,8 @@ pub(super) fn emit_dependencies<B: Backend>(
             callees: &callees,
             target_realizes_bodyless: backend.realizes_bodyless_dependency_support(),
             target_realizes_intrinsic: &target_realizes_intrinsic,
+            target_realizes_getter: &target_realizes_getter,
+            target_represents_classifier: &target_represents_classifier,
         };
         let declarations = match emitted_roots::declarations(
             platform,
@@ -164,18 +177,23 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
-        let callees = KlibCalleeFacts::with_declarations(
+        let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
-            declarations
-                .iter()
-                .filter_map(|declaration| declaration.klib_body_callable()),
+            declarations.iter().filter_map(|(target, declaration)| {
+                declaration
+                    .klib_body_callable()
+                    .map(|callable| (*target, callable))
+            }),
         )
-        .with_type_oracle(&type_oracle);
+        .with_type_oracle(&type_oracle)
+        .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
             target_realizes_bodyless: backend.realizes_bodyless_dependency_support(),
             target_realizes_intrinsic: &target_realizes_intrinsic,
+            target_realizes_getter: &target_realizes_getter,
+            target_represents_classifier: &target_represents_classifier,
         };
         if !prepare_bodyless_externals(
             platform,
@@ -205,7 +223,9 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         }
-        if unit.callable_functions().next().is_none() {
+        if unit.callable_functions().next().is_none()
+            && unit.allocating_constructors().next().is_none()
+        {
             continue;
         }
         if requires_intrinsic_link && !links_emitted_support(unit.ir(), &externals) {
@@ -249,7 +269,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             if let Some(previous) = support_state.materialized_classes.get(classifier) {
                 let message = if previous == identity {
-                    "cannot materialize an imported class in separate dependency support units before constructor exports are available"
+                    "cannot materialize an imported class twice in separate dependency support units"
                 } else {
                     "cannot materialize equal classifier names from different KLIB producers in one target program"
                 };
@@ -270,6 +290,9 @@ pub(super) fn emit_dependencies<B: Backend>(
             .collect::<Vec<_>>();
         for (identity, function) in &closed {
             exports.record_callable(*function, identity.clone());
+            if let Some(receiver) = unit.value_member_receiver(identity) {
+                exports.record_member_receiver(*function, receiver);
+            }
             if let Some(classifier) = unit.authenticated_singleton_classifier(identity) {
                 let inert_platform_singleton =
                     bodies.singleton_initialization_is_inert(&identity.module, classifier);
@@ -292,6 +315,30 @@ pub(super) fn emit_dependencies<B: Backend>(
                     !inert_platform_singleton,
                 );
             }
+        }
+        let constructors = unit
+            .allocating_constructors()
+            .map(|(identity, class)| (identity.clone(), class))
+            .collect::<Vec<_>>();
+        for (identity, class) in &constructors {
+            if unit
+                .ir()
+                .declared_class_self_type(unit.ir().classes[*class as usize].fq_name)
+                .is_none()
+            {
+                diags.error(
+                    Span::new(0, 0),
+                    "internal error: an allocating constructor lost its checked class self type",
+                );
+                return Vec::new();
+            }
+            exports.record_constructor(
+                crate::backend::ExportedConstructor {
+                    class: *class,
+                    secondary: None,
+                },
+                identity.clone(),
+            );
         }
         let mut published = Vec::with_capacity(closed.len());
         for (identity, _) in &closed {
@@ -327,7 +374,29 @@ pub(super) fn emit_dependencies<B: Backend>(
                     return Vec::new();
                 }
             };
-            published.push((identity.clone(), singleton_dispatch));
+            published.push((
+                identity.clone(),
+                PublishedDependency::Body(singleton_dispatch),
+            ));
+        }
+        for (identity, _) in &constructors {
+            let Some((_, realization)) = platform.external_callable_by_dependency(identity) else {
+                diags.error(
+                    Span::new(0, 0),
+                    "internal error: an allocating constructor has no exact provider declaration",
+                );
+                return Vec::new();
+            };
+            if realization.dependency_callable.as_ref() != Some(identity)
+                || realization.kind != crate::libraries::ExternalCallableKind::Constructor
+            {
+                diags.error(
+                    Span::new(0, 0),
+                    "internal error: an allocating constructor changed its provider role",
+                );
+                return Vec::new();
+            }
+            published.push((identity.clone(), PublishedDependency::AllocatingConstructor));
         }
         let callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
             Ok(callables) => callables,
@@ -372,11 +441,11 @@ pub(super) fn emit_dependencies<B: Backend>(
 
 fn rebound_externals(
     platform: &dyn crate::libraries::SemanticPlatform,
-    emitted: &HashMap<KlibDependencyCallable, Option<PublishedSingletonDispatch>>,
+    emitted: &HashMap<KlibDependencyCallable, PublishedDependency>,
     diags: &mut DiagSink,
 ) -> Option<HashMap<KlibDependencyCallable, EmittedDependencyCallable>> {
     let mut rebound = HashMap::with_capacity_and_hasher(emitted.len(), Default::default());
-    for (identity, singleton_dispatch) in emitted {
+    for (identity, published) in emitted {
         let Some((external, realization)) = platform.external_callable_by_dependency(identity)
         else {
             diags.error(
@@ -392,14 +461,24 @@ fn rebound_externals(
             );
             return None;
         }
-        rebound.insert(
-            identity.clone(),
-            EmittedDependencyCallable::new(
-                external,
-                singleton_dispatch.map(|dispatch| dispatch.ty),
-                singleton_dispatch.map(|dispatch| dispatch.classifier),
-            ),
-        );
+        let constructor = realization.kind == crate::libraries::ExternalCallableKind::Constructor;
+        let rebound_callable = match published {
+            PublishedDependency::AllocatingConstructor if constructor => {
+                EmittedDependencyCallable::allocating_constructor(external)
+            }
+            PublishedDependency::Body(singleton_dispatch) if !constructor => {
+                EmittedDependencyCallable::new(
+                    external,
+                    singleton_dispatch.map(|dispatch| dispatch.ty),
+                    singleton_dispatch.map(|dispatch| dispatch.classifier),
+                )
+            }
+            _ => {
+                diags.error(Span::new(0, 0), "internal error: the current module provider changed an emitted dependency role");
+                return None;
+            }
+        };
+        rebound.insert(identity.clone(), rebound_callable);
     }
     Some(rebound)
 }
@@ -410,6 +489,8 @@ struct DependencyLeafCapabilities<'a> {
     callees: &'a KlibCalleeFacts<'a>,
     target_realizes_bodyless: bool,
     target_realizes_intrinsic: &'a dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
+    target_realizes_getter: &'a dyn Fn(crate::backend::DependencyGetterSignature<'_>) -> bool,
+    target_represents_classifier: &'a dyn Fn(crate::types::TypeName) -> bool,
 }
 
 impl DependencyLeafCapabilities<'_> {
@@ -466,7 +547,7 @@ fn prepare_bodyless_externals(
                 }
             }
         } else {
-            bodies.emitted_body_callables(&identity, crate::klib_lowering::emitted_closure_function)
+            bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
         };
         for callee in edges {
             if externals.contains_key(&callee) {
@@ -535,13 +616,59 @@ fn prepare_bodyless_externals(
                 }
             }
             if intrinsics.get(&callee).is_some() {
-                // A target intrinsic is called through its provider handle like a bodyless
-                // declaration; the target's emitter realizes that call.
+                // An authenticated intrinsic retains its existing provider-handle realization.
                 let Some(external) = provider_external(platform, &callee, diags) else {
                     return false;
                 };
                 externals.insert(callee, external);
                 continue;
+            }
+            match capabilities.callees.target_getter(
+                &callee,
+                bodies,
+                capabilities.target_realizes_getter,
+            ) {
+                Ok(true) => {
+                    let Some(external) = provider_external(platform, &callee, diags) else {
+                        return false;
+                    };
+                    externals.insert(
+                        callee,
+                        EmittedDependencyCallable::property_getter(external.target()),
+                    );
+                    continue;
+                }
+                Ok(false) => {}
+                Err(reason) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("invalid target KLIB getter: {reason:?}"),
+                    );
+                    return false;
+                }
+            }
+            match capabilities
+                .callees
+                .target_member(&callee, capabilities.target_represents_classifier)
+            {
+                Ok(true) => {
+                    let Some(external) = provider_external(platform, &callee, diags) else {
+                        return false;
+                    };
+                    externals.insert(
+                        callee,
+                        EmittedDependencyCallable::target_member(external.target()),
+                    );
+                    continue;
+                }
+                Ok(false) => {}
+                Err(reason) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("invalid target KLIB member: {reason:?}"),
+                    );
+                    return false;
+                }
             }
             let Some(has_body) = bodies.function_has_body(&callee) else {
                 continue;
@@ -588,7 +715,7 @@ fn provider_external(
         );
         return None;
     }
-    Some(EmittedDependencyCallable::new(external, None, None))
+    Some(EmittedDependencyCallable::provider_leaf(external))
 }
 
 fn links_emitted_support(

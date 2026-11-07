@@ -275,9 +275,9 @@ pub trait Analysis {
         Vec::new()
     }
 
-    /// Whether the current model's inventory was truncated. Kept separate from the URI vector so
-    /// queueing stays allocation-focused while the engine can report incomplete workspace coverage.
-    fn workspace_index_incomplete(&self) -> bool {
+    /// Whether the workspace scan could not read every source root, so the inventory misses the
+    /// sources below an unreadable directory.
+    fn workspace_scan_incomplete(&self) -> bool {
         false
     }
 
@@ -359,81 +359,14 @@ pub struct DocumentAnalyzer;
 
 /// Read `uris` and extract their declarations, skipping anything unreadable.
 ///
-/// The read is bounded before the allocation: a file whose size already exceeds the per-file cap is
-/// never pulled into memory, so one generated multi-megabyte source costs a `stat` rather than a
-/// parse. An unreadable or deleted file simply contributes nothing; the caller knows which URIs it
-/// attempted and drops their stale entries.
+/// An unreadable or deleted file simply contributes nothing; the caller knows which URIs it
+/// attempted and drops their stale entries. Each source is dropped after its parse, so a chunk
+/// never holds more than one file's text.
 pub fn index_workspace_symbols_from_disk(uris: &[&str]) -> WorkspaceSymbolIndex {
-    // This check intentionally precedes the read: the generic builder never sees the source, so
-    // an oversized file costs a `stat`. The skip is recorded with its URI after construction
-    // rather than letting an empty-looking input incorrectly restore the chunk's completeness —
-    // and so the client log can name the file instead of reporting an anonymous gap.
-    let skipped = std::cell::RefCell::new(Vec::new());
-    let readable = uris.iter().filter_map(|uri| {
+    WorkspaceSymbolIndex::from_uri_sources(uris.iter().filter_map(|uri| {
         let path = crate::uri::file_uri_to_path(uri)?;
-        let bytes = std::fs::metadata(&path).ok()?.len();
-        let oversized = usize::try_from(bytes)
-            .map_or(true, |size| size > crate::analysis::MAX_INDEXED_FILE_BYTES);
-        if oversized {
-            skipped.borrow_mut().push(((*uri).to_string(), bytes));
-            return None;
-        }
         Some((*uri, std::fs::read_to_string(path).ok()?))
-    });
-    let mut index = WorkspaceSymbolIndex::from_uri_sources(readable);
-    for (uri, bytes) in skipped.into_inner() {
-        index.note_oversized_file(&uri, bytes);
-    }
-    index
-}
-
-/// One log line saying what project-wide symbol search is missing and which limit took it.
-///
-/// Every clause carries the number a user can act on: the skipped file's URI and size against the
-/// per-file cap, or the dropped-declaration count against the retention ceiling.
-fn symbol_index_incomplete_message(project: &crate::analysis::ProjectSymbolIndex) -> String {
-    const MIB: f64 = 1024.0 * 1024.0;
-    let omissions = project.omissions();
-    let mut clauses = Vec::new();
-    if omissions.oversized_files > 0 {
-        let mut examples = omissions
-            .oversized_examples
-            .iter()
-            .map(|(uri, bytes)| format!("{uri} ({:.1} MiB)", *bytes as f64 / MIB))
-            .collect::<Vec<_>>()
-            .join(", ");
-        if omissions.oversized_files > omissions.oversized_examples.len() {
-            examples.push_str(", …");
-        }
-        clauses.push(format!(
-            "skipped {} file(s) over the {} MiB per-file cap: {}",
-            omissions.oversized_files,
-            crate::analysis::MAX_INDEXED_FILE_BYTES / (1024 * 1024),
-            examples,
-        ));
-    }
-    if omissions.dropped_entries > 0 {
-        clauses.push(format!(
-            "dropped {} declaration(s) at the {} MiB retention ceiling ({} retained)",
-            omissions.dropped_entries,
-            crate::analysis::MAX_PROJECT_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES / (1024 * 1024),
-            project.entry_count(),
-        ));
-    }
-    if omissions.truncated_chunks > 0 {
-        clauses.push(format!(
-            "{} index chunk(s) stopped early on a spent per-chunk budget",
-            omissions.truncated_chunks,
-        ));
-    }
-    if clauses.is_empty() {
-        // Incomplete with no recorded provenance (e.g. a refused cross-phase merge).
-        clauses.push("an index chunk could not be retained".to_string());
-    }
-    format!(
-        "krusty: project-wide symbol search is incomplete: {}",
-        clauses.join("; ")
-    )
+    }))
 }
 
 /// FNV-1a over the file text. Only ever compared against another hash this process produced, so a
@@ -1037,7 +970,6 @@ pub struct LspService<B> {
     /// `(oversized, dropped, truncated)` presence triple. A sweep grows the counts chunk by chunk,
     /// so re-reporting on every change would log per chunk; a report repeats only when a NEW kind
     /// of omission appears.
-    reported_symbol_omissions: Option<(bool, bool, bool)>,
     /// Class names from the project's dependencies. Names only; a location costs a render.
     dependency_symbols: DependencySymbolIndex,
     /// Project-model generation shared by the dependency index and every asynchronous render.
@@ -1103,7 +1035,6 @@ where
             workspace_symbols: WorkspaceSymbolIndex::default(),
             project_symbols: ProjectSymbolIndex::default(),
             project_symbols_generation: 0,
-            reported_symbol_omissions: None,
             dependency_symbols: DependencySymbolIndex::default(),
             dependency_symbols_generation: 0,
             located_dependencies: HashMap::new(),
@@ -1265,12 +1196,6 @@ where
             return Vec::new();
         }
         let mut messages = Vec::new();
-        if outcome.newly_truncated {
-            messages.push(log_message(
-                "krusty: workspace diagnostic retention reached its memory limit; results are incomplete"
-                    .to_string(),
-            ));
-        }
         if outcome.changed {
             // Publish each chunk as it lands when the client has no pull channel. A workspace
             // pull only arrives if the client asks, and on a large repository the sweep runs for
@@ -1306,29 +1231,7 @@ where
         }
         self.project_symbols
             .replace_files(&batch.attempted, batch.symbols);
-        // Said once per generation and cause. A file too large to parse or a layer at its
-        // retention ceiling means the picker is answering over less than the workspace, and
-        // nothing else would tell anyone: a missing symbol looks exactly like a symbol that does
-        // not exist. The message names what was omitted and by which limit, because it is the
-        // only place a user can learn which file to exclude or which ceiling is undersized.
-        if self.project_symbols.is_complete() {
-            return Vec::new();
-        }
-        let omissions = self.project_symbols.omissions();
-        let causes = (
-            omissions.oversized_files > 0,
-            omissions.dropped_entries > 0,
-            omissions.truncated_chunks > 0,
-        );
-        if self.reported_symbol_omissions.is_some_and(|reported| {
-            (!causes.0 || reported.0) && (!causes.1 || reported.1) && (!causes.2 || reported.2)
-        }) {
-            return Vec::new();
-        }
-        self.reported_symbol_omissions = Some(causes);
-        vec![log_message(symbol_index_incomplete_message(
-            &self.project_symbols,
-        ))]
+        Vec::new()
     }
 
     pub(crate) fn set_dependency_index(&mut self, generation: u64, index: DependencySymbolIndex) {
@@ -1457,7 +1360,6 @@ where
     pub(crate) fn reset_workspace_index(&mut self, generation: u64) -> Vec<Value> {
         self.project_symbols = ProjectSymbolIndex::default();
         self.project_symbols_generation = generation;
-        self.reported_symbol_omissions = None;
         // Dependency names and materialized sources describe the same project model as the source
         // index. Clear all three pieces together; retaining names while clearing only locations
         // let stale candidates queue renders between reset and the replacement index arriving.
@@ -3681,7 +3583,7 @@ fn analysis_limit_diagnostics() -> DiagnosticIndex {
             span: krusty::diag::Span::new(0, 0),
             editor_span: None,
             identity: None,
-            warning_name: None,
+            name: None,
             severity: Severity::Error,
             kind: DiagnosticKind::Compiler,
             msg: format!(
@@ -4391,43 +4293,29 @@ mod tests {
 
     mod open_document_lifetime_tests;
 
+    /// A file of any size is parsed into the project symbol index; a large generated source keeps
+    /// its declarations instead of being skipped.
     #[test]
-    fn disk_symbol_index_reports_a_file_rejected_before_reading() {
-        struct RemoveOnDrop(std::path::PathBuf);
-        impl Drop for RemoveOnDrop {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_file(&self.0);
-            }
-        }
-
-        let path = std::env::temp_dir().join(format!(
-            "krusty-lsp-oversized-symbol-index-{}.kt",
+    fn a_large_source_is_indexed_from_disk() {
+        let directory = std::env::temp_dir().join(format!(
+            "krusty-lsp-large-symbol-source-{}",
             std::process::id()
         ));
-        let cleanup = RemoveOnDrop(path.clone());
-        let file = std::fs::File::create(&path).expect("create sparse oversized source");
-        file.set_len(crate::analysis::MAX_INDEXED_FILE_BYTES as u64 + 1)
-            .expect("size sparse oversized source");
-        drop(file);
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("Generated.kt");
+        let source = format!(
+            "package demo\n{}class LastDeclaration\n",
+            "// generated\n".repeat(1024 * 1024)
+        );
+        std::fs::write(&path, source).unwrap();
         let uri = crate::uri::path_to_file_uri(&path).expect("temporary path is a file URI");
 
         let index = index_workspace_symbols_from_disk(&[&uri]);
 
-        assert_eq!(index.entry_count(), 0);
-        assert!(
-            !index.is_complete(),
-            "pre-read size rejection must reach the retained index completeness flag"
-        );
-        // The skip keeps its provenance: the URI and size are what the client log reports.
-        assert_eq!(index.omissions().oversized_files, 1);
-        assert_eq!(
-            index.omissions().oversized_examples,
-            vec![(
-                uri.clone(),
-                crate::analysis::MAX_INDEXED_FILE_BYTES as u64 + 1
-            )]
-        );
-        drop(cleanup);
+        assert_eq!(index.entry_count(), 1);
+        assert!(index.is_complete());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -4504,7 +4392,7 @@ mod tests {
             span: krusty::diag::Span::new(0, 1),
             editor_span: None,
             identity: None,
-            warning_name: None,
+            name: None,
             severity: Severity::Error,
             kind: DiagnosticKind::Compiler,
             msg: message.to_string(),
@@ -5468,7 +5356,7 @@ mod tests {
                 span: krusty::diag::Span::new(0, 3),
                 editor_span: None,
                 identity: None,
-                warning_name: None,
+                name: None,
                 severity: Severity::Error,
                 kind: DiagnosticKind::Compiler,
                 msg: maximum_message,
@@ -5992,91 +5880,6 @@ mod tests {
         assert!(service
             .requested_dependencies
             .contains("vendor/StillRunning"));
-    }
-
-    #[test]
-    fn an_incomplete_project_symbol_index_is_reported_once() {
-        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let mut service = LspService::with_backend(RecordingBackend {
-            ready: true,
-            submitted,
-        });
-        service.force_initialized_for_test();
-        // Recorded the way the disk adapter records a stat-only skip; materializing a real
-        // past-the-cap source would allocate the whole cap per test run.
-        let oversized_skip = || {
-            let mut index = crate::analysis::WorkspaceSymbolIndex::default();
-            index.note_oversized_file(
-                "file:///Huge.kt",
-                crate::analysis::MAX_INDEXED_FILE_BYTES as u64 + 1,
-            );
-            index
-        };
-
-        let reported = service.apply_symbol_index_batch(SymbolIndexBatch {
-            generation: 0,
-            attempted: vec!["file:///Huge.kt".to_string()],
-            symbols: oversized_skip(),
-        });
-
-        // A symbol the picker never shows is indistinguishable from one that does not exist, so
-        // the shortfall has to be said out loud -- but once per cause, not per chunk.
-        assert_eq!(reported.len(), 1);
-        assert_eq!(reported[0]["method"], "window/logMessage");
-        let message = reported[0]["params"]["message"].as_str().unwrap();
-        assert!(message.contains("incomplete"), "{message}");
-        // The message names the skipped file, its size, and the cap it exceeded: it is the only
-        // place a user can learn which file to exclude or which limit is undersized.
-        assert!(message.contains("file:///Huge.kt"), "{message}");
-        assert!(message.contains("per-file cap"), "{message}");
-        let repeated = service.apply_symbol_index_batch(SymbolIndexBatch {
-            generation: 0,
-            attempted: vec!["file:///Huge.kt".to_string()],
-            symbols: oversized_skip(),
-        });
-        assert!(repeated.is_empty());
-    }
-
-    #[test]
-    fn a_new_omission_cause_is_reported_even_after_the_first_report() {
-        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let mut service = LspService::with_backend(RecordingBackend {
-            ready: true,
-            submitted,
-        });
-        service.force_initialized_for_test();
-
-        let mut oversized_index = crate::analysis::WorkspaceSymbolIndex::default();
-        oversized_index.note_oversized_file("file:///build/Gen.kt", 65 * 1024 * 1024);
-        let first = service.apply_symbol_index_batch(SymbolIndexBatch {
-            generation: 0,
-            attempted: vec!["file:///build/Gen.kt".to_string()],
-            symbols: oversized_index,
-        });
-        assert_eq!(first.len(), 1);
-        let message = first[0]["params"]["message"].as_str().unwrap();
-        assert!(message.contains("per-file cap"), "{message}");
-        assert!(
-            message.contains("file:///build/Gen.kt (65.0 MiB)"),
-            "{message}"
-        );
-
-        // A zero-budget merge drops every declaration: a different omission than the skip above,
-        // so it deserves its own report even though incompleteness was already said.
-        let populated = crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(
-            "file:///A.kt",
-            "package demo\nclass Alpha\n",
-        )]);
-        let mut trimmed = crate::analysis::WorkspaceSymbolIndex::default();
-        trimmed.merge_within(populated, 0);
-        let second = service.apply_symbol_index_batch(SymbolIndexBatch {
-            generation: 0,
-            attempted: vec!["file:///A.kt".to_string()],
-            symbols: trimmed,
-        });
-        assert_eq!(second.len(), 1, "a new cause must be reported");
-        let message = second[0]["params"]["message"].as_str().unwrap();
-        assert!(message.contains("declaration(s)"), "{message}");
     }
 
     #[test]
@@ -6949,7 +6752,7 @@ mod tests {
                         span: krusty::diag::Span::new(0, 1),
                         editor_span: None,
                         identity: None,
-                        warning_name: None,
+                        name: None,
                         severity: Severity::Error,
                         kind: DiagnosticKind::Compiler,
                         msg: "boom".to_string(),
@@ -6988,7 +6791,7 @@ mod tests {
                     span: krusty::diag::Span::new(0, 1),
                     editor_span: None,
                     identity: None,
-                    warning_name: None,
+                    name: None,
                     severity: Severity::Error,
                     kind: DiagnosticKind::Compiler,
                     msg: "boom".to_string(),
@@ -7055,7 +6858,7 @@ mod tests {
                     span: krusty::diag::Span::new(0, 1),
                     editor_span: None,
                     identity: None,
-                    warning_name: None,
+                    name: None,
                     severity: Severity::Error,
                     kind: DiagnosticKind::Compiler,
                     msg: "boom".to_string(),
@@ -7296,7 +7099,7 @@ mod tests {
                 span: krusty::diag::Span::new(0, 1),
                 editor_span: None,
                 identity: None,
-                warning_name: None,
+                name: None,
                 severity: Severity::Error,
                 kind: DiagnosticKind::Compiler,
                 msg: "same message".to_string(),
@@ -7306,7 +7109,7 @@ mod tests {
                 span: krusty::diag::Span::new(2, 3),
                 editor_span: None,
                 identity: None,
-                warning_name: None,
+                name: None,
                 severity: Severity::Warning,
                 kind: DiagnosticKind::Compiler,
                 msg: "same message".to_string(),
@@ -7351,7 +7154,7 @@ mod tests {
             span: krusty::diag::Span::new(0, 0),
             editor_span: None,
             identity: None,
-            warning_name: None,
+            name: None,
             severity: Severity::Error,
             kind: DiagnosticKind::Compiler,
             msg: "bounded".to_string(),
@@ -7399,7 +7202,7 @@ mod tests {
                 span: krusty::diag::Span::new(emoji, emoji + 4),
                 editor_span: None,
                 identity: None,
-                warning_name: None,
+                name: None,
                 severity: Severity::Error,
                 kind: DiagnosticKind::Compiler,
                 msg: "late source diagnostic".to_string(),
@@ -7417,7 +7220,7 @@ mod tests {
                 span: krusty::diag::Span::new(0, 0),
                 editor_span: None,
                 identity: None,
-                warning_name: None,
+                name: None,
                 severity: Severity::Warning,
                 kind: DiagnosticKind::Compiler,
                 msg: large_message.clone(),
@@ -7598,7 +7401,7 @@ mod tests {
                     span: krusty::diag::Span::new(4, 9),
                     editor_span: None,
                     identity: None,
-                    warning_name: None,
+                    name: None,
                     severity: Severity::Error,
                     kind: DiagnosticKind::Compiler,
                     msg: "swept boom".to_string(),
@@ -7642,7 +7445,7 @@ mod tests {
                     span: krusty::diag::Span::new(0, 1),
                     editor_span: None,
                     identity: None,
-                    warning_name: None,
+                    name: None,
                     severity: Severity::Error,
                     kind: DiagnosticKind::Compiler,
                     msg: "will be deleted".to_string(),
@@ -7767,7 +7570,7 @@ mod tests {
                     span: krusty::diag::Span::new(0, 1),
                     editor_span: None,
                     identity: None,
-                    warning_name: None,
+                    name: None,
                     severity: Severity::Error,
                     kind: DiagnosticKind::Compiler,
                     msg: "indexed".to_string(),
@@ -7834,7 +7637,7 @@ mod tests {
                     span: krusty::diag::Span::new(0, 1),
                     editor_span: None,
                     identity: None,
-                    warning_name: None,
+                    name: None,
                     severity: Severity::Error,
                     kind: DiagnosticKind::Compiler,
                     msg: "stale disk diagnostic".to_string(),
@@ -7875,7 +7678,7 @@ mod tests {
                     span: krusty::diag::Span::new(0, 3),
                     editor_span: None,
                     identity: None,
-                    warning_name: None,
+                    name: None,
                     severity: Severity::Error,
                     kind: DiagnosticKind::Compiler,
                     msg: "swept boom".to_string(),
@@ -7927,7 +7730,7 @@ mod tests {
                     span: krusty::diag::Span::new(0, 3),
                     editor_span: None,
                     identity: None,
-                    warning_name: None,
+                    name: None,
                     severity: Severity::Error,
                     kind: DiagnosticKind::Compiler,
                     msg: "swept boom".to_string(),
@@ -7981,7 +7784,7 @@ mod tests {
                     span: krusty::diag::Span::new(0, 3),
                     editor_span: None,
                     identity: None,
-                    warning_name: None,
+                    name: None,
                     severity: Severity::Error,
                     kind: DiagnosticKind::Compiler,
                     msg: "swept boom".to_string(),
@@ -8036,7 +7839,7 @@ mod tests {
                     span: krusty::diag::Span::new(0, 1),
                     editor_span: None,
                     identity: None,
-                    warning_name: None,
+                    name: None,
                     severity: Severity::Error,
                     kind: DiagnosticKind::Compiler,
                     msg: "stale from disk".to_string(),
@@ -8075,7 +7878,7 @@ mod tests {
                     span: krusty::diag::Span::new(0, 1),
                     editor_span: None,
                     identity: None,
-                    warning_name: None,
+                    name: None,
                     severity: Severity::Error,
                     kind: DiagnosticKind::Compiler,
                     msg: "removed diagnostic".to_string(),

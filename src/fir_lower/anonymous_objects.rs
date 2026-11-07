@@ -169,6 +169,7 @@ impl BodyLowering<'_> {
             internal: classifier,
             args: lowered_arguments,
             ctor_params: Some(parameter_types),
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),

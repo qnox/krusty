@@ -12,12 +12,21 @@ use crate::types::{Ty, TypeName};
 /// class; this backend pass alone decides that the selected `*-impl` consumes its carrier. A
 /// static whose own parameters are not the call's (`replacement`: an inherited default's static
 /// takes the member as the class's applied supertype substitutes it) is represented for those.
+/// The operands' `crossinline`/`noinline` modifiers of an inline call move with them: the receiver
+/// takes neither, and an inliner that reads a lambda operand's modifier by its position still finds
+/// it (a member inlined from its compiled body is the `-impl` static's body).
 pub(super) fn align(
     ir: &mut IrFile,
     call: ExprId,
     owner: TypeName,
     replacement: Option<Box<[Ty]>>,
 ) {
+    if let Some(modifiers) = ir.call_inline_modifiers.get(&call) {
+        let aligned = std::iter::once(crate::types::InlineParameterModifier::None)
+            .chain(modifiers.iter().copied())
+            .collect();
+        ir.call_inline_modifiers.insert(call, aligned);
+    }
     let Some(parameters) = replacement.or_else(|| ir.call_declared_params.get(&call).cloned())
     else {
         return;

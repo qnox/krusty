@@ -634,6 +634,8 @@ impl BodyFirChecker<'_> {
                     classifier: None,
                     context_binding: None,
                     singleton: None,
+                    context_parameter: false,
+                    construction_sites: Vec::new(),
                 }
             }
             FirDelegateDispatchReceiver::ContextBinding {
@@ -651,6 +653,8 @@ impl BodyFirChecker<'_> {
                     flow_identity: None,
                 }),
                 singleton: None,
+                context_parameter: true,
+                construction_sites: Vec::new(),
             },
             FirDelegateDispatchReceiver::Singleton { ty, classifier } => {
                 crate::resolve::ImplicitReceiverSelection {
@@ -663,6 +667,8 @@ impl BodyFirChecker<'_> {
                         classifier: *classifier,
                         companion_owner: None,
                     }),
+                    context_parameter: false,
+                    construction_sites: Vec::new(),
                 }
             }
         };
@@ -865,11 +871,13 @@ fn selected_delegate_call(
                     default_provider: *external_default_provider,
                     receiver: Some(receiver),
                     declared_receiver: None,
+                    declaring_receiver: None,
                     parameters: parameters.clone(),
                     result: resolved(*ret)?,
                     declared_result: None,
                     overridden_results: Box::new([]),
                     semantic_role: None,
+                    intrinsic_const: false,
                     overridden_declarations: Box::new([]),
                     suspend: false,
                     inline: crate::libraries::InlineKind::None,
@@ -889,6 +897,7 @@ fn selected_delegate_call(
         DelegateGetValueTarget::Extension {
             callable,
             stable_declaration,
+            ..
         } => {
             let parameters = callable
                 .params
@@ -968,6 +977,7 @@ fn selected_delegate_call(
                     default_provider: callable.external_default_provider,
                     receiver: Some(receiver),
                     declared_receiver: callable.source_receiver.map(resolved).transpose()?,
+                    declaring_receiver: None,
                     parameters: parameters.clone(),
                     result: resolved(callable.ret)?,
                     declared_result: callable.declared_ret.map(resolved).transpose()?,
@@ -979,6 +989,7 @@ fn selected_delegate_call(
                         .collect::<Result<Vec<_>, _>>()?
                         .into_boxed_slice(),
                     semantic_role: callable.semantic_role,
+                    intrinsic_const: super::calls::is_intrinsic_const(&callable.annotations),
                     overridden_declarations: callable.overridden_declarations.clone(),
                     suspend: callable.suspend,
                     inline: callable.inline,
@@ -1076,6 +1087,7 @@ fn selected_delegate_call(
                         default_provider: *external_default_provider,
                         receiver: Some(resolved(dispatch_receiver.ty)?),
                         declared_receiver: None,
+                        declaring_receiver: None,
                         parameters: parameters
                             .into_iter()
                             .map(resolved)
@@ -1085,6 +1097,7 @@ fn selected_delegate_call(
                         declared_result: declared_ret.map(resolved).transpose()?,
                         overridden_results: Box::new([]),
                         semantic_role: None,
+                        intrinsic_const: false,
                         overridden_declarations: Box::new([]),
                         suspend: *suspend,
                         inline: *inline,
@@ -1223,6 +1236,7 @@ mod tests {
         let target = DelegateGetValueTarget::Extension {
             callable: Box::new(callable),
             stable_declaration: None,
+            applied_receiver: Ty::Int,
         };
 
         let failure = selected_delegate_call(

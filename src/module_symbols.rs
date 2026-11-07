@@ -53,7 +53,7 @@ impl<'a> ModuleSymbols<'a> {
         identity: TypeName,
     ) -> Option<crate::libraries::AliasExpansion> {
         let target = *self.syms.source_alias_fqns.get(&identity)?;
-        let (formals, expansion) = self.syms.source_alias_expansions.get(&identity)?;
+        let template = self.syms.source_alias_expansions.get(&identity)?;
         let expansion_spelling = self
             .syms
             .alias_expansion_spellings
@@ -62,9 +62,10 @@ impl<'a> ModuleSymbols<'a> {
             .unwrap_or_default();
         Some(crate::libraries::AliasExpansion {
             identity,
+            declaration_name: template.declaration_name.clone().map(std::sync::Arc::new),
             target,
-            formals: formals.clone(),
-            expansion: *expansion,
+            formals: template.formals.clone(),
+            expansion: template.expansion,
             expansion_spelling,
         })
     }
@@ -132,7 +133,7 @@ impl<'a> ModuleSymbols<'a> {
     }
 
     /// Build the classifier half of this provider's single symbol record. Kept private so callers
-    /// cannot query classifier metadata through a second `SymbolSource` operation.
+    /// cannot publish a classifier shape independently of its declaration record.
     fn classifier_record(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
         if self.syms.module_cache_enabled() {
             if let Some(shape) = self.syms.module_shape_cache.borrow().get(&internal) {
@@ -217,7 +218,7 @@ impl<'a> ModuleSymbols<'a> {
         let mut constructors = Vec::new();
         let constructor_generic_signature = |params: Vec<Ty>| {
             (!c.type_params.is_empty()).then(|| GenericSig {
-                formals: c.type_params.clone(),
+                formals: crate::types::TyParamName::all(&c.type_params),
                 formal_bounds: c
                     .type_param_bounds
                     .iter()
@@ -442,6 +443,7 @@ impl<'a> ModuleSymbols<'a> {
         .into_iter()
         .collect();
         let mut shape = LibraryType {
+            runtime_exception: None,
             declaration_name: c.declaration_name.clone(),
             // A current-module classifier is by definition a Kotlin declaration.
             is_kotlin: true,
@@ -569,6 +571,7 @@ impl<'a> ModuleSymbols<'a> {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         };
@@ -887,7 +890,7 @@ impl<'a> ModuleSymbols<'a> {
                 associated_classifier: None,
                 associated_access_owner: None,
                 companion_associated: false,
-                formals: declaration.type_params().to_vec(),
+                formals: crate::types::TyParamName::all(declaration.type_params()),
                 ty: declaration.ret(),
                 context_count: declaration.context_params().len(),
                 context_param_names: declaration.context_param_names().to_vec(),
@@ -1023,7 +1026,6 @@ fn fn_info(
         external_identity: None,
         external_default_provider: None,
         external_property_identity: None,
-        compiler_core_declaration: None,
         declaration_owner: None,
         owner,
         name: name.to_string(),
@@ -1054,6 +1056,7 @@ fn fn_info(
         member_realization: crate::libraries::MemberRealization::Dispatch,
         inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
         default_call: false,
+        defaults_from_declaration: false,
         vararg_elem: None,
         vararg_index: None,
         signature: None,
@@ -1157,7 +1160,6 @@ fn source_callable(
         annotations: Vec::new(),
         external_default_provider: None,
         external_property_identity: None,
-        compiler_core_declaration: None,
         declaration_owner: None,
         owner,
         reflection_name: Some(name.clone()),
@@ -1184,6 +1186,7 @@ fn source_callable(
         member_realization: crate::libraries::MemberRealization::Dispatch,
         inline: InlineKind::None,
         default_call: false,
+        defaults_from_declaration: false,
         vararg_elem: None,
         vararg_index: None,
         signature: None,
@@ -1287,6 +1290,28 @@ fn source_property(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        use crate::libraries::ClassifierDeclarationKey as Key;
+        match declaration {
+            Key::TypeAlias(identity) => self
+                .syms
+                .source_alias_expansions
+                .get(&identity)
+                .map(|alias| alias.declaration_name.clone()),
+            Key::Ordinary(identity) => self
+                .class_by_type_name(identity)
+                .map(|class| class.declaration_name.clone())
+                .or_else(|| {
+                    self.syms
+                        .source_class_header_shape(identity)
+                        .map(|shape| shape.declaration_name)
+                }),
+        }
+    }
+
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
         self.syms
             .source_fragments
@@ -1319,8 +1344,8 @@ impl SymbolSource for ModuleSymbols<'_> {
         self.type_parameter_bounds(name)
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        &self.syms.sam_with_receiver_annotations
+    fn annotation_conventions(&self) -> &crate::symbol_source::AnnotationConventions {
+        &self.syms.annotation_conventions
     }
 
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
@@ -1539,7 +1564,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 associated_classifier: None,
                 associated_access_owner: None,
                 companion_associated: false,
-                formals: property.formals.clone(),
+                formals: crate::types::TyParamName::all(&property.formals),
                 ty: read_ty,
                 context_count: property.context_params.len(),
                 context_param_names: property.context_param_names.clone(),
@@ -1636,7 +1661,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     associated_access_owner: associated_classifier
                         .filter(|_| property.is_companion_block_member),
                     companion_associated: associated_classifier.is_some(),
-                    formals: property.formals.clone(),
+                    formals: crate::types::TyParamName::all(&property.formals),
                     ty: property.ty,
                     context_count: property.context_params.len(),
                     context_param_names: Vec::new(),

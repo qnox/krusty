@@ -908,9 +908,9 @@ fn contextual_serializer_for(ir: &mut IrFile, is_contextual: bool, ty: &Ty) -> O
     })
 }
 
-/// `new ContextualSerializer(<type>::class)` — the element serializer for a `@Contextual` property (or one
-/// whose type is named in `@file:UseContextualSerialization`). Its descriptor `kind` is CONTEXTUAL; the
-/// actual serializer is resolved from the `SerializersModule` at run time.
+/// `new ContextualSerializer(<type>::class)` — the serializer a `@Contextual` property's serialize and
+/// deserialize bodies fall back to when the cached child serializer is unavailable. Its descriptor
+/// `kind` is CONTEXTUAL; the actual serializer is resolved from the `SerializersModule` at run time.
 fn build_contextual_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId {
     let kclass = contextual_kclass(ir, classifier);
     ir.new_external(
@@ -921,7 +921,7 @@ fn build_contextual_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId 
 }
 
 /// `new ContextualSerializer(<type>::class, fallback, typeArgumentsSerializers)` — the serializer
-/// kotlinc caches for a contextual PROPERTY, as opposed to a contextual collection element.
+/// kotlinc builds for every contextual type, a property's or a collection element's alike.
 fn build_contextual_property_serializer(
     ir: &mut IrFile,
     classifier: TypeName,
@@ -1051,13 +1051,12 @@ impl SerializationPlugin {
                 internal: construction.serializer,
                 args,
                 ctor_params: (!declared_here).then(|| construction.parameters.to_vec()),
+                declared_params: Some(construction.parameters.clone()),
                 ctor_desc: None,
                 external_target,
                 defaults: Box::new([]),
                 default_prefix_count: 0,
             });
-            ir.construction_declared_params
-                .insert(new, construction.parameters.clone());
             if let Some(target) = target {
                 ir.construction_targets.insert(new, target);
             }
@@ -1691,7 +1690,7 @@ mod tests {
             params: params.clone(),
             ret: Ty::Unit,
             generic_sig: Some(crate::libraries::GenericSig {
-                formals: vec!["T".to_owned()],
+                formals: vec![crate::types::TyParamName::new("T")],
                 formal_bounds: vec![Vec::new()],
                 receiver: Some(builder),
                 params,
@@ -2337,6 +2336,7 @@ mod tests {
                     bounds: Vec::new(),
                     variance: crate::types::TypeVariance::Invariant,
                     reified: false,
+                    captured_from_enclosing: false,
                 }],
                 params: Vec::new(),
                 ret: None,
@@ -2354,6 +2354,15 @@ mod tests {
                 crate::ir::IrGeneratedClassRole::SerializationSerializer,
             )
             .expect("generic serializer class");
+        let serializer = ir.classes[ser_id as usize].fq_name_id();
+        assert_eq!(
+            ir.declared_class_self_type(serializer),
+            Some(Ty::obj_args_name(
+                serializer,
+                &[Ty::ty_param("T", Ty::nullable(class_ty("kotlin/Any")))],
+            )),
+            "the generated declaration retains its full applied receiver type"
+        );
         let tps_fid =
             GeneratedSerializerMembers::declared(&ir, ir.classes[ser_id as usize].fq_name_id())
                 .type_parameter_serializers;

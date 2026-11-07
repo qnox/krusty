@@ -1,6 +1,7 @@
 //! Library metadata shared by symbol sources.
 
 mod annotation_application;
+mod annotation_argument_provenance;
 mod array_factories;
 pub(crate) mod builtin_declaration;
 pub(crate) mod builtin_member_realization;
@@ -15,6 +16,7 @@ mod classifier_kind;
 mod classifier_role;
 mod compiler_intrinsic;
 mod core_builtins;
+mod core_identities;
 mod declaration_header;
 mod declared_members;
 mod default_value;
@@ -26,6 +28,8 @@ pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod inline_kind;
+pub(crate) mod intrinsic_const_numeric;
+mod klib_body_accessor;
 mod klib_body_class;
 mod member_flags;
 mod member_records;
@@ -37,13 +41,16 @@ mod platform_contract;
 mod property_producer;
 mod provider_override;
 mod result_nullability;
+mod runtime_exception;
 mod scalar_instruction;
 mod singleton_dispatch;
+mod source_inputs;
 mod stdlib_klib_intrinsics;
 pub use annotation_application::{
     AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
     AnnotationPositionalPolicy,
 };
+pub use annotation_argument_provenance::AnnotationArgumentProvenance;
 pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
 pub use call_realization::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
@@ -54,10 +61,14 @@ pub use call_realization::{
 pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
-pub use classifier_callables::BoundInnerConstructor;
-pub(crate) use classifier_callables::{constructor_generic_signature, ConstructorAlias};
+pub(crate) use classifier_callables::{
+    constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
+};
+pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
-pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
+pub use classifier_declaration::{
+    AliasExpansion, ClassifierDeclaration, ClassifierDeclarationKey, TypeAliasTemplate,
+};
 pub use classifier_kind::TypeKind;
 pub use declaration_header::{
     DeclarationHeader, DeclarationLanguage, HeaderSignature, HeaderSupertype, HeaderTypeParameter,
@@ -75,6 +86,8 @@ pub(crate) use dependency_body_contract::{
 pub(crate) use dependency_body_modifiers::KlibBodyDeclarationModifiers;
 pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
 pub use inline_kind::InlineKind;
+pub use klib_body_accessor::DependencyGetterSignature;
+pub(crate) use klib_body_accessor::{KlibAccessorRole, KlibBodyAccessor};
 pub use param_flags::ParamFlags;
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_abi::PlatformAbi;
@@ -84,7 +97,9 @@ pub use platform_contract::{
 pub use property_producer::PropertyProducer;
 pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
+pub use runtime_exception::{RuntimeExceptionKind, RuntimeExceptionLayout};
 pub use singleton_dispatch::SingletonDispatch;
+pub(crate) use source_inputs::{ReceiverInputBounds, SourceInputDeclaration};
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
 
 use crate::fx_hash::{HashMap, HashSet};
@@ -103,7 +118,11 @@ pub use inline_body::{
     InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
     InlineIterationTraversal,
 };
-pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters};
+#[cfg(test)]
+pub(crate) use klib_body_class::test_fixture as klib_body_class_fixture;
+pub(crate) use klib_body_class::{
+    KlibBodyClassContract, KlibBodyClassParameters, KlibClassStorage, KlibStoredField,
+};
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,
@@ -202,6 +221,15 @@ pub enum CollectionBarrierOutcome {
     False,
     NotFound,
     Null,
+}
+
+/// The JVM type-safe collection protocol of one exact declaration: the parameters a call through
+/// the erased declaration checks against the override's types, in declaration order, and the
+/// neutral result when one of them is not. `MutableMap.remove(key, value)` checks both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollectionBarrier {
+    pub checked_parameters: &'static [u16],
+    pub outcome: CollectionBarrierOutcome,
 }
 
 /// One member (constructor, member function/property accessor, or companion member) of a library
@@ -885,12 +913,6 @@ pub enum Origin {
     },
 }
 
-/// Exact declaration identity owned by the compiler's artifact-independent core provider.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CompilerCoreDeclaration {
-    KotlinAnyEquals,
-}
-
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
 #[derive(Clone, Debug)]
@@ -907,9 +929,6 @@ pub struct LibraryCallable {
     /// a Kotlin property. Explicit calls still use `external_identity`; property reads/writes carry
     /// this distinct identity so the target backend alone chooses field versus accessor realization.
     pub external_property_identity: Option<crate::fir::ExternalPropertyId>,
-    /// Exact artifact-independent declaration supplied by the compiler core provider. This is
-    /// assigned only at that provider boundary and is never reconstructed from name or shape.
-    pub compiler_core_declaration: Option<CompilerCoreDeclaration>,
     /// Exact semantic namespace that declares this callable. This is provider-owned identity, not
     /// the physical JVM facade/class in [`Self::owner`]. Keeping it on the normalized declaration
     /// lets cached inline-body dependencies be re-interned in another classpath without recovering
@@ -937,7 +956,7 @@ pub struct LibraryCallable {
     /// nothing or was not reached through a hierarchy walk.
     pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
     /// JVM collection barrier role of this exact decoded builtin declaration.
-    pub collection_barrier: Option<CollectionBarrierOutcome>,
+    pub collection_barrier: Option<CollectionBarrier>,
     pub plugin_expression: Option<PluginExpressionDeclaration>,
     /// Structural expansion decoded from this exact declaration's inline body.
     pub inline_body_plan: Option<Box<InlineBodyPlan>>,
@@ -990,6 +1009,12 @@ pub struct LibraryCallable {
     /// placeholders for the omitted trailing ones, an `int` bit-mask (a bit set per omitted parameter),
     /// and a `null` marker — the JVM realization of default arguments. `false` for an ordinary call.
     pub default_call: bool,
+    /// The declaration fills its own omitted arguments: a dependency declaration whose defaults
+    /// are part of its declaring module, where that module's compilation realizes them as one
+    /// entry taking every operand and a mask of the omitted ones. A call omitting a computed
+    /// default to such a declaration keeps the declaration's identity, with
+    /// [`Self::default_call`] set; no platform `$default` symbol is named.
+    pub defaults_from_declaration: bool,
     /// For a generic `vararg` callable resolved with a bound element type (`listOf<Long>(…)` →
     /// `Long`): the *logical* element type the trailing arguments adapt to. `None` for a non-vararg
     /// call or when the element type is not recovered. The backend uses it to coerce each packed
@@ -1362,6 +1387,9 @@ pub fn map_call_args<T: Copy>(
 #[derive(Clone)]
 pub struct FunctionInfo {
     pub kind: FnKind,
+    /// Declaration input slots and receiver bindings retained before classifier application.
+    /// An unapplied candidate still carries its declaration directly in `semantic_signature`.
+    pub(crate) source_inputs: Option<Box<SourceInputDeclaration>>,
     /// Provider-owned override-slot identity for declarations whose platform compatibility differs
     /// from their source-language signature. This is distinct from the physical emit handle.
     pub(crate) provider_override_slot: Option<ProviderOverrideSlot>,
@@ -1424,13 +1452,18 @@ pub struct FunctionInfo {
     /// value. It travels on the same candidate structure so the checker can combine both facets and
     /// run overload selection once.
     pub implicit_classifier_callable: Option<ImplicitClassifierCallable>,
-    /// The `inner` classifier this candidate constructs when it is a constructor reached through a
-    /// value of the outer class (`outer.Inner(args)`). Kotlin places such a constructor in the
+    /// The classifier this candidate constructs when it is a constructor. A constructor travels on
+    /// the same candidate structure as the functions it competes with: Kotlin places an `inner`
+    /// constructor reached through a value of the outer class (`outer.Inner(args)`) in the
     /// receiver's member level beside same-named member functions; selection runs once over both
     /// and the constructor path then materializes the selected declaration.
-    pub bound_inner_constructor: Option<BoundInnerConstructor>,
+    pub constructor: Option<ConstructorCandidate>,
     /// The alias selected on the caller's scope tower for this constructor candidate.
     pub(crate) constructor_alias: Option<Box<ConstructorAlias>>,
+    /// This declaration's identity as its classifier declares it, before a hierarchy rung applies
+    /// the receiver's type arguments (`Map.get(K): V?`, not `Map.get(String): Int?`). Recorded once,
+    /// when the declaration is first specialized; an override records it as what it overrides.
+    pub(crate) declaration_identity: Option<Box<crate::types::OverriddenDeclaration>>,
 }
 
 /// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
@@ -1522,10 +1555,14 @@ impl FunctionInfo {
             return declared.into_owned();
         }
 
-        fn merge_method_arguments(declared: Ty, selected: Ty, formals: &[String]) -> Ty {
+        fn merge_method_arguments(
+            declared: Ty,
+            selected: Ty,
+            formals: &[crate::types::TyParamName],
+        ) -> Ty {
             match (declared.kind(), selected.kind()) {
-                (TyKind::TyParam(formal, _), _)
-                    if formals.iter().any(|candidate| candidate == formal) =>
+                (TyKind::TyParam(formal, _) | TyKind::Var(formal, _), _)
+                    if formals.contains(&formal) =>
                 {
                     selected
                 }
@@ -1577,6 +1614,9 @@ impl FunctionInfo {
                 }
                 (TyKind::PlatformNullable(inner), TyKind::PlatformNullable(selected_inner)) => {
                     Ty::platform_nullable(merge_method_arguments(inner, selected_inner, formals))
+                }
+                (TyKind::MutabilityFlexible(inner), TyKind::MutabilityFlexible(selected_inner)) => {
+                    Ty::mutability_flexible(merge_method_arguments(inner, selected_inner, formals))
                 }
                 (TyKind::InProjection(inner), TyKind::InProjection(selected_inner)) => {
                     Ty::in_projection(merge_method_arguments(inner, selected_inner, formals))
@@ -1631,6 +1671,7 @@ impl FunctionInfo {
             .saturating_sub(usize::from(kind == FnKind::Extension));
         FunctionInfo {
             kind,
+            source_inputs: None,
             provider_override_slot: None,
             classifier_static: false,
             associated_classifier: None,
@@ -1654,8 +1695,9 @@ impl FunctionInfo {
             stable_declaration: None,
             source_member: None,
             implicit_classifier_callable: None,
-            bound_inner_constructor: None,
+            constructor: None,
             constructor_alias: None,
+            declaration_identity: None,
         }
     }
 
@@ -1908,7 +1950,7 @@ pub struct PropertyInfo {
     /// static storage of a companion `@JvmField`, published in the same namespace, is not.
     pub companion_associated: bool,
     /// The property's own formal type parameters (`val <T> List<T>.foo`); empty for a plain property.
-    pub formals: Vec<String>,
+    pub formals: Vec<crate::types::TyParamName>,
     /// The property's declared type.
     pub ty: Ty,
     /// Number of leading context parameters in each accessor's parameter list.
@@ -2106,6 +2148,8 @@ impl ResolvedSymbols {
 /// knowing the target ABI.
 #[derive(Clone)]
 pub struct LibraryType {
+    /// Authenticated platform-runtime storage, independently of any selected constructor.
+    pub runtime_exception: Option<RuntimeExceptionLayout>,
     /// Exact lexical declaration ownership, independent of captured outer instances. `None` is
     /// unavailable evidence; a recorded top-level declaration is an authoritative negative owner.
     pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
@@ -2242,6 +2286,12 @@ pub struct LibraryType {
     /// map pairs them. Published by the provider that owns that map; `None` for every other
     /// classifier.
     pub mapped_collection: Option<crate::types::MappedCollection>,
+    /// This classifier is a Kotlin builtin declaration that the platform realizes by a distinct
+    /// class (`kotlin/collections/List` by `java/util/List`), as the platform's builtin class map
+    /// pairs them. It is a Kotlin declaration although its class carries no Kotlin metadata.
+    /// Published by the provider that owns that map; `false` for every other classifier,
+    /// including a platform class that merely shares a builtin's package.
+    pub mapped_builtin: bool,
     /// For an annotation classifier: each element that declares a default, as the provider's
     /// declaration format records it. A module annotation publishes none; its defaults are
     /// checked default expressions.
@@ -2307,6 +2357,7 @@ impl LibraryType {
     /// query whose answer could disagree with the record.
     pub fn declaration_header() -> Self {
         Self {
+            runtime_exception: None,
             declaration_name: None,
             // The header commits existence only; the provider's full record supplies the real
             // declaration facts, this one included.
@@ -2348,6 +2399,7 @@ impl LibraryType {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         }
@@ -2503,17 +2555,76 @@ impl SemanticPlatform for EmptySymbolSource {
 #[cfg(test)]
 mod tests {
 
-    /// A source that publishes no dependency declarations has no identity to realize, so the
-    /// default answers nothing rather than a guess.
+    /// The core provider publishes real declarations, so each one it publishes carries an identity
+    /// that the same provider answers for at the backend boundary, as any dependency provider does.
     #[test]
-    fn a_source_without_dependencies_realizes_no_identity() {
+    fn core_declarations_carry_identities_their_provider_answers() {
         let source: &dyn crate::symbol_source::SymbolSource = &super::EmptySymbolSource;
-        assert!(source
-            .external_callable(crate::fir::ExternalCallableId::from_raw(0))
-            .is_none());
-        assert!(source
-            .external_property(crate::fir::ExternalPropertyId::from_raw(0))
-            .is_none());
+        let array = source
+            .classifier(crate::types::type_name("kotlin/IntArray"))
+            .expect("IntArray is a core classifier");
+        let size = array
+            .declared_callables
+            .get("size")
+            .expect("IntArray declares size")
+            .clone()
+            .into_parts()
+            .1
+            .overloads;
+        let [size] = size.as_slice() else {
+            panic!("IntArray declares one size property");
+        };
+        let property = size
+            .getter
+            .external_property_identity
+            .expect("the core size property is identified");
+        let getter = size
+            .getter
+            .external_identity
+            .expect("the core size getter is identified");
+        let published = source
+            .external_property(property)
+            .expect("the core provider answers for its property identity");
+        assert_eq!(published.name, "size");
+        assert_eq!(published.getter, getter);
+        assert_eq!(published.setter, None);
+        let realization = source
+            .external_callable(getter)
+            .expect("the core provider answers for its getter identity");
+        assert_eq!(realization.kind, super::ExternalCallableKind::Member);
+        assert_eq!(
+            realization.declaration_owner,
+            Some(crate::types::SemanticCallableOwner::Classifier(
+                crate::types::type_name("kotlin/IntArray")
+            ))
+        );
+        assert_eq!(realization.callable.external_identity, Some(getter));
+        // The realization the provider answers with is the declaration it published.
+        assert_eq!(
+            realization.callable.declaration_owner,
+            size.getter.declaration_owner
+        );
+        assert_eq!(
+            realization.callable.external_property_identity,
+            Some(property),
+            "the getter's realization names the property it belongs to"
+        );
+
+        let again = source
+            .classifier(crate::types::type_name("kotlin/IntArray"))
+            .expect("IntArray is a core classifier");
+        let again = again
+            .declared_callables
+            .get("size")
+            .unwrap()
+            .clone()
+            .into_parts()
+            .1;
+        assert_eq!(
+            again.overloads[0].getter.external_identity,
+            Some(getter),
+            "a declaration keeps its identity across provider queries"
+        );
     }
     use super::{
         map_call_args, AnnotationApplication, AnnotationParameterPolicy,
@@ -2604,6 +2715,7 @@ mod tests {
 
     fn ty_with<F: FnOnce(&mut super::LibraryType)>(f: F) -> super::LibraryType {
         let mut t = super::LibraryType {
+            runtime_exception: None,
             declaration_name: None,
             is_kotlin: true,
             is_data: false,
@@ -2643,6 +2755,7 @@ mod tests {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         };

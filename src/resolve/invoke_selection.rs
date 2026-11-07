@@ -124,7 +124,7 @@ impl Checker<'_> {
             let bound = bound.non_null();
             let callable_bounds = match bound.kind() {
                 TyKind::Fun(_) => vec![bound],
-                TyKind::TyParam(..) => {
+                TyKind::TyParam(..) | TyKind::Var(..) => {
                     self.collect_bound_function_types(scope, bound, visited, functions);
                     Vec::new()
                 }
@@ -179,7 +179,7 @@ impl Checker<'_> {
     fn invoke_projects_type_parameter(&self, receiver: Ty, function: Ty) -> bool {
         let mut first_bound = receiver.non_null();
         let mut visited = crate::fx_hash::HashSet::default();
-        while let TyKind::TyParam(name, bound) = first_bound.kind() {
+        while let TyKind::TyParam(name, bound) | TyKind::Var(name, bound) = first_bound.kind() {
             if !visited.insert(name) {
                 return false;
             }
@@ -230,7 +230,7 @@ impl Checker<'_> {
     ) -> bool {
         match ty.kind() {
             TyKind::Nullable(_) | TyKind::Null => true,
-            TyKind::TyParam(name, bound) => {
+            TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => {
                 visited.insert(name.as_str())
                     && std::iter::once(bound)
                         .chain(self.semantic_tparam_extra_bounds(scope, ty))
@@ -322,7 +322,7 @@ impl Checker<'_> {
                     },
                 ),
                 CallableCandidateSelection::MissingContext(_)
-                | CallableCandidateSelection::Ambiguous(_) => None,
+                | CallableCandidateSelection::Ambiguous(..) => None,
             };
         }
 
@@ -643,7 +643,7 @@ impl Checker<'_> {
             Some(CallableCandidateSelection::MissingContext(_)) | None => {
                 return InvokeResolution::Inapplicable(vec![diagnostic_declaration]);
             }
-            Some(CallableCandidateSelection::Ambiguous(_)) => {
+            Some(CallableCandidateSelection::Ambiguous(..)) => {
                 unreachable!("one planned invoke declaration cannot become ambiguous")
             }
         };
@@ -715,6 +715,7 @@ impl Checker<'_> {
             let member = selected.member_with_return(ret);
             let access_probe = crate::symbol_resolver::ResolvedMember {
                 receiver: receiver_ty,
+                declaring_receiver: None,
                 physical_params: selected.callable.physical_params.clone(),
                 context_args: shape.context_sources.clone(),
                 ret,
@@ -1114,7 +1115,9 @@ impl Checker<'_> {
                     result_constraint,
                     overloads.clone(),
                 );
-                if let Some(CallableCandidateSelection::Ambiguous(candidates)) = &member_selection {
+                if let Some(CallableCandidateSelection::Ambiguous(candidates, _)) =
+                    &member_selection
+                {
                     return InvokeResolution::Ambiguous(candidates.clone());
                 }
                 if let Some(mut selected) =
@@ -1180,6 +1183,7 @@ impl Checker<'_> {
                     let member = selected.member_with_return(ret);
                     let access_probe = crate::symbol_resolver::ResolvedMember {
                         receiver: receiver_ty,
+                        declaring_receiver: None,
                         member: member.clone(),
                         physical_params: physical_params.clone(),
                         context_args: shape.context_sources.clone(),
@@ -1222,9 +1226,13 @@ impl Checker<'_> {
                     },
                     receiver_ty,
                     CALLABLE_INVOKE_OPERATOR,
-                    (MemberExtensionSelection::Operators, None),
-                    result_constraint,
-                    None,
+                    MemberExtensionSearch {
+                        kinds: MemberExtensionSelection::Operators,
+                        receivers: None,
+                        rejections: RejectedMemberExtensions::Report,
+                        result: result_constraint,
+                        inference_bindings: None,
+                    },
                 ) {
                     // A member EXTENSION `operator fun Recv.invoke(...)` on an implicit receiver
                     // (`"case" { … }` inside a receiver-DSL lambda). Keep the selected member-
@@ -1279,7 +1287,7 @@ impl Checker<'_> {
                         result_constraint,
                         extensions.clone(),
                     );
-                    if let Some(CallableCandidateSelection::Ambiguous(candidates)) =
+                    if let Some(CallableCandidateSelection::Ambiguous(candidates, _)) =
                         &extension_selection
                     {
                         return InvokeResolution::Ambiguous(candidates.clone());

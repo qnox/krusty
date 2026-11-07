@@ -717,8 +717,11 @@ fn an_identity_its_provider_cannot_answer_is_an_internal_error() {
         dispatch_receiver: None,
         args: Vec::new(),
     });
+    // A provider that publishes no dependency declarations assigned no identity.
+    struct NoDependencies;
+    impl crate::symbol_source::SymbolSource for NoDependencies {}
     assert_eq!(
-        CheckedBackendCallables::freeze(&ir, &crate::libraries::EmptySymbolSource).map(|_| ()),
+        CheckedBackendCallables::freeze(&ir, &NoDependencies).map(|_| ()),
         Err(DependencyFactError::UnknownCallable(target))
     );
 }
@@ -788,8 +791,10 @@ fn selected_singletons_are_frozen_per_call_edge_not_on_the_provider_base_record(
             klib_body_type_parameters: Box::new([]),
             klib_body_declaration_modifiers: None,
             klib_body_class_contract: None,
+            klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            declares_parameter_defaults: false,
         },
     };
 
@@ -922,6 +927,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
     };
     ir.add_expr(crate::ir::IrExpr::Call {
         callee: Box::new(crate::ir::Callee::Super {
+            qualifier: owner,
             owner,
             dispatch_owner: type_name("fixture/Child"),
             enclosing_dispatch: false,
@@ -964,8 +970,10 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
         klib_body_type_parameters: Box::new([]),
         klib_body_declaration_modifiers: None,
         klib_body_class_contract: None,
+        klib_body_accessor: None,
         klib_body_vararg_index: None,
         klib_body_parameter_defaults: None,
+        declares_parameter_defaults: false,
     };
     let queries = std::cell::Cell::new(0);
     facts

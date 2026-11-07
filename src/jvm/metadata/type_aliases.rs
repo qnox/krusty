@@ -9,15 +9,17 @@ use super::{
 };
 use crate::fx_hash::HashMap;
 use crate::metadata::decode::{parse_type_node, parse_type_param, ParsedTypeParam, Pb};
-use crate::types::{type_name, Ty, TypeName};
+use crate::types::{type_name, ClassifierDeclarationName, Ty, TypeName};
 use type_annotations::bind_type_annotations;
 
 /// One public `typealias` from a file facade's `Package` metadata.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MetaTypeAlias {
     /// The alias's declaring identity (`package/Name`, or the classifier owner's path plus
     /// `/Name`). The classpath index keys this identity; it is not a rendered spelling.
     pub name: TypeName,
+    /// The alias's own declaration container and exact source segment, when supplied by metadata.
+    pub declaration_name: Option<ClassifierDeclarationName>,
     /// The expanded target's class internal name.
     pub target: String,
     /// The alias's own type-parameter names, in declaration order — the substitution domain.
@@ -42,8 +44,15 @@ pub(super) fn decode_type_aliases(
     package: Option<&str>,
     this_class: &str,
     classifier_owner: bool,
+    string_table: &[u8],
 ) -> MetadataResult<Vec<MetaTypeAlias>> {
     let owner = declaring_owner(package, this_class, classifier_owner);
+    let declared_in = if classifier_owner {
+        super::class_identity::class_declaration_name(ctx, string_table)?
+            .map(|name| TypeAliasContainer::Classifier(name.identity()))
+    } else {
+        Some(TypeAliasContainer::Package(owner))
+    };
     let field = if classifier_owner { 11 } else { 5 };
     let mut out = Vec::new();
     let records = ctx.records;
@@ -57,7 +66,7 @@ pub(super) fn decode_type_aliases(
                 let Some(body) = pb.bytes(len as usize) else {
                     break;
                 };
-                if let Some(alias) = parse_type_alias(owner, body, records, d2)? {
+                if let Some(alias) = parse_type_alias(owner, declared_in, body, records, d2)? {
                     // Key the alias by its FULL internal name — its DECLARING package plus the
                     // alias's simple name — so `kotlin/collections/ArrayList` is distinct from any
                     // other package's `ArrayList`. `resolve_type` looks it up by that identity, and
@@ -74,6 +83,12 @@ pub(super) fn decode_type_aliases(
         }
     }
     Ok(out)
+}
+
+#[derive(Clone, Copy)]
+enum TypeAliasContainer {
+    Package(TypeName),
+    Classifier(TypeName),
 }
 
 /// The semantic declaration owner of a package or classifier metadata typealias table.
@@ -112,6 +127,7 @@ fn declaring_owner(package: Option<&str>, this_class: &str, classifier_owner: bo
 /// than pasted onto the target — the template is the only place that mapping exists.
 fn parse_type_alias(
     owner: TypeName,
+    declared_in: Option<TypeAliasContainer>,
     body: &[u8],
     records: &[Rec],
     d2: &[String],
@@ -122,6 +138,7 @@ fn parse_type_alias(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(parse_type_alias_decoded(
         owner,
+        declared_in,
         body,
         records,
         d2,
@@ -131,6 +148,7 @@ fn parse_type_alias(
 
 fn parse_type_alias_decoded(
     owner: TypeName,
+    declared_in: Option<TypeAliasContainer>,
     body: &[u8],
     records: &[Rec],
     d2: &[String],
@@ -214,6 +232,16 @@ fn parse_type_alias_decoded(
     };
     Some(MetaTypeAlias {
         name,
+        declaration_name: declared_in.map(|container| match container {
+            TypeAliasContainer::Package(package) => ClassifierDeclarationName::TopLevel {
+                package,
+                name: simple_name.as_str().into(),
+            },
+            TypeAliasContainer::Classifier(owner) => ClassifierDeclarationName::Nested {
+                owner,
+                name: simple_name.as_str().into(),
+            },
+        }),
         target: internal,
         formals,
         expansion,
@@ -261,24 +289,33 @@ fn parse_argument_spelling(
         match (tag >> 3, tag & 7) {
             (2, 2) => {
                 let len = pb.varint()?;
-                let inner = pb.bytes(len as usize)?;
-                let node = parse_type_node(inner)?;
-                let (annotations, parameter_name) =
-                    occurrence_annotations(bind_type_annotations(&node.annotations, records, d2)?)?;
-                return Some(crate::spelling::Spelled {
-                    definitely_non_null: node.definitely_non_null,
-                    use_site_definitely_non_null: node.definitely_non_null,
-                    alias: parse_type_alias_name(inner, records, d2),
-                    args: parse_type_argument_spellings(inner, records, d2)?,
-                    annotations,
-                    parameter_name,
-                    ..crate::spelling::Spelled::default()
-                });
+                return type_spelling(pb.bytes(len as usize)?, records, d2);
             }
             (_, wire) => pb.skip(wire)?,
         }
     }
     Some(crate::spelling::Spelled::default())
+}
+
+/// A `Type`'s spelling: its own abbreviation and annotations plus, recursively, its arguments'.
+/// `None` when an annotation cannot be bound.
+pub(super) fn type_spelling(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+) -> Option<crate::spelling::Spelled> {
+    let node = parse_type_node(body)?;
+    let (annotations, parameter_name) =
+        occurrence_annotations(bind_type_annotations(&node.annotations, records, d2)?)?;
+    Some(crate::spelling::Spelled {
+        definitely_non_null: node.definitely_non_null,
+        use_site_definitely_non_null: node.definitely_non_null,
+        alias: parse_type_alias_name(body, records, d2),
+        args: parse_type_argument_spellings(body, records, d2)?,
+        annotations,
+        parameter_name,
+        ..crate::spelling::Spelled::default()
+    })
 }
 
 /// Split the applications a `Type` records into those its occurrence wrote and the name of a
@@ -356,9 +393,14 @@ mod tests {
     const OMITTED_FLAGS: [u8; 6] = [0x10, 0x00, 0x32, 0x02, 0x30, 0x01];
     const INTERNAL_FLAGS: [u8; 8] = [0x08, 0x00, 0x10, 0x00, 0x32, 0x02, 0x30, 0x01];
 
-    fn alias(owner: TypeName, body: &[u8]) -> Option<MetaTypeAlias> {
+    fn alias(
+        owner: TypeName,
+        declared_in: Option<TypeAliasContainer>,
+        body: &[u8],
+    ) -> Option<MetaTypeAlias> {
         parse_type_alias(
             owner,
+            declared_in,
             body,
             &[],
             &["Alias".to_string(), "sample/Real".to_string()],
@@ -368,21 +410,117 @@ mod tests {
 
     #[test]
     fn visibility_and_package_owner_are_semantic_identities() {
-        let public = alias(TypeName::ROOT, &OMITTED_FLAGS).expect("public alias decodes");
+        let public = alias(
+            TypeName::ROOT,
+            Some(TypeAliasContainer::Package(TypeName::ROOT)),
+            &OMITTED_FLAGS,
+        )
+        .expect("public alias decodes");
         assert_eq!(public.name, type_name("Alias"));
-        let packaged = alias(type_name("sample"), &OMITTED_FLAGS).expect("public alias decodes");
+        let packaged = alias(
+            type_name("sample"),
+            Some(TypeAliasContainer::Package(type_name("sample"))),
+            &OMITTED_FLAGS,
+        )
+        .expect("public alias decodes");
         assert_eq!(packaged.name, type_name("sample/Alias"));
         assert_eq!(public.target, "sample/Real");
         assert!(public.formals.is_empty());
         assert_eq!(public.expansion, Ty::obj("sample/Real"));
-        assert!(alias(TypeName::ROOT, &INTERNAL_FLAGS).is_none());
+        assert!(alias(
+            TypeName::ROOT,
+            Some(TypeAliasContainer::Package(TypeName::ROOT)),
+            &INTERNAL_FLAGS,
+        )
+        .is_none());
     }
 
     #[test]
     fn nested_classifier_owner_uses_source_identity_not_classfile_spelling() {
         let owner = declaring_owner(None, "sample/Outer$Middle$Inner", true);
         assert_eq!(owner, type_name("sample/Outer/Middle/Inner"));
-        let decoded = alias(owner, &OMITTED_FLAGS).expect("public nested alias decodes");
+        let declared_owner =
+            super::super::class_identity::metadata_classifier_name("sample/Outer.Middle.Inner");
+        let decoded = alias(
+            owner,
+            Some(TypeAliasContainer::Classifier(declared_owner)),
+            &OMITTED_FLAGS,
+        )
+        .expect("public nested alias decodes");
         assert_eq!(decoded.name, type_name("sample/Outer/Middle/Inner/Alias"));
+        assert_eq!(
+            decoded.declaration_name,
+            Some(ClassifierDeclarationName::Nested {
+                owner: declared_owner,
+                name: "Alias".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn alias_declaration_names_follow_raw_metadata_containers_and_package_relocation() {
+        let d2 = vec![
+            "Alias$Name".into(),
+            "alias_dependency/Real".into(),
+            "alias_metadata/Host$Literal.Inner$Literal".into(),
+        ];
+        for (classifier, class_name, expected) in [
+            (
+                false,
+                false,
+                Some(ClassifierDeclarationName::TopLevel {
+                    package: type_name("alias_relocated"),
+                    name: "Alias$Name".into(),
+                }),
+            ),
+            (
+                true,
+                true,
+                Some(ClassifierDeclarationName::Nested {
+                    owner: super::super::class_identity::metadata_classifier_name(
+                        "alias_metadata/Host$Literal.Inner$Literal",
+                    ),
+                    name: "Alias$Name".into(),
+                }),
+            ),
+            (true, false, None),
+        ] {
+            let mut message = Vec::new();
+            if class_name {
+                message.extend_from_slice(&[0x18, 0x02]);
+            }
+            message.extend_from_slice(&[if classifier { 0x5a } else { 0x2a }, 0x06]);
+            message.extend_from_slice(&OMITTED_FLAGS);
+            let ctx = MetaCtx {
+                msg: &message,
+                records: &[],
+                d2: &d2,
+                enclosing: &[],
+            };
+            let decoded = decode_type_aliases(
+                &ctx,
+                Some("alias_relocated"),
+                "physical/Carrier",
+                classifier,
+                &[],
+            )
+            .unwrap();
+            let identity = if classifier {
+                type_name("physical/Carrier/Alias$Name")
+            } else {
+                type_name("alias_relocated/Alias$Name")
+            };
+            assert_eq!(
+                decoded,
+                vec![MetaTypeAlias {
+                    name: identity,
+                    declaration_name: expected,
+                    target: "alias_dependency/Real".into(),
+                    formals: Vec::new(),
+                    expansion: Ty::obj("alias_dependency/Real"),
+                    expansion_spelling: Default::default(),
+                }]
+            );
+        }
     }
 }

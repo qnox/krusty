@@ -80,6 +80,9 @@ impl BodyLowering<'_> {
             .is_none()
             .then(|| super::string_concatenation::flattened_concatenation(self.body, expression_id))
             .flatten();
+        let builtin_call = (folded.is_none() && concatenation.is_none())
+            .then(|| super::builtin_calls::builtin_call(self.body, expression))
+            .flatten();
         let lowered = match &expression.kind {
             _ if concatenation.is_some() => {
                 let parts = concatenation.expect("guarded by the arm");
@@ -97,10 +100,10 @@ impl BodyLowering<'_> {
                                 self.ir.mark_positionless(lowered);
                             }
                             if debug.source != 0 {
-                                self.ir.expr_source_lines.insert(lowered, debug.source);
+                                self.ir.set_source_line(lowered, debug.source);
                             }
                             if debug.end != 0 {
-                                self.ir.expr_end_lines.insert(lowered, debug.end);
+                                self.ir.set_end_line(lowered, debug.end);
                             }
                             Ok(lowered)
                         }
@@ -111,7 +114,7 @@ impl BodyLowering<'_> {
                             // hoisting snapshots every effectful part before a later suspension and
                             // consumes this producer-owned type rather than rediscovering it.
                             let ty = self.converted_type(part.value, part.conversion)?;
-                            self.ir.logical_types.insert(lowered, ty);
+                            self.ir.set_logical_type(lowered, ty);
                             Ok(lowered)
                         }
                     })
@@ -154,7 +157,11 @@ impl BodyLowering<'_> {
                 let slot = self
                     .implicit_receiver_slot(*current, *depth)
                     .ok_or(FirLoweringFailure::MissingImplicitReceiver { origin })?;
-                self.ir.add_expr(IrExpr::GetValue(slot))
+                let read = self.ir.add_expr(IrExpr::GetValue(slot));
+                self.ir
+                    .binding_read_stability
+                    .insert(read, crate::ir::IrBindingStability::Stable);
+                read
             }
             FirExprKind::EnclosingReceiver { path } => self.enclosing_receiver(path, origin)?,
             FirExprKind::CapturedImplicitReceiver {
@@ -166,7 +173,11 @@ impl BodyLowering<'_> {
                 let slot = self
                     .implicit_receiver_capture_slot(*enclosing_depth, *current, *depth, path)
                     .ok_or(FirLoweringFailure::MissingImplicitReceiver { origin })?;
-                self.ir.add_expr(IrExpr::GetValue(slot))
+                let read = self.ir.add_expr(IrExpr::GetValue(slot));
+                self.ir
+                    .binding_read_stability
+                    .insert(read, crate::ir::IrBindingStability::Stable);
+                read
             }
             FirExprKind::SingletonValue { classifier } => self.checked_singleton(*classifier),
             FirExprKind::EnumEntry {
@@ -190,6 +201,7 @@ impl BodyLowering<'_> {
                     if let Some(stability) = self.binding_stability.get(value).copied() {
                         self.ir.binding_read_stability.insert(read, stability);
                     }
+                    self.record_crossinline_read(read, self.crossinline_parameter_slot(*value));
                     read
                 }
             }
@@ -222,6 +234,7 @@ impl BodyLowering<'_> {
                 context_arguments,
                 substitutions,
             } => {
+                let source_line = self.body.expression_debug_lines(expression_id).source;
                 let lowered = self.checked_property_read(
                     target,
                     *dispatch_receiver,
@@ -237,15 +250,7 @@ impl BodyLowering<'_> {
                         .map(|signature| signature.result.get()),
                     crate::fir::FirPropertyTarget::External { result, .. } => Some(result.get()),
                 };
-                if declared.is_some_and(|declared| declared != expression.ty.get()) {
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: lowered,
-                        type_operand: expression.ty.get(),
-                    })
-                } else {
-                    lowered
-                }
+                self.declaration_result(lowered, declared, expression.ty.get(), source_line)
             }
             FirExprKind::PropertyWrite {
                 target,
@@ -326,8 +331,8 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::Call(call) => {
-                let lowered = self
-                    .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
+                let source_line = self.body.expression_debug_lines(expression_id).source;
+                let lowered = self.checked_call(call, source_line)?;
                 let declared_result = match call.target {
                     crate::fir::FirCallTarget::Module(target) => self
                         .index
@@ -345,7 +350,7 @@ impl BodyLowering<'_> {
                         ..
                     } => Some(physical_result.get()),
                 };
-                self.declaration_result(lowered, declared_result, expression.ty.get())
+                self.declaration_result(lowered, declared_result, expression.ty.get(), source_line)
             }
             FirExprKind::ConstructorCall(call) => self.checked_constructor_call(call)?,
             FirExprKind::AnonymousObject(object) => self.anonymous_object(object)?,
@@ -356,7 +361,7 @@ impl BodyLowering<'_> {
                 // result is the `Int` that the relational operator compares with zero; the outer
                 // FIR expression records only the final Boolean, so keep the nested operand's
                 // checked type explicitly too.
-                self.ir.logical_types.insert(call, Ty::Int);
+                self.ir.set_logical_type(call, Ty::Int);
                 if let IrExpr::Call {
                     callee: call_callee,
                     ..
@@ -387,7 +392,7 @@ impl BodyLowering<'_> {
                 // The selected `contains` convention call is the Boolean operand of a synthesized
                 // negation for `!in`. The outer FIR expression records the negation's type, not
                 // this nested call's, so preserve the checker-owned result before building it.
-                self.ir.logical_types.insert(call, Ty::Boolean);
+                self.ir.set_logical_type(call, Ty::Boolean);
                 if *negated {
                     self.ir.add_negation(call)
                 } else {
@@ -413,7 +418,7 @@ impl BodyLowering<'_> {
                 ) {
                     return Err(FirLoweringFailure::InvalidComparableRangeOrdering { origin });
                 }
-                self.ir.logical_types.insert(lower, Ty::Int);
+                self.ir.set_logical_type(lower, Ty::Int);
                 let end = self.expression(*upper_bound)?;
                 self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::ComparableRangeContains {
@@ -541,9 +546,7 @@ impl BodyLowering<'_> {
                             check: crate::ir::NullCheck::Source,
                         });
                         let asserted = if operand_ty != target.get() {
-                            self.ir
-                                .logical_types
-                                .insert(asserted, operand_ty.non_null());
+                            self.ir.set_logical_type(asserted, operand_ty.non_null());
                             self.ir.add_expr(IrExpr::TypeOp {
                                 op: IrTypeOp::ImplicitCoercion,
                                 arg: asserted,
@@ -868,9 +871,7 @@ impl BodyLowering<'_> {
                         (None, present_comparison),
                     ],
                 });
-                self.ir
-                    .logical_types
-                    .insert(lhs_present_result, Ty::Boolean);
+                self.ir.set_logical_type(lhs_present_result, Ty::Boolean);
                 let lhs_is_null = null_test(self, lhs_temporary);
                 let rhs_null_comparison = null_test(self, rhs_temporary);
                 let lhs_null_result = if *operation == FirBinaryOperation::Equal {
@@ -884,7 +885,7 @@ impl BodyLowering<'_> {
                         (None, lhs_present_result),
                     ],
                 });
-                self.ir.logical_types.insert(result, Ty::Boolean);
+                self.ir.set_logical_type(result, Ty::Boolean);
                 self.ir.add_expr(IrExpr::Block {
                     stmts: vec![lhs_variable, rhs_variable],
                     value: Some(result),
@@ -969,6 +970,8 @@ impl BodyLowering<'_> {
                 });
                 if *suspend {
                     self.ir.suspend_calls.insert(invoke, result.get());
+                } else {
+                    super::inlining::splice_immediate_lambda(self, invoke, origin)?;
                 }
                 invoke
             }
@@ -1064,6 +1067,8 @@ impl BodyLowering<'_> {
                 self.safe_call_expression(expression_id, receiver, *selector, expression.ty.get())?
             }
             FirExprKind::Elvis { lhs, rhs } => {
+                // Set only while this elvis is the next link of an enclosing chain.
+                let chain_start = self.elvis_chain_start.take();
                 let lhs_value = self.expression(*lhs)?;
                 let temporary = self.allocate_temporary();
                 let variable = self.ir.add_expr(IrExpr::Variable {
@@ -1077,6 +1082,13 @@ impl BodyLowering<'_> {
                     init: Some(lhs_value),
                     named: false,
                 });
+                // fir2ir declares the temporary where the elvis starts: for a later link of a
+                // chain, where the chain starts.
+                let start = chain_start
+                    .unwrap_or_else(|| self.body.expression_debug_lines(expression_id).start);
+                if start != 0 {
+                    self.ir.elvis_temporaries.insert(variable, start);
+                }
                 let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
                 let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                 let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
@@ -1084,11 +1096,17 @@ impl BodyLowering<'_> {
                     lhs: condition_lhs,
                     rhs: null,
                 });
-                let chained = matches!(
-                    self.body.expr(*rhs).map(|rhs| &rhs.kind),
-                    Some(FirExprKind::Elvis { .. })
-                );
-                let rhs = self.expression(*rhs)?;
+                let next_link = match self.body.expr(*rhs).map(|rhs| &rhs.kind) {
+                    Some(FirExprKind::Elvis { lhs: next, .. }) => Some(*next),
+                    _ => None,
+                };
+                let chained = next_link.is_some();
+                if chained && start != 0 {
+                    self.elvis_chain_start = Some(start);
+                }
+                let rhs = self.expression(*rhs);
+                self.elvis_chain_start = None;
+                let rhs = rhs?;
                 if chained {
                     // `a ?: b ?: c` is one chain that begins with `a`, as kotlinc folds it: the
                     // later elvis does not state a start line of its own.
@@ -1100,8 +1118,15 @@ impl BodyLowering<'_> {
                 let result = self.ir.add_expr(IrExpr::When {
                     branches: vec![(Some(condition), rhs), (None, lhs)],
                 });
-                self.ir.logical_types.insert(result, expression.ty.get());
-                let line = self.body.expression_debug_lines(expression_id).source;
+                self.ir.set_logical_type(result, expression.ty.get());
+                // The fold's right-side condition marks the elvis's line. Where the right side is
+                // the chain's next link, kotlinc's chain marks that link's operand line there
+                // instead, and the last link marks the line the chain started on.
+                let line = match (next_link, chain_start) {
+                    (Some(next), _) => self.body.expression_debug_lines(next).start,
+                    (None, Some(chain_start)) => chain_start,
+                    (None, None) => self.body.expression_debug_lines(expression_id).source,
+                };
                 self.ir.whens.elvises.insert(result, line);
                 // An elvis over a safe call is one more guard of that call's chain: its left
                 // value's null check joins the chain's, and every `null` reaches the right side.
@@ -1429,13 +1454,14 @@ impl BodyLowering<'_> {
                 arguments,
                 parameter_types,
             } => {
+                let source_line = self.body.expression_debug_lines(expression_id).source;
                 let (call, declared) = self.checked_local_call(
                     target.clone(),
                     *extension_receiver,
                     arguments,
                     parameter_types,
                 )?;
-                self.declaration_result(call, Some(declared), expression.ty.get())
+                self.declaration_result(call, Some(declared), expression.ty.get(), source_line)
             }
             FirExprKind::Lambda {
                 callable,
@@ -1470,52 +1496,56 @@ impl BodyLowering<'_> {
                 lambda
             }
         };
-        self.ir.logical_types.insert(lowered, expression.ty.get());
+        self.ir.set_logical_type(lowered, expression.ty.get());
         let lowered = crate::ir::complete_bottom_value(self.ir, lowered, expression.ty.get());
-        self.ir.logical_types.insert(lowered, expression.ty.get());
+        self.ir.set_logical_type(lowered, expression.ty.get());
         // A lambda's own provenance went to its node above; the references in its body carry
         // theirs.
         if !matches!(expression.kind, FirExprKind::Lambda { .. }) {
             self.record_callable_reference_provenance(expression_id, first_generated);
         }
-        let debug = self.body.expression_debug_lines(expression_id);
+        let mut debug = self.body.expression_debug_lines(expression_id);
+        // kotlinc replaces an array-factory call (`intArrayOf(a, b)`) by its vararg, whose offsets
+        // start at the first element, so the call's own line never opens. An empty factory call
+        // keeps its own position.
+        if let FirExprKind::ArrayLiteral { elements, .. } = &expression.kind {
+            let first = elements
+                .first()
+                .map(|first| self.body.expression_debug_lines(first.value).source);
+            if let Some(line) = first.filter(|&line| line != 0) {
+                debug.source = line;
+            }
+        }
         if debug.positionless {
             self.ir.mark_positionless(lowered);
         }
         if debug.source != 0 {
-            self.ir.expr_source_lines.insert(lowered, debug.source);
+            self.ir.set_source_line(lowered, debug.source);
+            // The builtin call this node realizes, when lowering made a node of its own for it.
+            if let Some(call) = builtin_call.filter(|_| lowered as usize >= first_generated) {
+                self.ir.builtin_calls.insert(lowered, call);
+            }
             // A call whose operands were stored first keeps the call's line on the call itself, which
             // kotlinc marks once those operands are evaluated.
             if let Some(&call) = self.operand_bound_calls.get(&lowered) {
-                self.ir
-                    .expr_source_lines
-                    .entry(call)
-                    .or_insert(debug.source);
-            }
-            // So does a call one of whose operands is inlined from a compiled body: the inlined
-            // code ran under the callee's lines.
-            if let Some(call) = self.ir.call_after_compiled_inline_operand(lowered) {
-                self.ir
-                    .expr_source_lines
-                    .entry(call)
-                    .or_insert(debug.source);
+                self.ir.set_source_line_if_absent(call, debug.source);
             }
             for raw in first_generated..self.ir.exprs.len() {
                 let raw = raw as u32;
                 if !self.ir.suspend_calls.contains_key(&raw) {
                     continue;
                 }
-                self.ir.expr_source_lines.entry(raw).or_insert(debug.source);
+                self.ir.set_source_line_if_absent(raw, debug.source);
             }
         }
         if debug.end != 0 {
-            self.ir.expr_end_lines.insert(lowered, debug.end);
+            self.ir.set_end_line(lowered, debug.end);
             for raw in first_generated..self.ir.exprs.len() {
                 let raw = raw as u32;
                 if !self.ir.suspend_calls.contains_key(&raw) {
                     continue;
                 }
-                self.ir.expr_end_lines.entry(raw).or_insert(debug.end);
+                self.ir.set_end_line_if_absent(raw, debug.end);
             }
         }
         self.record_expression_origins(first_generated, lowered, origin);
@@ -1618,9 +1648,23 @@ impl BodyLowering<'_> {
     /// Preserve the checked semantic conversion from a declaration's result to its call-site
     /// substitution. Whether that conversion crosses a physical ABI boundary is target-owned; the
     /// JVM records its answer after generic erasure.
-    fn declaration_result(&mut self, call: ExprId, declared: Option<Ty>, result: Ty) -> ExprId {
+    fn declaration_result(
+        &mut self,
+        call: ExprId,
+        declared: Option<Ty>,
+        result: Ty,
+        source_line: u32,
+    ) -> ExprId {
         if declared.is_none_or(|declared| declared == result) {
             return call;
+        }
+        // The conversion remains the same checked source operation. Keep its position on the
+        // original producer and on the selected call inside an operand-evaluation block.
+        if source_line != 0 {
+            self.ir.set_source_line_if_absent(call, source_line);
+            if let Some(&selected) = self.operand_bound_calls.get(&call) {
+                self.ir.set_source_line_if_absent(selected, source_line);
+            }
         }
         let coercion = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
@@ -1670,16 +1714,16 @@ impl BodyLowering<'_> {
             let first_generated = self.ir.exprs.len();
             let constant = lower_constant(&folded.value, folded.ty, origin)?;
             let lowered = self.ir.add_expr(IrExpr::Const(constant));
-            self.ir.logical_types.insert(lowered, folded.ty);
+            self.ir.set_logical_type(lowered, folded.ty);
             let debug = self.body.expression_debug_lines(value);
             if debug.positionless {
                 self.ir.mark_positionless(lowered);
             }
             if debug.source != 0 {
-                self.ir.expr_source_lines.insert(lowered, debug.source);
+                self.ir.set_source_line(lowered, debug.source);
             }
             if debug.end != 0 {
-                self.ir.expr_end_lines.insert(lowered, debug.end);
+                self.ir.set_end_line(lowered, debug.end);
             }
             self.record_expression_origins(first_generated, lowered, origin);
             return Ok(lowered);
@@ -1690,8 +1734,8 @@ impl BodyLowering<'_> {
             matches!(conversion.kind, FirConversionKind::FunctionValue { .. })
         }) {
             // The checker named the class a function-value conversion compiles to on its value.
-            if let Some(&line) = self.ir.expr_source_lines.get(&expression) {
-                self.ir.expr_source_lines.insert(converted, line);
+            if let Some(line) = self.ir.source_line(expression) {
+                self.ir.set_source_line(converted, line);
             }
             self.record_generated_class_provenance(value, converted as usize);
         }
@@ -1743,8 +1787,8 @@ impl BodyLowering<'_> {
                         origin: conversion_origin,
                     })
                     .map(platform_null_check)?;
-                if check == crate::ir::NullCheck::Unnamed {
-                    return Ok(self.unnamed_null_check(expression, source_type, to.get()));
+                if let crate::ir::NullCheck::Unnamed { site } = check {
+                    return Ok(self.unnamed_null_check(expression, source_type, to.get(), site));
                 }
                 // A generic external call can already carry its checked result cast. Kotlin checks
                 // the value produced by the call and then casts that checked value; keep the
@@ -1769,9 +1813,7 @@ impl BodyLowering<'_> {
                         check,
                     });
                     if source_type != to.get() {
-                        self.ir
-                            .logical_types
-                            .insert(asserted, source_type.non_null());
+                        self.ir.set_logical_type(asserted, source_type.non_null());
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg: asserted,
@@ -1836,6 +1878,11 @@ impl BodyLowering<'_> {
                         nullable: false,
                         kotlin_interface: conversion.kotlin_interface,
                         parameter_identities: conversion.parameter_identities.to_vec(),
+                        type_parameters: conversion
+                            .type_parameters
+                            .iter()
+                            .map(crate::ir::IrSamTypeParameter::lowered)
+                            .collect(),
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,
@@ -1874,7 +1921,13 @@ impl BodyLowering<'_> {
     /// kotlinc's implicit not-null cast over a value it cannot name keeps the value in a temporary,
     /// checks the temporary, and yields it (`astore; aload; checkNotNull; aload`). A read of a
     /// stable binding is its own snapshot: `irLetS` checks and yields the binding itself.
-    fn unnamed_null_check(&mut self, value: ExprId, source_type: Ty, target: Ty) -> ExprId {
+    fn unnamed_null_check(
+        &mut self,
+        value: ExprId,
+        source_type: Ty,
+        target: Ty,
+        site: crate::ir::NullCheckSite,
+    ) -> ExprId {
         let reused = self.stable_value_read(value);
         let (stored, temporary) = match reused {
             Some(slot) => (None, slot),
@@ -1896,7 +1949,7 @@ impl BodyLowering<'_> {
         };
         let check = self.ir.add_expr(IrExpr::NotNullAssert {
             operand: checked,
-            check: crate::ir::NullCheck::Unnamed,
+            check: crate::ir::NullCheck::Unnamed { site },
         });
         let mut result = self.checked_value_read(temporary, reused.is_some());
         if source_type != target {
@@ -1932,7 +1985,7 @@ impl BodyLowering<'_> {
         self.ir
             .short_circuits
             .insert(when, crate::ir::IrShortCircuitKind::And);
-        self.ir.logical_types.insert(when, Ty::Boolean);
+        self.ir.set_logical_type(when, Ty::Boolean);
         when
     }
 
@@ -1944,7 +1997,7 @@ impl BodyLowering<'_> {
         self.ir
             .short_circuits
             .insert(when, crate::ir::IrShortCircuitKind::Or);
-        self.ir.logical_types.insert(when, Ty::Boolean);
+        self.ir.set_logical_type(when, Ty::Boolean);
         when
     }
 
@@ -1957,7 +2010,7 @@ impl BodyLowering<'_> {
             stmts: vec![effect],
             value: Some(unit),
         });
-        self.ir.logical_types.insert(block, Ty::Unit);
+        self.ir.set_logical_type(block, Ty::Unit);
         block
     }
 
@@ -2042,13 +2095,13 @@ impl BodyLowering<'_> {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });
         self.ir.whens.exhaustive.insert(guarded, result_type);
-        self.ir.logical_types.insert(guarded, result_type);
+        self.ir.set_logical_type(guarded, result_type);
         self.ir.null_guards.insert(guarded);
         let block = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],
             value: Some(guarded),
         });
-        self.ir.logical_types.insert(block, result_type);
+        self.ir.set_logical_type(block, result_type);
         Ok(block)
     }
 
@@ -2078,6 +2131,18 @@ impl BodyLowering<'_> {
         // explicit conversion so nullable primitive receivers are unboxed before their selected
         // operation; a raw nullable-slot read would put a wrapper into a primitive local.
         let selector_read = self.ir.add_expr(IrExpr::GetValue(temporary));
+        // fir2ir reads the temporary as the selector's receiver at the receiver's own position,
+        // and tests it for `null` at the safe call's (its `?.` selector's).
+        let safe_call_line = self.body.expression_debug_lines(safe_call).source;
+        let receiver_line = self.body.expression_debug_lines(receiver.value).start;
+        if receiver_line != 0 {
+            self.ir.safe_call_reads.insert(
+                selector_read,
+                crate::ir::IrSafeCallRead::Receiver {
+                    start_line: receiver_line,
+                },
+            );
+        }
         let selector_read = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg: selector_read,
@@ -2089,11 +2154,20 @@ impl BodyLowering<'_> {
         self.constants.bind_temporary(receiver.value);
         let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let condition_read = self.ir.add_expr(IrExpr::GetValue(temporary));
+        let null_check = crate::ir::IrSafeCallRead::NullCheck {
+            line: safe_call_line,
+        };
+        if safe_call_line != 0 {
+            self.ir.safe_call_reads.insert(condition_read, null_check);
+        }
         let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Eq,
             lhs: condition_read,
             rhs: null,
         });
+        if safe_call_line != 0 {
+            self.ir.safe_call_reads.insert(condition, null_check);
+        }
         let selector = self.expression(selector)?;
         let selector = self.coerce_result(selector, result_type);
         let null_result = if result_type == Ty::Unit {
@@ -2103,7 +2177,7 @@ impl BodyLowering<'_> {
             let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
             let line = self.body.expression_debug_lines(safe_call).source;
             if line != 0 {
-                self.ir.expr_source_lines.insert(null, line);
+                self.ir.set_source_line(null, line);
             }
             null
         };
@@ -2114,12 +2188,14 @@ impl BodyLowering<'_> {
         // common-IR `when`; a backend may choose its physical representation but must not
         // reconstruct `Nothing`, nullability, or another result from the branch instructions.
         self.ir.whens.exhaustive.insert(guarded, result_type);
-        self.ir.logical_types.insert(guarded, result_type);
+        self.ir.set_logical_type(guarded, result_type);
         self.ir.null_guards.insert(guarded);
-        Ok(self.ir.add_expr(IrExpr::Block {
+        let block = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],
             value: Some(guarded),
-        }))
+        });
+        self.ir.safe_calls.insert(block);
+        Ok(block)
     }
 
     fn storage_class(
@@ -2152,12 +2228,25 @@ impl BodyLowering<'_> {
             .dispatch_receiver_slot()
             .map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)))
             .ok_or(FirLoweringFailure::MissingLocalClass(owner))?;
+        self.capture_field_read(receiver, class, field)
+    }
+
+    /// Read capture `field` (its identity) of `class` from `receiver`, keeping the capture's
+    /// `crossinline` provenance on the read.
+    fn capture_field_read(
+        &mut self,
+        receiver: ExprId,
+        class: crate::ir::ClassId,
+        field: u32,
+    ) -> Result<ExprId, FirLoweringFailure> {
         let index = self.capture_field_index(class, field)?;
-        Ok(self.ir.add_expr(IrExpr::GetField {
+        let read = self.ir.add_expr(IrExpr::GetField {
             receiver,
             class,
             index,
-        }))
+        });
+        self.record_crossinline_read(read, self.class_field_crossinline_parameter(class, field));
+        Ok(read)
     }
 
     /// The field-table position of capture `field` (its identity) of `class`. A local class stores
@@ -2181,6 +2270,30 @@ impl BodyLowering<'_> {
             }
             _ => Ok(field),
         }
+    }
+
+    /// The `crossinline` parameter capture `field` (its identity) of local class `owner` holds, as
+    /// recorded when the class's captures were prepared.
+    pub(super) fn class_capture_crossinline_parameter(
+        &self,
+        owner: crate::fir::DeclarationId,
+        field: u32,
+    ) -> Result<Option<u32>, FirLoweringFailure> {
+        Ok(self.class_field_crossinline_parameter(self.storage_class(owner)?, field))
+    }
+
+    fn class_field_crossinline_parameter(
+        &self,
+        class: crate::ir::ClassId,
+        field: u32,
+    ) -> Option<u32> {
+        let declaration = &self.ir.classes[class as usize];
+        declaration
+            .ctor_args
+            .get(field as usize)
+            .filter(|_| field < declaration.constructor_prefix_count)
+            .and_then(|argument| argument.capture.as_ref())
+            .and_then(|capture| capture.crossinline_parameter)
     }
 
     pub(super) fn constructor_capture_parameter(
@@ -2215,7 +2328,10 @@ impl BodyLowering<'_> {
                 if !valid_owner || field >= self.class_constructor_capture_count {
                     return Err(FirLoweringFailure::InvalidConstructorCapture { owner, field });
                 }
-                return Ok(self.ir.add_expr(IrExpr::GetValue(field + 1)));
+                let read = self.ir.add_expr(IrExpr::GetValue(field + 1));
+                let parameter = self.class_capture_crossinline_parameter(owner, field)?;
+                self.record_crossinline_read(read, parameter);
+                return Ok(read);
             }
         };
         let capture = self
@@ -2226,7 +2342,9 @@ impl BodyLowering<'_> {
                 enclosing_depth,
                 source,
             })?;
-        Ok(self.ir.add_expr(IrExpr::GetValue(capture.slot)))
+        let read = self.ir.add_expr(IrExpr::GetValue(capture.slot));
+        self.record_crossinline_read(read, capture.crossinline_parameter);
+        Ok(read)
     }
 
     fn constructor_context_parameter(
@@ -2289,12 +2407,7 @@ impl BodyLowering<'_> {
                 ),
             });
         }
-        let index = self.capture_field_index(class, field)?;
-        Ok(self.ir.add_expr(IrExpr::GetField {
-            receiver,
-            class,
-            index,
-        }))
+        self.capture_field_read(receiver, class, field)
     }
 
     pub(super) fn enclosing_class_storage_read(
@@ -2339,12 +2452,7 @@ impl BodyLowering<'_> {
             return Err(FirLoweringFailure::MissingLocalClass(owner));
         }
         let class = self.storage_class(owner)?;
-        let index = self.capture_field_index(class, field)?;
-        Ok(self.ir.add_expr(IrExpr::GetField {
-            receiver,
-            class,
-            index,
-        }))
+        self.capture_field_read(receiver, class, field)
     }
 
     /// Realize the checker-published semantic enclosing-instance path in the current common class
@@ -2538,8 +2646,17 @@ fn lower_type_operation(operation: FirTypeOperation, target: crate::types::Ty) -
 pub(super) fn platform_null_check(
     narrowing: &crate::fir::FirPlatformNarrowing,
 ) -> crate::ir::NullCheck {
+    let site = match narrowing.site {
+        crate::fir::FirPlatformNarrowingSite::Value => crate::ir::NullCheckSite::Value,
+        crate::fir::FirPlatformNarrowingSite::ExtensionReceiver => {
+            crate::ir::NullCheckSite::ExtensionReceiver
+        }
+    };
     match &narrowing.message {
-        Some(message) => crate::ir::NullCheck::Named(message.to_string()),
-        None => crate::ir::NullCheck::Unnamed,
+        Some(message) => crate::ir::NullCheck::Named {
+            message: message.to_string(),
+            site,
+        },
+        None => crate::ir::NullCheck::Unnamed { site },
     }
 }

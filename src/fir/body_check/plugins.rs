@@ -206,6 +206,7 @@ impl BodyFirChecker<'_> {
                 default_provider: selected.member.external_default_provider,
                 receiver: Some(resolved(selected.receiver)?),
                 declared_receiver: None,
+                declaring_receiver: None,
                 parameters: selected
                     .member
                     .params
@@ -225,6 +226,7 @@ impl BodyFirChecker<'_> {
                     .collect::<Result<Vec<_>, _>>()?
                     .into_boxed_slice(),
                 semantic_role: selected.member.semantic_role,
+                intrinsic_const: super::calls::is_intrinsic_const(&selected.member.annotations),
                 overridden_declarations: selected.member.overridden_declarations.clone(),
                 suspend: selected.suspend,
                 inline: selected.member.inline,

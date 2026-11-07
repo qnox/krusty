@@ -275,6 +275,7 @@ impl ClassWriter {
 fn repeated_annotation_reuses_one_descriptor_slot() {
     let mut writer = super::ClassWriter::new("Use", "java/lang/Object");
     let annotation = crate::ir::AppliedAnnotation {
+        written_order: None,
         internal: crate::types::type_name("sample/anno6044/Marker"),
         values: Vec::new(),
     };
@@ -305,6 +306,7 @@ fn annotation_values_record_physical_enum_class_and_nested_descriptors() {
 
     let mut writer = super::ClassWriter::new("Use", "java/lang/Object");
     let annotation = crate::ir::AppliedAnnotation {
+        written_order: None,
         internal: crate::types::type_name("sample/anno6044/Marker"),
         values: vec![
             (
@@ -324,6 +326,7 @@ fn annotation_values_record_physical_enum_class_and_nested_descriptors() {
             (
                 "nested".to_string(),
                 AnnoValue::Annotation(crate::ir::AppliedAnnotation {
+                    written_order: None,
                     internal: crate::types::type_name_child(
                         crate::types::type_name("sample/anno6044"),
                         "Outer.Inner",
@@ -367,6 +370,7 @@ fn distinct_annotation_writers_keep_only_writer_local_text() {
         left.ev_annotation(
             &mut out,
             &crate::ir::AppliedAnnotation {
+                written_order: None,
                 internal: crate::types::type_name(&left_internal),
                 values: Vec::new(),
             },
@@ -374,6 +378,7 @@ fn distinct_annotation_writers_keep_only_writer_local_text() {
         right.ev_annotation(
             &mut out,
             &crate::ir::AppliedAnnotation {
+                written_order: None,
                 internal: crate::types::type_name(&right_internal),
                 values: Vec::new(),
             },

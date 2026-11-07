@@ -15,16 +15,28 @@ pub(in crate::fir::body_check) struct MemberExtensionFirTarget {
     pub(in crate::fir::body_check) extension_receiver: Ty,
 }
 
+/// The declaration's annotations mark it `@IntrinsicConstEvaluation`: kotlinc evaluates a call to
+/// it whose operands are constants.
+pub(in crate::fir::body_check) fn is_intrinsic_const(
+    annotations: &[crate::types::TypeName],
+) -> bool {
+    annotations.contains(&crate::types::wk::intrinsic_const_evaluation())
+}
+
 pub(super) struct ExternalCallTarget<'a> {
     pub(super) declaration: ExternalCallableId,
     pub(super) singleton_dispatch: Option<crate::types::TypeName>,
     pub(super) receiver: Option<Ty>,
     pub(super) declared_receiver: Option<Ty>,
+    /// A selected member's receiver applied as its generic declaring class, as the checker
+    /// published it on the selection.
+    pub(super) declaring_receiver: Option<Ty>,
     pub(super) parameters: Vec<Ty>,
     pub(super) result: Ty,
     pub(super) declared_result: Option<Ty>,
     pub(super) overridden_results: &'a [Ty],
     pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
+    pub(super) intrinsic_const: bool,
     pub(super) overridden_declarations: &'a [crate::types::OverriddenDeclaration],
     pub(super) suspend: bool,
     pub(super) inline: crate::libraries::InlineKind,

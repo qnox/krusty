@@ -18,6 +18,17 @@ pub(super) struct ArgSlots<'a> {
 pub(super) struct CallCandidateScore {
     pub(super) rank: (usize, std::cmp::Reverse<usize>, bool),
     pub(super) sam_signatures: Vec<Option<crate::symbol_resolver::SamSignature>>,
+    /// Every checked lambda body's result fits its parameter. Applicability never depends on
+    /// it; only a refinable most-specific tie consults it.
+    pub(super) lambda_result_fits: bool,
+}
+
+/// Receiver application and argument mapping keep separate declaration coordinates. Only source
+/// admission uses this view; the applied parameter vector still owns ranking and array packing.
+pub(super) struct DeclarationInputs<'a> {
+    pub(super) declaration: &'a crate::libraries::SourceInputDeclaration,
+    pub(super) bindings: &'a crate::symbol_resolver::GSigBinds,
+    pub(super) parameter_indices: &'a [usize],
 }
 
 impl CallCandidateScore {
@@ -39,13 +50,30 @@ pub(super) fn score(
     call_sig: &CallSig,
     slots: ArgSlots<'_>,
 ) -> Option<CallCandidateScore> {
+    score_with_declaration(checker, scope, params, call_sig, slots, None)
+}
+
+pub(super) fn score_with_declaration(
+    checker: &Checker<'_>,
+    scope: &CheckerScope<'_>,
+    params: &[Ty],
+    call_sig: &CallSig,
+    slots: ArgSlots<'_>,
+    declaration: Option<DeclarationInputs<'_>>,
+) -> Option<CallCandidateScore> {
     let ArgSlots {
         args,
         partial_arg_tys,
         arg_names,
         trailing_lambda,
     } = slots;
+    let declared_bindings = declaration.as_ref().map(|inputs| {
+        let mut bindings = inputs.bindings.clone();
+        bindings.extend(inputs.declaration.receiver_bindings.clone());
+        bindings
+    });
     let sam_signatures = std::cell::RefCell::new(vec![None; args.len()]);
+    let lambda_result_mismatch = std::cell::Cell::new(false);
     let record_sam = |source: usize, expected: Ty| {
         let signature = checker.semantic_sam_signature(expected)?;
         *sam_signatures.borrow_mut().get_mut(source)? = Some(signature);
@@ -60,6 +88,39 @@ pub(super) fn score(
         let semantic_actual = checker
             .unit_coerced_lambda_type(argument, expected, semantic_actual)
             .unwrap_or(semantic_actual);
+        // A provisional declaration result cannot reject a shaped candidate before the
+        // signature engine demands and finalizes it.
+        if expected.mentions_pending() || semantic_actual.mentions_pending() {
+            return Some(0);
+        }
+        if let Some(inputs) = declaration.as_ref() {
+            let ordinal = *inputs.parameter_indices.get(parameter)?;
+            let raw = inputs.declaration.declared_input(ordinal)?;
+            let named = arg_names
+                .and_then(|names| names.get(source))
+                .is_some_and(Option::is_some);
+            let raw = if call_sig.vararg_index == Some(parameter)
+                && !checker.file.is_spread_arg(argument)
+                && !named
+            {
+                raw.array_read_elem().unwrap_or(raw)
+            } else {
+                raw
+            };
+            let (input, projection) = crate::symbol_resolver::instantiate_input_slot(
+                &checker.fed_source(),
+                Some(&inputs.declaration.signature),
+                raw,
+                declared_bindings.as_ref().expect("declaration bindings"),
+                crate::symbol_resolver::UnboundSpecialization::Preserve,
+            );
+            if projection.is_some()
+                && !checker.receiver_is_assignable(semantic_actual, input)
+                && !checker.call_result_can_bind_expected(argument, input)
+            {
+                return None;
+            }
+        }
         let contextual_call_result = checker.call_result_can_bind_expected(argument, expected);
         // A collection literal is an expected-type-dependent expression. Its expectation-free
         // probe deliberately materializes the language fallback (`List<T>`), but that probe is
@@ -87,16 +148,13 @@ pub(super) fn score(
                     .copied()
                     .unwrap_or(false),
             );
-        // A nested declaration result may still be the signature engine's private `Pending`
-        // marker while an outer postponed-call frame is collecting constraints. It provides no
-        // overload preference, but it cannot make an otherwise shaped candidate inapplicable;
-        // the declaration is demanded and finalized before checked FIR is constructed.
-        if expected.mentions_pending() || semantic_actual.mentions_pending() {
-            return Some(0);
-        }
         if (checker.postponed_call_mentions(expected)
             || checker.postponed_call_mentions(semantic_actual))
-            && !checker.postponed_argument_constraint_is_satisfiable(expected, semantic_actual)
+            && !call_constraints::postponed_argument_constraint_is_satisfiable(
+                checker,
+                expected,
+                semantic_actual,
+            )
         {
             return None;
         }
@@ -107,21 +165,23 @@ pub(super) fn score(
         if checker.lambda_parameters_are_contextual(argument) {
             if let TyKind::Fun(expected_function) = expected.non_null().kind() {
                 if checker.contextual_lambda_accepts_function_shape(argument, expected_function) {
-                    // Omitted/untyped lambda INPUTS remain contextual, but an already-checked
-                    // body result is still pertinent to overload applicability. In particular,
-                    // `flatMap { list }` fits `(T) -> Iterable<R>` and cannot fit the sibling
-                    // `(T) -> Sequence<R>` merely because both candidates have the same arity.
-                    // A bare result variable remains postponed; a constructed result such as
-                    // `Sequence<R>` must already have the right semantic outer type.
+                    // Kotlin decides applicability before analyzing the lambda body, so the
+                    // checked result only marks this candidate for a refinement the selection
+                    // may apply to a most-specific tie (`flatMap { list }` fits
+                    // `(T) -> Iterable<R>`, not `(T) -> Sequence<R>`). A bare result variable
+                    // remains postponed; a constructed result such as `Sequence<R>` must already
+                    // have the right semantic outer type.
                     let result_admitted = match semantic_actual.non_null().kind() {
                         TyKind::Fun(actual_function) => {
-                            expected_function.ret == Ty::Unit
+                            let fits = expected_function.ret == Ty::Unit
                                 || actual_function.ret.mentions_error()
                                 || checker.receiver_is_assignable(
                                     actual_function.ret,
                                     expected_function.ret,
                                 )
-                                || expected_function.ret.non_null().is_ty_param()
+                                || expected_function.ret.non_null().is_ty_param();
+                            lambda_result_mismatch.set(lambda_result_mismatch.get() || !fits);
+                            true
                         }
                         TyKind::Error | TyKind::Pending => true,
                         _ => false,
@@ -166,6 +226,27 @@ pub(super) fn score(
         if sam_conversion.is_some() {
             return Some(0);
         }
+        // A lambda literal with declared parameter types still postpones its body, so only its
+        // inputs decide applicability; its result is consulted as for an untyped lambda above.
+        let semantic_actual = match (
+            checker.file.expr(argument),
+            semantic_actual.non_null().kind(),
+            expected.non_null().kind(),
+        ) {
+            (Expr::Lambda { .. }, TyKind::Fun(actual), TyKind::Fun(expected)) => {
+                let fits = checker.receiver_is_assignable(actual.ret, expected.ret)
+                    || expected.ret == Ty::Unit;
+                lambda_result_mismatch.set(lambda_result_mismatch.get() || !fits);
+                Ty::fun_with_shape(
+                    actual.params.clone(),
+                    expected.ret,
+                    actual.context_count,
+                    actual.has_receiver,
+                    actual.suspend,
+                )
+            }
+            _ => semantic_actual,
+        };
         if !call_sig.parameter_admits(parameter, expected, semantic_actual)
             && !contextual_call_result
         {
@@ -348,6 +429,7 @@ pub(super) fn score(
                 false,
             ),
             sam_signatures: sam_signatures.into_inner(),
+            lambda_result_fits: !lambda_result_mismatch.get(),
         });
     }
     if arg_names.is_none() && !trailing_lambda {
@@ -376,6 +458,7 @@ pub(super) fn score(
                 true,
             ),
             sam_signatures: sam_signatures.into_inner(),
+            lambda_result_fits: !lambda_result_mismatch.get(),
         });
     }
     let slots =
@@ -412,5 +495,79 @@ pub(super) fn score(
             !call_sig.vararg,
         ),
         sam_signatures: sam_signatures.into_inner(),
+        lambda_result_fits: !lambda_result_mismatch.get(),
     })
+}
+
+/// Under `+EagerLambdaAnalysis` a lambda's analyzed result discriminates the applicable
+/// candidates before most-specific selection, as kotlinc's `EagerLambdaResolution` does: the
+/// candidates the result does not fit are dropped while one still fits. Without the feature the
+/// result takes part only in the specification's refinement of a tie.
+pub(super) fn retain_eager_fits<T>(
+    file: &crate::ast::File,
+    applicable: &mut Vec<T>,
+    fits: impl Fn(&T) -> bool,
+) {
+    if file.eager_lambda_analysis && applicable.iter().any(&fits) {
+        applicable.retain(fits);
+    }
+}
+
+/// Kotlin's lambda-return refinement of a most-specific tie. It applies only when a tied
+/// candidate is `@OverloadResolutionByLambdaReturnType`, the call has exactly one lambda literal,
+/// and every tied parameter for it is a function type with the same inputs; once the lambda is
+/// analyzed, the candidates whose checked lambda result does not fit are dropped, and the refined
+/// set prefers unannotated candidates. Every other tie is left for the ordinary ambiguity.
+pub(super) fn refine_lambda_tie<T>(
+    file: &crate::ast::File,
+    (args, arg_tys): (&[ExprId], &[Ty]),
+    tied: &mut Vec<T>,
+    candidate: impl Fn(&T) -> (&crate::libraries::FunctionInfo, &[Ty], bool),
+) {
+    let refines = |function: &crate::libraries::FunctionInfo| {
+        function
+            .callable
+            .annotations
+            .contains(&crate::types::type_name(
+                "kotlin/OverloadResolutionByLambdaReturnType",
+            ))
+    };
+    let mut lambdas = args
+        .iter()
+        .enumerate()
+        .filter(|(_, &argument)| matches!(file.expr(argument), Expr::Lambda { .. }))
+        .map(|(position, _)| position);
+    let (Some(lambda), None) = (lambdas.next(), lambdas.next()) else {
+        return;
+    };
+    // Before the lambda is analyzed (a call's pre-lambda selection) a tie stays a tie.
+    let analyzed = arg_tys.get(lambda).is_some_and(|actual| {
+        matches!(actual.non_null().kind(), TyKind::Fun(function) if !function.ret.mentions_error())
+    });
+    if !analyzed {
+        return;
+    }
+    let inputs = |tie: &T| match candidate(tie).1.get(lambda)?.non_null().kind() {
+        TyKind::Fun(function) => Some((
+            function.params.clone(),
+            function.context_count,
+            function.has_receiver,
+            function.suspend,
+        )),
+        _ => None,
+    };
+    let Some(first) = tied.first().and_then(inputs) else {
+        return;
+    };
+    if tied.len() < 2
+        || !tied.iter().any(|tie| refines(candidate(tie).0))
+        || !tied.iter().all(|tie| inputs(tie).as_ref() == Some(&first))
+        || !tied.iter().any(|tie| candidate(tie).2)
+    {
+        return;
+    }
+    tied.retain(|tie| candidate(tie).2);
+    if tied.iter().any(|tie| !refines(candidate(tie).0)) {
+        tied.retain(|tie| !refines(candidate(tie).0));
+    }
 }

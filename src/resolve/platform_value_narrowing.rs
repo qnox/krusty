@@ -85,6 +85,47 @@ impl Checker<'_> {
         }
     }
 
+    /// An operator convention's explicit receiver (`map[k] = v`, `list += x`, `map + pair`) is the
+    /// argument of the selected extension's receiver parameter, guarded like a written call's.
+    pub(super) fn narrow_operator_receiver(
+        &mut self,
+        receiver: ExprId,
+        call: &super::ResolvedCall,
+    ) {
+        let (declared, applied) = match call {
+            // A non-generic extension has no generic signature; its selected declaration still
+            // records the receiver it declares.
+            super::ResolvedCall::Extension(extension) => (
+                extension
+                    .callable
+                    .generic_sig
+                    .as_ref()
+                    .and_then(|signature| signature.receiver)
+                    .or(extension.callable.source_receiver),
+                extension.receiver,
+            ),
+            super::ResolvedCall::MemberExtension {
+                generic_sig,
+                extension_receiver,
+                ..
+            } => (
+                generic_sig
+                    .as_ref()
+                    .and_then(|signature| signature.receiver),
+                *extension_receiver,
+            ),
+            _ => return,
+        };
+        // The receiver an operator convention records is the operand as written; a declared
+        // receiver that rejects `null` commits a Java operand to its non-null face.
+        self.narrow_extension_receiver(
+            receiver,
+            receiver,
+            declared,
+            applied.platform_lower_bound(),
+        );
+    }
+
     /// An enhanced Java result initializing a declaration whose type is inferred from it.
     ///
     /// kotlinc's expected type there is the declaration's own type, which is the initializer's
@@ -227,8 +268,10 @@ pub(super) fn expected_type_rejects_null(expected: Ty) -> bool {
             | TyKind::InProjection(_)
             | TyKind::OutProjection(_)
             | TyKind::StarProjection(_) => return false,
-            TyKind::TyParam(name, bound) if seen.insert(name) => current = bound,
-            TyKind::TyParam(..) => return false,
+            TyKind::TyParam(name, bound) | TyKind::Var(name, bound) if seen.insert(name) => {
+                current = bound
+            }
+            TyKind::TyParam(..) | TyKind::Var(..) => return false,
             _ => return !current.admits_null(),
         }
     }

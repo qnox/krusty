@@ -79,7 +79,8 @@ pub(super) fn realize(
                         internal: crate::types::type_name(&construction.through.internal),
                         args: arguments,
                         ctor_params: None,
-                        ctor_desc: Some(construction.through.ctor_desc),
+                        declared_params: None,
+                        ctor_desc: Some(construction.through.ctor_desc.into_boxed_str()),
                         external_target: None,
                         defaults: Box::new([]),
                         default_prefix_count: 0,
@@ -177,6 +178,10 @@ pub(super) fn realize(
             | IrExpr::EnumValues { .. }
             | IrExpr::EnumValueOf { .. }
             | IrExpr::EnumEntries { .. }
+            | IrExpr::EnumConstant { .. }
+            | IrExpr::EnumAllocation { .. }
+            | IrExpr::EnumEntriesList { .. }
+            | IrExpr::NoSuchEnumConstant { .. }
             | IrExpr::EnumSwitchOrdinal { .. }
             | IrExpr::EnumSwitchKey { .. }
             | IrExpr::ReifiedTypeOp { .. }
@@ -188,6 +193,7 @@ pub(super) fn realize(
             | IrExpr::Vararg { .. }
             | IrExpr::PluginPlaceholder { .. }
             | IrExpr::CurrentContinuation
+            | IrExpr::AbsentArgument { .. }
             | IrExpr::InlineFrameMarker
             | IrExpr::ForwardedSuperArgument { .. } => {}
         }
@@ -209,7 +215,8 @@ fn illegal_step(ir: &mut IrFile, cause: ExprId, step: ExprId) -> IrExpr {
         internal: crate::types::type_name("java/lang/IllegalArgumentException"),
         args: vec![message],
         ctor_params: None,
-        ctor_desc: Some("(Ljava/lang/String;)V".to_string()),
+        declared_params: None,
+        ctor_desc: Some("(Ljava/lang/String;)V".into()),
         external_target: None,
         defaults: Box::new([]),
         default_prefix_count: 0,
@@ -264,12 +271,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if let Some(line) = ir.expr_lines.get(&source).copied() {
         ir.expr_lines.insert(target, line);
     }
-    if let Some(line) = ir.expr_source_lines.get(&source).copied() {
-        ir.expr_source_lines.insert(target, line);
-    }
-    if let Some(line) = ir.expr_end_lines.get(&source).copied() {
-        ir.expr_end_lines.insert(target, line);
-    }
+    ir.copy_position(source, target);
 }
 
 /// The JVM's counted loops: Java-like counter loops HotSpot recognizes, with the calls kotlinc

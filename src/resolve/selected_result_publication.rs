@@ -140,7 +140,7 @@ impl CompactSelectedResultPublication {
 
     pub(super) fn constructor(
         owner: TypeName,
-        formals: Vec<String>,
+        formals: Vec<crate::types::TyParamName>,
         bounds: Vec<Ty>,
         parameters: Vec<Ty>,
         selected: Ty,
@@ -149,17 +149,23 @@ impl CompactSelectedResultPublication {
         whole_array_arguments: Box<[bool]>,
         explicit_type_arguments: bool,
     ) -> Self {
+        // A constructor yields its classifier's own type, whose arguments are rigid type
+        // parameters. Only an inferred argument takes the flexibility of the Java usage it was
+        // inferred through; an explicit one is substituted as written.
         let declared_arguments = formals
             .iter()
             .enumerate()
             .map(|(index, formal)| {
-                Ty::ty_param(
-                    formal,
-                    bounds
-                        .get(index)
-                        .copied()
-                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                )
+                let bound = bounds
+                    .get(index)
+                    .copied()
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                let bound = if explicit_type_arguments && bound.is_platform_nullable() {
+                    Ty::nullable(bound.platform_lower_bound())
+                } else {
+                    bound
+                };
+                Ty::ty_param(formal, bound)
             })
             .collect::<Vec<_>>();
         Self {
@@ -202,7 +208,7 @@ impl CompactSelectedResultPublication {
         let mut formals = callable_formals;
         for formal in &receiver_formals {
             if !formals.contains(formal) {
-                formals.push(formal.clone());
+                formals.push(*formal);
             }
         }
 
@@ -257,7 +263,7 @@ impl CompactSelectedResultPublication {
             .filter_map(|(formal, values)| {
                 let first = *values.first()?;
                 let publication = values.iter().copied().skip(1).fold(first, meet_publication);
-                Some((formal, publication))
+                Some((crate::types::TyParamName::from(formal), publication))
             })
             .collect::<HashMap<_, _>>();
         let published = publish_selected(self.declared, self.selected, &bindings);
@@ -270,6 +276,14 @@ impl CompactSelectedResultPublication {
 /// turn an enhanced position back into a platform type.
 fn suppress_enhanced_flexibility(selected: Ty, published: Ty, enhancement: &TypeEnhancement) -> Ty {
     match (selected.kind(), published.kind()) {
+        // Mutability flexibility is not a nesting level: the enhancement applies to its classifier.
+        (TyKind::MutabilityFlexible(selected), TyKind::MutabilityFlexible(published)) => {
+            Ty::mutability_flexible(suppress_enhanced_flexibility(
+                selected,
+                published,
+                enhancement,
+            ))
+        }
         (TyKind::Obj(selected_owner, selected), TyKind::Obj(owner, published))
             if selected_owner == owner && selected.len() == published.len() =>
         {
@@ -322,7 +336,8 @@ fn suppress_enhanced_flexibility(selected: Ty, published: Ty, enhancement: &Type
             )
         }
         (TyKind::Nullable(selected), TyKind::Nullable(published)) => Ty::nullable(
-            suppress_enhanced_flexibility(selected, published, enhancement).platform_lower_bound(),
+            suppress_enhanced_flexibility(selected, published, enhancement)
+                .non_null_keeping_mutability(),
         ),
         (_, TyKind::PlatformNullable(published)) if !selected.is_nullable() => {
             let published = suppress_enhanced_flexibility(selected, published, enhancement)
@@ -360,11 +375,11 @@ fn publication_arguments(
         .collect()
 }
 
-fn collect_type_parameters(ty: Ty, output: &mut Vec<String>) {
+fn collect_type_parameters(ty: Ty, output: &mut Vec<crate::types::TyParamName>) {
     match ty.kind() {
-        TyKind::TyParam(name, _) => {
-            if !output.iter().any(|candidate| candidate == name) {
-                output.push(name.to_owned().to_string());
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
+            if !output.contains(&name) {
+                output.push(name);
             }
         }
         TyKind::Obj(_, arguments) => {
@@ -380,6 +395,7 @@ fn collect_type_parameters(ty: Ty, output: &mut Vec<String>) {
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::DefinitelyNotNull(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
@@ -388,9 +404,9 @@ fn collect_type_parameters(ty: Ty, output: &mut Vec<String>) {
     }
 }
 
-fn publish_selected(declared: Ty, selected: Ty, bindings: &HashMap<String, Ty>) -> Ty {
+fn publish_selected(declared: Ty, selected: Ty, bindings: &crate::types::TyParamBindings) -> Ty {
     match (declared.kind(), selected.kind()) {
-        (TyKind::TyParam(name, declared_bound), _) => {
+        (TyKind::TyParam(name, declared_bound) | TyKind::Var(name, declared_bound), _) => {
             let publication = bindings
                 .get(name.as_str())
                 .copied()
@@ -402,8 +418,11 @@ fn publish_selected(declared: Ty, selected: Ty, bindings: &HashMap<String, Ty>) 
                 publication
             }
         }
-        (TyKind::PlatformNullable(declared), TyKind::Nullable(selected)) => {
-            Ty::nullable(publish_selected(declared, selected, bindings).platform_lower_bound())
+        (TyKind::PlatformNullable(declared), TyKind::Nullable(selected)) => Ty::nullable(
+            publish_selected(declared, selected, bindings).non_null_keeping_mutability(),
+        ),
+        (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(selected)) => {
+            Ty::mutability_flexible(publish_selected(declared, selected, bindings))
         }
         (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(selected)) => {
             Ty::platform_nullable(
@@ -415,9 +434,9 @@ fn publish_selected(declared: Ty, selected: Ty, bindings: &HashMap<String, Ty>) 
                 publish_selected(declared, selected, bindings).platform_lower_bound(),
             )
         }
-        (TyKind::Nullable(declared), TyKind::Nullable(selected)) => {
-            Ty::nullable(publish_selected(declared, selected, bindings).platform_lower_bound())
-        }
+        (TyKind::Nullable(declared), TyKind::Nullable(selected)) => Ty::nullable(
+            publish_selected(declared, selected, bindings).non_null_keeping_mutability(),
+        ),
         (TyKind::DefinitelyNotNull(declared), TyKind::DefinitelyNotNull(selected)) => Ty::from(
             TyKind::DefinitelyNotNull(publish_selected(declared, selected, bindings)),
         ),
@@ -470,7 +489,7 @@ fn publish_selected(declared: Ty, selected: Ty, bindings: &HashMap<String, Ty>) 
 fn align_publication(publication: Ty, selected: Ty) -> Ty {
     match (publication.kind(), selected.kind()) {
         (TyKind::PlatformNullable(publication), TyKind::Nullable(selected)) => {
-            Ty::nullable(align_publication(publication, selected).platform_lower_bound())
+            Ty::nullable(align_publication(publication, selected).non_null_keeping_mutability())
         }
         (TyKind::PlatformNullable(publication), TyKind::PlatformNullable(selected)) => {
             Ty::platform_nullable(align_publication(publication, selected).platform_lower_bound())
@@ -512,7 +531,10 @@ fn align_publication(publication: Ty, selected: Ty) -> Ty {
             )
         }
         (TyKind::Nullable(publication), TyKind::Nullable(selected)) => {
-            Ty::nullable(align_publication(publication, selected).platform_lower_bound())
+            Ty::nullable(align_publication(publication, selected).non_null_keeping_mutability())
+        }
+        (TyKind::MutabilityFlexible(publication), TyKind::MutabilityFlexible(selected)) => {
+            Ty::mutability_flexible(align_publication(publication, selected))
         }
         _ => selected,
     }
@@ -697,7 +719,7 @@ impl ResolvedCall {
 /// supplies only how its payload is viewed through a resolved supertype; wrapper and parameter-tree
 /// traversal is shared by flexible-interval and enhanced-nullability publication.
 pub(super) fn constrain_parameters<F: Clone>(
-    formals: &[String],
+    formals: &[crate::types::TyParamName],
     declared: Ty,
     actual: Ty,
     fact: &F,
@@ -706,7 +728,7 @@ pub(super) fn constrain_parameters<F: Clone>(
     view: &mut impl FnMut(Ty, &F, TypeName) -> Option<(Ty, Vec<F>)>,
 ) {
     match declared.kind() {
-        TyKind::TyParam(name, _) if formals.iter().any(|formal| formal == name) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) if formals.contains(&name) => {
             constraints
                 .entry(name.to_string())
                 .or_default()
@@ -714,6 +736,7 @@ pub(super) fn constrain_parameters<F: Clone>(
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::DefinitelyNotNull(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner) => constrain_parameters(
@@ -834,7 +857,7 @@ mod tests {
         let constructed = Ty::obj_args_name(carrier, &[rigid_list]);
         let constructor = CompactSelectedResultPublication::constructor(
             carrier,
-            vec!["T".to_owned()],
+            vec![crate::types::TyParamName::new("T")],
             vec![Ty::nullable(Ty::obj("kotlin/Any"))],
             vec![variable],
             constructed,
@@ -879,7 +902,7 @@ mod tests {
         let method_variable = Ty::ty_param("M", Ty::nullable(Ty::obj("kotlin/Any")));
         let target = CompactSelectedResultPublication {
             signature: Some(GenericSig {
-                formals: vec!["M".to_owned()],
+                formals: vec![crate::types::TyParamName::new("M")],
                 formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
                 receiver: None,
                 params: vec![method_variable],
@@ -915,7 +938,7 @@ mod tests {
         let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
         let target = CompactSelectedResultPublication {
             signature: Some(GenericSig {
-                formals: vec!["T".to_owned()],
+                formals: vec![crate::types::TyParamName::new("T")],
                 formal_bounds: vec![vec![Ty::platform_nullable(Ty::obj("kotlin/Any"))]],
                 receiver: None,
                 params: Vec::new(),
@@ -1014,7 +1037,7 @@ mod tests {
 
     #[test]
     fn star_projection_policy_controls_callable_formal_binding() {
-        let formals = vec!["T".to_string()];
+        let formals = vec![crate::types::TyParamName::new("T")];
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
         let declared = Ty::star_projection(Ty::ty_param("T", any));
         let mut view = |_, _: &u8, _| None;

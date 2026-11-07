@@ -8,7 +8,8 @@
 //! declarations and target-neutral inline bodies, not a target's realization of them.
 
 use crate::backend::{
-    Artifact, Backend, CheckedIrFile, DependencyExportSignatures, DependencyMetadata,
+    Artifact, Backend, BackendClassifierSource, CheckedIrFile, DependencyExportSignatures,
+    DependencyMetadata,
 };
 use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
@@ -16,8 +17,8 @@ use crate::ir::{IrClass, IrFile};
 use crate::metadata::class_declarations::{ClassTailOptions, FunctionOrigin, PropertyOrigin};
 use crate::metadata::declaration_records;
 use crate::metadata::id_signature::{
-    package_function_signature, package_property_accessor_signature, MetadataAccessor,
-    MetadataClass, MetadataContainer,
+    constructor_signature, package_function_signature, package_property_accessor_signature,
+    MetadataAccessor, MetadataClass, MetadataContainer,
 };
 use crate::metadata::klib_fragment::{
     package_fragment_with_inner_classifiers, KlibClass, KlibFileMembers,
@@ -124,7 +125,16 @@ impl KlibBackend {
         diags: &mut DiagSink,
     ) -> DependencyExportSignatures {
         let ir = &file.ir;
-        let classes = library_classes(ir);
+        let classes = match library_classes(ir) {
+            Ok(classes) => classes,
+            Err(error) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("{DECLINE_PREFIX}class metadata name: {error}"),
+                );
+                return DependencyExportSignatures::default();
+            }
+        };
         if let Some(construct) = classes
             .iter()
             .find_map(|&class| unsupported_class_construct(ir, class))
@@ -236,23 +246,62 @@ impl KlibBackend {
                 )
             })
             .collect::<Vec<_>>();
+        let class_ids = match records
+            .iter()
+            .zip(&tails)
+            .map(|(record, tail)| {
+                let classifier = record.classifier();
+                if tail.local_classifiers.contains(&classifier) {
+                    Ok(crate::metadata::class_id::ResolvedClassId::local(
+                        classifier,
+                    ))
+                } else {
+                    crate::metadata::class_id::ResolvedClassId::resolve(
+                        crate::libraries::ClassifierDeclarationKey::Ordinary(classifier),
+                        &|key| file.classifiers.classifier_declaration_name(key),
+                    )
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(names) => names,
+            Err(error) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("{DECLINE_PREFIX}class metadata name: {error}"),
+                );
+                return DependencyExportSignatures::default();
+            }
+        };
         let declarations = records
             .iter()
             .zip(&tails)
             .zip(enum_entries.iter().zip(&constants))
-            .map(|((record, tail), (entries, constants))| KlibClass {
-                declaration: record.declaration(tail, entries),
-                constants,
-                in_source_file: record.has_source_file(),
-            })
+            .zip(&class_ids)
+            .map(
+                |(((record, tail), (entries, constants)), class_id)| KlibClass {
+                    declaration: record.declaration(class_id, tail, entries),
+                    constants,
+                    in_source_file: record.has_source_file(),
+                },
+            )
             .collect::<Vec<_>>();
-        let fragment = package_fragment_with_inner_classifiers(
+        let fragment = match package_fragment_with_inner_classifiers(
             &segments,
             &members,
             &declarations,
             self.annotations_in_metadata,
             &inner_classifier,
-        );
+        ) {
+            Ok(fragment) => fragment,
+            Err(error) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("{DECLINE_PREFIX}class metadata name: {error}"),
+                );
+                return DependencyExportSignatures::default();
+            }
+        };
         let Some(package_exports) =
             package_exports(ir, file.module_name, &segments, &fragment, diags)
         else {
@@ -525,7 +574,7 @@ fn record_class_function_exports(
     exports: &mut DependencyExportSignatures,
     declarations: &mut super::inline_ir::DeclarationSignatures,
 ) -> Result<(), String> {
-    let source_classes = library_classes(ir);
+    let source_classes = library_classes(ir).map_err(|error| error.to_string())?;
     if source_classes.len() != decoded.class_order.len() {
         return Err("generated KLIB metadata changed class declaration order".to_string());
     }
@@ -584,7 +633,18 @@ fn record_class_function_exports(
                             declaration.name
                         )
                     })?;
-                Some(crate::types::Ty::obj_name(receiver))
+                if receiver != source.fq_name_id() {
+                    return Err(format!(
+                        "class function {} lost its declared receiver signature",
+                        declaration.name
+                    ));
+                }
+                Some(ir.declared_class_self_type(receiver).ok_or_else(|| {
+                    format!(
+                        "class function {} lost its declared receiver application",
+                        declaration.name
+                    )
+                })?)
             };
             // The current prepared writer can serialize a non-generic dispatch classifier exactly.
             // A generic owner also needs its class parameters remapped into the synthetic prepared
@@ -617,24 +677,106 @@ fn record_class_function_exports(
                 exports.record_member_receiver(function, receiver);
             }
         }
-        if source.is_interface {
-            record_interface_property_exports(
-                ir,
-                module_name,
-                source,
-                (record, class),
-                container,
-                exports,
-            )?;
-        }
+        record_constructor_exports(ir, module_name, source, (record, class), container, exports)?;
+        record_class_property_exports(
+            ir,
+            module_name,
+            source,
+            (record, class),
+            container,
+            exports,
+        )?;
     }
     Ok(())
 }
 
-/// Record the getter identity of every property the interface `source` declares, the identity
-/// another module's class implementing the property names it by, and export the accessor bodies
-/// an implementing class inherits as defaults.
-fn record_interface_property_exports(
+/// Record the identity of every constructor of `source` another module may call, and an object
+/// declaration another module may read as a value.
+///
+/// The decoded class lists the primary constructor first when the record publishes one, then the
+/// published secondary constructors in record order; `secondary_ordinals` joins each back to its
+/// IR declaration. Only an ordinary class whose object this file lays out is constructible from
+/// another module through an entry: an annotation is instantiated from its declaration instead,
+/// and a generic class would also need its type parameters on the entry, which the target-side
+/// entry does not declare yet. Neither publishes a constructor.
+fn record_constructor_exports(
+    ir: &IrFile,
+    module_name: &str,
+    source: &IrClass,
+    (record, class): (
+        &crate::metadata::class_declarations::ClassDeclarationRecord,
+        &crate::metadata::semantic::KotlinClass,
+    ),
+    container: MetadataContainer<'_>,
+    exports: &mut DependencyExportSignatures,
+) -> Result<(), String> {
+    let declarations = usize::from(record.emit_primary_ctor) + record.secondary_ordinals.len();
+    if class.constructors.len() != declarations {
+        return Err(format!(
+            "class {} changed constructor declaration order ({} decoded, {declarations} recorded)",
+            source.fq_name(),
+            class.constructors.len(),
+        ));
+    }
+    if (source.is_object || source.is_companion)
+        && class.visibility != crate::types::Visibility::Private
+    {
+        let id = ir
+            .class_id_by_name(source.fq_name_id())
+            .ok_or_else(|| format!("object {} has no IR identity", source.fq_name()))?;
+        exports.record_singleton(id);
+    }
+    if source.is_interface
+        || source.is_abstract
+        || source.is_sealed
+        || source.is_object
+        || source.is_companion
+        || source.is_enum
+        || source.is_value
+        || source.is_inner_class
+        || source.is_annotation
+        || !source.type_params.is_empty()
+        || !source.captured_type_params.is_empty()
+    {
+        return Ok(());
+    }
+    let primary = record
+        .emit_primary_ctor
+        .then_some(None)
+        .filter(|_| source.has_primary_ctor);
+    let secondaries = record
+        .secondary_ordinals
+        .iter()
+        .map(|&ordinal| Some(ordinal));
+    let skipped = usize::from(record.emit_primary_ctor && !source.has_primary_ctor);
+    for (declaration, secondary) in class
+        .constructors
+        .iter()
+        .skip(skipped)
+        .zip(primary.into_iter().chain(secondaries))
+    {
+        if declaration.visibility == crate::types::Visibility::Private {
+            continue;
+        }
+        let signature = constructor_signature(container, declaration)
+            .map_err(|error| format!("{}.<init>: {error}", source.fq_name()))?;
+        let class = ir
+            .class_id_by_name(source.fq_name_id())
+            .ok_or_else(|| format!("class {} has no IR identity", source.fq_name()))?;
+        exports.record_constructor(
+            crate::backend::ExportedConstructor { class, secondary },
+            crate::libraries::KlibDependencyCallable {
+                module: module_name.to_owned(),
+                declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Join each published property accessor to its checked declaration. Source-written bodies retain
+/// their exact function identities; concrete default accessors get target-neutral entry plans.
+fn record_class_property_exports(
     ir: &IrFile,
     module_name: &str,
     source: &IrClass,
@@ -647,11 +789,16 @@ fn record_interface_property_exports(
 ) -> Result<(), String> {
     let name = source.fq_name_id();
     if class.properties.len() != record.prop_origins.len() {
+        let kind = if source.is_interface {
+            "interface"
+        } else {
+            "class"
+        };
         return Err(format!(
-            "interface {} changed property declaration order ({} decoded, {} recorded)",
+            "{kind} {} changed property declaration order ({} decoded, {} recorded)",
             source.fq_name(),
             class.properties.len(),
-            record.prop_origins.len()
+            record.prop_origins.len(),
         ));
     }
     let extensions = ir.member_ext_props.get(&name);
@@ -659,10 +806,10 @@ fn record_interface_property_exports(
         if declaration.visibility == crate::types::Visibility::Private {
             continue;
         }
-        let Some((property, getter, setter)) =
+        let mut selected =
             ir.local_property_layouts
                 .iter()
-                .find_map(|(property, layout)| match (origin, layout) {
+                .filter_map(|(property, layout)| match (origin, layout) {
                     (
                         PropertyOrigin::Declared(index),
                         crate::ir::IrLocalPropertyLayout::Member {
@@ -670,10 +817,11 @@ fn record_interface_property_exports(
                             property: at,
                             getter,
                             setter,
+                            backing_field,
                             ..
                         },
                     ) if *owner == name && *at as usize == *index => {
-                        Some((*property, *getter, *setter))
+                        Some((Some(*property), *getter, *setter, backing_field.is_some()))
                     }
                     (
                         PropertyOrigin::MemberExtension(index),
@@ -688,12 +836,65 @@ fn record_interface_property_exports(
                             .and_then(|extensions| extensions.get(*index))
                             .is_some_and(|extension| extension.getter == *getter) =>
                     {
-                        Some((*property, Some(*getter), *setter))
+                        Some((Some(*property), Some(*getter), *setter, false))
                     }
                     _ => None,
-                })
-        else {
-            continue;
+                });
+        let first = selected.next();
+        if selected.next().is_some() {
+            return Err(format!(
+                "{}.{} has ambiguous checked property declaration identities",
+                source.fq_name(),
+                declaration.name,
+            ));
+        }
+        let (property, getter, setter, storage) = if let Some(first) = first {
+            first
+        } else {
+            // Generated forwarders and metadata-only declarations need not have a FIR property.
+            // The metadata origin still owns the exact IR declaration and its accessor body IDs.
+            let (getter, setter, source_order) = match origin {
+                PropertyOrigin::Declared(index) => {
+                    let property = source.properties.get(*index).ok_or_else(|| {
+                        format!(
+                            "{}.{} has no recorded IR property declaration",
+                            source.fq_name(),
+                            declaration.name
+                        )
+                    })?;
+                    (property.getter, property.setter, property.source_order)
+                }
+                PropertyOrigin::MemberExtension(index) => {
+                    let property = extensions
+                        .and_then(|properties| properties.get(*index))
+                        .ok_or_else(|| {
+                            format!(
+                                "{}.{} has no recorded IR extension declaration",
+                                source.fq_name(),
+                                declaration.name
+                            )
+                        })?;
+                    (
+                        Some(property.getter),
+                        property.setter,
+                        property.source_order,
+                    )
+                }
+                PropertyOrigin::Constant(_) | PropertyOrigin::CompanionBlock(_) => continue,
+            };
+            let owner = ir
+                .class_id_by_name(name)
+                .ok_or_else(|| format!("class {} has no IR identity", source.fq_name()))?;
+            if ir.checked_properties.values().any(|property| {
+                property.class == Some(owner) && property.source_order == source_order
+            }) {
+                return Err(format!(
+                    "{}.{} lost its checked property layout",
+                    source.fq_name(),
+                    declaration.name
+                ));
+            }
+            (None, getter, setter, false)
         };
         let accessor = |accessor| {
             package_property_accessor_signature(container, declaration, accessor)
@@ -703,18 +904,90 @@ fn record_interface_property_exports(
                 })
                 .map_err(|error| format!("{}.{}: {error}", source.fq_name(), declaration.name))
         };
-        exports.record_interface_property(property, accessor(MetadataAccessor::Getter)?);
-        for (function, role) in [
-            (getter, MetadataAccessor::Getter),
-            (setter, MetadataAccessor::Setter),
+        if let (true, Some(property)) = (source.is_interface, property) {
+            exports.record_interface_property(property, accessor(MetadataAccessor::Getter)?);
+        }
+        for (function, role, modifiers, present) in [
+            (
+                getter,
+                MetadataAccessor::Getter,
+                &declaration.getter_modifiers,
+                true,
+            ),
+            (
+                setter,
+                MetadataAccessor::Setter,
+                &declaration.setter_modifiers,
+                declaration.is_var,
+            ),
         ] {
-            let Some(function) = function
-                .filter(|function| crate::backend::has_standalone_dependency_code(ir, *function))
-            else {
+            if !present || modifiers.visibility == crate::types::Visibility::Private {
                 continue;
-            };
-            exports.record_callable(function, accessor(role)?);
-            exports.record_member_receiver(function, crate::types::Ty::obj_name(name));
+            }
+            if let Some(function) = function {
+                if crate::backend::has_standalone_dependency_code(ir, function) {
+                    let receiver = match ir.functions[function as usize].dispatch_receiver {
+                        Some(owner) => {
+                            if owner != name {
+                                return Err(format!(
+                                    "{}.{} lost its accessor receiver identity",
+                                    source.fq_name(),
+                                    declaration.name
+                                ));
+                            }
+                            Some(ir.declared_class_self_type(owner).ok_or_else(|| {
+                                format!(
+                                    "class {} has no declared accessor receiver application",
+                                    source.fq_name()
+                                )
+                            })?)
+                        }
+                        None => None,
+                    };
+                    exports.record_callable(function, accessor(role)?);
+                    if let Some(receiver) = receiver {
+                        exports.record_member_receiver(function, receiver);
+                    }
+                }
+            } else if !source.is_interface
+                && modifiers.is_default
+                && !modifiers.modality.is_abstract()
+                && !modifiers.is_external
+                && !declaration.is_external
+                && !declaration.is_expect
+            {
+                // Without a checked storage operation this is an honest metadata-only export;
+                // do not invent a property ID or infer a field access from an accessor spelling.
+                let Some(property) = property else { continue };
+                if !storage || !ir.checked_properties.contains_key(&property) {
+                    return Err(format!(
+                        "{}.{} has no checked storage for its default accessor",
+                        source.fq_name(),
+                        declaration.name
+                    ));
+                }
+                let operation = match role {
+                    MetadataAccessor::Getter => {
+                        crate::backend::ExportedPropertyAccessor::Getter(property)
+                    }
+                    MetadataAccessor::Setter => {
+                        crate::backend::ExportedPropertyAccessor::Setter(property)
+                    }
+                };
+                exports.record_property_accessor(operation, accessor(role)?);
+            } else if property.is_some()
+                && !source.is_interface
+                && !modifiers.modality.is_abstract()
+                && !modifiers.is_external
+                && !declaration.is_external
+                && !declaration.is_expect
+            {
+                return Err(format!(
+                    "{}.{} has no checked body for its declared accessor",
+                    source.fq_name(),
+                    declaration.name,
+                ));
+            }
         }
     }
     Ok(())
@@ -766,7 +1039,19 @@ fn declared_setter(
 /// in declaration order, each followed by the classifiers its `nestedClassName` list names (the
 /// declared ones, those a compiler plugin generated, the companion), in that list's order. A
 /// classifier declared in executable code is no declaration of the library.
-fn library_classes(ir: &IrFile) -> Vec<&IrClass> {
+fn library_classes(ir: &IrFile) -> Result<Vec<&IrClass>, crate::metadata::class_id::ClassIdError> {
+    for class in &ir.classes {
+        if class.is_source_declared
+            && class.enclosure.is_none()
+            && !class.is_enum_entry
+            && !crate::metadata::local_classifiers::is_local(ir, class)
+            && class.declaration_name.is_none()
+        {
+            return Err(crate::metadata::class_id::ClassIdError::UnknownName(
+                crate::libraries::ClassifierDeclarationKey::Ordinary(class.fq_name_id()),
+            ));
+        }
+    }
     let mut top_level = ir
         .classes
         .iter()
@@ -777,7 +1062,10 @@ fn library_classes(ir: &IrFile) -> Vec<&IrClass> {
                 && !class.is_local_class
                 && !class.is_anonymous_object
                 && !class.is_enum_entry
-                && class.fq_name.nested_owner().is_none()
+                && matches!(
+                    class.declaration_name.as_ref(),
+                    Some(crate::types::ClassifierDeclarationName::TopLevel { .. })
+                )
         })
         .map(|(index, class)| {
             let order = ir
@@ -807,7 +1095,7 @@ fn library_classes(ir: &IrFile) -> Vec<&IrClass> {
                 }),
         );
     }
-    ordered
+    Ok(ordered)
 }
 
 /// A construct of `class` this writer does not record yet.

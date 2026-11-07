@@ -185,6 +185,12 @@ impl Checker<'_> {
                                     signature.clone(),
                                 )
                             }),
+                            self.rejected_constructor_function_arguments(
+                                args,
+                                &argument_slots,
+                                signature,
+                                &explicit_type_arguments,
+                            ),
                         )
                     });
                     continue;
@@ -282,7 +288,7 @@ impl Checker<'_> {
                             let mut carries_enclosing_context = false;
                             for formal in &signature.formals {
                                 if ty_mentions_param(declared, std::slice::from_ref(formal)) {
-                                    enclosing_context_formals.insert(formal.clone());
+                                    enclosing_context_formals.insert(*formal);
                                     carries_enclosing_context = true;
                                 }
                             }
@@ -292,7 +298,8 @@ impl Checker<'_> {
                         }
                         let mut actual = kind.ty();
                         let mut bounded = declared.non_null();
-                        while let TyKind::TyParam(_, bound) = bounded.kind() {
+                        while let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = bounded.kind()
+                        {
                             let value_bound = self.integer_literal_semantic_type(bound);
                             if kind.adapts_integer_literal_to(value_bound) {
                                 actual = value_bound;
@@ -303,9 +310,8 @@ impl Checker<'_> {
                         Some((source, parameter, actual, whole_array))
                     })
                     .collect::<Vec<_>>();
-                // Inside the constructed class (or an inner class that sees its formals), the
-                // class's own `T` is a fixed type, while this call infers a fresh `T`.
-                let lexical = scope.lexical_tparam_identities();
+                // The call infers its own `T`, distinct from the class's `T` when that is in
+                // scope as a fixed type (inside the class or an inner class).
                 let source = self.fed_source();
                 let inference_actuals = actuals
                     .iter()
@@ -332,7 +338,7 @@ impl Checker<'_> {
                     .collect::<Vec<_>>();
                 let constraints = crate::symbol_resolver::CallSiteVariables::solve(
                     signature,
-                    |formal| lexical.iter().any(|identity| identity == formal),
+                    self.call_site(call),
                     |signature| {
                         crate::symbol_resolver::infer_generic_call_constraints_with_argument_ordinals(
                             &source,
@@ -342,17 +348,24 @@ impl Checker<'_> {
                         )
                     },
                 );
-                if let Some(violation) = constraints.bound_violation {
-                    let source_argument = violation.argument;
-                    if args.get(source_argument).is_none() {
-                        continue;
-                    }
-                    bound_failures.push(LibraryConstructorFailure::TypeMismatch {
-                        source_argument,
-                        expected: violation.expected,
-                        actual: violation.actual,
-                        result: None,
-                    });
+                let owner = super::type_parameter_owners::classifier_type_parameter_owner(
+                    &source, internal, classifier,
+                );
+                if let Some(contradictions) =
+                    super::generic_argument_bounds::ArgumentContradictions::new(
+                        signature,
+                        &constraints.bound_violations,
+                        owner,
+                        |source_argument| {
+                            let argument = *args.get(source_argument)?;
+                            let parameter = *argument_slots.get(source_argument)?;
+                            Some((argument, *signature.params.get(parameter)?))
+                        },
+                    )
+                {
+                    bound_failures.push(LibraryConstructorFailure::ArgumentContradictions(
+                        Box::new(contradictions),
+                    ));
                     continue;
                 }
                 let tightest_upper = constraints.tightest_upper_bindings(&source);
@@ -406,7 +419,7 @@ impl Checker<'_> {
                             let Some(index) = signature
                                 .formals
                                 .iter()
-                                .position(|candidate| candidate == &formal)
+                                .position(|candidate| candidate == formal)
                             else {
                                 continue;
                             };
@@ -416,14 +429,16 @@ impl Checker<'_> {
                             {
                                 continue;
                             }
-                            let Some(&fixed) = expected_bindings.get(&formal).filter(|&&fixed| {
-                                fixed.non_null().is_ty_param()
-                                    && Self::type_is_lexically_fixed(scope, fixed)
-                            }) else {
+                            let Some(&fixed) =
+                                expected_bindings.get(formal.as_str()).filter(|&&fixed| {
+                                    fixed.non_null().is_ty_param()
+                                        && Self::type_is_lexically_fixed(scope, fixed)
+                                })
+                            else {
                                 continue;
                             };
                             let mut trial = bindings.clone();
-                            trial.insert(formal.clone(), fixed);
+                            trial.insert(crate::types::TyParamName::new(&formal), fixed);
                             if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
                                 signature,
                                 &trial,
@@ -482,9 +497,9 @@ impl Checker<'_> {
                 // postponed producer completes from its declared upper bound. Substitute preceding
                 // solutions so dependent bounds (`U : Base<T>`) retain their semantic application.
                 for (index, formal) in classifier.type_params().iter().enumerate() {
-                    if !enclosing_context_formals.contains(formal)
+                    if !enclosing_context_formals.contains(&crate::types::TyParamName::new(formal))
                         || bindings
-                            .get(formal)
+                            .get(formal.as_str())
                             .is_some_and(|binding| *binding != Ty::Error)
                     {
                         continue;
@@ -495,7 +510,7 @@ impl Checker<'_> {
                         .take(index)
                         .filter_map(|known_formal| {
                             bindings
-                                .get(known_formal)
+                                .get(known_formal.as_str())
                                 .copied()
                                 .filter(|binding| *binding != Ty::Error)
                                 .map(|binding| (known_formal.clone(), binding))
@@ -509,7 +524,7 @@ impl Checker<'_> {
                         .filter(|bound| *bound != Ty::Error)
                     {
                         bindings.insert(
-                            formal.clone(),
+                            crate::types::TyParamName::new(formal),
                             crate::symbol_resolver::ty_subst_keep_unbound(bound, &known),
                         );
                     }
@@ -534,7 +549,7 @@ impl Checker<'_> {
                     .zip(explicit_type_arguments.iter().copied())
                 {
                     if !explicit.mentions_error() && !explicit.mentions_pending() {
-                        bindings.insert(formal.clone(), explicit);
+                        bindings.insert(crate::types::TyParamName::new(formal), explicit);
                     }
                 }
                 // Expected-result inference runs after argument inference and may replace a class
@@ -557,6 +572,7 @@ impl Checker<'_> {
                                     signature.clone(),
                                 )
                             }),
+                            Vec::new(),
                         )
                     });
                     continue;
@@ -638,6 +654,9 @@ impl Checker<'_> {
                                             source_argument,
                                             ..
                                         } => *source_argument,
+                                        LibraryConstructorFailure::ArgumentContradictions(
+                                            contradictions,
+                                        ) => contradictions.first_argument(),
                                         LibraryConstructorFailure::Mapping(_)
                                         | LibraryConstructorFailure::TypeArgumentMismatch {
                                             ..
@@ -647,8 +666,12 @@ impl Checker<'_> {
                                 return Err(failure);
                             }
                         }
-                        if let Some(((expected, actual), constructor, bound_constructor)) =
-                            type_argument_bound_failure
+                        if let Some((
+                            (expected, actual),
+                            constructor,
+                            bound_constructor,
+                            postponed_arguments,
+                        )) = type_argument_bound_failure
                         {
                             return Err(LibraryConstructorFailure::TypeArgumentMismatch {
                                 expected,
@@ -657,6 +680,7 @@ impl Checker<'_> {
                                 explicit: explicit_type_arguments,
                                 constructor,
                                 bound_constructor,
+                                postponed_arguments,
                             });
                         }
                         if let Some((failure, (params, call_sig))) =
@@ -752,7 +776,7 @@ impl Checker<'_> {
         self.check_selected_constructor_lambdas(scope, args, &selected.argument_types);
         let publication =
             constructor_commitment::ConstructorDeclarationShape::provider(classifier, &member);
-        self.commit_constructor(call, target.clone(), publication);
+        self.commit_constructor(scope, call, target.clone(), publication);
         if let Some(Some(bindings)) = member_bindings.get(candidate_index) {
             self.record_library_constructor_type_arguments(call, internal, classifier, bindings);
         }

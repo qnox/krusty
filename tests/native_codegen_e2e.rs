@@ -523,7 +523,10 @@ fn rendered_diagnostics(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<
         .iter()
         .map(|(path, text)| (path.as_str(), *text))
         .collect();
-    (artifacts, diags.render_all(&files))
+    (
+        artifacts,
+        diags.render_all(&files, krusty::diag::DiagnosticNames::Hidden),
+    )
 }
 
 #[test]
