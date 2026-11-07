@@ -238,6 +238,53 @@ impl Fixture {
         )
     }
 
+    fn closure(&mut self, expression: KlibIrExprId, result_type: KlibIrTypeId) -> KlibIrExprId {
+        let mut function = self.function.clone();
+        function.base = base(local_symbol(KlibIrSymbolKind::Function, 80));
+        function.dispatch_receiver = None;
+        function.context_parameters.clear();
+        function.extension_receiver = None;
+        function.regular_parameters.clear();
+        function.return_type = result_type;
+        let nothing = raw_type(
+            &mut self.arena,
+            public_symbol(
+                KlibIrSymbolKind::Class,
+                KlibPublicIdSignature::classifier(crate::types::type_name("kotlin/Nothing")),
+            ),
+            vec![],
+        );
+        let returned = self.arena.push_expr(
+            Some(nothing),
+            KlibIrExprKind::Return {
+                target: function.base.symbol.clone(),
+                value: expression,
+            },
+        );
+        function.body = Some(crate::metadata::klib_ir::tree::KlibIrBody::Block(vec![
+            KlibIrStatement::Expression(returned),
+        ]));
+        let function = self.arena.push_function(function);
+        let signature = raw_type(
+            &mut self.arena,
+            public_symbol(
+                KlibIrSymbolKind::Class,
+                KlibPublicIdSignature::classifier(crate::types::type_name("kotlin/Function0")),
+            ),
+            vec![KlibIrTypeArgument::Type {
+                variance: KlibIrVariance::Out,
+                ty: result_type,
+            }],
+        );
+        self.arena.push_expr(
+            Some(signature),
+            KlibIrExprKind::FunctionExpression {
+                function,
+                origin: Some("LAMBDA".into()),
+            },
+        )
+    }
+
     fn lower(&self, expression: KlibIrExprId, access: Access) -> (IrFile, Lowered<ExprId>) {
         self.lower_with(expression, access, false, false)
     }
@@ -542,4 +589,104 @@ fn initializer_value_must_have_the_declared_field_type() {
         fixture.lower(write, Access::Initializer).1,
         Err(KlibBodyDeclineReason::ImplicitConversion)
     );
+}
+
+#[test]
+fn nested_initializer_closure_keeps_exact_storage_for_reads_and_writes() {
+    for write in [false, true] {
+        let mut fixture = Fixture::new(false);
+        let (expression, result_type) = if write {
+            (
+                fixture.write(1, Some(fixture.receiver), fixture.unit_type),
+                fixture.unit_type,
+            )
+        } else {
+            (
+                fixture.read(1, Some(fixture.receiver), fixture.field_type),
+                fixture.field_type,
+            )
+        };
+        let closure = fixture.closure(expression, result_type);
+        let (ir, result) = fixture.lower(closure, Access::Initializer);
+        let IrExpr::Lambda {
+            impl_fn, captures, ..
+        } = ir.expr(result.unwrap())
+        else {
+            panic!("lowered closure")
+        };
+        assert_eq!(captures.len(), if write { 2 } else { 1 });
+        assert!(matches!(ir.expr(captures[0]), IrExpr::GetValue(0)));
+        let body = ir.functions[*impl_fn as usize].body.unwrap();
+        let operations = crate::ir::value_namespace_expressions(&ir, body)
+            .into_iter()
+            .filter_map(|id| match ir.expr(id) {
+                IrExpr::GetField {
+                    receiver,
+                    class,
+                    index,
+                } => Some((false, *receiver, *class, *index, None, id)),
+                IrExpr::SetField {
+                    receiver,
+                    class,
+                    index,
+                    value,
+                } => Some((true, *receiver, *class, *index, Some(*value), id)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [(stored, receiver, class, index, value, operation)] = operations.as_slice() else {
+            panic!("one exact field operation")
+        };
+        assert_eq!((*stored, *class, *index), (write, 0, 1));
+        assert!(matches!(ir.expr(*receiver), IrExpr::GetValue(0)));
+        assert_eq!(ir.checked_type(*receiver), Some(fixture.receiver_ty));
+        assert_eq!(
+            ir.checked_type(*operation),
+            Some(if write { Ty::Unit } else { fixture.field_ty })
+        );
+        if let Some(value) = value {
+            assert!(matches!(ir.expr(*value), IrExpr::GetValue(1)));
+            assert_eq!(ir.checked_type(*value), Some(fixture.field_ty));
+            assert!(receiver < value && value < operation);
+        }
+    }
+}
+
+#[test]
+fn nested_value_member_does_not_inherit_the_parent_storage_authority() {
+    for write in [false, true] {
+        let mut fixture = Fixture::new(true);
+        let (expression, result_type) = if write {
+            (
+                fixture.write(0, Some(fixture.receiver), fixture.unit_type),
+                fixture.unit_type,
+            )
+        } else {
+            (
+                fixture.read(0, Some(fixture.receiver), fixture.field_type),
+                fixture.field_type,
+            )
+        };
+        let closure = fixture.closure(expression, result_type);
+        let (ir, result) = fixture.lower(closure, Access::ValueReadOnly);
+        assert_eq!(
+            result,
+            Err(KlibBodyDeclineReason::UnsupportedOperation(if write {
+                "a field write"
+            } else {
+                "a field read"
+            }))
+        );
+        let field_operations = ir
+            .exprs
+            .iter()
+            .filter(|expression| {
+                matches!(
+                    expression,
+                    IrExpr::GetField { .. } | IrExpr::SetField { .. }
+                )
+            })
+            .count();
+        assert_eq!(field_operations, 0);
+    }
 }

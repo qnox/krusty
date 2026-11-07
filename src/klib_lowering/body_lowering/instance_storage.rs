@@ -20,6 +20,7 @@ struct Field<'a> {
     ty: Ty,
 }
 
+#[derive(Clone)]
 pub(super) struct InstanceStorageFrame<'a> {
     class: ClassId,
     receiver: Option<Ty>,
@@ -28,6 +29,12 @@ pub(super) struct InstanceStorageFrame<'a> {
 }
 
 impl<'a> InstanceStorageFrame<'a> {
+    /// Only constructor initialization storage was inherited by nested bodies. A value member's
+    /// read authority remains local to that member, as before the shared frame.
+    pub(super) fn nested_initializer(&self) -> Option<Self> {
+        matches!(self.access, Access::Initializer).then(|| self.clone())
+    }
+
     pub(super) fn initializer(
         class: ClassId,
         plan: &'a super::super::class_initialization::ClassInitialization<'a, 'a>,
