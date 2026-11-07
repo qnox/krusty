@@ -7,7 +7,6 @@
 use super::class_headers::{self, ClassMemberHeader};
 use super::decline::KlibBodyDeclineReason;
 use super::klib_types::semantic_type;
-use crate::fx_hash::HashSet;
 use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies};
 use crate::libraries::{
     KlibBodyCallable, KlibClassStorage, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
@@ -160,41 +159,28 @@ pub(super) fn plan<'a, 'b>(
             "an ordinary class does not delegate to Any and initialize its own instance",
         ));
     }
-    let mut fields = Vec::new();
-    let mut field_declarations = Vec::new();
     let mut steps = Vec::new();
-    let mut identities = HashSet::default();
-    for member in &header.class.members {
-        if let KlibIrMember::AnonymousInitializer { base, statements } = member {
-            if base.flags != 0 {
-                return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                    "a static or flagged class initializer",
-                ));
+    let storage =
+        super::class_storage::authenticate(&header, declared_superclass, |member, field| {
+            if let KlibIrMember::AnonymousInitializer { base, statements } = member {
+                if base.flags != 0 {
+                    return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                        "a static or flagged class initializer",
+                    ));
+                }
+                steps.push(InitializationStep::Block(statements));
             }
-            steps.push(InitializationStep::Block(statements));
-        }
-        let field = super::class_storage::member_field(member);
-        let Some(field) = field else { continue };
-        let index = u32::try_from(fields.len()).expect("a field list fits u32");
-        fields.push(super::class_storage::declared_field(
-            &header,
-            field,
-            &mut identities,
-        )?);
-        field_declarations.push(field);
-        if let Some(value) = field.initializer {
-            steps.push(InitializationStep::Field { index, value });
-        }
-    }
-    let storage = KlibClassStorage {
-        declaration: header.contract.clone(),
-        superclass: declared_superclass,
-        fields,
-    };
+            if let Some((index, field)) = field {
+                if let Some(value) = field.initializer {
+                    steps.push(InitializationStep::Field { index, value });
+                }
+            }
+            Ok(())
+        })?;
     Ok(Some(ClassInitialization {
         header,
-        field_declarations,
-        storage,
+        field_declarations: storage.field_declarations,
+        storage: storage.storage,
         steps,
     }))
 }
