@@ -189,7 +189,7 @@ mod intersection_inference;
 mod intersection_receiver_selection;
 mod invoke_selection;
 mod lexical_value_invoke;
-use lexical_value_invoke::{DeferredLexicalInvoke, LexicalInvokeSite};
+use lexical_value_invoke::{DeferredInvokePeers, DeferredLexicalInvoke, LexicalInvokeSite};
 mod lambda_call_shapes;
 mod property_read_selection;
 use lambda_call_shapes::UntypedLambdaCall;
@@ -17238,8 +17238,11 @@ impl<'a> Checker<'a> {
                     );
                     return ret;
                 }
-                let unshadowed_name =
-                    !self.lexical_value_claims_call_with_arguments(scope, &fname, args);
+                // An inapplicable function value remains a candidate, but it does not hide a
+                // same-named classifier. An applicable constructor still wins, and a constructor
+                // whose arguments map but whose types do not is reported beside the value.
+                let unshadowed_name = deferred_lexical_invoke.is_some()
+                    || !self.lexical_value_claims_call_with_arguments(scope, &fname, args);
                 // The alias, if any, is the one `select_classifier_binding` attached to the winning
                 // rung. A later spelling lookup would rediscover a star-imported alias even after a
                 // same-package class won (`class Pick<A, B>` above `typealias Pick<T> = Pick<T, T>`).
@@ -20074,22 +20077,68 @@ impl<'a> Checker<'a> {
                 let mut candidates = inapplicable_associated;
                 candidates.extend(self.resolver().top_level_candidates(&fname));
                 candidates.extend(inapplicable_classifier_invoke.iter().cloned());
+                let (nearer_lexical, farther_lexical) = if deferred_lexical_invoke.is_some() {
+                    Self::lexical_functions_around_value(scope, &fname)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                let invoke_call = CallArgs {
+                    call,
+                    args,
+                    arg_tys: &arg_tys,
+                };
+                let (constructor_candidates, constructor_name) = source_constructor_failure
+                    .as_ref()
+                    .map(|(_, candidates, name, _)| (candidates.as_slice(), name.as_str()))
+                    .unwrap_or((&[], ""));
+                let provider_constructor = match &constructor_mapping_failure {
+                    Some(LibraryConstructorFailure::TypeMismatch {
+                        rendered,
+                        expected,
+                        actual,
+                        ..
+                    }) if !rendered.is_empty() => Some((rendered.as_str(), *expected, *actual)),
+                    _ => None,
+                };
                 if self.report_deferred_lexical_invoke_among(
-                    CallArgs {
-                        call,
-                        args,
-                        arg_tys: &arg_tys,
-                    },
+                    invoke_call,
                     &fname,
                     span,
                     deferred_lexical_invoke.as_ref(),
-                    retained_receiver_call_rejections
-                        .as_ref()
-                        .map(|rejections| rejections.type_rejected_candidates())
-                        .unwrap_or_default(),
-                    &candidates,
+                    DeferredInvokePeers {
+                        nearer_lexical: &nearer_lexical,
+                        receiver: retained_receiver_call_rejections
+                            .as_ref()
+                            .map(|rejections| rejections.type_rejected_candidates())
+                            .unwrap_or_default(),
+                        farther_lexical: &farther_lexical,
+                        later: &candidates,
+                        constructors: constructor_candidates,
+                        constructor_name,
+                        provider_constructor,
+                    },
                 ) {
                     return Ty::Error;
+                }
+                // Every later level declined. A type-mismatch peer was reported above. Any
+                // remaining failure is a worse mapping error on a later rung, so the nearest
+                // deferred value owns the diagnostic before those reporters run.
+                if let Some(deferred) = deferred_lexical_invoke {
+                    return self.commit_deferred_lexical_invoke(
+                        scope,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &[],
+                        },
+                        &LexicalInvokeSite {
+                            callee,
+                            name: &fname,
+                            span,
+                            expected,
+                        },
+                        deferred,
+                    );
                 }
                 let had_rejected_callable = had_inapplicable_constructor
                     || !candidates.is_empty()
@@ -20268,23 +20317,6 @@ impl<'a> Checker<'a> {
                         );
                         return Ty::Error;
                     }
-                }
-                if let Some(deferred) = deferred_lexical_invoke {
-                    return self.commit_deferred_lexical_invoke(
-                        scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys: &[],
-                        },
-                        &LexicalInvokeSite {
-                            callee,
-                            name: &fname,
-                            span,
-                            expected,
-                        },
-                        deferred,
-                    );
                 }
                 let (message, identity, diagnostic_span) = if had_rejected_callable {
                     (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, span)

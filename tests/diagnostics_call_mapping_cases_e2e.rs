@@ -39,6 +39,13 @@ fn inapplicable_function_value_diagnostics_match_kotlinc_completely() {
         "fun f(n: Int, label: (String) -> Unit) { label(n) }",
         "fun label(x: Boolean) {}\nfun f(n: Int, label: (String) -> Unit) { label(n) }",
         "class R { fun label(x: Boolean) {} }\nfun f(n: Int, label: (String) -> Unit) { with(R()) { label(n) } }",
+        "fun label(x: Boolean): String = x.toString()\nfun f(label: (Int) -> String): String = label(\"x\")",
+        "fun label(x: Boolean, y: Boolean): String = \"\"\nfun f(label: (Int) -> String): String = label(\"x\")",
+        "class R { fun label(x: Boolean, y: Boolean) {} }\nfun f(label: (Int) -> String): String = with(R()) { label(\"x\") }",
+        "fun f(label: (Int) -> String): String {\nfun label(x: Boolean): String = \"b\"\nreturn label(\"x\")\n}",
+        "fun label(x: Boolean, y: Int = 1): String = \"\"\nfun f(n: Int, label: (String) -> Unit): Unit = label(n)",
+        "class label(val x: Boolean)\nfun f(label: (Int) -> String): String = label(\"x\")",
+        "class label(val x: Boolean, val y: Boolean)\nfun f(label: (Int) -> String): String = label(\"x\")",
     ];
     let stdlib = common::stdlib_jar();
     for (index, source) in cases.iter().enumerate() {
@@ -60,5 +67,26 @@ fn inapplicable_function_value_diagnostics_match_kotlinc_completely() {
             observed, expected,
             "complete diagnostic mismatch for {source:?}"
         );
+    }
+}
+
+#[test]
+fn inapplicable_function_value_programs_return_ok() {
+    let programs = [
+        (
+            "inapplicable_function_value_probe",
+            include_str!("box_regressions/inapplicableFunctionValueProbeKeepsFlowState.kt"),
+        ),
+        (
+            "inapplicable_function_value_later_level",
+            include_str!("box_regressions/inapplicableFunctionValueYieldsToLaterCallLevel.kt"),
+        ),
+        (
+            "inapplicable_function_value_constructor",
+            include_str!("box_regressions/inapplicableFunctionValueYieldsToConstructor.kt"),
+        ),
+    ];
+    for (stem, source) in programs {
+        common::expect_box_ok_with_stdlib(source, stem);
     }
 }

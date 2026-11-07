@@ -635,11 +635,18 @@ impl Checker<'_> {
                 } => (candidate_index, *resolved),
                 SourceConstructorSelection::NoMatch { mismatch } => {
                     if let Some(mismatch) = mismatch {
+                        let rendered = candidates.first().map_or_else(String::new, |candidate| {
+                            Self::constructor_candidate_display(
+                                internal.nested_segment_ref(),
+                                candidate,
+                            )
+                        });
                         return Err(LibraryConstructorFailure::TypeMismatch {
                             source_argument: mismatch.source_argument,
                             expected: mismatch.expected,
                             actual: mismatch.actual,
                             result: members.first().map(|member| member.ret),
+                            rendered,
                         });
                     }
                     if candidates.is_empty() {

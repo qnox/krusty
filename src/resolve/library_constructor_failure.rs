@@ -49,6 +49,8 @@ pub(super) enum LibraryConstructorFailure {
         /// it after reporting the argument error lets the enclosing expectation diagnose an
         /// independent result-type contradiction; no constructor target is committed to FIR.
         result: Option<Ty>,
+        /// kotlinc's `constructor(...): Name` rendering of the rejected declaration.
+        rendered: String,
     },
     TypeArgumentMismatch {
         expected: Ty,
