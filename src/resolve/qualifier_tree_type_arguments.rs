@@ -62,9 +62,10 @@ impl Checker<'_> {
             format!("{kind} '{}'", internal.nested_segment_ref())
         };
         let span = self.member_name_span(last.expression, name);
-        self.diags.error(
+        self.diags.error_named(
             span,
-            format!("nested {rendered} accessed via instance reference."),
+            crate::diag::names::NESTED_CLASS_ACCESSED_VIA_INSTANCE_REFERENCE,
+            format!("Nested {rendered} accessed via instance reference."),
         );
     }
 
@@ -111,10 +112,10 @@ impl Checker<'_> {
             return;
         }
         let span = self.qualifier_node_span(last.expression);
-        self.diags.error(
+        self.diags.error_named(
             span,
-            crate::features::deprecation_cycle_messages::PACKAGE_QUALIFIER_TYPE_ARGUMENTS
-                .to_string(),
+            crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED,
+            crate::features::deprecation_cycle_messages::PACKAGE_QUALIFIER_TYPE_ARGUMENTS,
         );
     }
 

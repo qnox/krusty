@@ -46,11 +46,10 @@ pub(crate) fn attach_dependency_function_realization(
     );
     let semantic_role = normalized_function_semantic_role(package, name, function);
     function.callable.semantic_role = match semantic_role {
-        Some(crate::types::SemanticCallRole::KotlinCharSequenceIterator)
-            if !compiler_builtin_owner =>
-        {
-            None
-        }
+        Some(
+            crate::types::SemanticCallRole::KotlinCharSequenceIterator
+            | crate::types::SemanticCallRole::IntrinsicConstNumeric(_),
+        ) if !compiler_builtin_owner => None,
         role => role,
     };
 }
@@ -609,7 +608,8 @@ fn comparable_range_to(
     let element = facts.receiver?;
     let bound = element.ty_param_bound()?;
     let is_element = |ty: &Ty| match (ty.kind(), element.kind()) {
-        (TyKind::TyParam(name, _), TyKind::TyParam(declared, _)) => name == declared,
+        (TyKind::TyParam(name, _), TyKind::TyParam(declared, _))
+        | (TyKind::Var(name, _), TyKind::Var(declared, _)) => name == declared,
         _ => false,
     };
     let applied_to_element = |ty: Ty, class| {
@@ -873,7 +873,7 @@ pub(crate) fn normalized_function_semantic_role(
 ) -> Option<crate::types::SemanticCallRole> {
     let params = function.semantic_params();
     let generic = function.generic_sig.as_ref();
-    function_semantic_role(&BuiltinFunctionDeclaration {
+    let facts = BuiltinFunctionDeclaration {
         package,
         name,
         kind: function.kind,
@@ -886,6 +886,13 @@ pub(crate) fn normalized_function_semantic_role(
         is_suspend: function.flags.suspend,
         is_operator: function.flags.operator,
         is_infix: function.flags.infix,
+    };
+    function_semantic_role(&facts).or_else(|| {
+        crate::libraries::intrinsic_const_numeric::function_operation(
+            &facts,
+            &function.callable.annotations,
+        )
+        .map(crate::types::SemanticCallRole::IntrinsicConstNumeric)
     })
 }
 
@@ -1387,7 +1394,7 @@ mod tests {
             ),
         );
         same_shape.generic_sig = Some(crate::libraries::GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: vec![vec![Ty::obj("kotlin/Enum")]],
             receiver: None,
             params: Vec::new(),

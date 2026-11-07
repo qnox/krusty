@@ -28,6 +28,39 @@ pub(super) enum ReferenceCoercion {
 }
 
 impl Emitter<'_> {
+    /// Materialize an assignment value at the slot's consumption boundary. The flag says
+    /// that a FunctionN invocation already fills an erased target slot and needs no adaptation.
+    pub(super) fn emit_assignment_operand(
+        &mut self,
+        value: ExprId,
+        jt: Ty,
+        code: &mut CodeBuilder,
+    ) -> (Ty, bool) {
+        // An erased `FunctionN.invoke` stored into an `Object` slot stays `Object`.
+        // The consumer after the store narrows it; casting at the store would put
+        // the checkcast inside the protected range.
+        // `FunctionN.invoke` returns `Object` even when the function type says
+        // `Unit`. A `Unit` consumer pops that object; an `Object` slot stores it.
+        let keep_erased_invoke = jvm_is_erased_top(jt)
+            && matches!(
+                self.ir.expr(value),
+                IrExpr::InvokeFunction { ret, .. } if *ret != Ty::Nothing
+            );
+        if keep_erased_invoke {
+            self.erased_invocations.insert(value);
+        }
+        // Any other value reaches the slot as a declaration's initializer does,
+        // in the slot an erased result leaves.
+        let source = if keep_erased_invoke {
+            self.emit_value(value, code);
+            self.erased_invocations.remove(&value);
+            self.value_ty(value)
+        } else {
+            self.emit_consumed_operand(value, code)
+        };
+        (source, keep_erased_invoke)
+    }
+
     /// Read a boxed mutable local at either its declared value type or its holder field type.
     ///
     /// Ordinary consumers need the `ObjectRef.element` value narrowed to the checked reference
@@ -115,7 +148,7 @@ impl Emitter<'_> {
         let checked = self.asserted_value(arg);
         self.ir.declaration_result_coercions.contains(&coercion)
             || (matches!(self.ir.expr(checked), IrExpr::Call { .. })
-                && self.ir.physical_types.contains_key(&checked))
+                && self.ir.physical_type(checked).is_some())
     }
 
     /// The value beneath every null assertion over `expression`: the slot those checks read.
@@ -149,10 +182,9 @@ impl Emitter<'_> {
         }
         let recorded = self
             .ir
-            .physical_types
-            .get(&producer)
-            .or_else(|| self.ir.physical_types.get(&checked));
-        if recorded.map(ir_ty_to_jvm) != Some(ir_ty_to_jvm(&slot)) {
+            .physical_type(producer)
+            .or_else(|| self.ir.physical_type(checked));
+        if recorded.map(|ty| ir_ty_to_jvm(&ty)) != Some(ir_ty_to_jvm(&slot)) {
             return false;
         }
         let Some(call) =
@@ -313,9 +345,7 @@ impl Emitter<'_> {
                 // annotation's stored `Class` read as `KClass`) is a representation, not a bound.
                 let slot = self
                     .ir
-                    .physical_types
-                    .get(arg)
-                    .copied()
+                    .physical_type(*arg)
                     .unwrap_or_else(|| self.value_ty(*arg));
                 if !jvm_is_erased_top(ir_ty_to_jvm(&slot))
                     && !inline_producer
@@ -385,7 +415,7 @@ impl Emitter<'_> {
         if self.transformed_result(*arg).is_some() {
             return None;
         }
-        let slot = *self.ir.physical_types.get(arg)?;
+        let slot = self.ir.physical_type(*arg)?;
         (jvm_is_erased_top(ir_ty_to_jvm(&slot)) && ir_ty_to_jvm(type_operand).is_jvm_scalar())
             .then_some((*arg, slot))
     }
@@ -538,6 +568,9 @@ impl Emitter<'_> {
                     .cw
                     .methodref(&classifier.render(), "unbox-impl", &descriptor);
                 code.invokevirtual(method, 0, slot_words(carrier) as i32);
+            } else if destination_semantic.is_some_and(declared_generic_shape) {
+                // See `coerce_declared_reference`.
+                self.checkcast_box(classifier, physical, code);
             }
             return;
         }
@@ -558,7 +591,53 @@ impl Emitter<'_> {
         } else if source_jvm.is_jvm_scalar() && physical.is_jvm_scalar() {
             emit_num_conv(source_jvm, physical, code);
         } else if source_jvm.is_reference() && physical.is_reference() {
-            self.coerce_reference_on_stack(source_jvm, physical, code);
+            self.coerce_declared_reference(source_jvm, destination_semantic, physical, code);
+        }
+    }
+
+    /// [`Self::coerce_reference_on_stack`] into a slot whose declared, unsubstituted type is
+    /// `declared`. kotlinc's implicit-cast inserter casts an argument that is not a subtype of the
+    /// declared parameter (`Z` passed as `Iterable<T>` or `I<out T>`); the cast survives
+    /// value-class boxing as a `checkcast` of the box.
+    pub(super) fn coerce_declared_reference(
+        &mut self,
+        source: Ty,
+        declared: Option<Ty>,
+        physical: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        match self.value_class_box(source) {
+            Some(classifier) if declared.is_some_and(declared_generic_shape) => {
+                self.checkcast_box(classifier, physical, code);
+            }
+            _ => self.coerce_reference_on_stack(source, physical, code),
+        }
+    }
+
+    /// The value class whose box `source` is on the stack.
+    fn value_class_box(&self, source: Ty) -> Option<crate::types::TypeName> {
+        let source = source.non_null();
+        source
+            .obj_internal()
+            .filter(|_| self.is_value_class_ty(&source))
+    }
+
+    /// Cast a value-class box to the reference `physical` slot unless that slot is `Object` or
+    /// the box's own class.
+    fn checkcast_box(
+        &mut self,
+        classifier: crate::types::TypeName,
+        physical: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        let physical = ir_ty_to_jvm(&physical);
+        if !physical.is_reference() || physical.non_null().obj_internal() == Some(classifier) {
+            return;
+        }
+        let internal = crate::jvm::names::instanceof_internal_name(physical);
+        if internal != "java/lang/Object" {
+            let class = self.cw.class_ref(&internal);
+            code.checkcast(class);
         }
     }
 
@@ -668,12 +747,7 @@ impl Emitter<'_> {
         physical: Ty,
         code: &mut CodeBuilder,
     ) {
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&expression)
-            .copied()
-            .unwrap_or(source);
+        let semantic = self.ir.logical_type(expression).unwrap_or(source);
         self.adapt_physical_operand(source, semantic, None, physical, code);
     }
 
@@ -692,12 +766,7 @@ impl Emitter<'_> {
         {
             return;
         }
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&expression)
-            .copied()
-            .unwrap_or(source);
+        let semantic = self.ir.logical_type(expression).unwrap_or(source);
         let destination_semantic = self
             .ir
             .call_declared_params
@@ -716,25 +785,19 @@ impl Emitter<'_> {
         physical: Ty,
         code: &mut CodeBuilder,
     ) {
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&expression)
-            .copied()
-            .unwrap_or(source);
-        let destination_semantic = self
-            .ir
-            .construction_declared_params
-            .get(&construction)
-            .and_then(|parameters| {
-                super::capture_order::physical_for(
-                    self.ir,
-                    self.constructed_class(construction),
-                    parameters.to_vec(),
-                )
-                .get(parameter_index)
-                .copied()
-            });
+        let semantic = self.ir.logical_type(expression).unwrap_or(source);
+        let destination_semantic =
+            self.ir
+                .construction_declared_params(construction)
+                .and_then(|parameters| {
+                    super::capture_order::physical_for(
+                        self.ir,
+                        self.constructed_class(construction),
+                        parameters.to_vec(),
+                    )
+                    .get(parameter_index)
+                    .copied()
+                });
         self.adapt_physical_operand(source, semantic, destination_semantic, physical, code);
     }
 
@@ -746,8 +809,7 @@ impl Emitter<'_> {
         let owner = self.constructed_class(construction);
         let checked = self
             .ir
-            .construction_declared_params
-            .get(&construction)
+            .construction_declared_params(construction)
             .map(|params| super::capture_order::physical_for(self.ir, owner, params.to_vec()));
         crate::jvm::physical_type::constructor_operand_tys(descriptor, checked.as_deref())
             .expect("constructor descriptor must be valid")
@@ -760,4 +822,11 @@ impl Emitter<'_> {
         };
         *internal
     }
+}
+
+/// A declared parameter type that names a type parameter without being one (`Iterable<T>`,
+/// `I<out T>`). No concrete argument is a subtype of it before substitution; a bare `T` is checked
+/// against its bound instead.
+fn declared_generic_shape(declared: Ty) -> bool {
+    !declared.non_null().is_ty_param() && crate::types::ty_mentions_any_param(declared)
 }

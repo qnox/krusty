@@ -21,6 +21,26 @@ pub enum ReferenceJvmAcceptance {
     Unavailable(String),
 }
 
+/// JVM settings Kotlin's own test runner supplies for directive-selected test-only features.
+/// Both enabling and disabling one passes through kotlinc's test-only argument check, even when
+/// another directive later overrides it. Feature ownership comes from the exact release table.
+pub fn reference_jvm_properties<'a>(arguments: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let table = crate::features::FeatureTable::for_version(crate::kotlin_version::target())
+        .expect("the configured reference release has a feature table");
+    let needs_test_features = arguments
+        .into_iter()
+        .filter_map(|argument| argument.strip_prefix("-XXLanguage:"))
+        .flat_map(|value| value.split(','))
+        .filter_map(|value| value.strip_prefix('+').or_else(|| value.strip_prefix('-')))
+        .filter_map(|name| table.get(name))
+        .any(|feature| feature.test_only);
+    if needs_test_features {
+        vec!["-Dkotlinc.test.allow.testonly.language.features=true".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
 struct ScratchDir(PathBuf);
 
 impl Drop for ScratchDir {
@@ -135,6 +155,13 @@ fn compile_unit(
     };
 
     let mut command = Command::new(kotlinc);
+    // The launcher forwards `-J` to this compiler JVM. The persistent test server applies the
+    // same settings at process start and keeps property-distinct compiler pools.
+    command.args(
+        reference_jvm_properties(language_args.iter().map(String::as_str))
+            .into_iter()
+            .map(|property| format!("-J{property}")),
+    );
     command
         .args(&kotlin_paths)
         .args(&java_paths)

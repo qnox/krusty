@@ -356,7 +356,7 @@ fn a_type_alias_is_rendered_as_the_reference_compiler_renders_it() {
 /// difference rather than a defect: the reference compiler rejects an `expect` and its `actual` in
 /// the SAME module (`expect and corresponding actual are declared in the same module`), so it
 /// reports all four of these as unmatched. krusty compiles a platform module and its `dependsOn`
-/// chain as ONE source set — see the multiplatform entry in `docs/SPEC.md` — where a pair in one
+/// chain as ONE source set where a pair in one
 /// file is exactly how a matched pair looks. Only krusty's side is asserted here.
 #[test]
 fn a_matched_actual_is_silent() {
