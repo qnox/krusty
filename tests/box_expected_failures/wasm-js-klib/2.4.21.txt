@@ -409,7 +409,6 @@ callableReference/bound/companionObjectReceiver.kt
 callableReference/bound/companionObjectReceiverInheritsFromOuter.kt
 callableReference/bound/dontShareReceiver.kt
 callableReference/bound/emptyLHS.kt
-callableReference/bound/enumEntryMember.kt
 callableReference/bound/equals/nullableReceiverInEquals.kt
 callableReference/bound/genericBoundPropertyAsCrossinline.kt
 callableReference/bound/genericValOnLHS.kt
@@ -1827,7 +1826,6 @@ enum/kt18731_2.kt
 enum/kt20651_inlineLambda.kt
 enum/kt38540.kt
 enum/kt44744_innerClass.kt
-enum/kt46605.kt
 enum/kt7257_boundReference1.kt
 enum/kt7257_boundReference2.kt
 enum/kt7257_boundReferenceWithImplicitReceiver.kt
