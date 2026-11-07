@@ -340,7 +340,7 @@ struct ScannedFileHeader {
 
 /// The same token-only preamble consumed by the syntax parser and name lexer.
 fn scan_file_imports(text: &str, tokens: &[crate::token::Token]) -> ScannedFileHeader {
-    let header = crate::file_header::from_tokens(text, tokens);
+    let header = crate::token::file_header::from_tokens(text, tokens);
     ScannedFileHeader {
         package: header.package,
         imports: header

@@ -11,9 +11,9 @@ pub fn lex(src: &str, diags: &mut DiagSink) -> Vec<Token> {
     lexer(src, diags).run()
 }
 
-pub(crate) fn file_header(src: &str, diags: &mut DiagSink) -> crate::file_header::Header {
+pub(crate) fn file_header(src: &str, diags: &mut DiagSink) -> crate::token::file_header::Header {
     let mut lexer = lexer(src, diags);
-    crate::file_header::read(src, || lexer.next_token())
+    crate::token::file_header::read(src, || lexer.next_token())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -426,7 +426,7 @@ impl<'a> Lexer<'a> {
     fn run_names(mut self) -> Vec<NameToken> {
         let mut names = Vec::new();
         let source = self.s;
-        let header = crate::file_header::read(source, || self.next_token());
+        let header = crate::token::file_header::read(source, || self.next_token());
         let mut prefix = header.prefix.into_iter();
         loop {
             let token = prefix.next().unwrap_or_else(|| self.next_token());
