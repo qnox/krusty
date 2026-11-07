@@ -11,6 +11,11 @@ pub fn lex(src: &str, diags: &mut DiagSink) -> Vec<Token> {
     lexer(src, diags).run()
 }
 
+pub(crate) fn file_header(src: &str, diags: &mut DiagSink) -> crate::file_header::Header {
+    let mut lexer = lexer(src, diags);
+    crate::file_header::read(src, || lexer.next_token())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NameTokenKind {
     Ident,
@@ -420,14 +425,13 @@ impl<'a> Lexer<'a> {
 
     fn run_names(mut self) -> Vec<NameToken> {
         let mut names = Vec::new();
-        // `import` is a soft keyword: a directive only where it starts a line (or follows `;`,
-        // which lexes as a line break), as an import list entry does.
-        let mut line_start = true;
+        let source = self.s;
+        let header = crate::file_header::read(source, || self.next_token());
+        let mut prefix = header.prefix.into_iter();
         loop {
-            let token = self.next_token();
-            let starts_line = std::mem::replace(&mut line_start, token.kind == TokenKind::Newline);
+            let token = prefix.next().unwrap_or_else(|| self.next_token());
             let kind = match token.kind {
-                TokenKind::Ident if starts_line && token.text(self.s) == "import" => {
+                TokenKind::Ident if header.import_starts.binary_search(&token.span.lo).is_ok() => {
                     Some(NameTokenKind::Import)
                 }
                 TokenKind::Ident => Some(NameTokenKind::Ident),
@@ -1702,10 +1706,9 @@ mod tests {
         assert!(!diagnostics.has_errors());
     }
 
-    /// `import` is a soft keyword: the name scan reports a directive only for a line-initial
-    /// `import` (a `;` lexes as a line break); elsewhere it is an ordinary name.
+    /// Only import-list positions in the file preamble receive the directive role.
     #[test]
-    fn only_a_line_initial_import_is_a_directive_name_token() {
+    fn only_a_preamble_import_is_a_directive_name_token() {
         let source = "package p; import q.Semi\nimport q.Shown\nval import = q.import\n";
         let mut diagnostics = DiagSink::new();
         let names = lex_name_tokens(source, &mut diagnostics)
