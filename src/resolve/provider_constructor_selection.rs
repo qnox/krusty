@@ -635,12 +635,22 @@ impl Checker<'_> {
                 } => (candidate_index, *resolved),
                 SourceConstructorSelection::NoMatch { mismatch } => {
                     if let Some(mismatch) = mismatch {
-                        let rendered = candidates.first().map_or_else(String::new, |candidate| {
-                            Self::constructor_candidate_display(
-                                internal.nested_segment_ref(),
-                                candidate,
-                            )
+                        let generic = members.first().is_some_and(|member| {
+                            member
+                                .generic_sig
+                                .as_ref()
+                                .is_some_and(|signature| !signature.formals.is_empty())
                         });
+                        let rendered = if generic {
+                            String::new()
+                        } else {
+                            candidates.first().map_or_else(String::new, |candidate| {
+                                Self::constructor_candidate_display(
+                                    internal.nested_segment_ref(),
+                                    candidate,
+                                )
+                            })
+                        };
                         return Err(LibraryConstructorFailure::TypeMismatch {
                             source_argument: mismatch.source_argument,
                             expected: mismatch.expected,

@@ -47,6 +47,9 @@ fn inapplicable_function_value_diagnostics_match_kotlinc_completely() {
         "class label(val x: Boolean)\nfun f(label: (Int) -> String): String = label(\"x\")",
         "class label(val x: Boolean, val y: Boolean)\nfun f(label: (Int) -> String): String = label(\"x\")",
         "fun f(label: (String, String) -> Unit) {\nfun <T> label(x: T, y: Boolean) {}\nlabel(1, \"bad\")\n}",
+        "fun f(label: (String, String) -> Unit) {\nfun label(x: Int, y: Boolean) {}\nlabel(1, \"bad\")\n}",
+        "fun <T> label(x: Boolean) {}\nfun f(label: (Int) -> String): String = label(\"x\")",
+        "class label<T>(val x: Boolean)\nfun f(label: (Int) -> String): String = label(\"x\")",
     ];
     let stdlib = common::stdlib_jar();
     for (index, source) in cases.iter().enumerate() {

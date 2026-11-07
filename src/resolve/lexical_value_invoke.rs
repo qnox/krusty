@@ -261,6 +261,15 @@ impl Checker<'_> {
             return None;
         }
         let signature = &callable.signature;
+        // A generic callable is a different failure from a concrete type mismatch. kotlinc leaves
+        // it out of the none-applicable set and reports the deferred value's own argument.
+        if signature
+            .generic_sig
+            .as_ref()
+            .is_some_and(|generic| !generic.formals.is_empty())
+        {
+            return None;
+        }
         let context_count = signature.context_count.min(signature.params.len());
         let call_sig = signature.call_sig().suffix(context_count);
         let parameters = &signature.params[context_count..];
@@ -381,6 +390,9 @@ impl Checker<'_> {
         candidate: &crate::libraries::FunctionInfo,
     ) -> Option<String> {
         let signature = candidate.semantic_signature();
+        if !signature.formals.is_empty() {
+            return None;
+        }
         let context_count = candidate.context_count.min(signature.params.len());
         let call_sig = candidate.call_sig.suffix(context_count);
         let parameters = &signature.params[context_count..];
