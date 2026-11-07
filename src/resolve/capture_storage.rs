@@ -480,6 +480,7 @@ impl Checker<'_> {
             lexical_shadow_depth: 0,
             lexical_binding: local.lexical_capture_identity,
             capture_dependency: None,
+            constructor_projections: Vec::new(),
             receiver_capture: None,
             receiver_role: None,
         });
@@ -579,9 +580,19 @@ impl Checker<'_> {
                 )
             });
         let innermost_label = self.this_labels.last();
-        let enclosing_instance = scope
-            .this_ty()
-            .filter(|_| innermost_label.is_some_and(|label| label.2));
+        // Class labels carry source labels, not closure identities. Keep the selected current
+        // dispatch rung's declared type and normalized enclosing-class role together here;
+        // a flow-narrowed `this` is a body lookup fact, not the constructor capture's ABI.
+        let enclosing_receiver = innermost_label.filter(|label| label.2).and_then(|_| {
+            self.declared_implicit_receivers(scope)
+                .into_iter()
+                .find(|receiver| receiver.current && receiver.class_receiver)
+        });
+        let enclosing_instance = enclosing_receiver
+            .as_ref()
+            .map(|receiver| receiver.declared_ty);
+        let enclosing_instance_role =
+            enclosing_receiver.and_then(|receiver| receiver.receiver_role);
         if implicit_receiver_capture.is_some() {
             // Receiver properties are reached through the captured receiver coordinate below; they
             // are not independent lexical values. Keeping both creates an impossible constructor
@@ -870,8 +881,8 @@ impl Checker<'_> {
         // The enclosing instance goes FIRST: lowering identifies it by POSITION (field 0), which is
         // what both an outer member read and a `this@Outer` go through.
         if needs_outer {
-            match enclosing_instance {
-                Some(outer) => result.values.push(AnonymousObjectCapture {
+            match (enclosing_instance, enclosing_instance_role) {
+                (Some(outer), Some(role)) => result.values.push(AnonymousObjectCapture {
                     name: "this$0".to_string(),
                     ty: outer,
                     shared_cell: false,
@@ -889,10 +900,11 @@ impl Checker<'_> {
                     lexical_shadow_depth: 0,
                     lexical_binding: None,
                     capture_dependency: None,
+                    constructor_projections: Vec::new(),
                     receiver_capture: None,
-                    receiver_role: None,
+                    receiver_role: Some(role),
                 }),
-                None => {
+                _ => {
                     result.unsupported.get_or_insert("this".to_string());
                 }
             }
@@ -925,6 +937,7 @@ impl Checker<'_> {
                 lexical_shadow_depth: 0,
                 lexical_binding: None,
                 capture_dependency: None,
+                constructor_projections: Vec::new(),
                 receiver_capture,
                 receiver_role,
             });
@@ -938,15 +951,13 @@ impl Checker<'_> {
                 continue;
             };
             let source = match local.origin {
-                ReceiverFnValueOrigin::ClassStorage(field)
-                | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
-                    AnonymousObjectCaptureSource::ClassStorage { field }
+                ReceiverFnValueOrigin::ClassStorage(storage) => {
+                    AnonymousObjectCaptureSource::ClassStorage(storage)
                 }
-                ReceiverFnValueOrigin::Local
-                | ReceiverFnValueOrigin::DispatchProperty { .. }
-                | ReceiverFnValueOrigin::TopLevelProperty => {
-                    AnonymousObjectCaptureSource::LexicalValue
+                ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field } => {
+                    AnonymousObjectCaptureSource::EnumEntryPropertyStorage { owner, field }
                 }
+                _ => AnonymousObjectCaptureSource::LexicalValue,
             };
             result.values.push(AnonymousObjectCapture {
                 // Smart-cast state is a fact about this control-flow point, not the type of a
@@ -974,6 +985,7 @@ impl Checker<'_> {
                 lexical_shadow_depth: 0,
                 lexical_binding: local.lexical_capture_identity,
                 capture_dependency: None,
+                constructor_projections: Vec::new(),
                 receiver_capture: None,
                 receiver_role: None,
             });

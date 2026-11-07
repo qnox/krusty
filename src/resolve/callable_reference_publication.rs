@@ -189,3 +189,11 @@ impl Checker<'_> {
         Ty::from(TyKind::Fun(expected))
     }
 }
+
+/// Whether an already-selected top-level callable has no reference realization to publish.
+pub(super) fn lacks_reference_realization(selected: &crate::libraries::FunctionInfo) -> bool {
+    selected.callable.external_identity.is_none()
+        && selected.callable.owner.matches("")
+        && selected.source_key.is_none()
+        && selected.stable_declaration.is_none()
+}

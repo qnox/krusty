@@ -43,8 +43,6 @@ mod class_comparison_e2e;
 mod classfile_low_priority_annotation_e2e;
 #[path = "common/mod.rs"]
 mod common_core;
-#[path = "jvm_conformance_deadline_e2e.rs"]
-mod jvm_conformance_deadline_e2e;
 #[cfg(test)]
 pub(crate) use common_core::server_pool::Pool as ServerPool;
 #[path = "common/compiler_plugin_fixture.rs"]
@@ -731,12 +729,10 @@ mod delegated_properties_array_e2e;
 mod delegation_forwarder_signature_e2e;
 #[path = "dep_resolution.rs"]
 mod dep_resolution;
-#[path = "dependency_override_signature_e2e.rs"]
-mod dependency_override_signature_e2e;
+#[path = "e2e/dependency_overrides.rs"]
+mod dependency_overrides;
 #[path = "dependency_property_reference_name_e2e.rs"]
 mod dependency_property_reference_name_e2e;
-#[path = "dependency_value_class_override_e2e.rs"]
-mod dependency_value_class_override_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
 mod descriptor_arity_fails_closed_e2e;
 #[path = "descriptor_element_companion_serializer_e2e.rs"]
@@ -1140,6 +1136,8 @@ mod inferred_types;
 mod inheritance_e2e;
 #[path = "inherited_collection_bridge_e2e.rs"]
 mod inherited_collection_bridge_e2e;
+#[path = "e2e/inherited_defaults.rs"]
+mod inherited_defaults;
 #[path = "inherited_interface_default_e2e.rs"]
 mod inherited_interface_default_e2e;
 #[path = "inherited_member_owner_e2e.rs"]
@@ -1534,6 +1532,8 @@ mod metadata_return_value_status_e2e;
 #[path = "metadata_synthetic_classes_e2e.rs"]
 mod metadata_synthetic_classes_e2e;
 mod metadata_type_modules;
+#[path = "nullable_function_field_signature_e2e.rs"]
+mod nullable_function_field_signature_e2e;
 metadata_type_modules::declare!();
 #[path = "e2e/line_breaks.rs"]
 mod line_breaks;
@@ -1565,8 +1565,6 @@ mod mpp_expect_actual_e2e;
 mod mpp_requires_the_feature_e2e;
 #[path = "multifile_inline_part_splice_e2e.rs"]
 mod multifile_inline_part_splice_e2e;
-#[path = "native_conformance_deadline_e2e.rs"]
-mod native_conformance_deadline_e2e;
 #[path = "nested_block_comment_e2e.rs"]
 mod nested_block_comment_e2e;
 #[path = "e2e/nested_classifiers.rs"]
@@ -1695,14 +1693,8 @@ mod value_class_generic_carrier_e2e;
 mod value_class_generic_slot_read_e2e;
 #[path = "value_class_hidden_constructor_e2e.rs"]
 mod value_class_hidden_constructor_e2e;
-#[path = "value_class_inherited_default_call_e2e.rs"]
-mod value_class_inherited_default_call_e2e;
-#[path = "value_class_inherited_default_names_e2e.rs"]
-mod value_class_inherited_default_names_e2e;
 #[path = "value_class_interface_default_receiver_e2e.rs"]
 mod value_class_interface_default_receiver_e2e;
-#[path = "value_class_interface_defaults_e2e.rs"]
-mod value_class_interface_defaults_e2e;
 #[path = "value_class_interface_entry_e2e.rs"]
 mod value_class_interface_entry_e2e;
 #[path = "value_class_java_generic_constructor_e2e.rs"]

@@ -776,7 +776,7 @@ impl Checker<'_> {
         self.check_selected_constructor_lambdas(scope, args, &selected.argument_types);
         let publication =
             constructor_commitment::ConstructorDeclarationShape::provider(classifier, &member);
-        self.commit_constructor(call, target.clone(), publication);
+        self.commit_constructor(scope, call, target.clone(), publication);
         if let Some(Some(bindings)) = member_bindings.get(candidate_index) {
             self.record_library_constructor_type_arguments(call, internal, classifier, bindings);
         }

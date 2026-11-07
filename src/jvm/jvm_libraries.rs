@@ -4349,18 +4349,14 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             .iter()
             .map(|(_, name, source)| (name.clone(), source.clone()))
             .collect::<Vec<_>>();
-        let Some(headers) = super::java_stub::stub_classes(
+        // Lenient, like kotlinc: one unresolvable Java type must not withdraw every Java header of
+        // the module (`an_unresolved_type_in_one_java_source_keeps_the_module_java_headers`).
+        let headers = super::java_stub::stub_classes(
             &java_blocks,
-            super::java_stub::StubMode::Strict,
+            super::java_stub::StubMode::Lenient,
             &world,
-        ) else {
-            return Err(crate::libraries::SourceHeaderError {
-                source: java[0].0,
-                message:
-                    "cannot resolve Java source declaration headers against this source module"
-                        .into(),
-            });
-        };
+        )
+        .expect("lenient Java header stubbing keeps every source set");
         *self.source_headers.borrow_mut() = Some(self.cp.push_stub_overlay(headers));
         Ok(())
     }

@@ -337,6 +337,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
         IrCheckedOperation::ConstructorDelegation {
             target,
             outer_parameter,
+            capture_arguments,
             arguments,
             substitutions,
             ..
@@ -354,6 +355,9 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             }
             if let Some(outer) = outer_parameter {
                 *outer = ty(*outer, names);
+            }
+            for (_, capture) in capture_arguments.iter_mut().flatten() {
+                *capture = ty(*capture, names);
             }
             checked_arguments(arguments, names);
             substitutions
@@ -569,7 +573,7 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
         IrExpr::Checked(operation) => checked_operation(operation, names),
         IrExpr::CallableReference(reference) => {
             match &mut reference.target {
-                IrCallableReferenceTarget::Constructor { classifier }
+                IrCallableReferenceTarget::Constructor { classifier, .. }
                 | IrCallableReferenceTarget::Classifier { classifier, .. } => {
                     name(classifier, names)
                 }
@@ -1336,6 +1340,11 @@ impl super::IrFile {
                 default.result = ty(default.result, names);
                 tys(&mut default.applied_parameters, names);
                 default.applied_result = ty(default.applied_result, names);
+                for parameter in default.type_parameters.iter_mut() {
+                    for bound in parameter.bounds.iter_mut() {
+                        resolved_ty(&mut bound.ty, names);
+                    }
+                }
             }
         }
         for overrides in self.function_overrides.values_mut() {

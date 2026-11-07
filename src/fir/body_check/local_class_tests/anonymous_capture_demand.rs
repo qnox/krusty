@@ -1,6 +1,76 @@
 use super::*;
 
 #[test]
+fn forwarded_nested_object_reads_the_actual_enclosing_capture_owner() {
+    let source =
+        include_str!("../../../../tests/box_regressions/captureStorageForwardedNestedObject.kt");
+    let (index, bodies) = checked_streamed_bodies(source);
+    let selected = |name| {
+        bodies
+            .iter()
+            .filter(|body| {
+                index.declaration_name(DeclarationId::from_raw(body.owner().raw())) == Some(name)
+            })
+            .collect::<Vec<_>>()
+    };
+    let makers = selected("make");
+    let [maker] = makers.as_slice() else {
+        panic!("one enclosing construction body expected")
+    };
+    let outer = (0..maker.expression_count())
+        .filter_map(
+            |raw| match &maker.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::AnonymousObject(object) => Some(object),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [outer] = outer.as_slice() else {
+        panic!("one enclosing anonymous object expected")
+    };
+    let [capture] = outer.captures.as_ref() else {
+        panic!("one lexical capture expected")
+    };
+    assert!(
+        capture.stored,
+        "the later member invocation needs the enclosing field"
+    );
+    assert_eq!(
+        capture.source,
+        FirLocalClassCaptureSource::Value(maker.parameters()[0].value)
+    );
+    let readers = selected("read");
+    let [reader] = readers.as_slice() else {
+        panic!("one later member body expected")
+    };
+    let nested = (0..reader.expression_count())
+        .filter_map(
+            |raw| match &reader.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::AnonymousObject(object) => Some(object),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(nested.len(), 2);
+    let captures = nested
+        .iter()
+        .flat_map(|object| object.captures.iter())
+        .collect::<Vec<_>>();
+    let [capture] = captures.as_slice() else {
+        panic!("only the callback stores the forwarded value")
+    };
+    assert!(capture.stored);
+    assert_eq!(
+        capture.source,
+        FirLocalClassCaptureSource::ClassStorage {
+            owner: outer.declaration,
+            enclosing_depth: 0,
+            field: 0,
+        }
+    );
+}
+
+#[test]
 fn anonymous_initializer_capture_uses_its_constructor_parameter_without_storage() {
     let (body, _) = checked_function_body(
         "fun create(value: Int): Any = object { val value: Int = value }",
@@ -128,4 +198,763 @@ fn anonymous_delegate_operands_follow_the_enclosing_construction_lifetime() {
         }
     }
     assert_eq!((constructor_reads, stored_reads), (1, 1));
+}
+
+#[test]
+fn initializer_function_value_reads_its_constructor_capture() {
+    let (index, bodies) = checked_streamed_bodies(
+        "fun create(read: String.() -> Int): Any = object { val result = \"word\".read() }",
+    );
+    let creators = bodies
+        .iter()
+        .filter(|body| {
+            index.declaration_name(DeclarationId::from_raw(body.owner().raw())) == Some("create")
+        })
+        .collect::<Vec<_>>();
+    let [creator] = creators.as_slice() else {
+        panic!("one constructor call body expected")
+    };
+    let objects = (0..creator.expression_count())
+        .filter_map(
+            |raw| match &creator.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::AnonymousObject(object) => Some(object),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [object] = objects.as_slice() else {
+        panic!("one anonymous constructor expected")
+    };
+    let [capture] = object.captures.as_ref() else {
+        panic!("one function-value capture expected")
+    };
+    assert!(!capture.stored);
+    assert_eq!(
+        capture.source,
+        FirLocalClassCaptureSource::Value(creator.parameters()[0].value)
+    );
+    let reads = bodies
+        .iter()
+        .flat_map(|body| {
+            (0..body.expression_count()).filter_map(move |raw| {
+                let FirExprKind::ConstructorCaptureRead {
+                    owner, field, site, ..
+                } = &body.expr(FirExprId::from_raw(raw as u32))?.kind
+                else {
+                    return None;
+                };
+                (*owner == object.declaration).then_some((*field, *site))
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reads,
+        [(0, crate::fir::FirConstructorCaptureSite::Parameter)]
+    );
+}
+
+fn is_local_capture_subclass(index: &ResolvedModuleIndex, declaration: DeclarationId) -> bool {
+    index
+        .classifier_header(declaration)
+        .and_then(|header| header.superclass)
+        .and_then(|superclass| superclass.get().kotlin_class_internal())
+        .and_then(|superclass| index.classifier_declaration(superclass))
+        .is_some_and(|superclass| index.owns_local_capture_environment(superclass))
+}
+
+#[test]
+fn constructor_capture_families_project_one_canonical_field_through_shadowed_calls() {
+    let source =
+        include_str!("../../../../tests/box_regressions/captureStorageConstructorFamilies.kt");
+    let (index, bodies) = checked_streamed_bodies(source);
+    let selected = |name| {
+        let mut selected = bodies.iter().filter(|body| {
+            index.declaration_name(DeclarationId::from_raw(body.owner().raw())) == Some(name)
+        });
+        let body = selected.next().expect("one selected member body");
+        assert!(selected.next().is_none());
+        body
+    };
+    let check = selected("check");
+    let captures = (0..check.statement_count())
+        .filter_map(
+            |raw| match &check.statement(FirStatementId::from_raw(raw as u32))?.kind {
+                FirStatementKind::LocalDeclaration {
+                    declaration,
+                    captures,
+                    ..
+                } => Some((*declaration, captures)),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(captures.len(), 3);
+    let mut identities = Vec::new();
+    let mut a_owner = None;
+    for (declaration, captures) in captures {
+        let [capture] = captures.as_ref() else {
+            panic!("each classifier stores exactly one resolved value: {captures:?}")
+        };
+        assert!(capture.stored);
+        assert!(!capture.shared_cell);
+        assert_eq!(capture.ty.get(), Ty::String);
+        assert_eq!(
+            capture.source,
+            FirLocalClassCaptureSource::Value(check.parameters()[0].value)
+        );
+        let identity = capture.capture_identity.expect("canonical capture family");
+        assert!(matches!(identity, ClassCaptureIdentity::Value { .. }));
+        assert!(!identities.contains(&identity));
+        identities.push(identity);
+        if is_local_capture_subclass(&index, declaration) {
+            assert!(
+                a_owner.replace(declaration).is_none(),
+                "one declared subclass"
+            );
+        }
+    }
+    let a_owner = a_owner.expect("declared subclass");
+    let super_operands = bodies
+        .iter()
+        .filter(|body| {
+            index
+                .declaration_anchor(DeclarationId::from_raw(body.owner().raw()))
+                .and_then(|anchor| anchor.owner)
+                == Some(a_owner)
+        })
+        .flat_map(|body| {
+            (0..body.statement_count()).filter_map(move |raw| {
+                let FirStatementKind::ConstructorDelegation(call) =
+                    &body.statement(FirStatementId::from_raw(raw as u32))?.kind
+                else {
+                    return None;
+                };
+                call.external_capture_arguments
+                    .as_deref()
+                    .map(|arguments| (body, arguments))
+            })
+        })
+        .collect::<Vec<_>>();
+    let [(constructor, arguments)] = super_operands.as_slice() else {
+        panic!("one explicit superclass projection: {super_operands:?}")
+    };
+    let [argument] = *arguments else {
+        panic!("one superclass operand")
+    };
+    assert!(!argument.shared_cell_holder);
+    assert_eq!(
+        constructor
+            .expr(argument.value)
+            .expect("before-super capture operand")
+            .kind,
+        FirExprKind::ConstructorCaptureRead {
+            owner: a_owner,
+            field: 0,
+            shared_cell: false,
+            site: crate::fir::FirConstructorCaptureSite::Parameter
+        }
+    );
+    let own = selected("own");
+    let reads = (0..own.expression_count())
+        .filter_map(
+            |raw| match &own.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::ClassStorageRead { owner, field } => Some((*owner, *field)),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(reads, [(a_owner, 0)]);
+    for method in ["requestedB", "requestedC"] {
+        let body = selected(method);
+        let calls = (0..body.expression_count())
+            .filter_map(|raw| {
+                let FirExprKind::ConstructorCall(call) =
+                    &body.expr(FirExprId::from_raw(raw as u32))?.kind
+                else {
+                    return None;
+                };
+                call.external_capture_arguments.as_deref()
+            })
+            .collect::<Vec<_>>();
+        let [arguments] = calls.as_slice() else {
+            panic!("one separately streamed constructor call: {calls:?}")
+        };
+        let [argument] = *arguments else {
+            panic!("one projected capture operand: {arguments:?}")
+        };
+        assert!(!argument.shared_cell_holder);
+        assert!(
+            matches!(body.expr(argument.value).expect("selected operand").kind,
+            FirExprKind::ClassStorageRead { owner, field: 0 } if owner == a_owner)
+        );
+    }
+}
+
+#[test]
+fn missing_ambiguous_and_malformed_constructor_sources_never_recover_a_shadowing_parameter() {
+    let source =
+        include_str!("../../../../tests/box_regressions/captureStorageConstructorFamilies.kt");
+    for corruption in 0..3 {
+        let missing_plan = corruption == 0;
+        let malformed_plan = corruption == 2;
+        let inputs =
+            [crate::source::SourceInput::kotlin(source).with_file_stem("FirCaptureProjection")];
+        let mut prepared = super::super::test_support::prepare_fir_source(
+            &inputs,
+            0,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &crate::features::LangFeatures::new(),
+        );
+        if missing_plan {
+            let info = &mut prepared.info;
+            let before = info.expr_lowers.len();
+            info.expr_lowers.retain(|_, lowering| {
+                !matches!(
+                    lowering,
+                    crate::resolve::ExprLowering::ConstructorCaptures(_)
+                )
+            });
+            assert!(
+                info.expr_lowers.len() < before,
+                "actual committed source plans removed"
+            );
+        }
+        if malformed_plan {
+            for lowering in prepared.info.expr_lowers.values_mut() {
+                if let crate::resolve::ExprLowering::ConstructorCaptures(plan) = lowering {
+                    if let crate::resolve::ConstructorCapturePlan::Selected(projected) =
+                        plan.as_mut()
+                    {
+                        if let Some(first) = projected.first() {
+                            let mut unused = first.clone();
+                            unused.required = ClassCaptureIdentity::Value {
+                                owner: crate::types::type_name("UnusedCapturePlanOwner"),
+                                binding: u32::MAX,
+                            };
+                            let mut extended = projected.to_vec();
+                            extended.push(unused);
+                            *projected = extended.into_boxed_slice();
+                        }
+                    }
+                }
+            }
+        }
+        let source_id = prepared.source;
+        let ordinary = prepared.ordinary.clone();
+        let index = &prepared.index;
+        let info = &prepared.info;
+        let a_owner = (0..index.declaration_count())
+            .map(|raw| DeclarationId::from_raw(raw as u32))
+            .find(|declaration| is_local_capture_subclass(index, *declaration))
+            .expect("actual subclass declaration");
+        let mut session = BodyCheckSession::default();
+        let mut sink = StreamedBodySink::default();
+        let mut rejected = Vec::new();
+        let mut poisoned = false;
+        for work in ordinary {
+            let name = index.declaration_name(DeclarationId::from_raw(work.owner.raw()));
+            let requested = matches!(name, Some("requestedB" | "requestedC"));
+            let poisoned_owner = if malformed_plan && requested {
+                let range = prepared
+                    .active
+                    .span(&prepared.file, work.declaration)
+                    .expect("selected method source range");
+                let selected = info
+                    .resolved_constructors
+                    .iter()
+                    .filter(|(expression, _)| {
+                        prepared
+                            .file
+                            .expr_span(**expression)
+                            .is_some_and(|span| range.lo <= span.lo && span.hi <= range.hi)
+                    })
+                    .map(|(_, constructor)| {
+                        index
+                            .classifier_declaration(constructor.owner())
+                            .expect("selected constructor classifier")
+                    })
+                    .collect::<Vec<_>>();
+                let [target] = selected.as_slice() else {
+                    panic!("one selected constructor in the requested method: {selected:?}")
+                };
+                *target
+            } else {
+                a_owner
+            };
+            let original = if requested && !missing_plan {
+                let context = session
+                    .class_bodies
+                    .get_mut(&poisoned_owner)
+                    .expect("completed real capture environment");
+                let original = context.clone();
+                assert!(!context.capture_values.is_empty());
+                let conflicts = context
+                    .capture_values
+                    .iter()
+                    .take(if malformed_plan {
+                        1
+                    } else {
+                        context.capture_values.len()
+                    })
+                    .map(|(name, binding)| {
+                        (
+                            name.clone(),
+                            ClassCaptureBinding {
+                                field: u32::MAX,
+                                ..*binding
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                context.capture_values.extend(conflicts);
+                poisoned = true;
+                Some(original)
+            } else {
+                None
+            };
+            let result = super::super::driver::check_and_dispatch_active_body_in_session(
+                crate::fir::BodyCheckUnit {
+                    file: &prepared.file,
+                    info,
+                    source: source_id,
+                    index,
+                },
+                &prepared.active,
+                work,
+                prepared.sources.origins_mut(),
+                &mut prepared.inline_bodies,
+                &mut sink,
+                &mut session,
+            );
+            if let Some(original) = original {
+                session.class_bodies.insert(poisoned_owner, original);
+            }
+            if requested {
+                assert!(
+                    matches!(
+                        result,
+                        Err(CheckedBodyDriverFailure::Check(BodyCheckFailure {
+                            kind: BodyCheckFailureKind::MissingStableCallTarget,
+                            ..
+                        }))
+                    ),
+                    "{name:?}: {result:?}"
+                );
+                rejected.push(name.expect("named selected body"));
+            } else {
+                result.expect("all unrelated complete bodies retain their real sources");
+            }
+        }
+        assert_eq!(rejected, ["requestedB", "requestedC"]);
+        assert_eq!(poisoned, !missing_plan);
+    }
+}
+
+#[test]
+fn a_local_constructor_in_a_lambda_captures_the_method_parameter_beside_outer_storage() {
+    let source =
+        include_str!("../../../../tests/box_regressions/captureStorageLocalShadowConstructor.kt");
+    let (index, bodies) = checked_streamed_bodies(source);
+    let selected = |name| {
+        let mut selected = bodies.iter().filter(|body| {
+            index.declaration_name(DeclarationId::from_raw(body.owner().raw())) == Some(name)
+        });
+        let body = selected.next().expect("one selected body");
+        assert!(selected.next().is_none());
+        body
+    };
+    let outer = selected("captureLocal");
+    let declarations = (0..outer.statement_count())
+        .filter_map(|raw| {
+            let FirStatementKind::LocalDeclaration {
+                declaration,
+                captures,
+                ..
+            } = &outer.statement(FirStatementId::from_raw(raw as u32))?.kind
+            else {
+                return None;
+            };
+            Some((*declaration, captures))
+        })
+        .collect::<Vec<_>>();
+    let [(a, captures)] = declarations.as_slice() else {
+        panic!("one outer-capturing class")
+    };
+    let [capture] = captures.as_ref() else {
+        panic!("one outer value field")
+    };
+    assert!(capture.stored);
+    assert_eq!(
+        capture.source,
+        FirLocalClassCaptureSource::Value(outer.parameters()[0].value)
+    );
+    let own = selected("own");
+    let reads = (0..own.expression_count())
+        .filter_map(
+            |raw| match &own.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::ClassStorageRead { owner, field } => Some((*owner, *field)),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(reads, [(*a, 0)]);
+    let local = selected("local");
+    assert_ne!(local.owner(), outer.owner());
+    let parameter = local.parameters()[0].value;
+    let declarations = (0..local.statement_count())
+        .filter_map(|raw| {
+            let FirStatementKind::LocalDeclaration {
+                declaration,
+                captures,
+                ..
+            } = &local.statement(FirStatementId::from_raw(raw as u32))?.kind
+            else {
+                return None;
+            };
+            Some((*declaration, captures))
+        })
+        .collect::<Vec<_>>();
+    let [(b, captures)] = declarations.as_slice() else {
+        panic!("one method-local class")
+    };
+    assert_ne!(a, b);
+    let [capture] = captures.as_ref() else {
+        panic!("one method-parameter capture")
+    };
+    assert!(capture.stored);
+    assert!(!capture.shared_cell);
+    assert_eq!(capture.source, FirLocalClassCaptureSource::Value(parameter));
+    let lambdas = (0..local.expression_count())
+        .filter_map(
+            |raw| match &local.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::Lambda { body, .. } => Some(body),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [lambda] = lambdas.as_slice() else {
+        panic!("one constructor-producing lambda")
+    };
+    let [capture] = lambda.captures() else {
+        panic!("one selected outer parameter")
+    };
+    assert_eq!(capture.enclosing_depth, 0);
+    assert_eq!(capture.source, FirCaptureSource::Value(parameter));
+    assert_eq!(capture.ty.get(), Ty::String);
+    assert!(!capture.shared_cell);
+    let calls = (0..lambda.expression_count())
+        .filter_map(|raw| {
+            let FirExprKind::ConstructorCall(call) =
+                &lambda.expr(FirExprId::from_raw(raw as u32))?.kind
+            else {
+                return None;
+            };
+            call.external_capture_arguments.as_deref()
+        })
+        .collect::<Vec<_>>();
+    let [arguments] = calls.as_slice() else {
+        panic!("one local-class construction")
+    };
+    let [argument] = *arguments else {
+        panic!("one explicit lexical operand")
+    };
+    assert!(!argument.shared_cell_holder);
+    assert_eq!(
+        lambda.expr(argument.value).expect("committed source").kind,
+        FirExprKind::CapturedValueRead {
+            enclosing_depth: 0,
+            source: parameter
+        }
+    );
+}
+
+// Common FIR source/lifetime contracts. The whole official range/map input already has runtime
+// coverage under extensionFunctions/kt23675.kt in the shared versioned corpus inventory.
+fn checked_receiver_constructor_bodies(source: &str) -> (ResolvedModuleIndex, Vec<FirBody>) {
+    let inputs =
+        [crate::source::SourceInput::kotlin(source).with_file_stem("ReceiverConstruction")];
+    let mut prepared = super::super::test_support::prepare_fir_source(
+        &inputs,
+        0,
+        super::super::test_support::jvm_stdlib_semantics(),
+        &crate::features::LangFeatures::new(),
+    );
+    let mut sink = StreamedBodySink::default();
+    prepared
+        .check_all_bodies(&mut sink)
+        .expect("complete receiver constructor FIR");
+    (
+        prepared.index,
+        sink.0.into_iter().map(|(_, body)| body).collect(),
+    )
+}
+
+fn receiver_constructor_body_tree(bodies: &[FirBody]) -> Vec<&FirBody> {
+    let mut pending = bodies.iter().collect::<Vec<_>>();
+    let mut complete = Vec::new();
+    while let Some(body) = pending.pop() {
+        complete.push(body);
+        for raw in 0..body.expression_count() {
+            if let Some(FirExpr {
+                kind: FirExprKind::Lambda { body, .. },
+                ..
+            }) = body.expr(FirExprId::from_raw(raw as u32))
+            {
+                pending.push(body);
+            }
+        }
+    }
+    complete
+}
+
+fn receiver_capture_identity(
+    bodies: &[&FirBody],
+    declaration: DeclarationId,
+) -> ClassCaptureIdentity {
+    let captures = bodies
+        .iter()
+        .flat_map(|body| {
+            (0..body.statement_count()).filter_map(move |raw| {
+                match &body.statement(FirStatementId::from_raw(raw as u32))?.kind {
+                    FirStatementKind::LocalDeclaration {
+                        declaration: selected,
+                        captures,
+                        ..
+                    } if *selected == declaration => Some(captures),
+                    _ => None,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let [captures] = captures.as_slice() else {
+        panic!("one classifier capture declaration")
+    };
+    let [capture] = captures.as_ref() else {
+        panic!("one receiver capture")
+    };
+    let identity = capture
+        .capture_identity
+        .expect("selected receiver capture identity");
+    assert!(matches!(identity, ClassCaptureIdentity::Receiver(_)));
+    identity
+}
+
+#[test]
+fn a_constructor_inside_an_initializer_lambda_reads_its_class_captured_receiver() {
+    let source = include_str!("fixtures/receiverConstructorProjection.kt");
+    let (index, root_bodies) = checked_receiver_constructor_bodies(source);
+    let bodies = receiver_constructor_body_tree(&root_bodies);
+    let calls = bodies
+        .iter()
+        .flat_map(|body| {
+            (0..body.expression_count()).filter_map(move |raw| {
+                let FirExprKind::ConstructorCall(call) =
+                    &body.expr(FirExprId::from_raw(raw as u32))?.kind
+                else {
+                    return None;
+                };
+                call.external_capture_arguments
+                    .as_ref()
+                    .map(|arguments| (body, call, arguments))
+            })
+        })
+        .collect::<Vec<_>>();
+    let [(body, call, arguments)] = calls.as_slice() else {
+        panic!("one separately checked receiver constructor")
+    };
+    assert!(body.local_callable().is_some());
+    let [argument] = arguments.as_ref() else {
+        panic!("one receiver operand: {arguments:?}")
+    };
+    assert!(!argument.shared_cell_holder);
+    let owner = body
+        .lexical_class_owner()
+        .expect("initializer's captured classifier");
+    let FirConstructorTarget::Module { declaration, .. } = call.target else {
+        panic!("selected source constructor")
+    };
+    let child = index
+        .callable(declaration)
+        .and_then(|callable| index.declaration_anchor(callable.declaration))
+        .and_then(|anchor| anchor.owner)
+        .expect("constructed classifier");
+    assert_ne!(owner, child);
+    let FirExprKind::CapturedClassStorageRead {
+        owner: selected,
+        receiver,
+        ref path,
+        field,
+        shared_cell,
+    } = body.expr(argument.value).expect("receiver operand").kind
+    else {
+        panic!("class-captured receiver operand")
+    };
+    assert_eq!((selected, field, shared_cell), (owner, 0, false));
+    assert!(path.is_empty());
+    assert!(
+        matches!(body.expr(receiver).expect("captured class receiver").kind,
+        FirExprKind::CapturedImplicitReceiver { enclosing_depth: 0, current: true, depth: 0, ref path } if path.is_empty())
+    );
+    assert_eq!(
+        receiver_capture_identity(&bodies, owner),
+        receiver_capture_identity(&bodies, child)
+    );
+}
+
+#[test]
+fn an_inner_same_typed_receiver_keeps_its_own_constructor_source() {
+    let source = include_str!("fixtures/distinctReceiverConstructors.kt");
+    let (index, root_bodies) = checked_receiver_constructor_bodies(source);
+    let bodies = receiver_constructor_body_tree(&root_bodies);
+    let mut class_sources = Vec::new();
+    let mut receiver_sources = Vec::new();
+    for body in &bodies {
+        for raw in 0..body.expression_count() {
+            let Some(expression) = body.expr(FirExprId::from_raw(raw as u32)) else {
+                continue;
+            };
+            let FirExprKind::ConstructorCall(call) = &expression.kind else {
+                continue;
+            };
+            let Some(arguments) = call.external_capture_arguments.as_ref() else {
+                continue;
+            };
+            let [argument] = arguments.as_ref() else {
+                panic!("one receiver operand")
+            };
+            assert!(!argument.shared_cell_holder);
+            let FirConstructorTarget::Module { declaration, .. } = call.target else {
+                panic!("selected source constructor")
+            };
+            let target = index
+                .callable(declaration)
+                .and_then(|callable| index.declaration_anchor(callable.declaration))
+                .and_then(|anchor| anchor.owner)
+                .expect("constructed classifier");
+            let selected = body
+                .expr(argument.value)
+                .expect("selected receiver operand");
+            assert_eq!(selected.ty.get(), Ty::obj("Context"));
+            match selected.kind {
+                FirExprKind::CapturedClassStorageRead {
+                    owner,
+                    field: 0,
+                    shared_cell: false,
+                    ref path,
+                    ..
+                } if path.is_empty() => class_sources.push((owner, target)),
+                FirExprKind::CapturedImplicitReceiver {
+                    enclosing_depth: 0,
+                    current: true,
+                    depth: 0,
+                    ref path,
+                } if path.is_empty() => receiver_sources.push(target),
+                ref other => panic!("exact distinct receiver source: {other:?}"),
+            }
+        }
+    }
+    let [(host, old)] = class_sources.as_slice() else {
+        panic!("one original receiver stored by its host")
+    };
+    let [fresh] = receiver_sources.as_slice() else {
+        panic!("one newly supplied receiver")
+    };
+    let original = receiver_capture_identity(&bodies, *host);
+    assert_eq!(receiver_capture_identity(&bodies, *old), original);
+    assert_ne!(receiver_capture_identity(&bodies, *fresh), original);
+}
+
+#[test]
+fn a_local_superclass_closure_keeps_its_selected_outer_class_role() {
+    // The complete official corpus case retains its runtime coverage under
+    // closures/captureInSuperConstructorCall/kt4174.kt.
+    let source = include_str!("fixtures/localSuperclassOuterCapture.kt");
+    let inputs = [crate::source::SourceInput::kotlin(source).with_file_stem("LocalOuterCapture")];
+    let mut prepared = super::super::test_support::prepare_fir_source(
+        &inputs,
+        0,
+        Box::new(crate::libraries::EmptySymbolSource),
+        &crate::features::LangFeatures::new(),
+    );
+    let mut sink = StreamedBodySink::default();
+    prepared
+        .check_all_bodies(&mut sink)
+        .expect("complete outer capture FIR");
+    let index = &prepared.index;
+    let roots = sink.0.into_iter().map(|(_, body)| body).collect::<Vec<_>>();
+    let bodies = receiver_constructor_body_tree(&roots);
+    let declarations = bodies
+        .iter()
+        .flat_map(|body| {
+            (0..body.statement_count()).filter_map(move |raw| {
+                match &body.statement(FirStatementId::from_raw(raw as u32))?.kind {
+                    FirStatementKind::LocalDeclaration {
+                        declaration,
+                        captures,
+                        ..
+                    } => Some((declaration, captures)),
+                    _ => None,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let [(local, captures)] = declarations.as_slice() else {
+        panic!("one complete local superclass declaration")
+    };
+    assert_eq!(
+        index.recorded_direct_supertypes(
+            index
+                .classifier_identity(**local)
+                .expect("local classifier")
+        ),
+        Some(vec![crate::types::type_name("C")])
+    );
+    let [capture] = captures.as_ref() else {
+        panic!("one enclosing-class capture: {captures:?}")
+    };
+    let outer = crate::types::type_name("B");
+    let (transient, _) = prepared
+        .active
+        .class(&prepared.file, **local)
+        .expect("selected local classifier source");
+    let [selected] = prepared
+        .info
+        .local_class_captures_by_class
+        .get(&transient)
+        .expect("completed local capture inventory")
+        .as_slice()
+    else {
+        panic!("one declaration-owned outer capture")
+    };
+    assert_eq!(selected.receiver_capture, None);
+    assert_eq!(
+        selected.source_identity(outer),
+        Some(ClassCaptureIdentity::EnclosingClass(outer))
+    );
+    assert!(matches!(
+        selected.source,
+        crate::resolve::AnonymousObjectCaptureSource::EnclosingInstance {
+            current: true,
+            depth: 0
+        }
+    ));
+    assert_eq!(
+        capture.capture_identity,
+        Some(ClassCaptureIdentity::EnclosingClass(outer))
+    );
+    assert_eq!(capture.ty.get(), Ty::obj_name(outer));
+    assert_eq!(capture.source, FirLocalClassCaptureSource::DispatchReceiver);
+    assert!(!capture.shared_cell);
+    assert_eq!(
+        capture.receiver,
+        Some(crate::fir::FirCapturedReceiver::Enclosing {
+            classifier: outer,
+            owner: Some(crate::fir::EnclosingInstanceOwner {
+                declaration: index
+                    .classifier_declaration(outer)
+                    .expect("selected outer declaration"),
+                kind: crate::fir::EnclosingInstanceKind::Classifier,
+            }),
+        })
+    );
 }

@@ -93,6 +93,7 @@ fn secondary(delegate: CtorDelegateTarget) -> IrSecondaryCtor {
         body: None,
         delegate,
         synthetic: false,
+        platform_visible: false,
         vc_params: false,
         param_checks: Vec::new(),
     }
