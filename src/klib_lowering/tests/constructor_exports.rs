@@ -61,6 +61,10 @@ fn fixture(bad_initializer: bool) -> Fixture {
     constructor.name = "<init>".into();
     constructor.kind = ExternalCallableKind::Constructor;
     constructor.generic_sig = None;
+    constructor.klib_body_parameter_defaults = Some(crate::libraries::ParamFlags::repeat(
+        false,
+        constructor.params.len(),
+    ));
     constructor.visibility = Visibility::Public;
     constructor.declaration_owner = Some(crate::types::SemanticCallableOwner::Classifier(owner));
     constructor.declaration_signature = Some(identity.declaration.clone());
@@ -277,6 +281,10 @@ fn fixture(bad_initializer: bool) -> Fixture {
     factory.name = "make".into();
     factory.visibility = Visibility::Public;
     factory.ret = Ty::obj_name(owner);
+    factory.klib_body_parameter_defaults = Some(crate::libraries::ParamFlags::repeat(
+        false,
+        factory.params.len(),
+    ));
     factory
         .generic_sig
         .as_mut()
