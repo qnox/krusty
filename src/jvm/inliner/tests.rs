@@ -739,6 +739,7 @@ fn a_lambda_passed_to_another_call_is_not_inlined() {
             },
         }],
         capture_owners: vec![0],
+        non_inline_suspend: Vec::new(),
     };
     // The route is decided from this fact before the body is inlined.
     assert_eq!(
