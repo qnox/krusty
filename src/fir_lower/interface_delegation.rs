@@ -614,7 +614,10 @@ fn delegate_member_call(
     Ok(match &call.result_check {
         Some(name) => ir.add_expr(IrExpr::NotNullAssert {
             operand: result,
-            check: crate::ir::NullCheck::Named(name.to_string()),
+            check: crate::ir::NullCheck::Named {
+                message: name.to_string(),
+                site: crate::ir::NullCheckSite::Value,
+            },
         }),
         None => result,
     })

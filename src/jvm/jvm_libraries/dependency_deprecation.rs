@@ -126,7 +126,7 @@ impl JvmLibraries {
         constructors: &mut [LibraryMember],
         outer: Option<TypeName>,
     ) -> Option<Arc<DeprecatedDeclaration>> {
-        let meta_constructors = crate::jvm::metadata::class_constructors(ci);
+        let meta_constructors = &self.cp.class_members(ci).constructors;
         for constructor in constructors {
             let declared = if ci.meta.is_present() {
                 let realization_name = constructor
@@ -374,8 +374,8 @@ fn value_parameters(params: &[Ty], call_sig: &CallSig, first: usize) -> Vec<Stri
 
 /// `<reified T : Bound, in U>`, or empty. A bound is shown unless it is the implicit `Any?`; a
 /// variance only when `variances` is given (a classifier's own parameters).
-fn type_parameters_display(
-    formals: &[String],
+fn type_parameters_display<F: std::ops::Deref<Target = str>>(
+    formals: &[F],
     bounds: &[Vec<Ty>],
     variances: Option<&[TypeVariance]>,
     reified: &[u32],
@@ -406,7 +406,7 @@ fn type_parameters_display(
                 .filter(|bound| **bound != Ty::nullable(Ty::obj("kotlin/Any")))
                 .map(|bound| format!(" : {}", bound.source_name()))
                 .unwrap_or_default();
-            format!("{variance}{reified}{name}{bound}")
+            format!("{variance}{reified}{}{bound}", &**name)
         })
         .collect::<Vec<_>>();
     format!("<{}>", parameters.join(", "))

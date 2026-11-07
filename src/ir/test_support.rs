@@ -97,6 +97,7 @@ pub(crate) fn blank_secondary_ctor() -> super::IrSecondaryCtor {
             default_masks: Vec::new(),
         },
         synthetic: false,
+        platform_visible: false,
         vc_params: false,
         param_checks: Vec::new(),
     }

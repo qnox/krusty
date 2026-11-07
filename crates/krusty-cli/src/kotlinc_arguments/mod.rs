@@ -80,20 +80,7 @@ pub fn lifecycle_warnings(
 /// kotlinc's plain-text renderer lowercases a message's first letter unless the message opens with
 /// `Java`/`Kotlin` or two capitals.
 pub fn render(message: &str) -> String {
-    let mut chars = message.chars();
-    let Some(first) = chars.next() else {
-        return String::new();
-    };
-    let second_is_upper = chars.next().is_some_and(char::is_uppercase);
-    if message.starts_with("Java")
-        || message.starts_with("Kotlin")
-        || (first.is_uppercase() && second_is_upper)
-    {
-        return message.to_string();
-    }
-    let mut rendered = first.to_ascii_lowercase().to_string();
-    rendered.push_str(&message[first.len_utf8()..]);
-    rendered
+    krusty::diag::decapitalize_if_needed(message).into_owned()
 }
 
 #[cfg(test)]

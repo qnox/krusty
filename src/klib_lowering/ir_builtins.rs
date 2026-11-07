@@ -269,6 +269,46 @@ impl IrBuiltinOperators {
     }
 }
 
+/// The compiler-owned empty root construction, signed by the same declaration mangler as KLIBs.
+/// A recognized operation still validates every available origin/header fact before admission.
+pub(super) fn root_constructor<E>(
+    signature: &KlibPublicIdSignature,
+    validate_known_declaration: impl FnOnce() -> Result<(), E>,
+) -> Result<bool, E> {
+    static ROOT: std::sync::OnceLock<KlibPublicIdSignature> = std::sync::OnceLock::new();
+    let root = ROOT.get_or_init(|| {
+        let package = ["kotlin".to_owned()];
+        let classes = [ClassScope {
+            name: "Any",
+            type_parameters: Vec::new(),
+            expect: false,
+        }];
+        callable_signature(
+            DeclarationContainer::<KotlinType> {
+                package: &package,
+                classes: &classes,
+                native_interop_library: false,
+            },
+            &CallableShape {
+                name: "<init>",
+                contexts: Vec::new(),
+                receiver: None,
+                params: Vec::new(),
+                vararg: None,
+                type_parameters: Vec::new(),
+                expect: false,
+                placement: Placement::Ordinary,
+            },
+        )
+        .expect("the compiler root constructor has a closed signature")
+    });
+    if signature != root {
+        return Ok(false);
+    }
+    validate_known_declaration()?;
+    Ok(true)
+}
+
 /// The nullable type of the class `internal`, as the built-in declarations state their operands.
 fn nullable(internal: &str) -> KotlinType {
     KotlinType::Class {
@@ -306,6 +346,47 @@ mod tests {
                 Ok::<_, ()>(BuiltinCallDisposition::Dependency)
             );
         }
+    }
+
+    #[test]
+    fn root_constructor_keeps_known_declaration_failures_mandatory() {
+        let package = ["kotlin".to_owned()];
+        let classes = [ClassScope {
+            name: "Any",
+            type_parameters: Vec::new(),
+            expect: false,
+        }];
+        let signature = callable_signature(
+            DeclarationContainer::<KotlinType> {
+                package: &package,
+                classes: &classes,
+                native_interop_library: false,
+            },
+            &CallableShape {
+                name: "<init>",
+                contexts: Vec::new(),
+                receiver: None,
+                params: Vec::new(),
+                vararg: None,
+                type_parameters: Vec::new(),
+                expect: false,
+                placement: Placement::Ordinary,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            root_constructor(&signature, || Ok::<(), &str>(())),
+            Ok(true)
+        );
+        assert_eq!(
+            root_constructor(&signature, || Err("ambiguous")),
+            Err("ambiguous")
+        );
+        let foreign = KlibPublicIdSignature::classifier(crate::types::wk::any());
+        assert_eq!(
+            root_constructor(&foreign, || panic!("not a root operation")),
+            Ok::<_, ()>(false)
+        );
     }
 
     /// The member ids the Kotlin/Native 2.4.20 stdlib KLIB serializes for its calls to these

@@ -182,7 +182,12 @@ impl Lane for WasmLane {
         modules: &[krusty::conformance::ModuleUnit],
         directive_source: &str,
     ) -> Outcome {
-        let backend = WasmBackend::new(self.target).with_entry(Entry::Box);
+        let Some(entry_module) = modules.last() else {
+            return Outcome::Harness("a module graph has no final source module".to_string());
+        };
+        let backend = WasmBackend::new(self.target)
+            .with_entry(Entry::Box)
+            .with_entry_module(entry_module.name.clone());
         let features = krusty::features::LangFeatures::from_source(directive_source);
         let platform = match self.target {
             WasmTarget::Js => krusty::klib::write::KlibPlatform::WasmJs,
@@ -414,6 +419,53 @@ fun box(): String {
     );
 }
 
+/// What a constructor that reaches back into its own enum finds, as kotlinc-wasm builds an enum:
+/// each constant is published once constructed, and a constant with a body right after its super
+/// call, so its own body already finds it. The expected log is kotlinc-wasm's for this program
+/// (2.4.21; wasm-js and wasm-wasi agree), taken by running it there. Kotlin/Native publishes every
+/// constant before constructing any (`native_enum_publication_e2e`), so this is target-owned.
+#[test]
+fn wasm_enum_constants_are_published_once_constructed() {
+    expect_wasm_box(
+        r##"
+var log = ""
+
+fun describe(x: Any?, self: Any): String = when {
+    x == null -> "null"
+    x === self -> "self"
+    else -> "other"
+}
+
+fun seen(self: Any): String =
+    "[" + describe(E.C, self) + describe(E.A, self) + describe(E.B, self) + "]"
+
+enum class E(val tag: Int) {
+    C(3),
+    A(1),
+    B(2) {
+        init { log += "body" + seen(this) }
+    };
+
+    init { log += ordinal.toString() + seen(this) }
+}
+
+fun box(): String {
+    E.A
+    val values = E.values()
+    val missing = try {
+        E.valueOf("D").name
+    } catch (e: Throwable) {
+        e.message
+    }
+    val result = log + "#" + values[0].name + values[1].name + values[2].name + "#" + missing
+    val expected = "0[nullnullnull]1[othernullnull]2[otherothernull]body[otherotherself]#CAB#No enum constant E.D"
+    return if (result == expected) "OK" else result
+}
+"##,
+        "wasmEnumPublication",
+    );
+}
+
 /// A same-module `@InlineOnly` wrapper is never emitted, so its function-typed parameter reaches no
 /// Wasm signature while its lambda expands through common IR. The lambda's ordinary assignments to
 /// a captured `var` are checked as `Unit` statements and must leave nothing on the stack: inside an
@@ -620,6 +672,35 @@ fn wasm_nested_source_and_dependency_arguments_share_boxing() {
     }
 }
 
+#[test]
+fn wasm_class_properties_export_their_checked_accessors() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/classPropertyDependencyExports.kt"),
+            "classPropertyDependencyExports",
+        ),
+        (
+            include_str!("box_regressions/delegatedPropertyDependencyExports.kt"),
+            "delegatedPropertyDependencyExports",
+        ),
+    ] {
+        super::box_reference_classes::checked_box(source, stem)
+            .expect("pinned kotlinc must run the whole property export module graph");
+        let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+        let units = krusty::conformance::module_units(&modules);
+        for target in WasmTarget::ALL {
+            let lane = WasmLane { target };
+            assert!(focused_wasm_lane_available(&lane, stem));
+            assert_eq!(
+                lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+                Outcome::Pass,
+                "{stem} on {}",
+                target.name()
+            );
+        }
+    }
+}
+
 // PLATFORM-SPECIFIC: Wasm's checked-access default and host trap are independent of the portable
 // reference-array value/identity/effect-order case in the shared box inventory.
 const REFERENCE_ARRAY_BOUNDS: &str = r#"fun captured(index: Int): Throwable? {
@@ -651,9 +732,58 @@ fun box(): String {
 }
 "#;
 
+// PLATFORM-SPECIFIC: an out-of-range store whose value has side effects reaches the bounds check
+// only after the receiver, the index and the value ran. With range checks, that check throws
+// `IndexOutOfBoundsException`; without them (the 2.4.0 and 2.4.10 default) the store is a host trap.
+// A throwing value at an out-of-range index, and the in-range order, are portable and stay in
+// `tests/box_regressions/referenceArrayStoreEvaluatesValueBeforeBoundsCheck.kt`.
+const REFERENCE_ARRAY_STORE_BOUNDS: &str = r#"class Tag(val text: String)
+
+var trace = ""
+
+fun slots(): Array<Tag> {
+    trace += "a"
+    return arrayOf(Tag("0"))
+}
+
+fun at(index: Int): Int {
+    trace += "i"
+    return index
+}
+
+fun stored(text: String): Tag {
+    trace += "v"
+    return Tag(text)
+}
+
+fun box(): String {
+    try {
+        slots()[at(1)] = stored("y")
+        return "out of range stored"
+    } catch (expected: Throwable) {
+        if (expected !is IndexOutOfBoundsException) return "out of range threw another exception"
+        if (trace != "aiv") return "out of range: $trace"
+    }
+    return "OK"
+}
+"#;
+
 // PLATFORM-SPECIFIC: both the Kotlin exception and the unchecked host trap are observable here.
 #[test]
 fn wasm_reference_array_bounds_preserve_reference_defaults_and_explicit_options() {
+    expect_reference_array_bounds(REFERENCE_ARRAY_BOUNDS, "referenceArrayBounds");
+}
+
+// PLATFORM-SPECIFIC: see `REFERENCE_ARRAY_STORE_BOUNDS`.
+#[test]
+fn wasm_reference_array_store_bounds_follow_the_value_under_every_bounds_policy() {
+    expect_reference_box(REFERENCE_ARRAY_STORE_BOUNDS, "referenceArrayStoreBounds");
+    expect_reference_array_bounds(REFERENCE_ARRAY_STORE_BOUNDS, "referenceArrayStoreBounds");
+}
+
+/// Run `source` under the release's default bounds policy and both explicit ones: a checked access
+/// must run `box()` to `OK`, and an unchecked one must stop at the exact host trap.
+fn expect_reference_array_bounds(source: &str, name: &str) {
     use krusty::kotlin_version::{KotlinVersion, ReleaseRecords};
     const DEFAULTS: ReleaseRecords<bool> = ReleaseRecords::new(&[
         (KotlinVersion::V2_4_0, false),
@@ -663,10 +793,9 @@ fn wasm_reference_array_bounds_preserve_reference_defaults_and_explicit_options(
     let default = *DEFAULTS
         .get(krusty::kotlin_version::target())
         .expect("supported release");
-    let source = REFERENCE_ARRAY_BOUNDS;
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
-        if !focused_wasm_lane_available(&lane, "referenceArrayBounds") {
+        if !focused_wasm_lane_available(&lane, name) {
             return;
         }
         for requested in [None, Some(false), Some(true)] {
@@ -675,7 +804,7 @@ fn wasm_reference_array_bounds_preserve_reference_defaults_and_explicit_options(
             if let Some(requested) = requested {
                 backend = backend.with_array_range_checks(requested);
             }
-            let stem = format!("referenceArrayBounds{requested:?}");
+            let stem = format!("{name}{requested:?}");
             let mut program = box_lane::compile(
                 &[("Bounds.kt".to_owned(), source.to_owned())],
                 source,
@@ -934,11 +1063,132 @@ fn wasm_declines_kotlin_any_rendering_it_has_no_body_for() {
     );
 }
 
+// A generated hash dispatches a property's value through its table's `hashCode` slot. A class
+// that keeps `kotlin.Any`'s identity hash has no body there, whether the property names that class
+// or erases it to `Any`, which can hold an instance of every class in the file. Each `Holder`
+// renders itself, since its generated `toString` would reach `Any`'s rendering first.
 #[test]
-fn wasm_declines_an_enum_class_by_name() {
+fn wasm_declines_a_generated_hash_that_can_reach_the_identity_hash() {
+    let reason = "`kotlin.Any.hashCode`'s identity hash";
     expect_wasm_decline(
-        "enum class Color { RED }\nfun box(): String = \"OK\"",
-        "wasmClassesEnum",
-        "an enum class (`Color`)",
+        "class Plain\ndata class Holder(val value: Plain) { override fun toString() = \"Holder\" }\n\
+         fun box(): String = if (Holder(Plain()).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfAClassProperty",
+        reason,
+    );
+    expect_wasm_decline(
+        "class Plain\ndata class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
+         fun box(): String = if (Holder(Plain()).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfAnErasedProperty",
+        reason,
     );
 }
+
+#[test]
+fn wasm_generated_members_keep_the_whole_portable_scalar_and_reference_control() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassEqualsAndHashCode.kt"),
+        "wasmDataClassEqualsAndHashCode",
+    );
+}
+
+#[test]
+fn wasm_generated_members_preserve_closure_identity() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassClosureIdentity.kt"),
+        "wasmDataClassClosureIdentity",
+    );
+}
+
+#[test]
+fn wasm_generated_members_keep_erased_array_hashes_stable_through_mutation() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassErasedArrayIdentityHash.kt"),
+        "wasmDataClassErasedArrayIdentityHash",
+    );
+}
+
+#[test]
+fn wasm_generated_members_compare_callable_declarations_and_receivers() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/dataClassErasedClosureIdentity.kt"),
+            "wasmDataClassErasedClosureIdentity",
+        ),
+        (
+            include_str!("box_regressions/dataClassCallableReferenceEquality.kt"),
+            "wasmDataClassCallableReferenceEquality",
+        ),
+        (
+            include_str!("box_regressions/dataClassCallableReferenceSelfEquality.kt"),
+            "wasmDataClassCallableReferenceSelfEquality",
+        ),
+        (
+            include_str!("box_regressions/dataClassOverloadedConstructorReferences.kt"),
+            "wasmDataClassOverloadedConstructorReferences",
+        ),
+        (
+            include_str!("box_regressions/constructorReferenceDeclaredSignature.kt"),
+            "wasmConstructorReferenceDeclaredSignature",
+        ),
+        (
+            include_str!("box_regressions/dataClassNullableBoundReference.kt"),
+            "wasmDataClassNullableBoundReference",
+        ),
+    ] {
+        expect_wasm_box(source, stem);
+    }
+}
+
+#[test]
+fn wasm_callable_references_share_identity_across_independent_module_analyses() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/dataClassReferenceAcrossModules.kt"),
+            "wasmDataClassReferenceAcrossModules",
+        ),
+        (
+            include_str!("box_regressions/constructorReferenceAcrossModules.kt"),
+            "wasmConstructorReferenceAcrossModules",
+        ),
+    ] {
+        super::box_reference_classes::checked_box(source, stem)
+            .expect("the exact Kotlin compiler must run the whole reference-identity fixture");
+        let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+        let units = krusty::conformance::module_units(&modules);
+        for target in WasmTarget::ALL {
+            let lane = WasmLane { target };
+            assert!(focused_wasm_lane_available(&lane, stem));
+            assert_eq!(
+                lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+                Outcome::Pass,
+                "{stem} on {}",
+                target.name(),
+            );
+        }
+    }
+}
+
+#[test]
+fn wasm_a_generated_hash_of_an_erased_property_dispatches_when_every_class_has_a_body() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassErasedPropertyHash.kt"),
+        "wasmGeneratedHashOfAnErasedPropertyWithBodies",
+    );
+}
+
+/// Enum classes realize through the shared enum pass, so the program the Wasm lanes used to
+/// decline by name now runs.
+#[test]
+fn wasm_runs_an_enum_class() {
+    expect_wasm_box(
+        "enum class Color { RED }\nfun box(): String = \"OK\"",
+        "wasmClassesEnum",
+    );
+}
+
+#[path = "wasm_value_hash.rs"]
+mod value_hash;
+
+#[path = "wasm_dependency_constructor_exports.rs"]
+mod dependency_constructor_exports;

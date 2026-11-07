@@ -246,7 +246,16 @@ impl Emitter<'_> {
                         .is_continuation(call, argument_index)
                 });
             if !is_continuation {
-                this.coerce_reference_on_stack(source, target, code);
+                let declared = parameter_index
+                    .checked_sub(leading_non_argument_operands)
+                    .and_then(|argument_index| {
+                        this.ir
+                            .call_declared_params
+                            .get(&call)?
+                            .get(argument_index)
+                            .copied()
+                    });
+                this.coerce_declared_reference(source, declared, target, code);
             }
         });
         Ok(())
@@ -642,6 +651,7 @@ mod tests {
             internal: crate::types::type_name("sample/Holder"),
             args,
             ctor_params: None,
+            declared_params: None,
             ctor_desc: Some("(Ljava/lang/Object;Ljava/lang/Object;)V".into()),
             external_target: None,
             defaults: Box::new([]),

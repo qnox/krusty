@@ -5,9 +5,9 @@
 
 use std::path::PathBuf;
 
-use super::{Classpath, Entry, JarId, PackageTree};
-use crate::name_tree::NameId;
-use crate::types::{type_name, TypeName};
+use super::{Classpath, Entry, JarId, PackageNode, PackageTree};
+use crate::name_tree::{NameId, NameTree};
+use crate::types::{existing_type_name_in, type_name, TypeName};
 
 impl Classpath {
     /// Whether the first classpath definition of `internal` belongs to a friend entry.
@@ -81,16 +81,102 @@ impl PackageTree {
     /// The first classpath entry whose class file is stored as `internal`. The spelling is the
     /// zip entry without `.class`. A miss does not intern it.
     pub(super) fn first_jar_for_spelling(&self, internal: &str) -> Option<JarId> {
-        self.first_jar_for_id(self.names.get(internal)?)
+        self.jars_declaring_spelling(internal).next()
     }
 
-    pub(super) fn first_jar_for_id(&self, class: NameId) -> Option<JarId> {
-        let start = self
-            .classes
-            .partition_point(|&(candidate, _)| candidate.0 < class.0);
-        self.classes
-            .get(start)
-            .and_then(|&(candidate, jar)| (candidate == class).then_some(jar))
+    /// Every entry that stores a class file as `internal`, in classpath (shadowing) order.
+    pub(super) fn jars_for_class(&self, internal: &str) -> Vec<JarId> {
+        self.jars_declaring_spelling(internal).collect()
+    }
+
+    /// [`Self::jars_for_class`] for a resolved class identity.
+    pub(super) fn jars_for_class_name(&self, internal: TypeName) -> Vec<JarId> {
+        self.jars_declaring(internal.namespace(), move |names| {
+            existing_type_name_in(names, internal)
+        })
+        .collect()
+    }
+
+    /// Whether `package` directly declares a class whose final path segment is `class_segment`.
+    /// The segment is the class file's last component (`CollectionsKt`, `Map$Entry`), not a source
+    /// nested name, and a miss does not intern it into the global type-name tree.
+    pub(in crate::jvm) fn contains_exact_class(
+        &self,
+        package: TypeName,
+        class_segment: &str,
+    ) -> bool {
+        self.jars_declaring(package, move |names| {
+            names.existing_child_of(existing_type_name_in(names, package)?, class_segment)
+        })
+        .next()
+        .is_some()
+    }
+
+    /// Whether `owner`'s flattened JVM nested class (`Owner$Companion`,
+    /// `Outer$Inner$Companion`) is declared. The owner class file itself need not be present. Both
+    /// probes stay inside the entry catalogs' name trees, so a miss neither formats nor interns a
+    /// candidate.
+    pub(in crate::jvm) fn contains_nested_class(&self, owner: TypeName, nested: &str) -> bool {
+        let package = owner.namespace();
+        self.jars_declaring(package, move |names| {
+            names.existing_nested_under(
+                existing_type_name_in(names, package)?,
+                owner.segment_ref(),
+                nested,
+            )
+        })
+        .next()
+        .is_some()
+    }
+
+    fn jars_declaring_spelling<'a>(
+        &'a self,
+        internal: &'a str,
+    ) -> impl Iterator<Item = JarId> + 'a {
+        let package = internal.rsplit_once('/').map_or("", |(package, _)| package);
+        self.entries_declaring(self.node_for(package), move |names| names.get(internal))
+    }
+
+    fn jars_declaring<'a>(
+        &'a self,
+        package: TypeName,
+        class: impl Fn(&NameTree) -> Option<NameId> + 'a,
+    ) -> impl Iterator<Item = JarId> + 'a {
+        self.entries_declaring(self.node_for_name(package), class)
+    }
+
+    /// The entries of `package`'s node, in classpath order, whose own catalog declares the class
+    /// `class` finds in that catalog's name tree. Only the package is composed across entries; a
+    /// class is answered by the entries that hold its package.
+    fn entries_declaring<'a>(
+        &'a self,
+        package: Option<&'a PackageNode>,
+        class: impl Fn(&NameTree) -> Option<NameId> + 'a,
+    ) -> impl Iterator<Item = JarId> + 'a {
+        package
+            .into_iter()
+            .flat_map(|node| node.jars.iter().copied())
+            .filter(move |&jar| {
+                self.parts
+                    .get(jar)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|part| {
+                        class(&part.names).is_some_and(|id| part.declares_class(id))
+                    })
+            })
+    }
+
+    /// Every class the classpath declares, as its slashed internal name and the entry that owns it,
+    /// entry by entry in classpath order. A name two entries declare is listed once for each, and
+    /// the earlier entry's listing is the one resolution sees.
+    pub fn classes(&self) -> impl Iterator<Item = (String, JarId)> + '_ {
+        self.parts.iter().enumerate().flat_map(|(jar, part)| {
+            part.iter().flat_map(move |part| {
+                part.classes
+                    .iter()
+                    .map(move |&class| (part.names.render(class), jar))
+            })
+        })
     }
 }
 

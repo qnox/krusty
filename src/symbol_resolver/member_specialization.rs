@@ -74,7 +74,9 @@ pub(super) fn bind_member_return_from_call_args_tracking(
         if let Some(classifier) = source.classifier(owner) {
             for (formal, argument) in classifier.type_params.iter().zip(arguments) {
                 if !gsig.formals.iter().any(|method| method == formal) {
-                    binds.entry(formal.clone()).or_insert(*argument);
+                    binds
+                        .entry(crate::types::TyParamName::new(formal))
+                        .or_insert(*argument);
                 }
             }
         }
@@ -151,9 +153,12 @@ pub(super) fn preserve_receiver_identity_bindings(
     bindings: &mut GSigBinds,
 ) {
     match (declared.non_null().kind(), actual.non_null().kind()) {
-        (TyKind::TyParam(declared, _), TyKind::TyParam(found, _)) if declared == found => {
+        (TyKind::TyParam(declared, _), TyKind::TyParam(found, _))
+        | (TyKind::Var(declared, _), TyKind::Var(found, _))
+            if declared == found =>
+        {
             bindings
-                .entry(declared.to_string())
+                .entry(crate::types::TyParamName::new(&declared))
                 .or_insert(actual.non_null());
         }
         (TyKind::Obj(declared, declared_args), TyKind::Obj(found, actual_args))
@@ -200,7 +205,7 @@ fn specialize_member_type_with_unbound(
     input_projection: &mut Option<InputProjection>,
 ) -> Ty {
     match ty.kind() {
-        TyKind::TyParam(name, bound) => {
+        TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => {
             let Some(binding) = bindings
                 .get(name.as_str())
                 .copied()
@@ -452,11 +457,15 @@ fn instantiate_slot_with_input_projection(
         };
     }
     let ty = signature.map_or(ty, |signature| {
-        let bounds: crate::fx_hash::HashMap<String, Ty> = signature
+        let bounds: crate::types::TyParamBindings = signature
             .formals
             .iter()
             .zip(&signature.formal_bounds)
-            .filter_map(|(formal, bounds)| bounds.first().map(|bound| (formal.clone(), *bound)))
+            .filter_map(|(formal, bounds)| {
+                bounds
+                    .first()
+                    .map(|bound| (crate::types::TyParamName::from(formal), *bound))
+            })
             .collect();
         if bounds.is_empty() {
             ty
@@ -643,17 +652,15 @@ fn specialize_fixed_member_receiver(
         .into_iter()
         .find_map(|(candidate, applied, _)| (candidate == owner).then_some(applied))?;
     let bindings = super::classifier_bindings(&classifier, applied_owner);
-    let declaration_formals = classifier
-        .type_params()
-        .iter()
+    let declaration_formals = crate::types::TyParamName::all(classifier.type_params())
+        .into_iter()
         .chain(
             member
                 .generic_sig
                 .as_ref()
                 .into_iter()
-                .flat_map(|signature| &signature.formals),
+                .flat_map(|signature| signature.formals.iter().copied()),
         )
-        .cloned()
         .collect::<Vec<_>>();
     let mut specialized = member.clone();
     // `params`/`ret` are the erased callable realization for classpath members. Kotlin metadata's
@@ -676,7 +683,11 @@ fn specialize_fixed_member_receiver(
         .then_some(specialized)
 }
 
-fn member_slots_are_applied(params: &[Ty], ret: Ty, declaration_formals: &[String]) -> bool {
+fn member_slots_are_applied(
+    params: &[Ty],
+    ret: Ty,
+    declaration_formals: &[crate::types::TyParamName],
+) -> bool {
     !params
         .iter()
         .any(|parameter| crate::types::ty_mentions_param(*parameter, declaration_formals))
@@ -821,7 +832,7 @@ pub(super) fn specialize_callable(
     // A declared bare type parameter stays one: bound to a value class it is still a box read out
     // of an erased slot, and only the unsubstituted declaration says so.
     callable.declared_ret = callable.declared_ret.map(|ty| match ty.kind() {
-        TyKind::TyParam(..) => ty,
+        TyKind::TyParam(..) | TyKind::Var(..) => ty,
         _ => specialize_member_type(source, ty, bindings, TypePosition::Out),
     });
 }
@@ -884,7 +895,7 @@ mod projected_member_view_tests {
     }
 
     fn bindings(projected: Ty) -> GSigBinds {
-        GSigBinds::from_iter([("T".to_string(), projected)])
+        GSigBinds::from_iter([("T".into(), projected)])
     }
 
     #[test]
@@ -995,7 +1006,7 @@ mod projected_member_view_tests {
 
     #[test]
     fn applied_member_slots_preserve_an_enclosing_declaration_identity() {
-        let provider_formals = ["T".to_owned()];
+        let provider_formals = [crate::types::TyParamName::new("T")];
         let provider_t = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
         let source_e = Ty::ty_param("\0tp:source:emit:E", Ty::nullable(Ty::obj("kotlin/Any")));
 
@@ -1040,7 +1051,7 @@ mod projected_member_view_tests {
     fn a_spread_array_is_not_reclassified_as_one_vararg_element() {
         let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
         let signature = GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: vec![vec![Ty::platform_nullable(Ty::obj("kotlin/Any"))]],
             receiver: None,
             params: vec![Ty::platform_nullable(Ty::array(variable))],

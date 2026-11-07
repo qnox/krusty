@@ -76,7 +76,7 @@ fn bottom_approximation_preserves_inputs(
         expected_result.non_null()
     };
     let mut trial = bindings.clone();
-    trial.insert(formal.to_string(), instantiated);
+    trial.insert(crate::types::TyParamName::new(formal), instantiated);
     if !crate::symbol_resolver::generic_bindings_satisfy_bounds(signature, &trial, is_assignable) {
         return false;
     }
@@ -205,7 +205,7 @@ mod tests {
 
     fn signature(ret: Ty) -> GenericSig {
         GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
             params: Vec::new(),
             ret,
@@ -261,7 +261,7 @@ mod tests {
 
     fn bottom_signature() -> GenericSig {
         GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
             params: vec![result_formal()],
             ret: result_formal(),
@@ -280,7 +280,7 @@ mod tests {
     fn an_error_input_cannot_contextualize_a_bottom_result() {
         let signature = bottom_signature();
         let mut bindings = crate::symbol_resolver::GSigBinds::default();
-        bindings.insert("T".to_string(), Ty::Nothing);
+        bindings.insert("T".into(), Ty::Nothing);
         assert!(
             !super::bottom_approximation_preserves_inputs(
                 &signature,
@@ -298,7 +298,7 @@ mod tests {
     fn a_matching_input_keeps_the_expected_result() {
         let signature = bottom_signature();
         let mut bindings = crate::symbol_resolver::GSigBinds::default();
-        bindings.insert("T".to_string(), Ty::Nothing);
+        bindings.insert("T".into(), Ty::Nothing);
         assert!(super::bottom_approximation_preserves_inputs(
             &signature,
             &bindings,

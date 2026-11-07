@@ -536,6 +536,19 @@ pub(super) fn record(
     let Some(first) = functions.first() else {
         return;
     };
+    // A library composable was compiled with the composer parameters the pass passes it.
+    let sites = functions
+        .iter()
+        .flat_map(|function| &function.calls)
+        .chain(composable_lambdas.iter().flat_map(|lambda| &lambda.calls));
+    for site in sites {
+        if let Some(CalleeOrigin::Library(target)) = calls.get(&site.call).map(|call| call.origin) {
+            runtime.appended_parameters(
+                target,
+                vec![Ty::nullable(super::runtime::composer()), Ty::Int],
+            );
+        }
+    }
     match ComposeRuntime::bind(runtime) {
         Ok(runtime) => {
             composable_lambdas.sort_by_key(|lambda| lambda.offsets);
@@ -976,10 +989,15 @@ impl BodyScope<'_> {
         rejections: &mut Vec<PluginRejection>,
     ) -> Option<(ComposableCallSite, String)> {
         let found = &self.calls[&call];
-        if !found.same_file {
+        let declined = match found.origin {
+            CalleeOrigin::File => None,
+            CalleeOrigin::Module => Some("a call to a composable function from another file"),
+            CalleeOrigin::Library(target) => self.unsupported_library_call(ir, call, target),
+        };
+        if let Some(what) = declined {
             rejections.push(PluginRejection {
                 span: found.span.unwrap_or(span),
-                message: unsupported("a call to a composable function from another file"),
+                message: unsupported(what),
             });
             return None;
         }
@@ -993,9 +1011,12 @@ impl BodyScope<'_> {
         let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
             unreachable!("a composable call is a call");
         };
-        let function = callee
-            .source_function()
-            .expect("a call of the file's composable function names it");
+        // A library callee takes no function value, so only the file's own callee is passed one.
+        let function = (found.origin == CalleeOrigin::File).then(|| {
+            callee
+                .source_function()
+                .expect("a call of the file's composable function names it")
+        });
         let omitted = omitted_parameters(callee);
         let mut supplied = supplied_arguments(callee, args).peekable();
         let arguments = (0..(args.len() + omitted.len()) as u32)
@@ -1006,7 +1027,10 @@ impl BodyScope<'_> {
                 let (_, argument) = supplied.next()?;
                 // A composable lambda is memoized, the same value in every execution.
                 if matches!(ir.exprs[argument as usize], IrExpr::Lambda { .. }) {
-                    return is_composable_lambda(ir, function, parameter as usize, self.composable)
+                    return function
+                        .is_some_and(|function| {
+                            is_composable_lambda(ir, function, parameter as usize, self.composable)
+                        })
                         .then_some(ArgumentState::Static);
                 }
                 let state = argument_state(ir, argument, values)?;
@@ -1031,6 +1055,59 @@ impl BodyScope<'_> {
             ComposableCallSite { call, arguments },
             call_location(self.positions, call_span),
         ))
+    }
+
+    /// What a call to the library composable `target` does that the pass does not cover yet.
+    fn unsupported_library_call(
+        &self,
+        ir: &IrFile,
+        call: ExprId,
+        target: crate::ir::ExternalCallableId,
+    ) -> Option<&'static str> {
+        let IrExpr::Call {
+            callee,
+            dispatch_receiver,
+            ..
+        } = &ir.exprs[call as usize]
+        else {
+            unreachable!("a composable call is a call");
+        };
+        let Callee::External {
+            params,
+            ret,
+            defaults,
+            extension_receiver_parameter,
+            ..
+        } = &**callee
+        else {
+            unreachable!("a library composable call selects a dependency declaration");
+        };
+        let Some(shape) = self.source.checked.dependency_shape(target) else {
+            return Some(
+                "a call to a library composable function the compilation does not declare",
+            );
+        };
+        if shape.inline {
+            Some("a call to an inline library composable function")
+        } else if shape.receiver
+            || dispatch_receiver.is_some()
+            || extension_receiver_parameter.is_some()
+        {
+            Some("a call to a library composable function with a receiver")
+        } else if shape.defaults || !defaults.is_empty() {
+            Some("a call to a library composable function with default arguments")
+        } else if params
+            .iter()
+            .any(|param| matches!(param.kind(), TyKind::Fun(_)))
+        {
+            Some("a call to a library composable function with a function-typed parameter")
+        } else if params.len() > 10 {
+            Some("a call to a library composable function with more than ten parameters")
+        } else if !matches!(ret.kind(), TyKind::Unit) {
+            Some("a call to a library composable function with a result")
+        } else {
+            None
+        }
     }
 
     /// The facts of the composable lambda `argument` passes, or `None` after rejecting its body.
@@ -1317,8 +1394,19 @@ pub(super) fn function_body(ir: &IrFile, function: FunId) -> Option<FunctionBody
 /// A call whose selected declaration is composable.
 struct ComposableCall {
     span: Option<crate::diag::Span>,
-    /// Whether the callee is declared in this file, so the pass gives it its composer parameters.
-    same_file: bool,
+    origin: CalleeOrigin,
+}
+
+/// Where a composable call's callee is declared, which decides who gives it its composer
+/// parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CalleeOrigin {
+    /// This file, whose pass gives the callee its composer parameters.
+    File,
+    /// Another file of the module.
+    Module,
+    /// A dependency the Compose compiler plugin compiled, which takes them already.
+    Library(crate::ir::ExternalCallableId),
 }
 
 /// Every call in `ir` whose selected declaration is composable.
@@ -1328,14 +1416,18 @@ fn composable_calls(
     composable_functions: &crate::fx_hash::HashSet<FunId>,
     composable: TypeName,
 ) -> HashMap<ExprId, ComposableCall> {
-    let local = |function: &FunId| composable_functions.contains(function).then_some(true);
+    let local = |function: &FunId| {
+        composable_functions
+            .contains(function)
+            .then_some(CalleeOrigin::File)
+    };
     let module = |target: &crate::ir::CallableId| {
         if ir
             .checked_callable_functions
             .get(target)
             .is_some_and(|function| composable_functions.contains(function))
         {
-            return Some(true);
+            return Some(CalleeOrigin::File);
         }
         ir.referenced_module_callables
             .get(target)
@@ -1345,13 +1437,13 @@ fn composable_calls(
                     .iter()
                     .any(|annotation| annotation.identity == composable)
             })
-            .then_some(false)
+            .then_some(CalleeOrigin::Module)
     };
     ir.exprs
         .iter()
         .enumerate()
         .filter_map(|(index, expression)| {
-            let same_file = match expression {
+            let origin = match expression {
                 IrExpr::Call { callee, .. } => match &**callee {
                     Callee::Local(function)
                     | Callee::LocalDefault(function)
@@ -1374,7 +1466,7 @@ fn composable_calls(
                         .checked
                         .dependency_annotations(*target)
                         .contains(&composable)
-                        .then_some(false),
+                        .then_some(CalleeOrigin::Library(*target)),
                     _ => None,
                 },
                 IrExpr::Checked(operation) => match &**operation {
@@ -1388,7 +1480,7 @@ fn composable_calls(
                 call,
                 ComposableCall {
                     span: source.expression_span(ir, call),
-                    same_file,
+                    origin,
                 },
             ))
         })

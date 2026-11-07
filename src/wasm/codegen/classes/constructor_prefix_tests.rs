@@ -319,6 +319,11 @@ fn copy_transport(ir: &IrFile) -> IrFile {
             .iter()
             .map(|(key, value)| (*key, *value)),
     );
+    copy.checked_classifier_classes.extend(
+        ir.checked_classifier_classes
+            .iter()
+            .map(|(declaration, class)| (*declaration, *class)),
+    );
     copy.class_capture_identities.extend(
         ir.class_capture_identities
             .iter()
@@ -456,9 +461,9 @@ fn optional_and_upstream_capture_identities_are_separate_from_physical_fields() 
     ir.classes[class as usize].ctor_args[parameter as usize].capture_identity = None;
     ir.class_capture_identities.remove(&(class, parameter));
     assert_eq!(check_supported(&ir, class), Ok(()));
-    let upstream = ClassCaptureIdentity::Field {
+    let upstream = ClassCaptureIdentity::Value {
         owner: type_name("Upstream"),
-        field: 42,
+        binding: 42,
     };
     ir.classes[class as usize].ctor_args[parameter as usize].capture_identity = Some(upstream);
     ir.class_capture_identities
@@ -501,6 +506,309 @@ fn forwarded_ordinals_ignore_preceding_capture_parameters() {
             "a class capturing its surroundings (`{}`)",
             ir.classes[class as usize].fq_name()
         ))
+    );
+}
+
+fn enclosing_capture_slots(ir: &IrFile) -> Vec<(ClassId, u32)> {
+    ir.classes
+        .iter()
+        .enumerate()
+        .flat_map(|(class, declaration)| {
+            declaration
+                .ctor_args
+                .iter()
+                .enumerate()
+                .filter(|(_, argument)| {
+                    matches!(
+                        argument
+                            .capture
+                            .as_ref()
+                            .and_then(|capture| capture.receiver.as_ref()),
+                        Some(IrCapturedReceiver::Enclosing { .. })
+                    )
+                })
+                .map(move |(parameter, _)| (class as ClassId, parameter as u32))
+        })
+        .collect()
+}
+
+fn named_enclosing_receiver_classes() -> IrFile {
+    crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
+        r#"
+class ReceiverOwner(private val text: String) {
+    fun source(): String = text
+    fun read(): String {
+        class InitializerOnly {
+            val initial = source()
+            fun read(): String = initial
+        }
+        class Retained {
+            fun read(): String = source()
+        }
+        return InitializerOnly().read() + Retained().read()
+    }
+}
+fun box(): String = ReceiverOwner("O").read()
+"#,
+        "NamedEnclosingReceiverTransport",
+    )
+}
+
+fn stored_enclosing_receiver() -> (IrFile, ClassId, u32) {
+    let ir = named_enclosing_receiver_classes();
+    let captured = enclosing_capture_slots(&ir);
+    assert_eq!(
+        captured.len(),
+        2,
+        "both complete local declarations capture the receiver"
+    );
+    for &(class, _) in &captured {
+        assert_eq!(check_supported(&ir, class), Ok(()));
+    }
+    let (class, parameter) = captured
+        .into_iter()
+        .find(|&(class, parameter)| {
+            ir.classes[class as usize].ctor_args[parameter as usize].is_field
+        })
+        .expect("the member-retained receiver is stored");
+    (ir, class, parameter)
+}
+
+#[test]
+fn whole_receiver_lifetime_classes_keep_selected_enclosing_capture_transport() {
+    let ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
+        include_str!("../../../../tests/box_regressions/ReceiverLifetimeContrast.kt"),
+        "ReceiverLifetimeContrast",
+    );
+    let captures = enclosing_capture_slots(&ir);
+    assert_eq!(
+        captures.len(),
+        5,
+        "all five complete source factories remain covered"
+    );
+    for (class, parameter) in captures {
+        let argument = &ir.classes[class as usize].ctor_args[parameter as usize];
+        assert!(argument.capture_identity.is_some());
+        assert_eq!(
+            argument.capture_identity,
+            ir.class_capture_identities
+                .get(&(class, parameter))
+                .copied()
+        );
+        assert_eq!(
+            check_supported(&ir, class),
+            Ok(()),
+            "{}: ctor_args={:?}; fields={:?}; pre_super={:?}; selected_classifier_owners={:?}; selected_enum_entry_owners={:?}; capture_identities={:?}",
+            ir.classes[class as usize].fq_name(),
+            ir.classes[class as usize].ctor_args,
+            ir.classes[class as usize].fields,
+            ir.classes[class as usize].pre_super_param_fields,
+            ir.checked_classifier_classes,
+            ir.checked_enum_entry_classes,
+            ir.class_capture_identities
+        );
+    }
+}
+
+#[test]
+fn enclosing_receiver_owner_type_and_identity_must_agree() {
+    type Mutation = fn(&mut IrFile, ClassId, u32);
+    let mutations: &[(&str, Mutation)] = &[
+        ("missing selected owner", |ir, class, parameter| {
+            let Some(IrCapturedReceiver::Enclosing { owner, .. }) = ir.classes[class as usize]
+                .ctor_args[parameter as usize]
+                .capture
+                .as_mut()
+                .unwrap()
+                .receiver
+                .as_mut()
+            else {
+                panic!("source enclosing capture")
+            };
+            *owner = None;
+        }),
+        ("missing declaration map", |ir, _, _| {
+            ir.checked_classifier_classes.clear()
+        }),
+        ("wrong declaring class", |ir, class, parameter| {
+            let Some(IrCapturedReceiver::Enclosing {
+                owner: Some(owner), ..
+            }) = ir.classes[class as usize].ctor_args[parameter as usize]
+                .capture
+                .as_ref()
+                .unwrap()
+                .receiver
+                .as_ref()
+            else {
+                panic!("source enclosing capture")
+            };
+            ir.checked_classifier_classes
+                .insert(owner.declaration, class);
+        }),
+        ("ambiguous declaring class", |ir, class, parameter| {
+            let Some(IrCapturedReceiver::Enclosing {
+                owner: Some(owner), ..
+            }) = ir.classes[class as usize].ctor_args[parameter as usize]
+                .capture
+                .as_ref()
+                .unwrap()
+                .receiver
+                .as_ref()
+            else {
+                panic!("source enclosing capture")
+            };
+            let declaration = owner.declaration;
+            let selected = ir.checked_classifier_classes[&declaration];
+            let other = *ir
+                .checked_classifier_classes
+                .keys()
+                .find(|&&other| other != declaration)
+                .unwrap();
+            ir.checked_classifier_classes.insert(other, selected);
+        }),
+        ("wrong owner role", |ir, class, parameter| {
+            let Some(IrCapturedReceiver::Enclosing {
+                owner: Some(owner), ..
+            }) = ir.classes[class as usize].ctor_args[parameter as usize]
+                .capture
+                .as_mut()
+                .unwrap()
+                .receiver
+                .as_mut()
+            else {
+                panic!("source enclosing capture")
+            };
+            owner.kind = crate::fir::EnclosingInstanceKind::EnumEntry;
+        }),
+        ("wrong semantic capture type", |ir, class, parameter| {
+            ir.classes[class as usize].ctor_args[parameter as usize].ty = Ty::Int;
+        }),
+        ("missing closure identity", |ir, class, parameter| {
+            ir.classes[class as usize].ctor_args[parameter as usize].capture_identity = None;
+            ir.class_capture_identities.remove(&(class, parameter));
+        }),
+        ("missing registry identity", |ir, class, parameter| {
+            ir.class_capture_identities.remove(&(class, parameter));
+        }),
+        ("mismatched registry identity", |ir, class, parameter| {
+            ir.class_capture_identities.insert(
+                (class, parameter),
+                ClassCaptureIdentity::Value {
+                    owner: ir.classes[class as usize].fq_name_id(),
+                    binding: u32::MAX,
+                },
+            );
+        }),
+    ];
+    let (original, class, parameter) = stored_enclosing_receiver();
+    let expected = Err(format!(
+        "a class capturing its surroundings (`{}`)",
+        original.classes[class as usize].fq_name()
+    ));
+    for (label, mutate) in mutations {
+        let mut ir = copy_transport(&original);
+        mutate(&mut ir, class, parameter);
+        assert_eq!(check_supported(&ir, class), expected, "{label}");
+    }
+    assert_eq!(check_supported(&original, class), Ok(()));
+}
+
+#[test]
+fn non_enclosing_receiver_profiles_remain_unsupported() {
+    let (original, class, parameter) = stored_enclosing_receiver();
+    let expected = Err(format!(
+        "a class capturing its surroundings (`{}`)",
+        original.classes[class as usize].fq_name()
+    ));
+    for receiver in [
+        IrCapturedReceiver::Lambda(None),
+        IrCapturedReceiver::Callable {
+            label: "callable".into(),
+            owner: crate::fir::CapturedCallableOwner::Declaration,
+        },
+        IrCapturedReceiver::Context {
+            kind: crate::types::CapturedContextKind::LegacyReceiver,
+            types: vec![Ty::String].into_boxed_slice(),
+            index: 0,
+        },
+    ] {
+        let mut ir = copy_transport(&original);
+        ir.classes[class as usize].ctor_args[parameter as usize]
+            .capture
+            .as_mut()
+            .unwrap()
+            .receiver = Some(receiver);
+        assert_eq!(check_supported(&ir, class), expected);
+    }
+}
+
+#[test]
+fn enclosing_receivers_stay_stored_for_initializer_and_member_reads() {
+    let ir = named_enclosing_receiver_classes();
+    let captures = enclosing_capture_slots(&ir);
+    assert_eq!(captures.len(), 2);
+    let mut profiles = [0, 0];
+    for (class, parameter) in captures {
+        assert_eq!(check_supported(&ir, class), Ok(()));
+        let argument = &ir.classes[class as usize].ctor_args[parameter as usize];
+        profiles[usize::from(argument.is_field)] += 1;
+        let expected = Err(format!(
+            "a class capturing its surroundings (`{}`)",
+            ir.classes[class as usize].fq_name()
+        ));
+        if let Some(field) = argument.field_index {
+            assert!(argument.is_field);
+            assert_eq!(
+                ir.classes[class as usize].pre_super_param_fields,
+                vec![(parameter, field)]
+            );
+            for shared in 0..3 {
+                let mut copy = copy_transport(&ir);
+                match shared {
+                    0 => {
+                        copy.shared_class_capture_fields
+                            .insert((class, field), argument.ty);
+                    }
+                    1 => {
+                        copy.shared_super_capture_parameters
+                            .insert((class, parameter), argument.ty);
+                    }
+                    _ => {
+                        copy.shared_secondary_super_capture_parameters
+                            .insert((class, 0, parameter), argument.ty);
+                    }
+                }
+                assert_eq!(check_supported(&copy, class), expected);
+            }
+            for duplicate in [false, true] {
+                let mut copy = copy_transport(&ir);
+                if duplicate {
+                    copy.classes[class as usize]
+                        .pre_super_param_fields
+                        .push((parameter, field));
+                } else {
+                    copy.classes[class as usize].pre_super_param_fields.clear();
+                }
+                assert_eq!(check_supported(&copy, class), expected);
+            }
+        } else {
+            assert!(!argument.is_field);
+            assert!(ir.classes[class as usize].pre_super_param_fields.is_empty());
+            let mut copy = copy_transport(&ir);
+            copy.classes[class as usize]
+                .pre_super_param_fields
+                .push((parameter, 0));
+            assert_eq!(check_supported(&copy, class), expected);
+        }
+        let mut copy = copy_transport(&ir);
+        copy.classes[class as usize].ctor_args[parameter as usize].anonymous_super_forward =
+            Some(1);
+        assert_eq!(check_supported(&copy, class), expected);
+    }
+    assert_eq!(
+        profiles,
+        [0, 2],
+        "direct enclosing receivers retain storage even for initializer-only uses"
     );
 }
 

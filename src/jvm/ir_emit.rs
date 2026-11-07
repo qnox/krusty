@@ -636,25 +636,6 @@ impl JvmDefaultMode {
     }
 }
 
-/// Drop every implicit not-null guard on a narrowed platform value.
-///
-/// `-Xno-call-assertions` removes the null checks kotlinc emits where a Java call's `T!` result is
-/// committed to a declared non-null type. The guard is an expression wrapper, so it is removed by
-/// rewriting the node into its operand's value: `x!!` is a SOURCE assertion the flag leaves alone.
-pub(crate) fn strip_call_assertions(ir: &mut IrFile) {
-    for expr in &mut ir.exprs {
-        let IrExpr::NotNullAssert { operand, check } = expr else {
-            continue;
-        };
-        if check.is_implicit() {
-            *expr = IrExpr::Block {
-                stmts: Vec::new(),
-                value: Some(*operand),
-            };
-        }
-    }
-}
-
 /// The primary constructor's JVM descriptor: every constructor argument, property-backed or plain.
 fn primary_ctor_descriptor(ir: &IrFile, c: &IrClass) -> String {
     format!("({})V", primary_ctor_parameter_descs(ir, c))
@@ -2429,8 +2410,7 @@ fn emit_class(
         markers: &markers,
         byte_parity,
     };
-    // A value class's declared members and `Any` overrides precede its private primary `<init>`,
-    // which its generated representation members follow; every other class starts with `<init>`.
+    // A value class's members precede its `<init>`, which the representation members follow.
     let (before_primary, after_primary) = split_around_primary_constructor(
         ir,
         c,
@@ -2440,6 +2420,7 @@ fn emit_class(
         emit_scheduled_member(&member_emission, member, &mut cw);
     }
     if c.is_value {
+        bridge_emission::emit_value_class_stubs(ir, c, &mut cw, env);
         inherited_default_forwarders::emit_value_class_inherited_defaults(ir, c, &mut cw, env);
     }
     seed_value_ctor_after_members(byte_parity, pool_seed(), &mut cw);
@@ -4241,7 +4222,7 @@ fn emit_placed_method(
     let declared_nullability::DeclaredNullability {
         result: ret_ann,
         parameters: param_anns,
-    } = override_result_emission::declared_nullability(ir, e.override_results, fid);
+    } = override_result_emission::declared_nullability(ir, env, fid);
     let emitted_param_anns = holder_receiver.map_or_else(
         || param_anns.clone(),
         |_| {
