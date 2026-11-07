@@ -56,9 +56,9 @@ pub(crate) fn read(source: &str, next: impl FnMut() -> Token) -> Header {
         if cursor.peek(0).kind == K::KwPackage {
             cursor.bump();
             let path = cursor.path().join(".");
-            if first_package && package_opens_file {
-                header.package = Some(path);
-            } else if header.package.is_none() && !path.is_empty() {
+            if (first_package && package_opens_file)
+                || (header.package.is_none() && !path.is_empty())
+            {
                 header.package = Some(path);
             }
             first_package = false;
