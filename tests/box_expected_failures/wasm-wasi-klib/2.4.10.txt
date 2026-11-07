@@ -196,7 +196,6 @@ branching/when_with_try1.kt
 bridges/complexTraitImpl.kt
 bridges/covariantGenericDiamond.kt
 bridges/delegationComplexWithList.kt
-bridges/fakeGenericCovariantOverride.kt
 bridges/genericProperty.kt
 bridges/internalMethodFakeOverrideInFriendModule.kt
 bridges/internalMethodOverrideInFriendModule.kt
@@ -227,7 +226,6 @@ bridges/test24.kt
 bridges/test25.kt
 bridges/test3.kt
 bridges/test5.kt
-builtinStubMethods/customReadOnlyIterator.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/adaptedSecondArgArray.kt
 callableReference/adaptedReferences/adaptedSecondArgTypeVariable.kt
@@ -412,7 +410,6 @@ classDelegation/multipleModules.kt
 classLiteral/bound/primitives.kt
 classLiteral/classEquality.kt
 classes/comanionObjectFieldVsClassField.kt
-classes/implementComparableInSubclass.kt
 classes/initializerBlockDImpl.kt
 classes/kt1535.kt
 classes/kt1538.kt
@@ -3548,11 +3545,8 @@ specialBuiltins/enumAsOrdinaled.kt
 specialBuiltins/exceptionCause.kt
 specialBuiltins/irrelevantRemoveAtOverride.kt
 specialBuiltins/maps.kt
-specialBuiltins/noSpecialBridgeInSuperClass.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
-specialBuiltins/redundantStubForSize.kt
-specialBuiltins/removeAtTwoSpecialBridges.kt
 specialBuiltins/throwable.kt
 specialBuiltins/throwableCause.kt
 specialBuiltins/throwableComplex.kt
