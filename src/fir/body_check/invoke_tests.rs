@@ -554,7 +554,7 @@ fn explicitly_imported_enum_entry_invoke_keeps_entry_and_extension_target() {
 
 #[test]
 fn callable_extension_property_contextualizes_invoke_lambda_receiver() {
-    let (body, index) = checked_function_body(
+    let (body, index) = checked_function_body_with_platform(
         "open class Base\n\
          class Derived : Base()\n\
          class Action { operator fun invoke(block: Action.() -> Unit): Int = 2 }\n\
@@ -562,6 +562,7 @@ fn callable_extension_property_contextualizes_invoke_lambda_receiver() {
          val Derived.action: Action get() = Action()\n\
          fun apply(value: Derived): Int = value.action {}\n",
         "apply",
+        jvm_stdlib_semantics(),
     );
     let FirExprKind::Call(call) = &body
         .expr(root_expression(&body))

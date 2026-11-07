@@ -20,8 +20,8 @@ pub(in super::super) struct DependencyInlineCall<'a> {
     pub(in super::super) template: DependencyInlineTemplate,
     pub(in super::super) parameter_types: &'a [Ty],
     pub(in super::super) dispatch_receiver: Option<ExprId>,
-    /// The checked type of the dispatch receiver, whose arguments bind a generic class's
-    /// parameters in the template.
+    /// The checked dispatch receiver applied as the member's declaring class, whose arguments
+    /// bind a generic class's parameters in the template.
     pub(in super::super) dispatch_type: Option<Ty>,
     pub(in super::super) extension_receiver: Option<ExprId>,
     /// The slot a member extension's checked call gives its extension receiver among

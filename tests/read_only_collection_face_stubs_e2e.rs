@@ -9,10 +9,9 @@
 //! final special bridge testing `instanceof String`, and an inherited `Base<T>.remove(T)` under
 //! `Base<String>` implements it with the erased descriptor itself, so it needs nothing.
 //!
-//! The JDK default `removeIf` that `java.util.Collection` declares is a stub as well
-//! (`removeIf(Predicate<? super String>)`). These comparisons compare every member, the `toArray`
-//! pair and the declared `containsAll` override included, byte for byte, except an abstract class's
-//! fake-override bridges, a later realization they leave out by their exact spelling.
+//! The mutable-only JDK default `removeIf` is stubbed after them. These comparisons cover every
+//! member, the `toArray` pair and the declared `containsAll` override included, byte for byte,
+//! apart from the later realizations a test names.
 
 use super::common;
 

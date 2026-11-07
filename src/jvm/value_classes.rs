@@ -1856,9 +1856,9 @@ pub(crate) fn lower_value_classes(
                 args,
                 ctor_params,
                 ctor_desc: None,
-                external_target: _,
                 defaults,
                 default_prefix_count,
+                ..
             } if under.contains_key(internal) => {
                 let owner = *internal;
                 let u = under
@@ -2325,7 +2325,7 @@ pub(crate) fn lower_value_classes(
                 ir.record_realized_member_target(id, constructor, None);
                 // The construction becomes a static `constructor-impl` call over the same checked
                 // declaration parameters. A generic `T` parameter consumes its argument as a box.
-                if let Some(parameters) = ir.construction_declared_params.remove(&id) {
+                if let Some(parameters) = ir.construction_declared_params(id).map(Box::from) {
                     ir.call_declared_params.insert(id, parameters);
                 }
                 Some(expr)

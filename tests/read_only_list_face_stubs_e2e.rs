@@ -9,11 +9,10 @@
 //! `remove(int)` bridge and the erased one. The override check sees applied supertypes, so a
 //! `MutableListIterator<String>` result implements `listIterator`.
 //!
-//! The JDK defaults `java.util.List` declares for the mutable face only (`replaceAll`, `sort`, the
-//! `SequencedCollection` members) are stubs too, with an erased bridge where the descriptor
-//! differs (`addFirst(Object)`). An abstract class's fake-override bridges are a later realization;
-//! these comparisons leave them out by their exact spelling and compare every other member, the
-//! `toArray` pair and the declared `containsAll` override included, byte for byte.
+//! The mutable-only JDK defaults (`replaceAll`, `sort`, and on Java 21 the `SequencedCollection`
+//! members) are stubbed after them. An abstract class's fake-override bridges are a later
+//! realization, which these comparisons leave out by exact spelling; they compare every other
+//! member, the `toArray` pair and the declared `containsAll` override included, byte for byte.
 
 use super::common;
 
@@ -343,12 +342,8 @@ fn a_narrower_remove_at_keeps_its_erased_remove_bridge_like_kotlinc() {
             "public final java.lang.String remove(int);",
             "public java.lang.Object remove(int);",
         ],
-        // The `Any` spellings of the later realizations.
-        &[
-            "public boolean containsAll(java.util.Collection<? extends java.lang.Object>);",
-            "public void replaceAll(java.util.function.UnaryOperator<java.lang.Object>);",
-            "public void sort(java.util.Comparator<? super java.lang.Object>);",
-        ],
+        // The `Any` spelling of a later realization.
+        &["public boolean containsAll(java.util.Collection<? extends java.lang.Object>);"],
     );
     let expected = "add: UnsupportedOperationException; add: UnsupportedOperationException; \
         remove: UnsupportedOperationException; addAll: UnsupportedOperationException; \

@@ -10,9 +10,9 @@
 //! synthetic `Object get(Object)` copy of it, and `final HashSet<String> keySet()` before an
 //! ordinary `Set keySet()` bridge to it.
 //!
-//! The JDK defaults `java.util.Map` declares for the mutable face only (`replaceAll`,
-//! `putIfAbsent`, `replace`, `compute*`, `merge`) are stubs too, each with its erased bridge
-//! (`Object putIfAbsent(Object, Object)`). These comparisons compare every member byte for byte.
+//! The mutable-only JDK defaults (`replaceAll`, `putIfAbsent`, `replace`, `compute*`, `merge`) are
+//! stubbed too, after the builtin members, each with its erased bridge; these comparisons cover
+//! every member byte for byte.
 
 use super::common;
 
