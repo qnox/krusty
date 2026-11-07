@@ -61,7 +61,15 @@ fun selections(flag: Boolean, long: Long, int: Int) {
 }
 "#;
     let mut diagnostics = DiagSink::new();
-    let (file, _, info) = crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![
+        crate::toolchain::stdlib_jar().expect("stdlib for the declared Number bounds"),
+        crate::toolchain::jdk_modules().expect("JDK numeric superclass declarations"),
+    ]));
+    let platform = crate::frontend::PlatformProvider::jvm(Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+            .expect("JVM provider initialization"),
+    ));
+    let (file, _, info) = crate::frontend::analyze_source(source, platform, &mut diagnostics);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     let info = info.expect("complete checked source");
     let direct = calls_named(&file, "Pick");
