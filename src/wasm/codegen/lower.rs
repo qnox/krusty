@@ -1323,6 +1323,13 @@ impl<'a> Body<'a> {
                 self.property_read(*target, *dispatch_receiver)?
             }
             IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } =
+                    &**checked_op
+                    && self.is_array_size_property(*target) =>
+            {
+                self.checked_array_size(checked_op)?;
+            }
+            IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
                     target,
                     dispatch: crate::ir::IrPropertyDispatch::Ordinary,
