@@ -272,7 +272,7 @@ impl Fixture {
                 KlibPublicIdSignature::classifier(crate::types::type_name("kotlin/Function0")),
             ),
             vec![KlibIrTypeArgument::Type {
-                variance: KlibIrVariance::Out,
+                variance: KlibIrVariance::Invariant,
                 ty: result_type,
             }],
         );
@@ -689,4 +689,111 @@ fn nested_value_member_does_not_inherit_the_parent_storage_authority() {
             .count();
         assert_eq!(field_operations, 0);
     }
+}
+
+#[test]
+fn value_member_closure_captures_the_following_parameter_without_receiver_facts() {
+    let mut fixture = Fixture::new(true);
+    let closure = fixture.closure(fixture.value, fixture.field_type);
+    let (ir, result) = fixture.lower(closure, Access::ValueReadOnly);
+    let IrExpr::Lambda {
+        impl_fn, captures, ..
+    } = ir.expr(result.unwrap())
+    else {
+        panic!("value closure")
+    };
+    assert_eq!(captures.len(), 1);
+    assert!(matches!(ir.expr(captures[0]), IrExpr::GetValue(1)));
+    let info = &ir.fn_params[impl_fn];
+    assert_eq!(info.captured_receivers, []);
+    let [identity] = info.identities.as_slice() else {
+        panic!("one captured value")
+    };
+    assert_eq!(identity.source_name.as_deref(), Some("value"));
+    assert!(matches!(
+        identity.role,
+        crate::ir::IrParameterRole::CapturedValue { ordinal: 0, .. }
+    ));
+    let body = ir.functions[*impl_fn as usize].body.unwrap();
+    let returns = crate::ir::value_namespace_expressions(&ir, body)
+        .into_iter()
+        .filter_map(|id| match ir.expr(id) {
+            IrExpr::Return(Some(value)) => Some(*value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [value] = returns.as_slice() else {
+        panic!("one captured-value return")
+    };
+    assert!(matches!(ir.expr(*value), IrExpr::GetValue(0)));
+    assert_eq!(ir.checked_type(*value), Some(fixture.field_ty));
+    assert_eq!(
+        ir.exprs
+            .iter()
+            .filter(|expression| matches!(
+                expression,
+                IrExpr::GetField { .. } | IrExpr::SetField { .. }
+            ))
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn value_member_closure_captures_its_explicit_instance_with_the_full_declared_type() {
+    let mut fixture = Fixture::new(true);
+    let receiver_type = fixture.arena.expr(fixture.receiver).ty.unwrap();
+    let closure = fixture.closure(fixture.receiver, receiver_type);
+    let (ir, result) = fixture.lower(closure, Access::ValueReadOnly);
+    let IrExpr::Lambda {
+        impl_fn, captures, ..
+    } = ir.expr(result.unwrap())
+    else {
+        panic!("receiver closure")
+    };
+    assert_eq!(captures.len(), 1);
+    assert!(matches!(ir.expr(captures[0]), IrExpr::GetValue(0)));
+    let info = &ir.fn_params[impl_fn];
+    assert_eq!(
+        info.captured_receivers,
+        [crate::ir::IrCapturedReceiver::Enclosing {
+            classifier: fixture.owner,
+            owner: None
+        }]
+    );
+    let [identity] = info.identities.as_slice() else {
+        panic!("one captured receiver")
+    };
+    assert_eq!(identity.source_name, None);
+    assert_eq!(
+        identity.role,
+        crate::ir::IrParameterRole::CapturedReceiver { ordinal: 0 }
+    );
+    assert_eq!(
+        ir.functions[*impl_fn as usize].params,
+        [fixture.receiver_ty]
+    );
+    let body = ir.functions[*impl_fn as usize].body.unwrap();
+    let returns = crate::ir::value_namespace_expressions(&ir, body)
+        .into_iter()
+        .filter_map(|id| match ir.expr(id) {
+            IrExpr::Return(Some(value)) => Some(*value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [value] = returns.as_slice() else {
+        panic!("one receiver return")
+    };
+    assert!(matches!(ir.expr(*value), IrExpr::GetValue(0)));
+    assert_eq!(ir.checked_type(*value), Some(fixture.receiver_ty));
+    assert_eq!(
+        ir.exprs
+            .iter()
+            .filter(|expression| matches!(
+                expression,
+                IrExpr::GetField { .. } | IrExpr::SetField { .. }
+            ))
+            .count(),
+        0
+    );
 }
