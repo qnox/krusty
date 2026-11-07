@@ -7,6 +7,23 @@ use crate::resolve::{
 };
 use crate::types::{Ty, TyKind};
 
+/// Whether the checked lambda's value-parameter shape introduces Kotlin's implicit `it`.
+/// Context and extension receivers are not value parameters, and a written empty arrow or an
+/// anonymous function never introduces an omitted parameter.
+pub(super) fn lambda_binds_implicit_it(
+    file: &File,
+    expression: ExprId,
+    signature: Option<&crate::types::FnSig>,
+) -> bool {
+    matches!(file.expr(expression), Expr::Lambda { params, .. } if params.is_empty())
+        && !file.anon_fun_lambdas.contains(&expression.0)
+        && !file.lambda_explicit_arrows.contains(&expression.0)
+        && signature.is_some_and(|signature| {
+            let receivers = signature.context_count + usize::from(signature.has_receiver);
+            signature.params.len().saturating_sub(receivers) == 1
+        })
+}
+
 /// Semantic selections consumed by context-capture analysis. Keeping the related checker handoff
 /// maps together prevents each new selected operation from widening the shared traversal's API.
 pub(crate) struct SelectedContextSources<'a> {
@@ -472,13 +489,7 @@ fn scan_context_sources(
         let nested_params = match file.expr(e) {
             Expr::Lambda { params, .. } if !params.is_empty() => Some(params.clone()),
             Expr::Lambda { .. } if !file.anon_fun_lambdas.contains(&e.0) => {
-                let implicit_it = match lambda_sig {
-                    Some(sig) => {
-                        let implicit_count = sig.context_count + usize::from(sig.has_receiver);
-                        sig.params.len().saturating_sub(implicit_count) == 1
-                    }
-                    None => false,
-                };
+                let implicit_it = lambda_binds_implicit_it(file, e, lambda_sig);
                 Some(if implicit_it {
                     vec!["it".to_string()]
                 } else {

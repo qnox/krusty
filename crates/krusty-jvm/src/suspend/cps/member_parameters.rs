@@ -55,7 +55,7 @@ impl SuspendLambdaParameters {
         for capture in &captures {
             match capture.role {
                 IrParameterRole::CapturedValue { .. } => assert!(
-                    capture.source_name.is_some(),
+                    capture.source_name.is_some() || capture.constructor_receiver().is_some(),
                     "a suspend lambda's captured value keeps its source name"
                 ),
                 IrParameterRole::CapturedReceiver { ordinal } => assert!(

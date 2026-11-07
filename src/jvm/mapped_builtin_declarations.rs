@@ -7,6 +7,10 @@
 use crate::libraries::LibraryMember;
 use crate::types::{type_name, TypeName};
 
+mod predefined_enhancements;
+
+pub use predefined_enhancements::enhance_jdk_signature;
+
 const SPECIAL_REALIZATIONS_2_4: &str =
     include_str!("mapped_builtin_declarations/special_realizations_2_4.tsv");
 

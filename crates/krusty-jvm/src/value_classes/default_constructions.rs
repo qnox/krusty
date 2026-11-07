@@ -63,9 +63,9 @@ fn sibling_call(
     under: &Under,
 ) -> IrExpr {
     let declared = ir
-        .construction_declared_params
-        .remove(&construction)
-        .expect("a checked construction records its declared parameters");
+        .construction_declared_params(construction)
+        .expect("a checked construction records its declared parameters")
+        .to_vec();
     let physical = declared.iter().map(|p| erase(p, under)).collect();
     let (mut parameters, args, _) =
         crate::module_calls::realize_default_arguments(ir, physical, args, omitted, None, &[])

@@ -166,7 +166,7 @@ fn materialize_unnamed_checks_before_result_coercion(ir: &mut IrFile) {
             };
             let IrExpr::NotNullAssert {
                 operand: checked,
-                check: krusty::ir::NullCheck::Unnamed,
+                check: krusty::ir::NullCheck::Unnamed { .. },
             } = ir.exprs.get(*assertion as usize)?
             else {
                 return None;
@@ -356,7 +356,9 @@ mod tests {
         let checked = ir.add_expr(IrExpr::GetValue(0));
         let assertion = ir.add_expr(IrExpr::NotNullAssert {
             operand: checked,
-            check: NullCheck::Unnamed,
+            check: NullCheck::Unnamed {
+                site: krusty::ir::NullCheckSite::Value,
+            },
         });
         let result = ir.add_expr(IrExpr::GetValue(0));
         let block = ir.add_expr(IrExpr::Block {

@@ -66,7 +66,8 @@ fn construction(ir: &mut IrFile, params: Option<Vec<Ty>>, descriptor: Option<&st
         internal: type_name("Captured"),
         args: Vec::new(),
         ctor_params: params,
-        ctor_desc: descriptor.map(str::to_owned),
+        declared_params: None,
+        ctor_desc: descriptor.map(Into::into),
         external_target: None,
         defaults: Box::new([]),
         default_prefix_count: 2,
@@ -92,6 +93,7 @@ fn secondary(delegate: CtorDelegateTarget) -> IrSecondaryCtor {
         body: None,
         delegate,
         synthetic: false,
+        platform_visible: false,
         vc_params: false,
         param_checks: Vec::new(),
     }

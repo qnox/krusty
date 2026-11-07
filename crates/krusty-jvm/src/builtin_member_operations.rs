@@ -11,7 +11,7 @@ use krusty::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, 
 use krusty::libraries::builtin_member_realization::{
     primitive_binary_operands, primitive_compare_operand,
 };
-use krusty::libraries::{CompilerIntrinsic, PrimitiveBinaryIntrinsic, PrimitiveUnaryIntrinsic};
+use krusty::libraries::{CompilerIntrinsic, PrimitiveUnaryIntrinsic};
 use krusty::types::Ty;
 
 /// Checked operands of one invocation of a builtin member.
@@ -87,7 +87,7 @@ pub(super) fn operation(
                     args: vec![rhs],
                 }));
             }
-            let op = binary_operation(intrinsic)?;
+            let op = IrBinOp::of_primitive_operator(intrinsic)?;
             let (lhs_ty, rhs_ty) = primitive_binary_operands(intrinsic, parameter, result)?;
             // The selected declaration and the operation result stay semantic (`UInt`/`ULong`),
             // while JVM primitive opcodes consume their physical carriers. Keep that conversion at
@@ -174,25 +174,6 @@ fn unary_operation(
         _ => None,
     };
     value.map(BuiltinMemberOperation::Value)
-}
-
-fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<IrBinOp> {
-    Some(match intrinsic {
-        CompilerIntrinsic::PrimitiveBinary(operation) => match operation {
-            PrimitiveBinaryIntrinsic::Add => IrBinOp::Add,
-            PrimitiveBinaryIntrinsic::Subtract => IrBinOp::Sub,
-            PrimitiveBinaryIntrinsic::Multiply => IrBinOp::Mul,
-            PrimitiveBinaryIntrinsic::Divide => IrBinOp::Div,
-            PrimitiveBinaryIntrinsic::Remainder => IrBinOp::Rem,
-        },
-        CompilerIntrinsic::PrimitiveBitAnd => IrBinOp::BitAnd,
-        CompilerIntrinsic::PrimitiveBitOr => IrBinOp::BitOr,
-        CompilerIntrinsic::PrimitiveBitXor => IrBinOp::BitXor,
-        CompilerIntrinsic::PrimitiveShiftLeft => IrBinOp::Shl,
-        CompilerIntrinsic::PrimitiveShiftRight => IrBinOp::Shr,
-        CompilerIntrinsic::PrimitiveUnsignedShiftRight => IrBinOp::Ushr,
-        _ => return None,
-    })
 }
 
 /// Bring one operand to its semantic scalar type, then to the operation's carrier. A reference

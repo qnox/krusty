@@ -312,7 +312,7 @@ fn existing_shapes(
                 source_shapes(ir, source, Some(same_package_path), &mut shapes);
             }
             Declaring::Dependency(Some(info)) => {
-                classpath_shapes(info, same_package_path, &mut shapes);
+                classpath_shapes(classpath, info, same_package_path, &mut shapes);
             }
             // Only a builtin without a class file (`kotlin.Any`) is absent here.
             Declaring::Dependency(None) => {}
@@ -355,9 +355,14 @@ fn module_shapes(
 
 /// The shapes of the members a dependency class declares that reach the class: from its Kotlin
 /// metadata, or from its class file for a Java class.
-fn classpath_shapes(info: &ClassInfo, same_package_path: bool, shapes: &mut Shapes) {
+fn classpath_shapes(
+    classpath: &Classpath,
+    info: &ClassInfo,
+    same_package_path: bool,
+    shapes: &mut Shapes,
+) {
     if info.meta.class_kind.is_some() {
-        for function in info.meta.class_functions.iter() {
+        for function in classpath.class_members(info).class_functions.iter() {
             if function.kotlin_name != NAME
                 || !inherited_along(function.visibility, same_package_path)
             {

@@ -76,8 +76,8 @@ use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_im
 pub(crate) use module_members::*;
 use operand_nullness::{operand_nonnull, operand_null_only};
 pub(crate) use representation::{
-    boxed_value_class_carrier, boxed_value_class_names, boxed_value_class_underlying,
-    instance_representation, is_boxed_value_class, type_operation_internal_name,
+    boxed_value_class_carrier, boxed_value_class_underlying, instance_representation,
+    is_boxed_value_class, type_operation_internal_name,
 };
 use representation::{erase, is_ref};
 use result_tail_boxing::box_vc_tail;
@@ -1859,9 +1859,9 @@ pub(crate) fn lower_value_classes(
                 args,
                 ctor_params,
                 ctor_desc: None,
-                external_target: _,
                 defaults,
                 default_prefix_count,
+                ..
             } if under.contains_key(internal) => {
                 let owner = *internal;
                 let u = under
@@ -2328,7 +2328,7 @@ pub(crate) fn lower_value_classes(
                 ir.record_realized_member_target(id, constructor, None);
                 // The construction becomes a static `constructor-impl` call over the same checked
                 // declaration parameters. A generic `T` parameter consumes its argument as a box.
-                if let Some(parameters) = ir.construction_declared_params.remove(&id) {
+                if let Some(parameters) = ir.construction_declared_params(id).map(Box::from) {
                     ir.call_declared_params.insert(id, parameters);
                 }
                 Some(expr)

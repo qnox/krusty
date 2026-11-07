@@ -181,6 +181,9 @@ impl BodyLowering<'_, '_, '_> {
             | IrExpr::EnumValueOf { .. }
             | IrExpr::EnumValues { .. }
             | IrExpr::EnumEntries { .. }
+            | IrExpr::EnumConstant { .. }
+            | IrExpr::EnumAllocation { .. }
+            | IrExpr::EnumEntriesList { .. }
             | IrExpr::NewArray { .. }
             | IrExpr::Vararg { .. }
             | IrExpr::CallableReference(_) => ir.named_type(id)?,
@@ -214,7 +217,7 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
     ) -> Option<Ty> {
         // In the order lowering tries them: the first that claims the read decides.
-        if self.enum_member_name(target).is_some() {
+        if krusty::backend::enums::base_member(self.file.callables, target).is_some() {
             return None;
         }
         if self.reference_property_role(target).is_some() {

@@ -126,7 +126,7 @@ impl JvmLibraries {
         constructors: &mut [LibraryMember],
         outer: Option<TypeName>,
     ) -> Option<Arc<DeprecatedDeclaration>> {
-        let meta_constructors = crate::jvm::metadata::class_constructors(ci);
+        let meta_constructors = &self.cp.class_members(ci).constructors;
         for constructor in constructors {
             let declared = if ci.meta.is_present() {
                 let realization_name = constructor

@@ -3,7 +3,7 @@
 //! A Kotlin primitive read as `Any`, as a type parameter's value or through a supertype that is a
 //! class (`Number`, `Comparable`) is an object, as it is on every Kotlin target. Each primitive
 //! type has one box type: a struct of the dispatch table every object starts with, then the value
-//! itself. Its table holds the primitive's own `equals`, as the JVM's box defines it, which is what
+//! itself. Its table holds the primitive's own `equals` and `hashCode`, as the JVM's box defines them, which is what
 //! kotlinc's output observes. A box type and its table are declared the first time a
 //! file boxes that primitive.
 //!
@@ -43,6 +43,19 @@ impl Primitive {
             TyKind::DOUBLE => Self::Double,
             _ => return None,
         })
+    }
+
+    fn ty(self) -> Ty {
+        match self {
+            Self::Boolean => Ty::Boolean,
+            Self::Byte => Ty::Byte,
+            Self::Short => Ty::Short,
+            Self::Char => Ty::Char,
+            Self::Int => Ty::Int,
+            Self::Long => Ty::Long,
+            Self::Float => Ty::Float,
+            Self::Double => Ty::Double,
+        }
     }
 
     fn value(self) -> ValType {
@@ -127,9 +140,9 @@ impl Runtime {
         });
         let [equals_ty, hash_code_ty, to_string_ty] = objects.any_slot_types;
         let equals = define(module, equals_ty, equals(primitive, structure));
-        // A box's `hashCode` and `toString` are reached only by a call of `kotlin.Any`'s members
-        // on an `Any` receiver, which this backend does not lower yet.
-        let hash_code = self.objects.trap(module, hash_code_ty);
+        let hash_code = define(module, hash_code_ty, self.hash_code(primitive, structure));
+        // A box's `toString` is reached only by a call of `kotlin.Any`'s members on an `Any`
+        // receiver, which this backend does not lower yet.
         let to_string = self.objects.trap(module, to_string_ty);
         let objects = &mut self.objects;
         let (_, itable) = objects
@@ -177,8 +190,8 @@ impl Runtime {
             supertype: Some(objects.object),
             open: false,
         });
-        let [_, hash_code_ty, to_string_ty] = objects.any_slot_types;
-        let hash_code = objects.trap(module, hash_code_ty);
+        let [_, _, to_string_ty] = objects.any_slot_types;
+        let hash_code = self.hashing.unit_hash_code;
         let to_string = objects.trap(module, to_string_ty);
         let (_, itable) = objects
             .interfaces
@@ -239,6 +252,19 @@ fn equals(primitive: Primitive, structure: u32) -> (Vec<ValType>, Code) {
     }
     code.else_().i32_const(0).end();
     (vec![value, value], code)
+}
+
+impl Runtime {
+    /// `hashCode(this)`: the hash of the primitive value the box holds.
+    fn hash_code(&self, primitive: Primitive, structure: u32) -> (Vec<ValType>, Code) {
+        let mut code = Code::default();
+        code.local_get(0)
+            .ref_cast(false, HeapType::Concrete(structure))
+            .struct_get(structure, BOX_VALUE_FIELD);
+        let hashed = self.hashing.emit_scalar_hash(&mut code, primitive.ty());
+        debug_assert!(hashed, "every boxed primitive has a scalar hash");
+        (Vec::new(), code)
+    }
 }
 
 /// The NaN test, the reinterpretation as bits and the bits' equality of a floating carrier.

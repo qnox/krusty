@@ -13,7 +13,7 @@ pub(super) fn parameters<'a>(
     construction: ExprId,
     ctor_params: &'a Option<Vec<Ty>>,
 ) -> &'a [Ty] {
-    match ir.construction_declared_params.get(&construction) {
+    match ir.construction_declared_params(construction) {
         Some(declared) => declared,
         None => ctor_params.as_deref().unwrap_or(&[]),
     }

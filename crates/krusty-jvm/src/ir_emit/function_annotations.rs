@@ -35,7 +35,7 @@ pub(super) fn add_abstract(
     // abstract class and an enum alike, classified from its declaration as a concrete method's
     // are: a value-class parameter is `@NotNull` whatever its carrier admits.
     let super::declared_nullability::DeclaredNullability { result, parameters } =
-        super::override_result_emission::declared_nullability(ir, override_results, function);
+        super::override_result_emission::declared_nullability(ir, env, function);
     if result.is_some() || parameters.iter().any(Option::is_some) {
         cw.set_method_nullability(&declaration.name, &descriptor, result, &parameters);
     }

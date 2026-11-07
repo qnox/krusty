@@ -51,6 +51,7 @@ impl Body<'_> {
     ) -> Result<(), Unsupported> {
         let Callee::External {
             target,
+            default_provider,
             params,
             ret,
             defaults,
@@ -79,17 +80,40 @@ impl Body<'_> {
             .calls
             .external(*target)
             .ok_or_else(|| "an unregistered dependency callable identity".to_owned())?;
-        let signature = self
+        // A call leaving arguments out goes through the default provider's entry, so its operands
+        // and result take that declaration's own ABI: an override's can differ from the inherited
+        // declaration's when the class it inherits from is generic.
+        let signature = match default_entry {
+            Some(_) => self.calls.external_default_signature(*target),
+            None => self.calls.signature(*target),
+        }
+        .ok_or_else(|| "an emitted dependency without its declared signature".to_owned())?
+        .clone();
+        if self
             .calls
             .signature(*target)
-            .ok_or_else(|| "an emitted dependency without its declared signature".to_owned())?
-            .clone();
+            .is_none_or(|own| own.parameters().len() != signature.parameters().len())
+        {
+            return Err(
+                "an inherited default provider whose operands disagree with its override".into(),
+            );
+        }
         let callable = self
             .callables
             .callable(*target)
             .ok_or_else(|| "a dependency call without frozen callable facts".to_owned())?;
         let instantiated =
             instantiate_dependency_signature(callable, callee).map_err(str::to_owned)?;
+        // An override's omitted arguments are the defaults of the declaration it inherits them
+        // from, whose entry evaluates them before dispatching to the actual member.
+        let provider = match default_provider {
+            Some(provider) if !defaults.is_empty() => {
+                self.callables.callable(*provider).ok_or_else(|| {
+                    "an inherited default provider without frozen callable facts".to_owned()
+                })?
+            }
+            _ => callable,
+        };
         if callable
             .generic_sig
             .as_ref()
@@ -163,7 +187,7 @@ impl Body<'_> {
                 defaults,
                 krusty::backend::DeclaredOperandRoles {
                     context_count: callable.context_count,
-                    defaults: callable
+                    defaults: provider
                         .klib_body_parameter_defaults
                         .map(|defaults| defaults.as_slice()),
                     declared: declared.len(),
@@ -171,6 +195,13 @@ impl Body<'_> {
             )
             .map_err(str::to_owned)?;
         let abi = declared;
+        // A member's receiver leads its operands but is not one of the parameters an omission
+        // mask covers, so the masks number the parameters after it.
+        let receiver_operands = call.unmasked_receiver_operands();
+        let masked = omitted
+            .iter()
+            .map(|&position| position - receiver_operands)
+            .collect::<Vec<_>>();
         match call {
             DependencyExportCall::TopLevel | DependencyExportCall::SerializedExtension => {
                 self.dependency_arguments_omitting(arguments, abi, &omitted)?;
@@ -191,14 +222,14 @@ impl Body<'_> {
                 if effect.evaluate_source() {
                     self.statement(dispatch_receiver.expect("validated singleton receiver"))?;
                 }
-                self.dependency_arguments(arguments, abi)?;
+                self.dependency_arguments_omitting(arguments, abi, &omitted)?;
             }
             DependencyExportCall::Member | DependencyExportCall::MemberExtension => {
                 self.value(
                     dispatch_receiver.expect("validated member receiver"),
                     abi[0],
                 )?;
-                self.dependency_arguments(arguments, &abi[1..])?;
+                self.dependency_arguments_omitting(arguments, &abi[1..], &masked)?;
             }
             DependencyExportCall::SourceExtension {
                 receiver_position, ..
@@ -256,15 +287,22 @@ impl Body<'_> {
         match default_entry {
             Some(entry) => {
                 for mask in krusty::backend::default_arguments::omission_masks(
-                    abi.len(),
-                    omitted.iter().copied(),
+                    abi.len() - receiver_operands,
+                    masked.iter().copied(),
                 ) {
                     self.code.i32_const(mask as i32);
                 }
                 self.code.call(entry);
             }
             None => {
-                self.code.call(function);
+                // An ordinary call to an overridable member runs the receiver's override.
+                let dispatch = match call {
+                    DependencyExportCall::Member | DependencyExportCall::MemberExtension => {
+                        self.calls.external_dispatch(*target)
+                    }
+                    _ => None,
+                };
+                self.code.call(dispatch.unwrap_or(function));
             }
         }
         self.coerce_emitted_value(signature.result(), *ret)
@@ -307,5 +345,37 @@ impl Body<'_> {
             self.value(argument, parameter)?;
         }
         Ok(())
+    }
+
+    /// Another module's class, constructed through the entry its module exports under the
+    /// selected constructor's identity; `None` when that module published none.
+    pub(super) fn dependency_construction(
+        &mut self,
+        target: krusty::fir::ExternalCallableId,
+        internal: krusty::types::TypeName,
+        args: &[u32],
+    ) -> Option<Result<(), Unsupported>> {
+        if self.ir.class_id_by_name(internal).is_some() {
+            return None;
+        }
+        let function = self.calls.external(target)?;
+        Some((|| {
+            let signature = self
+                .calls
+                .signature(target)
+                .ok_or("a dependency constructor without its declared signature")?
+                .clone();
+            if signature.parameters().len() != args.len() {
+                return Err(
+                    "a dependency construction whose operands disagree with its constructor"
+                        .to_string(),
+                );
+            }
+            for (argument, parameter) in args.iter().zip(signature.parameters()) {
+                self.value(*argument, *parameter)?;
+            }
+            self.code.call(function);
+            self.coerce_emitted_value(signature.result(), Ty::obj_name(internal))
+        })())
     }
 }

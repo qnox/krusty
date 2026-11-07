@@ -331,7 +331,7 @@ fn check_enhanced_result_before_unbox(ir: &mut IrFile) {
         .filter_map(|index| {
             let IrExpr::NotNullAssert {
                 operand: coercion,
-                check: krusty::ir::NullCheck::Named(_),
+                check: krusty::ir::NullCheck::Named { .. },
             } = &ir.exprs[index]
             else {
                 return None;

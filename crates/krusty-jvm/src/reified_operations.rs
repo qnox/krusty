@@ -512,7 +512,8 @@ fn collect_type_reified_parameters(
         | TyKind::Null
         | TyKind::Nothing
         | TyKind::Error
-        | TyKind::Pending => {}
+        | TyKind::Pending
+        | TyKind::Var(..) => {}
     }
 }
 

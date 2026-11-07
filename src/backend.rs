@@ -3,6 +3,7 @@
 //! A backend consumes checked frontend output and emits target artifacts.
 
 pub mod class_tables;
+pub mod construction_entries;
 mod constructor_selection;
 pub mod coroutines;
 pub mod counted_loops;
@@ -12,10 +13,13 @@ mod dependency_call_shape;
 mod dependency_facts;
 mod dependency_metadata;
 mod dependency_signature;
+pub mod dispatch_entries;
 mod entry;
+pub mod enums;
 pub mod interface_identity;
 pub mod local_properties;
 mod module_facts;
+pub mod property_entries;
 mod source_class_members;
 pub mod value_classes;
 
@@ -34,6 +38,7 @@ pub use dependency_metadata::{
     DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata,
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
+pub(crate) use dependency_metadata::{ExportedConstructor, ExportedPropertyAccessor};
 pub use dependency_signature::{instantiate_dependency_signature, DependencyFunctionSignature};
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.

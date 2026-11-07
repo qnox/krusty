@@ -107,7 +107,7 @@ fn reified_template_file(copy: bool) -> IrFile {
 
 fn lower(mut ir: IrFile) -> Result<(), Unsupported> {
     let properties = krusty::backend::local_properties::realize(&mut ir).unwrap();
-    let mut started = super::super::super::Started::new(crate::WasmTarget::Js);
+    let mut started = super::super::super::Started::new(crate::target::WasmTarget::Js);
     lower_alone(&ir, &properties, &mut started).map(|_| ())
 }
 

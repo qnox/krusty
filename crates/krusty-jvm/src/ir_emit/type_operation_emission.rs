@@ -593,7 +593,7 @@ impl Emitter<'_> {
             let checked_platform_value = matches!(
                 self.ir.expr(arg),
                 IrExpr::NotNullAssert {
-                    check: krusty::ir::NullCheck::Named(_),
+                    check: krusty::ir::NullCheck::Named { .. },
                     ..
                 }
             );

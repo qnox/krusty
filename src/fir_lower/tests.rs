@@ -18,6 +18,7 @@ mod catch_clauses;
 mod checked_hierarchy;
 mod checked_operand_types;
 mod checked_substitutions;
+mod enum_realization;
 mod external_constructions;
 mod external_references;
 mod inline_only;
@@ -590,6 +591,7 @@ fn external_default_call_keeps_only_supplied_common_operands() {
                 default_provider: None,
                 receiver: None,
                 declared_receiver: None,
+                declaring_receiver: None,
                 parameters: Box::new([resolved(Ty::Int), resolved(Ty::String)]),
                 result: resolved(Ty::String),
                 declared_result: None,

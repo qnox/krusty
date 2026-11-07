@@ -45,6 +45,12 @@ pub struct DeclaredOperandRoles<'a> {
 }
 
 impl DependencyExportCall {
+    /// How many leading export operands are the dispatch receiver, which a default entry takes
+    /// first but whose omission masks number only the parameters after it.
+    pub fn unmasked_receiver_operands(self) -> usize {
+        usize::from(matches!(self, Self::Member | Self::MemberExtension))
+    }
+
     /// The export operand positions a call leaving out the parameters `omitted` (checked call
     /// ordinals) leaves to the declaration's default entry.
     /// Ordinals keep the declaration's context prefix. A source extension receiver is inserted
@@ -64,13 +70,20 @@ impl DependencyExportCall {
             defaults,
             declared,
         } = roles;
-        // Where the receiver sits among the export operands, and whether call ordinals count it.
-        let (receiver, ordinal_counts_receiver) = match self {
-            Self::TopLevel => (None, false),
-            Self::SerializedExtension => (Some(context_count), true),
+        // How the call ordinals map onto the export operands: a dispatch receiver leads them, a
+        // source extension receiver is inserted after the contexts, and a serialized extension
+        // receiver occupies the ordinal after the contexts without a default flag of its own.
+        let (leading, inserted, serialized) = match self {
+            // A singleton member's export erases its receiver, so its operands are the ordinals.
+            Self::TopLevel | Self::SingletonMember => (0, None, None),
+            Self::Member => (1, None, None),
+            // Common lowering publishes member-extension ordinals over value parameters only, so
+            // its extension receiver is inserted after the contexts like a source extension's.
+            Self::MemberExtension => (1, Some(context_count), None),
+            Self::SerializedExtension => (0, None, Some(context_count)),
             Self::SourceExtension {
                 receiver_position, ..
-            } if receiver_position == context_count => (Some(context_count), false),
+            } if receiver_position == context_count => (0, Some(context_count), None),
             Self::SourceExtension { .. } => {
                 return Err("a dependency extension receiver outside its context prefix")
             }
@@ -83,7 +96,12 @@ impl DependencyExportCall {
         let defaults = defaults.ok_or(
             "a dependency call omitting a parameter of a declaration without published defaults",
         )?;
-        if defaults.len() + usize::from(receiver.is_some()) != declared {
+        if defaults.len()
+            + leading
+            + usize::from(inserted.is_some())
+            + usize::from(serialized.is_some())
+            != declared
+        {
             return Err(
                 "a dependency declaration whose default flags are not parallel to its export",
             );
@@ -94,16 +112,12 @@ impl DependencyExportCall {
             if ordinal < context_count {
                 return Err("a dependency call omitting a context operand");
             }
-            let (parameter, position) = match receiver {
-                None => (ordinal, ordinal),
-                Some(receiver) if ordinal_counts_receiver => {
-                    if ordinal == receiver {
-                        return Err("a dependency call omitting its extension receiver");
-                    }
-                    (ordinal - 1, ordinal)
-                }
-                Some(_) => (ordinal, ordinal + 1),
-            };
+            if serialized == Some(ordinal) {
+                return Err("a dependency call omitting its extension receiver");
+            }
+            let parameter = ordinal - usize::from(serialized.is_some_and(|at| ordinal > at));
+            let position =
+                leading + ordinal + usize::from(inserted.is_some_and(|at| ordinal >= at));
             match defaults.get(parameter) {
                 Some(true) => positions.push(position),
                 Some(false) => {
@@ -324,6 +338,27 @@ mod tests {
                 .omitted_operands(&[2], roles(1, &[false, true], 3)),
             Ok(vec![2])
         );
+        // A member's dispatch receiver leads its operands, ahead of its contexts.
+        assert_eq!(
+            DependencyExportCall::Member.omitted_operands(&[0], roles(0, &[true], 2)),
+            Ok(vec![1])
+        );
+        assert_eq!(
+            DependencyExportCall::Member.omitted_operands(&[2], roles(1, &[false, false, true], 4)),
+            Ok(vec![3])
+        );
+        // A singleton member's export erases its receiver; its operands are the ordinals.
+        assert_eq!(
+            DependencyExportCall::SingletonMember
+                .omitted_operands(&[1], roles(0, &[false, true], 2)),
+            Ok(vec![1])
+        );
+        // A member extension: the dispatch receiver, then the extension receiver inserted after
+        // the contexts; ordinals and default flags cover only the value parameters.
+        assert_eq!(
+            DependencyExportCall::MemberExtension.omitted_operands(&[0], roles(0, &[true], 3)),
+            Ok(vec![2])
+        );
         assert_eq!(
             DependencyExportCall::TopLevel.omitted_operands(&[], roles(0, &[], 0)),
             Ok(Vec::new())
@@ -407,10 +442,25 @@ mod tests {
                 "a dependency call omitting a context operand",
             ),
             (
-                DependencyExportCall::Member,
+                DependencyExportCall::SourceSingletonExtension {
+                    receiver: Ty::String,
+                    receiver_position: 0,
+                },
                 &[0][..],
                 roles(0, &[true], 2),
                 "a dependency call with omitted arguments through a receiver-erased export",
+            ),
+            (
+                DependencyExportCall::MemberExtension,
+                &[0][..],
+                roles(0, &[true, true], 3),
+                "a dependency declaration whose default flags are not parallel to its export",
+            ),
+            (
+                DependencyExportCall::Member,
+                &[0][..],
+                roles(1, &[true, true], 3),
+                "a dependency call omitting a context operand",
             ),
         ] {
             assert_eq!(

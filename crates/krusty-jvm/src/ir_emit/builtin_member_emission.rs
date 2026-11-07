@@ -31,7 +31,7 @@ impl Emitter<'_> {
             krusty::ir::IrIntrinsic::StringGet | krusty::ir::IrIntrinsic::StringLength => {
                 self.emit_string_member(expression, operation, receiver, arguments, code)
             }
-            krusty::ir::IrIntrinsic::EnumName => {
+            krusty::ir::IrIntrinsic::EnumName | krusty::ir::IrIntrinsic::EnumOrdinal => {
                 self.emit_value(receiver, code);
                 self.mark_dispatch_line(expression, code);
                 // kotlinc names the receiver's checked static classifier in the Methodref. JVM
@@ -42,7 +42,11 @@ impl Emitter<'_> {
                     .obj_internal()
                     .expect("checked Enum.name receiver has a JVM classifier")
                     .render();
-                let method = self.cw.methodref(&owner, "name", "()Ljava/lang/String;");
+                let (name, descriptor) = match operation {
+                    krusty::ir::IrIntrinsic::EnumName => ("name", "()Ljava/lang/String;"),
+                    _ => ("ordinal", "()I"),
+                };
+                let method = self.cw.methodref(&owner, name, descriptor);
                 code.invokevirtual(method, 0, 1);
             }
             krusty::ir::IrIntrinsic::NullableAnyToString => {

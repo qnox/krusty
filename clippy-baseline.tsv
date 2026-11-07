@@ -131,7 +131,6 @@
 1	src/resolve/member_extension_selection.rs	items after a test module
 1	src/resolve/operator_calls.rs	this function has too many arguments (10/7)
 1	src/resolve/operator_calls.rs	this function has too many arguments (9/7)
-1	src/resolve/postponed_constraints.rs	this function has too many arguments (10/7)
 1	src/resolve/property_read_selection.rs	called `map(..).flatten()` on `Option`: help: try replacing `map` with `and_then` and remove the `.flatten()`: `and_then(|getter| getter.member.external_identity)`
 1	src/resolve/reified_type_arguments.rs	this function has too many arguments (9/7)
 1	src/resolve/resolved_type_occurrences.rs	this function has too many arguments (9/7)

@@ -330,6 +330,28 @@ fn native_reference_runner_calls_the_packaged_final_module_box() {
     );
 }
 
+#[test]
+fn native_class_properties_export_their_checked_accessors() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/classPropertyDependencyExports.kt"),
+            "classPropertyDependencyExports",
+        ),
+        (
+            include_str!("box_regressions/delegatedPropertyDependencyExports.kt"),
+            "delegatedPropertyDependencyExports",
+        ),
+    ] {
+        super::box_reference_classes::checked_box(source, stem)
+            .expect("pinned kotlinc must run the whole property export module graph");
+        assert_eq!(
+            run_native_abi_case(source, stem),
+            Outcome::Pass,
+            "property accessor declarations must retain their module export identities"
+        );
+    }
+}
+
 /// A required inline dependency function whose body cannot become a template rejects its caller:
 /// it is never compiled as a direct call of the dependency function.
 // PLATFORM-SPECIFIC: Native expands required KLIB inline bodies in common IR; JVM uses bytecode.

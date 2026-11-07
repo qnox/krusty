@@ -30,6 +30,14 @@ pub struct KlibBodyClassContract {
     pub(crate) primary_constructor: Option<KlibPublicIdSignature>,
 }
 
+impl KlibBodyClassContract {
+    /// Whether the common type model carries this class's instances as one of its builtin types,
+    /// as it does an unsigned integer, rather than as an instance of a class.
+    pub(crate) fn is_builtin_type(&self) -> bool {
+        crate::types::builtin_semantic(self.classifier).is_some()
+    }
+}
+
 /// A complete declared instance layout. Its field ordinals belong to this exact producer class;
 /// retaining the layout grants no constructor, initializer, singleton or descriptor definition.
 #[derive(Clone, Debug, PartialEq, Eq)]

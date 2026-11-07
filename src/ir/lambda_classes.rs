@@ -92,6 +92,12 @@ pub enum IrLambdaCapture {
     },
     /// A captured implicit receiver, by its position among [`IrLambdaClass::captured_receivers`].
     Receiver(u32),
+    /// A receiver captured through a source constructor's logical prefix, before `this` exists.
+    /// Keep the original declaration identity when copies change their own constructor transport.
+    ConstructorReceiver {
+        owner: crate::fir::DeclarationId,
+        parameter: u32,
+    },
 }
 
 /// How an erased `FunctionN.invoke(Object…)Object` reaches a class's own specialized `invoke`.

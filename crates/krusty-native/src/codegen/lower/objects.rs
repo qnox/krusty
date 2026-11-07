@@ -1730,11 +1730,8 @@ impl<'a> FileLowering<'a> {
                     && model::is_enum(candidate)
             })
             .map(|outer| outer as ClassId)
-            .and_then(|outer| {
-                self.enum_entries
-                    .get(&outer)
-                    .map(|items| items.initializer())
-            });
+            .and_then(|outer| self.ir.enum_initializers().get(&outer))
+            .and_then(|&initializer| self.functions[initializer as usize]);
 
         let name = format!("{}.INSTANCE", self.ir.classes[class as usize].fq_name());
         let signature = self.signature_of(&[], any())?;
@@ -2048,6 +2045,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 "a constructor call with omitted arguments (`{name}`)"
             ));
         }
+        // An enum constant's `kotlin.Enum` storage, taken before the arguments are lowered: an
+        // argument's own construction is not the constant.
+        let enum_base = self.enum_base.take();
         // `Any()` is declared in no file and needs none: the root has no state and no constructor,
         // so the whole of constructing one is an object with its type and nothing after the
         // header. `kt_type_any` is the runtime's, the same descriptor every other type points at
@@ -2060,6 +2060,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return self.runtime_construction(internal, args, selected);
         }
         if let Some(constructed) = self.value_construction(internal, args) {
+            return constructed;
+        }
+        if let Some(constructed) =
+            self.unsigned_array_carrier_construction(internal, args, selected)
+        {
             return constructed;
         }
         if let Some(constructed) = self.range_class_construction(internal, args) {
@@ -2111,12 +2116,21 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
-        let object = match placement {
-            super::frame_objects::Placement::Heap => self.allocate(descriptor, size)?,
-            super::frame_objects::Placement::Frame { local } => {
+        let object = match (&enum_base, placement) {
+            // A constant published before its construction is constructed in place.
+            (
+                Some(super::enums::EnumBase {
+                    published: Some(slot),
+                    ..
+                }),
+                _,
+            ) => self.published_enum_constant(*slot)?,
+            (_, super::frame_objects::Placement::Heap) => self.allocate(descriptor, size)?,
+            (_, super::frame_objects::Placement::Frame { local }) => {
                 return self.frame_object(class, local, &arguments, &params);
             }
         };
+        self.store_enum_base(enum_base, object)?;
         arguments.insert(0, object);
         let func_ref = self.func_ref(constructor);
         self.emit_call(func_ref, &arguments)?;
@@ -2482,6 +2496,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         if let Some(instance) = self.module_singleton(classifier)? {
             return Ok(Some(instance));
+        }
+        // Another module's object is read through the entry its module exports.
+        if self.file.ir.class_id_by_name(classifier).is_none() {
+            if let Some(symbol) = self.file.dependency_singletons.get(&classifier) {
+                let id = self.file.import(symbol, &[], Ty::obj_name(classifier))?;
+                let func_ref = self.func_ref(id);
+                let call = self.emit_call(func_ref, &[])?;
+                return Ok(Some(self.builder.inst_results(call)[0]));
+            }
         }
         let class = self.file.class_of(classifier, "the object")?;
         let Some((_, getter)) = self.file.classes[class as usize].singleton else {

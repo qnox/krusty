@@ -55,8 +55,12 @@ versioning-tests:
 # Maven Central upload, against a stand-in Gradle build and Central Portal, and the Gradle wrapper
 # check it depends on, against stand-in published checksums.
 release-tests:
+    node --test scripts/test-release-build-progress.cjs
+    python3 scripts/test-format-release-notes.py
     bash scripts/test-signing-key-id.sh
     bash scripts/test-sign-release-checksums.sh
+    bash scripts/test-publish-release-signing-key.sh
+    python3 scripts/test-package-release-badges.py
     bash scripts/test-publish-maven-central.sh
     bash scripts/test-check-gradle-wrappers.sh
 
@@ -704,11 +708,9 @@ build-release TARGET="":
     export KRUSTY_VERSION="$(just version)"
     export KRUSTY_KOTLIN_SUPPORT="$(just supported-kotlin)"
     if [ -n "{{TARGET}}" ]; then
-        cargo build --locked --release --target {{TARGET}} -p krusty-cli --bin krusty
-        cargo build --locked --release --target {{TARGET}} -p krusty-lsp
+        cargo build --locked --release --timings --target {{TARGET}} -p krusty-cli -p krusty-lsp --bin krusty --bin krusty-lsp
     else
-        cargo build --locked --release -p krusty-cli --bin krusty
-        cargo build --locked --release -p krusty-lsp
+        cargo build --locked --release --timings -p krusty-cli -p krusty-lsp --bin krusty --bin krusty-lsp
     fi
     echo "built krusty and krusty-lsp $KRUSTY_VERSION (supported Kotlin: $KRUSTY_KOTLIN_SUPPORT) ${TARGET:+for {{TARGET}}}"
 

@@ -39,11 +39,15 @@ pub(super) struct CallableRegistry {
     dependencies: HashMap<KlibDependencyCallable, u32>,
     /// The default entry of each published declaration that declares a default.
     dependency_defaults: HashMap<KlibDependencyCallable, u32>,
+    /// The dispatching entry of each published overridable member.
+    dependency_dispatches: HashMap<KlibDependencyCallable, u32>,
     signatures: HashMap<KlibDependencyCallable, DependencyFunctionSignature>,
     member_receivers: HashMap<KlibDependencyCallable, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<KlibDependencyCallable, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
         HashMap<KlibDependencyCallable, SingletonExtensionUnreadReceiver>,
+    /// The entry answering each published object declaration's instance, by its classifier.
+    dependency_singletons: HashMap<krusty::backend::DependencyClassifier, u32>,
 }
 
 pub(super) struct FileCallTargets {
@@ -51,11 +55,16 @@ pub(super) struct FileCallTargets {
     module_defaults: HashMap<CallableId, u32>,
     external: HashMap<ExternalCallableId, u32>,
     external_defaults: HashMap<ExternalCallableId, u32>,
+    /// The ABI of each default entry, which is its provider declaration's own.
+    external_default_signatures: HashMap<ExternalCallableId, DependencyFunctionSignature>,
+    external_dispatches: HashMap<ExternalCallableId, u32>,
     signatures: HashMap<ExternalCallableId, DependencyFunctionSignature>,
     member_receivers: HashMap<ExternalCallableId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
         HashMap<ExternalCallableId, SingletonExtensionUnreadReceiver>,
+    /// The instance entry of each other module's object this file reads as a value.
+    singletons: HashMap<krusty::backend::DependencyClassifier, u32>,
 }
 
 impl CallableRegistry {
@@ -160,10 +169,13 @@ impl CallableRegistry {
             module_defaults: HashMap::default(),
             external: HashMap::default(),
             external_defaults: HashMap::default(),
+            external_default_signatures: HashMap::default(),
+            external_dispatches: HashMap::default(),
             signatures: HashMap::default(),
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
+            singletons: HashMap::default(),
         };
         for expression in krusty::ir::emitted_body_roots(ir)
             .into_iter()
@@ -176,6 +188,39 @@ impl CallableRegistry {
                     dispatch_receiver,
                     ..
                 } => (&**callee, *dispatch_receiver),
+                // Another module's class is constructed through the entry its module exports
+                // under the constructor's identity (see `backend::construction_entries`).
+                IrExpr::New {
+                    external_target: Some(target),
+                    defaults,
+                    ..
+                } if defaults.is_empty() => {
+                    let Some(identity) = callables
+                        .callable(*target)
+                        .and_then(|callable| callable.dependency_callable.as_ref())
+                    else {
+                        continue;
+                    };
+                    let Some(&index) = self.dependencies.get(identity) else {
+                        continue;
+                    };
+                    targets.external.insert(*target, index);
+                    let signature = self.signatures.get(identity).ok_or_else(|| {
+                        "an emitted dependency constructor without its declared signature"
+                            .to_owned()
+                    })?;
+                    targets.signatures.insert(*target, signature.clone());
+                    continue;
+                }
+                // Another module's object is read through the entry its module publishes.
+                IrExpr::SingletonValue { classifier }
+                    if ir.class_id_by_name(*classifier).is_none() =>
+                {
+                    if let Some(&entry) = self.dependency_singletons.get(classifier) {
+                        targets.singletons.insert(*classifier, entry);
+                    }
+                    continue;
+                }
                 IrExpr::Checked(operation) => {
                     let Some(access) = callables.dependency_accessor(operation) else {
                         continue;
@@ -214,6 +259,7 @@ impl CallableRegistry {
                 }
                 Callee::External {
                     target,
+                    default_provider,
                     params,
                     defaults,
                     extension_receiver_parameter,
@@ -223,10 +269,15 @@ impl CallableRegistry {
                         "a dependency call without frozen callable facts".to_string()
                     })?;
                     // A call leaving arguments out is realized only through the default entry
-                    // of the declaration's own module.
-                    let default_entry = callable
-                        .dependency_callable
-                        .as_ref()
+                    // of the declaration that owns them, in its own module: the selected one, or
+                    // the one an override inherits its defaults from.
+                    let provider = match default_provider {
+                        Some(provider) if !defaults.is_empty() => callables.callable(*provider),
+                        _ => Some(callable),
+                    };
+                    let provider_identity =
+                        provider.and_then(|provider| provider.dependency_callable.as_ref());
+                    let default_entry = provider_identity
                         .and_then(|identity| self.dependency_defaults.get(identity))
                         .copied();
                     if !defaults.is_empty() && default_entry.is_none() {
@@ -315,6 +366,18 @@ impl CallableRegistry {
                     targets.external.insert(*target, index);
                     if let Some(entry) = default_entry {
                         targets.external_defaults.insert(*target, entry);
+                        let signature = provider_identity
+                            .and_then(|identity| self.signatures.get(identity))
+                            .ok_or_else(|| {
+                                "a default entry without its provider's declared signature"
+                                    .to_owned()
+                            })?;
+                        targets
+                            .external_default_signatures
+                            .insert(*target, signature.clone());
+                    }
+                    if let Some(&entry) = self.dependency_dispatches.get(identity) {
+                        targets.external_dispatches.insert(*target, entry);
                     }
                     targets.signatures.insert(
                         *target,
@@ -351,6 +414,14 @@ impl CallableRegistry {
         exports: &DependencyExportSignatures,
         functions: &[Option<u32>],
     ) -> Result<(), Unsupported> {
+        for &(classifier, entry) in exports.singleton_entries() {
+            let entry = functions
+                .get(entry as usize)
+                .copied()
+                .flatten()
+                .ok_or_else(|| "an object instance entry without its function".to_string())?;
+            self.dependency_singletons.insert(classifier, entry);
+        }
         for (function, identity) in exports.callables() {
             let emitted = functions
                 .get(function as usize)
@@ -363,6 +434,14 @@ impl CallableRegistry {
                     .flatten()
                     .ok_or_else(|| "a default-argument entry without its function".to_string())?;
                 self.dependency_defaults.insert(identity.clone(), entry);
+            }
+            if let Some(&entry) = ir.dispatch_entries().get(&function) {
+                let entry = functions
+                    .get(entry as usize)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| "a dispatching entry without its function".to_string())?;
+                self.dependency_dispatches.insert(identity.clone(), entry);
             }
             let index = emitted
                 .ok_or_else(|| "an inline-only function exported as Wasm code".to_string())?;
@@ -450,6 +529,14 @@ impl FileCallTargets {
         self.module.get(&target).copied()
     }
 
+    /// The entry answering the instance of another module's object `classifier`.
+    pub(super) fn dependency_singleton(
+        &self,
+        classifier: krusty::backend::DependencyClassifier,
+    ) -> Option<u32> {
+        self.singletons.get(&classifier).copied()
+    }
+
     pub(super) fn external(&self, target: ExternalCallableId) -> Option<u32> {
         self.external.get(&target).copied()
     }
@@ -457,6 +544,20 @@ impl FileCallTargets {
     /// The default entry of the dependency declaration `target`, when its module published one.
     pub(super) fn external_default(&self, target: ExternalCallableId) -> Option<u32> {
         self.external_defaults.get(&target).copied()
+    }
+
+    /// The ABI of the default entry a call to `target` leaving arguments out goes through.
+    pub(super) fn external_default_signature(
+        &self,
+        target: ExternalCallableId,
+    ) -> Option<&DependencyFunctionSignature> {
+        self.external_default_signatures.get(&target)
+    }
+
+    /// The entry an ordinary call to the overridable dependency member `target` goes through,
+    /// which dispatches on its receiver.
+    pub(super) fn external_dispatch(&self, target: ExternalCallableId) -> Option<u32> {
+        self.external_dispatches.get(&target).copied()
     }
 
     pub(super) fn signature(
@@ -620,6 +721,7 @@ mod tests {
             klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            declares_parameter_defaults: false,
             annotations: Box::new([]),
         }
     }

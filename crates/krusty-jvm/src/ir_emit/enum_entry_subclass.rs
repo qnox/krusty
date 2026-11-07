@@ -8,6 +8,9 @@ use super::bridge_emission::emit_bridges;
 use super::frame_map::FrameKey;
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 /// Emit a synthesized enum-entry subclass (`Enum$ENTRY extends Enum`) for an entry with a body: a
 /// package-private `final` class with one constructor `(String name, int ordinal)V` that evaluates
 /// the constant's arguments and calls the enum's constructor with them, plus the entry's overriding
@@ -27,9 +30,26 @@ pub(super) fn emit_enum_entry_subclass(
     env.inner_classes.register(&mut cw);
 
     // Entry-body PROPERTIES are private backing fields (read via synthesized getters, like kotlinc).
-    for field in c.fields.iter() {
+    for (field_index, field) in c.fields.iter().enumerate() {
         let acc = 0x0002 | if field.is_final() { 0x0010 } else { 0 };
-        cw.add_field(acc, &field.name, &ir_type_desc(&field.ty));
+        let type_parameter = ir
+            .field_signatures(&fq_name)
+            .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
+            .map(|(_, parameter)| parameter.as_str())
+            .or(field.type_param.as_deref());
+        let signature = signature_formatter
+            .field_signature(
+                &field.ty,
+                type_parameter,
+                field_visibility::backs_var_property(c, field_index),
+            )
+            .filter(|_| !field.is_property_delegate());
+        cw.add_field_sig(
+            acc,
+            &field.name,
+            &ir_type_desc(&field.ty),
+            signature.as_deref(),
+        );
     }
 
     // Constructor: `(String, int)V` → `super(name, ordinal, <the constant's arguments>)`, then the
@@ -172,72 +192,22 @@ pub(super) fn emit_enum_entry_subclass(
     cw.set_method_debug("<init>", &ctor_desc, None, &locals);
     cw.set_method_lines("<init>", &ctor_desc, &ctor_lines);
 
-    // The overriding methods + synthesized property getters.
-    emit_declared_property_accessors(
-        ir,
-        c,
-        &mut cw,
-        &PropertyAccessorEmit {
-            fq_name: &fq_name,
-            facade,
-            formatter: &signature_formatter,
-            param_assertions: opts.param_assertions,
-            env,
-        },
-    );
+    // Source properties own both their default and custom accessors, so neither can overtake
+    // another declaration. Use the same member schedule and emitter as ordinary classes.
     let markers = member_schedule::property_annotation_marker_fids(ir, c);
-    for &fid in &c.methods {
-        if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) {
-            continue; // already emitted beside its property's accessors
-        }
-        // Lambda implementation helpers reparented into an enum-entry subclass remain static; only
-        // source member overrides consume an instance receiver. The ordinary class/enum writers
-        // already honor this IR bit, and entry subclasses must use the same rule.
-        let function = &ir.functions[fid as usize];
-        emit_method(
-            ir,
-            fid,
-            MethodSlot {
-                static_owner: StaticOwner::Class(c.fq_name),
-                instance: !function.is_static,
-            },
-            &fq_name,
-            facade,
-            &mut cw,
-            env,
-        );
-        if ir.function_reference_access_bridges.contains(&fid) {
-            super::access_bridges::emit_function_reference_access_bridge(
-                ir,
-                fid,
-                &fq_name,
-                &mut cw,
-                false,
-                c.decl_line,
-            );
-        }
-        if let Some((fid, defaults)) = crate::default_wrappers::member_function(ir, fid) {
-            if function.is_static {
-                emit_facade_default_stub(
-                    DefaultStubSource { ir, fid, defaults },
-                    StaticOwner::Class(c.fq_name),
-                    &fq_name,
-                    &mut cw,
-                    env,
-                    Ty::obj("java/lang/Object"),
-                );
-            } else {
-                emit_default_stub(
-                    DefaultStubSource { ir, fid, defaults },
-                    Some(StaticOwner::Class(c.fq_name)),
-                    &fq_name,
-                    facade,
-                    &mut cw,
-                    env,
-                    false,
-                );
-            }
-        }
+    let members = ScheduledMemberEmission {
+        ir,
+        class: c,
+        fq_name: &fq_name,
+        facade,
+        signature_formatter: &signature_formatter,
+        param_assertions: opts.param_assertions,
+        env,
+        markers: &markers,
+        byte_parity: false,
+    };
+    for member in source_ordered_members(ir, c, None) {
+        emit_scheduled_member(&members, member, &mut cw);
     }
     // Entry-body override edges are checked and frozen in Pass 1 like ordinary class overrides.
     // Their anonymous subclass still needs the JVM descriptor adapters derived from those edges

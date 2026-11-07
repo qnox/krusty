@@ -7,13 +7,41 @@
 
 use crate::anonymous_context_labels;
 use crate::suspend::cps::SuspendLambdaParameters;
-use krusty::fir::CapturedCallableOwner;
+use krusty::fir::{CapturedCallableOwner, DeclarationId};
 use krusty::fx_hash::HashSet;
 use krusty::ir::{
     FunId, IrCapturedReceiver, IrClass, IrConstructorCapture, IrFile, IrLambdaCapture,
     IrLambdaClass, IrParameterIdentity, IrParameterRole,
 };
 use krusty::types::CapturedContextKind;
+
+#[cfg(test)]
+pub(crate) mod constructor_prefix_tests;
+
+/// Names of a receiver transported by the original source constructor. Specialized copies can
+/// remove/reorder their own transport; the checked declaration map continues to select the original.
+/// Physical storage is optional, so a fieldless capture retains the same semantic spelling.
+pub(super) fn constructor_receiver(
+    ir: &IrFile,
+    owner: DeclarationId,
+    parameter: u32,
+) -> Option<CaptureNames> {
+    let class = *ir
+        .checked_classifier_classes
+        .get(&owner)
+        .or_else(|| ir.checked_enum_entry_classes.get(&owner))?;
+    let class = &ir.classes[class as usize];
+    let argument = class.ctor_args.get(parameter as usize)?;
+    if parameter >= class.constructor_prefix_count
+        || argument.provenance != krusty::ir::IrCtorParameterProvenance::Capture
+        || argument.capture.as_ref()?.receiver.is_none()
+    {
+        return None;
+    }
+    class_captures(ir, class)
+        .into_iter()
+        .nth(parameter as usize)?
+}
 
 /// The names of each capture a local or anonymous `class` stores, by constructor argument (`None`
 /// for an argument that is no capture): the field, which is also the constructor's
@@ -111,6 +139,9 @@ pub(super) fn lambda_class_capture(
             source_name,
             inlined,
         } => CaptureNames::value(source_name, *inlined),
+        &IrLambdaCapture::ConstructorReceiver { owner, parameter } => {
+            constructor_receiver(ir, owner, parameter)?
+        }
         &IrLambdaCapture::Receiver(ordinal) => {
             let container = lambda
                 .lifting_root
@@ -129,6 +160,10 @@ pub(super) fn suspend_lambda_capture(
     parameters: &SuspendLambdaParameters,
     capture: &IrParameterIdentity,
 ) -> CaptureNames {
+    if let Some((owner, parameter)) = capture.constructor_receiver() {
+        return constructor_receiver(ir, owner, parameter)
+            .expect("a captured constructor receiver keeps its exact original prefix");
+    }
     match capture.role {
         IrParameterRole::CapturedValue { .. } => CaptureNames::value(
             capture

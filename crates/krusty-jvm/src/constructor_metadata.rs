@@ -93,6 +93,7 @@ mod tests {
                 default_masks: Vec::new(),
             },
             synthetic: true,
+            platform_visible: false,
             vc_params: false,
             param_checks: Vec::new(),
         }

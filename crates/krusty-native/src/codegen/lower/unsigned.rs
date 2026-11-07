@@ -21,6 +21,42 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
+/// The class's declared primitive array must store exactly its unsigned element's scalar bits.
+fn declared_unsigned_array_carrier(
+    owner: krusty::types::TypeName,
+    declared: Option<Ty>,
+) -> Option<Ty> {
+    let element = Ty::obj_name(owner)
+        .array_elem()
+        .filter(|ty| ty.is_unsigned())?;
+    let expected = Ty::array(element.scalar_value_repr()?);
+    declared.filter(|carrier| *carrier == expected)
+}
+
+/// Select the allocating constructor; a raw signed array is not an unsigned nominal view.
+fn unsigned_array_size_argument(
+    owner: krusty::types::TypeName,
+    carrier: Ty,
+    args: &[u32],
+    selected: Option<&[Ty]>,
+) -> Result<u32, Unsupported> {
+    match (args, selected) {
+        ([size], Some([Ty::Int])) => Ok(*size),
+        ([_], Some([parameter])) if *parameter == carrier => Err(
+            "a signed-carrier constructor of an unsigned array without an alias-preserving view"
+                .into(),
+        ),
+        _ => Err(declined!(
+            "construction of `{}` from {} arguments",
+            owner.render(),
+            args.len()
+        )),
+    }
+}
+
 /// The runtime range an unsigned receiver ranges over, as (runtime suffix, the width its bounds are
 /// carried at). Kotlin declares exactly two — `UIntRange` and `ULongRange` — and `UByte.rangeTo`
 /// and `UShort.rangeTo` both answer the former, so the narrow two carry their bounds as `UInt`.
@@ -119,28 +155,43 @@ impl BodyLowering<'_, '_, '_> {
         }
     }
 
+    /// A construction of an unsigned array, which this target stores with its signed carrier's
+    /// layout under the unsigned array's own type.
+    ///
+    /// The class declares two constructors with one parameter each, and the selected one decides:
+    /// `constructor(size: Int)` allocates the array with its own descriptor. The primary
+    /// signed-carrier constructor needs an alias-preserving unsigned view, which is not available.
+    pub(super) fn unsigned_array_carrier_construction(
+        &mut self,
+        internal: krusty::types::TypeName,
+        args: &[u32],
+        selected: Option<&[Ty]>,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let carrier = self.unsigned_array_carrier(internal)?;
+        Some(
+            unsigned_array_size_argument(internal, carrier, args, selected)
+                .and_then(|size| self.new_array(Ty::obj_name(internal), size)),
+        )
+    }
+
     /// The unsigned element of `owner` when it is an unsigned array stored as a signed carrier.
+    fn unsigned_array_carrier_element(&self, owner: krusty::types::TypeName) -> Option<Ty> {
+        self.unsigned_array_carrier(owner)?;
+        Ty::obj_name(owner).array_elem()
+    }
+
+    /// The signed carrier array of `owner` when it is an unsigned array.
     ///
     /// That classifier's frozen value-class declaration must store a signed primitive array: the
     /// declaration, not the classifier's spelling, is what makes the carrier's operation the
     /// answer to the class's own member.
-    fn unsigned_array_carrier_element(&self, owner: krusty::types::TypeName) -> Option<Ty> {
-        let element = Ty::obj_name(owner)
-            .array_elem()
-            .filter(|ty| ty.is_unsigned())?;
-        self.file
-            .classifiers
-            .classifier(owner)
-            .and_then(|fact| fact.value_declaration.clone())
-            .is_some_and(|declaration| {
-                matches!(
-                    declaration.underlying.kind(),
-                    krusty::types::TyKind::Obj(carrier, _)
-                        if krusty::types::prim_array_element(carrier)
-                            .is_some_and(|element| !element.is_unsigned())
-                )
-            })
-            .then_some(element)
+    fn unsigned_array_carrier(&self, owner: krusty::types::TypeName) -> Option<Ty> {
+        let declared = self.file.classifiers.classifier(owner).and_then(|fact| {
+            fact.value_declaration
+                .as_ref()
+                .map(|declaration| declaration.underlying)
+        });
+        declared_unsigned_array_carrier(owner, declared)
     }
 
     /// Whether `target` reads the value an unsigned type wraps — the property its value-class

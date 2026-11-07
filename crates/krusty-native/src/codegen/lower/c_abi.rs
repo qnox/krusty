@@ -44,6 +44,24 @@ impl<'a> FileLowering<'a> {
             &export.symbol,
             export.signature.parameters().to_vec(),
         )?;
+        if let Some(symbol) = &export.dispatch_entry {
+            // An ordinary call from another module runs the receiver's override.
+            let Some(entry) = self
+                .ir
+                .dispatch_entries()
+                .get(&function)
+                .and_then(|&entry| self.functions[entry as usize])
+            else {
+                return Err(declined!("`{symbol}` has no dispatching entry"));
+            };
+            self.define_trampoline(
+                file_init,
+                entry,
+                function,
+                symbol,
+                export.signature.parameters().to_vec(),
+            )?;
+        }
         let Some(symbol) = &export.default_entry else {
             return Ok(());
         };
@@ -55,9 +73,12 @@ impl<'a> FileLowering<'a> {
             return Err(declined!("`{symbol}` has no default-argument entry"));
         };
         let mut params = export.signature.parameters().to_vec();
+        // One mask word per 32 of the declaration's own parameters: a member's receiver, which
+        // leads the export's operands, is not one of them.
+        let declared = self.ir.functions[function as usize].params.len();
         params.extend(std::iter::repeat_n(
             Ty::Int,
-            krusty::backend::default_arguments::mask_words(params.len()),
+            krusty::backend::default_arguments::mask_words(declared),
         ));
         self.define_trampoline(file_init, entry, function, symbol, params)
     }

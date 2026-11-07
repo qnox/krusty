@@ -1,6 +1,6 @@
 //! Calls through an interface, `is` against one, and the interface tables both read: what only the
 //! whole program decides, written when the module is finished, as the link does on Native
-//! (`crate::native::interface_calls`).
+//! (`krusty::native::interface_calls`).
 //!
 //! An interface member is numbered by the module that declares its interface
 //! (`krusty::backend::class_tables::module_interfaces`), so it is identified here by that module and

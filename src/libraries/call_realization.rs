@@ -383,6 +383,8 @@ pub struct ExternalCallableRealization {
     pub klib_body_accessor: Option<super::KlibBodyAccessor>,
     pub klib_body_vararg_index: Option<usize>,
     pub klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
+    /// Whether a source parameter declares a default value, as the provider's declaration says.
+    pub declares_parameter_defaults: bool,
 }
 
 impl ExternalCallableRealization {

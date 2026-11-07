@@ -454,6 +454,9 @@ impl<'a> StringTable<'a> {
                 self.local_classifiers.contains(&class.classifier()),
                 "a raw class ID requires local provenance"
             );
+            if class.is_anonymous() {
+                return Ok(self.class_literal(class.classifier().render(), true));
+            }
             return Ok(self.class_id(class.classifier()));
         };
         let package = package.render();
@@ -1015,7 +1018,7 @@ fn encode_type_with_parameter(
     match base.kind() {
         // The engine turns an undetermined declaration into a decline before anything is written,
         // so a pending type here is a broken invariant rather than a shape to encode.
-        TyKind::Pending => return Err(TypeEncodeError::NotDetermined),
+        TyKind::Pending | TyKind::Var(..) => return Err(TypeEncodeError::NotDetermined),
         TyKind::DefinitelyNotNull(inner) => {
             let mut intersection = spelled.clone();
             intersection.definitely_non_null = true;

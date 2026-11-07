@@ -4,6 +4,9 @@
 //! declaration. Emission alone replaces it: the frozen callable fact carries the provider's
 //! authenticated instruction or bit reinterpretation, and this module emits the operands and the
 //! opcode of their physical class (and, for a conversion, the result's) instead of a call.
+//!
+//! A builtin operator member (`Int.plus`, `Long.and`) reached from a library body is the binary
+//! operation its source operator form lowers to, by the mapping common IR owns.
 
 use super::*;
 use krusty::libraries::{CompilerIntrinsic, ScalarClass, ScalarComparison, ScalarInstruction};
@@ -17,13 +20,17 @@ impl Body<'_> {
         self.callables
             .callable(target)?
             .compiler_operation()
-            .filter(|operation| is_scalar_operation(*operation))
+            .filter(|operation| {
+                is_scalar_operation(*operation)
+                    || IrBinOp::of_primitive_operator(*operation).is_some()
+            })
     }
 
     /// Emit a call of `target`, a dependency declaration realized as one scalar instruction. An
     /// extension's receiver is the instruction's first operand, followed by the call's arguments.
     pub(super) fn scalar_operation_call(
         &mut self,
+        site: u32,
         target: krusty::fir::ExternalCallableId,
         receiver: Option<u32>,
         params: &[Ty],
@@ -33,6 +40,14 @@ impl Body<'_> {
         let operation = self
             .scalar_operation_of(target)
             .ok_or_else(|| "a call of an unauthenticated scalar operation".to_string())?;
+        if let Some(op) = IrBinOp::of_primitive_operator(operation) {
+            let (Some(lhs), [rhs]) = (receiver, args) else {
+                return Err(format!(
+                    "the operator member {operation:?} with malformed operands"
+                ));
+            };
+            return self.binary(site, op, lhs, *rhs);
+        }
         let receiver_ty = match receiver {
             Some(_) => Some(
                 self.callables

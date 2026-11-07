@@ -6,7 +6,10 @@
 use super::super::ir_builtins::{BuiltinCallDisposition, BuiltinOperator, BuiltinRelation};
 use super::super::klib_types::function_invocation_arity;
 use super::super::klib_types::semantic_type;
-use super::{mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedCallee, Lowered};
+use super::{
+    mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorTarget, LinkedCallee,
+    Lowered,
+};
 use crate::fir::FirTypeParameterRef;
 use crate::ir::{
     Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrPropertyDispatch,
@@ -102,6 +105,7 @@ impl BodyLowering<'_> {
                 ret: primitive.ret,
                 context_count: 0,
                 class_type_parameters: &primitive.class_type_parameters,
+                parameter_defaults: &[],
             },
         )?;
         let receiver = operands
@@ -126,14 +130,23 @@ impl BodyLowering<'_> {
                     }
                 }
             }
-            CommonPrimitive::Intrinsic(intrinsic) => self.ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::Intrinsic {
-                    operation: intrinsic,
-                    ret: primitive.ret,
-                }),
-                dispatch_receiver: Some(receiver),
-                args: Vec::new(),
-            }),
+            // The ordinary read of the property, as checked FIR lowers a source read of it.
+            CommonPrimitive::PropertyRead(_) => {
+                let target = primitive
+                    .property
+                    .expect("an authenticated property read names its property");
+                self.ir.add_expr(IrExpr::Checked(Box::new(
+                    IrCheckedOperation::ExternalPropertyRead {
+                        target,
+                        dispatch: IrPropertyDispatch::Ordinary,
+                        receiver: Some(receiver),
+                        arguments: Vec::new(),
+                        parameters: Vec::new(),
+                        result: operands.ret,
+                        source_receiver: operands.receiver_type,
+                    },
+                )))
+            }
             // The source range operator over the receiver and the end bound, as checked FIR
             // lowers `start..end` once the provider's declaration fixed the range it builds.
             CommonPrimitive::RangeConstruction(operation) => {
@@ -462,6 +475,7 @@ impl BodyLowering<'_> {
                 ret: linked.ret,
                 context_count: linked.context_count,
                 class_type_parameters: &linked.class_type_parameters,
+                parameter_defaults: &linked.parameter_defaults,
             },
         )?;
         let mut callee = linked.callee;
@@ -472,6 +486,18 @@ impl BodyLowering<'_> {
             Callee::Local(function) => Some(self.ir.functions[function as usize].ret),
             _ => None,
         };
+        // Only a function of this unit is linked with defaults, so only it can be left to them:
+        // the call carries its supplied arguments and the omitted parameters, as a source call
+        // of a function of its own file does.
+        if !operands.omitted.is_empty() {
+            let Callee::Local(function) = callee else {
+                unreachable!("only a unit function declares defaults a call may leave to");
+            };
+            callee = Callee::LocalWithDefaults {
+                function,
+                defaults: operands.omitted.into_boxed_slice(),
+            };
+        }
         let (dispatch_receiver, args) = (operands.receiver, operands.args);
         let singleton_dispatch = linked.singleton_dispatch;
         let call = self.ir.add_expr(IrExpr::Call {
@@ -513,13 +539,14 @@ impl BodyLowering<'_> {
         if let Some(primitive) = self.linker.common_primitive(&signature)? {
             return self.primitive_call(primitive, access, ty);
         }
-        let linked = self.linker.link_accessor(accessor)?;
+        let linked = self.linker.link_accessor(self.ir, accessor)?;
         let CallOperands {
             receiver,
             args: arguments,
             receiver_type: source_receiver,
             params: parameters,
             ret: result,
+            omitted: _,
         } = self.call_operands(
             access,
             ty,
@@ -529,13 +556,21 @@ impl BodyLowering<'_> {
                 ret: linked.ret,
                 context_count: linked.context_count,
                 class_type_parameters: &linked.class_type_parameters,
+                // An accessor declares no default a call may leave to.
+                parameter_defaults: &[],
             },
         )?;
-        let LinkedAccessor {
-            property: target,
-            write,
-            ..
-        } = linked;
+        let LinkedAccessor { target, write, .. } = linked;
+        let target = match target {
+            LinkedAccessorTarget::External(property) => property,
+            LinkedAccessorTarget::Local(function) => {
+                return Ok(self.ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Local(function)),
+                    dispatch_receiver: receiver,
+                    args: arguments,
+                }));
+            }
+        };
         let dispatch = IrPropertyDispatch::Ordinary;
         Ok(self.ir.add_expr(IrExpr::Checked(Box::new(if write {
             IrCheckedOperation::ExternalPropertyWrite {
@@ -628,15 +663,23 @@ impl BodyLowering<'_> {
             .map(|&param| substitute(param))
             .collect::<Vec<_>>();
         let mut args = Vec::with_capacity(params.len());
-        for (argument, &parameter) in arguments.zip(&params) {
-            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
-                "a call that leaves a parameter to its default",
-            ))?;
-            args.push(self.operand(argument, parameter)?);
+        let mut omitted = Vec::new();
+        for (index, (argument, &parameter)) in arguments.zip(&params).enumerate() {
+            match argument {
+                Some(argument) => args.push(self.operand(argument, parameter)?),
+                // A serialized call leaves out exactly the arguments the callee's defaults supply.
+                None if callee.parameter_defaults.get(index).copied() == Some(true) => {
+                    omitted.push(u32::try_from(index).expect("a parameter list fits u32"));
+                }
+                None => {
+                    return unsupported("a call that leaves a parameter to its default");
+                }
+            }
         }
         Ok(CallOperands {
             receiver,
             args,
+            omitted,
             receiver_type,
             params,
             ret,
@@ -941,13 +984,18 @@ struct CalleeShape<'a> {
     ret: Ty,
     context_count: usize,
     class_type_parameters: &'a [String],
+    /// Whether each parameter declares a default a call may leave it to.
+    parameter_defaults: &'a [bool],
 }
 
 /// A call's lowered dispatch receiver and arguments, with the receiver type, parameters and
 /// result they were read at.
 struct CallOperands {
     receiver: Option<ExprId>,
+    /// The supplied arguments, in parameter order.
     args: Vec<ExprId>,
+    /// The parameters the call leaves to their defaults, in order.
+    omitted: Vec<u32>,
     receiver_type: Option<Ty>,
     params: Vec<Ty>,
     ret: Ty,

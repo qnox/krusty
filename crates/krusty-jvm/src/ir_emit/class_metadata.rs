@@ -159,7 +159,11 @@ pub(super) fn build_class_metadata_with_facts(
     );
     let classifier = record.classifier();
     let class_id = if tail.local_classifiers.contains(&classifier) {
-        krusty::metadata::class_id::ResolvedClassId::local(classifier)
+        if c.is_anonymous_object && !c.is_enum_entry {
+            krusty::metadata::class_id::ResolvedClassId::anonymous(classifier)
+        } else {
+            krusty::metadata::class_id::ResolvedClassId::local(classifier)
+        }
     } else {
         match krusty::metadata::class_id::ResolvedClassId::resolve(
             krusty::libraries::ClassifierDeclarationKey::Ordinary(classifier),

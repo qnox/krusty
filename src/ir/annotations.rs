@@ -195,7 +195,7 @@ impl DeclarationAnnotations {
     /// Append an application a compiler plugin attaches after checking that Kotlin metadata
     /// records as well, as kotlinc's metadata declaration registrar adds it: it follows the
     /// checked applications and precedes the plugin's other ones.
-    pub(crate) fn push_metadata_visible(&mut self, annotation: RetainedAnnotation) {
+    pub fn push_metadata_visible(&mut self, annotation: RetainedAnnotation) {
         let checked = self.retained.len() - self.lowered;
         self.retained.insert(checked, annotation);
     }

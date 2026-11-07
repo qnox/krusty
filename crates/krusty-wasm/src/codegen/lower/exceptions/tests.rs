@@ -52,6 +52,7 @@ fn declaration() -> BackendCallableFact {
         klib_body_accessor: None,
         klib_body_vararg_index: None,
         klib_body_parameter_defaults: None,
+        declares_parameter_defaults: false,
         annotations: Box::new([]),
     }
 }

@@ -99,61 +99,16 @@ impl Body<'_> {
         let (ValueHash(ty), receiver) = call_kind(self.ir, self.callables, expression)
             .ok_or("a builtin hash call without its checked declaration and receiver")?;
         self.value(receiver, ty)?;
-        match ty {
-            Ty::String => {
-                self.code.ref_as_non_null().call(self.runtime.string_hash);
-            }
-            Ty::Boolean => {
-                self.code
-                    .if_(BlockType::Value(ValType::I32))
-                    .i32_const(1231)
-                    .else_()
-                    .i32_const(1237)
-                    .end();
-            }
-            Ty::Byte | Ty::Short | Ty::Char | Ty::Int => {}
-            Ty::Float => {
-                let value = self.local(ValType::F32);
-                self.code
-                    .local_tee(value)
-                    .local_get(value)
-                    .op(0x5c)
-                    .if_(BlockType::Value(ValType::I32))
-                    .i32_const(0x7fc00000)
-                    .else_()
-                    .local_get(value)
-                    .op(0xbc)
-                    .end();
-            }
-            Ty::Double => {
-                let value = self.local(ValType::F64);
-                self.code
-                    .local_tee(value)
-                    .local_get(value)
-                    .op(0x62)
-                    .if_(BlockType::Value(ValType::I64))
-                    .i64_const(0x7ff8000000000000)
-                    .else_()
-                    .local_get(value)
-                    .op(0xbd)
-                    .end();
-                self.hash_long_bits();
-            }
-            Ty::Long => self.hash_long_bits(),
-            _ => return Err("an unsupported builtin hash receiver".to_owned()),
+        // One hash of each value kind for every caller: the same functions realize boxes'
+        // `hashCode` slots and generated data-class hashes.
+        if ty == Ty::String {
+            self.code.call(self.runtime.hashing.string_hash);
+            return Ok(());
+        }
+        if !self.runtime.hashing.emit_scalar_hash(&mut self.code, ty) {
+            return Err("an unsupported builtin hash receiver".to_owned());
         }
         Ok(())
-    }
-
-    fn hash_long_bits(&mut self) {
-        let bits = self.local(ValType::I64);
-        self.code
-            .local_tee(bits)
-            .local_get(bits)
-            .i64_const(32)
-            .op(SHR_U64)
-            .op(XOR64)
-            .op(0xa7);
     }
 }
 

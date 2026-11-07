@@ -297,6 +297,7 @@ pub(super) fn apply(
         "-jdk-home" => opts.jdk_home = Some(PathBuf::from(text)),
         "-Xno-param-assertions" => opts.no_param_assertions = flag,
         "-Xno-call-assertions" => opts.no_call_assertions = flag,
+        "-Xno-receiver-assertions" => opts.no_receiver_assertions = flag,
         "-Xuse-inline-scopes-numbers" => opts.inline_scopes_numbers = flag,
         // `-Xlambdas` / `-Xsam-conversions` select how a lambda and a SAM conversion are realized:
         // `indy` is a `LambdaMetafactory` call site (kotlinc's default since 2.0), `class` gives each

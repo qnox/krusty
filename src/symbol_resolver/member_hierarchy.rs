@@ -1,5 +1,6 @@
 //! Declared and inherited member lookup over applied classifier hierarchies.
 
+mod applied_formal_bounds;
 mod bound_inner_aliases;
 mod bound_inner_constructors;
 mod result_enhancement;
@@ -274,11 +275,36 @@ fn specialize_declared_callables(
         // mention the declaring classifier's formals (`Parent<X>.val <T : X> T.x`), so specialize
         // only the applied copy while the declaration table retains the raw signature for
         // diagnostics. Property-owned formals were removed from `bindings` above and stay open.
+        let mut refreshed = crate::fx_hash::HashMap::default();
         if let Some(signature) = &mut property.getter.generic_sig {
+            let declared_bounds = (0..signature.formals.len())
+                .map(|ordinal| signature.primary_formal_bound(ordinal))
+                .collect::<Vec<_>>();
             for bounds in &mut signature.formal_bounds {
                 for bound in bounds {
                     *bound = ty_subst_keep_unbound(*bound, &bindings);
                 }
+            }
+            refreshed = applied_formal_bounds::refreshed_formal_bounds(signature, &declared_bounds);
+            if !refreshed.is_empty() {
+                let refresh =
+                    |ty: Ty| crate::types::ty_with_transitive_param_bounds(ty, &refreshed);
+                signature.receiver = signature.receiver.map(refresh);
+                signature.params = signature.params.iter().map(|ty| refresh(*ty)).collect();
+                signature.ret = refresh(signature.ret);
+            }
+        }
+        if !refreshed.is_empty() {
+            let refresh = |ty: Ty| crate::types::ty_with_transitive_param_bounds(ty, &refreshed);
+            property.ty = refresh(property.ty);
+            property.getter.params = property
+                .getter
+                .params
+                .iter()
+                .map(|ty| refresh(*ty))
+                .collect();
+            if property.kind != PropKind::Member {
+                property.receiver = property.receiver.map(refresh);
             }
         }
         property.getter.ret = property.ty;
@@ -290,6 +316,13 @@ fn specialize_declared_callables(
                         *bound = ty_subst_keep_unbound(*bound, &bindings);
                     }
                 }
+            }
+            if !refreshed.is_empty() {
+                setter.params = setter
+                    .params
+                    .iter()
+                    .map(|ty| crate::types::ty_with_transitive_param_bounds(*ty, &refreshed))
+                    .collect();
             }
         }
         if super::raw_member_view::is_raw_receiver(receiver) {
@@ -409,9 +442,26 @@ pub(crate) fn specialize_member_function(
         if signature.ret != declared_ret {
             function.callable.ret = signature.ret;
         }
+        let declared_bounds = (0..signature.formals.len())
+            .map(|ordinal| signature.primary_formal_bound(ordinal))
+            .collect::<Vec<_>>();
         for bounds in &mut signature.formal_bounds {
             for bound in bounds {
                 *bound = ty_subst_keep_unbound(*bound, &bindings);
+            }
+        }
+        let refreshed = applied_formal_bounds::refreshed_formal_bounds(signature, &declared_bounds);
+        if !refreshed.is_empty() {
+            let refresh = |ty: Ty| crate::types::ty_with_transitive_param_bounds(ty, &refreshed);
+            signature.receiver = signature.receiver.map(refresh);
+            signature.params = signature.params.iter().map(|ty| refresh(*ty)).collect();
+            signature.ret = refresh(signature.ret);
+            let callable = &mut function.callable;
+            callable.params = callable.params.iter().map(|ty| refresh(*ty)).collect();
+            callable.ret = refresh(callable.ret);
+            callable.source_receiver = callable.source_receiver.map(refresh);
+            if function.kind == FnKind::Extension {
+                function.receiver = function.receiver.map(refresh);
             }
         }
     }
@@ -1215,7 +1265,7 @@ fn expects_recorded_suspend_result(candidate: &FunctionInfo) -> bool {
     }
     matches!(
         candidate.callable.ret.non_null().kind(),
-        TyKind::Obj(..) | TyKind::TyParam(..)
+        TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Var(..)
     )
 }
 

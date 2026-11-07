@@ -5,6 +5,7 @@ use crate::source::SourceInput;
 use crate::types::{Ty, TyKind};
 
 mod local_classifier_identity;
+mod postponed_builder_captures;
 mod qualified_signatures;
 mod source_contracts;
 
@@ -3789,48 +3790,6 @@ fn pcla_receiver_constraints_cross_nested_local_classifier_scopes() {
     let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
-}
-
-#[test]
-fn selected_anonymous_member_effect_constrains_postponed_receiver_lambda() {
-    let inputs = [SourceInput::kotlin(
-        r#"class Buildee<T : Any> {
-            fun consume(value: T) {}
-        }
-        fun <T : Any> build(block: Buildee<T>.() -> Unit): Buildee<T> = Buildee<T>()
-        class Klass {
-            val buildee = build {
-                object {
-                    fun bar() { consume(foo()) }
-                    private fun foo() = "OK"
-                }.bar()
-            }
-        }"#,
-    )
-    .with_file_stem("AnonymousPostponedReceiverSignature")];
-    let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features(
-        &inputs,
-        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
-        &LangFeatures::new(),
-        &mut diagnostics,
-    );
-
-    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
-    let index = analysis
-        .streamed
-        .as_ref()
-        .expect("anonymous member effects must finalize in Pass 1")
-        .module
-        .index();
-    let result = (0..index.declaration_count())
-        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
-        .find(|declaration| index.declaration_name(*declaration) == Some("buildee"))
-        .and_then(|declaration| index.signature(declaration))
-        .expect("buildee signature")
-        .result
-        .get();
-    assert_eq!(result.type_args(), &[Ty::String]);
 }
 
 #[test]
