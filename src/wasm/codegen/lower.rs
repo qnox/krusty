@@ -19,6 +19,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 mod absent_arguments;
+pub(super) mod any_members;
 mod arrays;
 mod boxing;
 mod callable_reference_identity;
@@ -31,7 +32,6 @@ mod objects;
 mod scalar_instructions;
 mod shared_cells;
 mod string_conversion;
-pub(super) mod value_hash;
 
 #[cfg(test)]
 use tests::lower_alone;
@@ -41,6 +41,7 @@ pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
+        || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
@@ -1141,8 +1142,12 @@ impl<'a> Body<'a> {
             {
                 self.throwable_message(dispatch_receiver, &args, *ret)?;
             }
-            IrExpr::Call { .. } if value_hash::call_kind(self.ir, self.callables, id).is_some() => {
-                self.value_hash_call(id)?;
+            IrExpr::Call {
+                dispatch_receiver: Some(receiver),
+                args,
+                ..
+            } if let Some(member) = any_members::call_member(self.ir, self.callables, id) => {
+                self.dependency_any_member_call(member, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1159,7 +1164,7 @@ impl<'a> Body<'a> {
                 && defaults.is_empty()
                 && self.scalar_operation_of(*target).is_some() =>
             {
-                self.scalar_operation_call(*target, dispatch_receiver, params, *ret, &args)?;
+                self.scalar_operation_call(id, *target, dispatch_receiver, params, *ret, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1588,10 +1593,20 @@ impl<'a> Body<'a> {
         } else {
             left.is_unsigned() || right.is_unsigned()
         };
+        // Equality, shifts and the bitwise connectives are sign-agnostic on the carrier (a shift
+        // takes its right-shift kind from `unsigned` below); every other operator needs an
+        // unsigned instruction this lowering does not select yet.
         if unsigned
             && !matches!(
                 op,
-                IrBinOp::Eq | IrBinOp::Ne | IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr
+                IrBinOp::Eq
+                    | IrBinOp::Ne
+                    | IrBinOp::Shl
+                    | IrBinOp::Shr
+                    | IrBinOp::Ushr
+                    | IrBinOp::BitAnd
+                    | IrBinOp::BitOr
+                    | IrBinOp::BitXor
             )
         {
             return Err(format!("an ordinary operator on `{}`", describe(left)));
