@@ -2403,3 +2403,139 @@ fn streamed_emission_rejects_misaligned_source_metadata() {
         )]
     );
 }
+
+struct InlineFailureProvider {
+    selected: crate::fir::ExternalCallableId,
+    declaration: crate::libraries::ExternalCallableRealization,
+    queries: std::cell::RefCell<Vec<crate::fir::ExternalCallableId>>,
+}
+
+impl crate::symbol_source::SymbolSource for InlineFailureProvider {
+    fn external_callable(
+        &self,
+        id: crate::fir::ExternalCallableId,
+    ) -> Option<crate::libraries::ExternalCallableRealization> {
+        self.queries.borrow_mut().push(id);
+        (id == self.selected).then(|| self.declaration.clone())
+    }
+}
+
+impl crate::libraries::SemanticPlatform for InlineFailureProvider {}
+
+fn selected_inline_failure_provider() -> InlineFailureProvider {
+    use crate::libraries::{
+        ExternalCallableKind, ExternalCallableRealization, KlibDependencyCallable,
+    };
+    use crate::metadata::id_signature::{
+        callable_signature, CallableShape, DeclarationContainer, KlibDeclarationSignature,
+        Placement,
+    };
+    use crate::metadata::semantic::KotlinType;
+    use crate::types::{type_name, SemanticCallableOwner};
+
+    let signature = KlibDeclarationSignature::Public(
+        callable_signature(
+            DeclarationContainer::<KotlinType> {
+                package: &["selected".into()],
+                classes: &[],
+                native_interop_library: false,
+            },
+            &CallableShape {
+                name: "chosen",
+                contexts: Vec::new(),
+                receiver: None,
+                params: Vec::new(),
+                vararg: None,
+                type_parameters: Vec::new(),
+                expect: false,
+                placement: Placement::Ordinary,
+            },
+        )
+        .expect("the provider's declaration is signable"),
+    );
+    let dependency = KlibDependencyCallable {
+        module: "selected-module".into(),
+        declaration: signature.clone(),
+    };
+    let owner = SemanticCallableOwner::Package(type_name("selected"));
+    let mut callable = crate::libraries::LibraryCallable::library(
+        "physical/Facade",
+        "chosen",
+        Vec::new(),
+        Ty::Unit,
+        Ty::Unit,
+        "()V",
+    );
+    callable.physical_name = Some("physical-name".into());
+    InlineFailureProvider {
+        selected: crate::fir::ExternalCallableId::from_raw(7),
+        declaration: ExternalCallableRealization {
+            callable,
+            kind: ExternalCallableKind::TopLevel,
+            declaration_owner: Some(owner),
+            parameter_identities: Box::new([]),
+            declaration_signature: Some(signature),
+            dependency_callable: Some(dependency),
+            direct_c_function: None,
+            klib_body_companion_receiver: None,
+            klib_body_type_parameters: Box::new([]),
+            klib_body_declaration_modifiers: None,
+            klib_body_class_contract: None,
+            klib_body_accessor: None,
+            klib_body_vararg_index: None,
+            klib_body_parameter_defaults: None,
+            declares_parameter_defaults: false,
+        },
+        queries: Default::default(),
+    }
+}
+
+#[test]
+fn inline_failure_reports_only_the_exact_selected_provider_identity() {
+    use crate::fir::ExternalCallableId;
+    use crate::fir_lower::{FirFileLoweringFailure, FirLoweringFailure};
+
+    let provider = selected_inline_failure_provider();
+    let failure = FirFileLoweringFailure::Body(FirLoweringFailure::UnsupportedExternalCall(
+        provider.selected,
+    ));
+    let mut diagnostics = DiagSink::new();
+    diagnostics.set_file(3);
+    report_inline_body_failure(&mut diagnostics, &failure, &provider);
+    assert_eq!(provider.queries.borrow().as_slice(), &[provider.selected]);
+    assert_eq!(emitted_diagnostics(&diagnostics), [(3, format!(
+        "internal error: cannot consume inline FIR: {failure:?}; selected dependency owner={:?}, name=\"chosen\", declaration={:?}, dependency={:?}",
+        provider.declaration.declaration_owner,
+        provider.declaration.declaration_signature.as_ref(),
+        provider.declaration.dependency_callable.as_ref(),
+    ).as_str())]);
+    assert_eq!(diagnostics.diags.len(), 1);
+    assert!(!diagnostics.diags[0].msg.contains("physical/Facade"));
+    assert!(!diagnostics.diags[0].msg.contains("physical-name"));
+
+    let unknown = ExternalCallableId::from_raw(8);
+    let failure =
+        FirFileLoweringFailure::Body(FirLoweringFailure::UnsupportedExternalCall(unknown));
+    report_inline_body_failure(&mut diagnostics, &failure, &provider);
+    assert_eq!(
+        provider.queries.borrow().as_slice(),
+        &[provider.selected, unknown]
+    );
+    assert_eq!(diagnostics.diags.len(), 2);
+    assert_eq!(
+        diagnostics.diags[1].msg,
+        format!("internal error: cannot consume inline FIR: {failure:?}")
+    );
+
+    let unrelated = FirFileLoweringFailure::Body(FirLoweringFailure::UnsupportedIntrinsicCall);
+    report_inline_body_failure(&mut diagnostics, &unrelated, &provider);
+    assert_eq!(
+        provider.queries.borrow().as_slice(),
+        &[provider.selected, unknown]
+    );
+    assert_eq!(diagnostics.diags.len(), 3);
+    assert_eq!(
+        diagnostics.diags[2].msg,
+        format!("internal error: cannot consume inline FIR: {unrelated:?}")
+    );
+}
