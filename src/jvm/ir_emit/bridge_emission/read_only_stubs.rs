@@ -309,8 +309,9 @@ pub(super) struct Target<'a> {
 
 /// The bridge of an implemented member: each erased argument is cast or unboxed to the
 /// implementation's physical parameter, the class's member at that descriptor is called, and its
-/// result is discarded for a `void` bridge (a `Nothing` member's `Void`) or boxed back to the
-/// erased result when that is a reference. A type-safe declaration's bridge first tests each
+/// result is discarded for a `void` bridge (a `Nothing` member's `Void`), boxed back to the
+/// erased result when that is a reference, or unboxed when the bridge returns the scalar the
+/// member boxed. A type-safe declaration's bridge first tests each
 /// checked argument against its declared type.
 pub(super) fn emit_forwarding<const ACCESS: u16>(
     class: &IrClass,
@@ -369,6 +370,10 @@ pub(super) fn emit_forwarding<const ACCESS: u16>(
         if result != Ty::Unit {
             discard(result, &mut code);
         }
+    } else if result != erased_result && erased_result.is_jvm_scalar() && result.is_reference() {
+        // A renamed bridge returns the scalar its abstract method boxed (`int remove(int)` calls
+        // `Integer removeAt(int)` and unboxes).
+        unbox_prim_from(cw, &mut code, result, erased_result);
     } else if result != erased_result {
         assert!(
             erased_result.is_reference(),

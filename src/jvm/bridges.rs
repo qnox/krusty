@@ -69,6 +69,12 @@ pub(super) fn derive_bridges(
 /// A type-safe collection bridge is kotlinc's `BRIDGE_SPECIAL`: the erased root signature is
 /// final, so a subclass inherits it rather than publishing the same JVM method again. Bridge
 /// identity here is the JVM's `(name, descriptor)`, not the semantic `Ty` values that produced it.
+///
+/// A renamed member whose result is a narrower reference publishes the final bridge at that
+/// result (`final String remove(int)`, `final int remove(int)`), not at the erased descriptor.
+/// The erased bridge (`Object remove(int)`) stays overridable, and every override of the member
+/// writes it again, calling its own implementation. A subclass that already inherited the final
+/// bridge must not declare another one beside it.
 fn finalize_special_collection_bridges(
     ir: &mut IrFile,
     classpath: &crate::jvm::classpath::Classpath,
@@ -98,7 +104,7 @@ fn finalize_special_collection_bridges(
                 .map(|bridge| {
                     (
                         bridge.name.clone(),
-                        method_descriptor(&bridge.erased_params, bridge.erased_ret),
+                        method_descriptor(&bridge.erased_params, published_special_result(bridge)),
                     )
                 })
                 .chain(abstract_overrides.final_bridges(class.fq_name_id()))
@@ -129,7 +135,91 @@ fn finalize_special_collection_bridges(
         ir.classes[cid]
             .bridges
             .retain(|_| keep.next().expect("one verdict per bridge"));
+        let class_is_interface = ir.classes[cid].is_interface;
+        let clear_special = ir.classes[cid]
+            .bridges
+            .iter()
+            .map(|bridge| {
+                if class_is_interface || !narrower_renamed_special(bridge) {
+                    return false;
+                }
+                let descriptor = method_descriptor(&bridge.erased_params, bridge.erased_ret);
+                inherited_narrower_special_bridge(
+                    ir,
+                    cid,
+                    classpath,
+                    &inherited,
+                    &bridge.name,
+                    &descriptor,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (bridge, clear) in ir.classes[cid].bridges.iter_mut().zip(clear_special) {
+            if clear {
+                bridge.special = false;
+            }
+        }
     }
+}
+
+/// The descriptor a special bridge actually makes final. A renamed member with a narrower
+/// reference result finalizes that result (`(I)Ljava/lang/String;`); every other special bridge
+/// finalizes the erased descriptor.
+fn published_special_result(bridge: &Bridge) -> Ty {
+    if narrower_renamed_special(bridge) {
+        crate::jvm::physical_type::ir_ty_to_jvm(&bridge.concrete_ret)
+    } else {
+        bridge.erased_ret
+    }
+}
+
+/// `emit_planned_bridge` splits this bridge into a final method at the implementation result and
+/// an ordinary erased bridge. The final method is the renamed JVM signature, so its result is not
+/// the erased return recorded on the bridge.
+fn narrower_renamed_special(bridge: &Bridge) -> bool {
+    if !bridge.special || bridge.target_ret.is_some() || bridge.collection_barrier.is_some() {
+        return false;
+    }
+    if !matches!(
+        bridge.kind,
+        BridgeKind::Function | BridgeKind::PropertyGetter
+    ) {
+        return false;
+    }
+    let concrete = crate::jvm::physical_type::ir_ty_to_jvm(&bridge.concrete_ret);
+    let erased = crate::jvm::physical_type::ir_ty_to_jvm(&bridge.erased_ret);
+    concrete.is_reference() && erased.is_reference() && concrete != erased
+}
+
+/// A superclass already published the final renamed bridge at a different result
+/// (`final int remove(int)` over this bridge's erased `Object remove(int)`).
+fn inherited_narrower_special_bridge(
+    ir: &IrFile,
+    cid: usize,
+    classpath: &crate::jvm::classpath::Classpath,
+    inherited: &crate::fx_hash::HashSet<(String, String)>,
+    name: &str,
+    descriptor: &str,
+) -> bool {
+    let parameters = jvm_parameters(descriptor);
+    inherited
+        .iter()
+        .any(|(inherited_name, inherited_descriptor)| {
+            inherited_name == name
+                && inherited_descriptor != descriptor
+                && jvm_parameters(inherited_descriptor) == parameters
+        })
+        || classpath_superclass_has_final_bridge(ir, cid, classpath, |method| {
+            method.name == name
+                && method.descriptor != descriptor
+                && jvm_parameters(&method.descriptor) == parameters
+        })
+}
+
+fn jvm_parameters(descriptor: &str) -> &str {
+    descriptor
+        .split_once(')')
+        .map_or(descriptor, |(parameters, _)| parameters)
 }
 
 /// kotlinc's bridge lowering walks the class's declarations in order and adds each one's bridges
@@ -165,6 +255,17 @@ fn inherits_final_special_bridge(
     name: &str,
     descriptor: &str,
 ) -> bool {
+    classpath_superclass_has_final_bridge(ir, cid, classpath, |method| {
+        method.name == name && method.descriptor == descriptor
+    })
+}
+
+fn classpath_superclass_has_final_bridge(
+    ir: &IrFile,
+    cid: usize,
+    classpath: &crate::jvm::classpath::Classpath,
+    matches: impl Fn(&crate::jvm::classreader::MethodSig) -> bool,
+) -> bool {
     let mut next = ir.classes[cid].superclass;
     loop {
         if let Some(module_class) = ir.classes.iter().find(|class| class.fq_name == next) {
@@ -175,11 +276,10 @@ fn inherits_final_special_bridge(
             return false;
         };
         if info.meta.class_kind.is_some()
-            && info.methods.iter().any(|method| {
-                method.name == name
-                    && method.descriptor == descriptor
-                    && is_inherited_special_bridge(method)
-            })
+            && info
+                .methods
+                .iter()
+                .any(|method| is_inherited_special_bridge(method) && matches(method))
         {
             return true;
         }
@@ -510,14 +610,16 @@ fn superclass_method_bridges(
         let internal_name_bridge = sees_internal
             && overridden_internal
             && !function_target_is_internal(ir, callables, edge.implementation);
+        // A Kotlin superclass that already overrides the member published its final special
+        // bridge. This override still needs an erased bridge when that bridge's descriptor
+        // differs (`Object remove(int)` beside the inherited `final int remove(int)`); the
+        // identical descriptor is dropped once the superclass's final methods are known.
         let special = matches!(
             edge.overridden,
             crate::fir::ResolvedFunctionOverrideTarget::External(_)
         ) && bridge_name != edge.name
-            && !overridden_internal;
-        if special && edge.has_kotlin_superclass_override {
-            continue;
-        }
+            && !overridden_internal
+            && !edge.has_kotlin_superclass_override;
         if bridge_name != target_name
             && inherits_final_special_bridge(
                 ir,
@@ -747,14 +849,14 @@ fn property_bridges(
         {
             continue;
         }
+        // Same as a renamed function: the superclass owns the final special getter, and this
+        // class keeps only an erased bridge whose descriptor is not that final method.
         let getter_special = matches!(
             edge.overridden,
             crate::fir::ResolvedPropertyOverrideTarget::External(_)
         ) && bridge_getter != source_getter
-            && !overridden_getter_internal;
-        if getter_special && edge.has_kotlin_superclass_override {
-            continue;
-        }
+            && !overridden_getter_internal
+            && !edge.has_kotlin_superclass_override;
         let bridge_descriptor = method_descriptor(
             &declared_receiver.into_iter().collect::<Vec<_>>(),
             bridge_erasure(getter_results.declared),

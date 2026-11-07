@@ -6,8 +6,13 @@
 //! `abstract int toInt()` and `final int intValue()`, `abstract char get(int)` and `final char
 //! charAt(int)`), with the member's generic signature (`final Set<String> keySet()`) and, where the
 //! declaration's erased descriptor differs, an ordinary bridge there (`Object remove(int)` beside
-//! `String removeAt(int)`). A type-safe member's bridge tests its argument (`final boolean
-//! contains(Object)`), as two methods when the member's result is a narrower reference (`Object
+//! `String removeAt(int)`). A scalar result over that generic return slot is the wrapper
+//! (`Integer removeAt(int)` of `MutableList<Int>`): the final `remove(int)` bridge returns the
+//! scalar and unboxes the call, and the erased bridge returns the wrapper. A subclass that
+//! implements the method inherits that final bridge and publishes only `Object remove(int)`,
+//! calling its own `removeAt`. `MutableCollection.remove` of `Int` is `remove(Integer)`. A
+//! type-safe member's bridge tests its argument (`final boolean contains(Object)`), as two methods
+//! when the member's result is a narrower reference (`Object
 //! get(Object)`, then `Integer get(Object)`). A member whose type parameter erases like the
 //! declaration's needs nothing (`containsKey(K)`), a member the class declares or inherits a
 //! default for keeps its own bridges, and a subclass of a class that materialized the members
@@ -210,4 +215,67 @@ fun box(): String {
 #[test]
 fn java_reaches_the_implementations_through_the_materialized_bridges_like_kotlinc() {
     common::expect_box_same_as_kotlinc(THROUGH_JAVA, "abstract_builtin_overrides_through_java");
+}
+
+const SCALAR_RETURN_SLOT: &str = "abstract class IntRow : MutableList<Int>
+abstract class IntRows : IntRow() {
+    override fun removeAt(index: Int): Int = index
+}
+abstract class IntRowsAgain : IntRows() {
+    override fun removeAt(index: Int): Int = index
+}
+abstract class IntSet : MutableSet<Int>
+";
+
+/// `removeAt` of `MutableList<Int>` returns the generic `E`. The materialized method returns
+/// `Integer`, the final `remove(int)` bridge unboxes it, and a subclass override implements the
+/// abstract method without declaring that final bridge again. `MutableSet<Int>` boxes `remove`
+/// to `Integer` as well.
+#[test]
+fn a_scalar_result_over_a_generic_return_slot_is_boxed_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "AbstractScalarReturn",
+        SCALAR_RETURN_SLOT,
+        &["IntRow", "IntRows", "IntRowsAgain", "IntSet"],
+    );
+}
+
+/// Java's `List.remove(int)` reaches the subclass through the boxed bridge.
+#[test]
+fn java_reaches_a_boxed_remove_at_through_the_materialized_bridge_like_kotlinc() {
+    let program = format!(
+        "{SCALAR_RETURN_SLOT}
+class Rows : IntRow() {{
+    private val items = arrayListOf(1, 2)
+    override val size: Int get() = items.size
+    override fun isEmpty() = items.isEmpty()
+    override fun contains(element: Int) = items.contains(element)
+    override fun containsAll(elements: Collection<Int>) = items.containsAll(elements)
+    override fun iterator() = items.iterator()
+    override fun get(index: Int) = items[index]
+    override fun indexOf(element: Int) = items.indexOf(element)
+    override fun lastIndexOf(element: Int) = items.lastIndexOf(element)
+    override fun listIterator() = items.listIterator()
+    override fun listIterator(index: Int) = items.listIterator(index)
+    override fun subList(fromIndex: Int, toIndex: Int) = items.subList(fromIndex, toIndex)
+    override fun add(element: Int) = items.add(element)
+    override fun add(index: Int, element: Int) = items.add(index, element)
+    override fun addAll(index: Int, elements: Collection<Int>) = items.addAll(index, elements)
+    override fun addAll(elements: Collection<Int>) = items.addAll(elements)
+    override fun remove(element: Int) = items.remove(element)
+    override fun removeAt(index: Int) = items.removeAt(index)
+    override fun removeAll(elements: Collection<Int>) = items.removeAll(elements)
+    override fun retainAll(elements: Collection<Int>) = items.retainAll(elements)
+    override fun clear() = items.clear()
+    override fun set(index: Int, element: Int) = items.set(index, element)
+}}
+
+fun box(): String {{
+    val remove = java.util.List::class.java.getMethod(\"remove\", Int::class.javaPrimitiveType)
+    val outcome = remove.invoke(Rows(), 0)
+    return if (outcome == 1) \"OK\" else \"$outcome\"
+}}
+"
+    );
+    common::expect_box_same_as_kotlinc(&program, "abstract_builtin_overrides_boxed_remove_at");
 }

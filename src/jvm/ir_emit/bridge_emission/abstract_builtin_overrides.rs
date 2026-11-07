@@ -39,7 +39,7 @@ fn emit_member(
     let result = member.physical_result();
     let descriptor = method_descriptor(&parameters, result);
     let signature = formatter
-        .method_positions(&member.parameters, &member.result)
+        .method_positions(&member.parameters, &member.signature_result())
         .filter(|signature| *signature != descriptor);
     cw.add_abstract_method_sig(
         ACC_PUBLIC | ACC_ABSTRACT,
@@ -55,15 +55,29 @@ fn emit_member(
     };
     match &member.bridge {
         SpecialBridge::Renamed { jvm_name, erased } => {
+            let bridge_result = member.renamed_bridge_result();
+            let bridge_descriptor = method_descriptor(&parameters, bridge_result);
+            // The abstract method's signature describes its own descriptor. A bridge that unboxes
+            // (`(I)I` beside `(I)Ljava/lang/Integer;`) carries none.
+            let bridge_signature = if bridge_descriptor == descriptor {
+                signature.as_deref()
+            } else {
+                None
+            };
             let special = ThrowingMethod {
                 name: jvm_name,
                 parameters: &parameters,
                 parameter_names: &member.parameter_names,
-                descriptor: &descriptor,
-                signature: signature.as_deref(),
+                descriptor: &bridge_descriptor,
+                signature: bridge_signature,
             };
             emit_forwarding::<{ 0x0001 | 0x0010 | 0x0040 }>(
-                class, cw, &target, &special, result, None,
+                class,
+                cw,
+                &target,
+                &special,
+                bridge_result,
+                None,
             );
             if let Some((erased_parameters, erased_result)) = erased {
                 let erased_descriptor = method_descriptor(erased_parameters, *erased_result);

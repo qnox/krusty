@@ -7,8 +7,11 @@
 //! class inherits such a member as an abstract fake override, kotlinc's bridge lowering
 //! materializes it: an abstract method under its Kotlin JVM signature with the class's substituted
 //! types (`abstract boolean contains(String)`, `abstract int getSize()`), followed by the final
-//! special bridge under the JVM signature that calls it. A class below a superclass that reaches
-//! the builtin inherits what that superclass already wrote, so only the first class writes them.
+//! special bridge under the JVM signature that calls it. A scalar substituted for the builtin's
+//! generic return keeps that slot's reference representation (`abstract Integer removeAt(int)` of
+//! `MutableList<Int>`), the same wrapper an explicit override of the slot declares. A class below
+//! a superclass that reaches the builtin inherits what that superclass already wrote, so only the
+//! first class writes them.
 //! The plans remain backend facts; common IR never carries a fake override.
 
 use crate::backend::{BackendClassifierSource, CheckedBackendClassifiers, SourceClassMembers};
@@ -23,6 +26,7 @@ use crate::jvm::mapped_builtin_declarations::{
 };
 use crate::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
 use crate::jvm::names::method_descriptor;
+use crate::jvm::override_results::scalar_over_reference;
 use crate::jvm::read_only_collection_stubs::{
     builtin_extends, classifier_closure, overridden_declaration_policy, parameter_descriptor,
     stub_barrier, StubBarrier,
@@ -50,7 +54,10 @@ impl AbstractBuiltinOverrides {
                 let result = member.physical_result();
                 match &member.bridge {
                     SpecialBridge::Renamed { jvm_name, .. } => {
-                        vec![(jvm_name.clone(), method_descriptor(&parameters, result))]
+                        vec![(
+                            jvm_name.clone(),
+                            method_descriptor(&parameters, member.renamed_bridge_result()),
+                        )]
                     }
                     SpecialBridge::TypeSafe {
                         erased: (erased_parameters, erased_result),
@@ -81,6 +88,9 @@ pub(super) struct AbstractBuiltinOverride {
     pub(super) parameter_names: Vec<String>,
     /// The declaration's result type, substituted in the class's context.
     pub(super) result: Ty,
+    /// The substituted result is a scalar standing over the builtin's reference return slot, so
+    /// the JVM method returns the scalar's wrapper.
+    pub(super) boxed_result: bool,
     pub(super) bridge: SpecialBridge,
 }
 
@@ -89,8 +99,30 @@ impl AbstractBuiltinOverride {
         jvm_tys(&self.parameters)
     }
 
+    /// The result the generic signature is written from: the wrapper when the builtin slot is a
+    /// reference the substitution made scalar.
+    pub(super) fn signature_result(&self) -> Ty {
+        represented_result(self.result, self.boxed_result)
+    }
+
     pub(super) fn physical_result(&self) -> Ty {
+        jvm_declared_ty(&self.signature_result())
+    }
+
+    /// The final renamed bridge returns the substituted result's own JVM form. When the abstract
+    /// method boxes that result, the bridge unboxes the call (`final int remove(int)` calls
+    /// `Integer removeAt(int)`).
+    pub(super) fn renamed_bridge_result(&self) -> Ty {
         jvm_declared_ty(&self.result)
+    }
+}
+
+/// The JVM-facing result: `result`, or its wrapper when `boxed`.
+fn represented_result(result: Ty, boxed: bool) -> Ty {
+    if boxed {
+        Ty::nullable(result)
+    } else {
+        result
     }
 }
 
@@ -252,6 +284,26 @@ fn same_declaration(left: &DecodedBuiltinMember, right: &DecodedBuiltinMember) -
         && left.descriptor == right.descriptor
 }
 
+/// kotlinc's `shouldBoxSingleValueParameterForSpecialCaseOfRemove`: `MutableCollection.remove`
+/// of `Int` is declared `remove(Integer)`. The predicate is the declaration, so `MutableSet`
+/// boxes it even though that class has no `removeAt`.
+fn boxes_collection_remove_int(
+    classpath: &Classpath,
+    member: &DecodedBuiltinMember,
+    parameters: &[Ty],
+) -> bool {
+    if member.source_name != "remove"
+        || member.descriptor != "(Ljava/lang/Object;)Z"
+        || parameters != [Ty::Int]
+    {
+        return false;
+    }
+    overridden_declaration_policy(classpath, member.declaration_owner, |owner| {
+        (owner == crate::types::type_name("kotlin/collections/MutableCollection")).then_some(())
+    })
+    .is_some()
+}
+
 /// The materialization of an abstract builtin member in the substitution context `applied` of its
 /// declaring builtin, or `None` when Java reaches it at its Kotlin signature already.
 fn materialization(
@@ -274,12 +326,22 @@ fn materialization(
         .map(|formal| (formal.clone(), Ty::nullable(Ty::obj("kotlin/Any"))))
         .collect();
     let declared = &member.generic_sig;
-    let parameters: Vec<Ty> = declared
+    let mut parameters: Vec<Ty> = declared
         .params
         .iter()
         .map(|ty| ty_subst(*ty, &bindings))
         .collect();
+    // `MutableCollection.remove(Int)` is `remove(Integer)`. A primitive `remove(int)` is the JVM
+    // method `removeAt` already occupies, and the same declaration boxes on every mutable
+    // collection, `MutableSet` included.
+    if boxes_collection_remove_int(classpath, member, &parameters) {
+        parameters[0] = Ty::obj("java/lang/Integer");
+    }
     let result = ty_subst(declared.ret, &bindings);
+    // The builtin slot returns a reference (`E` erases to `Object`). A scalar substitution still
+    // occupies that slot, so the method returns the wrapper (`Integer removeAt(int)`), which is
+    // what an explicit override of the same slot declares.
+    let boxed_result = scalar_over_reference(result, declared.ret);
     let erased_parameters = jvm_tys(
         &declared
             .params
@@ -294,7 +356,7 @@ fn materialization(
         MappedBuiltinMemberKind::Property => property_getter_name(&member.source_name),
     };
     let own_parameters = jvm_tys(&parameters);
-    let own_result = jvm_declared_ty(&result);
+    let own_result = jvm_declared_ty(&represented_result(result, boxed_result));
     let bridge = if member.physical_name != name {
         let own_descriptor = method_descriptor(&own_parameters, own_result);
         SpecialBridge::Renamed {
@@ -326,6 +388,7 @@ fn materialization(
         parameters,
         parameter_names: member.parameter_names.clone(),
         result,
+        boxed_result,
         bridge,
     })
 }
