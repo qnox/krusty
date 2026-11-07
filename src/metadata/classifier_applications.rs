@@ -143,10 +143,20 @@ mod tests {
             })
         };
         let direct = |_| Ok(ClassifierApplication::Direct);
-        let mut actual =
-            StringTable::with_local_classifiers(&locals, &Default::default(), None, &lexical);
-        let mut expected =
-            StringTable::with_local_classifiers(&locals, &Default::default(), None, &direct);
+        let mut actual = StringTable::with_local_classifiers(
+            &locals,
+            &Default::default(),
+            &Default::default(),
+            None,
+            &lexical,
+        );
+        let mut expected = StringTable::with_local_classifiers(
+            &locals,
+            &Default::default(),
+            &Default::default(),
+            None,
+            &direct,
+        );
         let actual_type = encode_type(
             &mut actual,
             Ty::obj_args_name(local, &[Ty::Int, Ty::String]),
@@ -178,6 +188,7 @@ mod tests {
         };
         for count in [0, 1, 3] {
             let mut strings = StringTable::with_local_classifiers(
+                &Default::default(),
                 &Default::default(),
                 &Default::default(),
                 None,

@@ -297,6 +297,8 @@ pub struct ClassTail<'a> {
     /// The local classifiers whose ids keep their `pkg/Outer.Inner` spelling (enum entry bodies),
     /// together with the classes nested in them.
     pub enum_entry_bodies: &'a crate::fx_hash::HashSet<TypeName>,
+    /// Anonymous declarations whose references keep their raw class IDs.
+    pub anonymous_classifiers: &'a crate::fx_hash::HashSet<TypeName>,
     /// Whether the class is an `enum class`, whose implicit `Enum<E>` supertype metadata omits.
     pub is_enum: bool,
     /// Whether the class is a script's. kotlinc describes a script by its own declarations alone,
@@ -344,6 +346,7 @@ impl Default for ClassTail<'_> {
             primary_ctor_annotations: &crate::metadata::NO_ANNOTATIONS,
             local_classifiers: &NO_LOCAL_CLASSIFIERS,
             enum_entry_bodies: &NO_LOCAL_CLASSIFIERS,
+            anonymous_classifiers: &NO_LOCAL_CLASSIFIERS,
             is_enum: false,
             is_script: false,
             annotations_in_metadata: true,

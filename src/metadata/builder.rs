@@ -1387,6 +1387,7 @@ pub(crate) fn build_package_with_intersection_approximation(
     let mut st = StringTable::with_local_classifiers(
         &lookups.local_classifiers,
         &lookups.enum_entry_bodies,
+        &lookups.anonymous_classifiers,
         lookups.intersection_approximation,
         lookups.classifier_applications,
     );

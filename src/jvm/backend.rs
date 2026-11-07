@@ -1631,6 +1631,7 @@ pub fn facade_package_metadata_from_ir(
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let local_classifiers = crate::metadata::local_classifiers::names(ir);
     let enum_entry_bodies = crate::metadata::local_classifiers::enum_entry_bodies(ir);
+    let anonymous_classifiers = crate::metadata::local_classifiers::anonymous_names(ir);
     let functions = ir
         .package_functions
         .iter()
@@ -1849,6 +1850,7 @@ pub fn facade_package_metadata_from_ir(
             classifier_applications: &classifier_application,
             local_classifiers,
             enum_entry_bodies,
+            anonymous_classifiers,
         },
         metadata_stamp,
         annotations_in_metadata,

@@ -298,6 +298,7 @@ pub fn build_class(
     let mut st = StringTable::with_local_classifiers(
         tail.local_classifiers,
         tail.enum_entry_bodies,
+        tail.anonymous_classifiers,
         tail.intersection_approximation,
         tail.classifier_applications,
     );
