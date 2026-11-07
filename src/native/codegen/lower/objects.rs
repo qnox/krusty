@@ -1873,7 +1873,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .carrier(stored)
             .clif()
             .expect("fields are never `Unit`");
-        let value = self.builder.ins().load(clif, trusted(), object, offset);
+        let value = if self.file.ir.classes[class as usize].fields[index as usize].is_atomic() {
+            let address = self.builder.ins().iadd_imm_s(object, i64::from(offset));
+            self.builder.ins().atomic_load(clif, trusted(), address)
+        } else {
+            self.builder.ins().load(clif, trusted(), object, offset)
+        };
         self.field_value(value, class, index, ty)
     }
 
@@ -2003,7 +2008,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(value) = value else {
             return Err("a `Unit` value stored to a field".into());
         };
-        self.builder.ins().store(trusted(), value, object, offset);
+        if self.file.ir.classes[class as usize].fields[index as usize].is_atomic() {
+            let address = self.builder.ins().iadd_imm_s(object, i64::from(offset));
+            self.builder.ins().atomic_store(trusted(), value, address);
+        } else {
+            self.builder.ins().store(trusted(), value, object, offset);
+        }
         Ok(())
     }
 

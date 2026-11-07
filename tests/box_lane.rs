@@ -290,8 +290,8 @@ impl Libraries {
 
 /// The atomicfu compiler plugin for a `// WITH_ATOMICFU` native or wasm case. The JVM lane
 /// selects that plugin through its own `-Xplugin` argument. These lanes have no plugin switch, so
-/// without one their runtime library bodies are lowered. The plugin lowers only the JVM field
-/// updater and rejects any other representation instead of emitting plain field updates.
+/// without one their runtime library bodies are lowered. The plugin lowers the target's atomic
+/// representation: wasm value fields, or native atomic operations.
 fn atomicfu_plugins(
     directive_source: &str,
     target: krusty::compilation_target::CompilationTarget,

@@ -9,11 +9,14 @@
 //! atomics and the operations on them while their checked identities are still at hand, rejects
 //! every form this implementation does not cover yet, and selects the representation the
 //! compilation's target supports. A JVM compilation whose `java.util.concurrent.atomic` field
-//! updaters are present lowers through those. Any other target is rejected with a diagnostic.
-//! [`field_updaters`] then rewrites the JVM backend's IR. The
-//! class's Kotlin metadata is recorded before either runs, so it keeps the declared atomic
-//! property, as kotlinc's does.
+//! updaters are present lowers through those. Wasm lowers the value field with plain reads and
+//! writes, matching the wasm atomicfu runtime. Native lowers that field with atomic instructions.
+//! A JVM compilation without the updater classes, and the JavaScript target, are rejected with a
+//! diagnostic. [`field_updaters`] rewrites the JVM backend's IR; [`direct_fields`] rewrites the
+//! others at the handoff. The class's Kotlin metadata is recorded before either runs, so it keeps
+//! the declared atomic property, as kotlinc's does.
 
+mod direct_fields;
 mod field_updaters;
 mod source_facts;
 

@@ -2,7 +2,8 @@
 //!
 //! An atomic is a property whose type is one of `kotlinx.atomicfu`'s atomic classes. Each one the
 //! transform lowers is recorded with the store that initializes it and every operation the file
-//! applies to it, together with the field-updater declarations those operations become. A file
+//! applies to it. A JVM compilation also records the field-updater declarations those operations
+//! become; Wasm and Native record the value field itself. A file
 //! that uses an atomic in any form this implementation does not lower is rejected here, with the
 //! construct's position, so it is never compiled to a different program than kotlinc's.
 
@@ -23,6 +24,58 @@ const FIELD_UPDATERS: &str = "java/util/concurrent/atomic";
 pub struct AtomicfuFileFacts {
     pub(super) updaters: Vec<FieldUpdater>,
     pub(super) operations: Vec<UpdaterOperation>,
+}
+
+/// How a non-JVM target stores an `Int` or `Long` atomic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectedRepresentation {
+    Jvm,
+    Direct(FieldRepresentation),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FieldRepresentation {
+    /// A plain value field, as the wasm atomicfu runtime updates `AtomicInt.value`.
+    WasmValue,
+    /// A naturally aligned integer field updated with atomic instructions.
+    NativeAtomic,
+}
+
+/// An atomic property lowered to its value field.
+#[derive(Clone, Copy)]
+pub(super) struct DirectAtomic {
+    pub(super) class: ClassId,
+    pub(super) field: u32,
+    pub(super) value: AtomicValue,
+    /// The constructor's store of the property's initializer, and the value the `atomic(…)` call
+    /// it stores wraps.
+    pub(super) initializer: (ExprId, ExprId),
+}
+
+/// One operation on an atomic, with the receiver and arguments still in call order.
+pub(super) struct DirectOperation {
+    pub(super) expression: ExprId,
+    pub(super) instance: ExprId,
+    pub(super) arguments: Vec<ExprId>,
+    pub(super) class: ClassId,
+    pub(super) field: u32,
+    pub(super) value: AtomicValue,
+    pub(super) op: AtomicOp,
+}
+
+/// An atomic class's operation, independent of the target representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AtomicOp {
+    Get,
+    Set,
+    CompareAndSet,
+    GetAndSet,
+    GetAndAdd,
+    AddAndGet,
+    GetAndIncrement,
+    IncrementAndGet,
+    GetAndDecrement,
+    DecrementAndGet,
 }
 
 /// An atomic property of a class, which becomes a volatile field and a static field updater.
@@ -117,6 +170,22 @@ fn atomic_type(ty: Ty) -> Option<AtomicType> {
 /// An operation of an atomic class, by the updater function it becomes and the parameters that
 /// function takes after the updated instance. `value` is the atomic's property: a read with no
 /// arguments, a write with one.
+fn direct_operation(name: &str, arguments: usize) -> Option<AtomicOp> {
+    Some(match (name, arguments) {
+        ("value", 0) => AtomicOp::Get,
+        ("value", 1) | ("lazySet", 1) => AtomicOp::Set,
+        ("compareAndSet", 2) => AtomicOp::CompareAndSet,
+        ("getAndSet", 1) => AtomicOp::GetAndSet,
+        ("getAndAdd", 1) => AtomicOp::GetAndAdd,
+        ("addAndGet", 1) => AtomicOp::AddAndGet,
+        ("getAndIncrement", 0) => AtomicOp::GetAndIncrement,
+        ("incrementAndGet", 0) => AtomicOp::IncrementAndGet,
+        ("getAndDecrement", 0) => AtomicOp::GetAndDecrement,
+        ("decrementAndGet", 0) => AtomicOp::DecrementAndGet,
+        _ => return None,
+    })
+}
+
 fn updater_function(
     name: &str,
     arguments: usize,
@@ -161,11 +230,20 @@ pub(super) fn record(
         release,
         target,
         updaters: Vec::new(),
+        directs: Vec::new(),
+        direct_operations: Vec::new(),
+        direct_representation: None,
         by_property: HashMap::default(),
         bound: HashMap::default(),
     };
     recorder.declarations();
     let operations = recorder.operations();
+    if let Some(representation) = recorder.direct_representation {
+        let directs = std::mem::take(&mut recorder.directs);
+        let direct_operations = std::mem::take(&mut recorder.direct_operations);
+        super::direct_fields::rewrite(ir, &directs, &direct_operations, representation);
+        return;
+    }
     let updaters = std::mem::take(&mut recorder.updaters);
     if updaters.is_empty() {
         return;
@@ -184,6 +262,9 @@ struct Recorder<'a, 'b> {
     release: Option<PluginRelease>,
     target: Option<CompilationTarget>,
     updaters: Vec<FieldUpdater>,
+    directs: Vec<DirectAtomic>,
+    direct_operations: Vec<DirectOperation>,
+    direct_representation: Option<FieldRepresentation>,
     /// Each lowered atomic by its checked identity.
     by_property: HashMap<crate::ir::PropertyId, usize>,
     /// Each updater function selected so far.
@@ -191,11 +272,20 @@ struct Recorder<'a, 'b> {
 }
 
 impl Recorder<'_, '_> {
-    /// The JVM field-updater representation: the compilation is for the JVM and
-    /// `java.util.concurrent.atomic` provides `value`'s updater class.
-    fn jvm_field_updaters(&self, value: AtomicValue) -> bool {
-        self.target == Some(CompilationTarget::Jvm)
-            && self.runtime.classifier(value.updater()).is_some()
+    /// The representation this compilation lowers, or `None` when the target has none.
+    fn representation(&self, value: AtomicValue) -> Option<SelectedRepresentation> {
+        match self.target {
+            Some(CompilationTarget::WasmJs | CompilationTarget::WasmWasi) => Some(
+                SelectedRepresentation::Direct(FieldRepresentation::WasmValue),
+            ),
+            Some(CompilationTarget::Native) => Some(SelectedRepresentation::Direct(
+                FieldRepresentation::NativeAtomic,
+            )),
+            Some(CompilationTarget::Jvm) if self.runtime.classifier(value.updater()).is_some() => {
+                Some(SelectedRepresentation::Jvm)
+            }
+            Some(CompilationTarget::Jvm | CompilationTarget::Js) | None => None,
+        }
     }
 
     fn reject(&mut self, span: Option<Span>, what: &str) {
@@ -345,13 +435,24 @@ impl Recorder<'_, '_> {
                 self.reject(span, "an atomic property not initialized by atomic(value)");
                 continue;
             };
-            // Field updaters are selected for a JVM compilation that has them. Every other
-            // compilation is rejected with a diagnostic.
-            if !self.jvm_field_updaters(value) {
+            // A JVM compilation with the field-updater classes lowers through them. Wasm and
+            // Native lower the value field in their own representations. Anything else is rejected.
+            let Some(selected) = self.representation(value) else {
                 self.reject(
                     span,
                     "an atomic property without the JVM field-updater representation",
                 );
+                continue;
+            };
+            if let SelectedRepresentation::Direct(representation) = selected {
+                self.direct_representation = Some(representation);
+                self.by_property.insert(id, self.directs.len());
+                self.directs.push(DirectAtomic {
+                    class,
+                    field,
+                    value,
+                    initializer,
+                });
                 continue;
             }
             let updater = value.updater();
@@ -491,13 +592,35 @@ impl Recorder<'_, '_> {
                 continue;
             };
             receivers.push(receiver);
-            let class = self.updaters[updater].class;
-            let value_ty = self.updaters[updater].value.ty();
+            let (class, value_ty) = if self.direct_representation.is_some() {
+                let slot = self.directs[updater];
+                (slot.class, slot.value.ty())
+            } else {
+                let slot = &self.updaters[updater];
+                (slot.class, slot.value.ty())
+            };
             if owner_of[expression as usize] != Some(class) {
                 self.reject(
                     span,
                     "an atomic operation outside a member function of the atomic's class",
                 );
+                continue;
+            }
+            if self.direct_representation.is_some() {
+                let Some(op) = direct_operation(&name, arguments.len()) else {
+                    self.reject(span, &format!("the atomic operation `{name}`"));
+                    continue;
+                };
+                let slot = self.directs[updater];
+                self.direct_operations.push(DirectOperation {
+                    expression,
+                    instance,
+                    arguments,
+                    class: slot.class,
+                    field: slot.field,
+                    value: slot.value,
+                    op,
+                });
                 continue;
             }
             let Some((function, params, ret)) = updater_function(&name, arguments.len(), value_ty)

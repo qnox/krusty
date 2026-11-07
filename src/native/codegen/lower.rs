@@ -37,6 +37,7 @@ use declared_capabilities::{
 };
 mod functions;
 mod implementor_dispatch;
+mod atomic_fields;
 mod imported_functions;
 mod interface_records;
 pub(super) use imported_functions::ImportedAbis;
@@ -2150,6 +2151,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 finally,
                 result,
             } => self.try_catch(body, &catches, finally, result),
+            IrExpr::PluginPlaceholder {
+                plugin: "atomicfu",
+                kind,
+                exprs,
+                data,
+                types,
+            } => self.atomic_field_operation(kind, &exprs, &data, &types),
             IrExpr::Return(_)
             | IrExpr::Variable { .. }
             | IrExpr::SetValue { .. }
