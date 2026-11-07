@@ -121,8 +121,31 @@ function reportDarwinMemory() {
   }
 }
 
+// Keep each native mode separate: Windows IRQ time can overlap system time.
+let previousCpuTimes;
+function reportCpuTimes() {
+  try {
+    const fields = ['user', 'sys', 'idle', 'nice', 'irq'];
+    const current = os.cpus().map(cpu => fields.map(field => cpu.times?.[field]));
+    if (!current.length || current.some(cpu => cpu.some(value => !Number.isSafeInteger(value) || value < 0))) throw new Error();
+    const reset = previousCpuTimes && (current.length !== previousCpuTimes.length
+      || current.some((cpu, index) => cpu.some((value, field) => value < previousCpuTimes[index][field])));
+    const state = !previousCpuTimes ? 'baseline' : reset ? 'reset' : 'available';
+    const lines = current.map((cpu, index) => `release build: host_cpu index=${index} `
+      + fields.map((field, position) => `${field}_ms=${cpu[position]}`
+        + (state === 'available' ? ` ${field}_delta_ms=${cpu[position] - previousCpuTimes[index][position]}` : '')).join(' '));
+    console.error(`release build: host_cpu cpu_count=${current.length} counter_deltas=${state}`);
+    for (const line of lines) console.error(line);
+    previousCpuTimes = current;
+  } catch {
+    previousCpuTimes = undefined;
+    console.error('release build: host_cpu snapshot unavailable');
+  }
+}
+
 function report() {
   console.error(`release build: ${new Date().toISOString()}, elapsed ${Math.round((Date.now() - started) / 1000)}s, free RAM ${mib(os.freemem())}/${mib(os.totalmem())} MiB`);
+  reportCpuTimes();
   try {
     const options = { encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'] };
     if (os.platform() === 'win32') {
