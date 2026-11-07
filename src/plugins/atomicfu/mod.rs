@@ -8,10 +8,12 @@
 //! The work is split at the frontend/backend handoff. [`source_facts`] classifies the file's
 //! atomics and the operations on them while their checked identities are still at hand, rejects
 //! every form this implementation does not cover yet, and selects the field-updater declarations
-//! the generated code calls. [`field_updaters`] then rewrites the JVM backend's IR. The class's
-//! Kotlin metadata is recorded before either runs, so it keeps the declared atomic property, as
-//! kotlinc's does.
+//! the generated code calls when `java.util.concurrent.atomic` is on the classpath. When it is
+//! not, [`direct_fields`] rewrites the same operations onto the property's backing field.
+//! [`field_updaters`] then rewrites the JVM backend's IR. The class's Kotlin metadata is recorded
+//! before either runs, so it keeps the declared atomic property, as kotlinc's does.
 
+mod direct_fields;
 mod field_updaters;
 mod source_facts;
 

@@ -629,6 +629,30 @@ pub fn atomicfu_compiler_plugin_jar() -> Option<PathBuf> {
     )
 }
 
+/// The atomicfu runtime KLIB for `target`, pinned to [`ATOMICFU_RUNTIME_VERSION`].
+///
+/// Native and Wasm `// WITH_ATOMICFU` cases resolve `kotlinx.atomicfu` against this library. The
+/// JVM lane uses [`atomicfu_runtime_jar`] and the compiler plugin instead. Maven drops the
+/// underscores of a Kotlin/Native target name, so `linux_x64` is `atomicfu-linuxx64`.
+pub fn atomicfu_klib(target: crate::compilation_target::CompilationTarget) -> Option<PathBuf> {
+    use crate::compilation_target::CompilationTarget;
+    let artifact = match target {
+        CompilationTarget::Native => {
+            let konan = crate::native::NativeTarget::host()?.konan_name()?;
+            format!("atomicfu-{}", konan.replace('_', ""))
+        }
+        CompilationTarget::WasmJs => "atomicfu-wasm-js".to_string(),
+        CompilationTarget::WasmWasi => "atomicfu-wasm-wasi".to_string(),
+        CompilationTarget::Jvm | CompilationTarget::Js => return None,
+    };
+    ensure_maven_artifact(
+        "org.jetbrains.kotlinx",
+        &artifact,
+        ATOMICFU_RUNTIME_VERSION,
+        "klib",
+    )
+}
+
 /// Locate the coroutines runtime jar used by classpath suspend tests.
 pub fn coroutines_jar() -> Option<PathBuf> {
     dist_jar("kotlinx-coroutines-core-jvm.jar").or_else(|| {

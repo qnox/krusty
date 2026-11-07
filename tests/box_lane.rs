@@ -288,6 +288,68 @@ impl Libraries {
     }
 }
 
+/// The atomicfu compiler plugin for a `// WITH_ATOMICFU` native or wasm case. The JVM lane
+/// selects that plugin through its own `-Xplugin` argument; these lanes have no plugin switch, and
+/// without one the atomicfu runtime's library bodies are lowered instead of the plugin's.
+fn atomicfu_plugins(
+    directive_source: &str,
+    target: krusty::compilation_target::CompilationTarget,
+) -> krusty::plugins::registry::NativePlugins {
+    use krusty::compilation_target::CompilationTarget;
+    use krusty::plugins::cli::{PluginConfig, ATOMICFU_PLUGIN_ID};
+    use krusty::plugins::registry::{Activation, PluginRegistry};
+    if !krusty::conformance::directive(directive_source, "WITH_ATOMICFU") {
+        return krusty::plugins::registry::NativePlugins::none();
+    }
+    if matches!(target, CompilationTarget::Jvm | CompilationTarget::Js) {
+        return krusty::plugins::registry::NativePlugins::none();
+    }
+    let jar = krusty::toolchain::atomicfu_compiler_plugin_jar()
+        .unwrap_or_else(|| panic!("cannot provision the atomicfu compiler plugin"));
+    let mut config = PluginConfig::none();
+    config.plugin_jars.push(jar.display().to_string());
+    let resolved = PluginRegistry::with_builtins().resolve(&Activation {
+        config: &config,
+        classpath: &[],
+        module_name: "box",
+        codegen_host: false,
+    });
+    let errors = resolved
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.is_error())
+        .map(|diagnostic| diagnostic.message())
+        .collect::<Vec<_>>();
+    if !errors.is_empty() {
+        panic!("atomicfu compiler plugin: {}", errors.join("\n"));
+    }
+    let native = resolved.native;
+    if !native.plugin_ids().contains(&ATOMICFU_PLUGIN_ID) {
+        panic!("atomicfu compiler plugin was not activated");
+    }
+    native
+}
+
+/// The atomicfu runtime KLIB a `// WITH_ATOMICFU` native or wasm case resolves `kotlinx.atomicfu`
+/// against. The JVM lane compiles that directive with the compiler plugin and the JVM jar.
+fn atomicfu_runtime_dependencies(
+    directive_source: &str,
+    target: krusty::compilation_target::CompilationTarget,
+) -> Vec<PathBuf> {
+    if !krusty::conformance::directive(directive_source, "WITH_ATOMICFU") {
+        return Vec::new();
+    }
+    if matches!(
+        target,
+        krusty::compilation_target::CompilationTarget::Jvm
+            | krusty::compilation_target::CompilationTarget::Js
+    ) {
+        return Vec::new();
+    }
+    vec![krusty::toolchain::atomicfu_klib(target)
+        .unwrap_or_else(|| panic!("cannot provision the atomicfu runtime KLIB for {target:?}"))]
+}
+
 /// Wasm publishes kotlin-test separately from its stdlib. Retain it as an ordinary dependency:
 /// these coordinates select the exact target/version but confer no compiler intrinsic authority.
 fn wasm_test_library(
@@ -404,11 +466,13 @@ pub fn compile<B: Backend>(
             "the {target:?} corpus lane received a {compilation_target:?} backend"
         )));
     }
+    let dependencies = atomicfu_runtime_dependencies(directive_source, compilation_target);
     let PlatformLibraries {
         semantics,
         native_imports,
-    } = libraries.platform(compilation_target, &[], &[]);
-    let platform = krusty::frontend::PlatformProvider::new(compilation_target, semantics);
+    } = libraries.platform(compilation_target, &dependencies, &[]);
+    let platform = krusty::frontend::PlatformProvider::new(compilation_target, semantics)
+        .with_native_plugins(atomicfu_plugins(directive_source, compilation_target));
     let features = krusty::features::LangFeatures::from_source(directive_source);
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
@@ -491,11 +555,17 @@ pub fn analyze_module(
         .iter()
         .map(|(stem, _)| stem.clone())
         .collect::<Vec<_>>();
+    let mut dependencies = dependency_klibs.to_vec();
+    dependencies.extend(atomicfu_runtime_dependencies(
+        directive_source,
+        backend_target,
+    ));
     let PlatformLibraries {
         semantics,
         native_imports,
-    } = libraries.platform(backend_target, dependency_klibs, friend_klibs);
-    let platform = krusty::frontend::PlatformProvider::new(backend_target, semantics);
+    } = libraries.platform(backend_target, &dependencies, friend_klibs);
+    let platform = krusty::frontend::PlatformProvider::new(backend_target, semantics)
+        .with_native_plugins(atomicfu_plugins(directive_source, backend_target));
     let features = module_features(directive_source, unit.common_file_count);
     let diagnostics_start = diags.diags.len();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
