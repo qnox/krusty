@@ -12,6 +12,7 @@
 //! Env vars:
 //!   KRUSTY_REF_JAVA_HOME / JAVA_HOME
 //!   KRUSTY_BOX_LIMIT        cap on files scanned (default: all)
+//!   KRUSTY_BOX_CASE_TIMEOUT_MS  per-case box() deadline (default: 2000)
 //!   KRUSTY_BLESS_BOX_EXPECTATIONS=1  rewrite the JVM applicability inventory (full local only)
 //!
 //! Every applicable case must pass. Every run is also held to that version's exact JVM
@@ -49,7 +50,7 @@ import java.io.*;
 import java.util.concurrent.*;
 
 public class BoxRunner {
-    static final long TIMEOUT_MS = 2000; // 2s per test
+    static final long TIMEOUT_MS = __TIMEOUT_MS__L;
     static final ExecutorService EXEC = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r);
         t.setDaemon(true);
@@ -984,9 +985,10 @@ impl BoxRunner {
         self.stdin.flush()?;
 
         // Read: [u32 result_len][result_bytes]
-        // Hard deadline: Java allows 2 s per test; give 10 s total for the round-trip.
-        // This is our OS-level escape hatch in case the JVM's main thread stalls.
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // The JVM cancels box() at its own deadline. Wait 8s past that so a slow pipe
+        // cannot surface a client timeout while the JVM is still inside its budget.
+        let deadline =
+            Instant::now() + Duration::from_millis(box_case_timeout_ms().saturating_add(8_000));
         let fd = self.stdout.as_raw_fd();
         let mut len_buf = [0u8; 4];
         read_exact_deadline(fd, &mut len_buf, deadline)?;
@@ -997,12 +999,62 @@ impl BoxRunner {
     }
 }
 
+/// Milliseconds `BoxRunner` waits for one `box()` call.
+///
+/// Unset or blank keeps the hosted-runner deadline of 2s. A positive integer lengthens it for a
+/// slower machine. The value is compiled into that run's runner, and the client waits longer.
+fn box_case_timeout_ms_from(raw: Option<&str>) -> u64 {
+    const DEFAULT_MS: u64 = 2_000;
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return DEFAULT_MS;
+    };
+    let Ok(value) = raw.parse::<u64>() else {
+        panic!("KRUSTY_BOX_CASE_TIMEOUT_MS must be a positive integer, got {raw}");
+    };
+    if value == 0 {
+        panic!("KRUSTY_BOX_CASE_TIMEOUT_MS must be a positive integer, got {raw}");
+    }
+    value
+}
+
+fn box_case_timeout_ms() -> u64 {
+    box_case_timeout_ms_from(std::env::var("KRUSTY_BOX_CASE_TIMEOUT_MS").ok().as_deref())
+}
+
+fn box_runner_source(timeout_ms: u64) -> String {
+    BOX_RUNNER_SRC.replace("__TIMEOUT_MS__", &timeout_ms.to_string())
+}
+
+#[test]
+fn box_case_timeout_uses_two_seconds_unless_overridden() {
+    assert_eq!(box_case_timeout_ms_from(None), 2_000);
+    assert_eq!(box_case_timeout_ms_from(Some("")), 2_000);
+    assert_eq!(box_case_timeout_ms_from(Some("  ")), 2_000);
+    assert_eq!(box_case_timeout_ms_from(Some("8000")), 8_000);
+    let source = box_runner_source(8_000);
+    assert!(
+        source.contains("static final long TIMEOUT_MS = 8000L;"),
+        "{source}"
+    );
+    assert!(!source.contains("__TIMEOUT_MS__"));
+}
+
+#[test]
+fn box_case_timeout_rejects_values_that_are_not_positive_integers() {
+    for raw in ["0", "nope", "-5", "8_000"] {
+        let panicked = std::panic::catch_unwind(|| box_case_timeout_ms_from(Some(raw))).is_err();
+        assert!(panicked, "{raw}");
+    }
+}
+
 /// Compile and run BoxRunner.java once, return path to the directory with BoxRunner.class.
 fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
     // Cache the compiled runner in a stable location keyed by the source hash — BoxRunner.java is
-    // static, so javac runs once across all test runs, not every invocation (~1.8s saved per run).
+    // static for one deadline, so javac runs once across all test runs, not every invocation
+    // (~1.8s saved per run).
+    let runner_src = box_runner_source(box_case_timeout_ms());
     let mut hash: u64 = 0xcbf29ce484222325;
-    for b in BOX_RUNNER_SRC.bytes() {
+    for b in runner_src.bytes() {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
     }
     let runner_dir =
@@ -1012,7 +1064,7 @@ fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
     }
     fs::create_dir_all(&runner_dir).unwrap();
     let src_path = runner_dir.join("BoxRunner.java");
-    fs::write(&src_path, BOX_RUNNER_SRC).unwrap();
+    fs::write(&src_path, &runner_src).unwrap();
     let javac = format!("{java_home}/bin/javac");
     let out = Command::new(&javac)
         .args([

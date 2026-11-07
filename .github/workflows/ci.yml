@@ -351,6 +351,15 @@ jobs:
       - name: build focused KLIB test binaries
         run: |
           set -euo pipefail
+          # One Cargo job still leaves a single rustc of the cfg(test) crate above 8 GB at
+          # opt-level 1 (signal 9). The non-test library at that profile fits. On the serial
+          # budget, compile only the krusty package unoptimized and keep 256 codegen units so
+          # each LLVM module stays small. Cap glibc arenas so they do not fragment the rest of
+          # the budget away. Forks keep four jobs and the hosted profile.
+          if [ "${CARGO_BUILD_JOBS}" = 1 ]; then
+            export MALLOC_ARENA_MAX=2
+            export KRUSTY_KLIB_CRATE_OPT_LEVEL=0
+          fi
           source scripts/phase-timing.sh
           phase_log_prefix=klib-test-bins
           PHASE_TIMING_LOG="$(mktemp)"
@@ -426,9 +435,13 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [jvm]
-    # Cold reflective box cases share the fixed per-case execution deadline. Hosted capacity
-    # keeps JVM conformance independent of the heterogeneous self-hosted build fleet.
+    # Cold reflective box() calls share one deadline. Hosted runners and forks keep 2s. The 8 GB
+    # pool missed it once: functions/functionNtoString.kt on Kotlin 2.4.0, while the same source
+    # passed for 2.4.10, 2.4.20, and 2.4.21. Give that pool 8s. The client round-trip wait stays
+    # 8s above the JVM deadline.
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    env:
+      KRUSTY_BOX_CASE_TIMEOUT_MS: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '2000' || '8000' }}
     steps: &conformance-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
