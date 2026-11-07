@@ -404,7 +404,11 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &selected.sig.params,
                 selected.context_args.iter().map(Some),
-                selected.sig.vararg_index,
+                self.declared_argument_vararg(
+                    self.file.expr_span(expression),
+                    selected.sig.vararg_index,
+                    selected.sig.context_count,
+                )?,
             )?,
             parameter_types: self
                 .published_parameter_types(self.file.expr_span(expression), &selected.sig.params)?,

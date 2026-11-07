@@ -6,6 +6,7 @@ use crate::libraries::{CompilerIntrinsic, ListStorageConstruction};
 pub(super) enum DependencyOperation {
     ListStorage(ListStorageConstruction),
     StringPlus,
+    PrimitiveIteratorNext,
 }
 
 pub(super) fn operation_plan(operation: CompilerIntrinsic) -> Option<DependencyOperation> {
@@ -14,6 +15,9 @@ pub(super) fn operation_plan(operation: CompilerIntrinsic) -> Option<DependencyO
             Some(DependencyOperation::ListStorage(plan))
         }
         CompilerIntrinsic::StringPlus => Some(DependencyOperation::StringPlus),
+        CompilerIntrinsic::PrimitiveIteratorNext => {
+            Some(DependencyOperation::PrimitiveIteratorNext)
+        }
         _ => None,
     }
 }
@@ -29,6 +33,18 @@ mod tests {
         for &target in NativeTarget::ALL {
             assert!(CraneliftBackend::new(target)
                 .realizes_dependency_intrinsic(CompilerIntrinsic::StringPlus));
+        }
+    }
+
+    #[test]
+    fn a_primitive_iterator_bridge_is_a_native_dependency_capability() {
+        assert_eq!(
+            operation_plan(CompilerIntrinsic::PrimitiveIteratorNext),
+            Some(DependencyOperation::PrimitiveIteratorNext)
+        );
+        for &target in NativeTarget::ALL {
+            assert!(CraneliftBackend::new(target)
+                .realizes_dependency_intrinsic(CompilerIntrinsic::PrimitiveIteratorNext));
         }
     }
 

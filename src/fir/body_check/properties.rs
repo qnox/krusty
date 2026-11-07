@@ -2848,7 +2848,7 @@ impl BodyFirChecker<'_> {
             })?;
         let selected = self.selected_call_target(span, Some(&selected))?;
         if !selected.context_arguments.is_empty()
-            || selected.vararg_index.is_some()
+            || selected.vararg.is_some()
             || !selected.value_parameters.is_empty()
         {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));

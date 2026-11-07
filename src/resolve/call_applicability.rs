@@ -2,6 +2,15 @@
 
 use super::*;
 
+impl Signature {
+    /// Index of the `vararg` among the parameters a call's source arguments address: the logical
+    /// index without the `context_count` leading context parameters.
+    pub(crate) fn argument_vararg_index(&self) -> Option<usize> {
+        self.vararg_index
+            .and_then(|vararg| vararg.checked_sub(self.context_count))
+    }
+}
+
 /// The per-argument view of a call site used during overload scoring: the argument expressions,
 /// whatever types are known so far, their labels, and whether the last one is a trailing lambda.
 /// All four are indexed by the same argument position.
