@@ -174,6 +174,18 @@ impl Body<'_> {
             .struct_get(object, crate::wasm::reference_arrays::STORAGE_FIELD);
     }
 
+    /// The length of the backing storage selected by a checked reference-array receiver.
+    pub(super) fn reference_array_size(&mut self, receiver: u32) -> Result<(), Unsupported> {
+        let array = self
+            .type_of(receiver)?
+            .ok_or_else(|| "an array receiver without a checked type".to_string())?;
+        reference_element(array)?;
+        self.value(receiver, array)?;
+        self.reference_array_storage();
+        self.code.array_len();
+        Ok(())
+    }
+
     pub(super) fn reference_array_get(
         &mut self,
         receiver: u32,
