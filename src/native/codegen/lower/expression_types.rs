@@ -220,7 +220,7 @@ impl BodyLowering<'_, '_, '_> {
         if self.enum_member_name(target).is_some() {
             return None;
         }
-        if self.reference_property_role(target).is_some() {
+        if self.reads_reference_slot(target) {
             return self
                 .file
                 .callables
