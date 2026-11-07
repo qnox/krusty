@@ -197,6 +197,7 @@ pub(super) fn prepare_inline_template(
         update: None,
         post_test: false,
         label: Some(label),
+        inline_return_frame: true,
     }));
     let value = match result_slot {
         Some(slot) => Some(ir.add_expr(IrExpr::GetValue(slot))),

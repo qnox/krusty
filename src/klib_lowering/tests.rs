@@ -502,6 +502,7 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             update,
             post_test,
             label,
+            inline_return_frame: _,
         } => format!(
             "{}{}({}) {}{}",
             if *post_test { "do-while" } else { "while" },

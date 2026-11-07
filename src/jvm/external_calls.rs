@@ -470,7 +470,10 @@ fn realize_expressions(
         let kind = callable.kind;
         publish_inline_substitutions(ir, expression, target, &callable, &substitutions);
         let declared_params = callable.declared_params.clone();
-        let mut inline_modifiers = callable.inline_modifiers.clone();
+        let mut inline_modifiers = crate::jvm::suspend_coroutine_blocks::jvm_inline_roles(
+            &callable,
+            callable.inline_modifiers.clone(),
+        );
         let member_realization = callable.member_realization;
         let semantic_role = callable.semantic_role;
         let descriptor = if callable.descriptor.is_empty() {

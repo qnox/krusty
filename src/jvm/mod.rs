@@ -112,6 +112,7 @@ mod singleton_storage;
 pub mod source_map;
 mod string_constant;
 pub mod suspend;
+mod suspend_coroutine_blocks;
 pub(crate) mod suspend_impls;
 mod suspend_inline_functions;
 mod top_level_properties;

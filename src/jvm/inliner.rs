@@ -64,7 +64,7 @@ pub(in crate::jvm) use default_lambda::load as load_default_lambda;
 pub(crate) use default_masks::{
     expand as expand_default_masks, DefaultMasks, ExtractedDefaultLambda,
 };
-pub(crate) use functional_arguments::lambda_placements;
+pub(crate) use functional_arguments::{keeps_lambda_as_value, lambda_placements};
 pub(crate) use inline_scopes::InlineScopes;
 pub(crate) use lambda_expansion::{Lambda, SourceLines};
 pub(crate) use name_generator::ClassNameGenerators;
@@ -170,7 +170,7 @@ pub(in crate::jvm) fn inline(
     returns::normalize_local_returns(&mut node)?;
     let constructors =
         object_regeneration::regenerate_objects(&mut node, parameters, lambdas, classes, objects)?;
-    let invokes = functional_arguments::mark_places(&mut node, parameters)?;
+    let invokes = functional_arguments::mark_places(&mut node, parameters, &constructors)?;
     object_regeneration::complete_constructor_calls(&mut node, constructors)?;
     let context = lambda_expansion::Context {
         parameters,

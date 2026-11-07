@@ -33,6 +33,29 @@ pub struct MissingInlineParameterFacts {
     pub parameter: usize,
 }
 
+/// The arguments of `call`, by parameter, when the backend inlines its callee: a must-inline
+/// library call, a call to an `inline` function of this module, or a call inlined from its callee's
+/// compiled body.
+pub(super) fn inlined_call_arguments(ir: &IrFile, call: ExprId) -> Option<Vec<ExprId>> {
+    match ir.expr(call) {
+        IrExpr::Call {
+            callee: call_callee,
+            args,
+            ..
+        } if let Callee::Static {
+            inline: crate::libraries::InlineKind::MustInline,
+            ..
+        } = &**call_callee =>
+        {
+            Some(args.clone())
+        }
+        IrExpr::Call { args, .. } if ir.module_inline_calls.contains(&call) => Some(args.clone()),
+        _ => ir
+            .compiled_inline_operands(call)
+            .map(|operands| operands.arguments),
+    }
+}
+
 /// Mark the standalone method of every lambda a must-inline call inlines as dead. Fails on a lambda
 /// argument whose parameter facts the call did not publish: a missing fact never grants inlining.
 pub fn mark_must_inline_lambdas(ir: &mut IrFile) -> Result<(), MissingInlineParameterFacts> {
@@ -40,23 +63,8 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) -> Result<(), MissingInlinePara
     let mut dead: Vec<u32> = Vec::new();
     for i in 0..ir.exprs.len() {
         let call = u32::try_from(i).expect("IR expression index exceeds ExprId");
-        let args = match &ir.exprs[i] {
-            IrExpr::Call {
-                callee: call_callee,
-                args,
-                ..
-            } if let Callee::Static {
-                inline: crate::libraries::InlineKind::MustInline,
-                ..
-            } = &**call_callee =>
-            {
-                args.clone()
-            }
-            IrExpr::Call { args, .. } if ir.module_inline_calls.contains(&call) => args.clone(),
-            _ => match ir.compiled_inline_operands(call) {
-                Some(operands) => operands.arguments,
-                None => continue,
-            },
+        let Some(args) = inlined_call_arguments(ir, call) else {
+            continue;
         };
         for (parameter, a) in args.into_iter().enumerate() {
             let IrExpr::Lambda { impl_fn, .. } = &ir.exprs[a as usize] else {

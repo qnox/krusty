@@ -19,6 +19,7 @@ impl Emitter<'_> {
             update,
             post_test,
             label,
+            inline_return_frame: _,
         } = self.ir.expr(expression).clone()
         else {
             unreachable!("emit_while is called on a loop");

@@ -1331,6 +1331,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 update,
                 post_test,
                 label,
+                inline_return_frame: _,
             } => self.loop_statement(cond, body, update, post_test, label)?,
             IrExpr::BottomValue {
                 producer,

@@ -53,6 +53,7 @@ pub use compiled_inline_calls::{CompiledInlineOperands, SameModuleInlining};
 mod constants;
 mod constructors;
 mod default_arguments;
+mod endless_loops;
 mod enum_switch_whens;
 pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
@@ -69,6 +70,7 @@ mod function_scope;
 mod generic_signature;
 pub use generic_signature::{IrGenericSig, IrTypeParameter};
 mod inline_copies;
+mod inline_return_frame_bodies;
 mod suspension_points;
 pub use suspension_points::{IrIntrinsicSuspensionPoint, IrValueClassSuspendResult};
 mod intrinsic;
@@ -409,6 +411,10 @@ pub enum IrExpr {
         update: Option<ExprId>,
         post_test: bool,
         label: Option<String>,
+        /// The loop is an inline-return frame: lowering built it around a template whose own
+        /// returns became the loop's exits, and its body evaluates that template first
+        /// ([`IrFile::inline_return_frame_body`]).
+        inline_return_frame: bool,
     },
     /// `break` — exit the innermost enclosing loop, or the loop carrying `label` (`break@outer`).
     Break {

@@ -90,39 +90,56 @@ impl InlineScopes {
                 let mut visited = HashSet::default();
                 visited.insert(lambda);
                 let owner = self.inline_owner(ir, scope, &mut visited)?;
-                // An enclosure names the declaring function even for a lambda nested in another
-                // one; only a node of the function's own body is written directly in it.
-                let declares = |function: FunId| {
-                    ir.functions[function as usize].body.is_some_and(|body| {
-                        crate::ir::value_namespace_expressions(ir, body).contains(&node)
-                    })
-                };
-                let direct = declares(owner);
-                let parent_lambda = if direct {
-                    None
-                } else {
-                    self.lambda_scopes
-                        .keys()
-                        .copied()
-                        .filter(|&other| other != lambda)
-                        .find(|&other| declares(other))
-                };
-                Some(InlineScope {
-                    owner,
-                    node,
-                    direct,
-                    parent_lambda,
-                    foreign: ir.foreign_inline_templates.contains(&owner),
-                })
+                Some(self.scope_at(ir, lambda, owner, node))
             })
     }
 
-    /// The inline declaration that owns the source implementation copied into `lambda`.
+    /// The inline declaration that owns the source implementation copied into `lambda`. A copy
+    /// an expansion wrote into that declaration's own body is written there directly, as kotlinc
+    /// writes the lambda an inlined call regenerates into its caller.
     pub(super) fn specialization_scope(&self, ir: &IrFile, lambda: FunId) -> Option<InlineScope> {
         let source = super::specialization_source(ir, lambda);
-        (source != lambda)
-            .then(|| self.inline_scope(ir, source))
-            .flatten()
+        if source == lambda {
+            return None;
+        }
+        let scope = self.inline_scope(ir, source)?;
+        if scope.direct {
+            return Some(scope);
+        }
+        let copy = ir.functions[scope.owner as usize]
+            .body
+            .into_iter()
+            .flat_map(|body| crate::ir::value_namespace_expressions(ir, body))
+            .find(|&node| matches!(ir.expr(node), IrExpr::Lambda { impl_fn, .. } if *impl_fn == lambda));
+        Some(copy.map_or(scope, |node| self.scope_at(ir, lambda, scope.owner, node)))
+    }
+
+    /// The scope of `lambda` written at `node` in the inline function `owner`.
+    fn scope_at(&self, ir: &IrFile, lambda: FunId, owner: FunId, node: ExprId) -> InlineScope {
+        // An enclosure names the declaring function even for a lambda nested in another one; only
+        // a node of the function's own body is written directly in it.
+        let declares = |function: FunId| {
+            ir.functions[function as usize].body.is_some_and(|body| {
+                crate::ir::value_namespace_expressions(ir, body).contains(&node)
+            })
+        };
+        let direct = declares(owner);
+        let parent_lambda = if direct {
+            None
+        } else {
+            self.lambda_scopes
+                .keys()
+                .copied()
+                .filter(|&other| other != lambda)
+                .find(|&other| declares(other))
+        };
+        InlineScope {
+            owner,
+            node,
+            direct,
+            parent_lambda,
+            foreign: ir.foreign_inline_templates.contains(&owner),
+        }
     }
 
     /// The inline function that `scope` is, or is nested in.
