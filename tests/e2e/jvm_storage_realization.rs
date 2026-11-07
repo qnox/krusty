@@ -16,6 +16,8 @@ mod enum_companion_property_e2e;
 mod enum_init_block_line_e2e;
 #[path = "../in_place_delegate_e2e.rs"]
 mod in_place_delegate_e2e;
+#[path = "../inline_top_level_property_accessors_e2e.rs"]
+mod inline_top_level_property_accessors_e2e;
 #[path = "../inner_outer_field_signature_e2e.rs"]
 mod inner_outer_field_signature_e2e;
 #[path = "../jvmfield_companion_e2e.rs"]
@@ -28,6 +30,8 @@ mod package_property_annotation_marker_clash_e2e;
 mod package_property_annotations_e2e;
 #[path = "../property_accessor_annotation_e2e.rs"]
 mod property_accessor_annotation_e2e;
+#[path = "../synchronized_method_e2e.rs"]
+mod synchronized_method_e2e;
 #[path = "../unread_field_annotation_order_e2e.rs"]
 mod unread_field_annotation_order_e2e;
 #[path = "../volatile_field_e2e.rs"]

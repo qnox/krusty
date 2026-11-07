@@ -50,7 +50,9 @@ pub(super) fn normalize_tail(
         candidate,
         array_list,
     );
-    common.attach(compiler_builtin_owner, namespace, name, candidate);
+    if let Err(error) = common.attach(compiler_builtin_owner, namespace, name, candidate) {
+        classpath.defer_common_expectation_error(error);
+    }
 }
 
 /// Publish one receiver-less Java declaration in its classifier's static namespace while

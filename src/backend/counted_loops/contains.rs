@@ -336,8 +336,8 @@ impl Realizer<'_> {
     /// marks the call as inlined; another orders the values with its unsigned comparison.
     fn unsigned_ordering(&mut self, ty: Ty, value: ExprId, bound: ExprId) -> ExprId {
         // The operands are compared in the selected type; targets choose only its representation.
-        self.ir.logical_types.insert(value, ty);
-        self.ir.logical_types.insert(bound, ty);
+        self.ir.set_logical_type(value, ty);
+        self.ir.set_logical_type(bound, ty);
         let compare = self
             .unsigned_compare
             .clone()
@@ -368,8 +368,8 @@ impl Realizer<'_> {
         rhs: ExprId,
     ) -> ExprId {
         // The operands are compared in the selected type; targets choose only its representation.
-        self.ir.logical_types.insert(lhs, ty);
-        self.ir.logical_types.insert(rhs, ty);
+        self.ir.set_logical_type(lhs, ty);
+        self.ir.set_logical_type(rhs, ty);
         self.add_checked(
             IrExpr::PrimitiveBinOp {
                 op: operation,

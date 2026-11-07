@@ -31,6 +31,9 @@ pub(super) struct ExternalCallTarget<'a> {
     pub(super) singleton_dispatch: Option<crate::types::TypeName>,
     pub(super) receiver: Option<Ty>,
     pub(super) declared_receiver: Option<Ty>,
+    /// A selected member's receiver applied as its generic declaring class, as the checker
+    /// published it on the selection.
+    pub(super) declaring_receiver: Option<Ty>,
     pub(super) parameters: Vec<Ty>,
     pub(super) result: Ty,
     pub(super) declared_result: Option<Ty>,

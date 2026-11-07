@@ -132,6 +132,7 @@ impl BodyFirChecker<'_> {
                     .map(|singleton| singleton.classifier),
                 receiver: Some(dispatch_receiver.ty),
                 declared_receiver: None,
+                declaring_receiver: None,
                 parameters: target_parameters,
                 result: *ret,
                 declared_result: *declared_ret,

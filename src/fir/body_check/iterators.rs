@@ -111,6 +111,7 @@ impl BodyFirChecker<'_> {
             self.body
                 .add_platform_narrowing(crate::fir::FirPlatformNarrowing {
                     message: Some(message),
+                    site: crate::fir::FirPlatformNarrowingSite::Value,
                 }),
         )
     }

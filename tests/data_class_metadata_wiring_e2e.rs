@@ -853,7 +853,8 @@ fn data_class_emits_metadata_debug_tables_and_annotations() {
     let bytes = krusty_bytes(src, "demo/Point", &[]);
     let info = parse_class(&bytes).expect("parses back");
     let fns: Vec<&str> = info
-        .meta
+        .kotlin_members()
+        .expect("member metadata decodes")
         .class_functions
         .iter()
         .map(|f| f.kotlin_name.as_str())
@@ -904,9 +905,15 @@ fn generic_list_property_with_default_metadata_byte_identical() {
     // so the decoded shape must match kotlinc exactly: same property names, function names, and the
     // `items: List<String>` return type resolving to the `List` builtin (a generic/argument/default
     // encoding divergence would surface as a decode mismatch here).
-    let kr_meta = parse_class(&kr).expect("krusty parses").meta;
-    let ko_meta = parse_class(&ko).expect("kotlinc parses").meta;
-    let names = |m: &krusty::jvm::metadata::KotlinMeta| {
+    let kr_class = parse_class(&kr).expect("krusty parses");
+    let ko_class = parse_class(&ko).expect("kotlinc parses");
+    let kr_meta = kr_class
+        .kotlin_members()
+        .expect("krusty member metadata decodes");
+    let ko_meta = ko_class
+        .kotlin_members()
+        .expect("kotlinc member metadata decodes");
+    let names = |m: &krusty::jvm::metadata::KotlinMembers| {
         (
             m.class_properties
                 .iter()
@@ -919,8 +926,8 @@ fn generic_list_property_with_default_metadata_byte_identical() {
         )
     };
     assert_eq!(
-        names(&kr_meta),
-        names(&ko_meta),
+        names(kr_meta),
+        names(ko_meta),
         "@Metadata property + function names match kotlinc"
     );
     let items = kr_meta

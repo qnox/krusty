@@ -593,6 +593,7 @@ impl BodyFirChecker<'_> {
                         .as_deref()
                         .map(|singleton| singleton.ty()),
                     declared_receiver: None,
+                    declaring_receiver: None,
                     parameters: parameters.clone(),
                     result: member.ret,
                     declared_result: member.declared_ret,
@@ -894,6 +895,7 @@ impl BodyFirChecker<'_> {
                         singleton_dispatch: Some(singleton.classifier),
                         receiver: Some(singleton.ty()),
                         declared_receiver: None,
+                        declaring_receiver: None,
                         parameters: target_parameters,
                         result: extension.callable.ret,
                         declared_result: extension.callable.declared_ret,
@@ -1088,6 +1090,10 @@ impl BodyFirChecker<'_> {
                         })?
                 } else {
                     FirCallTarget::External {
+                        declaring_receiver: selected
+                            .declaring_receiver
+                            .map(resolved)
+                            .transpose()?,
                         declaration: selected.member.external_identity.ok_or_else(|| {
                             self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
                         })?,
@@ -1198,6 +1204,7 @@ impl BodyFirChecker<'_> {
                             .source_receiver
                             .map(resolved)
                             .transpose()?,
+                        declaring_receiver: None,
                         parameters: selected.callable.params[..context_count]
                             .iter()
                             .copied()
@@ -1315,6 +1322,7 @@ impl BodyFirChecker<'_> {
                         default_provider: *external_default_provider,
                         receiver: Some(resolved(dispatch_receiver.ty)?),
                         declared_receiver: None,
+                        declaring_receiver: None,
                         parameters: target_parameters
                             .into_iter()
                             .map(resolved)
@@ -1469,6 +1477,7 @@ impl BodyFirChecker<'_> {
                     .map(|singleton| singleton.classifier),
                 receiver,
                 declared_receiver: callable.source_receiver,
+                declaring_receiver: None,
                 parameters: parameters.into_iter().collect(),
                 result: callable.ret,
                 declared_result: callable.declared_ret,
@@ -1507,6 +1516,7 @@ impl BodyFirChecker<'_> {
             singleton_dispatch,
             receiver,
             declared_receiver,
+            declaring_receiver,
             parameters,
             result,
             declared_result,
@@ -1574,6 +1584,7 @@ impl BodyFirChecker<'_> {
             .collect::<Result<Vec<_>, BodyCheckFailure>>()?;
         Ok((
             FirCallTarget::External {
+                declaring_receiver: declaring_receiver.map(resolved).transpose()?,
                 declaration,
                 singleton_dispatch,
                 default_provider: None,
@@ -1923,7 +1934,7 @@ impl BodyFirChecker<'_> {
             let lhs_conversion = self
                 .selected_type_conversion(lhs_actual, lhs_target, cause)
                 .or(receiver.conversion);
-            let lhs = self.convert_fir_value(receiver.value, lhs_target, cause, lhs_conversion);
+            let lhs = self.convert_fir_value(receiver.value, lhs_target, lhs_conversion);
             let rhs = self.value_at_selected_boundary(*argument, rhs_target)?;
             return Ok(FirExprKind::Binary {
                 operation,
@@ -1971,7 +1982,7 @@ impl BodyFirChecker<'_> {
                     }
                     crate::libraries::PrimitiveUnaryIntrinsic::Negate => FirUnaryOperation::Negate,
                 },
-                operand: self.convert_fir_value(receiver.value, target, cause, conversion),
+                operand: self.convert_fir_value(receiver.value, target, conversion),
             });
         }
         if primitive_operation == Some(crate::libraries::CompilerIntrinsic::PrimitiveBitNot) {
@@ -2265,6 +2276,7 @@ impl BodyFirChecker<'_> {
                     .map(|singleton| singleton.classifier),
                 receiver: Some(selected.receiver),
                 declared_receiver: None,
+                declaring_receiver: selected.declaring_receiver,
                 parameters: selected.member.params.clone(),
                 result: selected.ret,
                 declared_result: selected.member.declared_ret,

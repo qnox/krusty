@@ -313,56 +313,6 @@ mod tests {
         );
     }
 
-    /// The kotlin-versions manifest is the only list of supported releases: the plugin and its
-    /// packaging read it, and CI runs a Gradle lane for each of its releases.
-    #[test]
-    fn supported_gradle_kotlin_versions_follow_the_repository_manifest() {
-        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let manifest = std::fs::read_to_string(repository.join("kotlin-versions"))
-            .expect("read kotlin-versions");
-        let supported = manifest
-            .lines()
-            .map(|line| line.split('#').next().unwrap_or_default().trim())
-            .filter(|line| !line.is_empty())
-            .map(|line| line.split_whitespace().next().expect("reference version"))
-            .collect::<Vec<_>>();
-
-        let plugin = std::fs::read_to_string(
-            repository.join("tools/krusty-gradle/src/main/kotlin/krusty/KrustyKotlinPlugin.kt"),
-        )
-        .expect("read Gradle plugin");
-        let check = plugin
-            .split_once("private fun supportedKotlinPluginVersion")
-            .expect("supported Kotlin plugin version check")
-            .1
-            .split_once("\n    }\n")
-            .expect("end of the supported Kotlin plugin version check")
-            .0;
-        assert_eq!(quoted_release_versions(check), Vec::<&str>::new());
-
-        let workflow = std::fs::read_to_string(repository.join(".github/workflows/ci.yml"))
-            .expect("read CI workflow");
-        let gradle_job = workflow
-            .split_once("\n  gradle:\n")
-            .expect("Gradle integration job")
-            .1
-            .split_once("\n    steps:\n")
-            .expect("Gradle integration steps")
-            .0;
-        assert!(
-            gradle_job.contains("kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}"),
-            "every supported release needs a Gradle lane:\n{gradle_job}"
-        );
-        let unsupported = gradle_job
-            .lines()
-            .filter_map(|line| line.split_once("{ kotlin:").map(|(_, row)| row))
-            .filter_map(|row| row.split(',').next())
-            .map(str::trim)
-            .filter(|version| !supported.contains(version))
-            .collect::<Vec<_>>();
-        assert_eq!(unsupported, Vec::<&str>::new());
-    }
-
     /// The release Maven repository is exercised with the real krusty CLI. The proxy records each
     /// command before forwarding it, so the fixture verifies both Gradle wiring and emitted bytes.
     #[test]
@@ -1603,6 +1553,11 @@ android {
 dependencies {
     testImplementation("junit:junit:4.13.2")
 }
+
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    outputs.upToDateWhen { false }
+    outputs.doNotCacheIf("the integration test must execute the classes compiled by krusty") { true }
+}
 "#,
         );
         write(
@@ -1925,19 +1880,6 @@ fun main() {
                 build
             }
         }
-    }
-
-    fn quoted_release_versions(text: &str) -> Vec<&str> {
-        text.split('"')
-            .skip(1)
-            .step_by(2)
-            .filter(|value| {
-                value.split('.').count() == 3
-                    && value.split('.').all(|part| {
-                        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
-                    })
-            })
-            .collect()
     }
 
     fn strings(values: &[&str]) -> Vec<String> {

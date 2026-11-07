@@ -771,7 +771,6 @@ impl BodyFirChecker<'_> {
         Ok(self.convert_fir_value(
             value,
             target,
-            origin,
             Some(FirConversion {
                 origin,
                 kind: conversion.kind,
@@ -987,22 +986,14 @@ impl BodyFirChecker<'_> {
                 }
                 let cause = self.expression_origin(source)?;
                 let conversion = self.platform_narrowing_conversion(None, cause, target);
-                Ok(self.body.add_expr(crate::fir::FirExpr {
-                    origin: cause,
-                    ty: target,
-                    kind: FirExprKind::ImplicitConversion { value, conversion },
-                }))
+                Ok(self.body.add_implicit_conversion(value, target, conversion))
             }
             Expr::Block { .. } => Ok(value),
             _ if !self.info.produces_unchecked_java_value(source) => Ok(value),
             _ => {
                 let cause = self.expression_origin(source)?;
                 let conversion = self.platform_producer_conversion(source, value, cause, target);
-                Ok(self.body.add_expr(crate::fir::FirExpr {
-                    origin: cause,
-                    ty: target,
-                    kind: FirExprKind::ImplicitConversion { value, conversion },
-                }))
+                Ok(self.body.add_implicit_conversion(value, target, conversion))
             }
         }
     }
@@ -1051,7 +1042,7 @@ impl BodyFirChecker<'_> {
         let target = self.resolved_type(span, received)?;
         let cause = self.expression_origin(receiver)?;
         checked.conversion =
-            Some(self.platform_producer_conversion(receiver, checked.value, cause, target));
+            Some(self.extension_receiver_conversion(receiver, checked.value, cause, target));
         Ok(())
     }
 
@@ -1074,9 +1065,28 @@ impl BodyFirChecker<'_> {
             let target = self.resolved_type(span, parameter)?;
             let cause = self.expression_origin(call)?;
             checked.conversion =
-                Some(self.platform_producer_conversion(receiver, checked.value, cause, target));
+                Some(self.extension_receiver_conversion(receiver, checked.value, cause, target));
         }
         Ok(checked)
+    }
+
+    /// [`Self::platform_producer_conversion`] for a value that reaches an extension receiver. The
+    /// guard can narrow inside the value too (a conditional's branches), and every narrowing it
+    /// records is a receiver assertion.
+    fn extension_receiver_conversion(
+        &mut self,
+        receiver: ExprId,
+        value: crate::fir::FirExprId,
+        cause: OriginId,
+        target: ResolvedTy,
+    ) -> FirConversion {
+        let start = self.body.platform_narrowing_count();
+        let conversion = self.platform_producer_conversion(receiver, value, cause, target);
+        self.body.consume_narrowings_at(
+            start,
+            crate::fir::FirPlatformNarrowingSite::ExtensionReceiver,
+        );
+        conversion
     }
 
     /// The implicit not-null cast over the checked `value` of `source`. kotlinc names the check
@@ -1141,9 +1151,10 @@ impl BodyFirChecker<'_> {
         cause: OriginId,
         target: ResolvedTy,
     ) -> FirConversion {
-        let narrowing = self
-            .body
-            .add_platform_narrowing(FirPlatformNarrowing { message });
+        let narrowing = self.body.add_platform_narrowing(FirPlatformNarrowing {
+            message,
+            site: crate::fir::FirPlatformNarrowingSite::Value,
+        });
         FirConversion {
             origin: cause,
             kind: FirConversionKind::PlatformNarrowing {
@@ -1231,11 +1242,7 @@ impl BodyFirChecker<'_> {
         let Some(conversion) = conversion else {
             return Ok(value);
         };
-        Ok(self.body.add_expr(crate::fir::FirExpr {
-            origin,
-            ty: target,
-            kind: crate::fir::FirExprKind::ImplicitConversion { value, conversion },
-        }))
+        Ok(self.body.add_implicit_conversion(value, target, conversion))
     }
 
     /// The value a block yields, including a fun-interface conversion recorded on a trailing lambda.
@@ -1299,11 +1306,7 @@ impl BodyFirChecker<'_> {
         let Some(conversion) = conversion else {
             return Err(self.failure(span, BodyCheckFailureKind::UnpublishedRecordedSamConversion));
         };
-        Ok(self.body.add_expr(crate::fir::FirExpr {
-            origin,
-            ty: target,
-            kind: crate::fir::FirExprKind::ImplicitConversion { value, conversion },
-        }))
+        Ok(self.body.add_implicit_conversion(value, target, conversion))
     }
 
     fn value_has_sam_conversion(&self, value: crate::fir::FirExprId) -> bool {
@@ -1732,6 +1735,25 @@ impl BodyFirChecker<'_> {
             nullable,
             kotlin_interface: sam.kotlin_interface,
             parameter_identities: sam.parameter_identities.clone(),
+            type_parameters: sam
+                .type_parameters
+                .iter()
+                .map(|parameter| {
+                    Ok(crate::fir::FirSamTypeParameter {
+                        name: parameter.name.as_str().into(),
+                        bounds: parameter
+                            .bounds
+                            .iter()
+                            .map(|&(ty, is_interface)| {
+                                Ok(crate::fir::ResolvedTypeParameterBound {
+                                    ty: resolved(ty)?,
+                                    is_interface,
+                                })
+                            })
+                            .collect::<Result<Box<[_]>, _>>()?,
+                    })
+                })
+                .collect::<Result<Box<[_]>, _>>()?,
         })
     }
 }

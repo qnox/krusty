@@ -802,6 +802,8 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     None => format!("{}({})", name, args),
                 }
             }
+            // Only a target that runs the shared default-argument lowering builds this callee.
+            Callee::ModuleDefaultEntry { .. } => unsupported_expression("ModuleDefaultEntry"),
             Callee::External { target, .. } => format!(
                 "__krusty_external_{}({})",
                 target.raw(),
@@ -853,6 +855,12 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 }
                 crate::ir::IrIntrinsic::EnumName => {
                     format!("{}.name", emit_expr(ir, dispatch_receiver.unwrap(), inst))
+                }
+                crate::ir::IrIntrinsic::EnumOrdinal => {
+                    format!(
+                        "{}.ordinal",
+                        emit_expr(ir, dispatch_receiver.unwrap(), inst)
+                    )
                 }
                 crate::ir::IrIntrinsic::StringGet | crate::ir::IrIntrinsic::ArrayGet => format!(
                     "{}[{}]",
@@ -1292,6 +1300,7 @@ mod tests {
 
     fn blank_class(name: &str) -> IrClass {
         IrClass {
+            declaration_context: None,
             fq_name: name.into(),
             declaration_name: None,
             is_source_declared: true,
