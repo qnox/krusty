@@ -21,6 +21,7 @@ use crate::fx_hash::{HashMap, HashSet};
 mod absent_arguments;
 mod arrays;
 mod boxing;
+mod callable_reference_identity;
 mod dependency_exports;
 mod exceptions;
 mod function_values;
@@ -36,6 +37,7 @@ pub(super) mod value_hash;
 use tests::lower_alone;
 
 pub(super) use scalar_instructions::is_scalar_operation;
+pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
@@ -146,12 +148,20 @@ pub(super) fn lower_file(
         let params = function
             .params
             .iter()
-            .map(|param| carrier(*param)?.ok_or_else(|| "a `Unit` parameter".to_string()))
+            .enumerate()
+            .map(|(parameter, _)| {
+                parameter_carrier(module, ir, id as FunId, parameter as u32)?
+                    .ok_or_else(|| "a `Unit` parameter".to_string())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
     }
     let indices = callable_registry.declare_file(ir, module)?;
+    let reference_file =
+        runtime
+            .callable_references
+            .begin_file(module_name, ir, dependency_exports)?;
     let call_targets = callable_registry.file_calls(ir, callables, module)?;
     let inert_singleton_bindings = crate::backend::inert_staged_singleton_bindings(
         ir,
@@ -201,6 +211,7 @@ pub(super) fn lower_file(
         array_range_checks,
         classifiers,
         module_name,
+        reference_file,
         numbers: plan.interfaces(),
         ir,
         functions: &indices,
@@ -248,6 +259,7 @@ pub(super) fn lower_file(
             function.ret,
         );
         body.scope = crate::ir::IrEnclosure::Function(id as FunId);
+        body.shared_cell_parameters(id as FunId)?;
         match body.function_body(root, function.ret) {
             Ok(()) => {
                 let Body { code, locals, .. } = body;
@@ -345,6 +357,8 @@ struct FileContext<'a> {
     array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
+    /// Backend namespace of this file's local callable declarations.
+    reference_file: u32,
     /// The module-wide numbers of the module's interface members.
     numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
@@ -380,6 +394,20 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         TyKind::DOUBLE => ValType::F64,
         TyKind::STRING | TyKind::Null => STRING,
         TyKind::Nullable(Ty::String) => STRING,
+        // Nullable scalars keep their semantic type until this representation boundary. They
+        // use the same boxes as erased values; nullable Unit can hold its singleton or null.
+        TyKind::Nullable(
+            Ty::Boolean
+            | Ty::Byte
+            | Ty::Short
+            | Ty::Char
+            | Ty::Int
+            | Ty::Long
+            | Ty::Float
+            | Ty::Double
+            | Ty::Unit
+            | Ty::Nothing,
+        ) => REFERENCE,
         // Every object, interface and `Any` value, and a type parameter's: a reference the
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
@@ -564,6 +592,7 @@ struct Body<'a> {
     array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
+    reference_file: u32,
     numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
     module: &'a mut Module,
@@ -623,6 +652,7 @@ impl<'a> Body<'a> {
         );
         Self {
             module_name: context.module_name,
+            reference_file: context.reference_file,
             array_range_checks: context.array_range_checks,
             classifiers: context.classifiers,
             numbers: context.numbers,
@@ -1032,8 +1062,8 @@ impl<'a> Body<'a> {
                 if params.len() != args.len() {
                     return Err("a call whose arguments do not match its parameters".into());
                 }
-                for (arg, param) in args.iter().zip(params) {
-                    self.value(*arg, param)?;
+                for (parameter, &arg) in args.iter().enumerate() {
+                    self.function_argument(*function, parameter as u32, arg)?;
                 }
                 let function = self.emitted_function(*function)?;
                 self.code.call(function);

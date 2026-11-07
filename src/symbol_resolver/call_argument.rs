@@ -27,6 +27,31 @@ pub(crate) enum CallArgKind {
 }
 
 impl CallArgKind {
+    /// This argument with every type it carries rewritten by `map`.
+    pub(crate) fn map_types(self, map: impl Fn(Ty) -> Ty) -> Self {
+        match self {
+            Self::Typed(ty) => Self::Typed(map(ty)),
+            Self::Spread(ty) => Self::Spread(map(ty)),
+            Self::LambdaLiteral(ty) => Self::LambdaLiteral(map(ty)),
+            Self::CallableReference { nominal, function } => Self::CallableReference {
+                nominal: map(nominal),
+                function: map(function),
+            },
+            Self::ExpectedTypeCallable {
+                provisional,
+                generic_sig,
+            } => Self::ExpectedTypeCallable {
+                provisional: map(provisional),
+                generic_sig,
+            },
+            Self::IntegerLiteral { ty, constant } => Self::IntegerLiteral {
+                ty: map(ty),
+                constant,
+            },
+            Self::OmittedDefault => Self::OmittedDefault,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn integer_literal(ty: Ty, value: i32) -> Self {
         let constant = if ty.is_unsigned() {

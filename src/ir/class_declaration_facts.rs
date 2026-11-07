@@ -126,6 +126,13 @@ impl IrFile {
             .insert(crate::types::type_name(internal), sigs);
     }
 
+    /// Whether this exact owner retains field-signature records whose declaration roles are opaque.
+    pub(crate) fn has_field_signatures(&self, owner: crate::types::TypeName) -> bool {
+        self.field_signatures
+            .get(&owner)
+            .is_some_and(|records| !records.is_empty())
+    }
+
     pub fn field_signatures(&self, internal: &str) -> Option<&Vec<(String, String)>> {
         self.field_signatures
             .get(&crate::types::type_name(internal))

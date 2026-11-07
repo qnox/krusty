@@ -1612,10 +1612,13 @@ mod tests {
             true,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
-        let meta =
-            crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/Lib1Kt", None, &[])
-                .expect("decode generated metadata");
-        let props = meta.package_properties;
+        let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/Lib1Kt", None)
+            .expect("decode generated metadata");
+        let members = meta
+            .members
+            .decode(&[], &meta.type_parameter_scope)
+            .expect("decode generated members");
+        let props = members.package_properties.clone();
         assert_eq!(props.len(), 1);
         assert_eq!(props[0].name, "doubled");
         assert!(
@@ -1676,16 +1679,14 @@ mod tests {
             true,
         );
         let d1 = String::from_iter(d1.into_iter().map(char::from));
-        let metadata = crate::jvm::metadata::decode_metadata(
-            &[d1],
-            &d2,
-            Some(2),
-            "sample/ContextKt",
-            None,
-            &[],
-        )
-        .expect("decode generated metadata");
-        let [property] = metadata.package_properties.as_ref() else {
+        let metadata =
+            crate::jvm::metadata::decode_metadata(&[d1], &d2, Some(2), "sample/ContextKt", None)
+                .expect("decode generated metadata");
+        let members = metadata
+            .members
+            .decode(&[], &metadata.type_parameter_scope)
+            .expect("decode generated members");
+        let [property] = members.package_properties.as_ref() else {
             panic!("context property metadata must retain one declaration")
         };
         assert_eq!(property.context_params.len(), 1);
@@ -1739,10 +1740,13 @@ mod tests {
             true,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
-        let meta =
-            crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", None, &[])
-                .expect("decode generated metadata");
-        let signature = meta.package_properties[0]
+        let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", None)
+            .expect("decode generated metadata");
+        let members = meta
+            .members
+            .decode(&[], &meta.type_parameter_scope)
+            .expect("decode generated members");
+        let signature = members.package_properties[0]
             .generic_sig
             .as_ref()
             .expect("generic property signature");
@@ -1794,10 +1798,13 @@ mod tests {
             true,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
-        let meta =
-            crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", None, &[])
-                .expect("decode generated metadata");
-        let property = &meta.package_properties[0];
+        let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", None)
+            .expect("decode generated metadata");
+        let members = meta
+            .members
+            .decode(&[], &meta.type_parameter_scope)
+            .expect("decode generated members");
+        let property = &members.package_properties[0];
         let signature = property
             .generic_sig
             .as_ref()
@@ -1863,10 +1870,13 @@ mod tests {
             true,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
-        let meta =
-            crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", None, &[])
-                .expect("decode generated metadata");
-        let mf = meta
+        let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", None)
+            .expect("decode generated metadata");
+        let members = meta
+            .members
+            .decode(&[], &meta.type_parameter_scope)
+            .expect("decode generated members");
+        let mf = members
             .package_functions
             .iter()
             .find(|f| f.kotlin_name == "validate")
@@ -1919,10 +1929,13 @@ mod tests {
             true,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
-        let meta =
-            crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", None, &[])
-                .expect("decode generated metadata");
-        let function = meta
+        let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", None)
+            .expect("decode generated metadata");
+        let members = meta
+            .members
+            .decode(&[], &meta.type_parameter_scope)
+            .expect("decode generated members");
+        let function = members
             .package_functions
             .iter()
             .find(|f| f.kotlin_name == "whenString")
@@ -1969,16 +1982,14 @@ mod tests {
             true,
         );
         let d1 = String::from_iter(d1.into_iter().map(char::from));
-        let metadata = crate::jvm::metadata::decode_metadata(
-            &[d1],
-            &d2,
-            Some(2),
-            "sample/NestedKt",
-            None,
-            &[],
-        )
-        .expect("decode generated package metadata");
-        let function = metadata
+        let metadata =
+            crate::jvm::metadata::decode_metadata(&[d1], &d2, Some(2), "sample/NestedKt", None)
+                .expect("decode generated package metadata");
+        let members = metadata
+            .members
+            .decode(&[], &metadata.type_parameter_scope)
+            .expect("decode generated members");
+        let function = members
             .package_functions
             .iter()
             .find(|function| function.kotlin_name == "nested")

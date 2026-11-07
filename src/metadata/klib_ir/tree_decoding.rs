@@ -57,6 +57,12 @@ pub struct KlibIrModuleTrees {
 }
 
 impl KlibIrModuleTrees {
+    /// The decoded trees themselves, to rebuild a module from rewritten copies.
+    #[cfg(test)]
+    pub(crate) fn into_trees(self) -> Vec<KlibIrDeclarationTree> {
+        self.trees
+    }
+
     pub fn trees(&self) -> &[KlibIrDeclarationTree] {
         &self.trees
     }

@@ -10,9 +10,9 @@
 //! synthetic `Object get(Object)` copy of it, and `final HashSet<String> keySet()` before an
 //! ordinary `Set keySet()` bridge to it.
 //!
-//! The JDK defaults (`replaceAll`, `putIfAbsent`, `replace`, `compute*`, `merge`) and an abstract
-//! class's fake-override bridges are later realizations; these comparisons leave them out by
-//! their exact spelling and compare every other member byte for byte.
+//! The mutable-only JDK defaults (`replaceAll`, `putIfAbsent`, `replace`, `compute*`, `merge`) are
+//! stubbed too, after the builtin members, each with its erased bridge; these comparisons cover
+//! every member byte for byte.
 
 use super::common;
 
@@ -66,25 +66,6 @@ const GENERIC_ENTRY: &str = "class Dict<V>(override val value: V) : Map.Entry<St
 
 const ABSTRACT_ENTRY: &str = "abstract class Dict : Map.Entry<String, Int>\n";
 
-/// The members a later realization writes, as `javap -p` spells them in either compiler's class.
-const LATER_REALIZATIONS: &[&str] = &[
-    "public void replaceAll(java.util.function.BiFunction<? super java.lang.String, ? super java.lang.Integer, ? extends java.lang.Integer>);",
-    "public java.lang.Integer putIfAbsent(java.lang.String, java.lang.Integer);",
-    "public boolean replace(java.lang.String, java.lang.Integer, java.lang.Integer);",
-    "public java.lang.Integer replace(java.lang.String, java.lang.Integer);",
-    "public java.lang.Integer computeIfAbsent(java.lang.String, java.util.function.Function<? super java.lang.String, ? extends java.lang.Integer>);",
-    "public java.lang.Integer computeIfPresent(java.lang.String, java.util.function.BiFunction<? super java.lang.String, ? super java.lang.Integer, ? extends java.lang.Integer>);",
-    "public java.lang.Integer compute(java.lang.String, java.util.function.BiFunction<? super java.lang.String, ? super java.lang.Integer, ? extends java.lang.Integer>);",
-    "public java.lang.Integer merge(java.lang.String, java.lang.Integer, java.util.function.BiFunction<? super java.lang.Integer, ? super java.lang.Integer, ? extends java.lang.Integer>);",
-    "public java.lang.Object putIfAbsent(java.lang.Object, java.lang.Object);",
-    "public boolean replace(java.lang.Object, java.lang.Object, java.lang.Object);",
-    "public java.lang.Object replace(java.lang.Object, java.lang.Object);",
-    "public java.lang.Object computeIfAbsent(java.lang.Object, java.util.function.Function);",
-    "public java.lang.Object computeIfPresent(java.lang.Object, java.util.function.BiFunction);",
-    "public java.lang.Object compute(java.lang.Object, java.util.function.BiFunction);",
-    "public java.lang.Object merge(java.lang.Object, java.lang.Object, java.util.function.BiFunction);",
-];
-
 fn assert_members_match_kotlinc(source: &str, members: &[&str]) {
     let classes = common::classes_against_kotlinc_module(&[(
         "Dict.kt",
@@ -93,13 +74,7 @@ fn assert_members_match_kotlinc(source: &str, members: &[&str]) {
     let (reference, krusty) = classes
         .method_declarations("maps/Dict")
         .expect("both compilers write maps/Dict");
-    let realized_here = |declarations: Vec<String>| {
-        declarations
-            .into_iter()
-            .filter(|declaration| !LATER_REALIZATIONS.contains(&declaration.as_str()))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(realized_here(krusty), realized_here(reference));
+    assert_eq!(krusty, reference);
     let (reference, krusty) = classes.method_blocks("maps/Dict");
     for member in members {
         let block = |blocks: &[(String, String)]| {

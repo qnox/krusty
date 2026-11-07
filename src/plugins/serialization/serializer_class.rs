@@ -195,6 +195,16 @@ pub(super) fn declare(
         descriptor_order,
     ));
     let serializer_identity = ser.fq_name_id();
+    ir.record_declared_class_self_type(
+        serializer_identity,
+        Ty::obj_args_name(
+            serializer_identity,
+            &serializer_type_parameters
+                .iter()
+                .map(crate::ir::IrTypeParameter::ty)
+                .collect::<Vec<_>>(),
+        ),
+    );
     ir.mark_synthetic_class(serializer_identity);
     ir.mark_deprecated_class(serializer_identity);
     let serializer_class = ir.add_class(ser);
@@ -482,6 +492,7 @@ pub(super) fn complete(
             internal: ser_internal,
             args,
             ctor_params: Some(type_serializers.clone()),
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),
@@ -841,6 +852,7 @@ fn declare_type_serializer_constructor(
             default_masks: vec![],
         },
         synthetic: false,
+        platform_visible: false,
         vc_params: false,
     });
 }

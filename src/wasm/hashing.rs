@@ -213,9 +213,8 @@ impl Hashing {
     }
 
     /// `(Any?) -> Int`. A string is not an object of the class model (see `super::objects`), so it
-    /// is hashed here; every object, boxes included, answers through its table. Any other `eq`
-    /// reference (an array) would need the identity hash this backend does not keep yet, and
-    /// traps at the cast.
+    /// is hashed here; every object, including primitive boxes and array identity wrappers,
+    /// answers through its table.
     fn define_hash_code(&self, module: &mut Module, objects: &ObjectRoot, string: u32) {
         let ty = module.func_type(vec![REFERENCE], vec![ValType::I32]);
         let string = HeapType::Concrete(string);
