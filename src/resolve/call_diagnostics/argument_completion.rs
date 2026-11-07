@@ -80,7 +80,7 @@ impl Checker<'_> {
                     .copied()
                     .unwrap_or_else(|| self.span(argument));
                 for formal in &signature.formals {
-                    if bindings.contains_key(formal)
+                    if bindings.contains_key(formal.as_str())
                         || !ty_mentions_param(*input, std::slice::from_ref(formal))
                     {
                         continue;

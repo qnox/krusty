@@ -1787,8 +1787,8 @@ impl BodyLowering<'_> {
                         origin: conversion_origin,
                     })
                     .map(platform_null_check)?;
-                if check == crate::ir::NullCheck::Unnamed {
-                    return Ok(self.unnamed_null_check(expression, source_type, to.get()));
+                if let crate::ir::NullCheck::Unnamed { site } = check {
+                    return Ok(self.unnamed_null_check(expression, source_type, to.get(), site));
                 }
                 // A generic external call can already carry its checked result cast. Kotlin checks
                 // the value produced by the call and then casts that checked value; keep the
@@ -1878,6 +1878,11 @@ impl BodyLowering<'_> {
                         nullable: false,
                         kotlin_interface: conversion.kotlin_interface,
                         parameter_identities: conversion.parameter_identities.to_vec(),
+                        type_parameters: conversion
+                            .type_parameters
+                            .iter()
+                            .map(crate::ir::IrSamTypeParameter::lowered)
+                            .collect(),
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,
@@ -1916,7 +1921,13 @@ impl BodyLowering<'_> {
     /// kotlinc's implicit not-null cast over a value it cannot name keeps the value in a temporary,
     /// checks the temporary, and yields it (`astore; aload; checkNotNull; aload`). A read of a
     /// stable binding is its own snapshot: `irLetS` checks and yields the binding itself.
-    fn unnamed_null_check(&mut self, value: ExprId, source_type: Ty, target: Ty) -> ExprId {
+    fn unnamed_null_check(
+        &mut self,
+        value: ExprId,
+        source_type: Ty,
+        target: Ty,
+        site: crate::ir::NullCheckSite,
+    ) -> ExprId {
         let reused = self.stable_value_read(value);
         let (stored, temporary) = match reused {
             Some(slot) => (None, slot),
@@ -1938,7 +1949,7 @@ impl BodyLowering<'_> {
         };
         let check = self.ir.add_expr(IrExpr::NotNullAssert {
             operand: checked,
-            check: crate::ir::NullCheck::Unnamed,
+            check: crate::ir::NullCheck::Unnamed { site },
         });
         let mut result = self.checked_value_read(temporary, reused.is_some());
         if source_type != target {
@@ -2635,8 +2646,17 @@ fn lower_type_operation(operation: FirTypeOperation, target: crate::types::Ty) -
 pub(super) fn platform_null_check(
     narrowing: &crate::fir::FirPlatformNarrowing,
 ) -> crate::ir::NullCheck {
+    let site = match narrowing.site {
+        crate::fir::FirPlatformNarrowingSite::Value => crate::ir::NullCheckSite::Value,
+        crate::fir::FirPlatformNarrowingSite::ExtensionReceiver => {
+            crate::ir::NullCheckSite::ExtensionReceiver
+        }
+    };
     match &narrowing.message {
-        Some(message) => crate::ir::NullCheck::Named(message.to_string()),
-        None => crate::ir::NullCheck::Unnamed,
+        Some(message) => crate::ir::NullCheck::Named {
+            message: message.to_string(),
+            site,
+        },
+        None => crate::ir::NullCheck::Unnamed { site },
     }
 }

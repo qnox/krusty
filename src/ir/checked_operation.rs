@@ -22,6 +22,9 @@ pub enum IrCheckedOperation {
         target: IrCheckedConstructorTarget,
         outer_parameter: Option<Ty>,
         outer_receiver: Option<ExprId>,
+        /// The selected local superclass's hidden captures, projected in its constructor order.
+        /// `None` belongs to declarations without a checked local-class capture environment.
+        capture_arguments: Option<Vec<(ExprId, Ty)>>,
         arguments: Vec<IrCheckedArgument>,
         substitutions: Vec<IrCheckedSubstitution>,
     },

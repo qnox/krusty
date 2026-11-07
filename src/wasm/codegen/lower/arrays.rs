@@ -4,8 +4,8 @@ use crate::libraries::RuntimeExceptionKind;
 
 use super::*;
 
-const I32_GE_U: u8 = 0x4f;
 const I32_ADD: u8 = 0x6a;
+const I32_GE_U: u8 = 0x4f;
 
 fn reference_element(array: Ty) -> Result<Ty, Unsupported> {
     if !array.non_null().is_reference_array() {
@@ -39,7 +39,7 @@ impl Body<'_> {
             return Err("a malformed array literal's spread inventory".into());
         }
         if spreads.contains(&true) {
-            return self.reference_array_literal_with_spreads(spreads, elements);
+            return self.spread_reference_array_literal(spreads, elements);
         }
         for &element in elements {
             self.value(element, Ty::nullable(Ty::obj_name(crate::types::wk::any())))?;
@@ -47,108 +47,142 @@ impl Body<'_> {
         let length = u32::try_from(elements.len())
             .map_err(|_| "an array literal exceeding Wasm's length space".to_string())?;
         self.code.array_new_fixed(self.runtime.references, length);
+        self.wrap_reference_array();
         Ok(())
     }
 
-    /// `arrayOf(a, *b, c)`: evaluate every operand left to right, then copy each into one new
-    /// array. A spread operand is a reference array of the same storage, copied whole; the result
-    /// never aliases it. A spread's elements are taken when the spread is evaluated, so a spread
-    /// that a later operand follows is snapshotted there, as Kotlin's spread builder copies it.
-    fn reference_array_literal_with_spreads(
+    /// An array literal with spreads (`arrayOf(*a, x, *b)`). Each operand is evaluated in source
+    /// order, and a spread array's elements are taken when it is reached, as the JVM's spread builder
+    /// takes them: a later operand that writes to an earlier spread array does not change the result.
+    /// The result is then allocated at the summed length and filled from those parts.
+    fn spread_reference_array_literal(
         &mut self,
         spreads: &[bool],
         elements: &[u32],
     ) -> Result<(), Unsupported> {
         let references = self.runtime.references;
-        let mut operands = Vec::with_capacity(elements.len());
-        for (operand, (&element, &spread)) in elements.iter().zip(spreads).enumerate() {
-            if spread {
-                let array = self
-                    .type_of(element)?
-                    .ok_or_else(|| "a spread operand without a checked type".to_string())?;
-                reference_element(array)?;
-                let storage = self.local(ValType::nullable(references));
-                self.value(element, array)?;
-                self.code
-                    .ref_cast(true, HeapType::Concrete(references))
-                    .local_set(storage);
-                let storage = if operand + 1 < elements.len() {
-                    self.snapshot_reference_array(storage)
-                } else {
-                    storage
-                };
-                operands.push((true, storage));
-            } else {
-                let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
-                let carried = carrier(any)?
-                    .ok_or_else(|| "an array element without a Wasm value".to_string())?;
-                let value = self.local(carried);
+        let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+        let element_carrier =
+            carrier(any)?.ok_or_else(|| "a reference element without a carrier".to_string())?;
+        let mut parts = Vec::with_capacity(elements.len());
+        for (&element, &spread) in elements.iter().zip(spreads) {
+            if !spread {
+                let value = self.local(element_carrier);
                 self.value(element, any)?;
                 self.code.local_set(value);
-                operands.push((false, value));
+                parts.push((value, false));
+                continue;
             }
+            let array = self
+                .type_of(element)?
+                .ok_or_else(|| "a spread operand without a checked type".to_string())?;
+            reference_element(array)?;
+            let source = self.local(ValType::nullable(references));
+            let taken = self.local(ValType::nullable(references));
+            self.value(element, array)?;
+            self.reference_array_storage();
+            self.code
+                .local_set(source)
+                .local_get(source)
+                .ref_as_non_null()
+                .array_len()
+                .array_new_default(references)
+                .local_set(taken)
+                .local_get(taken)
+                .ref_as_non_null()
+                .i32_const(0)
+                .local_get(source)
+                .ref_as_non_null()
+                .i32_const(0)
+                .local_get(source)
+                .ref_as_non_null()
+                .array_len()
+                .array_copy(references, references);
+            parts.push((taken, true));
         }
-        let singles = operands.iter().filter(|(spread, _)| !spread).count();
-        let singles = i32::try_from(singles)
+        let fixed = parts.iter().filter(|(_, spread)| !spread).count();
+        let fixed = i32::try_from(fixed)
             .map_err(|_| "an array literal exceeding Wasm's length space".to_string())?;
-        let result = self.local(ValType::nullable(references));
-        let position = self.local(ValType::I32);
-        self.code.i32_const(singles);
-        for &(spread, storage) in &operands {
-            if spread {
-                self.code
-                    .local_get(storage)
-                    .ref_as_non_null()
-                    .array_len()
-                    .op(I32_ADD);
-            }
+        self.code.i32_const(fixed);
+        for &(part, _) in parts.iter().filter(|(_, spread)| *spread) {
+            self.code
+                .local_get(part)
+                .ref_as_non_null()
+                .array_len()
+                .op(I32_ADD);
         }
+        let result = self.local(ValType::nullable(references));
+        let offset = self.local(ValType::I32);
         self.code
             .array_new_default(references)
             .local_set(result)
             .i32_const(0)
-            .local_set(position);
-        for (spread, operand) in operands {
-            self.code
-                .local_get(result)
-                .ref_as_non_null()
-                .local_get(position);
+            .local_set(offset);
+        for (part, spread) in parts {
             if spread {
                 self.code
-                    .local_get(operand)
+                    .local_get(result)
+                    .ref_as_non_null()
+                    .local_get(offset)
+                    .local_get(part)
                     .ref_as_non_null()
                     .i32_const(0)
-                    .local_get(operand)
+                    .local_get(part)
                     .ref_as_non_null()
                     .array_len()
                     .array_copy(references, references)
-                    .local_get(position)
-                    .local_get(operand)
+                    .local_get(offset)
+                    .local_get(part)
                     .ref_as_non_null()
-                    .array_len();
+                    .array_len()
+                    .op(I32_ADD)
+                    .local_set(offset);
             } else {
                 self.code
-                    .local_get(operand)
+                    .local_get(result)
+                    .ref_as_non_null()
+                    .local_get(offset)
+                    .local_get(part)
                     .array_set(references)
-                    .local_get(position)
-                    .i32_const(1);
+                    .local_get(offset)
+                    .i32_const(1)
+                    .op(I32_ADD)
+                    .local_set(offset);
             }
-            self.code.op(I32_ADD).local_set(position);
         }
         self.code.local_get(result).ref_as_non_null();
+        self.wrap_reference_array();
         Ok(())
     }
 
-    /// `array.size` of a reference-element array: its storage length.
+    /// Wrap the freshly allocated backing array on the stack in its Kotlin identity object.
+    fn wrap_reference_array(&mut self) {
+        let storage = self.local(ValType::reference(self.runtime.references));
+        self.code
+            .local_set(storage)
+            .global_get(self.runtime.arrays.table)
+            .call(self.runtime.identity.allocate)
+            .local_get(storage)
+            .struct_new(self.runtime.arrays.object);
+    }
+
+    /// Read the backing array of the checked Kotlin array value on the stack.
+    fn reference_array_storage(&mut self) {
+        let object = self.runtime.arrays.object;
+        self.code
+            .ref_cast(false, HeapType::Concrete(object))
+            .struct_get(object, crate::wasm::reference_arrays::STORAGE_FIELD);
+    }
+
+    /// The length of the backing storage selected by a checked reference-array receiver.
     pub(super) fn reference_array_size(&mut self, receiver: u32) -> Result<(), Unsupported> {
         let array = self
             .type_of(receiver)?
             .ok_or_else(|| "an array receiver without a checked type".to_string())?;
         reference_element(array)?;
         self.value(receiver, array)?;
-        self.code
-            .ref_cast(false, HeapType::Concrete(self.runtime.references))
-            .array_len();
+        self.reference_array_storage();
+        self.code.array_len();
         Ok(())
     }
 
@@ -157,7 +191,9 @@ impl Body<'_> {
         receiver: u32,
         index: u32,
     ) -> Result<(), Unsupported> {
-        let (element, storage, offset) = self.checked_reference_slot(receiver, index)?;
+        let (storage, offset, element) = self.reference_slot_operands(receiver, index)?;
+        let storage = self.reference_array_backing(storage);
+        self.check_reference_slot(storage, offset)?;
         self.code
             .local_get(storage)
             .ref_as_non_null()
@@ -168,46 +204,25 @@ impl Body<'_> {
         self.coerce_emitted_value(Ty::nullable(Ty::obj_name(crate::types::wk::any())), element)
     }
 
-    /// Copy the reference array in local `storage` into a new array and return the local
-    /// holding the copy.
-    fn snapshot_reference_array(&mut self, storage: u32) -> u32 {
-        let references = self.runtime.references;
-        let snapshot = self.local(ValType::nullable(references));
-        self.code
-            .local_get(storage)
-            .ref_as_non_null()
-            .array_len()
-            .array_new_default(references)
-            .local_set(snapshot)
-            .local_get(snapshot)
-            .ref_as_non_null()
-            .i32_const(0)
-            .local_get(storage)
-            .ref_as_non_null()
-            .i32_const(0)
-            .local_get(storage)
-            .ref_as_non_null()
-            .array_len()
-            .array_copy(references, references);
-        snapshot
-    }
-
-    /// `array[index] = value` on a reference-element array. The receiver, index and value are
-    /// evaluated in source order before the range check, as on the JVM.
+    /// `array[index] = value` on a reference array. The receiver, the index and the value are all
+    /// evaluated, in that order, before the bounds check, as `Array.set` receives them as
+    /// arguments: an out-of-range index still runs the value's side effects, and a value that
+    /// throws wins over `IndexOutOfBoundsException`.
     pub(super) fn reference_array_set(
         &mut self,
         receiver: u32,
         index: u32,
         value: u32,
     ) -> Result<(), Unsupported> {
-        let (_, storage, offset) = self.reference_slot(receiver, index)?;
+        let (storage, offset, _) = self.reference_slot_operands(receiver, index)?;
         let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
-        let carried =
-            carrier(any)?.ok_or_else(|| "an array element without a Wasm value".to_string())?;
-        let stored = self.local(carried);
+        let stored = self.local(
+            carrier(any)?.ok_or_else(|| "a reference element without a carrier".to_string())?,
+        );
         self.value(value, any)?;
         self.code.local_set(stored);
-        self.check_reference_index(storage, offset)?;
+        let storage = self.reference_array_backing(storage);
+        self.check_reference_slot(storage, offset)?;
         self.code
             .local_get(storage)
             .ref_as_non_null()
@@ -217,39 +232,39 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// Evaluate a reference array and an index into locals, throwing
-    /// `IndexOutOfBoundsException` when the index is outside the array.
-    fn checked_reference_slot(
+    /// Evaluate a reference array receiver and an index, in that order, into locals. Returns the
+    /// array-object and offset locals and the array's element type. Dereferencing its backing
+    /// storage waits until every call operand, including a store's value, has been evaluated.
+    fn reference_slot_operands(
         &mut self,
         receiver: u32,
         index: u32,
-    ) -> Result<(Ty, u32, u32), Unsupported> {
-        let slot = self.reference_slot(receiver, index)?;
-        self.check_reference_index(slot.1, slot.2)?;
-        Ok(slot)
-    }
-
-    /// Evaluate a reference array and an index into locals: the element type, the array local
-    /// and the index local.
-    fn reference_slot(&mut self, receiver: u32, index: u32) -> Result<(Ty, u32, u32), Unsupported> {
+    ) -> Result<(u32, u32, Ty), Unsupported> {
         let array = self
             .type_of(receiver)?
             .ok_or_else(|| "an array receiver without a checked type".to_string())?;
         let element = reference_element(array)?;
-        let storage = self.local(ValType::nullable(self.runtime.references));
+        let storage = self.local(ValType::nullable(self.runtime.arrays.object));
         let offset = self.local(ValType::I32);
         self.value(receiver, array)?;
         self.code
-            .ref_cast(true, HeapType::Concrete(self.runtime.references))
+            .ref_cast(true, HeapType::Concrete(self.runtime.arrays.object))
             .local_set(storage);
         self.value(index, Ty::Int)?;
         self.code.local_set(offset);
-        Ok((element, storage, offset))
+        Ok((storage, offset, element))
     }
 
-    /// Throw `IndexOutOfBoundsException` when the index in `offset` is outside the array in
-    /// `storage`, if array range checks are on.
-    fn check_reference_index(&mut self, storage: u32, offset: u32) -> Result<(), Unsupported> {
+    fn reference_array_backing(&mut self, array: u32) -> u32 {
+        let storage = self.local(ValType::reference(self.runtime.references));
+        self.code.local_get(array);
+        self.reference_array_storage();
+        self.code.local_set(storage);
+        storage
+    }
+
+    /// Throw `IndexOutOfBoundsException` when the captured index is outside the captured array.
+    fn check_reference_slot(&mut self, storage: u32, offset: u32) -> Result<(), Unsupported> {
         if !self.array_range_checks {
             return Ok(());
         }

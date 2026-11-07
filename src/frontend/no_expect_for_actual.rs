@@ -766,11 +766,11 @@ fn render_extension_property(
         return Err("has a type that did not resolve");
     }
     let formals = if signature.formal_names.is_empty() {
-        &signature.formals
+        signature.formals.iter().map(ToString::to_string).collect()
     } else {
-        &signature.formal_names
+        signature.formal_names.clone()
     };
-    let formals = type_parameters(formals, &|index| {
+    let formals = type_parameters(&formals, &|index| {
         signature
             .formal_bounds
             .get(index)

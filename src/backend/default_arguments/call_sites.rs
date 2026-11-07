@@ -4,7 +4,8 @@
 //!
 //! A call this lowering cannot realize keeps its checked form, so the backend's own decline
 //! names it: a member-extension receiver, a `super` call, an inherited default whose provider is
-//! in another file, a dependency callable, and a constructor.
+//! in another file, and a dependency callable. Constructions are rewritten by
+//! [`super::constructor_calls`].
 
 use crate::fir::ResolvedFunctionOverrideTarget;
 use crate::ir::{Callee, ExprId, FunId, IrConst, IrExpr, IrFile, IrTypeOp};
@@ -14,7 +15,7 @@ use super::entries::{Entries, StaticForm};
 use super::masks::omission_masks;
 
 /// The argument of each parameter of a call, `None` for one left to its default.
-type Frame = Vec<Option<ExprId>>;
+pub(super) type Frame = Vec<Option<ExprId>>;
 
 /// What a call with omitted arguments becomes.
 enum Rewrite {
@@ -142,7 +143,7 @@ fn parameter_count(ir: &IrFile, function: FunId) -> usize {
 }
 
 /// The frame of a call that supplies `args` in declaration order and leaves `defaults` out.
-fn frame(args: &[ExprId], defaults: &[u32], parameters: usize) -> Option<Frame> {
+pub(super) fn frame(args: &[ExprId], defaults: &[u32], parameters: usize) -> Option<Frame> {
     if args.len() + defaults.len() != parameters
         || defaults.windows(2).any(|pair| pair[0] >= pair[1])
         || defaults
@@ -222,7 +223,7 @@ fn to_module_entry(ir: &mut IrFile, site: ExprId, callee: Callee, frame: Frame) 
 }
 
 /// The entry's operands for `frame`: every parameter's, then the mask words.
-fn arguments(ir: &mut IrFile, parameters: &[Ty], frame: Frame) -> Vec<ExprId> {
+pub(super) fn arguments(ir: &mut IrFile, parameters: &[Ty], frame: Frame) -> Vec<ExprId> {
     let masks = omission_masks(
         parameters.len(),
         frame

@@ -371,6 +371,7 @@ impl<'a> Checker<'a> {
                 member.params = params;
                 ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
                     receiver,
+                    declaring_receiver: None,
                     physical_params: selected.callable.physical_params.clone(),
                     context_args: context_args.into_iter().map(Some).collect(),
                     ret,
@@ -633,7 +634,7 @@ impl<'a> Checker<'a> {
                     arguments: signature
                         .formals
                         .iter()
-                        .map(|formal| bindings.get(formal).copied())
+                        .map(|formal| bindings.get(formal.as_str()).copied())
                         .collect(),
                     signature: signature.clone(),
                     call_sig: selected.call_sig.clone(),
@@ -1050,6 +1051,7 @@ fn selected_member_call(
     member.params = params;
     ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
         receiver,
+        declaring_receiver: None,
         physical_params: selected.callable.physical_params.clone(),
         context_args: Vec::new(),
         ret,

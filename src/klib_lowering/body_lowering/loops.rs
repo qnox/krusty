@@ -7,7 +7,9 @@
 
 use super::{mismatch, unsupported, BodyLowering, Lowered};
 use crate::ir::{ExprId, IrExpr};
-use crate::metadata::klib_ir::tree::{KlibIrExprKind, KlibIrLoop, KlibIrStatement};
+use crate::metadata::klib_ir::tree::{
+    KlibIrArguments, KlibIrExprKind, KlibIrLoop, KlibIrStatement, KlibIrVariableId,
+};
 use crate::types::Ty;
 
 impl BodyLowering<'_> {
@@ -42,7 +44,7 @@ impl BodyLowering<'_> {
         else {
             return unsupported("a loop whose body is not a block");
         };
-        self.labeled_loop(serialized, post_test, statements)
+        self.labeled_loop(serialized, post_test, statements, None)
     }
 
     /// A `for` loop, which a KLIB serializes as kotlinc desugars it and checked FIR lowering lowers
@@ -76,20 +78,59 @@ impl BodyLowering<'_> {
         else {
             return unsupported("a loop whose body is not a block");
         };
-        let declares_variable = matches!(
-            body.first(),
-            Some(KlibIrStatement::Variable(variable))
-                if self.arena.variable(*variable).base.origin == "FOR_LOOP_VARIABLE"
-        );
-        if !declares_variable || !matches!(origin.as_deref(), None | Some("FOR_LOOP_INNER_WHILE")) {
+        let Some(KlibIrStatement::Variable(binding)) = body.first() else {
+            return unsupported("a `for` loop body that does not open with its variable");
+        };
+        if !matches!(origin.as_deref(), None | Some("FOR_LOOP_INNER_WHILE")) {
             return unsupported("a `for` loop body that does not open with its variable");
         }
+        let temporary = match self.arena.variable(*binding).base.origin.as_str() {
+            "FOR_LOOP_VARIABLE" => None,
+            "IR_TEMPORARY_VARIABLE" if self.is_loop_element(*binding, *iterator) => Some(*binding),
+            _ => return unsupported("a `for` loop body that does not open with its variable"),
+        };
         let iterator = self.unnamed_local(*iterator)?;
-        let lowered = self.labeled_loop(serialized, false, body)?;
+        let lowered = self.labeled_loop(serialized, false, body, temporary)?;
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: vec![iterator, lowered],
             value: None,
         }))
+    }
+
+    /// A destructured loop binding is an immutable temporary of the iterator's next element.
+    /// Its call still goes through ordinary selected-callee lowering; the serialized protocol
+    /// origin and exact receiver identity establish only this temporary's place in the loop.
+    fn is_loop_element(&self, binding: KlibIrVariableId, iterator: KlibIrVariableId) -> bool {
+        let Some(initializer) = self.arena.variable(binding).initializer else {
+            return false;
+        };
+        let KlibIrExprKind::Call {
+            access,
+            super_qualifier: None,
+        } = &self.arena.expr(initializer).kind
+        else {
+            return false;
+        };
+        if access.origin.as_deref() != Some("FOR_LOOP_NEXT") {
+            return false;
+        }
+        let receiver = match &access.arguments {
+            KlibIrArguments::Flat(arguments) => match arguments.as_slice() {
+                [Some(receiver)] => *receiver,
+                _ => return false,
+            },
+            KlibIrArguments::Split {
+                dispatch_receiver: Some(receiver),
+                extension_receiver: None,
+                values,
+            } if values.is_empty() => *receiver,
+            _ => return false,
+        };
+        matches!(
+            &self.arena.expr(receiver).kind,
+            KlibIrExprKind::GetValue { symbol, .. }
+                if symbol == &self.arena.variable(iterator).base.symbol
+        )
     }
 
     /// A loop labeled for the jumps that name `serialized`, whose body block holds `statements`.
@@ -98,6 +139,7 @@ impl BodyLowering<'_> {
         serialized: &KlibIrLoop,
         post_test: bool,
         statements: &[KlibIrStatement],
+        temporary: Option<KlibIrVariableId>,
     ) -> Lowered<ExprId> {
         if self.loops.iter().any(|(id, _)| *id == serialized.id) {
             return Err(mismatch("a loop repeats an enclosing loop's identity"));
@@ -107,7 +149,11 @@ impl BodyLowering<'_> {
         let lowered = self
             .operand(serialized.condition, Ty::Boolean)
             .and_then(|cond| {
-                let body = self.block(statements)?;
+                let (prefix, statements) = match temporary {
+                    Some(binding) => (vec![self.unnamed_local(binding)?], &statements[1..]),
+                    None => (Vec::new(), statements),
+                };
+                let body = self.block_with_prefix(prefix, statements)?;
                 Ok((cond, body))
             });
         self.loops.pop();

@@ -34,6 +34,8 @@ mod kotlin_cli_jvm_conformance;
 mod kotlin_native_multimodule_support;
 #[path = "kotlinc_argument_conformance_e2e.rs"]
 mod kotlinc_argument_conformance_e2e;
+#[path = "common/reference_targets/invocation.rs"]
+mod reference_invocation_support;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;
 #[path = "serialization_conformance.rs"]
