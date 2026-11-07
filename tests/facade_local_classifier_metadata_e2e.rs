@@ -38,11 +38,7 @@ fun box(): String = "OK"
 fn private_generic_anonymous_factory_metadata_matches_kotlinc() {
     assert_facade_metadata(
         "GenericAnonymousMetadataBaseline",
-        r#"
-interface Token<T>
-private fun <T> copy(value: T) = object : Token<T> {}
-fun box(): String = "OK"
-"#,
+        include_str!("box_regressions/localGenericAnonymousMetadata.kt"),
     );
 }
 
@@ -68,31 +64,14 @@ fn assert_class_metadata(stem: &str, source: &str, class_internal: &str) {
 fn named_local_class_metadata_keeps_own_arguments_and_omits_enclosing_captures() {
     assert_class_metadata(
         "NamedLocalArgumentMetadata",
-        r#"
-private fun <T> enclose(value: T): Any {
-    class Holder<U>(val item: U, val seen: T) {
-        fun self() = this
-    }
-    return Holder(value, value).self()
-}
-fun box(): String = "OK"
-"#,
+        include_str!("box_regressions/namedLocalArgumentMetadata.kt"),
         "NamedLocalArgumentMetadataKt$enclose$Holder",
     );
 }
 
 #[test]
 fn shadowed_enclosing_formal_stays_out_of_the_anonymous_application() {
-    let source = r#"
-interface Token<T> { fun value(): T }
-class Outer<T> {
-    private fun <T> copy(value: T) = object : Token<T> {
-        override fun value(): T = value
-    }
-    fun use(value: Int) = copy(value).value()
-}
-fun box(): String = "OK"
-"#;
+    let source = include_str!("box_regressions/shadowedLocalFormalMetadata.kt");
     let classes = common::classes_against_kotlinc_module(&[("ShadowedFormalMetadata.kt", source)]);
     let metadata = |bytes: &Vec<u8>| {
         let info = krusty::jvm::classreader::parse_class(bytes).expect("readable class");
