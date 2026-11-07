@@ -127,6 +127,13 @@ pub(crate) fn ty_declared_at_call(ty: super::Ty, site: CallSiteIdentity) -> supe
     })
 }
 
+/// Whether `ty` names one of call `site`'s own inference variables: a variable that call's
+/// selection has not solved. A declaration formal never does, even when it is the called
+/// declaration's own formal in scope at a recursive call.
+pub(crate) fn ty_mentions_call_variable(ty: super::Ty, site: CallSiteIdentity) -> bool {
+    ty_declared_at_call(ty, site) != ty
+}
+
 /// The call and formal behind a call's inference variable; `None` for every other identity.
 pub(crate) fn call_site_variable(variable: super::TyParamName) -> Option<CallSiteVariable> {
     CALL_SITE_VARIABLES
