@@ -7,13 +7,13 @@
 //!
 //! The work is split at the frontend/backend handoff. [`source_facts`] classifies the file's
 //! atomics and the operations on them while their checked identities are still at hand, rejects
-//! every form this implementation does not cover yet, and selects the field-updater declarations
-//! the generated code calls when `java.util.concurrent.atomic` is on the classpath. When it is
-//! not, [`direct_fields`] rewrites the same operations onto the property's backing field.
-//! [`field_updaters`] then rewrites the JVM backend's IR. The class's Kotlin metadata is recorded
-//! before either runs, so it keeps the declared atomic property, as kotlinc's does.
+//! every form this implementation does not cover yet, and selects the JVM field-updater
+//! declarations the generated code calls. That is the only representation this plugin lowers. A
+//! compilation that does not have it is rejected; missing `java.util.concurrent.atomic` classes
+//! are not rewritten to plain field reads and writes. [`field_updaters`] then rewrites the JVM
+//! backend's IR. The class's Kotlin metadata is recorded before either runs, so it keeps the
+//! declared atomic property, as kotlinc's does.
 
-mod direct_fields;
 mod field_updaters;
 mod source_facts;
 

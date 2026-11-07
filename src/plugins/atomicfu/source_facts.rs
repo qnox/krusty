@@ -53,14 +53,6 @@ pub(super) struct UpdaterOperation {
     pub(super) function: BoundRuntimeFunction,
 }
 
-/// Which lowering an atomic property took: field updaters, or the value field when those classes
-/// are not on the classpath.
-#[derive(Clone, Copy)]
-enum AtomicSlot {
-    Updater(usize),
-    Direct(usize),
-}
-
 /// The value an atomic holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AtomicValue {
@@ -166,18 +158,11 @@ pub(super) fn record(
         rejections,
         release,
         updaters: Vec::new(),
-        direct: Vec::new(),
-        direct_operations: Vec::new(),
         by_property: HashMap::default(),
         bound: HashMap::default(),
     };
     recorder.declarations();
     let operations = recorder.operations();
-    let direct = std::mem::take(&mut recorder.direct);
-    let direct_operations = std::mem::take(&mut recorder.direct_operations);
-    if !direct.is_empty() {
-        super::direct_fields::rewrite(recorder.ir, &direct, &direct_operations);
-    }
     let updaters = std::mem::take(&mut recorder.updaters);
     if updaters.is_empty() {
         return;
@@ -195,10 +180,8 @@ struct Recorder<'a, 'b> {
     rejections: &'a mut Vec<PluginRejection>,
     release: Option<PluginRelease>,
     updaters: Vec<FieldUpdater>,
-    direct: Vec<super::direct_fields::DirectAtomic>,
-    direct_operations: Vec<super::direct_fields::DirectOperation>,
     /// Each lowered atomic by its checked identity.
-    by_property: HashMap<crate::ir::PropertyId, AtomicSlot>,
+    by_property: HashMap<crate::ir::PropertyId, usize>,
     /// Each updater function selected so far.
     bound: HashMap<(TypeName, &'static str), BoundRuntimeFunction>,
 }
@@ -352,15 +335,14 @@ impl Recorder<'_, '_> {
                 continue;
             };
             let updater = value.updater();
+            // Field updaters are the only representation this plugin lowers. Absence of
+            // `java.util.concurrent.atomic` does not mean plain loads and stores implement the
+            // target's atomic operations.
             if self.runtime.classifier(updater).is_none() {
-                let index = self.direct.len();
-                self.by_property.insert(id, AtomicSlot::Direct(index));
-                self.direct.push(super::direct_fields::DirectAtomic {
-                    class,
-                    field,
-                    ty: value.ty(),
-                    initializer,
-                });
+                self.reject(
+                    span,
+                    "an atomic property without the JVM field-updater representation",
+                );
                 continue;
             }
             let Some(new_updater) = self.bind(
@@ -375,8 +357,7 @@ impl Recorder<'_, '_> {
             ) else {
                 continue;
             };
-            self.by_property
-                .insert(id, AtomicSlot::Updater(self.updaters.len()));
+            self.by_property.insert(id, self.updaters.len());
             self.updaters.push(FieldUpdater {
                 class,
                 property: index,
@@ -488,7 +469,7 @@ impl Recorder<'_, '_> {
                 continue;
             };
             let span = self.source.expression_span(self.ir, expression);
-            let Some((slot, instance)) = self.atomic_read(receiver) else {
+            let Some((updater, instance)) = self.atomic_read(receiver) else {
                 // An atomic property this implementation does not lower is rejected where it is
                 // declared.
                 if !self.atomic_read_of_any(receiver) {
@@ -500,13 +481,8 @@ impl Recorder<'_, '_> {
                 continue;
             };
             receivers.push(receiver);
-            let (class, value_ty) = match slot {
-                AtomicSlot::Updater(updater) => (
-                    self.updaters[updater].class,
-                    self.updaters[updater].value.ty(),
-                ),
-                AtomicSlot::Direct(index) => (self.direct[index].class, self.direct[index].ty),
-            };
+            let class = self.updaters[updater].class;
+            let value_ty = self.updaters[updater].value.ty();
             if owner_of[expression as usize] != Some(class) {
                 self.reject(
                     span,
@@ -523,25 +499,6 @@ impl Recorder<'_, '_> {
                 self.reject(span, &format!("the atomic operation `{name}`"));
                 continue;
             }
-            if let AtomicSlot::Direct(index) = slot {
-                let class = self.direct[index].class;
-                let field = self.direct[index].field;
-                let ty = self.direct[index].ty;
-                self.direct_operations
-                    .push(super::direct_fields::DirectOperation {
-                        expression,
-                        instance,
-                        arguments,
-                        name,
-                        class,
-                        field,
-                        ty,
-                    });
-                continue;
-            }
-            let AtomicSlot::Updater(updater) = slot else {
-                continue;
-            };
             let updater_class = self.updaters[updater].value.updater();
             let Some(bound) = self.bind(
                 RuntimeDeclaration::Member(updater_class),
@@ -651,7 +608,7 @@ impl Recorder<'_, '_> {
     }
 
     /// The lowered atomic `expression` reads, and the instance it reads it from.
-    fn atomic_read(&self, expression: ExprId) -> Option<(AtomicSlot, ExprId)> {
+    fn atomic_read(&self, expression: ExprId) -> Option<(usize, ExprId)> {
         let IrExpr::Checked(operation) = &self.ir.exprs[expression as usize] else {
             return None;
         };
