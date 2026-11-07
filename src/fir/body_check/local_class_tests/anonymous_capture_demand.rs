@@ -863,3 +863,98 @@ fn an_inner_same_typed_receiver_keeps_its_own_constructor_source() {
     assert_eq!(receiver_capture_identity(&bodies, *old), original);
     assert_ne!(receiver_capture_identity(&bodies, *fresh), original);
 }
+
+#[test]
+fn a_local_superclass_closure_keeps_its_selected_outer_class_role() {
+    // The complete official corpus case retains its runtime coverage under
+    // closures/captureInSuperConstructorCall/kt4174.kt.
+    let source = include_str!("fixtures/localSuperclassOuterCapture.kt");
+    let inputs = [crate::source::SourceInput::kotlin(source).with_file_stem("LocalOuterCapture")];
+    let mut prepared = super::super::test_support::prepare_fir_source(
+        &inputs,
+        0,
+        Box::new(crate::libraries::EmptySymbolSource),
+        &crate::features::LangFeatures::new(),
+    );
+    let mut sink = StreamedBodySink::default();
+    prepared
+        .check_all_bodies(&mut sink)
+        .expect("complete outer capture FIR");
+    let index = &prepared.index;
+    let roots = sink.0.into_iter().map(|(_, body)| body).collect::<Vec<_>>();
+    let bodies = receiver_constructor_body_tree(&roots);
+    let declarations = bodies
+        .iter()
+        .flat_map(|body| {
+            (0..body.statement_count()).filter_map(move |raw| {
+                match &body.statement(FirStatementId::from_raw(raw as u32))?.kind {
+                    FirStatementKind::LocalDeclaration {
+                        declaration,
+                        captures,
+                        ..
+                    } => Some((declaration, captures)),
+                    _ => None,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let [(local, captures)] = declarations.as_slice() else {
+        panic!("one complete local superclass declaration")
+    };
+    assert_eq!(
+        index.recorded_direct_supertypes(
+            index
+                .classifier_identity(**local)
+                .expect("local classifier")
+        ),
+        Some(vec![crate::types::type_name("C")])
+    );
+    let [capture] = captures.as_ref() else {
+        panic!("one enclosing-class capture: {captures:?}")
+    };
+    let outer = crate::types::type_name("B");
+    let (transient, _) = prepared
+        .active
+        .class(&prepared.file, **local)
+        .expect("selected local classifier source");
+    let [selected] = prepared
+        .info
+        .local_class_captures_by_class
+        .get(&transient)
+        .expect("completed local capture inventory")
+        .as_slice()
+    else {
+        panic!("one declaration-owned outer capture")
+    };
+    assert_eq!(selected.receiver_capture, None);
+    assert_eq!(
+        selected.source_identity(outer),
+        Some(ClassCaptureIdentity::EnclosingClass(outer))
+    );
+    assert!(matches!(
+        selected.source,
+        crate::resolve::AnonymousObjectCaptureSource::EnclosingInstance {
+            current: true,
+            depth: 0
+        }
+    ));
+    assert_eq!(
+        capture.capture_identity,
+        Some(ClassCaptureIdentity::EnclosingClass(outer))
+    );
+    assert_eq!(capture.ty.get(), Ty::obj_name(outer));
+    assert_eq!(capture.source, FirLocalClassCaptureSource::DispatchReceiver);
+    assert!(!capture.shared_cell);
+    assert_eq!(
+        capture.receiver,
+        Some(crate::fir::FirCapturedReceiver::Enclosing {
+            classifier: outer,
+            owner: Some(crate::fir::EnclosingInstanceOwner {
+                declaration: index
+                    .classifier_declaration(outer)
+                    .expect("selected outer declaration"),
+                kind: crate::fir::EnclosingInstanceKind::Classifier,
+            }),
+        })
+    );
+}
