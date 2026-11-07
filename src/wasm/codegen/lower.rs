@@ -821,6 +821,9 @@ impl<'a> Body<'a> {
             return Ok(());
         }
         let Some(source) = source_ty else {
+            // A non-completing Kotlin expression may close an empty-result Wasm block.
+            // Its outer frame is reachable to validation again, so retain bottom at this use.
+            self.code.unreachable();
             return Ok(());
         };
         if source == Ty::Unit && carrier(target)?.is_some() {
