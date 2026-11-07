@@ -65,6 +65,12 @@ fn unadapted_local_function_reference_keeps_structural_identity_and_capture() {
         panic!("one semantic local function reference")
     };
     assert_eq!(reference.captures.len(), 1);
+    let body = ir.functions[reference.adapter as usize]
+        .body
+        .expect("local callable-reference adapter body");
+    let call = ir.callable_reference_adapter_results[&body];
+    assert!(matches!(ir.expr(call), IrExpr::Call { .. }));
+    assert_eq!(ir.call_declared_ret.get(&call), Some(&Ty::Int));
     assert!(matches!(
         &reference.target,
         crate::ir::IrCallableReferenceTarget::Local { name, .. } if name.as_ref() == "add"
@@ -1255,7 +1261,8 @@ fn ordinary_inner_constructor_keeps_source_property_after_physical_outer_prefix(
     assert_eq!(ir.checked_type(*outer), Some(Ty::obj("Outer")));
     assert_eq!(ir.checked_type(*value), Some(Ty::String));
     assert_eq!(
-        ir.construction_declared_params[&construction.0].as_ref(),
+        ir.construction_declared_params(construction.0)
+            .expect("declared parameters"),
         [Ty::obj("Outer"), Ty::String]
     );
 }
@@ -1407,6 +1414,7 @@ fn external_inner_constructor_prepends_the_checked_outer_receiver() {
             internal,
             args,
             ctor_params: Some(parameters),
+            declared_params: _,
             ctor_desc: None,
             external_target: Some(target),
             defaults,
@@ -1573,7 +1581,7 @@ fn reflective_unbound_inner_constructor_reference_keeps_structural_identity() {
     assert!(reference.captures.is_empty());
     assert!(matches!(
         reference.target,
-        crate::ir::IrCallableReferenceTarget::Constructor { classifier }
+        crate::ir::IrCallableReferenceTarget::Constructor { classifier, .. }
             if classifier == crate::types::type_name("Outer$Inner")
     ));
     assert!(

@@ -56,6 +56,27 @@ impl Body<'_> {
                 self.code.array_get_u(self.runtime.chars);
                 Ok(())
             }
+            // `Any?.toString()` is the string a template makes of its operand.
+            IrIntrinsic::NullableAnyToString => {
+                let value = match (receiver, args) {
+                    (None, [value]) => *value,
+                    (Some(value), []) => value,
+                    _ => return Err("a malformed `toString` call".to_string()),
+                };
+                self.string_of(value)
+            }
+            IrIntrinsic::GeneratedPropertyHash { ty } => {
+                let (None, [value]) = (receiver, args) else {
+                    return Err("a malformed generated property hash".to_string());
+                };
+                self.generated_property_hash(*value, ty)
+            }
+            IrIntrinsic::GeneratedPropertyEquals { ty } => {
+                let (None, [left, right]) = (receiver, args) else {
+                    return Err("a malformed generated property comparison".to_string());
+                };
+                self.generated_property_equals(*left, *right, ty)
+            }
             other => Err(format!("a call to the intrinsic {other:?}")),
         }
     }

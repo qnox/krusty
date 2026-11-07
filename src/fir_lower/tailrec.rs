@@ -286,7 +286,7 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> TailC
                 // tail call and runs the check on every frame, so it stays opaque here.
                 IrExpr::NotNullAssert {
                     operand,
-                    check: crate::ir::NullCheck::Named(_),
+                    check: crate::ir::NullCheck::Named { .. },
                 } => {
                     let operand = *operand;
                     self.visit_held(operand, tail, edge);

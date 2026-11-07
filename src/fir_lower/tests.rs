@@ -592,6 +592,7 @@ fn external_default_call_keeps_only_supplied_common_operands() {
                 default_provider: None,
                 receiver: None,
                 declared_receiver: None,
+                declaring_receiver: None,
                 parameters: Box::new([resolved(Ty::Int), resolved(Ty::String)]),
                 result: resolved(Ty::String),
                 declared_result: None,

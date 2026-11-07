@@ -113,7 +113,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         declaration_argument_boundaries,
         call_declared_params,
         physical_call_parameters,
-        construction_declared_params,
         construction_targets,
         static_extension_receivers,
         call_inline_modifiers,
@@ -251,6 +250,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         inline_anonymous_lambdas: _,
         class_method_owners: _,
         default_entries: _,
+        construction_entries: _,
         dispatch_entries: _,
         enum_initializers: _,
         fn_params: _,
@@ -352,7 +352,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         lambda_sam_jvm_signature: _,
     } = ir;
 
-    let inherited: [&mut dyn InheritedFacts; 77] = [
+    let inherited: [&mut dyn InheritedFacts; 76] = [
         module_constructions,
         callable_reference_provenance,
         callable_reference_enclosures,
@@ -424,7 +424,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         jvm_external_result_coercions,
         call_declared_params,
         physical_call_parameters,
-        construction_declared_params,
         construction_targets,
         static_extension_receivers,
         call_inline_modifiers,

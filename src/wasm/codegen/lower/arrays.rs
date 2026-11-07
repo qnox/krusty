@@ -47,6 +47,7 @@ impl Body<'_> {
         let length = u32::try_from(elements.len())
             .map_err(|_| "an array literal exceeding Wasm's length space".to_string())?;
         self.code.array_new_fixed(self.runtime.references, length);
+        self.wrap_reference_array();
         Ok(())
     }
 
@@ -79,8 +80,8 @@ impl Body<'_> {
             let source = self.local(ValType::nullable(references));
             let taken = self.local(ValType::nullable(references));
             self.value(element, array)?;
+            self.reference_array_storage();
             self.code
-                .ref_cast(true, HeapType::Concrete(references))
                 .local_set(source)
                 .local_get(source)
                 .ref_as_non_null()
@@ -150,7 +151,27 @@ impl Body<'_> {
             }
         }
         self.code.local_get(result).ref_as_non_null();
+        self.wrap_reference_array();
         Ok(())
+    }
+
+    /// Wrap the freshly allocated backing array on the stack in its Kotlin identity object.
+    fn wrap_reference_array(&mut self) {
+        let storage = self.local(ValType::reference(self.runtime.references));
+        self.code
+            .local_set(storage)
+            .global_get(self.runtime.arrays.table)
+            .call(self.runtime.identity.allocate)
+            .local_get(storage)
+            .struct_new(self.runtime.arrays.object);
+    }
+
+    /// Read the backing array of the checked Kotlin array value on the stack.
+    fn reference_array_storage(&mut self) {
+        let object = self.runtime.arrays.object;
+        self.code
+            .ref_cast(false, HeapType::Concrete(object))
+            .struct_get(object, crate::wasm::reference_arrays::STORAGE_FIELD);
     }
 
     pub(super) fn reference_array_get(
@@ -159,6 +180,7 @@ impl Body<'_> {
         index: u32,
     ) -> Result<(), Unsupported> {
         let (storage, offset, element) = self.reference_slot_operands(receiver, index)?;
+        let storage = self.reference_array_backing(storage);
         self.check_reference_slot(storage, offset)?;
         self.code
             .local_get(storage)
@@ -187,6 +209,7 @@ impl Body<'_> {
         );
         self.value(value, any)?;
         self.code.local_set(stored);
+        let storage = self.reference_array_backing(storage);
         self.check_reference_slot(storage, offset)?;
         self.code
             .local_get(storage)
@@ -198,7 +221,8 @@ impl Body<'_> {
     }
 
     /// Evaluate a reference array receiver and an index, in that order, into locals. Returns the
-    /// storage and offset locals and the array's element type.
+    /// array-object and offset locals and the array's element type. Dereferencing its backing
+    /// storage waits until every call operand, including a store's value, has been evaluated.
     fn reference_slot_operands(
         &mut self,
         receiver: u32,
@@ -208,15 +232,23 @@ impl Body<'_> {
             .type_of(receiver)?
             .ok_or_else(|| "an array receiver without a checked type".to_string())?;
         let element = reference_element(array)?;
-        let storage = self.local(ValType::nullable(self.runtime.references));
+        let storage = self.local(ValType::nullable(self.runtime.arrays.object));
         let offset = self.local(ValType::I32);
         self.value(receiver, array)?;
         self.code
-            .ref_cast(true, HeapType::Concrete(self.runtime.references))
+            .ref_cast(true, HeapType::Concrete(self.runtime.arrays.object))
             .local_set(storage);
         self.value(index, Ty::Int)?;
         self.code.local_set(offset);
         Ok((storage, offset, element))
+    }
+
+    fn reference_array_backing(&mut self, array: u32) -> u32 {
+        let storage = self.local(ValType::reference(self.runtime.references));
+        self.code.local_get(array);
+        self.reference_array_storage();
+        self.code.local_set(storage);
+        storage
     }
 
     /// Throw `IndexOutOfBoundsException` when the captured index is outside the captured array.

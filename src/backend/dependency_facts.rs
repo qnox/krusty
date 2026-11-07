@@ -104,6 +104,8 @@ pub struct BackendCallableFact {
     pub(crate) klib_body_accessor: Option<crate::libraries::KlibBodyAccessor>,
     pub(crate) klib_body_vararg_index: Option<usize>,
     pub(crate) klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
+    /// Whether a source parameter declares a default value, as the provider's declaration says.
+    pub declares_parameter_defaults: bool,
     /// Qualified identities of the annotations the provider recorded on this declaration. A
     /// compiler plugin keys its own calling convention on them (Compose's `@Composable`).
     pub annotations: Box<[TypeName]>,
@@ -327,6 +329,7 @@ mod tests {
             klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            declares_parameter_defaults: false,
             annotations: Box::new([]),
         }
     }
@@ -550,6 +553,7 @@ mod tests {
             klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            declares_parameter_defaults: false,
             annotations: Box::new([]),
         };
         assert!(fact.matches_dependency_body_call(&[Ty::Int], None, true));
@@ -825,6 +829,7 @@ impl CheckedBackendCallables {
                 let klib_body_accessor = realization.klib_body_accessor;
                 let klib_body_vararg_index = realization.klib_body_vararg_index;
                 let klib_body_parameter_defaults = realization.klib_body_parameter_defaults;
+                let declares_parameter_defaults = realization.declares_parameter_defaults;
                 let callable = realization.callable;
                 let annotations = callable.annotations.into_boxed_slice();
                 slot.insert(BackendCallableFact {
@@ -869,6 +874,7 @@ impl CheckedBackendCallables {
                     klib_body_class_contract,
                     klib_body_vararg_index,
                     klib_body_parameter_defaults,
+                    declares_parameter_defaults,
                     annotations,
                 })
             }

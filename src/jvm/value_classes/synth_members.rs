@@ -368,6 +368,7 @@ pub(super) fn synth_value_members(
             internal: box_internal,
             args: vec![arg],
             ctor_params: Some(vec![u_ir]),
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),

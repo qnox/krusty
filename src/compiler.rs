@@ -1,6 +1,7 @@
 //! Compiler orchestration.
 
 mod backend_handoff;
+mod capture_storage;
 mod checked_body_observer;
 mod declaration_metadata;
 mod dependency_body_emission;
@@ -84,6 +85,13 @@ pub fn emit_analyzed_to<B: Backend>(
             .into_iter()
             .for_each(sink);
     }
+}
+
+/// Only the successful complete-source path below creates this handoff value. Header-only or
+/// manually unfinished IR cannot enter the storage-retirement handoff API.
+struct CompletedSourceIr {
+    local_storage_owners: crate::fx_hash::HashSet<crate::ir::ClassId>,
+    ir: crate::ir::IrFile,
 }
 
 /// What a caller of [`emit_analyzed_into`] sees of Pass 2.
@@ -414,7 +422,10 @@ fn emit_analyzed_into<B: Backend>(
             continue;
         }
         let Some(mut file) = backend_handoff::checked_ir_file(
-            ir,
+            CompletedSourceIr {
+                local_storage_owners: capture_storage::source_owners(&ir, &index, source_id),
+                ir,
+            },
             source_id,
             &backend_module_facts,
             &symbols,

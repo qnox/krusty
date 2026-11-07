@@ -217,6 +217,7 @@ impl super::Emitter<'_> {
                 internal,
                 args,
                 ctor_params,
+                declared_params: _,
                 ctor_desc,
                 external_target: _,
                 defaults: default_parameters,
@@ -258,7 +259,7 @@ impl super::Emitter<'_> {
                         // Every parameter of a verbatim descriptor is a supplied operand; the
                         // descriptor, not the argument count, says how many there are.
                         let parameters = self.constructor_physical_params(e, d).len();
-                        (d.clone(), false, parameters, parameters)
+                        (d.to_string(), false, parameters, parameters)
                     } else {
                         let mut field_tys: Vec<Ty> = match ctor_params {
                             Some(ps) => jvm_tys(&capture_order::physical_for(
@@ -1941,7 +1942,7 @@ impl super::Emitter<'_> {
                 // kotlinc lowers the implicit check to a temporary of the checked value
                 // (`TypeOperatorLowering`), whose declaration marks the check's line once the
                 // value is on the stack: after an inlined operand the mapper wrote nothing yet.
-                if matches!(check, NullCheck::Named(_)) {
+                if matches!(check, NullCheck::Named { .. }) {
                     self.mark_expression_start(e, code);
                 }
                 code.dup();
@@ -1949,7 +1950,7 @@ impl super::Emitter<'_> {
                 // in its failure (`getenv(...) must not be null`); `x!!` has no such name and uses the
                 // one-argument form. Both consume the duplicate and leave the value in place.
                 let m = match check {
-                    NullCheck::Named(message) => {
+                    NullCheck::Named { message, .. } => {
                         code.push_string(message, self.cw);
                         self.cw.methodref(
                             "kotlin/jvm/internal/Intrinsics",
@@ -1957,13 +1958,13 @@ impl super::Emitter<'_> {
                             "(Ljava/lang/Object;Ljava/lang/String;)V",
                         )
                     }
-                    NullCheck::Source | NullCheck::Unnamed => self.cw.methodref(
+                    NullCheck::Source | NullCheck::Unnamed { .. } => self.cw.methodref(
                         "kotlin/jvm/internal/Intrinsics",
                         "checkNotNull",
                         "(Ljava/lang/Object;)V",
                     ),
                 };
-                let arguments = if matches!(check, NullCheck::Named(_)) {
+                let arguments = if matches!(check, NullCheck::Named { .. }) {
                     2
                 } else {
                     1

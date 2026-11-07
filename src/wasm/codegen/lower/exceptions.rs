@@ -97,6 +97,11 @@ impl Body<'_> {
                 _ => None,
             })
         else {
+            if let Some(constructed) =
+                external.and_then(|target| self.dependency_construction(target, internal, args))
+            {
+                return constructed;
+            }
             return self.construction(site, internal, args, params);
         };
         constructor_frame(internal, params, args.len(), kind, message, declaration)?;

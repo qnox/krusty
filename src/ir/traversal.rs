@@ -25,9 +25,14 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
             }
             IrCheckedOperation::ConstructorDelegation {
                 outer_receiver,
+                capture_arguments,
                 arguments,
                 ..
             } => {
+                capture_arguments
+                    .iter()
+                    .flatten()
+                    .for_each(|&(value, _)| f(value));
                 outer_receiver.iter().for_each(|&receiver| f(receiver));
                 arguments.iter().for_each(|argument| match argument {
                     IrCheckedArgument::Expression { value, .. } => f(*value),
