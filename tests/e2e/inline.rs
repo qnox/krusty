@@ -2,6 +2,8 @@
 
 use super::common;
 
+#[path = "../apply_receiver_single_store_e2e.rs"]
+mod apply_receiver_single_store_e2e;
 #[path = "../inline_arguments_in_place_e2e.rs"]
 mod inline_arguments_in_place_e2e;
 #[path = "../inline_body_class_source_map_e2e.rs"]

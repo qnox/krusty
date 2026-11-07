@@ -2405,6 +2405,7 @@ reflection/typeOf/typeOfCapturedStar.kt
 reflection/types/innerGenericArguments.kt
 reflection/types/typeArguments.kt
 reflection/types/useSiteVariance.kt
+regressions/applyReceiverSingleStore.kt
 regressions/directInvokeNameBasedDestructuring.kt
 regressions/floatingRangeContainsMixedWidths.kt
 regressions/generic.kt
