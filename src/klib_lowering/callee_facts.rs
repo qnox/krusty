@@ -176,12 +176,66 @@ impl<'a> KlibCalleeFacts<'a> {
                 super::class_initialization::constructor_initialization_callees(
                     callables[0],
                     bodies,
+                    self,
                 )
             }
             _ => Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
                 "an initializer has no unique selected constructor declaration".to_owned(),
             )),
         }
+    }
+
+    /// Check graph-owned declarations even when the root operation emits no callee body/export.
+    pub(super) fn validate_root_constructor(
+        &self,
+        module: &str,
+        signature: &crate::metadata::id_signature::KlibPublicIdSignature,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<(), super::decline::KlibBodyDeclineReason> {
+        use super::decline::KlibBodyDeclineReason;
+        use crate::klib_libraries::KlibCalleeOrigin;
+        use crate::libraries::KlibDeclarationSignature;
+        let mismatch = |detail: &str| KlibBodyDeclineReason::SignatureMismatch(detail.to_owned());
+        let declaration = KlibDeclarationSignature::Public(signature.clone());
+        let exact = match bodies.callee_origin(module, &declaration) {
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(mismatch("ambiguous root constructor producer"))
+            }
+            KlibCalleeOrigin::Exact(identity) => Some(identity),
+            KlibCalleeOrigin::Missing => None,
+        };
+        let reachable = bodies.body_provider_modules(module);
+        let mut known = self
+            .callables
+            .keys()
+            .copied()
+            .filter(|identity| {
+                identity.declaration == declaration
+                    && reachable.contains(&identity.module)
+                    && exact.as_ref().is_none_or(|exact| *identity == exact)
+            })
+            .collect::<Vec<_>>();
+        if exact.is_none() && known.iter().any(|identity| identity.module == module) {
+            known.retain(|identity| identity.module == module);
+        }
+        if known.len() > 1 {
+            return Err(mismatch("ambiguous frozen root constructor producer"));
+        }
+        for identity in known {
+            let Some(KlibCalleeFact::Selected(callables)) = self.get(identity) else {
+                return Err(mismatch(
+                    "conflicting provider contracts for the root constructor",
+                ));
+            };
+            super::constructor_calls::authenticate_root_declaration(callables[0])?;
+            if exact.is_some() {
+                super::constructor_calls::authenticate(callables[0], bodies)?;
+            }
+        }
+        if let Some(identity) = exact {
+            super::constructor_calls::authenticate_root_header(&identity, bodies)?;
+        }
+        Ok(())
     }
 
     /// Authenticate a declaration the target implements without lowering its serialized body.

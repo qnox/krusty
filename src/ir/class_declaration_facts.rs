@@ -14,6 +14,20 @@ impl IrFile {
         );
     }
 
+    /// A lowering checkpoint retains immutable declaration facts, including owners whose class
+    /// storage has not been materialized in this file yet.
+    pub(crate) fn declared_class_self_type_owners(&self) -> crate::fx_hash::HashSet<TypeName> {
+        self.declared_class_self_types.keys().copied().collect()
+    }
+
+    pub(crate) fn restore_declared_class_self_type_owners(
+        &mut self,
+        owners: &crate::fx_hash::HashSet<TypeName>,
+    ) {
+        self.declared_class_self_types
+            .retain(|owner, _| owners.contains(owner));
+    }
+
     pub(crate) fn declared_class_self_type(&self, classifier: TypeName) -> Option<Ty> {
         self.declared_class_self_types.get(&classifier).copied()
     }
