@@ -1,6 +1,3 @@
-// TARGET_BACKEND: JVM_IR
-// PLATFORM-SPECIFIC: the continuation an inline suspend call stores inside an inline
-// lambda is a JVM local. Native and Wasm do not lower suspend functions.
 // MODULE: lib
 // FILE: Lib.kt
 package lib
