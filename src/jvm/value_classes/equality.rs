@@ -239,9 +239,10 @@ fn if_null(ir: &mut IrFile, slot: u32, when_null: ExprId, otherwise: ExprId) -> 
         lhs: value,
         rhs: null,
     });
-    ir.add_expr(IrExpr::When {
-        branches: vec![(Some(is_null), when_null), (None, otherwise)],
-    })
+    ir.add_when(
+        vec![(Some(is_null), when_null), (None, otherwise)],
+        Ty::Boolean,
+    )
 }
 
 fn constant(ir: &mut IrFile, value: IrConst) -> ExprId {

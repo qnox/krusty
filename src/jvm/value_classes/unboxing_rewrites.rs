@@ -116,10 +116,10 @@ pub(super) fn unbox_wrap_nullable(
         dispatch_receiver: Some(get_for_unbox),
         args: vec![],
     });
-    let when = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::When {
-        branches: vec![(Some(is_null), null2), (None, unboxed)],
-    });
+    let when = ir.add_when(
+        vec![(Some(is_null), null2), (None, unboxed)],
+        Ty::nullable(u),
+    );
     ir.null_guards.insert(when);
     ir.jvm_value_class_null_guards.insert(when);
     ir.exprs[id as usize] = IrExpr::Block {

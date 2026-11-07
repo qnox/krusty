@@ -793,9 +793,10 @@ fn linearize_suspending_finally(ir: &mut IrFile, expression: ExprId, suspend_set
         stmts: Vec::new(),
         value: None,
     });
-    let rethrow = ir.add_expr(IrExpr::When {
-        branches: vec![(Some(has_exception), throw_block), (None, no_exception)],
-    });
+    let rethrow = ir.add_when(
+        vec![(Some(has_exception), throw_block), (None, no_exception)],
+        Ty::Unit,
+    );
     ir.exprs[expression as usize] = IrExpr::Block {
         stmts: vec![declaration, protected, finally, rethrow],
         value: None,
@@ -900,9 +901,10 @@ fn linearize_finally_returns(ir: &mut IrFile, expression: ExprId, return_ty: &Ty
         stmts: Vec::new(),
         value: None,
     });
-    let dispatch = ir.add_expr(IrExpr::When {
-        branches: vec![(Some(has_return), return_block), (None, fallthrough)],
-    });
+    let dispatch = ir.add_when(
+        vec![(Some(has_return), return_block), (None, fallthrough)],
+        Ty::Unit,
+    );
     ir.exprs[expression as usize] = IrExpr::Block {
         stmts: vec![completion_decl, return_decl, protected, dispatch],
         value: None,
@@ -1830,7 +1832,7 @@ fn build_state_machine(
     );
     branches.push((None, else_block));
 
-    let dispatch = k(ir, IrExpr::When { branches });
+    let dispatch = ir.add_when(branches, Ty::Unit);
     let dispatch =
         wrap_dispatch_for_handlers(ir, dispatch, &state_handlers, catch_var, cont_v, cont_id, 0);
     loop_stmts.push(dispatch);
@@ -2188,9 +2190,9 @@ impl Flat<'_> {
             stmts: vec![],
             value: None,
         });
-        let when = self.add(IrExpr::When {
-            branches: vec![(Some(is), ret_block), (None, empty)],
-        });
+        let when = self
+            .ir
+            .add_when(vec![(Some(is), ret_block), (None, empty)], Ty::Unit);
         out.push(when);
         let mut vg = self.gv(vv);
         // A declaration that returns the carrier is boxed here, so this synchronous edge matches
@@ -2610,9 +2612,7 @@ impl Flat<'_> {
             });
             out_branches.push((*cond, block));
         }
-        self.add(IrExpr::When {
-            branches: out_branches,
-        })
+        self.ir.add_when(out_branches, Ty::Unit)
     }
     /// Emit the `when` for an `if`/`when` STATEMENT whose branch body suspends: each branch `goto`s its
     /// own entry state (which flattens the branch body, converging at `merge`); a missing `else` falls
@@ -2642,9 +2642,7 @@ impl Flat<'_> {
             });
             out_branches.push((None, block));
         }
-        self.add(IrExpr::When {
-            branches: out_branches,
-        })
+        self.ir.add_when(out_branches, Ty::Unit)
     }
 
     fn split_when_statement(
@@ -2936,9 +2934,10 @@ impl Flat<'_> {
                             value: None,
                         })
                     };
-                    let hwhen = self.add(IrExpr::When {
-                        branches: vec![(Some(condition_value), t_block), (None, e_block)],
-                    });
+                    let hwhen = self.ir.add_when(
+                        vec![(Some(condition_value), t_block), (None, e_block)],
+                        Ty::Unit,
+                    );
                     hs.push(hwhen);
                     condition_stmts.extend(hs);
                     // body → cont (back to header after the update). A `continue` in the body targets
@@ -3179,7 +3178,7 @@ impl Flat<'_> {
                         // A single unguarded arm (a full-coverage catch) keeps the direct shape.
                         self.block_stmts(arms[0].1)
                     } else {
-                        vec![self.add(IrExpr::When { branches: arms })]
+                        vec![self.ir.add_when(arms, Ty::Unit)]
                     };
                     self.flatten(&catch_stmts, handler, Some(try_after));
                     // `try_after` joins the body and handler paths: a spilled local is definitely
@@ -3631,7 +3630,7 @@ fn wrap_dispatch_for_handlers(
         value: None,
     });
     branches.push((None, rethrow));
-    let when = ir.add_expr(IrExpr::When { branches });
+    let when = ir.add_when(branches, Ty::Unit);
     let throwable = crate::types::type_name("java/lang/Throwable");
     let catch = crate::ir::IrCatch::generated(catch_var, throwable, when);
     ir.add_expr(IrExpr::Try {

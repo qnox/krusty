@@ -29,7 +29,7 @@ impl Emitter<'_> {
                     let entry_height = code.stack_height().max(0) as u16;
                     let elvis = self.ir.elvis_safe_call_guards.contains(&expression);
                     let result_ty = if elvis {
-                        self.value_ty_of_when(branches)
+                        self.when_value_ty(expression)
                     } else {
                         Ty::Unit
                     };
