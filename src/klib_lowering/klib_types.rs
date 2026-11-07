@@ -297,6 +297,34 @@ pub(super) fn classifier_name(
     )
 }
 
+/// The declaring container and own segment of the classifier `signature` names.
+pub(super) fn classifier_declaration(
+    signature: &KlibPublicIdSignature,
+) -> Result<crate::types::ClassifierDeclarationName, KlibBodyDeclineReason> {
+    let segments = signature.declaration().segments();
+    let (name, owner) = segments
+        .split_last()
+        .ok_or(KlibBodyDeclineReason::UnsupportedType(
+            "a type whose classifier is not a class",
+        ))?;
+    let name = name.as_str().into();
+    Ok(if owner.is_empty() {
+        let package = signature
+            .package()
+            .segments()
+            .iter()
+            .fold(TypeName::ROOT, |parent, segment| {
+                type_name_child(parent, segment)
+            });
+        crate::types::ClassifierDeclarationName::TopLevel { package, name }
+    } else {
+        crate::types::ClassifierDeclarationName::Nested {
+            owner: declaration_name(signature.package().segments(), owner)?,
+            name,
+        }
+    })
+}
+
 /// The classifier that declares the member `member`: its signature's declaration path without the
 /// member's own segment.
 pub(super) fn member_owner(

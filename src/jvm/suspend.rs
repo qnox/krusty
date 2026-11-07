@@ -1657,7 +1657,7 @@ fn build_state_machine(
             ),
             enclosing_function: Some(fid),
         };
-        continuation_metadata.insert(cont_internal.clone(), metadata);
+        continuation_metadata.insert(crate::types::type_name(&cont_internal), metadata);
     }
     let states = std::mem::take(&mut flat.states);
     let state_handlers = std::mem::take(&mut flat.state_handlers);

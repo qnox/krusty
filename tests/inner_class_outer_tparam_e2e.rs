@@ -169,7 +169,10 @@ fn inner_get_return(classpath: &krusty::jvm::classpath::Classpath) -> krusty::ty
     let inner = classpath
         .find("lib/Outer$Inner")
         .expect("the inner class is on the classpath");
-    krusty::jvm::metadata::class_functions(&inner)
+    inner
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .class_functions
         .iter()
         .find(|function| function.kotlin_name == "get")
         .and_then(|function| function.generic_sig.as_ref())

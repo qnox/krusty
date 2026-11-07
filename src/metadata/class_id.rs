@@ -10,9 +10,16 @@ mod tests;
 /// A metadata class name whose lexical segments are known, or an explicitly local raw identity.
 /// The semantic identity remains available for self types and diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum ClassIdName {
+    Declared(TypeName, Box<[Box<str>]>),
+    Local,
+    Anonymous,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedClassId {
     classifier: TypeName,
-    declaration: Option<(TypeName, Box<[Box<str>]>)>,
+    declaration: ClassIdName,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +72,7 @@ impl ResolvedClassId {
                     segments.reverse();
                     return Ok(Self {
                         classifier,
-                        declaration: Some((package, segments.into_boxed_slice())),
+                        declaration: ClassIdName::Declared(package, segments.into_boxed_slice()),
                     });
                 }
                 ClassifierDeclarationName::Nested { owner, name } => {
@@ -85,10 +92,10 @@ impl ResolvedClassId {
         );
         Self {
             classifier,
-            declaration: Some((
+            declaration: ClassIdName::Declared(
                 package,
                 segments.iter().map(|name| Box::from(*name)).collect(),
-            )),
+            ),
         }
     }
 
@@ -96,7 +103,16 @@ impl ResolvedClassId {
     pub fn local(classifier: TypeName) -> Self {
         Self {
             classifier,
-            declaration: None,
+            declaration: ClassIdName::Local,
+        }
+    }
+
+    /// An anonymous object's own declaration retains its raw local ID even when its named
+    /// members belong to an enum-entry declaration namespace.
+    pub(crate) fn anonymous(classifier: TypeName) -> Self {
+        Self {
+            classifier,
+            declaration: ClassIdName::Anonymous,
         }
     }
 
@@ -104,9 +120,14 @@ impl ResolvedClassId {
         self.classifier
     }
 
+    pub(crate) fn is_anonymous(&self) -> bool {
+        matches!(self.declaration, ClassIdName::Anonymous)
+    }
+
     pub(crate) fn declaration(&self) -> Option<(TypeName, &[Box<str>])> {
-        self.declaration
-            .as_ref()
-            .map(|(package, names)| (*package, names.as_ref()))
+        match &self.declaration {
+            ClassIdName::Declared(package, names) => Some((*package, names.as_ref())),
+            ClassIdName::Local | ClassIdName::Anonymous => None,
+        }
     }
 }
