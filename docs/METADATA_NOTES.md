@@ -644,3 +644,11 @@ The class metadata projection excludes only that role, after retaining each prop
 index; ordinary and plugin-generated declarations remain properties. Physical fields and capture
 storage demand remain separate facts, owned by the current declaration-keyed capture plan.
 Tests: `tests/capture_storage_metadata_e2e.rs` and the FIR local-class owner tests.
+
+## Lexical and inner classifier applications
+
+A local classifier's JVM metadata application records only its own type arguments. Checked
+applications retain enclosing-method lexical arguments for captured formal references. Actual inner
+instances encode `outer_type`. KLIB retains its flattened lexical-application argument policy; JVM
+inner types with a local outer retain their flat form. Tests:
+`tests/local_metadata_applications_e2e.rs`.

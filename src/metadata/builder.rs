@@ -1389,7 +1389,7 @@ pub(crate) fn build_package_with_intersection_approximation(
         &lookups.enum_entry_bodies,
         &lookups.anonymous_classifiers,
         lookups.intersection_approximation,
-        lookups.inner_classifiers,
+        lookups.classifier_applications,
     );
     let mut requirements = VersionRequirementTable::default();
     let mut contract_types = ContractTypeTable::default();
