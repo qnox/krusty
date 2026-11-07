@@ -10,12 +10,21 @@ const row = (image, pid, memory = '1,048,576 K', cpu = '1:02:03') =>
   [image, pid, 'Console', '1', memory, 'Running', 'PRIVATE_USER', cpu, 'PRIVATE_TITLE, "quoted"\nsecond line'];
 const csv = rows => rows.map(cells => cells.map(cell => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\r\n') + '\r\n';
 
-function run(outputs, platform = 'win32') {
+const cpu = (user = 0, sys = 0, idle = 0, nice = 0, irq = 0) => ({
+  times: { user, sys, idle, nice, irq }, model: 'PRIVATE_MODEL', speed: 'PRIVATE_SPEED',
+});
+
+function run(outputs, platform = 'win32', cpuOutputs = []) {
   const logs = [], calls = [], timers = [];
+  let cpuReads = 0;
   vm.runInNewContext(source, {
     require(name) {
       if (name === 'node:os') return {
-        platform: () => platform, arch: () => 'arm64', cpus: () => [0, 0, 0, 0],
+        platform: () => platform, arch: () => 'arm64', cpus: () => {
+          const next = cpuReads++ === 0 ? undefined : cpuOutputs.shift();
+          if (next instanceof Error) throw next;
+          return next === undefined ? [cpu(), cpu(), cpu(), cpu()] : next;
+        },
         totalmem: () => 16 * 1024 ** 3, freemem: () => 8 * 1024 ** 3,
       };
       assert.equal(name, 'node:child_process');
@@ -190,5 +199,63 @@ test('Darwin memory reporting survives a failed process snapshot, and other plat
     const other = run([output], platform);
     assert.equal(other.calls.length, 1);
     assert.notEqual(other.calls[0].file, 'vm_stat');
+  }
+});
+const cpuLines = result => result.logs.filter(line => line.startsWith('release build: host_cpu '));
+
+test('host CPU output preserves separate native cumulative modes and consecutive per-core deltas', () => {
+  const result = run(['', ''], 'linux', [[cpu(100, 200, 300, 40, 50), cpu(10, 20, 30, 4, 5)],
+    [cpu(107, 211, 313, 57, 69), cpu(11, 22, 33, 8, 10)]]);
+  result.timers[0].callback();
+  assert.deepEqual(cpuLines(result), [
+    'release build: host_cpu cpu_count=2 counter_deltas=baseline',
+    'release build: host_cpu index=0 user_ms=100 sys_ms=200 idle_ms=300 nice_ms=40 irq_ms=50',
+    'release build: host_cpu index=1 user_ms=10 sys_ms=20 idle_ms=30 nice_ms=4 irq_ms=5',
+    'release build: host_cpu cpu_count=2 counter_deltas=available',
+    'release build: host_cpu index=0 user_ms=107 user_delta_ms=7 sys_ms=211 sys_delta_ms=11 idle_ms=313 idle_delta_ms=13 nice_ms=57 nice_delta_ms=17 irq_ms=69 irq_delta_ms=19',
+    'release build: host_cpu index=1 user_ms=11 user_delta_ms=1 sys_ms=22 sys_delta_ms=2 idle_ms=33 idle_delta_ms=3 nice_ms=8 nice_delta_ms=4 irq_ms=10 irq_delta_ms=5',
+  ]);
+  assert.doesNotMatch(result.text(), /PRIVATE_|percent|busy|total_ms=/);
+  assert.equal(result.timers[0].ms, 60000);
+});
+
+test('host CPU counters precede and survive each failed external Windows query', () => {
+  const error = Object.assign(new Error('PRIVATE_QUERY'), { code: 'ETIMEDOUT' });
+  const result = run([error, error], 'win32', [[cpu(1, 2, 3, 0, 8)], [cpu(4, 6, 9, 0, 12)]]);
+  result.timers[0].callback();
+  assert.match(cpuLines(result)[2], /counter_deltas=available$/);
+  assert.match(cpuLines(result)[3], /sys_delta_ms=4.*irq_delta_ms=4/);
+  assert.ok(result.logs.indexOf(cpuLines(result)[0]) < result.logs.findIndex(line => line.includes('ETIMEDOUT')));
+  assert.equal(result.calls.length, 2);
+  assert.doesNotMatch(result.text(), /PRIVATE_/);
+});
+
+test('CPU count changes and any per-core counter reset establish a new baseline', async t => {
+  for (const [name, next] of [['count', [cpu(), cpu()]], ['counter', [cpu(99, 200, 300, 40, 50)]]]) {
+    await t.test(name, () => {
+      const result = run(['', '', ''], 'linux', [[cpu(100, 200, 300, 40, 50)], next, next]);
+      result.timers[0].callback();
+      const reset = cpuLines(result).findIndex(line => /counter_deltas=reset$/.test(line));
+      assert.ok(reset > 0);
+      assert.doesNotMatch(cpuLines(result)[reset + 1], /_delta_ms=/);
+      result.timers[0].callback();
+      assert.match(cpuLines(result).at(-1), /user_delta_ms=0/);
+    });
+  }
+});
+
+test('invalid or unavailable CPU data emits no partial metrics or raw errors and resets baseline', async t => {
+  for (const [index, invalid] of [[], [cpu(-1)], [cpu(1.5)], [cpu(NaN)], [cpu(Infinity)],
+    [cpu(Number.MAX_SAFE_INTEGER + 1)], [cpu(), {}], new Error('PRIVATE_CPU_ERROR')].entries()) {
+    await t.test(String(index), () => {
+      const result = run(['', '', ''], 'linux', [[cpu(10)], invalid, [cpu(20)]]);
+      result.timers[0].callback();
+      assert.deepEqual(cpuLines(result).slice(2), ['release build: host_cpu snapshot unavailable']);
+      result.timers[0].callback();
+      assert.match(cpuLines(result).at(-2), /counter_deltas=baseline$/);
+      assert.doesNotMatch(cpuLines(result).at(-1), /_delta_ms=/);
+      assert.doesNotMatch(result.text(), /PRIVATE_/);
+      assert.equal(result.calls.length, 3);
+    });
   }
 });
