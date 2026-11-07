@@ -276,6 +276,8 @@ mod resolved_type_occurrences;
 mod safe_call_flow;
 mod safe_index;
 mod sam_constructors;
+mod scope_constructor_selection;
+use provider_constructor_selection::ConstructorPreselection;
 mod sam_conversion_recording;
 mod serialization_generated_members;
 mod source_constructor_type_oracle;
@@ -7895,7 +7897,8 @@ struct ConstructorArgumentMismatch {
 
 enum LibraryConstructorSelection {
     Selected,
-    Rejected,
+    /// Reported; the call has the given type.
+    Rejected(Ty),
     NoMatch,
 }
 
@@ -7913,9 +7916,9 @@ struct LibraryConstructorOptions<'a> {
     bound_outer: Option<Ty>,
     expected: Option<Ty>,
     priority: ConstructorPriorityTier,
-    /// A constructor already chosen by a selection that ran over a wider candidate family (the
-    /// receiver member level of `outer.Inner(args)`). Only that declaration is materialized.
-    selected: Option<&'a crate::libraries::FunctionInfo>,
+    /// What a selection that ran over a wider candidate family (the receiver member level of
+    /// `outer.Inner(args)`, or the shared bare-call selector) already decided.
+    selected: ConstructorPreselection<'a>,
 }
 
 fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
@@ -14341,7 +14344,7 @@ impl<'a> Checker<'a> {
                                 bound_outer: None,
                                 expected,
                                 priority: ConstructorPriorityTier::All,
-                                selected: None,
+                                selected: ConstructorPreselection::Open,
                             },
                         ) {
                             Ok(LibraryConstructorSelection::Selected) => {
@@ -14358,7 +14361,7 @@ impl<'a> Checker<'a> {
                                     qualified_alias_target,
                                 );
                             }
-                            Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                            Ok(LibraryConstructorSelection::Rejected(result)) => return result,
                             Ok(LibraryConstructorSelection::NoMatch) => {}
                             Err(error) => {
                                 constructor_mapping_error = Some(error);
@@ -18471,23 +18474,20 @@ impl<'a> Checker<'a> {
                                 low_priority_provider_constructor =
                                     Some((scoped_internal, classifier.clone(), requires_outer));
                             }
-                            match self.record_library_constructor(
+                            match self.record_scope_constructor(
                                 scope,
-                                call,
-                                scoped_internal,
-                                classifier,
-                                args,
-                                LibraryConstructorOptions {
+                                CallArgs {
+                                    call,
+                                    args,
+                                    arg_tys: &arg_tys,
+                                },
+                                (scoped_internal, classifier),
+                                scope_constructor_selection::ScopeConstructorCall {
                                     arg_names: arg_names.as_deref(),
-                                    applied_classifier: bare_alias_target,
-                                    bound_outer: None,
+                                    explicit_type_args: &explicit_type_args,
+                                    alias_target: bare_alias_target,
                                     expected,
-                                    priority: if has_low_priority {
-                                        ConstructorPriorityTier::Ordinary
-                                    } else {
-                                        ConstructorPriorityTier::All
-                                    },
-                                    selected: None,
+                                    has_low_priority,
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -18504,7 +18504,7 @@ impl<'a> Checker<'a> {
                                         bare_alias_target,
                                     );
                                 }
-                                Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                                Ok(LibraryConstructorSelection::Rejected(result)) => return result,
                                 Ok(LibraryConstructorSelection::NoMatch) => {
                                     had_inapplicable_constructor |=
                                         !classifier.constructors.is_empty();
@@ -18616,23 +18616,20 @@ impl<'a> Checker<'a> {
                                 low_priority_provider_constructor =
                                     Some((scoped_internal, classifier.clone(), requires_outer));
                             }
-                            match self.record_library_constructor(
+                            match self.record_scope_constructor(
                                 scope,
-                                call,
-                                scoped_internal,
-                                classifier,
-                                args,
-                                LibraryConstructorOptions {
+                                CallArgs {
+                                    call,
+                                    args,
+                                    arg_tys: &arg_tys,
+                                },
+                                (scoped_internal, classifier),
+                                scope_constructor_selection::ScopeConstructorCall {
                                     arg_names: arg_names.as_deref(),
-                                    applied_classifier: bare_alias_target,
-                                    bound_outer: None,
+                                    explicit_type_args: &explicit_type_args,
+                                    alias_target: bare_alias_target,
                                     expected,
-                                    priority: if has_low_priority {
-                                        ConstructorPriorityTier::Ordinary
-                                    } else {
-                                        ConstructorPriorityTier::All
-                                    },
-                                    selected: None,
+                                    has_low_priority,
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -18649,7 +18646,7 @@ impl<'a> Checker<'a> {
                                         bare_alias_target,
                                     );
                                 }
-                                Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                                Ok(LibraryConstructorSelection::Rejected(result)) => return result,
                                 Ok(LibraryConstructorSelection::NoMatch) => {
                                     had_inapplicable_constructor |=
                                         !classifier.constructors.is_empty();
@@ -19286,7 +19283,7 @@ impl<'a> Checker<'a> {
                             bound_outer: None,
                             expected,
                             priority: ConstructorPriorityTier::Low,
-                            selected: None,
+                            selected: ConstructorPreselection::Open,
                         },
                     ) {
                         Ok(LibraryConstructorSelection::Selected) => {
@@ -19303,7 +19300,7 @@ impl<'a> Checker<'a> {
                                 bare_alias_target,
                             );
                         }
-                        Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                        Ok(LibraryConstructorSelection::Rejected(result)) => return result,
                         Ok(LibraryConstructorSelection::NoMatch) => {
                             had_inapplicable_constructor |= !classifier.constructors.is_empty();
                         }
@@ -34003,46 +34000,6 @@ impl<'a> Checker<'a> {
         semantic_common_supertype(&self.fed_source(), self, a, b)
     }
 
-    /// Exact branch lower bounds for a conditional used as a generic-call argument. The ordinary
-    /// expression slot keeps Kotlin's denotable common-type approximation, while inference consumes
-    /// the branch constraints that produced it. Nested conditionals flatten into the same
-    /// source-argument ordinal so a later bound failure is still reported on that argument.
-    fn conditional_inference_inputs(&self, expression: ExprId) -> Vec<Ty> {
-        let Expr::If {
-            then_branch,
-            else_branch: Some(else_branch),
-            ..
-        } = self.file.expr(expression)
-        else {
-            return self
-                .expr_types
-                .get(expression.0 as usize)
-                .copied()
-                .into_iter()
-                .collect();
-        };
-        [*then_branch, *else_branch]
-            .into_iter()
-            .flat_map(|branch| self.conditional_inference_inputs(branch))
-            .collect()
-    }
-
-    fn conditional_branches_admit_expected(&self, expression: ExprId, expected: Ty) -> bool {
-        matches!(
-            self.file.expr(expression),
-            Expr::If {
-                else_branch: Some(_),
-                ..
-            }
-        ) && self
-            .conditional_inference_inputs(expression)
-            .into_iter()
-            .all(|branch| {
-                branch == Ty::Nothing
-                    || (branch != Ty::Error && self.receiver_is_assignable(branch, expected))
-            })
-    }
-
     /// The checker's own binary-operator result: shared algebra, the checker's lookup context, and
     /// the checker's exact diagnostics for each refusal.
     fn check_binary(&mut self, op: BinOp, lt: Ty, rt: Ty, span: Span) -> Ty {
@@ -35594,7 +35551,7 @@ impl<'a> Checker<'a> {
                 .zip(&argument_kinds)
                 .zip(&whole_arrays)
                 .enumerate()
-                .filter_map(
+                .flat_map(
                     |(argument, (((parameter, _raw_actual), kind), named_whole_array))| {
                         if self
                             .unbound_contextual_result_signature(args[argument])
@@ -35653,9 +35610,25 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                        Some((argument, declaration_parameter, actual, whole_array))
+                        let inputs = match conditional_branch::conditional_argument_branches(
+                            self.file,
+                            args[argument],
+                        ) {
+                            Some(branches) if !whole_array => branches
+                                .into_iter()
+                                .map(|branch| {
+                                    self.call_arg_kind(scope, branch)
+                                        .inference_type(&source, declared)
+                                })
+                                .collect(),
+                            _ => vec![actual],
+                        };
+                        Some(inputs.into_iter().map(move |actual| {
+                            (argument, declaration_parameter, actual, whole_array)
+                        }))
                     },
                 )
+                .flatten()
                 .collect::<Vec<_>>();
             // Kotlin integer literals are adaptable constraints, not fixed primitive types. Let
             // non-literal arguments solve first; when they already fix every formal touched by a

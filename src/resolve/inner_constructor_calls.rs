@@ -331,7 +331,10 @@ impl Checker<'_> {
                 bound_outer: Some(receiver),
                 expected,
                 priority: ConstructorPriorityTier::All,
-                selected,
+                selected: selected.map_or(
+                    ConstructorPreselection::Open,
+                    ConstructorPreselection::Selected,
+                ),
             },
         ) {
             Ok(LibraryConstructorSelection::Selected) => {
@@ -356,7 +359,7 @@ impl Checker<'_> {
                     Some(receiver),
                 ))
             }
-            Ok(LibraryConstructorSelection::Rejected) => Some(Ty::Error),
+            Ok(LibraryConstructorSelection::Rejected(result)) => Some(result),
             Ok(LibraryConstructorSelection::NoMatch) => {
                 crate::trace_compiler!(
                     "resolve",

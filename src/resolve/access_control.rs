@@ -176,10 +176,13 @@ impl<'a> Checker<'a> {
         {
             return true;
         }
-        if !matches!(
-            candidate.kind,
-            crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
-        ) {
+        // Constructor access belongs to its classifier and is checked at commitment.
+        if candidate.constructor.is_some()
+            || !matches!(
+                candidate.kind,
+                crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
+            )
+        {
             return true;
         }
         crate::callable_access::source_callable_accessible(

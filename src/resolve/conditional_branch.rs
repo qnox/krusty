@@ -261,7 +261,60 @@ pub(super) fn terminal_value_expressions(file: &File, expression: ExprId, out: &
     }
 }
 
+/// The value expressions contributing independent lower bounds for one conditional argument.
+/// Nested conditionals flatten in source order but retain their caller's source-argument ordinal.
+/// Call inference gives each value its normal argument view; expected-type admission reads its
+/// checked nominal type. The caller keeps every branch at its original source-argument ordinal.
+pub(super) fn conditional_argument_branches(file: &File, argument: ExprId) -> Option<Vec<ExprId>> {
+    let Expr::If {
+        then_branch,
+        else_branch: Some(else_branch),
+        ..
+    } = file.expr(argument)
+    else {
+        return None;
+    };
+    Some(
+        [*then_branch, *else_branch]
+            .into_iter()
+            .flat_map(|branch| {
+                let value = branch_value_expression(file, branch);
+                conditional_argument_branches(file, value).unwrap_or_else(|| vec![value])
+            })
+            .collect(),
+    )
+}
+
 impl Checker<'_> {
+    /// Checked nominal branch types for provider inference and expected-type admission.
+    pub(super) fn conditional_inference_inputs(&self, expression: ExprId) -> Vec<Ty> {
+        conditional_argument_branches(self.file, expression)
+            .unwrap_or_else(|| vec![expression])
+            .into_iter()
+            .filter_map(|branch| self.expr_types.get(branch.0 as usize).copied())
+            .collect()
+    }
+
+    pub(super) fn conditional_branches_admit_expected(
+        &self,
+        expression: ExprId,
+        expected: Ty,
+    ) -> bool {
+        matches!(
+            self.file.expr(expression),
+            Expr::If {
+                else_branch: Some(_),
+                ..
+            }
+        ) && self
+            .conditional_inference_inputs(expression)
+            .into_iter()
+            .all(|branch| {
+                branch == Ty::Nothing
+                    || (branch != Ty::Error && self.receiver_is_assignable(branch, expected))
+            })
+    }
+
     /// Which expression owns completion of a conditional's still-open branch calls.
     ///
     /// A branch call owns an otherwise open result only while the conditional itself remains a
