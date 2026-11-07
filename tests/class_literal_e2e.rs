@@ -377,3 +377,45 @@ fun box(): String {\n\
 }\n";
     common::expect_box_same_as_kotlinc(SRC, "UnitClassLiteral");
 }
+
+const UNSIGNED_BOUND_CLASS_LITERALS: &str = r#"fun ofParam(x: UInt) = x::class.simpleName
+fun box(): String {
+    val literal = 1u::class.simpleName
+    val long = 3uL
+    val local = long::class.simpleName
+    val parameter = ofParam(4u)
+    val byte: UByte = 1u
+    val narrow = byte::class
+    val same = narrow == UByte::class
+    return if (literal == "UInt" && local == "ULong" && parameter == "UInt" && same) "OK"
+    else "unsigned class literals: $literal $local $parameter $narrow"
+}
+"#;
+
+/// `value::class` of an unsigned value names its own classifier, as kotlinc boxes it
+/// (`UInt.box-impl` then `getClass`), never the signed carrier the value sits in.
+#[test]
+fn an_unsigned_value_has_its_own_runtime_class() {
+    common::expect_box_same_as_kotlinc(UNSIGNED_BOUND_CLASS_LITERALS, "UnsignedBoundClassLiterals");
+}
+
+const VALUE_CLASS_BOUND_CLASS_LITERALS: &str = r#"@JvmInline value class Meters(val amount: Int)
+fun ofParameter(value: Meters) = value::class.simpleName
+fun box(): String {
+    val local = Meters(1)
+    val fromLocal = local::class.simpleName
+    val fromParameter = ofParameter(Meters(2))
+    val same = local::class == Meters::class
+    return if (fromLocal == "Meters" && fromParameter == "Meters" && same) "OK"
+    else "value class literals: $fromLocal $fromParameter $same"
+}
+"#;
+
+/// The runtime class of an unboxed value-class value is its box, not its carrier.
+#[test]
+fn a_value_class_value_has_its_box_as_runtime_class() {
+    common::expect_box_same_as_kotlinc(
+        VALUE_CLASS_BOUND_CLASS_LITERALS,
+        "ValueClassBoundClassLiterals",
+    );
+}
