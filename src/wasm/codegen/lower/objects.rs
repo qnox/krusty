@@ -649,8 +649,19 @@ impl Body<'_> {
     }
 
     /// The class property a checked property identity names, and its index there.
-    fn member_property(&self, target: PropertyId) -> Result<(ClassId, usize), Unsupported> {
-        match self.ir.local_property_layouts.get(&target) {
+    fn member_property(
+        &self,
+        target: PropertyId,
+        operation: Option<u32>,
+    ) -> Result<(ClassId, usize), Unsupported> {
+        let layout = match operation {
+            Some(operation) => self
+                .ir
+                .property_layout_at(operation, target)
+                .map_err(|_| "a malformed property specialization".to_owned())?,
+            None => self.ir.local_property_layouts.get(&target).cloned(),
+        };
+        match layout.as_ref() {
             Some(IrLocalPropertyLayout::Member {
                 class, property, ..
             }) if self.classes.is_some() => Ok((*class, *property as usize)),
@@ -666,7 +677,7 @@ impl Body<'_> {
         receiver: u32,
     ) -> Result<(), Unsupported> {
         let target = self.realized_property(operation)?;
-        self.property_read(target, Some(receiver))
+        self.property_read_at(target, Some(receiver), Some(operation))
     }
 
     /// A member write common realization left for this backend (`receiver.p = value`).
@@ -677,7 +688,7 @@ impl Body<'_> {
         value: u32,
     ) -> Result<(), Unsupported> {
         let target = self.realized_property(operation)?;
-        self.property_write(target, Some(receiver), value)
+        self.property_write_at(target, Some(receiver), value, Some(operation))
     }
 
     fn realized_property(&self, operation: u32) -> Result<PropertyId, Unsupported> {
@@ -690,6 +701,15 @@ impl Body<'_> {
         &mut self,
         target: PropertyId,
         receiver: Option<u32>,
+    ) -> Result<(), Unsupported> {
+        self.property_read_at(target, receiver, None)
+    }
+
+    fn property_read_at(
+        &mut self,
+        target: PropertyId,
+        receiver: Option<u32>,
+        operation: Option<u32>,
     ) -> Result<(), Unsupported> {
         if receiver.is_none() {
             if let Some(storage) = self.top_level_property(target)? {
@@ -715,7 +735,7 @@ impl Body<'_> {
                 return Ok(());
             }
         }
-        let (class, index) = self.member_property(target)?;
+        let (class, index) = self.member_property(target, operation)?;
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less read of `{}`", property.name))?;
@@ -755,6 +775,16 @@ impl Body<'_> {
         receiver: Option<u32>,
         value: u32,
     ) -> Result<(), Unsupported> {
+        self.property_write_at(target, receiver, value, None)
+    }
+
+    fn property_write_at(
+        &mut self,
+        target: PropertyId,
+        receiver: Option<u32>,
+        value: u32,
+        operation: Option<u32>,
+    ) -> Result<(), Unsupported> {
         if receiver.is_none() {
             if let Some(storage) = self.top_level_property(target)? {
                 if !storage.mutable {
@@ -787,7 +817,7 @@ impl Body<'_> {
                 return Ok(());
             }
         }
-        let (class, index) = self.member_property(target)?;
+        let (class, index) = self.member_property(target, operation)?;
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less write of `{}`", property.name))?;

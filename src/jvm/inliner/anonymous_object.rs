@@ -43,9 +43,6 @@ pub(crate) use suspend_methods::CallSiteSource;
 use suspend_methods::ContinuationMachine;
 pub(crate) use type_remapper::{MalformedType, TypeRemapper};
 
-const ALOAD: u8 = 0x19;
-const GETFIELD: u8 = 0xb4;
-const PUTFIELD: u8 = 0xb5;
 const GETSTATIC: u8 = 0xb2;
 const INVOKESPECIAL: u8 = 0xb7;
 const NEW: u8 = 0xbb;
@@ -217,8 +214,6 @@ pub(crate) fn regenerate(
         .any(|method| suspend_methods::is_lambda_machine(original, method));
     check_supported(
         original,
-        regeneration.classes,
-        &continuations,
         regeneration.continuation.is_some(),
         lambda_machine,
         regeneration.lambdas.is_empty(),
@@ -281,8 +276,11 @@ pub(crate) fn regenerate(
                 METADATA_DESC => metadata = Some(annotation),
                 // The copy's map is written with the class; kotlinc drops the original's.
                 SOURCE_DEBUG_EXTENSION_DESC => {}
-                // So is a continuation's `@DebugMetadata`, which its machine describes.
-                DEBUG_METADATA_DESC if regeneration.continuation.is_some() || lambda_machine => {}
+                // Rebuilt machines and copied non-lambda continuations publish their own debug metadata.
+                DEBUG_METADATA_DESC
+                    if regeneration.continuation.is_some()
+                        || lambda_machine
+                        || is_continuation_not_lambda(original) => {}
                 _ => {
                     let mut annotation = annotation.clone();
                     remapper.remap_annotation(&mut annotation)?;
@@ -317,11 +315,17 @@ pub(crate) fn regenerate(
         .code
         .as_ref()
         .ok_or(RegenerationError::Unsupported("a constructor without code"))?;
-    if constructor.desc != regeneration.constructor_desc {
+    // An object a copy's method constructs is called with the copy's types already in place: one
+    // that captures the copy as its outer instance passes the copy where the original took its
+    // original. The constructor is planned from the original's own descriptor, then renamed.
+    if constructor.desc != regeneration.constructor_desc
+        && remapper.map_desc(&constructor.desc)? != regeneration.constructor_desc
+    {
         return Err(RegenerationError::Unsupported(
             "a constructor called through another descriptor",
         ));
     }
+    let call_desc = constructor.desc.as_str();
     let mut constructor_code = constructor_code.clone();
     let mut reified_parameters_remain =
         specialize_copied(&mut constructor_code, regeneration.reified)?;
@@ -334,17 +338,10 @@ pub(crate) fn regenerate(
             desc: &field.desc,
         })
         .collect();
-    let mut plan = constructor::extract(
-        &constructor_code,
-        old,
-        &declared,
-        regeneration.constructor_desc,
-    )?;
-    // The fields holding function values the call passes for its inline suspend parameters
-    // without inlining them, read before the lambdas' fields are taken out of the plan.
-    let suspend_value_fields =
-        plan.argument_fields(regeneration.constructor_desc, regeneration.suspend_values)?;
-    let lambdas = plan_lambdas(&mut plan, regeneration)?;
+    let mut plan = constructor::extract(&constructor_code, old, &declared, call_desc)?;
+    // Preserve the original constructor's physical argument frame before lambda fields are removed.
+    let suspend_value_fields = plan.argument_fields(call_desc, regeneration.suspend_values)?;
+    let lambdas = plan_lambdas(&mut plan, call_desc, regeneration)?;
     plan.desc = remapper.map_desc(&plan.desc)?;
     for field in &mut plan.fields {
         field.desc = remapper.map_desc(&field.desc)?;
@@ -366,7 +363,44 @@ pub(crate) fn regenerate(
         })
         .map_err(RegenerationError::Copy)?;
     }
-    let body = copy_body(&plan.body, &remapper, &mut lines)?;
+    // kotlinc's `MethodInliner` transforms the constructor first: the objects it constructs are
+    // the copy's first ones, enclosed by the new constructor. What is left of its body reads no
+    // lambda, so only those objects are regenerated.
+    let mut nested = Vec::new();
+    let mut sam_wrappers = Vec::new();
+    let regenerates_objects = plan.body.instructions().any(|insn| {
+        references_other_regenerated_class(insn, regeneration.classes, old, &continuations)
+    });
+    let body = if regenerates_objects {
+        let mut body = plan.body.clone();
+        body.desc.clone_from(&plan.desc);
+        let mut objects = NestedObjects {
+            regeneration,
+            names: &mut *names,
+            own_constructor: &plan.desc,
+            method: "<init>",
+            descriptor: &plan.desc,
+            renamed: Vec::new(),
+            classes: Vec::new(),
+            sam_wrappers: Vec::new(),
+            reified_parameters_remain: false,
+        };
+        let body = transform_method(
+            body,
+            new,
+            false,
+            &[],
+            &mut remapper,
+            &mut lines,
+            &mut objects,
+        )?;
+        nested.extend(objects.classes);
+        sam_wrappers.extend(objects.sam_wrappers);
+        reified_parameters_remain |= objects.reified_parameters_remain;
+        body
+    } else {
+        copy_body(&plan.body, &remapper, &mut lines)?
+    };
     let body = plan.assemble(new, body);
     cw.add_copied_method(&ClassMethod {
         access: constructor.access,
@@ -388,8 +422,6 @@ pub(crate) fn regenerate(
     // The suspend lambda fields the copy inlines.
     // The continuations of copies that need none, whose `InnerClasses` rows go with them.
     let mut dropped_continuations = Vec::new();
-    let mut nested = Vec::new();
-    let mut sam_wrappers = Vec::new();
     for method in methods {
         if for_inline.skips(method) {
             continue;
@@ -443,8 +475,6 @@ pub(crate) fn regenerate(
                     )
                 });
             let mut code = if regenerates_objects {
-                let mut code = code.clone();
-                remapper.remap_method(&mut code)?;
                 let mut objects = NestedObjects {
                     regeneration,
                     names: &mut *names,
@@ -457,18 +487,15 @@ pub(crate) fn regenerate(
                     sam_wrappers: Vec::new(),
                     reified_parameters_remain: false,
                 };
-                let code = lambda_inlining::inline_into(
-                    &code,
+                let code = transform_method(
+                    code.clone(),
                     new,
                     machine.is_some(),
                     &lambdas,
+                    &mut remapper,
                     &mut lines,
-                    regeneration.caller_lines,
                     &mut objects,
                 )?;
-                for (original, copy) in &objects.renamed {
-                    remapper.add_mapping(original, copy);
-                }
                 nested.extend(objects.classes);
                 sam_wrappers.extend(objects.sam_wrappers);
                 reified_parameters_remain |= objects.reified_parameters_remain;
@@ -715,6 +742,7 @@ fn remap_declaration(
 /// copies before the constructor is patched.
 fn plan_lambdas<'a>(
     plan: &mut constructor::Constructor,
+    call_desc: &str,
     regeneration: &Regeneration<'a>,
 ) -> Result<Vec<FieldLambda<'a>>, RegenerationError> {
     if regeneration.lambdas.is_empty() {
@@ -766,7 +794,7 @@ fn plan_lambdas<'a>(
         .iter()
         .flat_map(|lambda| lambda.captured.iter().cloned())
         .collect();
-    let fields = plan.inline_lambdas(regeneration.constructor_desc, &arguments, &recaptured)?;
+    let fields = plan.inline_lambdas(call_desc, &arguments, &recaptured)?;
     for (lambda, field) in lambdas.iter_mut().zip(fields) {
         lambda.field = field;
     }
@@ -776,22 +804,20 @@ fn plan_lambdas<'a>(
 /// Refuse what the ported stages do not regenerate yet.
 fn check_supported(
     original: &ClassNode,
-    classes: &dyn ClassRoles,
-    continuations: &[String],
     continuation: bool,
     lambda_machine: bool,
     specialization_only: bool,
 ) -> Result<(), RegenerationError> {
-    // A continuation copied for a suspend method's machine is one coroutine the port regenerates,
-    // and a suspend lambda whose machine is rebuilt over its `invokeSuspend$$forInline` another.
-    // A suspend lambda the call passes no lambda to is the third: its copy only specializes its
-    // reified operations, so its machine and `@DebugMetadata` stay as they are.
+    // Rebuild an enclosing suspend method's continuation or a lambda's own machine. Plain
+    // specialization retains a suspend lambda's machine; a copied non-lambda continuation keeps
+    // its owning method's machine and drops its original debug metadata.
     let regenerated_coroutine = (continuation
         && original.super_name.as_deref() == Some(CONTINUATION_IMPL))
         || lambda_machine
         || (specialization_only
             && !continuation
-            && original.super_name.as_deref() == Some(SUSPEND_LAMBDA));
+            && original.super_name.as_deref() == Some(SUSPEND_LAMBDA))
+        || (specialization_only && is_continuation_not_lambda(original));
     if !regenerated_coroutine
         && original
             .super_name
@@ -814,19 +840,16 @@ fn check_supported(
             "a class without a source file",
         ));
     }
-    for method in &original.methods {
-        let Some(code) = &method.code else { continue };
-        // A method's nested objects are regenerated while its lambdas are inlined into it; a
-        // constructor or initializer is copied as it is.
-        if matches!(method.name.as_str(), "<init>" | "<clinit>")
-            && code.instructions().any(|insn| {
-                references_other_regenerated_class(insn, classes, &original.name, continuations)
-            })
-        {
-            return Err(RegenerationError::Unsupported("a nested anonymous object"));
-        }
-    }
     Ok(())
+}
+
+/// kotlinc's `isContinuationNotLambda`: a continuation class, whose state machine is its suspend
+/// method's, not its own.
+fn is_continuation_not_lambda(original: &ClassNode) -> bool {
+    original.super_name.as_deref().is_some_and(|name| {
+        name.strip_prefix(COROUTINE_BASE_PACKAGE)
+            .is_some_and(|name| name.ends_with("ContinuationImpl"))
+    })
 }
 
 /// Whether `insn` constructs or loads an object other than `self_name` that a copy would
@@ -863,6 +886,40 @@ fn references_other_regenerated_class(
     }
 }
 
+/// `code`, a method of the copy `new` with its types not yet renamed, as kotlinc's `MethodInliner`
+/// transforms it: every `invoke` of one of `lambdas` becomes the lambda's body, and each object it
+/// constructs that the copy regenerates in turn is regenerated into `objects`, whose originals the
+/// method and the copy's later methods then name by their copies.
+fn transform_method(
+    mut code: MethodNode,
+    new: &str,
+    for_inline: bool,
+    lambdas: &[FieldLambda<'_>],
+    remapper: &mut TypeRemapper,
+    lines: &mut CopiedLines,
+    objects: &mut NestedObjects<'_, '_>,
+) -> Result<MethodNode, RegenerationError> {
+    remapper.remap_method(&mut code)?;
+    let caller_lines = objects.regeneration.caller_lines;
+    let mut code = lambda_inlining::inline_into(
+        &code,
+        new,
+        for_inline,
+        lambdas,
+        lines,
+        caller_lines,
+        objects,
+    )?;
+    for (original, copy) in &objects.renamed {
+        remapper.add_mapping(original, copy);
+    }
+    // kotlinc writes a copy's methods through its remapping class builder once every one is
+    // transformed, so a reference before an object's `new` (a suspend method's `instanceof` of its
+    // continuation) names the copy too.
+    remapper.remap_method(&mut code)?;
+    Ok(code)
+}
+
 /// The original's one constructor and its other methods, in order.
 fn split_constructor(
     original: &ClassNode,
@@ -891,39 +948,12 @@ fn check_captured_field_accesses(
     old: &str,
     declared: &[DeclaredCapture<'_>],
 ) -> Result<(), RegenerationError> {
-    let Some(code) = &method.code else {
-        return Ok(());
-    };
-    let mut previous: Option<&Insn> = None;
-    for entry in &code.nodes {
-        let Node::Insn(insn) = entry else {
-            previous = None;
-            continue;
-        };
-        if let Insn::Field {
-            op,
-            owner,
-            name,
-            desc,
-        } = insn
-        {
-            if (*op == GETFIELD || *op == PUTFIELD) && is_captured_field_name(name) {
-                let direct = *op == GETFIELD
-                    && owner == old
-                    && declared
-                        .iter()
-                        .any(|field| field.name == name && field.desc == desc)
-                    && matches!(previous, Some(Insn::Var { op: ALOAD, slot: 0 }));
-                if !direct {
-                    return Err(RegenerationError::Unsupported(
-                        "a captured field accessed other than from this",
-                    ));
-                }
-            }
-        }
-        previous = Some(insn);
+    match &method.code {
+        Some(code) if !constructor::reads_captured_fields_from_this(code, old, declared) => Err(
+            RegenerationError::Unsupported("a captured field accessed other than from this"),
+        ),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// A body of the original as the copy carries it: every regenerated class renamed and every line
@@ -1072,11 +1102,6 @@ fn write_metadata(
         .value("xi")
         .and_then(ElementValue::as_int)
         .unwrap_or(0);
-    if extra & METADATA_PUBLIC_ABI_FLAG == 0 {
-        return Err(RegenerationError::Unsupported(
-            "an object outside the public ABI",
-        ));
-    }
     let strings = |name| {
         metadata
             .value(name)

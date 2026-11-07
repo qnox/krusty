@@ -94,21 +94,52 @@ pub(in crate::jvm) fn realized_property_accessor(
 
 /// Start the identity source map kotlinc writes for a class whose nearest enclosing function is
 /// `inline` (`visitSMAP(…, intoInline = true)`): code inlining that function copies the class and
-/// maps its lines through it. A class one function further in carries none.
+/// maps its lines through it. A class one function further in carries none, and neither does one
+/// declared in another class's constructor, initializer or body, whose code is that class's.
 pub(super) fn start_inline_body_source_map(
     ir: &IrFile,
     class: &crate::ir::IrClass,
     writer: &mut crate::jvm::classfile::ClassWriter,
 ) {
-    let in_inline_body = enclosing_functions(ir, class.enclosure)
-        .next()
-        .is_some_and(|(function, _)| ir.inline_fns.contains(&function));
+    use crate::ir::IrEnclosure;
+    let declared_in_class_code = matches!(
+        class.enclosure,
+        Some(
+            IrEnclosure::Constructor { .. }
+                | IrEnclosure::ClassInitializer(_)
+                | IrEnclosure::Classifier(_)
+        )
+    );
+    let in_inline_body = !declared_in_class_code
+        && enclosing_functions(ir, class.enclosure)
+            .next()
+            .is_some_and(|(function, _)| ir.inline_fns.contains(&function));
     if in_inline_body {
-        let lines = u16::try_from(ir.source_line_count)
-            .unwrap_or(u16::MAX)
-            .max(1);
+        // Another file's class, compiled here for a call site that inlines its declaring
+        // function, maps that file's lines.
+        let lines = match foreign_declaration_source(ir, class) {
+            Some((_, lines)) => lines,
+            None => u16::try_from(ir.source_line_count)
+                .unwrap_or(u16::MAX)
+                .max(1),
+        };
         writer.start_inline_origin_source_map(lines);
     }
+}
+
+/// The source file name and line count of the file whose inline function declares `class`, when
+/// that is another file.
+pub(super) fn foreign_declaration_source(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+) -> Option<(String, u16)> {
+    let template = crate::jvm::inner_classes::foreign_declaration(ir, class)?;
+    let debug = ir
+        .source_debug
+        .file(ir.foreign_template_source(template)?.source)?;
+    let source_file = debug.name.rsplit(['/', '\\']).next().unwrap_or(&debug.name);
+    let lines = u16::try_from(debug.line_count).unwrap_or(u16::MAX).max(1);
+    Some((source_file.to_string(), lines))
 }
 
 /// Whether `class` is declared in an `inline` function's scope, however deeply (kotlinc's

@@ -1036,7 +1036,10 @@ impl Walk<'_> {
         };
         let crate::ir::IrLocalPropertyLayout::Member {
             class, property, ..
-        } = *self.ir.local_property_layouts.get(target)?
+        } = self
+            .ir
+            .property_layout_at(operation, *target)
+            .expect("a realized property retains its checked specialization")?
         else {
             return None;
         };
@@ -1081,7 +1084,10 @@ impl Walk<'_> {
             property,
             private,
             ..
-        } = *self.ir.local_property_layouts.get(target)?
+        } = self
+            .ir
+            .property_layout_at(operation, *target)
+            .expect("a realized property retains its checked specialization")?
         else {
             return None;
         };
