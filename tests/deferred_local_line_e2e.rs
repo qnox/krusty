@@ -7,21 +7,9 @@ use super::common;
 
 #[test]
 fn a_deferred_local_records_no_line_beyond_its_declaration() {
-    let src = "fun next(): Int = 2\n\
-               \n\
-               fun box(): String {\n\
-               \x20   val task: String\n\
-               \n\
-               \x20   do {\n\
-               \x20       if (next() % 2 == 0) {\n\
-               \x20           task = \"OK\"\n\
-               \x20           break\n\
-               \x20       }\n\
-               \x20   }\n\
-               \x20   while (true)\n\
-               \n\
-               \x20   return task\n\
-               }\n";
+    // PLATFORM-SPECIFIC: compare JVM LineNumberTable and complete classfile bytes. The whole
+    // portable program is also executed by the shared box inventory.
+    let src = include_str!("box_regressions/deferredLocalLine.kt");
     let Some(result) = common::byte_diff_against_kotlinc_cp(
         "DeferredLocalLine",
         src,
