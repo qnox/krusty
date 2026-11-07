@@ -12,6 +12,8 @@ mod continuation_spill_order_e2e;
 mod coroutine_intrinsics_e2e;
 #[path = "../generic_suspend_member_return_e2e.rs"]
 mod generic_suspend_member_return_e2e;
+#[path = "../inline_lambda_suspend_completion_e2e.rs"]
+mod inline_lambda_suspend_completion_e2e;
 #[path = "../local_suspend_default_e2e.rs"]
 mod local_suspend_default_e2e;
 #[path = "../suspend_anonymous_object_name_e2e.rs"]
