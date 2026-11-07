@@ -136,6 +136,22 @@ knobs mirror Native's with the `WASM_JS`/`WASM_WASI` infix (`KRUSTY_WASM_JS_BOX_
 `…_BOX_LIMIT`, `…_BOX_TRACE`). Each lane has its own target-KLIB ratchet, keyed by `wasm-js-klib`
 or `wasm-wasi-klib`, because Kotlin publishes different platform surfaces for the two targets.
 
+Upstream discovery is derived from the pinned Kotlin test generators for each version and target,
+including their model roots, filename patterns and directory exclusions. It includes `boxInline`,
+JVM's modern-JDK, compose-like, synthetic-accessor and spec box suites, Native's own codegen and
+synthetic-accessor roots, and Wasm's interop and selected JS-translator suites. Owned regressions
+remain a separate shared inventory. Keys below the historical `codegen/box` root stay unchanged;
+other upstream roots use `upstream/<repository-relative-path>`.
+
+`just box-corpus` requires Python 3 and provisions every declared box root plus the matching
+selection sources. Missing roots or unsupported generator declarations fail discovery. The
+`box_selection_reference` tests execute the original upstream generator bodies using their original
+model API defaults and compare every selected root and file with harness discovery. They also
+execute Kotlin's backend matcher to pin target inheritance, exact exclusions and K2 mute rules.
+The JVM version-matrix regression suite runs these checks for every supported compiler version.
+For example, Wasm excludes `compileKotlinAgainstKotlin/` through `jvmOnlyBoxTests`; JVM and Native
+retain it subject to file directives. No upstream test program is rewritten to apply these rules.
+
 The Native lane uses the same committed text ratchet as JVM, keyed by `native-klib` and the exact
 Kotlin release. Its cases are analyzed against that release's Kotlin/Native stdlib KLIB
 (`KRUSTY_KOTLIN_NATIVE`, provisioned by `just kotlin-native <v>`), as kotlinc-native compiles them; the
@@ -163,14 +179,32 @@ invocation separately because each is a separate process with its own wall time.
 unfiltered binary name.
 
 CI builds the conformance test binary and CLI once. Every version in `kotlin-versions` expands into
-independent `jvm`, `native`, and `wasm` matrix rows from those artifacts. GitHub resolves a job's
-producer dependencies before it expands the matrix, so JVM rows use an early scheduler matrix that
-does not wait for the focused KLIB test binaries; Native and Wasm use a second scheduler matrix once
-that target-only artifact is ready. Both matrices execute one YAML-anchored conformance step
-inventory and the same backend-neutral case table. The JVM row runs its box corpus and JVM-owned
+independent `jvm`, `native`, `wasm-js`, and `wasm-wasi` matrix rows from those artifacts. GitHub
+resolves a job's producer dependencies before it expands the matrix. Every target waits only for the conformance
+binary and tool producer. The tool producer also exports the normal compiler unit-test binary.
+Every Native/Wasm version row runs its exact KLIB implementation-coverage ratchet from that
+unit binary, including after a corpus failure; no dedicated KLIB profile or artifact producer is
+required. One platform/version matrix executes the conformance step inventory and
+the same backend-neutral case table. The JVM row runs its box corpus and JVM-owned
 regressions. The Native and Wasm rows run their own box corpora followed by
 their focused non-corpus regressions against the same exact target compiler and KLIB setup, so no
 target test consumes JVM artifacts and no target waits for another target's corpus result.
+Native/Wasm byte scoring is enabled by `KRUSTY_NATIVE_BYTE_REPORT`, `KRUSTY_WASM_JS_BYTE_REPORT`,
+and `KRUSTY_WASM_WASI_BYTE_REPORT`. Each report uses the same `<pct> <matched> <total>` format and
+leading-prefix/max-length scoring as JVM. Entries are paired by `(source module, unpacked KLIB
+entry path)`, including the manifest, metadata and IR; ZIP packaging is not scored. Non-passing
+boxes receive zero credit against the reference bytes, and a reference error fails the run.
+Reference inventories use the same immutable release/RC policy as JVM: source bytes and names,
+dependency/friend/refinement topology, target, compiler/stdlib/test-library content, producing JDK,
+and reference-driver inputs identify each recording. Each inventory has its own atomically written
+ZIP under `target/cache/klib-references` (`KRUSTY_KLIB_REFERENCE_CACHE` overrides it), so a cold
+corpus does not rebuild an archive containing earlier cases. Warm hits perform no reference
+compilation; cold misses use bounded persistent compiler pools. Executable compilation records
+KLIB bytes from the same checked-IR stream, without a second frontend pass. CI restores the
+per-version/target directory; pull requests compile/cache misses locally, while only master
+publishes the directory through the Actions cache. KLIB byte reports are uploaded as
+`klib-byte-equality-<version>-<target>` artifacts.
+
 `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and
 `KRUSTY_KOTLIN_BOX_DIR` select the runtime reference toolchain, so the matrix does not rebuild Rust
 code per Kotlin version or target. Toolchain and box/serialization corpora are isolated by version.
@@ -471,12 +505,14 @@ Do not use `--release` for tests. The release build cycle takes longer than it s
 ## Required Check
 
 The `ci` workflow's `ci-and-conformance` job is the single check for master's ruleset to require.
-It needs the independent `lint` and coverage-owning `ci` jobs, both scheduler halves of the shared
+It needs the independent `lint` and coverage-owning `ci` jobs, the platform/version
 conformance matrix, `build-gradle-plugin`, and the whole `gradle` compatibility matrix. Every
 supported Kotlin version has distinct JVM, Native and Wasm conformance
-rows; the maximum-version Native row also runs the focused KLIB decoder, value-class and
-kotlinc-native oracle coverage formerly owned by a standalone job, while `just klib-semantics`
-remains the focused local recipe. One backend-neutral box inventory includes upstream and owned
+rows. Native and both Wasm lanes also report module-qualified KLIB entry byte equality against
+the exact reference compiler. Decoder unit tests and KLIB artifact compatibility regressions run
+in the normal unit/e2e coverage suites with the Native toolchain provisioned; there is no separate
+KLIB test artifact build. `just klib-semantics` remains the focused local recipe. One backend-neutral
+box inventory includes upstream and owned
 portable regular/multimodule cases in every JVM, Native and Wasm row; directives may not silently
 skip owned cases. Genuinely platform-specific sources live in named target-owned tests with a
 `PLATFORM-SPECIFIC` marker. The JVM row owns JVM regressions; Native

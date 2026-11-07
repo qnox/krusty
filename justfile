@@ -360,11 +360,30 @@ box-corpus VERSION=`just max-version`:
         # Keep cone mode: a fresh sparse clone checks out the repository-root files that cone mode
         # owns. Switching to non-cone while excluding them can leave those paths in place and abort
         # the update before the requested corpus directory is materialized.
-        git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs >&2
+        git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs "${selection_dirs[@]}" >&2
     }
     # Kotlin's command-line test corpus (`.args`/`.out` pairs) and the third-party annotation
     # sources some of its cases put on the classpath; kotlin_cli_jvm_conformance runs it.
     cli_dirs="compiler/testData/cli third-party/annotations third-party/java8-annotations third-party/jsr305"
+    # The matching generators and backend matcher are the selection oracle, not another
+    # compiler build. Keep their original sources beside each exact-version corpus.
+    selection_files=()
+    selection_dirs=()
+    while IFS= read -r selection_file; do
+        [ -n "$selection_file" ] || continue
+        selection_files+=("$selection_file")
+        selection_dirs+=("${selection_file%/*}")
+    done < tests/box_selection_sources.txt
+    box_roots=()
+    load_box_roots() {
+        local roots_text
+        roots_text=$(python3 scripts/box_selection.py --checkout "$root" --required-roots) || return 1
+        box_roots=()
+        while IFS= read -r box_root; do
+            [ -n "$box_root" ] && box_roots+=("$box_root")
+        done <<< "$roots_text"
+        [ "${#box_roots[@]}" -gt 0 ]
+    }
     mock_dir=""
     if [ -d "$root/.git" ] && [ -d "$box" ]; then
         mock_dir="$(mock_dir_at_tag)"
@@ -373,6 +392,15 @@ box-corpus VERSION=`just max-version`:
     if [ -n "$mock_dir" ] && [ -f "$root/$mock_dir/rt.jar" ]; then
         complete=1
         for dir in $cli_dirs; do [ -d "$root/$dir" ] || complete=0; done
+        for selection_file in "${selection_files[@]}"; do
+            [ -f "$root/$selection_file" ] || complete=0
+        done
+        if [ "$complete" = 1 ]; then
+            load_box_roots || exit 1
+            for box_root in "${box_roots[@]}"; do
+                [ -d "$root/$box_root" ] || complete=0
+            done
+        fi
     fi
     if [ "$complete" = 1 ]; then
         echo "$box"
@@ -387,18 +415,29 @@ box-corpus VERSION=`just max-version`:
     if [ -n "$mock_dir" ]; then
         # A cache provisioned before the mock JDK or the CLI corpus was needed: extend it rather
         # than accept it.
-        echo "adding the mock JDK and the CLI corpus to the Kotlin codegen/box corpus (v${ver})…" >&2
-        git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs >&2 \
+        echo "adding the mock JDK, CLI corpus and selection sources to Kotlin v${ver}…" >&2
+        git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs "${selection_dirs[@]}" >&2 \
             || { echo "failed to extend the v${ver} corpus checkout" >&2; exit 1; }
     else
         # No checkout, or a restored one whose tree cannot name its mock JDK: provision afresh.
         clone_corpus
     fi
+    load_box_roots || exit 1
+    git -C "$root" sparse-checkout add "${box_roots[@]}" >&2 \
+        || { echo "failed to provision the upstream box roots for v${ver}" >&2; exit 1; }
     [ -d "$box" ] || { echo "box dir missing after sparse checkout: $box" >&2; exit 1; }
     [ -f "$root/$mock_dir/rt.jar" ] \
         || { echo "mock JDK missing after sparse checkout: $root/$mock_dir/rt.jar" >&2; exit 1; }
     [ -d "$root/compiler/testData/cli/jvm" ] \
         || { echo "CLI corpus missing after sparse checkout: $root/compiler/testData/cli/jvm" >&2; exit 1; }
+    for selection_file in "${selection_files[@]}"; do
+        [ -f "$root/$selection_file" ] \
+            || { echo "selection source missing after sparse checkout: $root/$selection_file" >&2; exit 1; }
+    done
+    for box_root in "${box_roots[@]}"; do
+        [ -d "$root/$box_root" ] \
+            || { echo "upstream box root missing after sparse checkout: $root/$box_root" >&2; exit 1; }
+    done
     echo "$box"
 
 # Provision the kotlinx.serialization compiler-plugin box corpus (plugins/kotlinx-serialization/
@@ -504,6 +543,12 @@ krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
     scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib
+
+# Reuse the normal compiler unit suite in exact-version CI rows without rebuilding Rust there.
+compiler-unit-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/cargo-test-binary.sh krusty -p krusty --lib
 
 # Build the conformance test binary and print its path.
 conformance-bin:

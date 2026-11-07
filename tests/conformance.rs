@@ -13,12 +13,14 @@ mod common;
 #[path = "box_byte_score.rs"]
 mod box_byte_score;
 mod box_inventory;
+mod box_klib_bytes;
 #[path = "box_lane.rs"]
 mod box_lane;
 #[path = "box_ratchet.rs"]
 mod box_ratchet;
 #[path = "box_reference_classes.rs"]
 mod box_reference_classes;
+mod box_selection_reference;
 #[path = "box_vendored_e2e.rs"]
 mod box_vendored_e2e;
 mod dependency_template_rejections;
