@@ -134,6 +134,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         // operation.
         value_class_type_operations: _,
         value_class_unbox_type_operation_edges: _,
+        value_class_null_safe_unbox_type_operation_edges: _,
         // The accessor bodies materialized for one inline property access.
         inline_property_access: _,
         // A callable reference consumed as an inline argument: the expansion that consumes the

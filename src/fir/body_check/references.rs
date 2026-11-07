@@ -1356,6 +1356,7 @@ impl BodyFirChecker<'_> {
             dispatch: crate::fir::FirPropertyDispatch::Ordinary,
 
             metadata_constant_read: false,
+            semantic_role: None,
         })
     }
 

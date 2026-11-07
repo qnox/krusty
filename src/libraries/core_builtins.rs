@@ -59,11 +59,24 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         ty: Ty,
         intrinsic: CompilerIntrinsic,
     ) {
+        let role = super::builtin_declaration::semantic_call_role(
+            super::builtin_declaration::BuiltinMemberDeclaration {
+                owner,
+                name,
+                params: &[],
+                ret: ty,
+                is_property: true,
+                is_operator: false,
+                is_infix: false,
+                annotations: &[],
+            },
+        );
         if let Some(callables) = classifier.declared_callables.get_mut(name) {
             let (functions, mut properties) = std::mem::take(callables).into_parts();
             if !properties.overloads.is_empty() {
                 for property in &mut properties.overloads {
                     property.getter.compiler_intrinsic = Some(intrinsic);
+                    property.getter.semantic_role = role;
                 }
                 *callables = Callables::from_parts(functions, properties);
                 return;
@@ -72,6 +85,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         }
         let mut getter = LibraryCallable::library(owner, name, Vec::new(), ty, ty, "");
         getter.compiler_intrinsic = Some(intrinsic);
+        getter.semantic_role = role;
         let property = PropertyInfo {
             return_value_status: None,
             name: name.to_string(),
