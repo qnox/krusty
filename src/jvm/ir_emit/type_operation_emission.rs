@@ -736,9 +736,7 @@ impl Emitter<'_> {
             let physical = self.emit_consumed_operand(operand, code);
             let semantic = self
                 .ir
-                .logical_types
-                .get(&operand)
-                .copied()
+                .logical_type(operand)
                 .unwrap_or_else(|| self.value_ty(operand));
             return (physical, semantic);
         }
