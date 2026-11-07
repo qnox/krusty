@@ -9,18 +9,20 @@
 //! implementation has the parameters its function value is invoked with.
 //!
 //! A body with no suspension point completes in place: it returns its result, coerced to `Any?`.
-//! A body that suspends needs the state machine, which is not modeled on these targets yet; the
-//! pass declines it rather than emit a body that cannot resume.
+//! A call to such a function passes a continuation the callee never resumes and reads that
+//! returned value, so the caller completes in place too. A body that can actually suspend — an
+//! intrinsic suspension, a continuation read, or a call to a suspend function whose body is absent
+//! or itself suspends — needs the state machine, which is not modeled on these targets yet. The
+//! pass declines that file rather than emit a body that cannot resume.
 
 use crate::fx_hash::HashSet;
 use crate::ir::{
-    for_each_child, shift_value_indices, ExprId, IrExpr, IrFile, IrGeneratedParameterRole,
-    IrParameterIdentity, IrTypeOp,
+    for_each_child, shift_value_indices, Callee, ExprId, IrConst, IrExpr, IrFile,
+    IrGeneratedParameterRole, IrParameterIdentity, IrTypeOp,
 };
 use crate::types::{wk, Ty};
 
 use super::control_flow::stmt_diverges;
-use super::suspension_points::expr_calls_suspend;
 
 /// Why a file's suspend functions cannot take the continuation-passing form yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,45 +46,222 @@ pub(crate) fn add_continuation_parameters(ir: &mut IrFile) -> Result<(), Continu
     suspend_functions.sort_unstable();
     suspend_functions.dedup();
     let suspend_set: HashSet<u32> = suspend_functions.iter().copied().collect();
-    // Any body may reach a suspension point: a suspend function's own, and a non-suspend one that
-    // forwards to a suspend declaration (a `$default` entry). Neither can complete in place.
+    let completing = completing_suspend_functions(ir, &suspend_set);
+    // Any body may reach a real suspension: a suspend function's own, and a non-suspend one that
+    // forwards to a suspend declaration (a `$default` entry). A call whose callee completes in
+    // place does not.
     if ir
         .functions
         .iter()
         .filter_map(|function| function.body)
-        .any(|body| suspends(ir, body, &suspend_set))
+        .any(|body| body_needs_state_machine(ir, body, &suspend_set, &completing))
     {
         return Err(ContinuationDecline::Suspends);
     }
     for function in suspend_functions {
         add_continuation_parameter(ir, function);
     }
+    pass_continuations(ir, &suspend_set);
     Ok(())
 }
 
-/// Whether evaluating `body` can suspend the function that owns it.
-fn suspends(ir: &IrFile, body: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    if expr_calls_suspend(ir, body, suspend_set) {
-        return true;
-    }
-    // The enclosing continuation read by `suspendCoroutineUninterceptedOrReturn`'s block. A lambda
-    // body is its own function, so only captures are this frame's.
-    fn reads_continuation(ir: &IrFile, expression: ExprId) -> bool {
-        match &ir.exprs[expression as usize] {
-            IrExpr::CurrentContinuation => true,
-            IrExpr::Lambda { captures, .. } => captures
-                .iter()
-                .any(|&capture| reads_continuation(ir, capture)),
-            _ => {
-                let mut found = false;
-                for_each_child(&ir.exprs, expression, &mut |child| {
-                    found |= reads_continuation(ir, child);
-                });
-                found
+/// Suspend functions whose bodies return their value and never resume a continuation.
+///
+/// A function is rejected when its body has no implementation, reads the current continuation,
+/// contains an intrinsic suspension, calls a suspend function outside this file, or calls a
+/// rejected function. Calls among the rest complete in place, including a cycle of them.
+fn completing_suspend_functions(ir: &IrFile, suspend_set: &HashSet<u32>) -> HashSet<u32> {
+    let mut rejected = HashSet::default();
+    for &function in suspend_set {
+        match ir
+            .functions
+            .get(function as usize)
+            .and_then(|declaration| declaration.body)
+        {
+            None => {
+                rejected.insert(function);
             }
+            Some(body) if has_unrealized_suspension(ir, body, suspend_set) => {
+                rejected.insert(function);
+            }
+            Some(_) => {}
         }
     }
-    reads_continuation(ir, body)
+    loop {
+        let decided = rejected.len();
+        for &function in suspend_set {
+            if rejected.contains(&function) {
+                continue;
+            }
+            let Some(body) = ir.functions[function as usize].body else {
+                continue;
+            };
+            if calls_rejected_suspend(ir, body, suspend_set, &rejected) {
+                rejected.insert(function);
+            }
+        }
+        if rejected.len() == decided {
+            break;
+        }
+    }
+    suspend_set
+        .iter()
+        .copied()
+        .filter(|function| !rejected.contains(function))
+        .collect()
+}
+
+/// Whether `body` reaches a suspension this pass cannot turn into a direct call.
+fn body_needs_state_machine(
+    ir: &IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+    completing: &HashSet<u32>,
+) -> bool {
+    has_unrealized_suspension(ir, body, suspend_set)
+        || any_in_body(ir, body, |ir, expression| {
+            direct_suspend_callee(ir, expression, suspend_set)
+                .is_some_and(|function| !completing.contains(&function))
+        })
+}
+
+/// A continuation read, an intrinsic suspension, or a suspend call whose callee is not a function
+/// of this file. A lambda body belongs to the lambda's function, so only its captures count here.
+fn has_unrealized_suspension(ir: &IrFile, body: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    any_in_body(ir, body, |ir, expression| {
+        matches!(ir.expr(expression), IrExpr::CurrentContinuation)
+            || ir.intrinsic_suspension_points.contains_key(&expression)
+            || (ir.suspend_calls.contains_key(&expression)
+                && direct_suspend_callee(ir, expression, suspend_set).is_none())
+    })
+}
+
+/// Whether `body` calls a suspend function already known to need the state machine.
+fn calls_rejected_suspend(
+    ir: &IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+    rejected: &HashSet<u32>,
+) -> bool {
+    any_in_body(ir, body, |ir, expression| {
+        direct_suspend_callee(ir, expression, suspend_set)
+            .is_some_and(|function| rejected.contains(&function))
+    })
+}
+
+/// Whether any node of `body` makes `hit` true. A shared child is visited once.
+fn any_in_body(ir: &IrFile, body: ExprId, mut hit: impl FnMut(&IrFile, ExprId) -> bool) -> bool {
+    fn walk(
+        ir: &IrFile,
+        expression: ExprId,
+        hit: &mut impl FnMut(&IrFile, ExprId) -> bool,
+        seen: &mut HashSet<ExprId>,
+    ) -> bool {
+        if !seen.insert(expression) {
+            return false;
+        }
+        if hit(ir, expression) {
+            return true;
+        }
+        let lambda_captures = match ir.expr(expression) {
+            IrExpr::Lambda { captures, .. } => Some(captures.clone()),
+            _ => None,
+        };
+        if let Some(captures) = lambda_captures {
+            return captures
+                .into_iter()
+                .any(|capture| walk(ir, capture, hit, seen));
+        }
+        let mut children = Vec::new();
+        for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+        children.into_iter().any(|child| walk(ir, child, hit, seen))
+    }
+    walk(ir, body, &mut hit, &mut HashSet::default())
+}
+
+/// The same-file suspend function a direct call names, when `expression` is such a call.
+///
+/// A `$default` entry keeps the callee's identity but is its own function: its parameters were not
+/// given a continuation, and the call it makes to the declaration is the one that needs one.
+fn direct_suspend_callee(
+    ir: &IrFile,
+    expression: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> Option<u32> {
+    match ir.expr(expression) {
+        IrExpr::Call { callee, .. } => match &**callee {
+            Callee::Local(function) | Callee::ClassStatic { function, .. }
+                if suspend_set.contains(function) =>
+            {
+                Some(*function)
+            }
+            _ => None,
+        },
+        IrExpr::MethodCall { class, index, .. } => {
+            let function = *ir.classes[*class as usize].methods.get(*index as usize)?;
+            suspend_set.contains(&function).then_some(function)
+        }
+        _ => None,
+    }
+}
+
+/// Pass a continuation into every direct call of a suspend function and read the call at the
+/// function's declared result. The callee completes in place and never resumes the continuation,
+/// so the value is `null`.
+fn pass_continuations(ir: &mut IrFile, suspend_set: &HashSet<u32>) {
+    let sites: Vec<ExprId> = (0..ir.exprs.len() as ExprId)
+        .filter(|&expression| direct_suspend_callee(ir, expression, suspend_set).is_some())
+        .collect();
+    if sites.is_empty() {
+        return;
+    }
+    let continuation = ir.add_expr(IrExpr::Const(IrConst::Null));
+    let suspended = Ty::nullable(Ty::obj_name(wk::any()));
+    for site in sites {
+        let Some(function) = direct_suspend_callee(ir, site, suspend_set) else {
+            continue;
+        };
+        let Some(&(_, declared)) = ir.suspend_declared_sigs.get(&function) else {
+            continue;
+        };
+        let logical = ir.checked_type(site).unwrap_or(declared);
+        let parameters = ir.functions[function as usize].params.len();
+        let call = match ir.exprs[site as usize].clone() {
+            IrExpr::Call {
+                callee,
+                dispatch_receiver,
+                mut args,
+            } if args.len() + 1 == parameters => {
+                args.push(continuation);
+                ir.add_expr(IrExpr::Call {
+                    callee,
+                    dispatch_receiver,
+                    args,
+                })
+            }
+            IrExpr::MethodCall {
+                class,
+                index,
+                receiver,
+                mut args,
+            } if args.iter().all(Option::is_some) && args.len() + 1 == parameters => {
+                args.push(Some(continuation));
+                ir.add_expr(IrExpr::MethodCall {
+                    class,
+                    index,
+                    receiver,
+                    args,
+                })
+            }
+            _ => continue,
+        };
+        ir.call_declared_ret.insert(call, suspended);
+        ir.exprs[site as usize] = IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: call,
+            type_operand: logical,
+        };
+    }
 }
 
 fn add_continuation_parameter(ir: &mut IrFile, function: u32) {

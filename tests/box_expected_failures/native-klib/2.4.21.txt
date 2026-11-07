@@ -851,7 +851,6 @@ coroutines/suspendInTheMiddleOfObjectConstruction.kt
 coroutines/suspendInTheMiddleOfObjectConstructionEvaluationOrder.kt
 coroutines/suspendInTheMiddleOfObjectConstructionWithJumpOut.kt
 coroutines/suspendInlineReference.kt
-coroutines/suspendLambdaInInterface.kt
 coroutines/suspendLambdaWithArgumentRearrangement.kt
 coroutines/suspendTwoProblematicExpressionsInOneCoroutine.kt
 coroutines/suspendWhileBreakContinueInsideElvis.kt
@@ -885,15 +884,12 @@ coroutines/varCaptuedInCoroutineIntrinsic.kt
 coroutines/varSpilling/fakeInlinerVariables.kt
 coroutines/varSpilling/kt19475.kt
 coroutines/varSpilling/kt38925.kt
-coroutines/varSpilling/kt49834.kt
 coroutines/varSpilling/kt64139.kt
 coroutines/varSpilling/kt75926.kt
 coroutines/varSpilling/kt79276.kt
-coroutines/varSpilling/kt83372.kt
 coroutines/varSpilling/kt85203.kt
 coroutines/varSpilling/kt85203_2.kt
 coroutines/varSpilling/nullSpilling.kt
-coroutines/varSpilling/refinedIntTypesAnalysis.kt
 coroutines/varSpilling/safeCallElvis.kt
 coroutines/varValueConflictsWithTable.kt
 coroutines/varValueConflictsWithTableSameSort.kt

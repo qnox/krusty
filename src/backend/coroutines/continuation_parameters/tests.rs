@@ -111,7 +111,51 @@ fn a_unit_body_completes_with_unit() {
     assert!(matches!(ir.exprs[end_unit as usize], IrExpr::UnitInstance));
 }
 
-/// A body that calls a suspend function needs the state machine, and nothing is rewritten.
+/// A call to a suspend function that completes in place passes a continuation and is read at the
+/// declared result. The callee's expression body stays its own node.
+#[test]
+fn a_call_to_a_suspend_function_that_completes_in_place_passes_a_continuation() {
+    let mut ir = IrFile::default();
+    let seven = ir.add_expr(IrExpr::Const(IrConst::Int(7)));
+    let leaf = ir.add_fun(function(Vec::new(), Ty::Int, Some(seven)));
+    let call = ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::Local(leaf)),
+        dispatch_receiver: None,
+        args: Vec::new(),
+    });
+    let caller = ir.add_fun(function(Vec::new(), Ty::Int, Some(call)));
+    ir.suspend_funs.extend([leaf, caller]);
+
+    assert_eq!(add_continuation_parameters(&mut ir), Ok(()));
+
+    assert_eq!(ir.functions[leaf as usize].params.len(), 1);
+    assert_eq!(ir.functions[leaf as usize].ret, any());
+    assert!(matches!(
+        ir.exprs[seven as usize],
+        IrExpr::Const(IrConst::Int(7))
+    ));
+    let IrExpr::TypeOp {
+        op: IrTypeOp::ImplicitCoercion,
+        arg: invoked,
+        type_operand,
+    } = ir.exprs[call as usize]
+    else {
+        panic!("the call is read at its declared result");
+    };
+    assert_eq!(type_operand, Ty::Int);
+    let IrExpr::Call { args, .. } = &ir.exprs[invoked as usize] else {
+        panic!("the call");
+    };
+    let [continuation] = args.as_slice() else {
+        panic!("the continuation is the only argument: {args:?}");
+    };
+    assert!(matches!(
+        ir.exprs[*continuation as usize],
+        IrExpr::Const(IrConst::Null)
+    ));
+}
+
+/// A call to a suspend function with no body needs the state machine, and nothing is rewritten.
 #[test]
 fn a_body_that_suspends_is_declined_before_any_signature_changes() {
     let mut ir = IrFile::default();
