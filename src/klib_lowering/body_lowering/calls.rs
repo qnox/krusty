@@ -6,7 +6,10 @@
 use super::super::ir_builtins::{BuiltinCallDisposition, BuiltinOperator, BuiltinRelation};
 use super::super::klib_types::function_invocation_arity;
 use super::super::klib_types::semantic_type;
-use super::{mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedCallee, Lowered};
+use super::{
+    mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorTarget, LinkedCallee,
+    Lowered,
+};
 use crate::fir::FirTypeParameterRef;
 use crate::ir::{
     Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrPropertyDispatch,
@@ -127,14 +130,23 @@ impl BodyLowering<'_> {
                     }
                 }
             }
-            CommonPrimitive::Intrinsic(intrinsic) => self.ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::Intrinsic {
-                    operation: intrinsic,
-                    ret: primitive.ret,
-                }),
-                dispatch_receiver: Some(receiver),
-                args: Vec::new(),
-            }),
+            // The ordinary read of the property, as checked FIR lowers a source read of it.
+            CommonPrimitive::PropertyRead(_) => {
+                let target = primitive
+                    .property
+                    .expect("an authenticated property read names its property");
+                self.ir.add_expr(IrExpr::Checked(Box::new(
+                    IrCheckedOperation::ExternalPropertyRead {
+                        target,
+                        dispatch: IrPropertyDispatch::Ordinary,
+                        receiver: Some(receiver),
+                        arguments: Vec::new(),
+                        parameters: Vec::new(),
+                        result: operands.ret,
+                        source_receiver: operands.receiver_type,
+                    },
+                )))
+            }
             // The source range operator over the receiver and the end bound, as checked FIR
             // lowers `start..end` once the provider's declaration fixed the range it builds.
             CommonPrimitive::RangeConstruction(operation) => {
@@ -527,7 +539,7 @@ impl BodyLowering<'_> {
         if let Some(primitive) = self.linker.common_primitive(&signature)? {
             return self.primitive_call(primitive, access, ty);
         }
-        let linked = self.linker.link_accessor(accessor)?;
+        let linked = self.linker.link_accessor(self.ir, accessor)?;
         let CallOperands {
             receiver,
             args: arguments,
@@ -548,11 +560,17 @@ impl BodyLowering<'_> {
                 parameter_defaults: &[],
             },
         )?;
-        let LinkedAccessor {
-            property: target,
-            write,
-            ..
-        } = linked;
+        let LinkedAccessor { target, write, .. } = linked;
+        let target = match target {
+            LinkedAccessorTarget::External(property) => property,
+            LinkedAccessorTarget::Local(function) => {
+                return Ok(self.ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Local(function)),
+                    dispatch_receiver: receiver,
+                    args: arguments,
+                }));
+            }
+        };
         let dispatch = IrPropertyDispatch::Ordinary;
         Ok(self.ir.add_expr(IrExpr::Checked(Box::new(if write {
             IrCheckedOperation::ExternalPropertyWrite {

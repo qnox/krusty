@@ -32,6 +32,8 @@ use super::{carrier, Body, FileContext, Unsupported, STRING};
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
 const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
+mod override_bridges;
+
 #[cfg(test)]
 mod tests;
 
@@ -178,6 +180,12 @@ impl Body<'_> {
         &mut self,
         classifier: crate::types::TypeName,
     ) -> Result<(), Unsupported> {
+        if self.ir.class_id_by_name(classifier).is_none() {
+            if let Some(entry) = self.calls.dependency_singleton(classifier) {
+                self.code.call(entry);
+                return Ok(());
+            }
+        }
         let singleton = self
             .classes
             .and(self.ir.class_id_by_name(classifier))
@@ -249,7 +257,7 @@ impl Body<'_> {
         if params.len() != args.len() {
             return Err("a call whose arguments do not match its parameters".into());
         }
-        self.dispatch(class, slot, receiver, args, &params)
+        self.dispatch(class, slot, receiver, args, &params, Some(function))
     }
 
     /// Dispatch a member-extension property's recorded accessor. Its extension receiver and any
@@ -306,7 +314,7 @@ impl Body<'_> {
             .tables
             .slot(class, &key)
             .ok_or_else(|| "a member-extension property with no dispatch slot".to_string())?;
-        self.dispatch(class, slot, receiver, args, &params)
+        self.dispatch(class, slot, receiver, args, &params, Some(function))
     }
 
     /// A call through `slot` of the table of `receiver`, statically of `class`.
@@ -317,6 +325,7 @@ impl Body<'_> {
         receiver: u32,
         args: &[u32],
         params: &[Ty],
+        function: Option<FunId>,
     ) -> Result<(), Unsupported> {
         let classes = self.file_classes()?;
         let ty = classes
@@ -331,8 +340,11 @@ impl Body<'_> {
         let this = self.local(REFERENCE);
         self.value(receiver, self.object_type(class))?;
         self.code.local_tee(this);
-        for (arg, param) in args.iter().zip(params) {
-            self.value(*arg, *param)?;
+        for (parameter, (&arg, &param)) in args.iter().zip(params).enumerate() {
+            match function {
+                Some(function) => self.function_argument(function, parameter as u32, arg)?,
+                None => self.value(arg, param)?,
+            }
         }
         self.code.local_get(this);
         self.table_of_object();
@@ -537,8 +549,8 @@ impl Body<'_> {
             return Err("a call whose arguments do not match its parameters".into());
         }
         self.value(receiver, Ty::obj_name(owner))?;
-        for (arg, param) in args.iter().zip(params) {
-            self.value(*arg, param)?;
+        for (parameter, &arg) in args.iter().enumerate() {
+            self.function_argument(function, parameter as u32, arg)?;
         }
         let function = self.emitted_function(function)?;
         self.code.call(function);
@@ -723,7 +735,7 @@ impl Body<'_> {
                 .slot(class, &SlotKey::Getter(target))
         });
         if let Some(slot) = slot {
-            return self.dispatch(class, slot, receiver, &[], &[]);
+            return self.dispatch(class, slot, receiver, &[], &[], None);
         }
         if let Some(getter) = property.getter {
             return self.direct_member_call(getter, receiver, &[]);
@@ -795,7 +807,7 @@ impl Body<'_> {
                 .slot(class, &SlotKey::Setter(target))
         });
         if let Some(slot) = slot {
-            return self.dispatch(class, slot, receiver, &[value], &[property.ty]);
+            return self.dispatch(class, slot, receiver, &[value], &[property.ty], None);
         }
         if let Some(setter) = property.setter {
             return self.direct_member_call(setter, receiver, &[value]);
@@ -1097,55 +1109,10 @@ impl Body<'_> {
 
     /// `lhs == rhs` on objects: `lhs?.equals(rhs) ?: (rhs === null)`.
     pub(super) fn object_equality(&mut self, lhs: u32, rhs: u32) -> Result<(), Unsupported> {
-        // Both operands run once, left first, even when the left value is null. The static
-        // type can be Any: the GC representation, not that type, selects the equality body.
-        let (left, right) = (self.local(REFERENCE), self.local(REFERENCE));
+        // The shared runtime dispatch begins only after both operands have run, left first.
         self.value(lhs, any())?;
-        self.code.local_set(left);
         self.value(rhs, any())?;
-        self.code.local_set(right);
-        let any_table = self.runtime.objects.any_table;
-        let equals = self.runtime.objects.any_slot_types[0];
-        self.code
-            .local_get(left)
-            .ref_is_null()
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(right)
-            .ref_is_null()
-            .else_()
-            .local_get(left)
-            .ref_test(false, STRING_HEAP)
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(right)
-            .ref_test(false, STRING_HEAP)
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(left)
-            .ref_cast(false, STRING_HEAP)
-            .local_get(right)
-            .ref_cast(false, STRING_HEAP)
-            .call(self.runtime.string_equals)
-            .else_()
-            .i32_const(0)
-            .end()
-            .else_()
-            .local_get(left)
-            .ref_test(false, HeapType::Concrete(self.runtime.objects.object))
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(left)
-            .local_get(right)
-            .local_get(left);
-        self.table_of_object();
-        self.code
-            .struct_get(any_table, AnyMember::Equals.slot())
-            .call_ref(equals)
-            .else_()
-            // Non-object eq references have no virtual override: their default is identity.
-            .local_get(left)
-            .local_get(right)
-            .ref_eq()
-            .end()
-            .end()
-            .end();
+        self.code.call(self.runtime.object_equals);
         Ok(())
     }
 
@@ -1316,7 +1283,7 @@ pub(super) fn define_class_functions(
             },
         );
     }
-    Ok(())
+    override_bridges::define_override_bridges(context, classes, module, runtime)
 }
 
 /// Define the program-wide entries reserved for ordinary member properties of this source file.

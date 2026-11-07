@@ -590,6 +590,7 @@ impl DeserializeBody<'_> {
                 internal: foo_internal,
                 args,
                 ctor_params: Some(synthetic_ctor_params.clone()),
+                declared_params: None,
                 ctor_desc: None,
                 external_target: None,
                 defaults: Box::new([]),

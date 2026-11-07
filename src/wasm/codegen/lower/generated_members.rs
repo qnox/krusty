@@ -10,6 +10,9 @@ use crate::backend::class_tables::AnyMember;
 use super::objects::any;
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 impl Body<'_> {
     /// Push the hash of property value `value`, declared of type `ty`.
     pub(super) fn generated_property_hash(
@@ -64,7 +67,7 @@ impl Body<'_> {
                 self.value(right, ty)?;
                 self.code.call(self.runtime.string_equals);
             }
-            // An array is compared by identity, which is what `equals` on a non-object is.
+            // Array wrappers keep identity equality; classes use their selected `equals` slot.
             Some(ValType::Ref { .. }) => self.object_equality(left, right)?,
             Some(ValType::F32 | ValType::F64) => {
                 for operand in [left, right] {

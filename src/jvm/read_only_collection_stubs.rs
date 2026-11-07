@@ -35,6 +35,8 @@ use crate::jvm::value_classes::collection_stub_replacements::{
 };
 use crate::types::{ty_subst, wk, CollectionKind, Ty, TypeName, Visibility};
 
+mod jdk_mutable_members;
+
 /// kotlinc's `preComputedStubs` order: a class's applicable faces contribute their stubs in this
 /// order.
 const FACE_ORDER: [CollectionKind; 8] = [
@@ -48,8 +50,7 @@ const FACE_ORDER: [CollectionKind; 8] = [
     CollectionKind::ListIterator,
 ];
 
-/// The faces whose stubs are realized. The JDK members of the mutable collections (`removeIf`) and
-/// the `toArray` lowering are not yet realized for any face.
+/// The faces whose stubs are realized. The `toArray` lowering is not yet realized for any face.
 const REALIZED_FACES: [CollectionKind; 7] = [
     CollectionKind::Collection,
     CollectionKind::Set,
@@ -158,6 +159,14 @@ pub(super) enum StubBody {
 impl ReadOnlyStub {
     pub(super) fn descriptor(&self) -> String {
         method_descriptor(&jvm_tys(&self.parameters), self.physical_result())
+    }
+
+    /// The mutable declaration's erased JVM descriptor: its bridge's, or the stub's own.
+    fn erased_descriptor(&self) -> String {
+        self.bridge.as_ref().map_or_else(
+            || self.descriptor(),
+            |(parameters, result)| method_descriptor(parameters, *result),
+        )
     }
 
     /// The JVM result of the stub's own descriptor.
@@ -584,6 +593,8 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
         }
     }
     stubs.sort_by_key(|stub| names.iter().position(|name| *name == stub.name));
+    let jdk = jdk_mutable_members::jdk_mutable_stubs(classpath, face, arguments, &stubs);
+    stubs.extend(jdk);
     stubs
 }
 
@@ -948,8 +959,8 @@ fn superclass_chain(
                         method.descriptor
                     ))
                 };
-                let declaration = info
-                    .meta
+                let declaration = classpath
+                    .class_members(&info)
                     .class_functions
                     .iter()
                     .find(|declaration| {
@@ -1001,17 +1012,19 @@ fn superclass_chain(
                 // does not tell. A generated member has no declaration and only its descriptor.
                 // A suspend declaration's continuation is a real parameter its metadata signature
                 // omits, so it keeps its physical key and implements no non-suspend member.
-                let declaration = (is_kotlin
-                    && candidates.iter().any(|stub| stub.name == method.name))
-                .then(|| {
-                    info.meta.class_functions.iter().find(|declaration| {
-                        declaration.jvm_name == method.name
-                            && declaration.jvm_desc == Some(method.descriptor.as_str())
-                    })
-                })
-                .flatten()
-                .filter(|declaration| !declaration.is_suspend())
-                .and_then(|declaration| declaration.generic_sig.as_ref());
+                let declaration =
+                    (is_kotlin && candidates.iter().any(|stub| stub.name == method.name))
+                        .then(|| {
+                            classpath.class_members(&info).class_functions.iter().find(
+                                |declaration| {
+                                    declaration.jvm_name == method.name
+                                        && declaration.jvm_desc == Some(method.descriptor.as_str())
+                                },
+                            )
+                        })
+                        .flatten()
+                        .filter(|declaration| !declaration.is_suspend())
+                        .and_then(|declaration| declaration.generic_sig.as_ref());
                 let (key, result) = match declaration {
                     Some(signature) => {
                         let bindings = superclass_bindings(

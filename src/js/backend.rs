@@ -26,6 +26,7 @@ impl Backend for JsBackend {
     ) -> Vec<Artifact> {
         let stem = &file.stems[file.source.raw() as usize];
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
+        super::provider_operations::realize(&mut file.ir, &file.callables);
         if let Err(target) = crate::backend::local_properties::realize(&mut file.ir) {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -132,6 +133,21 @@ fun box(): String {\n\
             vec![(
                 "Main.js".to_string(),
                 b"function box() {\n  return 3;\n}\n".to_vec(),
+            )]
+        );
+    }
+
+    #[test]
+    fn js_backend_realizes_a_selected_array_size_read_as_the_array_length() {
+        let (outputs, diags) =
+            compile_js_sources(&[("Main", "fun count(values: IntArray): Int = values.size")]);
+
+        assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
+        assert_eq!(
+            outputs,
+            vec![(
+                "Main.js".to_string(),
+                b"function count(v0) {\n  return v0.length;\n}\n".to_vec(),
             )]
         );
     }
