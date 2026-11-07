@@ -268,3 +268,91 @@ fn an_explicit_unknown_or_unrelated_specialization_cannot_use_the_source_layout(
         assert!(matches!(ir.expr(read), IrExpr::Checked(_)));
     }
 }
+
+#[test]
+fn a_copied_anonymous_class_keeps_its_inherited_storage_and_accessors_on_the_base() {
+    for interface in [false, true] {
+        let (mut ir, read) = fixture();
+        ir.classes[0].is_anonymous_object = false;
+        ir.classes[0].is_interface = interface;
+        let body = ir.add_expr(IrExpr::Const(IrConst::String("base".into())));
+        let getter = ir.add_fun(IrFunction {
+            name: "getValue".into(),
+            params: Vec::new(),
+            ret: Ty::String,
+            body: Some(body),
+            is_static: false,
+            dispatch_receiver: Some("p/Declaration".into()),
+            param_checks: Vec::new(),
+        });
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: Vec::new(),
+            value: None,
+        });
+        let setter = ir.add_fun(IrFunction {
+            name: "setValue".into(),
+            params: vec![Ty::String],
+            ret: Ty::Unit,
+            body: Some(body),
+            is_static: false,
+            dispatch_receiver: Some("p/Declaration".into()),
+            param_checks: Vec::new(),
+        });
+        ir.classes[0].properties[0].getter = Some(getter);
+        ir.classes[0].properties[0].setter = Some(setter);
+        ir.classes[0].methods = vec![getter, setter];
+        if interface {
+            ir.classes[0].properties[0].backing_field = None;
+            ir.classes[0].fields.clear();
+        }
+        let Some(IrLocalPropertyLayout::Member {
+            getter: selected_getter,
+            setter: selected_setter,
+            backing_field,
+            interface: selected_interface,
+            ..
+        }) = ir.local_property_layouts.get_mut(&TARGET)
+        else {
+            panic!("the selected member");
+        };
+        *selected_getter = Some(getter);
+        *selected_setter = Some(setter);
+        *selected_interface = interface;
+        if interface {
+            *backing_field = None;
+        }
+        let mut anonymous = IrClass::synthetic("p/Anonymous".into());
+        anonymous.is_anonymous_object = true;
+        if interface {
+            anonymous.interfaces = vec!["p/Declaration".into()].into();
+        } else {
+            anonymous.superclass = "p/Declaration".into();
+        }
+        // The copy has its own DIFFERENT property at ordinal zero. The inherited selected
+        // PropertyId must retain the base layout, not project onto this unrelated slot.
+        let mut own = IrProperty::stored_value("own".into(), Ty::String, 0);
+        own.is_var = true;
+        anonymous.properties.push(own);
+        anonymous
+            .fields
+            .push(IrField::new("own".into(), Ty::String));
+        let source = ir.add_class(anonymous);
+        let copied = copy(&mut ir, source, "p/CopiedAnonymous", 3);
+        let expected = (0, 0, (!interface).then_some(0), Some(getter), Some(setter));
+        assert_eq!(
+            member(ir.property_layout_for_class(TARGET, copied).unwrap()),
+            expected
+        );
+        ir.dispatch_classes
+            .insert(read, ir.classes[copied as usize].fq_name);
+        assert_eq!(
+            member(ir.property_layout_at(read, TARGET).unwrap()),
+            expected
+        );
+        crate::backend::local_properties::realize(&mut ir).unwrap();
+        let IrExpr::PropertyRead { owner, .. } = ir.expr(read) else {
+            panic!("the inherited read");
+        };
+        assert_eq!(*owner, ir.classes[0].fq_name);
+    }
+}

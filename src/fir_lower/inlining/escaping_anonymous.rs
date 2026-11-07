@@ -278,24 +278,15 @@ fn retarget_caller_property_use(
     if actual != copy_id && !specialization_descends_from(ir, actual, copy_id, receiver) {
         return Err(malformed(source_name));
     }
-    let Some(crate::ir::IrLocalPropertyLayout::Member {
-        class, property, ..
-    }) = ir.local_property_layouts.get(&target)
-    else {
-        return Err(malformed(source_name));
-    };
-    if !specialization_lineage(ir, actual)
-        .iter()
-        .any(|(ancestor, _)| ancestor == class)
-        || ir.classes[actual as usize]
-            .properties
-            .get(*property as usize)
-            .is_none()
-    {
+    if !matches!(
+        ir.property_layout_for_class(target, actual)
+            .map_err(|_| malformed(source_name))?,
+        Some(crate::ir::IrLocalPropertyLayout::Member { .. })
+    ) {
         return Err(malformed(source_name));
     }
-    // Retain the selected PropertyId. The completed copy owns the same property ordinal;
-    // target realization projects its accessor/storage layout through this exact receiver fact.
+    // Retain the selected PropertyId. The projection authenticated either same-ordinal copied
+    // storage/accessors or the original inherited declaration through recorded supertypes.
     ir.dispatch_classes
         .insert(expression, ir.classes[actual as usize].fq_name);
     Ok(())

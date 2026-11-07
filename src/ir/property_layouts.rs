@@ -74,6 +74,25 @@ impl super::IrFile {
         operation: super::ExprId,
         target: crate::fir::PropertyId,
     ) -> Result<Option<IrLocalPropertyLayout>, crate::fir::PropertyId> {
+        let Some(layout) = self.local_property_layouts.get(&target).cloned() else {
+            return Ok(None);
+        };
+        if !matches!(layout, IrLocalPropertyLayout::Member { .. }) {
+            return Ok(Some(layout));
+        }
+        let Some(dispatch) = self.dispatch_classes.get(&operation) else {
+            return Ok(Some(layout));
+        };
+        let actual = self.class_id_by_name(*dispatch).ok_or(target)?;
+        self.property_layout_for_class(target, actual)
+    }
+
+    /// The same projection while a copied construction publishes its dispatch-class fact.
+    pub(crate) fn property_layout_for_class(
+        &self,
+        target: crate::fir::PropertyId,
+        actual: super::ClassId,
+    ) -> Result<Option<IrLocalPropertyLayout>, crate::fir::PropertyId> {
         let Some(mut layout) = self.local_property_layouts.get(&target).cloned() else {
             return Ok(None);
         };
@@ -84,10 +103,7 @@ impl super::IrFile {
             return Ok(Some(layout));
         };
         let (declared, index) = (*class, *property);
-        let Some(dispatch) = self.dispatch_classes.get(&operation) else {
-            return Ok(Some(layout));
-        };
-        let actual = self.class_id_by_name(*dispatch).ok_or(target)?;
+        self.classes.get(actual as usize).ok_or(target)?;
         if actual != declared && !self.specialized_anonymous_classes.contains_key(&actual) {
             // An ordinary inherited property retains its selected declaration's layout.
             return Ok(Some(layout));
@@ -98,10 +114,13 @@ impl super::IrFile {
             if !seen.insert(current) {
                 return Err(target);
             }
-            let copy = self
-                .specialized_anonymous_classes
-                .get(&current)
-                .ok_or(target)?;
+            let Some(copy) = self.specialized_anonymous_classes.get(&current) else {
+                return if self.property_owner_is_supertype(current, declared) {
+                    Ok(Some(layout))
+                } else {
+                    Err(target)
+                };
+            };
             self.classes.get(copy.source as usize).ok_or(target)?;
             current = copy.source;
         }
@@ -135,6 +154,39 @@ impl super::IrFile {
         *mutable = copied.is_var;
         *private = copied.is_private;
         Ok(Some(layout))
+    }
+
+    fn property_owner_is_supertype(
+        &self,
+        source: super::ClassId,
+        declared: super::ClassId,
+    ) -> bool {
+        let mut pending = vec![source];
+        let mut seen = crate::fx_hash::HashSet::default();
+        while let Some(class) = pending.pop() {
+            if class == declared {
+                return true;
+            }
+            if !seen.insert(class) {
+                continue;
+            }
+            let Some(class) = self.classes.get(class as usize) else {
+                continue;
+            };
+            pending.extend(
+                std::iter::once(class.superclass)
+                    .chain(class.interfaces.iter())
+                    .chain(
+                        class
+                            .supertypes
+                            .iter()
+                            .copied()
+                            .filter_map(Ty::obj_internal),
+                    )
+                    .filter_map(|name| self.class_id_by_name(name)),
+            );
+        }
+        false
     }
 }
 
