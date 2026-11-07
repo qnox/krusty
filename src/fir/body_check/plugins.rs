@@ -206,6 +206,7 @@ impl BodyFirChecker<'_> {
                 default_provider: selected.member.external_default_provider,
                 receiver: Some(resolved(selected.receiver)?),
                 declared_receiver: None,
+                declaring_receiver: None,
                 parameters: selected
                     .member
                     .params

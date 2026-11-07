@@ -168,9 +168,22 @@ impl BodyFirChecker<'_> {
                     ));
                 }
             }
-            ReceiverFnValueOrigin::ClassStorage(field)
-            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
-                let kind = self.direct_class_storage_read_kind(field, function_ty, origin_id)?;
+            origin @ (ReceiverFnValueOrigin::ClassStorage(_)
+            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }) => {
+                let span = self
+                    .file
+                    .expr_span(expression)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+                let binding = match origin {
+                    ReceiverFnValueOrigin::ClassStorage(storage) => {
+                        self.selected_class_capture_binding(storage, span)?
+                    }
+                    ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field } => {
+                        self.enum_entry_storage_binding(owner, field, function_ty, span)?
+                    }
+                    _ => unreachable!("matched storage origin"),
+                };
+                let kind = self.capture_read_kind(expression, binding)?;
                 self.body.add_expr(FirExpr {
                     origin: origin_id,
                     ty: function_ty,
@@ -517,9 +530,18 @@ impl BodyFirChecker<'_> {
         cause: OriginId,
         argument: &ResolvedContextArgument,
     ) -> Result<FirReceiver, BodyCheckFailure> {
-        let origin = self
-            .origins
-            .synthetic(cause, SyntheticOriginKind::ContextArgument);
+        // kotlinc reads a context parameter passed on with no source offsets, so the call marks
+        // its line only after the load; a dispatch, extension or lambda receiver passed as a
+        // context argument is read at the call's own offsets, like any implicit receiver.
+        let kind = match argument {
+            ResolvedContextArgument::ImplicitReceiver(selection)
+                if !selection.context_parameter =>
+            {
+                SyntheticOriginKind::ImplicitReceiver
+            }
+            _ => SyntheticOriginKind::ContextArgument,
+        };
+        let origin = self.origins.synthetic(cause, kind);
         let value = match argument {
             ResolvedContextArgument::Binding {
                 name, shadow_depth, ..

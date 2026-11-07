@@ -153,7 +153,7 @@ mod tests {
             span: krusty::diag::Span::new(0, 0),
             editor_span: None,
             identity: None,
-            warning_name: None,
+            name: None,
             severity: Severity::Error,
             kind: DiagnosticKind::Compiler,
             msg: message.to_string(),

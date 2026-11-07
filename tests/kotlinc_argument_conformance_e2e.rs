@@ -4,7 +4,8 @@
 //!
 //! * the argument table krusty parses with (`crates/krusty-cli/src/kotlinc_arguments/releases`)
 //!   is exactly what `scripts/kotlinc-arguments/DumpKotlincArguments.java` reads from the
-//!   compiler's annotations, so no name, alias, type, delimiter, lifecycle or feature toggle drifts;
+//!   compiler's annotations, so no name, alias, type, delimiter, lifecycle or feature toggle drifts,
+//!   and likewise the language feature, language version and diagnostic name tables;
 //! * for a corpus generated from that table (every argument, every spelling, every value form),
 //!   krusty's tokenizer parses the same values and sources and reports the same syntax errors and
 //!   warnings, in the same order and words, as kotlinc's `parseCommandLineArguments`,
@@ -21,6 +22,8 @@ const ORACLE: &str = include_str!("kotlinc_arguments/KotlincArgumentOracle.java"
 const DUMPER: &str = include_str!("../scripts/kotlinc-arguments/DumpKotlincArguments.java");
 const FEATURE_DUMPER: &str = include_str!("../scripts/kotlinc-arguments/DumpLanguageFeatures.java");
 const VERSION_DUMPER: &str = include_str!("../scripts/kotlinc-arguments/DumpLanguageVersions.java");
+const DIAGNOSTIC_DUMPER: &str =
+    include_str!("../scripts/kotlinc-arguments/DumpDiagnosticNames.java");
 
 /// The reference compiler's classpath: the compiler and the standard library it runs on.
 fn compiler_classpath() -> String {
@@ -207,6 +210,19 @@ fn the_language_version_policy_is_what_the_reference_compiler_declares() {
     assert_eq!(
         dumped, vendored,
         "kotlinc {version} declares a different language version policy; regenerate it with \
+         `just kotlinc-arguments {version}`"
+    );
+}
+
+#[test]
+fn the_diagnostic_names_are_what_the_reference_compiler_declares() {
+    let (version, _) = kotlinc_report(&[]);
+    let dumped = run_java("diagnostics", "DumpDiagnosticNames", DIAGNOSTIC_DUMPER);
+    let vendored = krusty::diag::names::vendored_table(version)
+        .unwrap_or_else(|| panic!("kotlinc {version} has no vendored diagnostic table"));
+    assert_eq!(
+        dumped, vendored,
+        "kotlinc {version} declares different diagnostics; regenerate them with \
          `just kotlinc-arguments {version}`"
     );
 }

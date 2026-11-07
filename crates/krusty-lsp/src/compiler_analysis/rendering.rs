@@ -99,7 +99,7 @@ pub(crate) fn render_ty(ty: Ty) -> String {
             .map(render_ty)
             .collect::<Vec<_>>()
             .join(" & "),
-        TyKind::TyParam(name, _) => name.to_string(),
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => name.to_string(),
         TyKind::InProjection(inner) => format!("in {}", render_ty(inner)),
         TyKind::OutProjection(inner) => format!("out {}", render_ty(inner)),
         TyKind::StarProjection(_) => "*".to_string(),
