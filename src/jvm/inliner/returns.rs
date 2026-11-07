@@ -132,9 +132,54 @@ pub(super) fn normalize_local_returns(node: &mut MethodNode) -> Result<(), Inlin
     Ok(())
 }
 
+/// Drop the `void` return that only keeps a `Unit` frame's after-return join inside the method.
+///
+/// The join's label stands between the lambda's own `void` return and this one, with nothing else
+/// between them. Removing it puts the join on the inliner's end label, which is the instruction
+/// after the own return becomes the closing-brace `nop`.
+fn drop_unit_return_landing(node: &mut MethodNode) {
+    let Some(landing) = node
+        .nodes
+        .iter()
+        .rposition(|entry| matches!(entry, Node::Insn(_)))
+    else {
+        return;
+    };
+    if !matches!(node.nodes[landing], Node::Insn(Insn::Op(RETURN)))
+        || is_marked_return(&node.nodes, landing)
+    {
+        return;
+    }
+    let Some(own) = node.nodes[..landing]
+        .iter()
+        .rposition(|entry| matches!(entry, Node::Insn(_)))
+    else {
+        return;
+    };
+    if !matches!(node.nodes[own], Node::Insn(Insn::Op(RETURN)))
+        || is_marked_return(&node.nodes, own)
+    {
+        return;
+    }
+    let between = &node.nodes[own + 1..landing];
+    if between.is_empty()
+        || !between
+            .iter()
+            .all(|entry| matches!(entry, Node::Label(_) | Node::Line { .. }))
+        || !between.iter().any(|entry| matches!(entry, Node::Label(_)))
+    {
+        return;
+    }
+    node.nodes.remove(landing);
+}
+
 /// Replace every return with `nop; goto end` and place a fresh label after the jump. A marked
 /// return stays, with the fresh label after it.
 pub(super) fn process_returns(node: &mut MethodNode, end: LabelId) {
+    // A `Unit` lambda's early break targets a label between its own return and a second `void`
+    // return that exists only so the method does not fall off that label. Dropping the second
+    // return leaves the label on `end`, the instruction after the closing-brace `nop`.
+    drop_unit_return_landing(node);
     let mut at = 0;
     while at < node.nodes.len() {
         if is_marked_return(&node.nodes, at) {

@@ -629,6 +629,7 @@ impl Emitter<'_> {
             .map(|(machine, completion)| self.arm_placed_suspend_lambda(machine, completion));
         let caller_type_parameters = self.type_parameter_function.replace(impl_fn);
         let caller_fakes = self.enter_placed_fake_continuations(&fake_continuations);
+        let brace_depth = self.unit_lambda_brace_depth();
         let result = self.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch);
         self.leave_placed_fake_continuations(&fake_continuations, caller_fakes);
         self.type_parameter_function = caller_type_parameters;
@@ -775,6 +776,14 @@ impl Emitter<'_> {
                 }
             }
         }
+        // A `Unit` frame's early break lands after this return. The return is the closing-brace
+        // `nop` once inlined, so the join has to follow it. A branch cannot target the end of the
+        // code, so the landing is a `nop` until the body is a node and the inliner's own end label
+        // can take the jump.
+        let unit_return_landing = self.bind_owned_unit_lambda_braces(brace_depth, &mut scratch);
+        if unit_return_landing {
+            scratch.nop();
+        }
         scratch.link_local_branches();
         if !scratch.external_branches().is_empty() {
             return Err("a lambda planned for the inliner jumps out of its body");
@@ -796,6 +805,11 @@ impl Emitter<'_> {
             .ok_or("an inline lambda's code cannot be read back as a method node")?;
         mark_non_local_returns(&mut node, &scratch.bytes, own_return, &jumps)?;
         let return_type = return_unit_as_void(&mut node, return_type);
+        if unit_return_landing && return_type == "V" {
+            // A branch to the join is a real instruction, and the method must not fall off it.
+            // The inliner drops this return and leaves the join on its own end label.
+            close_unit_return_landing(&mut node);
+        }
         Ok(LambdaArgument {
             lambda: inliner::Lambda {
                 node,
@@ -994,6 +1008,24 @@ fn mark_non_local_returns(
         at += 1;
     }
     Ok(())
+}
+
+/// Turn the after-return join's landing `nop` into a `void` return.
+///
+/// The join is that `nop`, so the branch is inside the method. A `nop` falls off the end, which
+/// the inliner rejects; a return does not. Nothing falls through into it: the lambda's own return
+/// is the instruction before the join.
+fn close_unit_return_landing(node: &mut MethodNode) {
+    let Some(at) = node
+        .nodes
+        .iter()
+        .rposition(|entry| matches!(entry, Node::Insn(_)))
+    else {
+        return;
+    };
+    if matches!(node.nodes[at], Node::Insn(Insn::Op(0x00))) {
+        node.nodes[at] = Node::Insn(Insn::Op(RETURN));
+    }
 }
 
 /// A `Unit` lambda: krusty's body yields `Unit.INSTANCE` for the `Object` `invoke` returns, where

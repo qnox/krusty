@@ -608,11 +608,13 @@ impl Emitter<'_> {
         };
         // A `Unit` labeled return (`return@let`) is a `break` of the inline-return frame. The
         // frame's own trailing break falls into the lambda's closing-brace `nop`. An earlier
-        // break is the return, and kotlinc lands it on the instruction after that `nop`.
-        let target = if brk && self.jumps_past_unit_lambda_brace(transfer, label) {
-            self.past_lambda_brace.last().copied().unwrap_or(end)
-        } else if brk {
-            end
+        // break is the return, and kotlinc lands it on the instruction after that `nop`. The
+        // join belongs to the frame the return names, not whichever lambda was opened last.
+        let target = if brk {
+            label
+                .as_deref()
+                .and_then(|frame| self.unit_return_past_brace(transfer, frame))
+                .unwrap_or(end)
         } else {
             cont
         };
@@ -641,7 +643,7 @@ impl Emitter<'_> {
         // another load.
         if brk && !code.is_dead() {
             if let Some(label) = label {
-                if let Some(&(value, ty)) = self.inline_return_frame_results.get(label) {
+                if let Some((value, ty)) = self.inline_return_result(label) {
                     // A generic return specialized to `Unit` stores `kotlin.Unit.INSTANCE`
                     // and leaves it there. kotlinc does not carry that reference across
                     // `finally`: a later read is its own `getstatic`, and a discarded call
@@ -678,32 +680,6 @@ impl Emitter<'_> {
             }
         }
         code.goto(target);
-    }
-
-    /// An early `break` of the `Unit` inline-return frame under a spliced lambda brace.
-    ///
-    /// The frame's trailing break still joins that brace. This break is the labeled return.
-    fn jumps_past_unit_lambda_brace(
-        &self,
-        transfer: crate::ir::ExprId,
-        label: &Option<String>,
-    ) -> bool {
-        if self.past_lambda_brace.is_empty() {
-            return false;
-        }
-        let Some(trailing) = self.trailing_unit_return_break else {
-            return false;
-        };
-        if trailing == transfer {
-            return false;
-        }
-        let Some(label) = label.as_deref() else {
-            return false;
-        };
-        matches!(
-            self.ir.expr(trailing),
-            crate::ir::IrExpr::Break { label: Some(frame) } if frame == label
-        )
     }
 }
 

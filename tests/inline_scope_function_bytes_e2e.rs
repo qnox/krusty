@@ -133,6 +133,47 @@ fun chain(s: String?): Int {
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
 
+/// A labeled return from an outer `Unit` lambda must leave that lambda, not the inner one whose
+/// closing brace was emitted most recently. `return@outer` skips `side`, and `return@inner` does
+/// not. Both jumps land where kotlinc lands them, past the frame's own closing `nop`.
+#[test]
+fn a_nested_unit_lambda_labeled_return_leaves_its_own_frame() {
+    let classes = common::classes_against_kotlinc_module(&[(
+        "NestedUnitLabel.kt",
+        r#"
+inline fun unitRun(block: () -> Unit) {
+    block()
+}
+
+fun nested(condition: Boolean): String {
+    var result = "none"
+    unitRun outer@ {
+        unitRun {
+            if (condition) return@outer
+        }
+        result = "side"
+    }
+    return result
+}
+
+fun both(leaveOuter: Boolean, leaveInner: Boolean): String {
+    var log = ""
+    unitRun outer@ {
+        unitRun inner@ {
+            if (leaveOuter) return@outer
+            if (leaveInner) return@inner
+            log += "body"
+        }
+        log += "side"
+    }
+    return log
+}
+"#,
+    )]);
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
 /// A statement-position `with`/`run` whose lambda is a multi-line `Unit` body. After the lambda's
 /// closing-brace `nop`, while its locals are open, kotlinc's inliner returns to the call's line on
 /// a `nop` of its own once the lambda locals end. The redundant-`nop` sweep keeps it: nothing else

@@ -55,7 +55,7 @@ impl Emitter<'_> {
             discarded_frame_result: value
                 .and_then(|value| self.discarded_copied_frame_tail(block, &stmts, value)),
         };
-        let brace_join_depth = self.past_lambda_brace.len();
+        let brace_join_depth = self.unit_lambda_brace_depth();
         let EmittedBlock {
             discard_after_close,
             retains_postfix_temporary,
@@ -72,14 +72,14 @@ impl Emitter<'_> {
             self.close_external_inline_frame(block, code);
             if close_lambda_before_locals {
                 self.close_spliced_lambda_frame(block, true, code);
-                self.bind_unit_lambda_brace_join(brace_join_depth, code);
+                self.bind_unit_lambda_braces(brace_join_depth, code);
             } else if discard_after_close.is_some() {
                 // A discarded `return this` (`also`/`apply`). A multi-line `}` is a `nop`
                 // while the lambda locals are still open; a one-line brace shares the body's
                 // line and the sweep drops the `nop`. The call-line `nop` still follows the
                 // locals.
                 self.emit_spliced_lambda_brace(block, code);
-                self.bind_unit_lambda_brace_join(brace_join_depth, code);
+                self.bind_unit_lambda_braces(brace_join_depth, code);
             }
             if let Some(value) = load_after_brace {
                 // After the brace join, so a labeled return discards the same `return this`
@@ -98,8 +98,8 @@ impl Emitter<'_> {
         }
         // A diverging body never reached the brace close above. The return still names this
         // join, so it has to be bound before any later instruction.
-        if self.past_lambda_brace.len() > brace_join_depth {
-            self.bind_unit_lambda_brace_join(brace_join_depth, code);
+        if self.unit_lambda_brace_depth() > brace_join_depth {
+            self.bind_unit_lambda_braces(brace_join_depth, code);
         }
         // kotlinc returns to the call's line once the inlined body ends, before the statement
         // discards its result: the `pop` occupies that line, so the cleanup drops the frame's
@@ -180,6 +180,18 @@ impl Emitter<'_> {
         let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
         self.block_depth += 1;
+        let brace_join_depth = self.unit_lambda_brace_depth();
+        let owned_unit_frames = self.unit_frames_this_lambda_closes(stmts, value);
+        if !owned_unit_frames.is_empty() {
+            self.open_unit_lambda_brace(owned_unit_frames, code.new_label());
+        }
+        // A same-file `Unit` lambda has no frame marker in its body. The frame block's trailing
+        // `Unit` is the closing brace, and an early break must land on the instruction after it.
+        // A lambda that already recorded this frame keeps that join.
+        let frame_brace = self.plain_unit_return_frame(block, stmts, value);
+        if let Some(frame) = frame_brace.clone() {
+            self.open_unit_lambda_return_brace(vec![frame], code.new_label());
+        }
         let mut dead = false;
         let mut reserved_inline_stack = None;
         let mut anchored_lambda_result = false;
@@ -251,6 +263,7 @@ impl Emitter<'_> {
                                 code.set_stack(base.max(0) as u16);
                             }
                             self.close_lambda_value_frame(block, code);
+                            self.bind_unit_lambda_braces(brace_join_depth, code);
                             self.emit_value(unit, code);
                             if normalizes_inline_stack
                                 && (!delays_stack_normalization || reserved_inline_stack.is_some())
@@ -283,6 +296,7 @@ impl Emitter<'_> {
                         // A one-line brace shares the body's line; the `nop` is then redundant
                         // and the trivial sweep drops it.
                         self.emit_spliced_lambda_brace(block, code);
+                        self.bind_unit_lambda_braces(brace_join_depth, code);
                         self.close_scope_locals(code, false);
                         self.anchor_spliced_lambda_result(block, code);
                         self.emit_value(value, code);
@@ -342,7 +356,11 @@ impl Emitter<'_> {
         }
         // After the lambda locals, including when this block is itself a callable scope and those
         // locals stay open through the return. The `nop` is the inline body's line, not the brace.
-        // A `return this` already anchored that line on the load.
+        // A `return this` already anchored that line on the load. A labeled return that has not
+        // joined yet lands here, on the instruction after the brace `nop` the body already wrote.
+        if self.unit_lambda_brace_depth() > brace_join_depth {
+            self.bind_unit_lambda_braces(brace_join_depth, code);
+        }
         if !anchored_lambda_result {
             if let Some(pending) = self
                 .inline_coercions
@@ -1130,24 +1148,84 @@ impl Emitter<'_> {
         code.nop();
     }
 
-    /// Close the frame of a lambda body spliced into an inline call.
+    /// The `Unit` inline-return frame this block itself is, when nothing else owns its brace join.
     ///
-    /// `brace` is the `{ effects; }` coercion to `Unit`: kotlinc marks the lambda literal's `}`
-    /// and emits a `nop` while the lambda locals are still open, then materializes `Unit`. A brace
-    /// on its own line starts a new entry; the local-end label on the following `Unit` keeps the
-    /// `nop`. A one-line brace shares the body's line and the `nop` goes.
-    ///
-    /// Otherwise the locals have already ended. The `nop` returns to the inline body's own line
-    /// at the invocation the lambda replaced. The local-end label sits on the `nop`, and the next
-    /// debug point (the inline-function frame's end, or the consumer) keeps it.
-    fn bind_unit_lambda_brace_join(&mut self, depth: usize, code: &mut CodeBuilder) {
-        if self.past_lambda_brace.len() > depth {
-            let past = self
-                .past_lambda_brace
-                .pop()
-                .expect("the lambda brace join was pushed");
-            self.bind(past, code);
+    /// The frame is `while (true) { …; break }` followed by `Unit`. The lambda method returns that
+    /// `Unit`, and the inliner turns the return into the closing-brace `nop`. The join is bound
+    /// after that return, so an early `break` lands past the `nop` and the trailing `break` still
+    /// falls into it.
+    fn plain_unit_return_frame(
+        &self,
+        block: u32,
+        stmts: &[u32],
+        value: Option<u32>,
+    ) -> Option<String> {
+        let value = value?;
+        if !matches!(self.ir.expr(value), IrExpr::UnitInstance) {
+            return None;
         }
+        if self.spliced_lambda_result_read(stmts, value)
+            || self.ir.external_frame_closes.contains_key(&block)
+            || self.copied_frame_result(block, value).is_some()
+        {
+            return None;
+        }
+        let frame_loop = stmts
+            .iter()
+            .copied()
+            .rev()
+            .find(|&statement| self.ir.inline_return_frames.contains_key(&statement))?;
+        let IrExpr::While {
+            label: Some(label), ..
+        } = self.ir.expr(frame_loop)
+        else {
+            return None;
+        };
+        if self.has_inline_return_result(label) || self.has_open_unit_lambda_brace(label) {
+            return None;
+        }
+        Some(label.clone())
+    }
+
+    /// `Unit` inline-return frames whose closing brace is this lambda's, not a nested lambda's.
+    ///
+    /// The frame's loop may sit in the block's value rather than its statements. A nested spliced
+    /// lambda owns the frames inside it and records its own brace join.
+    fn unit_frames_this_lambda_closes(&self, stmts: &[u32], value: Option<u32>) -> Vec<String> {
+        if !self.opens_spliced_lambda_frame(stmts) {
+            return Vec::new();
+        }
+        let mut frames = Vec::new();
+        let mut pending = stmts.to_vec();
+        if let Some(value) = value {
+            pending.push(value);
+        }
+        let mut seen = HashSet::default();
+        while let Some(expression) = pending.pop() {
+            if !seen.insert(expression) {
+                continue;
+            }
+            match self.ir.expr(expression) {
+                IrExpr::While { label, .. }
+                    if self.ir.inline_return_frames.contains_key(&expression) =>
+                {
+                    if let Some(label) = label.clone() {
+                        if !frames.contains(&label) {
+                            frames.push(label);
+                        }
+                    }
+                    crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| {
+                        pending.push(child)
+                    });
+                }
+                IrExpr::Block { stmts, .. } if self.opens_spliced_lambda_frame(stmts) => {}
+                IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
+                _ => crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| {
+                    pending.push(child)
+                }),
+            }
+        }
+        frames
     }
 
     /// Whether `roots` contain a `Unit` inline-return frame (`return@let` with nothing to store).
@@ -1171,6 +1249,16 @@ impl Emitter<'_> {
         false
     }
 
+    /// Close the frame of a lambda body spliced into an inline call.
+    ///
+    /// `brace` is the `{ effects; }` coercion to `Unit`: kotlinc marks the lambda literal's `}`
+    /// and emits a `nop` while the lambda locals are still open, then materializes `Unit`. A brace
+    /// on its own line starts a new entry; the local-end label on the following `Unit` keeps the
+    /// `nop`. A one-line brace shares the body's line and the `nop` goes.
+    ///
+    /// Otherwise the locals have already ended. The `nop` returns to the inline body's own line
+    /// at the invocation the lambda replaced. The local-end label sits on the `nop`, and the next
+    /// debug point (the inline-function frame's end, or the consumer) keeps it.
     fn close_spliced_lambda_frame(&mut self, block: u32, brace: bool, code: &mut CodeBuilder) {
         let IrExpr::Block { stmts, .. } = self.ir.expr(block) else {
             return;
@@ -1249,12 +1337,11 @@ impl Emitter<'_> {
                     )
                 })
         });
-        if closes_lambda_before_locals
-            || (opens_lambda_frame && self.contains_unit_inline_return(&stmts))
-        {
-            // Bound after this lambda's closing-brace `nop`. An early `Unit` labeled return
-            // targets it; the frame's trailing break still falls into the `nop`.
-            self.past_lambda_brace.push(code.new_label());
+        let owned_unit_frames = self.unit_frames_this_lambda_closes(&stmts, value);
+        if !owned_unit_frames.is_empty() {
+            // Bound after this lambda's closing-brace `nop`. An early break of a frame in
+            // `owned_unit_frames` targets it; that frame's trailing break still falls into the nop.
+            self.open_unit_lambda_brace(owned_unit_frames, code.new_label());
         }
         let InlineBodyEntry {
             mut normalize_at_lambda_frame,
@@ -1653,11 +1740,7 @@ impl Emitter<'_> {
     /// kotlinc's block end does.
     pub(super) fn restore_slot_scope(&mut self, scope: SlotScope) {
         let current = std::mem::take(&mut self.slots);
-        let results = self
-            .inline_return_frame_results
-            .values()
-            .map(|&(value, _)| value)
-            .collect::<HashSet<_>>();
+        let results = self.inline_return_result_values();
         self.slots = close_slot_scope(current, scope.slots, &results, &mut self.unassigned_values);
         self.frame.leave_block(scope.frame);
     }

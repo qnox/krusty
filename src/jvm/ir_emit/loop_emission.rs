@@ -53,9 +53,8 @@ impl Emitter<'_> {
         self.loop_stack
             .push((bottom, end, label.clone(), self.return_finalizers.len()));
         let trailing_unit_return = self.trailing_unit_return_break(body, label.as_deref());
-        let saved_trailing = self.trailing_unit_return_break;
-        if trailing_unit_return.is_some() {
-            self.trailing_unit_return_break = trailing_unit_return;
+        if let (Some(frame), Some(trailing)) = (label.clone(), trailing_unit_return) {
+            self.enter_unit_return_frame(frame, trailing);
         }
         let enclosing_terminal_target = self.terminal_statement_target.replace(bottom);
         // A lowered `for` loop's body is a transparent scope (kotlinc's `IrComposite`): what it
@@ -99,7 +98,7 @@ impl Emitter<'_> {
         };
         self.terminal_statement_target = enclosing_terminal_target;
         if trailing_unit_return.is_some() {
-            self.trailing_unit_return_break = saved_trailing;
+            self.leave_unit_return_frame();
         }
         // A pre-test body's block has restored its slot map. A post-test body's block stays
         // open here because `continue` and the condition are inside that same Kotlin scope.
@@ -153,7 +152,7 @@ impl Emitter<'_> {
     /// reachable from the path that does not return.
     fn trailing_unit_return_break(&self, body: ExprId, label: Option<&str>) -> Option<ExprId> {
         let label = label?;
-        if self.inline_return_frame_results.contains_key(label)
+        if self.has_inline_return_result(label)
             || !self
                 .ir
                 .inline_return_frames
