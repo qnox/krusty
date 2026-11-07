@@ -103,6 +103,9 @@ impl BodyLowering<'_, '_, '_> {
                     }
                     self.list_storage_construction(plan, args)
                 }
+                DependencyOperation::PrimitiveIteratorNext => {
+                    self.primitive_iterator_next(receiver, args, extension_receiver_parameter, ret)
+                }
                 DependencyOperation::StringPlus => {
                     let Some((left, right)) =
                         exact_extension_pair(receiver, args, extension_receiver_parameter)
@@ -138,7 +141,7 @@ impl BodyLowering<'_, '_, '_> {
         }
         // A primitive operator member — `a.and(b)` in an expanded library body — is the binary
         // operation its source operator form lowers to.
-        if let Some(op) = intrinsic.and_then(primitive_binary_operation) {
+        if let Some(op) = intrinsic.and_then(IrBinOp::of_primitive_operator) {
             let (Some(lhs), [rhs]) = (receiver, args) else {
                 return Some(Err("a primitive operator with malformed operands".into()));
             };
@@ -351,31 +354,6 @@ impl BodyLowering<'_, '_, '_> {
             &[value, fallback],
         )
     }
-}
-
-/// The common-IR operation of a provider's primitive binary operator.
-fn primitive_binary_operation(
-    intrinsic: crate::backend::BackendCompilerIntrinsic,
-) -> Option<IrBinOp> {
-    use crate::backend::BackendCompilerIntrinsic;
-    use crate::libraries::PrimitiveBinaryIntrinsic;
-
-    Some(match intrinsic {
-        BackendCompilerIntrinsic::PrimitiveBinary(operation) => match operation {
-            PrimitiveBinaryIntrinsic::Add => IrBinOp::Add,
-            PrimitiveBinaryIntrinsic::Subtract => IrBinOp::Sub,
-            PrimitiveBinaryIntrinsic::Multiply => IrBinOp::Mul,
-            PrimitiveBinaryIntrinsic::Divide => IrBinOp::Div,
-            PrimitiveBinaryIntrinsic::Remainder => IrBinOp::Rem,
-        },
-        BackendCompilerIntrinsic::PrimitiveBitAnd => IrBinOp::BitAnd,
-        BackendCompilerIntrinsic::PrimitiveBitOr => IrBinOp::BitOr,
-        BackendCompilerIntrinsic::PrimitiveBitXor => IrBinOp::BitXor,
-        BackendCompilerIntrinsic::PrimitiveShiftLeft => IrBinOp::Shl,
-        BackendCompilerIntrinsic::PrimitiveShiftRight => IrBinOp::Shr,
-        BackendCompilerIntrinsic::PrimitiveUnsignedShiftRight => IrBinOp::Ushr,
-        _ => return None,
-    })
 }
 
 /// The two common-IR representations of one exact top-level extension receiver. A checked source

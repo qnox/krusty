@@ -1534,6 +1534,8 @@ impl Parser<'_> {
                     self.parse_annotation();
                     self.skip_newlines();
                 }
+                let unused =
+                    self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident();
                 let name = self.ident_or_error("catch parameter name");
                 self.skip_newlines();
                 self.expect(TokenKind::Colon, "':'");
@@ -1550,6 +1552,7 @@ impl Parser<'_> {
                 let param_span = Span::new(param_start.lo, ty.span.hi);
                 catches.push(CatchClause {
                     name,
+                    unused,
                     ty,
                     body: cbody,
                     param_span,

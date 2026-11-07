@@ -41,6 +41,8 @@ pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
+        || intrinsic_operations::member_operation(operation).is_some()
+        || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
@@ -821,6 +823,11 @@ impl<'a> Body<'a> {
             return Ok(());
         }
         let Some(source) = source_ty else {
+            // Restore stack polymorphism after structured control only when completion proves
+            // divergence: an inlined generic result may retain Nothing but complete normally.
+            if self.ir.expr_diverges_by(id, &|_, _| false) {
+                self.code.unreachable();
+            }
             return Ok(());
         };
         if source == Ty::Unit && carrier(target)?.is_some() {
@@ -1141,6 +1148,32 @@ impl<'a> Body<'a> {
             {
                 self.throwable_message(dispatch_receiver, &args, *ret)?;
             }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                params,
+                ret,
+                defaults,
+                extension_receiver_parameter,
+                ..
+            } = &**call_callee
+                && let Some(operation) = self
+                    .callables
+                    .callable(*target)
+                    .and_then(|fact| fact.compiler_operation())
+                    .and_then(intrinsic_operations::member_operation) =>
+            {
+                intrinsic_operations::string_get_frame(
+                    params,
+                    *ret,
+                    defaults,
+                    *extension_receiver_parameter,
+                )?;
+                self.intrinsic(operation, dispatch_receiver, &args)?;
+            }
             IrExpr::Call { .. } if value_hash::call_kind(self.ir, self.callables, id).is_some() => {
                 self.value_hash_call(id)?;
             }
@@ -1159,7 +1192,7 @@ impl<'a> Body<'a> {
                 && defaults.is_empty()
                 && self.scalar_operation_of(*target).is_some() =>
             {
-                self.scalar_operation_call(*target, dispatch_receiver, params, *ret, &args)?;
+                self.scalar_operation_call(id, *target, dispatch_receiver, params, *ret, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1588,10 +1621,20 @@ impl<'a> Body<'a> {
         } else {
             left.is_unsigned() || right.is_unsigned()
         };
+        // Equality, shifts and the bitwise connectives are sign-agnostic on the carrier (a shift
+        // takes its right-shift kind from `unsigned` below); every other operator needs an
+        // unsigned instruction this lowering does not select yet.
         if unsigned
             && !matches!(
                 op,
-                IrBinOp::Eq | IrBinOp::Ne | IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr
+                IrBinOp::Eq
+                    | IrBinOp::Ne
+                    | IrBinOp::Shl
+                    | IrBinOp::Shr
+                    | IrBinOp::Ushr
+                    | IrBinOp::BitAnd
+                    | IrBinOp::BitOr
+                    | IrBinOp::BitXor
             )
         {
             return Err(format!("an ordinary operator on `{}`", describe(left)));

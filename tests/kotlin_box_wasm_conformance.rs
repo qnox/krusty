@@ -1144,3 +1144,21 @@ mod value_hash;
 
 #[path = "wasm_dependency_constructor_exports.rs"]
 mod dependency_constructor_exports;
+
+// PLATFORM-SPECIFIC: the whole portable programs also exercise selected stdlib member calls
+// through each Wasm target's real KLIB provider, registry and executable runtime.
+#[test]
+fn wasm_whole_catch_programs_realize_their_library_member_calls() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/unusedCatchParameterName.kt"),
+            "wasmUnusedCatchLibraryMembers",
+        ),
+        (
+            include_str!("box_regressions/inlineCatchParameterNames.kt"),
+            "wasmInlineCatchLibraryMembers",
+        ),
+    ] {
+        expect_wasm_box(source, stem);
+    }
+}

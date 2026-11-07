@@ -45,8 +45,9 @@ impl IrCatch {
             .unwrap_or_else(|| unreachable!("a catch type determines a JVM class"))
     }
 
-    /// The source spelling of the binding, absent for a compiler-generated handler.
+    /// The source spelling of the binding, absent for a compiler-generated handler or an unused
+    /// parameter.
     pub fn binding_name(&self) -> Option<&str> {
-        self.binding.as_ref().map(|binding| binding.name.as_str())
+        self.binding.as_ref().and_then(IrCatchBinding::source_name)
     }
 }

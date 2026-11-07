@@ -42,3 +42,21 @@ fn primitive_iterator_next_is_byte_identical_to_kotlinc() {
     .expect("reference kotlinc is provisioned")
     .expect("store/PrimitiveIteratorNextKt byte-identical to kotlinc");
 }
+
+// PLATFORM-SPECIFIC: the existing whole source pins Native object emission for every primitive
+// bridge and its boxed/nullable/interface uses; the JVM test above owns its bytecode oracle.
+#[test]
+fn primitive_iterator_bridges_emit_verified_native_objects() {
+    use common::native_backend::{native_objects, NativeBox};
+    let target = krusty::native::NativeTarget::ALL[0];
+    let objects = match native_objects(&[("PrimitiveIteratorNext", SOURCE)], target) {
+        Ok(objects) => objects,
+        Err(NativeBox::Declined(reason) | NativeBox::Failed(reason)) => panic!("{reason}"),
+        Err(NativeBox::Unavailable) => panic!("the pinned stdlib must be provisioned"),
+        Err(_) => panic!("object emission must not execute the program"),
+    };
+    assert!(
+        !objects.is_empty(),
+        "the complete source must emit an object"
+    );
+}

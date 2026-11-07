@@ -951,6 +951,29 @@ impl BodyLowering<'_, '_, '_> {
         Some(self.list_call(symbol, &carried, answer, receiver, args, ret))
     }
 
+    /// The provider-authenticated primitive iterator bridge uses the same boxed descriptor
+    /// protocol as generic iteration. Its declaration does not prove the receiver's storage.
+    pub(super) fn primitive_iterator_next(
+        &mut self,
+        receiver: Option<u32>,
+        args: &[u32],
+        extension: Option<u32>,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let ty = receiver.and_then(|receiver| self.checked_type(receiver));
+        let shape = ty.and_then(|ty| {
+            self.file
+                .iteration_shape_of(ty)
+                .or_else(|| self.file.walkable_shape(ty))
+        });
+        let unwalkable = ty.is_some_and(|ty| self.file.implements_unwalkable_collection_of(ty));
+        let receiver = primitive_iterator_next_receiver(
+            receiver, args, extension, shape, unwalkable,
+        )
+        .ok_or("a primitive iterator next with unsupported operands or receiver representation")?;
+        self.list_call("kt_iterator_next", &[any()], any(), receiver, &[], ret)
+    }
+
     /// A complete stdlib collection declaration whose body the active provider cannot publish.
     /// Signature matching lives at the Native intrinsic boundary; this method only validates the
     /// actual receiver representation and evaluates the already-selected operands.
@@ -1328,9 +1351,61 @@ impl BodyLowering<'_, '_, '_> {
     }
 }
 
+/// Keep the exact instance-call and descriptor proof together; a selected primitive bridge
+/// alone cannot turn an unrelated or incompletely represented object into a runtime iterator.
+fn primitive_iterator_next_receiver(
+    receiver: Option<u32>,
+    args: &[u32],
+    extension: Option<u32>,
+    shape: Option<super::super::super::intrinsics::CollectionShape>,
+    unwalkable: bool,
+) -> Option<u32> {
+    use super::super::super::intrinsics::CollectionShape;
+    match (receiver, args, extension, shape, unwalkable) {
+        (Some(receiver), [], None, Some(CollectionShape::Iterator), false) => Some(receiver),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_primitive_next_requires_an_exact_instance_call_and_complete_iterator_storage() {
+        use crate::native::intrinsics::CollectionShape;
+        let iterator = Some(CollectionShape::Iterator);
+        assert_eq!(
+            primitive_iterator_next_receiver(Some(41), &[], None, iterator, false),
+            Some(41)
+        );
+        for (receiver, args, extension) in [
+            (None, Vec::new(), None),
+            (Some(41), vec![42], None),
+            (Some(41), Vec::new(), Some(0)),
+        ] {
+            assert_eq!(
+                primitive_iterator_next_receiver(receiver, &args, extension, iterator, false),
+                None
+            );
+        }
+        for shape in [
+            None,
+            Some(CollectionShape::Iterable),
+            Some(CollectionShape::Map),
+            Some(CollectionShape::Sequence),
+            Some(CollectionShape::Text),
+        ] {
+            assert_eq!(
+                primitive_iterator_next_receiver(Some(41), &[], None, shape, false),
+                None
+            );
+        }
+        assert_eq!(
+            primitive_iterator_next_receiver(Some(41), &[], None, iterator, true),
+            None
+        );
+    }
 
     fn signature<'a>(
         owner: &str,
