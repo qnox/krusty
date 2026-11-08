@@ -77,6 +77,36 @@ impl CompilerOutcome {
     }
 }
 
+/// These callers supply original source text, before source writing or FILE splitting. Include
+/// target options in the recording key as well as the invocation so a default-mode answer cannot
+/// be replayed for an explicitly checked compilation.
+fn reference_compilation_arguments(
+    target: CompilationTarget,
+    sources: &[(&str, &str)],
+    arguments: &[String],
+) -> Vec<String> {
+    let mut arguments = arguments.to_vec();
+    if matches!(
+        target,
+        CompilationTarget::WasmJs | CompilationTarget::WasmWasi
+    ) {
+        let original = sources
+            .iter()
+            .map(|(_, source)| *source)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let options = krusty::conformance::WasmCompilerOptions::from_source(&original)
+            .expect("valid original Wasm compilation options");
+        arguments.extend(
+            options
+                .reference_arguments(target)
+                .iter()
+                .map(|argument| (*argument).to_owned()),
+        );
+    }
+    arguments
+}
+
 /// What the reference compiler for `target` does with `sources`. `None` when kotlinc-native is not
 /// provisioned and no recording exists; the kotlinc distribution is always provisioned.
 pub fn reference_outcome(
@@ -84,6 +114,8 @@ pub fn reference_outcome(
     sources: &[(&str, &str)],
     args: &[String],
 ) -> Option<CompilerOutcome> {
+    let invocation_arguments = reference_compilation_arguments(target, sources, args);
+    let args = invocation_arguments.as_slice();
     let files = recorded(target, "outcome", sources, args, |work| {
         let outcome = if target == CompilationTarget::Jvm {
             let (status, stderr) = super::common::reference_compiler_run(sources, args);
@@ -165,7 +197,30 @@ fn run_reference(
 
 #[cfg(test)]
 mod tests {
-    use super::CompilerOutcome;
+    use super::{reference_compilation_arguments, CompilerOutcome};
+    use krusty::compilation_target::CompilationTarget;
+
+    #[test]
+    fn original_case_options_enter_the_recorded_and_invoked_arguments() {
+        let source = include_str!("../box_regressions/arrayStoreIndexAfterValue.kt");
+        let existing = vec!["-progressive".to_owned()];
+        for target in [CompilationTarget::WasmJs, CompilationTarget::WasmWasi] {
+            assert_eq!(
+                reference_compilation_arguments(target, &[("Case.kt", source)], &existing),
+                ["-progressive", "-Xwasm-enable-array-range-checks"]
+            );
+        }
+        for target in [
+            CompilationTarget::Jvm,
+            CompilationTarget::Native,
+            CompilationTarget::Js,
+        ] {
+            assert_eq!(
+                reference_compilation_arguments(target, &[("Case.kt", source)], &existing),
+                existing
+            );
+        }
+    }
 
     #[test]
     #[should_panic(expected = "exited with 1 and reported 0 error(s)")]

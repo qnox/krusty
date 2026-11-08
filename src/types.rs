@@ -70,7 +70,7 @@ pub(crate) use type_parameter_identity::{
     generated_function_type_parameter, hidden_captured_type_parameter,
     is_nested_result_type_variable, metadata_type_parameter, nested_result_type_variable,
     postponed_call_type_variable, postponed_variable_origin, ty_declared_at_call,
-    type_parameter_source_name, CallSiteIdentity,
+    ty_mentions_call_variable, type_parameter_source_name, CallSiteIdentity,
 };
 
 /// Compile-time policy for Kotlin's `assert` operation. Every backend must guard, retain, or elide
