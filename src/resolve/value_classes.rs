@@ -28,21 +28,20 @@ impl Checker<'_> {
         })
     }
 
-    /// The element a single-index read `receiver[i]` yields as the built-in array operation, or
-    /// `None` when the subscript is a `get` convention call.
-    ///
-    /// An array classifier's element access is the array operation itself. A value class over an
-    /// array (`UIntArray` over `IntArray`) is not an array: its `get` is the class's own member,
-    /// which kotlinc calls (`UIntArray.get-pVg5ArA`). The declaration decides, through
-    /// [`Self::ty_is_value_class`], never the classifier's spelling.
-    pub(super) fn builtin_array_read_element(&self, receiver: Ty) -> Option<Ty> {
-        receiver
-            .array_read_elem()
-            .filter(|_| !self.ty_is_value_class(receiver))
+    /// `ty` when it is an array the compiler constructs itself: the size constructor of an
+    /// `IntArray` or `Array<T>` has no declaration of its own. A value class over an array
+    /// (`UIntArray`) declares its constructors in metadata, and kotlinc calls them
+    /// (`UIntArray.constructor-impl(I)[I`), so it is not one.
+    pub(super) fn compiler_constructed_array(&self, ty: Option<Ty>) -> Option<Ty> {
+        ty.filter(|ty| ty.is_array() && !self.ty_is_value_class(*ty))
     }
 
     /// The element a single-index store `receiver[i] = v` writes as the built-in array operation,
-    /// or `None` when it is a `set` convention call; see [`Self::builtin_array_read_element`].
+    /// or `None` when it is a `set` convention call.
+    ///
+    /// A value class over an array (`UIntArray` over `IntArray`) is not an array: its `set` is the
+    /// class's own member, which kotlinc calls. The declaration decides, through
+    /// [`Self::ty_is_value_class`], never the classifier's spelling.
     pub(super) fn builtin_array_store_element(&self, receiver: Ty) -> Option<Ty> {
         receiver
             .array_elem()

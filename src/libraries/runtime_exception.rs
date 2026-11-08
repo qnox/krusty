@@ -9,6 +9,8 @@ pub enum RuntimeExceptionKind {
     RuntimeException,
     IndexOutOfBounds,
     NullPointer,
+    IllegalState,
+    IllegalArgument,
 }
 
 impl RuntimeExceptionKind {
@@ -21,6 +23,8 @@ impl RuntimeExceptionKind {
             Self::RuntimeException => "kotlin/RuntimeException",
             Self::IndexOutOfBounds => "kotlin/IndexOutOfBoundsException",
             Self::NullPointer => "kotlin/NullPointerException",
+            Self::IllegalState => "kotlin/IllegalStateException",
+            Self::IllegalArgument => "kotlin/IllegalArgumentException",
         })
     }
 }

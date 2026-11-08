@@ -4,6 +4,7 @@
 //! supplies the parameter, receiver and expected function types its lambdas would be checked
 //! against. Selecting the callable is left to call resolution once the lambdas are checked.
 
+use super::member_extension_selection::MemberExtensionLambdaShape;
 use super::*;
 use crate::types::TyKind;
 
@@ -160,7 +161,7 @@ impl Checker<'_> {
                 semantic
                     .formals
                     .iter()
-                    .filter(|formal| !bindings.contains_key(*formal))
+                    .filter(|formal| !bindings.contains_key((*formal).as_str()))
                     .cloned()
                     .collect::<Vec<_>>()
             })
@@ -405,7 +406,9 @@ impl Checker<'_> {
             // formal by its broad declared bound still admits the actual receiver, that binding can
             // widen and is not an expected lambda-return type yet.
             for (index, formal) in semantic.formals.iter().enumerate() {
-                if fixed_expectation_formals.contains(formal) || !binds.contains_key(formal) {
+                if fixed_expectation_formals.contains(formal)
+                    || !binds.contains_key(formal.as_str())
+                {
                     continue;
                 }
                 let broad = semantic
@@ -415,7 +418,7 @@ impl Checker<'_> {
                     .copied()
                     .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
                 let mut trial = binds.clone();
-                trial.insert(formal.clone(), broad);
+                trial.insert(crate::types::TyParamName::new(formal), broad);
                 let widened_receiver =
                     crate::symbol_resolver::ty_subst_keep_unbound(receiver_sig, &trial);
                 let widened_receiver = self.declared_function_semantic_type(widened_receiver);
@@ -423,10 +426,10 @@ impl Checker<'_> {
                 crate::trace_compiler!(
                     "expected_call",
                     "receiver lambda constraint formal={formal:?} binding={:?} broad={broad:?} receiver={receiver:?} declared={receiver_sig:?} widened={widened_receiver:?} widens={widens}",
-                    binds.get(formal),
+                    binds.get(formal.as_str()),
                 );
                 if !widens {
-                    fixed_expectation_formals.insert(formal.clone());
+                    fixed_expectation_formals.insert(*formal);
                 }
             }
         }
@@ -447,14 +450,14 @@ impl Checker<'_> {
                 continue;
             };
             for formal in &semantic.formals {
-                if binds.contains_key(formal)
+                if binds.contains_key(formal.as_str())
                     && function
                         .params
                         .iter()
                         .copied()
                         .any(|input| ty_mentions_param(input, std::slice::from_ref(formal)))
                 {
-                    fixed_expectation_formals.insert(formal.clone());
+                    fixed_expectation_formals.insert(*formal);
                 }
             }
         }
@@ -469,8 +472,8 @@ impl Checker<'_> {
                 .ok()?
             {
                 if !fixed_expectation_formals.contains(&formal) {
-                    binds.insert(formal.clone(), actual);
-                    expectation_binds.insert(formal.clone(), actual);
+                    binds.insert(formal, actual);
+                    expectation_binds.insert(formal, actual);
                     fixed_expectation_formals.insert(formal);
                 }
             }
@@ -491,8 +494,8 @@ impl Checker<'_> {
         // the integer literal to `Long`; joining the provisional `Int` with fixed `A = Long` into
         // `Any` would type the lambda's `acc` as `Any` before final overload selection.
         for formal in &fixed_expectation_formals {
-            if let Some(&fixed) = fixed_before_argument_merge.get(formal) {
-                binds.insert(formal.clone(), fixed);
+            if let Some(&fixed) = fixed_before_argument_merge.get(formal.as_str()) {
+                binds.insert(crate::types::TyParamName::new(formal), fixed);
             }
         }
         for (&parameter, actual) in argument_map.iter().zip(arg_tys) {
@@ -501,23 +504,23 @@ impl Checker<'_> {
                     continue;
                 };
                 for formal in &semantic.formals {
-                    if binds.contains_key(formal)
+                    if binds.contains_key(formal.as_str())
                         && crate::symbol_resolver::formal_variance_in_type(
                             &self.fed_source(),
                             *parameter,
                             formal,
                         ) == Some(crate::types::TypeVariance::Invariant)
                     {
-                        fixed_expectation_formals.insert(formal.clone());
+                        fixed_expectation_formals.insert(*formal);
                     }
                 }
             }
         }
-        expectation_binds.extend(
-            fixed_expectation_formals
-                .iter()
-                .filter_map(|formal| binds.get(formal).map(|binding| (formal.clone(), *binding))),
-        );
+        expectation_binds.extend(fixed_expectation_formals.iter().filter_map(|formal| {
+            binds
+                .get(formal.as_str())
+                .map(|binding| (crate::types::TyParamName::from(formal), *binding))
+        }));
         let param_types = argument_parameters
             .iter()
             .zip(argument_map)
@@ -625,7 +628,7 @@ impl Checker<'_> {
                         .iter()
                         .filter(|formal| {
                             declared_return.is_some_and(|declared_return| {
-                                ty_mentions_param(declared_return, std::slice::from_ref(formal))
+                                ty_mentions_param(declared_return, std::slice::from_ref(*formal))
                             })
                         })
                         .collect::<Vec<_>>();
@@ -837,10 +840,10 @@ impl Checker<'_> {
                     .iter()
                     .flatten()
                     .any(|(inputs, result)| {
-                        ty_mentions_param(*result, std::slice::from_ref(&formal))
-                            || inputs.iter().any(|input| {
-                                ty_mentions_param(*input, std::slice::from_ref(&formal))
-                            })
+                        ty_mentions_param(*result, &[formal.to_string()])
+                            || inputs
+                                .iter()
+                                .any(|input| ty_mentions_param(*input, &[formal.to_string()]))
                     });
             if shapes_lambda_expectation {
                 bindings.entry(formal).or_insert(actual);
@@ -852,7 +855,7 @@ impl Checker<'_> {
             |actual, bound| self.generic_bound_admits(actual, bound),
         ) {
             for (formal, actual) in inferred {
-                if !symbolic.constrained_formals.contains(&formal) {
+                if !symbolic.constrained_formals.contains(formal.as_str()) {
                     bindings.entry(formal).or_insert(actual);
                 }
             }
@@ -1077,11 +1080,136 @@ impl Checker<'_> {
         )
     }
 
+    /// The lambda shape of an extension call, decided by the call's own pre-lambda candidate
+    /// selection ([`Self::select_callable_candidate`] over the receiver's extension rung, every
+    /// lambda argument still unanalyzed): its callable-tower rungs, declaration priorities,
+    /// argument mapping and omitted defaults. The selected candidate shapes the lambdas. A tie is
+    /// refined by the lambda's result where the specification allows it, and otherwise claims the
+    /// call as ambiguous.
     pub(super) fn extension_lambda_shape(
-        &self,
+        &mut self,
         scope: &CheckerScope<'_>,
+        call: ExprId,
         receiver: Ty,
         name: &str,
+        untyped: UntypedLambdaCall<'_>,
+    ) -> MemberExtensionLambdaShape {
+        let family = crate::libraries::FunctionSet {
+            overloads: self
+                .stable_receiver_callables(receiver, name)
+                .functions()
+                .iter()
+                .filter(|function| function.is_extension())
+                .cloned()
+                .collect(),
+        };
+        // Only the candidates that can take the already typed arguments, callable references
+        // included, enter the selection, exactly as each would be checked before its lambdas.
+        let src = self.fed_source();
+        let shaped =
+            crate::symbol_resolver::ranked_extension_overloads_by_recv(&src, receiver, &family)
+                .into_iter()
+                .filter_map(|(_, binding_receiver, overload)| {
+                    self.extension_overload_shape(scope, name, overload, binding_receiver, untyped)
+                        .map(|shape| (overload.clone(), shape))
+                })
+                .collect::<Vec<_>>();
+        // A lambda is admitted by its shape; any other argument still untyped is postponed
+        // until the selected candidate supplies its expectation (`mapTo(HashSet()) { .. }`).
+        let arg_tys = untyped
+            .partial
+            .iter()
+            .zip(untyped.args)
+            .map(|(ty, &argument)| match (ty, self.file.expr(argument)) {
+                (Some(ty), _) => *ty,
+                (None, Expr::Lambda { .. }) => Ty::Error,
+                (None, _) => Ty::Pending,
+            })
+            .collect::<Vec<_>>();
+        let selection = self.select_callable_candidate(
+            scope,
+            CallArgs {
+                call,
+                args: untyped.args,
+                arg_tys: &arg_tys,
+            },
+            untyped.type_args,
+            Some(receiver),
+            CallResultConstraint::direct(untyped.expected),
+            shaped
+                .iter()
+                .map(|(overload, _)| overload.clone())
+                .collect(),
+        );
+        let positions = match selection {
+            // Kotlin resolves a call whose only shaped candidate is inapplicable to that
+            // candidate, and still analyzes the lambda against it; its diagnostic is reported by
+            // the call's own selection.
+            None if shaped.len() == 1 => vec![0],
+            None => return MemberExtensionLambdaShape::Absent,
+            Some(
+                CallableCandidateSelection::Selected(selected)
+                | CallableCandidateSelection::MissingContext(selected),
+            ) => selected.candidate_index.into_iter().collect::<Vec<_>>(),
+            Some(CallableCandidateSelection::Ambiguous(_, positions)) => positions,
+        };
+        crate::trace_compiler!(
+            "lambda_shape",
+            "extension selection={name} receiver={receiver:?} candidates={} shaped={} chosen={positions:?}",
+            family.overloads.len(),
+            shaped.len(),
+        );
+        let tied = positions
+            .iter()
+            .map(|&position| (shaped[position].1.clone(), &shaped[position].0))
+            .collect::<Vec<_>>();
+        match self.extension_tie_choice(untyped.args, tied) {
+            ExtensionShapeChoice::Decided(shape) => shape,
+            ExtensionShapeChoice::Refine { lambda, tied } => self.refined_extension_lambda_shape(
+                scope,
+                name,
+                (lambda, untyped.args[lambda]),
+                tied,
+            ),
+        }
+    }
+
+    /// The shape of a call selected by its lambda's return type (`recv.sumOf { … }`): each lambda
+    /// takes the receiver's element inputs, and nothing else is shaped.
+    pub(super) fn lambda_return_overload_shape(
+        &self,
+        receiver: Ty,
+        name: &str,
+        args: &[ExprId],
+    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        let params = self.lambda_return_overload_param_types(receiver, name)?;
+        Some(crate::symbol_resolver::LambdaCallShape {
+            generic_formals: Vec::new(),
+            argument_parameters: Vec::new(),
+            param_types: Some(
+                args.iter()
+                    .map(|&argument| match self.file.expr(argument) {
+                        Expr::Lambda { .. } => params.clone(),
+                        _ => Vec::new(),
+                    })
+                    .collect(),
+            ),
+            expected_types: None,
+            fixed_expected_types: None,
+            receivers: None,
+            context_counts: None,
+            boxes_captures: None,
+            inline: false,
+        })
+    }
+
+    /// The lambda shape `overload` supplies when it is selected for `call` on `binding_receiver`.
+    fn extension_overload_shape(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        overload: &crate::libraries::FunctionInfo,
+        binding_receiver: Ty,
         call: UntypedLambdaCall<'_>,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let UntypedLambdaCall {
@@ -1092,99 +1220,182 @@ impl Checker<'_> {
             type_args,
             expected: expected_result,
         } = call;
-        let src = self.fed_source();
-        let fs = crate::libraries::FunctionSet {
-            overloads: self
-                .resolver()
-                .resolve_symbol(
-                    crate::symbol_resolver::SymRecv::Value(receiver),
-                    name,
-                    &[],
-                    &[],
-                )
-                .map(crate::symbol_resolver::Symbol::overloads)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(crate::libraries::FunctionInfo::is_extension)
-                .collect(),
-        };
-        crate::trace_compiler!(
-            "lambda_shape",
-            "extension inventory={name} receiver={receiver:?} candidates={} ranked={}",
-            fs.overloads.len(),
-            crate::symbol_resolver::ranked_extension_overloads_by_recv(&src, receiver, &fs).len(),
-        );
-        for (_, binding_receiver, o) in
-            crate::symbol_resolver::ranked_extension_overloads_by_recv(&src, receiver, &fs)
-        {
+        // Use the same semantic slot mapper as module/provider member expectations. This handles
+        // reordered names, omitted defaults, and syntactic trailing lambdas together.
+        let shape = self.contextual_call_shape(
+            scope,
+            &overload.semantic_params(),
+            &overload.call_sig,
+            overload.context_count,
+            arg_names,
+        )?;
+        let argument_map = call_argument_parameter_indices(
+            arg_tys.len(),
+            shape.params.len(),
+            arg_names,
+            trailing_lambda,
+            &shape.call_sig,
+        )?
+        .into_iter()
+        .map(|parameter| shape.parameter_indices[parameter])
+        .collect::<Vec<_>>();
+        let whole_arrays = named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig);
+        if !self.lambda_overload_partially_applicable(
+            scope,
+            overload,
+            Some(binding_receiver),
+            (args, arg_tys),
+            (&argument_map, &whole_arrays),
+            type_args,
+        ) {
             crate::trace_compiler!(
                 "lambda_shape",
-                "extension candidate={name} receiver={receiver:?} scope_rank={} receiver_rank={} binding_receiver={binding_receiver:?} params={:?} generic={:?} partial={arg_tys:?}",
-                o.scope_rank,
-                o.receiver_rank,
-                o.semantic_params(),
-                o.generic_sig,
+                "extension candidate={name} rejected before contextual typing"
             );
-            // Use the same semantic slot mapper as module/provider member expectations.
-            // This handles reordered names, omitted defaults, and syntactic trailing lambdas
-            // together; an origin-specific label-only map used to drift from real call
-            // recording whenever more than one of those features appeared in the same call.
-            let shape = self.contextual_call_shape(
-                scope,
-                &o.semantic_params(),
-                &o.call_sig,
-                o.context_count,
-                arg_names,
-            )?;
-            let Some(argument_map) = call_argument_parameter_indices(
-                arg_tys.len(),
-                shape.params.len(),
-                arg_names,
-                trailing_lambda,
-                &shape.call_sig,
-            ) else {
-                continue;
-            };
-            let argument_map = argument_map
-                .into_iter()
-                .map(|parameter| shape.parameter_indices[parameter])
-                .collect::<Vec<_>>();
-            let partial = self.lambda_overload_partially_applicable(
-                scope,
-                o,
-                Some(binding_receiver),
-                (args, arg_tys),
-                (
-                    &argument_map,
-                    &named_whole_array_varargs(&argument_map, arg_names, &o.call_sig),
-                ),
-                type_args,
-            );
-            if !partial {
-                crate::trace_compiler!(
-                    "lambda_shape",
-                    "extension candidate={name} rejected before contextual typing"
-                );
-                continue;
-            }
-            if let Some(shape) = self.lambda_shape_for_overload(
-                o,
-                Some(binding_receiver),
-                (args, arg_tys),
-                (
-                    &argument_map,
-                    &named_whole_array_varargs(&argument_map, arg_names, &o.call_sig),
-                ),
-                type_args,
-                CallResultConstraint::direct(expected_result),
-            ) {
-                crate::trace_compiler!(
-                    "lambda_shape",
-                    "extension candidate={name} selected shape={shape:?}"
-                );
-                return Some(shape);
-            }
+            return None;
         }
-        None
+        let shape = self.lambda_shape_for_overload(
+            overload,
+            Some(binding_receiver),
+            (args, arg_tys),
+            (&argument_map, &whole_arrays),
+            type_args,
+            CallResultConstraint::direct(expected_result),
+        )?;
+        crate::trace_compiler!("lambda_shape", "extension candidate={name} shape={shape:?}");
+        Some(shape)
     }
+
+    /// The shape of a tie that the lambda's result refines. The lambda is probed against the first
+    /// tied candidate's fixed expectation, and the first candidate whose result accepts the
+    /// probed results shapes the lambda with its own fixed expectation. Without fixed
+    /// expectations, or when none accepts the results, the lambda is checked with an open result
+    /// and call resolution refines the tie.
+    fn refined_extension_lambda_shape(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        (position, lambda): (usize, ExprId),
+        mut tied: Vec<crate::symbol_resolver::LambdaCallShape>,
+    ) -> MemberExtensionLambdaShape {
+        let expectations = tied
+            .iter()
+            .map(|shape| {
+                let fixed = shape
+                    .fixed_expected_types
+                    .as_ref()?
+                    .get(position)
+                    .copied()??;
+                match fixed.non_null().kind() {
+                    TyKind::Fun(signature) => Some(signature),
+                    _ => None,
+                }
+            })
+            .collect::<Option<Vec<_>>>();
+        let inputs = tied[0]
+            .param_types
+            .as_ref()
+            .and_then(|inputs| inputs.get(position))
+            .cloned()
+            .unwrap_or_default();
+        let chosen = expectations.and_then(|expectations| {
+            self.refine_tie_by_lambda_results(scope, (lambda, &inputs), &expectations, Some(name))
+        });
+        crate::trace_compiler!("lambda_shape", "extension refined tie chosen={chosen:?}");
+        let Some(chosen) = chosen else {
+            let mut shape = tied.swap_remove(0);
+            if let Some(fixed) = shape
+                .fixed_expected_types
+                .as_mut()
+                .and_then(|fixed| fixed.get_mut(position))
+            {
+                *fixed = None;
+            }
+            return MemberExtensionLambdaShape::Selected(shape);
+        };
+        MemberExtensionLambdaShape::Selected(tied.swap_remove(chosen))
+    }
+
+    /// What a tie of the extension call's ordinary selection decides for its lambdas. Tied
+    /// candidates that shape the lambdas identically shape them together. The lambda's result
+    /// refines the tie only where the specification allows it
+    /// (`@OverloadResolutionByLambdaReturnType` on a tied candidate, exactly one lambda argument,
+    /// and tied function types with the same inputs). Any other tie is an ambiguity that claims
+    /// the call without shaping its lambdas.
+    fn extension_tie_choice(
+        &self,
+        args: &[ExprId],
+        tied: Vec<(
+            crate::symbol_resolver::LambdaCallShape,
+            &crate::libraries::FunctionInfo,
+        )>,
+    ) -> ExtensionShapeChoice {
+        let Some(((first, _), others)) = tied.split_first() else {
+            return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Absent);
+        };
+        if others.iter().all(|(shape, _)| shape == first) {
+            return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Selected(
+                first.clone(),
+            ));
+        }
+        let refinable = tied.iter().any(|(_, overload)| {
+            overload
+                .callable
+                .annotations
+                .contains(&crate::types::type_name(
+                    "kotlin/OverloadResolutionByLambdaReturnType",
+                ))
+        });
+        let mut lambdas = args
+            .iter()
+            .enumerate()
+            .filter(|(_, &argument)| matches!(self.file.expr(argument), Expr::Lambda { .. }))
+            .map(|(position, _)| position);
+        let (Some(lambda), None) = (lambdas.next(), lambdas.next()) else {
+            return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Ambiguous);
+        };
+        let inputs = |shape: &crate::symbol_resolver::LambdaCallShape| {
+            let parameter = shape
+                .expected_types
+                .as_ref()?
+                .get(lambda)
+                .copied()
+                .flatten()?;
+            match parameter.non_null().kind() {
+                TyKind::Fun(signature) => Some((
+                    signature.params.clone(),
+                    signature.context_count,
+                    signature.has_receiver,
+                    signature.suspend,
+                )),
+                _ => None,
+            }
+        };
+        let same_inputs = inputs(first).is_some_and(|first_inputs| {
+            others
+                .iter()
+                .all(|(shape, _)| inputs(shape).as_ref() == Some(&first_inputs))
+        });
+        crate::trace_compiler!(
+            "lambda_shape",
+            "extension tie refinable={refinable} same_inputs={same_inputs}"
+        );
+        if !refinable || !same_inputs {
+            return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Ambiguous);
+        }
+        ExtensionShapeChoice::Refine {
+            lambda,
+            tied: tied.into_iter().map(|(shape, _)| shape).collect(),
+        }
+    }
+}
+
+/// What an extension call's pre-lambda selection decides for its lambdas.
+enum ExtensionShapeChoice {
+    Decided(MemberExtensionLambdaShape),
+    /// A tie that the result of the lambda argument at `lambda` refines.
+    Refine {
+        lambda: usize,
+        tied: Vec<crate::symbol_resolver::LambdaCallShape>,
+    },
 }

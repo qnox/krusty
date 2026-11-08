@@ -198,7 +198,7 @@ fn emit_companion_bridge(
     let declared_nullability::DeclaredNullability {
         result: result_nullability,
         parameters: parameter_nullability,
-    } = override_result_emission::declared_nullability(ir, env.override_results, function);
+    } = override_result_emission::declared_nullability(ir, env, function);
     let nullability_annotated =
         function_annotations::nullability_annotated(ir, function, &annotations);
     let parameter_annotations: &[crate::ir::DeclarationAnnotations] = ir
@@ -286,7 +286,11 @@ fn emit_companion_bridge(
     let visibility = method_access::jvm_visibility(ir.method_visibility(function));
     // A static method of an interface cannot be final.
     let finality = if interface { 0 } else { 0x0010 };
-    let access = visibility | 0x0008 | finality | method_access::varargs_access(ir, function);
+    let access = visibility
+        | 0x0008
+        | finality
+        | method_access::varargs_access(ir, function)
+        | method_access::annotated_method_modifiers(ir.function_annotations.get(&function));
     cw.add_method_sig(access, name, &descriptor, &code, signature.as_deref());
     cw.set_method_parameters(name, &descriptor, &method_parameters);
     if nullability_annotated
