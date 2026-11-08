@@ -1,9 +1,14 @@
 //! A body may use a non-public class of the library that declares the body. The same file-local
 //! identity in another library, even one the producer depends on, stays refused.
+//!
+//! Stores come from field initializers and anonymous initializers in member order. Two libraries
+//! that reuse one file-local signature stay distinct, including after a declined lowering. An
+//! interface is a supertype only when this library authenticates it, and that same list is the
+//! class's hierarchy.
 
-use super::demo_package::{demo_with, selected_demo_module, Demo, Shape, T};
+use super::demo_package::{demo_with, module_trees, selected_demo_module, Demo, Shape, T};
 use super::{base, local_symbol, public_symbol, validated, DependencyBodyUnit};
-use crate::ir::{IrConstructorAccess, IrExpr};
+use crate::ir::{IrConst, IrConstructorAccess, IrExpr};
 use crate::klib_libraries::{KlibBodyLibrary, KlibDeclarationBodies};
 use crate::metadata::id_signature::{
     callable_signature, CallableShape, ClassScope, DeclarationContainer, KlibPublicIdSignature,
@@ -16,19 +21,24 @@ use crate::metadata::klib_ir::tree::{
     KlibIrVariance,
 };
 use crate::metadata::klib_ir::{
-    KlibIrDeclarationTree, KlibIrModuleTrees, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind,
+    KlibIrConstant, KlibIrDeclarationTree, KlibIrModuleTrees, KlibIrSignature, KlibIrSymbol,
+    KlibIrSymbolKind,
 };
 use crate::metadata::semantic::KotlinType;
+use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
 const CLASS_SLOT: u32 = 40;
 const CONSTRUCTOR_SLOT: u32 = 41;
-const FIELD_SLOT: u32 = 42;
+const STORED_SLOT: u32 = 42;
 const TYPE_PARAMETER_SLOT: u32 = 43;
 const THIS_SLOT: u32 = 44;
 const PARAMETER_SLOT: u32 = 45;
+const MARK_SLOT: u32 = 46;
+const INITIALIZER_SLOT: u32 = 47;
 
-const MAKE: Shape = ("make", &[T::Int], T::CharSequence);
+const MAKE: Shape = ("make", &[T::Int], T::Any);
+const EMPTY_MAKE: Shape = ("make", &[], T::Any);
 
 fn file_local(kind: KlibIrSymbolKind, slot: u32) -> KlibIrSymbol {
     local_symbol(kind, slot)
@@ -68,9 +78,17 @@ fn any_constructor() -> KlibPublicIdSignature {
     .expect("Any.<init> is signable")
 }
 
+fn class_symbol() -> KlibIrSymbol {
+    file_local(KlibIrSymbolKind::Class, CLASS_SLOT)
+}
+
+fn parameter_symbol() -> KlibIrSymbol {
+    file_local(KlibIrSymbolKind::ValueParameter, PARAMETER_SLOT)
+}
+
 fn applied_hidden(arena: &mut KlibIrArena, argument: KlibIrTypeId) -> KlibIrTypeId {
     arena.push_type(KlibIrType::Simple {
-        classifier: file_local(KlibIrSymbolKind::Class, CLASS_SLOT),
+        classifier: class_symbol(),
         nullability: KlibIrNullability::NotSpecified,
         arguments: vec![KlibIrTypeArgument::Type {
             variance: KlibIrVariance::Invariant,
@@ -81,20 +99,23 @@ fn applied_hidden(arena: &mut KlibIrArena, argument: KlibIrTypeId) -> KlibIrType
     })
 }
 
-/// `class Hidden<T>(val value: T) : CharSequence`, private to its file, delegating to `Any`.
-fn hidden_class() -> KlibIrDeclarationTree {
-    let mut arena = KlibIrArena::default();
-    let class_symbol = file_local(KlibIrSymbolKind::Class, CLASS_SLOT);
-    let formal = arena.push_type(KlibIrType::Simple {
-        classifier: file_local(KlibIrSymbolKind::TypeParameter, TYPE_PARAMETER_SLOT),
+fn plain_hidden(arena: &mut KlibIrArena) -> KlibIrTypeId {
+    arena.push_type(KlibIrType::Simple {
+        classifier: class_symbol(),
         nullability: KlibIrNullability::NotSpecified,
         arguments: Vec::new(),
         annotations: Vec::new(),
         abbreviation: None,
-    });
-    let class_ty = applied_hidden(&mut arena, formal);
+    })
+}
+
+fn const_int(arena: &mut KlibIrArena, value: i32) -> crate::metadata::klib_ir::tree::KlibIrExprId {
+    let ty = arena.push_type(T::Int.klib());
+    arena.push_expr(Some(ty), KlibIrExprKind::Const(KlibIrConstant::Int(value)))
+}
+
+fn delegation(arena: &mut KlibIrArena, class_symbol: &KlibIrSymbol) -> Vec<KlibIrStatement> {
     let unit = arena.push_type(T::Unit.klib());
-    let char_sequence = arena.push_type(T::CharSequence.klib());
     let delegate = arena.push_expr(
         Some(unit),
         KlibIrExprKind::DelegatingConstructorCall(KlibIrMemberAccess {
@@ -108,6 +129,54 @@ fn hidden_class() -> KlibIrDeclarationTree {
         Some(unit),
         KlibIrExprKind::InstanceInitializerCall(class_symbol.clone()),
     );
+    vec![
+        KlibIrStatement::Expression(delegate),
+        KlibIrStatement::Expression(initialize),
+    ]
+}
+
+fn field(
+    slot: u32,
+    name: &str,
+    ty: KlibIrTypeId,
+    initializer: crate::metadata::klib_ir::tree::KlibIrExprId,
+) -> KlibIrField {
+    let mut declaration = base(file_local(KlibIrSymbolKind::Field, slot));
+    declaration.flags = (1 << 1) | (1 << 4);
+    KlibIrField {
+        base: declaration,
+        name: name.to_owned(),
+        ty,
+        initializer: Some(initializer),
+    }
+}
+
+/// `class Hidden<T>(value: T) : Super`, with `stored` initialized from the parameter and `mark`
+/// from a later constant. The field spelling is not the parameter spelling.
+fn hidden_class(supertype: T) -> KlibIrDeclarationTree {
+    let mut arena = KlibIrArena::default();
+    let symbol = class_symbol();
+    let formal = arena.push_type(KlibIrType::Simple {
+        classifier: file_local(KlibIrSymbolKind::TypeParameter, TYPE_PARAMETER_SLOT),
+        nullability: KlibIrNullability::NotSpecified,
+        arguments: Vec::new(),
+        annotations: Vec::new(),
+        abbreviation: None,
+    });
+    let class_ty = applied_hidden(&mut arena, formal);
+    let int = arena.push_type(T::Int.klib());
+    let listed = arena.push_type(supertype.klib());
+    let parameter = parameter_symbol();
+    let stored_init = arena.push_expr(
+        Some(formal),
+        KlibIrExprKind::GetValue {
+            symbol: parameter.clone(),
+            origin: None,
+        },
+    );
+    let init_value = const_int(&mut arena, 4);
+    let mark_init = const_int(&mut arena, 7);
+    let constructor_body = delegation(&mut arena, &symbol);
     let constructor = arena.push_function(KlibIrFunction {
         base: private(base(file_local(
             KlibIrSymbolKind::Constructor,
@@ -120,7 +189,7 @@ fn hidden_class() -> KlibIrDeclarationTree {
         context_parameters: Vec::new(),
         extension_receiver: None,
         regular_parameters: vec![KlibIrParameter {
-            base: base(file_local(KlibIrSymbolKind::ValueParameter, PARAMETER_SLOT)),
+            base: base(parameter),
             name: "value".to_owned(),
             ty: formal,
             vararg_element_type: None,
@@ -130,20 +199,15 @@ fn hidden_class() -> KlibIrDeclarationTree {
         overridden: Vec::new(),
         companion_extension_class: None,
         prepared_inline_file: None,
-        body: Some(KlibIrBody::Block(vec![
-            KlibIrStatement::Expression(delegate),
-            KlibIrStatement::Expression(initialize),
-        ])),
+        body: Some(KlibIrBody::Block(constructor_body)),
     });
-    let mut field = base(file_local(KlibIrSymbolKind::Field, FIELD_SLOT));
-    field.flags = (1 << 1) | (1 << 4);
     let mut formal_declaration = base(file_local(
         KlibIrSymbolKind::TypeParameter,
         TYPE_PARAMETER_SLOT,
     ));
     formal_declaration.flags = 4;
     let class = arena.push_class(KlibIrClass {
-        base: private(base(class_symbol.clone())),
+        base: private(base(symbol.clone())),
         name: "Hidden".to_owned(),
         this_receiver: Some(KlibIrParameter {
             base: base(file_local(KlibIrSymbolKind::ValueParameter, THIS_SLOT)),
@@ -157,14 +221,66 @@ fn hidden_class() -> KlibIrDeclarationTree {
             name: "T".to_owned(),
             supertypes: Vec::new(),
         }],
-        supertypes: vec![char_sequence],
+        supertypes: vec![listed],
         members: vec![
-            KlibIrMember::Field(KlibIrField {
-                base: field,
-                name: "value".to_owned(),
-                ty: formal,
-                initializer: None,
-            }),
+            KlibIrMember::Field(field(STORED_SLOT, "stored", formal, stored_init)),
+            KlibIrMember::AnonymousInitializer {
+                base: base(file_local(KlibIrSymbolKind::Class, INITIALIZER_SLOT)),
+                statements: vec![KlibIrStatement::Expression(init_value)],
+            },
+            KlibIrMember::Field(field(MARK_SLOT, "mark", int, mark_init)),
+            KlibIrMember::Function(constructor),
+        ],
+        value_class_representation: None,
+        sealed_subclasses: Vec::new(),
+    });
+    KlibIrDeclarationTree {
+        arena,
+        declaration: KlibIrMember::Class(class),
+    }
+}
+
+/// A non-generic class whose only store is the constant `value`, not a constructor parameter.
+fn counted_class(value: i32) -> KlibIrDeclarationTree {
+    let mut arena = KlibIrArena::default();
+    let symbol = class_symbol();
+    let class_ty = plain_hidden(&mut arena);
+    let any = arena.push_type(T::Any.klib());
+    let int = arena.push_type(T::Int.klib());
+    let initializer = const_int(&mut arena, value);
+    let constructor_body = delegation(&mut arena, &symbol);
+    let constructor = arena.push_function(KlibIrFunction {
+        base: private(base(file_local(
+            KlibIrSymbolKind::Constructor,
+            CONSTRUCTOR_SLOT,
+        ))),
+        name: "<init>".to_owned(),
+        constructor: true,
+        type_parameters: Vec::new(),
+        dispatch_receiver: None,
+        context_parameters: Vec::new(),
+        extension_receiver: None,
+        regular_parameters: Vec::new(),
+        return_type: class_ty,
+        overridden: Vec::new(),
+        companion_extension_class: None,
+        prepared_inline_file: None,
+        body: Some(KlibIrBody::Block(constructor_body)),
+    });
+    let class = arena.push_class(KlibIrClass {
+        base: private(base(symbol.clone())),
+        name: "Hidden".to_owned(),
+        this_receiver: Some(KlibIrParameter {
+            base: base(file_local(KlibIrSymbolKind::ValueParameter, THIS_SLOT)),
+            name: "<this>".to_owned(),
+            ty: class_ty,
+            vararg_element_type: None,
+            default_value: None,
+        }),
+        type_parameters: Vec::new(),
+        supertypes: vec![any],
+        members: vec![
+            KlibIrMember::Field(field(STORED_SLOT, "stored", int, initializer)),
             KlibIrMember::Function(constructor),
         ],
         value_class_representation: None,
@@ -196,6 +312,24 @@ fn hidden_construction(
     )
 }
 
+fn counted_construction(
+    body: &mut super::demo_package::Body,
+) -> crate::metadata::klib_ir::tree::KlibIrExprId {
+    let class_ty = plain_hidden(&mut body.arena);
+    body.arena.push_expr(
+        Some(class_ty),
+        KlibIrExprKind::ConstructorCall {
+            access: KlibIrMemberAccess {
+                symbol: file_local(KlibIrSymbolKind::Constructor, CONSTRUCTOR_SLOT),
+                arguments: KlibIrArguments::Flat(Vec::new()),
+                type_arguments: Vec::new(),
+                origin: None,
+            },
+            constructor_type_arguments: 0,
+        },
+    )
+}
+
 fn hidden_body(body: &mut super::demo_package::Body) -> Vec<KlibIrStatement> {
     let first = hidden_construction(body);
     let second = hidden_construction(body);
@@ -205,9 +339,35 @@ fn hidden_body(body: &mut super::demo_package::Body) -> Vec<KlibIrStatement> {
     ]
 }
 
+fn classifier(module: &str) -> crate::types::TypeName {
+    super::super::same_library_class::classifier_name(
+        module,
+        &KlibIrSignature::FileLocal {
+            file: 0,
+            slot: CLASS_SLOT,
+        },
+    )
+    .expect("a file-local class has a classifier")
+}
+
+fn init_statements<'a>(ir: &'a crate::ir::IrFile, class: crate::ir::ClassId) -> Vec<&'a IrExpr> {
+    let init = ir.classes[class as usize].methods[0];
+    let body = ir.functions[init as usize]
+        .body
+        .expect("the initializer has a body");
+    let IrExpr::Block { stmts, .. } = &ir.exprs[body as usize] else {
+        panic!("the initializer body is a block");
+    };
+    stmts.iter().map(|id| &ir.exprs[*id as usize]).collect()
+}
+
+fn expression<'a>(ir: &'a crate::ir::IrFile, id: u32) -> &'a IrExpr {
+    &ir.exprs[id as usize]
+}
+
 #[test]
 fn a_body_constructs_a_non_public_class_of_its_own_library() {
-    let demo = demo_with(&[MAKE], vec![hidden_class()], |_, body| {
+    let demo = demo_with(&[MAKE], vec![hidden_class(T::Any)], |_, body| {
         Some(hidden_body(body))
     });
     let mut unit = DependencyBodyUnit::default();
@@ -216,27 +376,66 @@ fn a_body_constructs_a_non_public_class_of_its_own_library() {
         .unwrap_or_else(|decline| panic!("{decline}"));
     assert_eq!(demo.lower(&mut unit, "make", &[]).unwrap(), function);
     validated(unit.ir());
-    let classifier = super::super::same_library_class::classifier_name(
-        "demo",
-        &KlibIrSignature::FileLocal {
-            file: 0,
-            slot: CLASS_SLOT,
-        },
-    )
-    .expect("a file-local class has a classifier");
+    let classifier = classifier("demo");
     let ir = unit.ir();
     assert_eq!(ir.classes.len(), 1);
     assert_eq!(ir.class_id_by_name(classifier), Some(0));
     let class = &ir.classes[0];
     assert_eq!(class.fq_name, classifier);
     assert!(class.has_primary_ctor);
-    assert!(!class.explicit_param_stores);
-    assert_eq!(class.fields.len(), 1);
-    assert_eq!(class.fields[0].name, "value");
+    assert!(class.explicit_param_stores);
+    assert_eq!(class.ctor_param_count, 0);
+    assert_eq!(class.fields.len(), 2);
+    assert_eq!(class.fields[0].name, "stored");
     assert!(class.fields[0].ty.is_ty_param());
-    assert!(class.ctor_args[0].is_field);
-    assert_eq!(class.ctor_args[0].field_index, Some(0));
+    assert_eq!(class.fields[1].name, "mark");
+    assert_eq!(class.fields[1].ty, Ty::Int);
+    assert!(!class.ctor_args[0].is_field);
+    assert_eq!(class.ctor_args[0].field_index, None);
+    assert_eq!(class.ctor_args[0].name.as_deref(), Some("value"));
     assert!(class.ctor_args[0].ty.is_ty_param());
+    assert_eq!(
+        class.supertypes,
+        vec![Ty::obj_name(crate::types::wk::any())]
+    );
+    let statements = init_statements(ir, 0);
+    assert_eq!(statements.len(), 3);
+    match statements[0] {
+        IrExpr::SetField {
+            receiver,
+            index: 0,
+            value,
+            ..
+        } => {
+            assert!(matches!(expression(ir, *receiver), IrExpr::GetValue(0)));
+            assert!(matches!(expression(ir, *value), IrExpr::GetValue(1)));
+        }
+        other => panic!("first initializer: {other:?}"),
+    }
+    match statements[1] {
+        IrExpr::Block {
+            value: Some(value), ..
+        } => assert!(matches!(
+            expression(ir, *value),
+            IrExpr::Const(IrConst::Int(4))
+        )),
+        other => panic!("anonymous initializer: {other:?}"),
+    }
+    match statements[2] {
+        IrExpr::SetField {
+            receiver,
+            index: 1,
+            value,
+            ..
+        } => {
+            assert!(matches!(expression(ir, *receiver), IrExpr::GetValue(0)));
+            assert!(matches!(
+                expression(ir, *value),
+                IrExpr::Const(IrConst::Int(7))
+            ));
+        }
+        other => panic!("second initializer: {other:?}"),
+    }
     let constructions = ir
         .exprs
         .iter()
@@ -279,7 +478,8 @@ fn a_non_public_class_of_another_library_stays_refused() {
         let constructed = hidden_construction(body);
         Some(vec![body.ret(constructed)])
     });
-    let hidden = KlibIrModuleTrees::from_trees(vec![hidden_class()]).expect("one private class");
+    let hidden =
+        KlibIrModuleTrees::from_trees(vec![hidden_class(T::Any)]).expect("one private class");
     let bodies = KlibDeclarationBodies::from_body_libraries(vec![
         KlibBodyLibrary::new("demo".to_owned(), ["other".to_owned()], caller),
         KlibBodyLibrary::new("other".to_owned(), Vec::<String>::new(), hidden),
@@ -290,4 +490,258 @@ fn a_non_public_class_of_another_library_stays_refused() {
         demo.declined("make", &[]),
         "the KLIB body of `demo.make` (it uses a type of a non-public class)"
     );
+}
+
+#[test]
+fn an_unauthenticated_interface_is_refused_before_admission() {
+    let demo = demo_with(&[MAKE], vec![hidden_class(T::CharSequence)], |_, body| {
+        Some(hidden_body(body))
+    });
+    assert_eq!(
+        demo.declined("make", &[]),
+        "the KLIB body of `demo.make` (it declares a supertype this library does not authenticate)"
+    );
+}
+
+fn stored_constant(ir: &crate::ir::IrFile, module: &str) -> i32 {
+    let class = ir
+        .class_id_by_name(classifier(module))
+        .expect("the library's class");
+    let statements = init_statements(ir, class);
+    let IrExpr::SetField {
+        value, index: 0, ..
+    } = statements[0]
+    else {
+        panic!("the constant is the class's only store");
+    };
+    let IrExpr::Const(IrConst::Int(value)) = expression(ir, *value) else {
+        panic!("the store lowers the field initializer");
+    };
+    *value
+}
+
+fn lower_named(
+    unit: &mut DependencyBodyUnit,
+    facts: &crate::fx_hash::HashMap<&'static str, crate::backend::BackendCallableFact>,
+    bodies: &KlibDeclarationBodies,
+    name: &str,
+) -> Result<crate::ir::FunId, crate::klib_lowering::KlibBodyDecline> {
+    let callable = facts[name]
+        .klib_body_callable()
+        .expect("a demo function is signed");
+    let callees = super::super::KlibCalleeFacts::new([callable]);
+    unit.lower_function(callable, bodies, &callees)
+}
+
+fn two_libraries(
+    beta: &[Shape],
+    beta_body: impl Fn(&str, &mut super::demo_package::Body) -> Option<Vec<KlibIrStatement>>,
+) -> (
+    crate::fx_hash::HashMap<&'static str, crate::backend::BackendCallableFact>,
+    crate::fx_hash::HashMap<&'static str, crate::backend::BackendCallableFact>,
+    KlibDeclarationBodies,
+) {
+    let (alpha_facts, alpha) =
+        module_trees("alpha", &[EMPTY_MAKE], vec![counted_class(3)], |_, body| {
+            let constructed = counted_construction(body);
+            Some(vec![body.ret(constructed)])
+        });
+    let (beta_facts, beta_trees) = module_trees("beta", beta, vec![counted_class(9)], beta_body);
+    let bodies = KlibDeclarationBodies::from_body_libraries(vec![
+        KlibBodyLibrary::new("alpha".to_owned(), Vec::<String>::new(), alpha),
+        KlibBodyLibrary::new("beta".to_owned(), Vec::<String>::new(), beta_trees),
+    ])
+    .expect("the two libraries have distinct modules");
+    (alpha_facts, beta_facts, bodies)
+}
+
+#[test]
+fn equal_file_local_signatures_stay_distinct_in_either_order() {
+    let (alpha_facts, beta_facts, bodies) = two_libraries(&[EMPTY_MAKE], |_, body| {
+        let constructed = counted_construction(body);
+        Some(vec![body.ret(constructed)])
+    });
+    for (first, second) in [("alpha", "beta"), ("beta", "alpha")] {
+        let mut unit = DependencyBodyUnit::default();
+        let (first_facts, second_facts) = if first == "alpha" {
+            (&alpha_facts, &beta_facts)
+        } else {
+            (&beta_facts, &alpha_facts)
+        };
+        lower_named(&mut unit, first_facts, &bodies, "make")
+            .unwrap_or_else(|decline| panic!("{first}: {decline}"));
+        lower_named(&mut unit, second_facts, &bodies, "make")
+            .unwrap_or_else(|decline| panic!("{second}: {decline}"));
+        validated(unit.ir());
+        assert_eq!(stored_constant(unit.ir(), "alpha"), 3);
+        assert_eq!(stored_constant(unit.ir(), "beta"), 9);
+        assert_ne!(classifier("alpha"), classifier("beta"));
+    }
+}
+
+#[test]
+fn a_declined_library_does_not_keep_another_librarys_class() {
+    let (alpha_facts, beta_facts, bodies) = two_libraries(
+        &[("bad", &[], T::Any), ("good", &[], T::Any)],
+        |name, body| match name {
+            "good" => {
+                let constructed = counted_construction(body);
+                Some(vec![body.ret(constructed)])
+            }
+            "bad" => {
+                let constructed = counted_construction(body);
+                let dynamic = body.arena.push_type(KlibIrType::Dynamic {
+                    annotations: Vec::new(),
+                });
+                let broken = body
+                    .arena
+                    .push_expr(Some(dynamic), KlibIrExprKind::Const(KlibIrConstant::Int(1)));
+                let discarded = body.coerced(constructed);
+                Some(vec![
+                    KlibIrStatement::Expression(discarded),
+                    body.ret(broken),
+                ])
+            }
+            _ => None,
+        },
+    );
+    let mut unit = DependencyBodyUnit::default();
+    lower_named(&mut unit, &alpha_facts, &bodies, "make")
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    let functions = unit.ir().functions.len();
+    let decline = lower_named(&mut unit, &beta_facts, &bodies, "bad")
+        .expect_err("the dynamic type declines the lowering");
+    assert!(
+        decline.to_string().contains("the dynamic type"),
+        "{decline}"
+    );
+    assert_eq!(unit.ir().classes.len(), 1);
+    assert_eq!(unit.ir().functions.len(), functions);
+    assert!(unit.ir().class_id_by_name(classifier("beta")).is_none());
+    assert_eq!(stored_constant(unit.ir(), "alpha"), 3);
+    lower_named(&mut unit, &beta_facts, &bodies, "good")
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    assert_eq!(stored_constant(unit.ir(), "alpha"), 3);
+    assert_eq!(stored_constant(unit.ir(), "beta"), 9);
+}
+
+const LIBRARY: &str = include_str!("../../../tests/fixtures/klib_same_library_class/Library.kt");
+
+#[test]
+fn official_klib_initializes_a_private_class_and_calls_its_members() {
+    let Some(root) = super::distribution_root() else {
+        return;
+    };
+    let directory = std::env::temp_dir().join(format!(
+        "krusty-klib-same-library-class-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).expect("create producer directory");
+    let source = directory.join("Library.kt");
+    std::fs::write(&source, LIBRARY).unwrap();
+    let library = directory.join("hidden");
+    let output = std::process::Command::new(root.join("bin/kotlinc-native"))
+        .args(["-p", "library", "-nopack", "-o"])
+        .arg(&library)
+        .arg(&source)
+        .output()
+        .expect("run exact Native KLIB producer");
+    assert!(
+        output.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let libraries = crate::klib_libraries::KlibLibraries::open(&[
+        crate::klib_libraries::KlibLibraryInput::platform_stdlib(
+            root.join("klib/common/stdlib"),
+            crate::klib_libraries::KlibStdlibSemantics::Native,
+        ),
+        crate::klib_libraries::KlibLibraryInput::dependency(library),
+    ])
+    .expect("read the serialized library");
+    let mut unit = DependencyBodyUnit::default();
+    for name in ["make", "marked", "asMarker"] {
+        let symbols = libraries.symbols(
+            crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+            name,
+        );
+        let [function] = symbols.callables.functions() else {
+            panic!("one producer declaration {name}")
+        };
+        let selected = libraries
+            .external_callable(function.callable.external_identity.unwrap())
+            .unwrap();
+        let callable = selected.klib_body_callable().unwrap();
+        let callees = super::super::KlibCalleeFacts::new([callable]);
+        unit.lower_function_with_intrinsics(
+            callable,
+            libraries.declaration_bodies(),
+            &callees,
+            libraries.intrinsic_facts(),
+        )
+        .unwrap_or_else(|decline| panic!("{name}: {decline}"));
+    }
+    validated(unit.ir());
+    let ir = unit.ir();
+    let class_index = ir
+        .classes
+        .iter()
+        .position(|class| class.fq_name.render().contains("klib-local"))
+        .expect("the private class is materialized");
+    let class = &ir.classes[class_index];
+    assert!(class.explicit_param_stores);
+    assert!(class.ctor_args.iter().all(|argument| !argument.is_field));
+    let supertypes = class
+        .supertypes
+        .iter()
+        .map(|ty| ty.kotlin_class_internal().unwrap().render())
+        .collect::<Vec<_>>();
+    assert!(
+        supertypes.iter().any(|name| name.contains("Marker")),
+        "{supertypes:?}"
+    );
+    assert!(class
+        .interfaces
+        .iter()
+        .any(|name| name.render().contains("Marker")));
+    let methods = class
+        .methods
+        .iter()
+        .map(|function| ir.functions[*function as usize].name.clone())
+        .collect::<Vec<_>>();
+    assert!(methods.iter().any(|name| name == "member"), "{methods:?}");
+    assert!(methods.iter().any(|name| name == "mark"), "{methods:?}");
+    let init = class.methods[0];
+    assert_eq!(ir.functions[init as usize].name, "<init>");
+    let statements = init_statements(ir, u32::try_from(class_index).unwrap());
+    let stores = statements
+        .iter()
+        .filter_map(|statement| match statement {
+            IrExpr::SetField { index, value, .. } => Some((*index, *value)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(stores.len() >= 2, "{statements:?}");
+    assert!(matches!(expression(ir, stores[0].1), IrExpr::GetValue(_)));
+    assert!(
+        matches!(expression(ir, stores[1].1), IrExpr::Call { .. }),
+        "the later field initializer calls a member: {:?}",
+        expression(ir, stores[1].1)
+    );
+    let calls = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Call { callee, .. } => match callee.as_ref() {
+                crate::ir::Callee::Local(function) => {
+                    Some(ir.functions[*function as usize].name.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(calls.iter().any(|name| name == "member"), "{calls:?}");
+    assert!(calls.iter().any(|name| name == "mark"), "{calls:?}");
 }

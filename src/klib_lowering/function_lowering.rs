@@ -13,7 +13,7 @@
 use crate::fx_hash::HashMap;
 
 use super::decline::KlibBodyDeclineReason;
-use super::klib_types::{classifier_name, semantic_type, KlibTypeParameters};
+use super::klib_types::{classifier_name, semantic_type, semantic_type_in, KlibTypeParameters};
 use crate::fir::ResolvedParameterIdentity;
 use crate::ir::{FnParamInfo, FunId, IrFile, IrFunction, IrParameterIdentity};
 use crate::libraries::KlibBodyCallable;
@@ -25,7 +25,9 @@ use crate::types::{Ty, TyKind, TypeName};
 
 mod class_initializers;
 mod closure_headers;
-pub(super) use class_initializers::initializer_header;
+pub(super) use class_initializers::{
+    initializer_header, local_initializer_header, local_member_header,
+};
 mod declared_type_parameters;
 pub(super) use closure_headers::{closure_header, CaptureParameter};
 pub(super) mod vararg_parameters;

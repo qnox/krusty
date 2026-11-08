@@ -156,6 +156,15 @@ pub(super) trait CallLinker {
         unsupported("a call of a file-private constructor")
     }
 
+    /// The function a file-local call invokes. Template linkers keep the refusal.
+    fn link_local_function(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<LinkedCallee> {
+        unsupported("a call of a file-private declaration")
+    }
+
     /// The dependency property a call of its accessor `callee` reads or writes.
     fn link_accessor(
         &mut self,

@@ -32,6 +32,13 @@ pub struct KlibDeclarationBodies {
     dependencies: HashMap<String, Vec<String>>,
 }
 
+/// A public classifier search over one producer dependency closure.
+pub(crate) enum LocatedClass<'a> {
+    Missing,
+    One(&'a KlibIrClass),
+    Several,
+}
+
 pub(crate) struct KlibClassMember<'a> {
     pub(crate) arena: &'a KlibIrArena,
     pub(crate) class: &'a crate::metadata::klib_ir::tree::KlibIrClass,
@@ -429,6 +436,68 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_function(signature)
     }
 
+    /// The class in `module` that declares the file-local function `signature` directly.
+    pub(crate) fn module_class_declaring<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
+        let library = *self.modules.get(module)?;
+        let mut found = None;
+        for tree in self.libraries[library].trees() {
+            let mut pending = vec![&tree.declaration];
+            while let Some(member) = pending.pop() {
+                let Some(class) = class_of(&tree.arena, member) else {
+                    continue;
+                };
+                pending.extend(class.members.iter());
+                if !class_declares(&tree.arena, class, signature) {
+                    continue;
+                }
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((&tree.arena, class));
+            }
+        }
+        found
+    }
+
+    /// A public classifier serialized by `module` or a library its manifest depends on.
+    pub(crate) fn public_class<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> LocatedClass<'a> {
+        let wanted = KlibIrSignature::Public(signature.clone());
+        let mut found = None;
+        for owner in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&owner) else {
+                continue;
+            };
+            for tree in self.libraries[library].trees() {
+                let mut pending = vec![&tree.declaration];
+                while let Some(member) = pending.pop() {
+                    let Some(class) = class_of(&tree.arena, member) else {
+                        continue;
+                    };
+                    pending.extend(class.members.iter());
+                    if class.base.symbol.signature != wanted {
+                        continue;
+                    }
+                    if found.is_some() {
+                        return LocatedClass::Several;
+                    }
+                    found = Some(class);
+                }
+            }
+        }
+        match found {
+            Some(class) => LocatedClass::One(class),
+            None => LocatedClass::Missing,
+        }
+    }
+
     /// Whether the exact serialized declaration intentionally carries an executable body.
     pub(crate) fn function_has_body(&self, identity: &KlibDependencyCallable) -> Option<bool> {
         self.function(identity)
@@ -734,6 +803,25 @@ fn declaration_signature(signature: &KlibIrSignature) -> Option<KlibDeclarationS
         }
         KlibIrSignature::FileLocal { .. } => None,
     }
+}
+
+fn class_of<'a>(arena: &'a KlibIrArena, member: &'a KlibIrMember) -> Option<&'a KlibIrClass> {
+    match member {
+        KlibIrMember::Class(id) => Some(arena.class(*id)),
+        KlibIrMember::EnumEntry(entry) => entry.class.map(|id| arena.class(id)),
+        _ => None,
+    }
+}
+
+fn class_declares(arena: &KlibIrArena, class: &KlibIrClass, signature: &KlibIrSignature) -> bool {
+    class.members.iter().any(|member| match member {
+        KlibIrMember::Function(id) => arena.function(*id).base.symbol.signature == *signature,
+        KlibIrMember::Property(property) => [property.getter, property.setter]
+            .into_iter()
+            .flatten()
+            .any(|id| arena.function(id).base.symbol.signature == *signature),
+        _ => false,
+    })
 }
 
 #[cfg(test)]

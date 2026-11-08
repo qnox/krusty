@@ -4,28 +4,43 @@
 //! file and slot in another library are a different declaration and stay refused. The class is
 //! not published, so lowering materializes it in the unit that lowers the body, and the
 //! constructor call builds that class instead of an external dependency constructor.
+//!
+//! Fields are stored from their initializer expressions, in member order, through the same
+//! initialization steps a public class uses. Supertypes written on the class are the supertypes
+//! subtyping reads: `Any`, because the constructor's delegation to it was authenticated, or an
+//! interface this library's producer graph serializes. Any other hierarchy is refused before the
+//! class is admitted.
 
-use super::class_storage::member_field;
+use super::class_initialization::{record_initializer, InitializationStep};
+use super::class_storage::{member_field, stored_field};
 use super::constructor_calls::{require_constructor_kind, ConstructorDeclaration};
 use super::decline::KlibBodyDeclineReason;
+use super::function_lowering::{local_initializer_header, local_member_header, FunctionHeader};
 use super::klib_types::{semantic_type_in, KlibTypeParameters};
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{
-    IrClass, IrConstructorAccess, IrConstructorTarget, IrCtorArg, IrCtorParameterProvenance,
-    IrField, IrFile,
+    ClassId, IrClass, IrConstructorAccess, IrConstructorTarget, IrCtorArg,
+    IrCtorParameterProvenance, IrField,
 };
-use crate::klib_libraries::KlibDeclarationBodies;
-use crate::libraries::KlibBodyClassParameters;
+use crate::klib_libraries::{KlibDeclarationBodies, LocatedClass};
+use crate::libraries::{KlibBodyClassParameters, TypeKind};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction,
-    KlibIrMember, KlibIrStatement, KlibIrTypeParameter, KlibIrVariance,
+    KlibIrMember, KlibIrStatement, KlibIrType, KlibIrTypeParameter, KlibIrVariance,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::metadata::semantic::{
     class_is_value, class_kind, declaration_modality, declaration_visibility,
 };
 use crate::types::{Ty, TyKind, TypeName, TypeVariance, Visibility};
+
+/// The module and file-local signature that identify one declaration inside one library.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub(super) struct LocalIdentity {
+    pub(super) module: String,
+    pub(super) signature: KlibIrSignature,
+}
 
 /// The constructor a same-library file-local construction invokes.
 pub(super) struct LocalConstructor {
@@ -35,21 +50,91 @@ pub(super) struct LocalConstructor {
 
 /// One file-local class materialized in the unit that lowers its library's bodies.
 pub(super) struct MaterializedLocalClass {
-    pub(super) class: crate::ir::ClassId,
-    classifier: TypeName,
-    constructor: KlibIrSignature,
-    declaration: ConstructorDeclaration,
-    access: IrConstructorAccess,
-    formals: Vec<Ty>,
-    supertypes: Vec<Ty>,
+    pub(super) class: ClassId,
+    pub(super) classifier: TypeName,
+    pub(super) constructor: KlibIrSignature,
+    pub(super) declaration: ConstructorDeclaration,
+    pub(super) access: IrConstructorAccess,
+    pub(super) formals: Vec<Ty>,
+    /// The supertypes written on [`Self::class`]. Subtyping reads this same list.
+    pub(super) supertypes: Vec<Ty>,
+    pub(super) self_type: Ty,
+    pub(super) class_type_parameters: Vec<String>,
+}
+
+/// A field the class initializer and its members store through, in declaration order.
+#[derive(Clone, Copy)]
+pub(super) struct LocalStoredField<'a> {
+    pub(super) symbol: &'a KlibIrSymbol,
+    pub(super) ty: Ty,
+}
+
+/// The initializer frame queued for a file-local class.
+pub(super) struct LocalInitialize<'a> {
+    pub(super) class: ClassId,
+    pub(super) receiver_symbol: &'a KlibIrSymbol,
+    pub(super) receiver_ty: Ty,
+    pub(super) fields: Vec<LocalStoredField<'a>>,
+    pub(super) steps: Vec<InitializationStep<'a>>,
+}
+
+/// The field frame of one member of a file-local class.
+pub(super) struct LocalMemberFields<'a> {
+    pub(super) class: ClassId,
+    pub(super) receiver: Ty,
+    pub(super) fields: Vec<LocalStoredField<'a>>,
+}
+
+/// Work a file-local class adds to the body queue.
+pub(super) enum LocalBody<'a> {
+    Initialize(LocalInitialize<'a>),
+    Member(LocalMemberFields<'a>),
 }
 
 /// Where a lowering reads the library that owns the body, and how it checks a root delegation.
-pub(super) struct LocalClassSource<'a> {
-    pub(super) bodies: &'a KlibDeclarationBodies,
-    pub(super) module: &'a str,
+/// The prepared class borrows only the library; the module name and the root check do not.
+pub(super) struct LocalClassSource<'bodies, 'call> {
+    pub(super) bodies: &'bodies KlibDeclarationBodies,
+    pub(super) module: &'call str,
     pub(super) validate_root:
-        &'a dyn Fn(&KlibPublicIdSignature) -> Result<(), KlibBodyDeclineReason>,
+        &'call dyn Fn(&KlibPublicIdSignature) -> Result<(), KlibBodyDeclineReason>,
+}
+
+/// A class ready to install, or the constructor of one already installed for this library.
+pub(super) enum LocalLink<'a> {
+    Ready(LocalConstructor),
+    Prepared(PreparedLocalClass<'a>),
+}
+
+/// One member function, declared before its body is lowered so an initializer can call it.
+pub(super) struct PreparedMember<'a> {
+    pub(super) signature: KlibIrSignature,
+    pub(super) symbol: &'a KlibIrSymbol,
+    pub(super) statements: &'a [KlibIrStatement],
+    pub(super) header: FunctionHeader,
+}
+
+/// A file-local class authenticated and not yet added to the unit.
+pub(super) struct PreparedLocalClass<'a> {
+    pub(super) key: LocalIdentity,
+    pub(super) classifier: TypeName,
+    pub(super) self_type: Ty,
+    pub(super) supertypes: Vec<Ty>,
+    pub(super) interfaces: Vec<TypeName>,
+    pub(super) fields: Vec<IrField>,
+    pub(super) stored: Vec<LocalStoredField<'a>>,
+    pub(super) ctor_args: Vec<IrCtorArg>,
+    pub(super) declaration: ConstructorDeclaration,
+    pub(super) access: IrConstructorAccess,
+    pub(super) formals: Vec<Ty>,
+    pub(super) class_type_parameters: Vec<String>,
+    pub(super) constructor_symbol: &'a KlibIrSymbol,
+    pub(super) arena: &'a KlibIrArena,
+    pub(super) receiver_symbol: &'a KlibIrSymbol,
+    pub(super) receiver_ty: Ty,
+    pub(super) init_header: FunctionHeader,
+    pub(super) steps: Vec<InitializationStep<'a>>,
+    pub(super) members: Vec<PreparedMember<'a>>,
 }
 
 /// The classifier identity of a file-local class in `module`. The file and slot are the identity;
@@ -88,7 +173,7 @@ pub(super) fn classifier(
         return Err(unsupported("a non-public value class"));
     }
     match class_kind(class.base.flags) {
-        crate::libraries::TypeKind::Class => Ok(Some(name)),
+        TypeKind::Class => Ok(Some(name)),
         _ => Err(unsupported("a non-public classifier other than a class")),
     }
 }
@@ -96,7 +181,7 @@ pub(super) fn classifier(
 /// Whether a same-library class materialized in `classes` makes `sub` a subtype of `sup`.
 /// A class from another library is absent here, so it stays outside this relation.
 pub(super) fn is_subtype(
-    classes: &HashMap<KlibIrSignature, MaterializedLocalClass>,
+    classes: &HashMap<LocalIdentity, MaterializedLocalClass>,
     sub: Ty,
     sup: Ty,
     public_subtype: &dyn Fn(Ty, Ty) -> bool,
@@ -105,7 +190,7 @@ pub(super) fn is_subtype(
 }
 
 fn proves_local(
-    classes: &HashMap<KlibIrSignature, MaterializedLocalClass>,
+    classes: &HashMap<LocalIdentity, MaterializedLocalClass>,
     sub: Ty,
     sup: Ty,
     public_subtype: &dyn Fn(Ty, Ty) -> bool,
@@ -154,13 +239,35 @@ fn proves_local(
     false
 }
 
-/// The file-local constructor `signature` of the body module, materialized once per class.
-pub(super) fn link(
-    source: LocalClassSource<'_>,
+/// The call shape of a member already declared for `class`.
+pub(super) fn linked_member(
+    class: &MaterializedLocalClass,
+    function: crate::ir::FunId,
+    ir: &crate::ir::IrFile,
+    defaults: Vec<bool>,
+) -> super::body_lowering::LinkedCallee {
+    let declared = &ir.functions[function as usize];
+    super::body_lowering::LinkedCallee {
+        callee: crate::ir::Callee::Local(function),
+        receiver: Some(class.self_type),
+        params: declared.params.clone(),
+        ret: declared.ret,
+        context_count: 0,
+        singleton_dispatch: None,
+        type_parameters: Vec::new(),
+        type_parameter_bounds: Some(Vec::new()),
+        class_type_parameters: class.class_type_parameters.clone(),
+        parameter_defaults: defaults,
+    }
+}
+
+/// The file-local constructor `signature` of the body module. A class already materialized for
+/// this library answers immediately; a new one is prepared and left for the linker to install.
+pub(super) fn link<'bodies>(
+    source: LocalClassSource<'bodies, '_>,
     signature: &KlibIrSignature,
-    ir: &mut IrFile,
-    cache: &mut HashMap<KlibIrSignature, MaterializedLocalClass>,
-) -> Result<LocalConstructor, KlibBodyDeclineReason> {
+    cache: &HashMap<LocalIdentity, MaterializedLocalClass>,
+) -> Result<LocalLink<'bodies>, KlibBodyDeclineReason> {
     let Some((arena, function)) = source
         .bodies
         .module_local_function(source.module, signature)
@@ -184,38 +291,38 @@ pub(super) fn link(
         ));
     }
     let class_signature = constructor_class(arena, function)?;
-    if let Some(known) = cache.get(&class_signature) {
+    let key = LocalIdentity {
+        module: source.module.to_owned(),
+        signature: class_signature,
+    };
+    if let Some(known) = cache.get(&key) {
         if known.constructor != *signature {
             return Err(unsupported("a non-public class with another constructor"));
         }
-        return Ok(LocalConstructor {
+        return Ok(LocalLink::Ready(LocalConstructor {
             declaration: known.declaration.clone(),
             access: known.access,
-        });
+        }));
     }
     let Some((class_arena, class)) = source
         .bodies
-        .module_local_class(source.module, &class_signature)
+        .module_local_class(source.module, &key.signature)
     else {
         return Err(non_public_type());
     };
     if !std::ptr::eq(arena, class_arena) {
         return Err(mismatch("a constructor is not a member of its class"));
     }
-    let materialized = materialize(source, signature, arena, class, function, ir)?;
-    let realized = LocalConstructor {
-        declaration: materialized.declaration.clone(),
-        access: materialized.access,
-    };
-    cache.insert(class_signature, materialized);
-    Ok(realized)
+    Ok(LocalLink::Prepared(prepare(
+        source, signature, arena, class, function, key,
+    )?))
 }
 
 fn constructor_class(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
 ) -> Result<KlibIrSignature, KlibBodyDeclineReason> {
-    let crate::metadata::klib_ir::tree::KlibIrType::Simple {
+    let KlibIrType::Simple {
         classifier,
         arguments,
         ..
@@ -233,14 +340,14 @@ fn constructor_class(
     }
 }
 
-fn materialize(
-    source: LocalClassSource<'_>,
+fn prepare<'a>(
+    source: LocalClassSource<'a, '_>,
     signature: &KlibIrSignature,
-    arena: &KlibIrArena,
-    class: &KlibIrClass,
-    function: &KlibIrFunction,
-    ir: &mut IrFile,
-) -> Result<MaterializedLocalClass, KlibBodyDeclineReason> {
+    arena: &'a KlibIrArena,
+    class: &'a KlibIrClass,
+    function: &'a KlibIrFunction,
+    key: LocalIdentity,
+) -> Result<PreparedLocalClass<'a>, KlibBodyDeclineReason> {
     let class_name = classifier(source.bodies, source.module, &class.base.symbol.signature)?
         .ok_or_else(non_public_type)?;
     if declaration_modality(class.base.flags).is_abstract() {
@@ -273,11 +380,8 @@ fn materialize(
     delegates_to_any(arena, &class.base.symbol, function, source.validate_root)?;
     let resolve = |signature: &KlibIrSignature| classifier(source.bodies, source.module, signature);
     let (types, formals, variances, bounds) = class_formals(arena, class, &resolve)?;
-    let supertypes = class
-        .supertypes
-        .iter()
-        .map(|supertype| semantic_type_in(arena, &types, *supertype, &resolve))
-        .collect::<Result<Vec<_>, _>>()?;
+    let (supertypes, interfaces) =
+        authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
     let self_type = Ty::obj_args_name(class_name, &formals);
     let result = semantic_type_in(arena, &types, function.return_type, &resolve)?;
     if result != self_type {
@@ -285,46 +389,39 @@ fn materialize(
             "a constructor result is not its declared class application",
         ));
     }
-    if let Some(receiver) = &class.this_receiver {
-        if semantic_type_in(arena, &types, receiver.ty, &resolve)? != self_type {
-            return Err(mismatch(
-                "a class instance receiver has another declared type",
-            ));
-        }
-    }
-    let (fields, field_names) = instance_fields(arena, class, &types, &resolve)?;
-    let (params, defaults, ctor_args) =
-        constructor_parameters(arena, function, &types, &resolve, &fields, &field_names)?;
-    for index in 0..fields.len() {
-        if !ctor_args.iter().any(|argument| {
-            argument.field_index == Some(u32::try_from(index).expect("field index"))
-        }) {
-            return Err(unsupported(
-                "a non-public class field without a constructor parameter",
-            ));
-        }
-    }
-    let mut declaration = IrClass::synthetic(class_name);
-    declaration.fields = fields;
-    declaration.ctor_param_count = u32::try_from(
-        ctor_args
-            .iter()
-            .filter(|argument| argument.is_field)
-            .count(),
-    )
-    .expect("constructor arity fits u32");
-    declaration.ctor_args = ctor_args;
-    declaration.explicit_param_stores = false;
-    let class_id = ir.add_class(declaration);
-    ir.record_declared_class_self_type(class_name, self_type);
-    let access = match declaration_visibility(function.base.flags) {
-        Visibility::Private => IrConstructorAccess::Private,
-        _ => IrConstructorAccess::Unrestricted,
+    let Some(receiver) = &class.this_receiver else {
+        return Err(mismatch("a class initializer has no instance receiver"));
     };
-    Ok(MaterializedLocalClass {
-        class: class_id,
+    if semantic_type_in(arena, &types, receiver.ty, &resolve)? != self_type {
+        return Err(mismatch(
+            "a class instance receiver has another declared type",
+        ));
+    }
+    let StoredMembers {
+        fields,
+        stored,
+        steps,
+        members,
+    } = members_and_storage(arena, class, &types, &resolve, self_type)?;
+    let (params, defaults, ctor_args) = constructor_parameters(arena, function, &types, &resolve)?;
+    let class_type_parameters = formals
+        .iter()
+        .map(|formal| match formal.kind() {
+            TyKind::TyParam(identity, _) => Ok(identity.as_str().to_owned()),
+            _ => Err(mismatch("a non-public class type parameter has no symbol")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let init_header =
+        local_initializer_header(function, receiver, self_type, arena, &types, &resolve)?;
+    Ok(PreparedLocalClass {
+        key,
         classifier: class_name,
-        constructor: signature.clone(),
+        self_type,
+        supertypes,
+        interfaces,
+        fields,
+        stored,
+        ctor_args,
         declaration: ConstructorDeclaration::local(
             class_name,
             params,
@@ -336,9 +433,160 @@ fn materialize(
             },
             defaults.into_iter().collect(),
         ),
-        access,
+        access: match declaration_visibility(function.base.flags) {
+            Visibility::Private => IrConstructorAccess::Private,
+            _ => IrConstructorAccess::Unrestricted,
+        },
         formals,
-        supertypes,
+        class_type_parameters,
+        constructor_symbol: &function.base.symbol,
+        arena,
+        receiver_symbol: &receiver.base.symbol,
+        receiver_ty: self_type,
+        init_header,
+        steps,
+        members,
+    })
+}
+
+fn authenticate_supertypes(
+    bodies: &KlibDeclarationBodies,
+    module: &str,
+    arena: &KlibIrArena,
+    class: &KlibIrClass,
+    types: &KlibTypeParameters,
+    resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
+) -> Result<(Vec<Ty>, Vec<TypeName>), KlibBodyDeclineReason> {
+    let mut supertypes = Vec::new();
+    let mut interfaces = Vec::new();
+    for supertype in &class.supertypes {
+        let ty = semantic_type_in(arena, types, *supertype, resolve)?;
+        if ty == Ty::obj_name(crate::types::wk::any()) {
+            supertypes.push(ty);
+            continue;
+        }
+        let KlibIrType::Simple { classifier, .. } = arena.ty(*supertype) else {
+            return Err(unsupported("a superclass other than Any"));
+        };
+        let KlibIrSignature::Public(signature) = &classifier.signature else {
+            return Err(unsupported("a non-public supertype"));
+        };
+        match bodies.public_class(module, signature) {
+            LocatedClass::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "a supertype this library does not authenticate",
+                ))
+            }
+            LocatedClass::Several => return Err(mismatch("two libraries serialize one supertype")),
+            LocatedClass::One(found) => {
+                if class_kind(found.base.flags) != TypeKind::Interface {
+                    return Err(unsupported("a superclass other than Any"));
+                }
+                let TyKind::Obj(name, _) = ty.kind() else {
+                    return Err(mismatch("an interface supertype is not a class"));
+                };
+                interfaces.push(name);
+                supertypes.push(ty);
+            }
+        }
+    }
+    Ok((supertypes, interfaces))
+}
+
+struct StoredMembers<'a> {
+    fields: Vec<IrField>,
+    stored: Vec<LocalStoredField<'a>>,
+    steps: Vec<InitializationStep<'a>>,
+    members: Vec<PreparedMember<'a>>,
+}
+
+fn members_and_storage<'a>(
+    arena: &'a KlibIrArena,
+    class: &'a KlibIrClass,
+    types: &KlibTypeParameters,
+    resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
+    self_type: Ty,
+) -> Result<StoredMembers<'a>, KlibBodyDeclineReason> {
+    let mut fields = Vec::new();
+    let mut stored = Vec::new();
+    let mut identities = HashSet::default();
+    let mut steps = Vec::new();
+    let mut members = Vec::new();
+    for declaration in &class.members {
+        let field = if let Some(field) = member_field(declaration) {
+            let index = u32::try_from(fields.len()).expect("a field list fits u32");
+            let authenticated = stored_field(field, &mut identities, || {
+                semantic_type_in(arena, types, field.ty, resolve)
+            })?;
+            fields.push(
+                IrField::new(authenticated.name, authenticated.ty)
+                    .with_is_final(authenticated.final_)
+                    .with_is_private(authenticated.private),
+            );
+            stored.push(LocalStoredField {
+                symbol: &field.base.symbol,
+                ty: authenticated.ty,
+            });
+            Some((index, field))
+        } else {
+            None
+        };
+        record_initializer(declaration, field, &mut steps)?;
+        match declaration {
+            KlibIrMember::Function(id) => {
+                let function = arena.function(*id);
+                if !function.constructor {
+                    members.push(prepare_member(arena, function, types, resolve, self_type)?);
+                }
+            }
+            KlibIrMember::Property(property) => {
+                for id in [property.getter, property.setter].into_iter().flatten() {
+                    members.push(prepare_member(
+                        arena,
+                        arena.function(id),
+                        types,
+                        resolve,
+                        self_type,
+                    )?);
+                }
+            }
+            KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {}
+            KlibIrMember::Class(_) => {
+                return Err(unsupported("a nested class of a non-public class"))
+            }
+            KlibIrMember::EnumEntry(_) => return Err(unsupported("a non-public enum")),
+            KlibIrMember::TypeAlias(_) => {
+                return Err(unsupported("a type alias of a non-public class"))
+            }
+        }
+    }
+    Ok(StoredMembers {
+        fields,
+        stored,
+        steps,
+        members,
+    })
+}
+
+fn prepare_member<'a>(
+    arena: &'a KlibIrArena,
+    function: &'a KlibIrFunction,
+    types: &KlibTypeParameters,
+    resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
+    self_type: Ty,
+) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
+    let statements = match &function.body {
+        Some(KlibIrBody::Block(statements)) => statements.as_slice(),
+        Some(KlibIrBody::Synthetic(_)) => {
+            return Err(unsupported("a synthetic member of a non-public class"))
+        }
+        None => return Err(unsupported("a member of a non-public class without a body")),
+    };
+    Ok(PreparedMember {
+        signature: function.base.symbol.signature.clone(),
+        symbol: &function.base.symbol,
+        statements,
+        header: local_member_header(function, arena, types, self_type, resolve)?,
     })
 }
 
@@ -392,56 +640,11 @@ fn variance(parameter: &KlibIrTypeParameter) -> Result<TypeVariance, KlibBodyDec
     }
 }
 
-fn instance_fields(
-    arena: &KlibIrArena,
-    class: &KlibIrClass,
-    types: &KlibTypeParameters,
-    resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
-) -> Result<(Vec<IrField>, HashMap<String, usize>), KlibBodyDeclineReason> {
-    let mut fields = Vec::new();
-    let mut names = HashMap::default();
-    for member in &class.members {
-        match member {
-            KlibIrMember::AnonymousInitializer { statements, .. } if !statements.is_empty() => {
-                return Err(unsupported("an initializer of a non-public class"));
-            }
-            _ => {}
-        }
-        let Some(field) = member_field(member) else {
-            continue;
-        };
-        if field.initializer.is_some() {
-            return Err(unsupported("a non-public class field initializer"));
-        }
-        if !matches!(
-            field.base.symbol.kind,
-            KlibIrSymbolKind::Field | KlibIrSymbolKind::StandaloneField
-        ) {
-            return Err(mismatch("a class field has an invalid storage identity"));
-        }
-        let flags = field
-            .instance_storage_flags()
-            .ok_or_else(|| unsupported("an external, static or unknown field storage flag"))?;
-        let ty = semantic_type_in(arena, types, field.ty, resolve)?;
-        if names.insert(field.name.clone(), fields.len()).is_some() {
-            return Err(mismatch("a non-public class repeats a field"));
-        }
-        fields.push(
-            IrField::new(field.name.clone(), ty)
-                .with_is_final(flags.is_final)
-                .with_is_private(flags.visibility == Visibility::Private),
-        );
-    }
-    Ok((fields, names))
-}
-
 fn constructor_parameters(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
     types: &KlibTypeParameters,
     resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
-    fields: &[IrField],
-    field_names: &HashMap<String, usize>,
 ) -> Result<(Vec<Ty>, Vec<bool>, Vec<IrCtorArg>), KlibBodyDeclineReason> {
     let mut params = Vec::with_capacity(function.regular_parameters.len());
     let mut defaults = Vec::with_capacity(function.regular_parameters.len());
@@ -454,15 +657,6 @@ fn constructor_parameters(
             return Err(mismatch("a constructor parameter has no value symbol"));
         }
         let ty = semantic_type_in(arena, types, parameter.ty, resolve)?;
-        let field_index = match field_names.get(&parameter.name) {
-            Some(&index) => {
-                if fields[index].ty != ty {
-                    return Err(mismatch("a constructor parameter disagrees with its field"));
-                }
-                Some(u32::try_from(index).expect("field index"))
-            }
-            None => None,
-        };
         defaults.push(parameter.default_value.is_some());
         params.push(ty);
         arguments.push(IrCtorArg {
@@ -470,8 +664,8 @@ fn constructor_parameters(
             context_kind: crate::types::ContextParameterKind::None,
             ty,
             declared_ty: Some(ty),
-            is_field: field_index.is_some(),
-            field_index,
+            is_field: false,
+            field_index: None,
             has_default: parameter.default_value.is_some(),
             is_vararg: false,
             type_param: None,
@@ -549,4 +743,19 @@ fn non_public_type() -> KlibBodyDeclineReason {
 /// The construction target recorded for a same-library primary constructor.
 pub(super) fn construction_target(access: IrConstructorAccess) -> IrConstructorTarget {
     IrConstructorTarget { ordinal: 0, access }
+}
+
+/// The class shape a prepared file-local class installs. Its supertypes are the authenticated
+/// list, and its fields are stored by the initializer rather than by parameter spelling.
+pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
+    let mut class = IrClass::synthetic(prepared.classifier);
+    class.supertypes = prepared.supertypes.clone();
+    for interface in &prepared.interfaces {
+        class.interfaces.push_name(*interface);
+    }
+    class.fields = prepared.fields.clone();
+    class.ctor_args = prepared.ctor_args.clone();
+    class.ctor_param_count = 0;
+    class.explicit_param_stores = true;
+    class
 }
