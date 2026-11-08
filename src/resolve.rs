@@ -9965,16 +9965,8 @@ fn unify_member_extension_slot(
     }
 }
 
-fn apply_inference_bindings(mut ty: Ty, bindings: &crate::symbol_resolver::GSigBinds) -> Ty {
-    let mut seen = crate::fx_hash::HashSet::default();
-    while seen.insert(ty) {
-        let next = crate::symbol_resolver::ty_subst_keep_unbound(ty, bindings);
-        if next == ty {
-            break;
-        }
-        ty = next;
-    }
-    ty
+fn apply_inference_bindings(ty: Ty, bindings: &crate::symbol_resolver::GSigBinds) -> Ty {
+    crate::types::ty_subst_keep_unbound_closed(ty, bindings)
 }
 
 impl<'a> Checker<'a> {
@@ -24897,12 +24889,15 @@ fun box(): String {
                         Ty::Char,
                         "(I)C",
                     );
+                    // `kotlin.String.get` is declared `operator`, which is what admits `s[0]`.
+                    let mut info = crate::libraries::FunctionInfo::plain(
+                        crate::libraries::FnKind::Member,
+                        Some(Ty::String),
+                        callable,
+                    );
+                    info.flags.operator = true;
                     return crate::libraries::FunctionSet {
-                        overloads: vec![crate::libraries::FunctionInfo::plain(
-                            crate::libraries::FnKind::Member,
-                            Some(Ty::String),
-                            callable,
-                        )],
+                        overloads: vec![info],
                     };
                 }
                 if recv != Ty::String
@@ -51249,24 +51244,6 @@ impl<'a> Checker<'a> {
                 None => self.expr(scope, array),
             };
             let its: Vec<Ty> = indices.iter().map(|&i| self.expr(scope, i)).collect();
-            if let [index] = indices.as_slice() {
-                // A read consumes the projection rather than exposing it as an expression type.
-                if let Some(elem) = self
-                    .builtin_array_read_element(at)
-                    .filter(|_| self.receiver_is_assignable(its[0], Ty::Int))
-                {
-                    self.expect_assignable(Ty::Int, its[0], self.span(*index), "array index");
-                    return self.set(e, elem);
-                }
-                // `str[i]` is the `String.get(Int): Char` operator.
-                if at == Ty::String {
-                    if let Some(m) = self.select_instance_member(at, "get", &its) {
-                        let ret = m.ret;
-                        self.resolved_calls.insert(e, ResolvedCall::Member(m));
-                        return self.set(e, ret);
-                    }
-                }
-            }
             if at == Ty::Error {
                 return Ty::Error;
             }

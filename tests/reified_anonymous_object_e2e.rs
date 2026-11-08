@@ -435,3 +435,70 @@ fun box(): String {
         "NestedReifiedCatchInAnonymousObject",
     );
 }
+
+#[test]
+fn inferred_anonymous_superclass_keeps_captured_type_parameter_identities() {
+    let source = include_str!("reified_anonymous_object_e2e/capturedSuperclass.kt");
+    let reference = common::kotlinc_box_files_result(
+        &[("CapturedSuperclass.kt", source)],
+        "test.CapturedSuperclassKt",
+    );
+    assert_eq!(reference, "OK");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::expect_box_run(source, "CapturedSuperclass", &[stdlib], Some(jdk.as_path())),
+        reference,
+    );
+}
+
+#[test]
+fn copied_anonymous_metadata_keeps_declaration_captures() {
+    let source = include_str!("reified_anonymous_object_e2e/capturedSuperclass.kt");
+    let (reference_classes, actual_classes) = compiled_classes("CapturedSuperclass", source);
+    let copy = "test/CapturedSuperclassKt$box$$inlined$lift$1";
+    let read = |classes: &[(String, Vec<u8>)]| {
+        let bytes = &classes
+            .iter()
+            .find(|(name, _)| name == copy)
+            .expect("call-site class")
+            .1;
+        krusty::jvm::classreader::parse_class(bytes).expect("read call-site class")
+    };
+    let reference = read(&reference_classes);
+    let actual = read(&actual_classes);
+    assert_eq!(actual.signature, reference.signature);
+    let inspect = |classes: &[(String, Vec<u8>)]| {
+        let directory = common::scratch_dir().expect("allocate metadata oracle");
+        for (name, bytes) in classes {
+            let path = directory.join(format!("{name}.class"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let driver = directory.join("CapturedMetadata.java");
+        std::fs::write(
+            &driver,
+            include_str!("reified_anonymous_object_e2e/CapturedMetadata.java"),
+        )
+        .unwrap();
+        let lib = krusty::toolchain::kotlinc_lib_dir().expect("exact compiler distribution");
+        let classpath = std::env::join_paths([
+            directory.clone(),
+            lib.join("kotlin-compiler.jar"),
+            lib.join("kotlin-stdlib.jar"),
+        ])
+        .unwrap();
+        let output = common::javac_run(
+            driver.to_str().unwrap(),
+            classpath.to_str().unwrap(),
+            directory.to_str().unwrap(),
+            "CapturedMetadata",
+        )
+        .expect("run the compiler's metadata decoder");
+        std::fs::remove_dir_all(directory).unwrap();
+        output
+    };
+    let reference_metadata = inspect(&reference_classes);
+    assert_eq!(reference_metadata, "1|test/Inv|true|0");
+    assert_eq!(inspect(&actual_classes), reference_metadata);
+}

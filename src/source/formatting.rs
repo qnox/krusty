@@ -3300,7 +3300,7 @@ fn formatting_kind(
         Colon => Kind::Colon,
         Dot => Kind::Dot,
         At => at_kind(tokens, source, logical_lo),
-        Newline => Kind::Semicolon,
+        Newline | Semicolon => Kind::Semicolon,
         Eof => return None,
         Eq | Plus | Minus | Star | Slash | Percent | EqEq | NotEq | RefEq | RefNe | Lt | LtEq
         | Gt | GtEq | Amp | AndAnd | OrOr | Not | Arrow | DotDot | DotDotLt | PlusPlus
