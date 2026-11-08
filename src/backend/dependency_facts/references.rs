@@ -268,13 +268,15 @@ impl ReferencedDependencies {
             IrCheckedOperation::PropertyReference { target, .. } => {
                 self.property_reference(target);
             }
+            IrCheckedOperation::RangeConstruction { declaration, .. } => {
+                self.callables.extend(*declaration);
+            }
             IrCheckedOperation::Call { .. }
             | IrCheckedOperation::PropertyRead { .. }
             | IrCheckedOperation::PropertyWrite { .. }
             | IrCheckedOperation::LateinitFieldRead { .. }
             | IrCheckedOperation::BackingFieldRead { .. }
             | IrCheckedOperation::BackingFieldWrite { .. }
-            | IrCheckedOperation::RangeConstruction { .. }
             | IrCheckedOperation::ComparableRangeContains { .. }
             | IrCheckedOperation::IllegalProgressionStep { .. } => {}
         }

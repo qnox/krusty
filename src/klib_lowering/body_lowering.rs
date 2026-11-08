@@ -126,6 +126,16 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The range construction a range literal's membership compares against, read as
+    /// [`Self::common_primitive`] reads its primitive but whatever range class the target lays
+    /// out: the membership builds no range.
+    fn range_literal_bounds(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
+        Ok(None)
+    }
+
     /// Whether a checked source edge or retained external export needs this exact declaration.
     /// Such calls must remain callable edges; only a compiler builtin without either obligation
     /// may be folded into a common-IR operation.

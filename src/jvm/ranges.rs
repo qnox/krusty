@@ -42,6 +42,7 @@ pub(super) fn realize(
             end,
             end_type,
             result,
+            ..
         } = *checked_op
         else {
             continue;

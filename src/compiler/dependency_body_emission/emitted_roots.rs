@@ -146,13 +146,14 @@ pub(super) fn declarations(
         let member = facts
             .target_member(&identity, capabilities.target_represents_classifier)
             .map_err(|reason| format!("an invalid target member declaration: {reason:?}"))?;
-        // A member of a class no support unit materializes is a leaf: support bodies call it
-        // through its declaration, as source calls do, and the target realizes it. Every target
-        // realizes one of `kotlin.Any`'s members, or a declaration overriding one, from the
-        // receiver's own representation, as it does for a source call. A target which realizes
-        // no other declaration outside its emitted bodies has no other such leaf: body lowering
-        // declines a call of one, as it declines any unmodelled form.
-        let outside_edge = if !member && is_outside_units(platform, bodies, &facts, selected)? {
+        // A member of a class the target lays out, or of one no support unit materializes, is a
+        // leaf: support bodies call it through its declaration, as source calls do, and the
+        // target realizes it. Every target realizes one of `kotlin.Any`'s members, or a
+        // declaration overriding one, from the receiver's own representation, as it does for a
+        // source call. A target which realizes no other declaration outside its emitted bodies
+        // has no other such leaf: body lowering declines a call of one, as it declines any
+        // unmodelled form.
+        let outside_edge = if member || is_outside_units(platform, bodies, &facts, selected)? {
             Some(member_edge(platform, declaration_target, selected)?)
         } else {
             None
@@ -161,13 +162,8 @@ pub(super) fn declarations(
             .as_ref()
             .is_some_and(|edge| capabilities.target_realizes_bodyless || realizes_any_member(edge));
         // A call of a member realized outside the unit carries the facts the member hierarchy
-        // decorates a source call of it with.
-        if member {
-            member_edges.insert(
-                identity.clone(),
-                member_edge(platform, declaration_target, selected)?,
-            );
-        } else if let Some(edge) = outside_edge.filter(|_| external_member) {
+        // decorates a source call of it with; the edge is what authorizes the call.
+        if let Some(edge) = outside_edge.filter(|_| external_member) {
             member_edges.insert(identity.clone(), edge);
         }
         let emits_body = !externals.contains_key(&identity)
@@ -348,6 +344,16 @@ fn is_materialized_class_member(
 ) -> Result<bool, String> {
     if callable.kind() != ExternalCallableKind::Member {
         return Ok(false);
+    }
+    if crate::klib_lowering::is_receiver_member(callable, bodies, callees) {
+        // Every target realizes one of `kotlin.Any`'s members from the receiver's own
+        // representation, a builtin value included, so such a member stays the target's.
+        let (target, _) = platform
+            .external_callable_by_dependency(callable.identity())
+            .ok_or("a builtin-type member has no provider declaration")?;
+        return Ok(!realizes_any_member(&member_edge(
+            platform, target, callable,
+        )?));
     }
     let Some(class) = callable
         .class_contract()

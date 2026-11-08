@@ -166,6 +166,9 @@ impl BodyLowering<'_> {
                         end,
                         end_type,
                         result: primitive.ret,
+                        // A support body builds a range this way only on a target laying out
+                        // the range class itself: no declaration is called to build it.
+                        declaration: None,
                     },
                 )))
             }

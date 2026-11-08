@@ -668,6 +668,26 @@ fn header(
                 value_receiver = Some((&receiver.base.symbol, serialized));
                 Some(serialized)
             }
+            (Some(receiver), Some(selected))
+                if selected.class_contract().is_some_and(
+                    crate::libraries::KlibBodyClassContract::emits_receiver_members,
+                ) =>
+            {
+                // A builtin type's member is a function of its receiver value, which its body
+                // reads as the value the target carries.
+                let serialized = semantic_type(arena, types, receiver.ty)?;
+                if selected.declaration_owner()
+                    != serialized
+                        .kotlin_class_internal()
+                        .map(crate::types::SemanticCallableOwner::Classifier)
+                {
+                    return Err(mismatch(
+                        "a builtin type member's receiver is not its declaring type".to_owned(),
+                    ));
+                }
+                value_receiver = Some((&receiver.base.symbol, serialized));
+                Some(serialized)
+            }
             (Some(receiver), selected) => {
                 // A member body can be emitted with an erased dispatch slot only when its serialized
                 // body never observes that slot. The backend still accepts a source edge only when its

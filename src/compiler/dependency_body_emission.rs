@@ -91,7 +91,11 @@ pub(super) fn emit_dependencies<B: Backend>(
     let intrinsics = facts.intrinsics();
     let selected = source.callables.klib_body_callables();
     let type_oracle = crate::symbol_resolver::SourceOracle(platform);
-    let callees = KlibCalleeFacts::new(selected.iter().copied()).with_type_oracle(&type_oracle);
+    let target_represents_classifier =
+        |classifier| backend.represents_dependency_classifier(classifier);
+    let callees = KlibCalleeFacts::new(selected.iter().copied())
+        .with_type_oracle(&type_oracle)
+        .with_target_classifiers(&target_represents_classifier);
     let mut roots: Vec<crate::libraries::KlibBodyCallable<'_>> = Vec::new();
     for callable in selected.iter().copied().filter(|callable| {
         !support_state.emitted.contains_key(callable.identity())
@@ -110,8 +114,6 @@ pub(super) fn emit_dependencies<B: Backend>(
     let target_realizes_getter = |signature: crate::backend::DependencyGetterSignature<'_>| {
         backend.realizes_dependency_getter(signature)
     };
-    let target_represents_classifier =
-        |classifier| backend.represents_dependency_classifier(classifier);
     let mut ordinary = match emitted_roots::ordinary_roots(
         platform,
         source,
@@ -671,6 +673,9 @@ fn prepare_bodyless_externals(
                 .callees
                 .target_member(&callee, capabilities.target_represents_classifier)
             {
+                // A member the closure froze no call edge for is one this target does not
+                // realize outside its emitted bodies; lowering declines its call.
+                Ok(true) if capabilities.callees.member_edge(&callee).is_none() => continue,
                 Ok(true) => {
                     let Some(external) = provider_external(platform, &callee, diags) else {
                         return false;

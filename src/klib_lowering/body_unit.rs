@@ -753,37 +753,18 @@ impl CallLinker for Linker<'_, '_> {
         &self,
         signature: &KlibDeclarationSignature,
     ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
-        // Keep the existing public-call obligation and canonical ambiguity diagnostics. A
-        // positive primitive capability does not own selection or producer-origin failures.
-        if let KlibDeclarationSignature::Public(callee) = signature {
-            if self.requires_declaration(callee)? {
-                return Ok(None);
-            }
-        }
-        let identity = match self
-            .sources
-            .bodies
-            .callee_origin(&self.active_module, signature)
-        {
-            KlibCalleeOrigin::Exact(identity) => identity,
-            KlibCalleeOrigin::Missing => return Ok(None),
-            KlibCalleeOrigin::Ambiguous => {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "ambiguous producer origin for a primitive declaration".to_owned(),
-                ))
-            }
-        };
-        let primitive = self
-            .sources
-            .callees
-            .common_primitive(&identity, self.sources.bodies)?;
-        Ok(
-            if self.sources.externals.contains_key(&identity) || &identity == self.root.identity() {
-                None
-            } else {
-                primitive
-            },
-        )
+        self.primitive_at(signature, |facts, identity, bodies| {
+            facts.common_primitive(identity, bodies)
+        })
+    }
+
+    fn range_literal_bounds(
+        &self,
+        signature: &KlibDeclarationSignature,
+    ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
+        self.primitive_at(signature, |facts, identity, bodies| {
+            facts.range_literal_bounds(identity, bodies)
+        })
     }
 
     fn range_membership_header(
@@ -1490,6 +1471,9 @@ impl<'s> Linker<'_, 's> {
         &self,
         candidate: KlibBodyCallable<'s>,
     ) -> Result<bool, KlibBodyDeclineReason> {
+        if is_receiver_member(candidate, self.sources.bodies, self.sources.callees) {
+            return Ok(true);
+        }
         let Some(class) = candidate
             .class_contract()
             .filter(|class| class.emits_members())
@@ -1727,6 +1711,12 @@ impl<'s> Linker<'_, 's> {
         block_statements(function)?;
         let header = body_header(selected, arena, function, self.sources.bodies)?;
         let value_member = match (header.value_receiver(), selected) {
+            // A builtin type's member reads its receiver as the value the target carries.
+            (Some(_), Some(selected))
+                if is_receiver_member(selected, self.sources.bodies, self.sources.callees) =>
+            {
+                None
+            }
             (Some(_), Some(selected)) => Some(self.materialize_member_class(ir, selected)?),
             (Some(_), None) => {
                 return Err(KlibBodyDeclineReason::SignatureMismatch(
@@ -1788,6 +1778,29 @@ impl<'s> Linker<'_, 's> {
         });
         Ok(declared)
     }
+}
+
+/// Whether `candidate` is a member with a body of a builtin type whose members a support unit emits
+/// as functions of their receiver value
+/// ([`emits_receiver_members`](crate::libraries::KlibBodyClassContract::emits_receiver_members))
+/// and whose layout the target does not own. A bodyless one is the target's to realize.
+pub(crate) fn is_receiver_member(
+    candidate: KlibBodyCallable<'_>,
+    bodies: &KlibDeclarationBodies,
+    callees: &KlibCalleeFacts<'_>,
+) -> bool {
+    candidate.is_member()
+        && candidate
+            .class_contract()
+            .is_some_and(crate::libraries::KlibBodyClassContract::emits_receiver_members)
+        && bodies.function_has_body(candidate.identity()) == Some(true)
+        // The body of a member of a type the target lays out itself reads a layout the target's
+        // value does not have.
+        && !matches!(
+            candidate.declaration_owner(),
+            Some(crate::types::SemanticCallableOwner::Classifier(owner))
+                if callees.target_represents(owner)
+        )
 }
 
 /// Whether `identity` is a private member of the value class `class` with a body, which no
@@ -1993,3 +2006,52 @@ fn parameter_defaults(declaration: &KlibIrFunction) -> Vec<bool> {
         .map(|parameter| parameter.default_value.is_some())
         .collect()
 }
+
+impl Linker<'_, '_> {
+    /// The primitive `select` reads for the declaration a call of `signature` names, unless the
+    /// call is an exact declaration edge.
+    fn primitive_at(
+        &self,
+        signature: &KlibDeclarationSignature,
+        select: PrimitiveSelection,
+    ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
+        // Keep the existing public-call obligation and canonical ambiguity diagnostics. A
+        // positive primitive capability does not own selection or producer-origin failures.
+        if let KlibDeclarationSignature::Public(callee) = signature {
+            if self.requires_declaration(callee)? {
+                return Ok(None);
+            }
+        }
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => return Ok(None),
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "ambiguous producer origin for a primitive declaration".to_owned(),
+                ))
+            }
+        };
+        let primitive = select(self.sources.callees, &identity, self.sources.bodies)?;
+        Ok(
+            if self.sources.externals.contains_key(&identity) || &identity == self.root.identity() {
+                None
+            } else {
+                primitive
+            },
+        )
+    }
+}
+
+/// A primitive reading of a selected declaration's callee facts.
+type PrimitiveSelection = for<'f> fn(
+    &KlibCalleeFacts<'f>,
+    &KlibDependencyCallable,
+    &KlibDeclarationBodies,
+) -> Result<
+    Option<super::primitive_calls::CommonPrimitiveCall>,
+    KlibBodyDeclineReason,
+>;

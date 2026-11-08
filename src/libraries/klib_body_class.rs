@@ -37,6 +37,17 @@ impl KlibBodyClassContract {
         crate::types::builtin_semantic(self.classifier).is_some()
     }
 
+    /// Whether a support unit emits this class's members as functions of their receiver value,
+    /// materializing no class: a final builtin type of the common type model that is not a value
+    /// class, whose values the target carries itself. Such a member dispatches statically.
+    pub(crate) fn emits_receiver_members(&self) -> bool {
+        self.is_builtin_type()
+            && !self.is_value
+            && self.kind == super::TypeKind::Class
+            && self.modality == KotlinModality::Final
+            && self.parameters.formals.is_empty()
+    }
+
     /// Whether a support unit materializes this class and emits its members as functions of the
     /// class it materializes: a value class, or a final class without type parameters, whose
     /// members all dispatch statically. A builtin type of the common type model is neither.

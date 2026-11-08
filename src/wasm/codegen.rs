@@ -122,6 +122,15 @@ impl Backend for WasmBackend {
         true
     }
 
+    /// The runtime lays out text itself: a library body of one of `String`'s members reads a
+    /// layout this target's string does not have.
+    fn represents_dependency_classifier(
+        &self,
+        classifier: crate::backend::DependencyClassifier,
+    ) -> bool {
+        classifier == crate::types::wk::string()
+    }
+
     fn realizes_dependency_intrinsic(
         &self,
         operation: crate::backend::BackendCompilerIntrinsic,

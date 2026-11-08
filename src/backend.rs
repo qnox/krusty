@@ -20,6 +20,7 @@ pub(crate) mod interface_identity;
 pub(crate) mod local_properties;
 mod module_facts;
 pub(crate) mod property_entries;
+pub(crate) mod range_constructions;
 mod source_class_members;
 pub(crate) mod value_classes;
 

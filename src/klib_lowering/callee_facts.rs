@@ -64,7 +64,7 @@ impl<'a> KlibCalleeFacts<'a> {
         self
     }
 
-    pub(super) fn member_edge(&self, identity: &KlibDependencyCallable) -> Option<&CallEdge> {
+    pub(crate) fn member_edge(&self, identity: &KlibDependencyCallable) -> Option<&CallEdge> {
         self.member_edges.get(identity)
     }
 
@@ -375,6 +375,45 @@ impl<'a> KlibCalleeFacts<'a> {
     }
 
     pub(crate) fn common_primitive(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Option<super::primitive_calls::CommonPrimitiveCall>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        // A target that does not lay out the range class builds it by calling the declaration,
+        // as a source range construction on that target does.
+        Ok(self.primitive(identity, bodies)?.filter(|primitive| {
+            !matches!(
+                primitive.operation,
+                super::primitive_calls::CommonPrimitive::RangeConstruction(_)
+            ) || primitive
+                .ret
+                .kotlin_class_internal()
+                .is_some_and(|class| self.target_represents(class))
+        }))
+    }
+
+    /// The range construction `identity` performs, whatever the target lays out. A membership in
+    /// a range literal compares against its bounds, as kotlinc folds it, so it builds no range.
+    pub(crate) fn range_literal_bounds(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Option<super::primitive_calls::CommonPrimitiveCall>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        Ok(self.primitive(identity, bodies)?.filter(|primitive| {
+            matches!(
+                primitive.operation,
+                super::primitive_calls::CommonPrimitive::RangeConstruction(_)
+            )
+        }))
+    }
+
+    fn primitive(
         &self,
         identity: &KlibDependencyCallable,
         bodies: &crate::klib_libraries::KlibDeclarationBodies,
