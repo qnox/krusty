@@ -182,8 +182,9 @@ pub struct DependencyBodyUnit {
     enum_classes: HashMap<TypeName, (KlibDependencyCallable, crate::ir::ClassId)>,
     /// One getter per entry of those enums, in declaration order.
     enum_entry_getters: Vec<(TypeName, String, FunId)>,
-    /// Enums an earlier support unit already realized. This unit reads them through that export.
-    materialized_elsewhere: HashSet<TypeName>,
+    /// Enums an earlier support unit already realized, retaining each exact producer identity.
+    /// This unit reads them through that export only when its selected producer agrees.
+    materialized_elsewhere: HashMap<TypeName, KlibDependencyCallable>,
     builtins: IrBuiltinOperators,
 }
 
@@ -199,7 +200,7 @@ impl Default for DependencyBodyUnit {
             value_receivers: HashMap::default(),
             enum_classes: HashMap::default(),
             enum_entry_getters: Vec::new(),
-            materialized_elsewhere: HashSet::default(),
+            materialized_elsewhere: HashMap::default(),
             builtins: IrBuiltinOperators::new(),
         }
     }
@@ -536,7 +537,10 @@ impl DependencyBodyUnit {
     }
 
     /// Enums an earlier unit of this program already realized.
-    pub(crate) fn excluding_materialized(&mut self, classes: &HashSet<TypeName>) {
+    pub(crate) fn excluding_materialized(
+        &mut self,
+        classes: &HashMap<TypeName, KlibDependencyCallable>,
+    ) {
         self.materialized_elsewhere.clone_from(classes);
     }
 
@@ -656,7 +660,7 @@ struct Linker<'u, 's> {
     value_receivers: &'u mut HashMap<KlibDependencyCallable, Ty>,
     enum_classes: &'u mut HashMap<TypeName, (KlibDependencyCallable, crate::ir::ClassId)>,
     enum_entry_getters: &'u mut Vec<(TypeName, String, FunId)>,
-    materialized_elsewhere: &'u HashSet<TypeName>,
+    materialized_elsewhere: &'u HashMap<TypeName, KlibDependencyCallable>,
     pending: &'u mut VecDeque<PendingBody<'s>>,
     /// The declaration this lowering was asked for, which its own recursive calls select.
     root: KlibBodyCallable<'s>,

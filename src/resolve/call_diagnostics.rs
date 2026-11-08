@@ -97,6 +97,56 @@ fn rejected_candidate_argument_shape(
 }
 
 impl Checker<'_> {
+    pub(super) fn assignability_error_message(
+        &self,
+        expected: Ty,
+        actual: Ty,
+        ctx: &str,
+    ) -> Option<String> {
+        // Neither side is a TYPE when it still carries the not-determined marker: the declaration it
+        // came from has not been resolved yet, and the message would name `<not determined>` — a
+        // placeholder the source never wrote — for a program that may well be correct. Whatever
+        // could not be determined is reported at its own declaration.
+        if expected.mentions_pending() || actual.mentions_pending() {
+            return None;
+        }
+        let context = [expected, actual];
+        let expected = self.diagnostic_type_name(expected, &context);
+        let actual = self.diagnostic_type_name(actual, &context);
+        if actual == "Null" {
+            return Some(format!(
+                "null cannot be a value of a non-null type '{expected}'."
+            ));
+        }
+        let msg = match ctx {
+            "function body" | "getter body" | "local function body" | "return" => {
+                format!("return type mismatch: expected '{expected}', actual '{actual}'.")
+            }
+            "initializer" | "property initializer" | "default argument" => {
+                format!("initializer type mismatch: expected '{expected}', actual '{actual}'.")
+            }
+            "assignment" => {
+                format!(
+                    "assignment type mismatch: actual type is '{actual}', but '{expected}' was expected."
+                )
+            }
+            argument if argument.ends_with("argument") => {
+                format!(
+                    "argument type mismatch: actual type is '{actual}', but '{expected}' was expected."
+                )
+            }
+            condition if condition.ends_with("condition") => {
+                format!(
+                    "condition type mismatch: inferred type is '{actual}' but '{expected}' was expected."
+                )
+            }
+            _ => {
+                format!("type mismatch: inferred type is {actual} but {expected} was expected")
+            }
+        };
+        Some(msg)
+    }
+
     /// When overload selection rejects a family by type but exactly one declaration has a valid
     /// source-argument mapping, report that declaration's mapped argument errors. This diagnostic
     /// step is origin-neutral: top-level and extension candidates carry the same semantic shape and

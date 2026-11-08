@@ -48,7 +48,9 @@ pub(crate) enum ProvenEnumEntry {
 /// A dependency enum whose constants the shared realization can build.
 ///
 /// The proof is the serialized class: it extends `kotlin.Enum`, and every entry is a
-/// declaration-order constant with no body and no constructor argument. A second class, a
+/// declaration-order constant with no body and no constructor argument. Construction contains only
+/// Enum delegation and own instance initialization; no additional storage or executable members
+/// are discarded. A second class, a
 /// file-private class, or an entry the common realization does not construct is not a simple
 /// enum.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -713,6 +715,18 @@ fn prove_simple_enum(
     if !is_kotlin_enum(arena, supertype, class) {
         return Err("a class that does not extend kotlin.Enum");
     }
+    let mut constructors = class.members.iter().filter_map(|member| match member {
+        KlibIrMember::Function(function) if arena.function(*function).constructor => {
+            Some(arena.function(*function))
+        }
+        _ => None,
+    });
+    let Some(constructor) = constructors.next() else {
+        return Err("an enum class without its constructor");
+    };
+    if constructors.next().is_some() || !simple_enum_class_constructor(arena, constructor, class) {
+        return Err("an enum class with a nontrivial constructor");
+    }
     let mut entries = Vec::new();
     for member in &class.members {
         match member {
@@ -720,13 +734,33 @@ fn prove_simple_enum(
                 if entry.class.is_some() {
                     return Err("an enum entry with a body");
                 }
-                if let Some(initializer) = entry.initializer {
-                    simple_enum_constructor(arena, initializer, class)?;
-                }
+                let Some(initializer) = entry.initializer else {
+                    return Err("an enum entry without its constructor initializer");
+                };
+                simple_enum_constructor(arena, initializer, class, constructor)?;
                 if entry.name.is_empty() || entries.iter().any(|name| name == &entry.name) {
                     return Err("an enum entry without a unique name");
                 }
                 entries.push(entry.name.clone());
+            }
+            KlibIrMember::Function(function) => {
+                let function = arena.function(*function);
+                if !function.constructor && !simple_enum_member_body(function) {
+                    return Err("an enum class with an executable member body");
+                }
+            }
+            KlibIrMember::Field(_) => return Err("an enum class with additional field storage"),
+            KlibIrMember::Property(property) => {
+                if property.backing_field.is_some() {
+                    return Err("an enum class with additional property storage");
+                }
+                if [property.getter, property.setter]
+                    .into_iter()
+                    .flatten()
+                    .any(|accessor| !simple_enum_member_body(arena.function(accessor)))
+                {
+                    return Err("an enum class with an executable accessor body");
+                }
             }
             KlibIrMember::AnonymousInitializer { statements, .. } if !statements.is_empty() => {
                 return Err("an enum class with an initializer");
@@ -806,6 +840,7 @@ fn simple_enum_constructor(
     arena: &KlibIrArena,
     initializer: crate::metadata::klib_ir::tree::KlibIrExprId,
     class: &crate::metadata::klib_ir::tree::KlibIrClass,
+    constructor: &KlibIrFunction,
 ) -> Result<(), &'static str> {
     let KlibIrExprKind::EnumConstructorCall(access) = &arena.expr(initializer).kind else {
         return Err("an enum entry whose initializer is not its constructor");
@@ -815,12 +850,83 @@ fn simple_enum_constructor(
         return Err("an enum entry with a constructor argument");
     }
     if access.symbol.kind != KlibIrSymbolKind::Constructor
+        || access.symbol != constructor.base.symbol
         || declaration_owner(&access.symbol.signature)
             != class_identity(&class.base.symbol.signature)
     {
-        return Err("an enum entry constructed by another class");
+        return Err("an enum entry constructed by another class or constructor");
     }
     Ok(())
+}
+
+/// The shared realization supplies only Enum's name/ordinal initialization. A serialized
+/// constructor may perform that delegation and initialize its own otherwise inert instance,
+/// but no user code or defaulted operands may be discarded.
+fn simple_enum_class_constructor(
+    arena: &KlibIrArena,
+    constructor: &KlibIrFunction,
+    class: &crate::metadata::klib_ir::tree::KlibIrClass,
+) -> bool {
+    if constructor.base.symbol.kind != KlibIrSymbolKind::Constructor
+        || declaration_owner(&constructor.base.symbol.signature)
+            != class_identity(&class.base.symbol.signature)
+        || !constructor.type_parameters.is_empty()
+        || constructor.dispatch_receiver.is_some()
+        || !constructor.context_parameters.is_empty()
+        || constructor.extension_receiver.is_some()
+        || !constructor.regular_parameters.is_empty()
+    {
+        return false;
+    }
+    let Some(KlibIrBody::Block(statements)) = constructor.body.as_ref() else {
+        return false;
+    };
+    let [KlibIrStatement::Expression(delegate), KlibIrStatement::Expression(initialize)] =
+        statements.as_slice()
+    else {
+        return false;
+    };
+    let KlibIrExprKind::EnumConstructorCall(access) = &arena.expr(*delegate).kind else {
+        return false;
+    };
+    let [Some(argument)] = access.type_arguments.as_slice() else {
+        return false;
+    };
+    access.symbol.kind == KlibIrSymbolKind::Constructor
+        && declaration_owner(&access.symbol.signature) == Some(crate::types::wk::kotlin_enum())
+        && arguments_are_absent(&access.arguments)
+        && this_class(arena, *argument, class)
+        && matches!(&arena.expr(*initialize).kind,
+            KlibIrExprKind::InstanceInitializerCall(initialized) if initialized == &class.base.symbol)
+}
+
+/// Inherited declarations have no serialized body; the three enum synthetic roles are supplied
+/// by the target's ordinary enum realization. An executable override/accessor needs its own body
+/// and override graph, which this restricted realization does not install.
+fn simple_enum_member_body(function: &KlibIrFunction) -> bool {
+    match function.body {
+        Some(KlibIrBody::Synthetic(_)) => true,
+        Some(KlibIrBody::Block(_)) => false,
+        None => {
+            // Body absence also describes external declarations. Only an explicitly serialized
+            // inherited role with exact Enum/Any declaration edges is supplied by this layout.
+            function.base.origin == "FAKE_OVERRIDE"
+                && !function.overridden.is_empty()
+                && function.overridden.iter().all(|symbol| {
+                    let signature = match &symbol.signature {
+                        KlibIrSignature::Public(signature) => signature,
+                        KlibIrSignature::Accessor(signature) => signature.property(),
+                        KlibIrSignature::FileLocal { .. } => return false,
+                    };
+                    symbol.kind == KlibIrSymbolKind::Function
+                        && matches!(
+                            declaration_owner(&KlibIrSignature::Public(signature.clone())),
+                            Some(owner) if owner == crate::types::wk::kotlin_enum()
+                                || owner == crate::types::wk::any()
+                        )
+                })
+        }
+    }
 }
 
 fn find_enum_entry(
@@ -1261,5 +1367,310 @@ mod tests {
         };
         statements.push(KlibIrStatement::Expression(effect));
         assert!(!inert_constructor(&arena, &executable, &class));
+    }
+
+    fn simple_enum_fixture() -> (KlibIrArena, crate::metadata::klib_ir::tree::KlibIrClass) {
+        use crate::metadata::klib_ir::tree::{
+            KlibIrClass, KlibIrEnumEntry, KlibIrTypeArgument, KlibIrVariance,
+        };
+        let mut arena = KlibIrArena::default();
+        let symbol = class_symbol("fixture", "Enum");
+        let own_type = arena.push_type(KlibIrType::Simple {
+            classifier: symbol.clone(),
+            nullability: KlibIrNullability::DefinitelyNotNull,
+            arguments: Vec::new(),
+            annotations: Vec::new(),
+            abbreviation: None,
+        });
+        let super_type = arena.push_type(KlibIrType::Simple {
+            classifier: class_symbol("kotlin", "Enum"),
+            nullability: KlibIrNullability::DefinitelyNotNull,
+            arguments: vec![KlibIrTypeArgument::Type {
+                variance: KlibIrVariance::Invariant,
+                ty: own_type,
+            }],
+            annotations: Vec::new(),
+            abbreviation: None,
+        });
+        let mut constructor = empty_constructor(
+            &mut arena,
+            symbol.clone(),
+            constructor_symbol("kotlin", "Enum"),
+        );
+        constructor.base.symbol = constructor_symbol("fixture", "Enum");
+        constructor.return_type = own_type;
+        let delegate = arena.push_expr(
+            None,
+            KlibIrExprKind::EnumConstructorCall(KlibIrMemberAccess {
+                symbol: constructor_symbol("kotlin", "Enum"),
+                arguments: KlibIrArguments::Flat(Vec::new()),
+                type_arguments: vec![Some(own_type)],
+                origin: None,
+            }),
+        );
+        let initialize = arena.push_expr(
+            None,
+            KlibIrExprKind::InstanceInitializerCall(symbol.clone()),
+        );
+        constructor.body = Some(KlibIrBody::Block(vec![
+            KlibIrStatement::Expression(delegate),
+            KlibIrStatement::Expression(initialize),
+        ]));
+        let constructor_symbol = constructor.base.symbol.clone();
+        let constructor = arena.push_function(constructor);
+        let base = KlibIrDeclarationBase {
+            symbol: symbol.clone(),
+            origin: "DEFINED".to_owned(),
+            flags: 0,
+            annotations: Vec::new(),
+        };
+        let mut members = vec![KlibIrMember::Function(constructor)];
+        for name in ["FIRST", "SECOND"] {
+            let initializer = arena.push_expr(
+                None,
+                KlibIrExprKind::EnumConstructorCall(KlibIrMemberAccess {
+                    symbol: constructor_symbol.clone(),
+                    arguments: KlibIrArguments::Flat(Vec::new()),
+                    type_arguments: Vec::new(),
+                    origin: None,
+                }),
+            );
+            members.push(KlibIrMember::EnumEntry(KlibIrEnumEntry {
+                base: base.clone(),
+                name: name.to_owned(),
+                initializer: Some(initializer),
+                class: None,
+            }));
+        }
+        (
+            arena,
+            KlibIrClass {
+                base,
+                name: "Enum".to_owned(),
+                this_receiver: None,
+                type_parameters: Vec::new(),
+                supertypes: vec![super_type],
+                members,
+                value_class_representation: None,
+                sealed_subclasses: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn simple_enum_keeps_implicit_construction_order_and_synthetic_roles() {
+        use crate::metadata::klib_ir::tree::KlibIrSyntheticBody;
+        let (mut arena, mut class) = simple_enum_fixture();
+        let KlibIrMember::Function(constructor) = class.members[0] else {
+            unreachable!()
+        };
+        for role in [
+            KlibIrSyntheticBody::EnumValues,
+            KlibIrSyntheticBody::EnumValueOf,
+            KlibIrSyntheticBody::EnumEntries,
+        ] {
+            let mut generated = arena.function(constructor).clone();
+            generated.constructor = false;
+            generated.base.symbol.kind = KlibIrSymbolKind::Function;
+            generated.body = Some(KlibIrBody::Synthetic(role));
+            class
+                .members
+                .push(KlibIrMember::Function(arena.push_function(generated)));
+        }
+        let mut inherited = arena.function(constructor).clone();
+        inherited.constructor = false;
+        inherited.base.symbol.kind = KlibIrSymbolKind::Function;
+        inherited.base.origin = "FAKE_OVERRIDE".to_owned();
+        let package = ["kotlin".to_owned()];
+        let owners = [ClassScope::<KotlinType> {
+            name: "Enum",
+            type_parameters: Vec::new(),
+            expect: false,
+        }];
+        let inherited_signature = callable_signature(
+            DeclarationContainer {
+                package: &package,
+                classes: &owners,
+                native_interop_library: false,
+            },
+            &CallableShape {
+                name: "hashCode",
+                contexts: Vec::new(),
+                receiver: None,
+                params: Vec::new(),
+                vararg: None,
+                type_parameters: Vec::new(),
+                expect: false,
+                placement: Placement::Ordinary,
+            },
+        )
+        .expect("Enum's no-argument hashCode is signable");
+        inherited.name = "hashCode".to_owned();
+        inherited.overridden.push(KlibIrSymbol {
+            kind: KlibIrSymbolKind::Function,
+            signature: KlibIrSignature::Public(inherited_signature),
+        });
+        inherited.body = None;
+        class
+            .members
+            .push(KlibIrMember::Function(arena.push_function(inherited)));
+        assert_eq!(
+            prove_simple_enum(&arena, &class)
+                .expect("bare enum")
+                .entries,
+            ["FIRST".to_owned(), "SECOND".to_owned()]
+        );
+    }
+
+    #[test]
+    fn simple_enum_declines_discarded_field_and_property_initialization() {
+        use crate::metadata::klib_ir::tree::{KlibIrField, KlibIrProperty};
+        let (mut arena, mut class) = simple_enum_fixture();
+        let effect = arena.push_expr(None, KlibIrExprKind::GetObject(class.base.symbol.clone()));
+        let field = KlibIrField {
+            base: class.base.clone(),
+            name: "payload".to_owned(),
+            ty: class.supertypes[0],
+            initializer: Some(effect),
+        };
+        class.members.push(KlibIrMember::Property(KlibIrProperty {
+            base: class.base.clone(),
+            name: "payload".to_owned(),
+            backing_field: Some(field.clone()),
+            getter: None,
+            setter: None,
+        }));
+        assert_eq!(
+            prove_simple_enum(&arena, &class).err(),
+            Some("an enum class with additional property storage")
+        );
+        class.members.pop();
+        class.members.push(KlibIrMember::Field(field));
+        assert_eq!(
+            prove_simple_enum(&arena, &class).err(),
+            Some("an enum class with additional field storage")
+        );
+    }
+
+    #[test]
+    fn simple_enum_declines_constructor_effects_and_omitted_default_operands() {
+        use crate::metadata::klib_ir::tree::KlibIrParameter;
+        let (mut arena, mut class) = simple_enum_fixture();
+        let KlibIrMember::Function(id) = class.members[0] else {
+            unreachable!()
+        };
+        let original = arena.function(id).clone();
+        let effect = arena.push_expr(None, KlibIrExprKind::GetObject(class.base.symbol.clone()));
+        let mut constructor = original.clone();
+        let Some(KlibIrBody::Block(statements)) = constructor.body.as_mut() else {
+            unreachable!()
+        };
+        statements.push(KlibIrStatement::Expression(effect));
+        class.members[0] = KlibIrMember::Function(arena.push_function(constructor));
+        assert_eq!(
+            prove_simple_enum(&arena, &class).err(),
+            Some("an enum class with a nontrivial constructor")
+        );
+        let mut constructor = original;
+        constructor.regular_parameters.push(KlibIrParameter {
+            base: class.base.clone(),
+            name: "value".to_owned(),
+            ty: constructor.return_type,
+            vararg_element_type: None,
+            default_value: Some(effect),
+        });
+        class.members[0] = KlibIrMember::Function(arena.push_function(constructor));
+        assert_eq!(
+            prove_simple_enum(&arena, &class).err(),
+            Some("an enum class with a nontrivial constructor")
+        );
+    }
+
+    #[test]
+    fn simple_enum_declines_executable_overrides_and_accessors() {
+        use crate::metadata::klib_ir::tree::KlibIrProperty;
+        let (mut arena, mut class) = simple_enum_fixture();
+        let KlibIrMember::Function(id) = class.members[0] else {
+            unreachable!()
+        };
+        let mut executable = arena.function(id).clone();
+        executable.constructor = false;
+        executable.base.symbol.kind = KlibIrSymbolKind::Function;
+        let executable = arena.push_function(executable);
+        class.members.push(KlibIrMember::Function(executable));
+        assert_eq!(
+            prove_simple_enum(&arena, &class).err(),
+            Some("an enum class with an executable member body")
+        );
+        class.members.pop();
+        class.members.push(KlibIrMember::Property(KlibIrProperty {
+            base: class.base.clone(),
+            name: "computed".to_owned(),
+            backing_field: None,
+            getter: Some(executable),
+            setter: None,
+        }));
+        assert_eq!(
+            prove_simple_enum(&arena, &class).err(),
+            Some("an enum class with an executable accessor body")
+        );
+    }
+    #[test]
+    fn simple_enum_requires_its_own_instance_and_each_actual_entry_initializer() {
+        let (mut arena, mut class) = simple_enum_fixture();
+        let KlibIrMember::Function(id) = class.members[0] else {
+            unreachable!()
+        };
+        let original = arena.function(id).clone();
+        let mut constructor = original;
+        let foreign = arena.push_expr(
+            None,
+            KlibIrExprKind::InstanceInitializerCall(class_symbol("fixture", "Other")),
+        );
+        let Some(KlibIrBody::Block(statements)) = constructor.body.as_mut() else {
+            unreachable!()
+        };
+        statements[1] = KlibIrStatement::Expression(foreign);
+        class.members[0] = KlibIrMember::Function(arena.push_function(constructor));
+        assert_eq!(
+            prove_simple_enum(&arena, &class).err(),
+            Some("an enum class with a nontrivial constructor")
+        );
+        class.members[0] = KlibIrMember::Function(id);
+        let KlibIrMember::EnumEntry(entry) = &mut class.members[1] else {
+            unreachable!()
+        };
+        entry.initializer = None;
+        assert_eq!(
+            prove_simple_enum(&arena, &class).err(),
+            Some("an enum entry without its constructor initializer")
+        );
+    }
+    #[test]
+    fn simple_enum_declines_bodyless_external_members_and_unproven_inheritance() {
+        let (mut arena, mut class) = simple_enum_fixture();
+        let KlibIrMember::Function(id) = class.members[0] else {
+            unreachable!()
+        };
+        let mut external = arena.function(id).clone();
+        external.constructor = false;
+        external.base.symbol.kind = KlibIrSymbolKind::Function;
+        external.body = None;
+        class.members.push(KlibIrMember::Function(
+            arena.push_function(external.clone()),
+        ));
+        assert_eq!(
+            prove_simple_enum(&arena, &class).err(),
+            Some("an enum class with an executable member body")
+        );
+        class.members.pop();
+        external.base.origin = "FAKE_OVERRIDE".to_owned();
+        class
+            .members
+            .push(KlibIrMember::Function(arena.push_function(external)));
+        assert_eq!(
+            prove_simple_enum(&arena, &class).err(),
+            Some("an enum class with an executable member body")
+        );
     }
 }

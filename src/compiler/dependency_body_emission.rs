@@ -142,9 +142,11 @@ pub(super) fn emit_dependencies<B: Backend>(
     });
     let mut artifacts = Vec::new();
     artifacts.extend(emit_referenced_enums(
-        source,
-        symbols,
-        module_facts,
+        DependencyEmissionContext {
+            source,
+            symbols,
+            module_facts,
+        },
         bodies,
         backend,
         state,
@@ -164,7 +166,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             return Vec::new();
         };
         let mut unit = DependencyBodyUnit::default();
-        unit.excluding_materialized(&support_state.materialized_classes.keys().copied().collect());
+        unit.excluding_materialized(&support_state.materialized_classes);
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
@@ -461,25 +463,32 @@ pub(super) fn emit_dependencies<B: Backend>(
     artifacts
 }
 
+/// Immutable source/provider facts shared by one dependency-support emission.
+struct DependencyEmissionContext<'a, 'source> {
+    source: &'a CheckedIrFile<'source>,
+    symbols: &'a PassTwoSymbols,
+    module_facts: &'a BackendModuleFacts,
+}
+
 /// A source read of a dependency enum entry. The declaring class is realized once, here, before
 /// any body that also reads it, and its entry getters are the export those reads call.
 fn emit_referenced_enums<B: Backend>(
-    source: &CheckedIrFile<'_>,
-    symbols: &PassTwoSymbols,
-    module_facts: &BackendModuleFacts,
+    context: DependencyEmissionContext<'_, '_>,
     bodies: &crate::klib_libraries::KlibDeclarationBodies,
     backend: &B,
     state: &mut B::State,
     support_state: &mut DependencySupportState,
     diags: &mut DiagSink,
 ) -> Vec<Artifact> {
+    let DependencyEmissionContext {
+        source,
+        symbols,
+        module_facts,
+    } = context;
     let mut unit = DependencyBodyUnit::default();
-    unit.excluding_materialized(&support_state.materialized_classes.keys().copied().collect());
+    unit.excluding_materialized(&support_state.materialized_classes);
     let platform = symbols.semantic_platform();
     for classifier in dependency_enum_reads(&source.ir) {
-        if support_state.materialized_classes.contains_key(&classifier) {
-            continue;
-        }
         match bodies.proven_loaded_enum(classifier) {
             crate::klib_libraries::ProvenEnumClass::None => continue,
             crate::klib_libraries::ProvenEnumClass::Several => {

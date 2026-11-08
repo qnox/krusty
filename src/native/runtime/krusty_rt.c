@@ -1212,11 +1212,6 @@ static const char *kt_text_of(KRef self, kt_int *byte_length) {
     return self->as.string.bytes;
 }
 
-/* An enum constant declared by another compilation unit. The object has `kotlin.Enum`'s storage
-   (name, ordinal). Its class descriptor is this one shared type: the declaring enum's own
-   descriptor lives in that unit, and identity (`===`) is what a read of the constant promises.
-   The intern key is the classifier text plus the entry text. The slot list is not a GC object,
-   so a reallocation cannot move a root the collector already holds. */
 /* `StringBuilder(capacity)`. A capacity is a hint to a builder that grows anyway, but a NEGATIVE
    one is not read as zero. Kotlin's common declaration specifies no exception, and the platforms
    differ, so this runtime throws the type Kotlin/Native does, being a native target: its

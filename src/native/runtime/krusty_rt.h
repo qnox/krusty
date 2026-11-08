@@ -292,9 +292,6 @@ void kt_no_when_branch_matched(void);
 /* The failure `Color.valueOf` makes when no constant has that name. */
 void kt_no_such_enum_constant(KRef name);
 
-/* One object for an enum constant another compilation unit declares. Two reads of the same
-   classifier name and entry name are the same object (`===`). `ordinal` is not recovered here:
-   the constant's identity is the interned object, and its name is `name`. */
 /* The array types, all runtime-owned: an array's descriptor depends on its element WIDTH, not on
    the element type a program wrote, so `Array<String>` and `Array<Foo>` share one. */
 extern const KType kt_type_array; /* Array<T>: references */

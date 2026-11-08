@@ -16,11 +16,6 @@ impl<'u, 's> Linker<'u, 's> {
         classifier: TypeName,
         entry: &str,
     ) -> Result<(), KlibBodyDeclineReason> {
-        if self.materialized_elsewhere.contains(&classifier)
-            || self.enum_classes.contains_key(&classifier)
-        {
-            return Ok(());
-        }
         let (identity, entries) = match self
             .sources
             .bodies
@@ -41,6 +36,16 @@ impl<'u, 's> Linker<'u, 's> {
                 return Err(KlibBodyDeclineReason::UnsupportedDeclaration(reason))
             }
         };
+        if already_materialized(
+            classifier,
+            &identity,
+            self.enum_classes,
+            self.materialized_elsewhere,
+        )
+        .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?
+        {
+            return Ok(());
+        }
         if !entries.iter().any(|name| name == entry) {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "an enum entry is not a member of its proven class".to_owned(),
@@ -64,11 +69,6 @@ impl DependencyBodyUnit {
         bodies: &KlibDeclarationBodies,
         classifier: TypeName,
     ) -> Result<(), &'static str> {
-        if self.materialized_elsewhere.contains(&classifier)
-            || self.enum_classes.contains_key(&classifier)
-        {
-            return Ok(());
-        }
         let (identity, entries) = match bodies.proven_loaded_enum(classifier) {
             ProvenEnumClass::Simple { identity, entries } => (identity, entries),
             ProvenEnumClass::None => return Err("the serialized enum class is absent"),
@@ -77,6 +77,14 @@ impl DependencyBodyUnit {
             }
             ProvenEnumClass::Unsupported(reason) => return Err(reason),
         };
+        if already_materialized(
+            classifier,
+            &identity,
+            &self.enum_classes,
+            &self.materialized_elsewhere,
+        )? {
+            return Ok(());
+        }
         install_enum(
             &mut self.ir,
             classifier,
@@ -93,6 +101,29 @@ impl DependencyBodyUnit {
             _ => "an enum class this realization does not construct",
         })
     }
+}
+
+/// Physical classifier keys are unqualified by producer. Reusing either a current-unit class or
+/// an earlier unit's getter therefore requires the same exact module-qualified declaration.
+fn already_materialized(
+    classifier: TypeName,
+    identity: &KlibDependencyCallable,
+    current: &HashMap<TypeName, (KlibDependencyCallable, crate::ir::ClassId)>,
+    previous: &HashMap<TypeName, KlibDependencyCallable>,
+) -> Result<bool, &'static str> {
+    let mut found = false;
+    for selected in current
+        .get(&classifier)
+        .map(|(identity, _)| identity)
+        .into_iter()
+        .chain(previous.get(&classifier))
+    {
+        if selected != identity {
+            return Err("equal enum classifier names from different KLIB producers");
+        }
+        found = true;
+    }
+    Ok(found)
 }
 
 fn install_enum(
@@ -161,4 +192,59 @@ fn install_enum(
     }
     enum_classes.insert(classifier, (identity, class_id));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::libraries::KlibDeclarationSignature;
+    use crate::metadata::id_signature::KlibPublicIdSignature;
+
+    #[test]
+    fn enum_reuse_retains_producer_identity_within_and_between_support_units() {
+        let classifier = crate::types::type_name("fixture/Enum");
+        let first = KlibDependencyCallable {
+            module: "first".to_owned(),
+            declaration: KlibDeclarationSignature::Public(KlibPublicIdSignature::classifier(
+                classifier,
+            )),
+        };
+        let second = KlibDependencyCallable {
+            module: "second".to_owned(),
+            ..first.clone()
+        };
+        let mut current = HashMap::default();
+        let mut previous = HashMap::default();
+        assert_eq!(
+            already_materialized(classifier, &first, &current, &previous),
+            Ok(false)
+        );
+        current.insert(classifier, (first.clone(), 0));
+        assert_eq!(
+            already_materialized(classifier, &first, &current, &previous),
+            Ok(true)
+        );
+        assert_eq!(
+            already_materialized(classifier, &second, &current, &previous),
+            Err("equal enum classifier names from different KLIB producers")
+        );
+        let mut unit = DependencyBodyUnit::default();
+        previous.insert(classifier, first.clone());
+        unit.excluding_materialized(&previous);
+        current.clear();
+        assert_eq!(
+            already_materialized(classifier, &first, &current, &unit.materialized_elsewhere),
+            Ok(true)
+        );
+        assert_eq!(
+            already_materialized(classifier, &second, &current, &unit.materialized_elsewhere),
+            Err("equal enum classifier names from different KLIB producers")
+        );
+        // A conflicting record cannot be hidden by an earlier matching record.
+        current.insert(classifier, (second, 0));
+        assert_eq!(
+            already_materialized(classifier, &first, &current, &unit.materialized_elsewhere),
+            Err("equal enum classifier names from different KLIB producers")
+        );
+    }
 }
