@@ -1752,8 +1752,6 @@ diagnostics/functions/invoke/onObjects/invokeOnClassObject1.kt
 diagnostics/functions/invoke/onObjects/invokeOnClassObject2.kt
 diagnostics/functions/invoke/onObjects/invokeOnClassObjectOfNestedClass1.kt
 diagnostics/functions/invoke/onObjects/invokeOnClassObjectOfNestedClass2.kt
-diagnostics/functions/tailRecursion/defaultArgs.kt
-diagnostics/functions/tailRecursion/defaultArgs2.kt
 diagnostics/functions/tailRecursion/labeledThisReferences.kt
 diagnostics/functions/tailRecursion/realIteratorFoldl.kt
 diagnostics/functions/tailRecursion/realStringEscape.kt
@@ -1853,7 +1851,6 @@ evaluate/intrinsicConst/kCallableName.kt
 evaluate/intrinsicConst/kCallableNameWithSideEffect.kt
 evaluate/intrinsicConst/kt58717.kt
 evaluate/intrinsicConst/lowerAndUpperCase.kt
-evaluate/intrinsicConst/nullableEnumName.kt
 evaluate/kt9443.kt
 evaluate/objectConstValInAnnotationArgument.kt
 evaluate/serialization/annotationSerialization.kt
