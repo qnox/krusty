@@ -25,8 +25,8 @@ pub(super) fn rewrite(
     for slot in slots {
         retarget_field(ir, slot, representation);
     }
-    // Above any slot a source function declares. Each operation takes a fresh run of them.
-    let mut temp = 100_000;
+    // Reserve above every existing parameter, declaration and use in this IR file.
+    let mut temp = ir.next_value_slot();
     for operation in operations {
         let mut statements = Vec::new();
         let value = Lowering {
@@ -254,3 +254,6 @@ impl Lowering<'_> {
         self.ir.add_expr(IrExpr::Const(IrConst::Boolean(value)))
     }
 }
+
+#[cfg(test)]
+mod tests;
