@@ -25,6 +25,12 @@ impl Body<'_> {
                 };
                 self.reference_array_set(receiver, *index, *value)
             }
+            IrIntrinsic::ArraySize => {
+                let (Some(receiver), []) = (receiver, args) else {
+                    return Err("an array size read with malformed operands".into());
+                };
+                self.reference_array_size(receiver)
+            }
             IrIntrinsic::PrimitiveCompare { operand, .. } => {
                 let (lhs, rhs) = match (receiver, args) {
                     (None, [lhs, rhs]) => (*lhs, *rhs),
@@ -81,15 +87,22 @@ impl Body<'_> {
         }
     }
 
-    /// Whether `target` is a string's `length`, by its getter's provider realization.
-    pub(super) fn is_string_length_property(&self, target: crate::fir::ExternalPropertyId) -> bool {
-        self.callables
+    /// The operation a receiver-only property read realizes, by its getter's provider
+    /// realization: a string's `length` or an array's `size`.
+    pub(super) fn intrinsic_property(
+        &self,
+        target: crate::fir::ExternalPropertyId,
+    ) -> Option<IrIntrinsic> {
+        use crate::backend::BackendCompilerIntrinsic;
+        let getter = self
+            .callables
             .property(target)
-            .and_then(|property| self.callables.callable(property.getter))
-            .is_some_and(|getter| {
-                getter.compiler_operation()
-                    == Some(crate::backend::BackendCompilerIntrinsic::StringLength)
-            })
+            .and_then(|property| self.callables.callable(property.getter))?;
+        match getter.compiler_operation()? {
+            BackendCompilerIntrinsic::StringLength => Some(IrIntrinsic::StringLength),
+            BackendCompilerIntrinsic::ArraySize => Some(IrIntrinsic::ArraySize),
+            _ => None,
+        }
     }
 
     /// Leave the selected String receiver's UTF-16 storage array on the stack.

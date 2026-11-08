@@ -1,7 +1,7 @@
 # Kotlin 2.4.10 codegen/box files expected to fail on wasm-wasi-klib, relative to
+# compiler/testData/codegen/box. Later releases with no file of their own read this one.
 # Owned fixtures use regressions/<path relative to tests/box_regressions>.
 # Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local
-# compiler/testData/codegen/box. Later releases with no file of their own read this one.
 # wasm-wasi-klib run. The lists only shrink.
 annotations/annotations0.kt
 annotations/instances/AnnotationInstantiationWithArray.kt
@@ -334,8 +334,6 @@ callableReference/adaptedReferences/contextFunctionWithPassedSuperType.kt
 callableReference/adaptedReferences/contextFunctionWithSam.kt
 callableReference/adaptedReferences/contextPropertyWithSam.kt
 callableReference/adaptedReferences/contextTypeWithSam.kt
-callableReference/adaptedReferences/defaultAfterVararg.kt
-callableReference/adaptedReferences/emptyVarargAndDefault.kt
 callableReference/adaptedReferences/extensionFunctionAdaptedReferences.kt
 callableReference/adaptedReferences/extensionFunctionAnonymous.kt
 callableReference/adaptedReferences/extensionInSamWithPassedSupertype.kt
@@ -353,7 +351,6 @@ callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
 callableReference/adaptedReferences/referenceToFakeOverrideWithTypeParameter.kt
 callableReference/adaptedReferences/referenceToVarargWithDefaults.kt
-callableReference/adaptedReferences/simpleEmptyVararg.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithCoercionToUnit.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithDefaultArguments.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithVarargs.kt
@@ -795,7 +792,6 @@ controlStructures/breakContinueInExpressions/inlinedBreakContinue/lambdaPassedTo
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/loopWithinInlineFunction.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/stdlibFunctions.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValueNested.kt
-controlStructures/breakContinueInExpressions/kt17384.kt
 controlStructures/breakContinueInExpressions/kt45704_elvisInInlineFun.kt
 controlStructures/breakContinueInExpressions/popSizes.kt
 controlStructures/breakContinueInExpressions/tryFinally1.kt
@@ -828,7 +824,6 @@ controlStructures/forInArrayWithIndex/forInArrayWithIndexBreakAndContinue.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexContinuesAsUnmodified.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNoElementVar.kt
-controlStructures/forInArrayWithIndex/forInArrayWithIndexNoIndexOrElementVar.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNoIndexVar.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNotDestructured.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexWithExplicitlyTypedIndexVariable.kt
@@ -2055,7 +2050,6 @@ increment/argumentWithSideEffects.kt
 increment/arrayElement.kt
 increment/augmentedAssignmentWithComplexRhs.kt
 increment/classVarargGetSet.kt
-increment/classVarargGetSetEvaluationOrder.kt
 increment/classWithGetSet.kt
 increment/genericClassWithGetSet.kt
 increment/mutableListElement.kt
@@ -3150,7 +3144,6 @@ inlineSizeReduction/simpleReturnFunction.kt
 inlineSizeReduction/this.kt
 inlineSizeReduction/valAssignment.kt
 inlineSizeReduction/valDeclaration.kt
-inlineSizeReduction/varargTemporaryVar.kt
 inlineStdlib/callableRefToFunInCurrentModule.kt
 innerClass/doubleInner.kt
 innerClass/getOuterVal.kt
@@ -3288,8 +3281,6 @@ localClass/signatureConflictHiddenByTypeParameter.kt
 localClass/tryCatch.kt
 localClass/virtualCallFromConstructor.kt
 localClasses/anonymousObjectInExtension.kt
-localClasses/closureOfInnerLocalClass.kt
-localClasses/closureOfLambdaInLocalClass.kt
 localClasses/closureWithSelfInstantiation.kt
 localClasses/defaultParameterInConstructor.kt
 localClasses/inExtensionFunction.kt
@@ -3344,11 +3335,6 @@ multiDecl/forIterator/longIterator/MultiDeclForComponentMemberExtensionsInExtens
 multiDecl/forRange/UnderscoreNamesDontCallComponent.kt
 multiDecl/forRange/explicitRangeToWithDot/long/MultiDeclForComponentExtensions.kt
 multiDecl/kt9828_hashMap.kt
-multiDecl/nameBasedDestructuringFullForm.kt
-multiDecl/nameBasedDestructuringShortForm.kt
-multiDecl/nameBasedDestructuringUnderscoreWithRenaming.kt
-multiDecl/positionalDestructuringFullForm.kt
-multiDecl/positionalDestructuringShortForm.kt
 multiplatform/k2/aliasSuperTypeInLazy.kt
 multiplatform/k2/annotations/expectAnnotationCallInLibrary.kt
 multiplatform/k2/annotations/optionalExpectationAnnotation.kt
@@ -3888,7 +3874,6 @@ ranges/forInIndices/forInPrimitiveArrayIndices.kt
 ranges/forInIndices/forNullableIntInArrayIndices.kt
 ranges/forInIndices/forNullableIntInCollectionIndices.kt
 ranges/forInIndices/indexOfLast.kt
-ranges/forInIndices/kt12983_forInGenericArrayIndices.kt
 ranges/forInIndices/kt12983_forInGenericCollectionIndices.kt
 ranges/forInIndices/kt12983_forInSpecificArrayIndices.kt
 ranges/forInIndices/kt12983_forInSpecificCollectionIndices.kt
@@ -4686,7 +4671,6 @@ reified/reifiedIntersectionTypeArgument.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/reifiedNullableNothing1.kt
 reified/reifiedNullableNothing2.kt
-reified/reifiedNullableNothing3.kt
 reified/reifiedNullableNothing4.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 reified/reifiedTypeArgumentWithRecursion.kt
@@ -4738,7 +4722,6 @@ secondaryConstructors/generics.kt
 secondaryConstructors/innerClasses.kt
 secondaryConstructors/innerClassesInheritance.kt
 secondaryConstructors/localClasses.kt
-secondaryConstructors/varargs.kt
 secondaryConstructors/withReturnUnit.kt
 serialization/deserializedMembers.kt
 serialization/serializedCharConstant.kt
@@ -5009,7 +4992,6 @@ vararg/evaluationOrder.kt
 vararg/inlineClassArraysAsNamedArgumentInVararg.kt
 vararg/kt10926.kt
 vararg/kt37715.kt
-vararg/kt37779.kt
 vararg/kt581.kt
 vararg/kt6192.kt
 vararg/kt796_797.kt
@@ -5146,7 +5128,6 @@ when/enumOptimization/nullability.kt
 when/enumOptimization/subjectAny.kt
 when/enumOptimization/withoutElse.kt
 when/exceptionOnNoMatch.kt
-when/exhaustiveBreakContinue.kt
 when/exhaustiveness/exhaustiveWithNegativeEnum.kt
 when/exhaustiveness/exhaustiveWithNegativeSealed.kt
 when/guard/whenWithGuard.kt

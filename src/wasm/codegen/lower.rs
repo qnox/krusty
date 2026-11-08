@@ -1377,9 +1377,9 @@ impl<'a> Body<'a> {
                 } = &**checked_op
                     && parameters.is_empty()
                     && arguments.is_empty()
-                    && self.is_string_length_property(*target) =>
+                    && let Some(operation) = self.intrinsic_property(*target) =>
             {
-                self.intrinsic(IrIntrinsic::StringLength, Some(*receiver), &[])?;
+                self.intrinsic(operation, Some(*receiver), &[])?;
             }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::PropertyWrite {
