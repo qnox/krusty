@@ -10,13 +10,13 @@ class Derived : Base() {
 }
 
 class Buffer {
-    private val parts = StringBuilder()
+    private var parts = ""
 
     fun write(text: String) {
-        parts.append(text)
+        parts += text
     }
 
-    fun read(): String = parts.toString()
+    fun read(): String = parts
 }
 
 // The local function writes only a non-null `Buffer`, and the enclosing function narrows the
