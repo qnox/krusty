@@ -109,7 +109,7 @@ impl IrFile {
 
     /// Record the signature a plugin's IR lowering gives a class it generated, when it differs from
     /// the declared one (kotlinx.serialization's bounded `$serializer` type parameters).
-    pub(crate) fn insert_lowered_class_signature(&mut self, internal: TypeName, sig: IrGenericSig) {
+    pub fn insert_lowered_class_signature(&mut self, internal: TypeName, sig: IrGenericSig) {
         self.lowered_class_signatures.insert(internal, sig);
     }
 
