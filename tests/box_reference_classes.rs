@@ -98,8 +98,10 @@ pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, S
 /// its own `// LAMBDAS:`/`// SAM_CONVERSIONS:`/`// JVM_DEFAULT_MODE:` modes and keys on the producing
 /// JDK, so an older entry compiled under kotlinc's default modes or another JDK is never replayed.
 /// Every directive-selected argument rides its unit's `unit_arguments` and the test-only feature
-/// property rides `jvm_properties`, so a change of either re-keys itself.
-const REF_CACHE_SALT: &str = "ref-classes-v6-typed-language-settings";
+/// property rides `jvm_properties`, so a change of either re-keys itself. `v7` keeps a module's
+/// text before its first `// FILE:` in its first Kotlin file, as Kotlin's test infrastructure
+/// does, which changes the sources (and line numbers) of most multi-file units.
+const REF_CACHE_SALT: &str = "ref-classes-v7-leading-text-in-first-file";
 
 /// A reference `.class` inventory grouped by module identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

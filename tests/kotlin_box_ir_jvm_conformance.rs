@@ -463,7 +463,8 @@ fn compile_multifile(
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    // Split on `// FILE: name.kt` markers (the preamble before the first marker is directives).
+    // Split on `// FILE: name.kt` markers; the text before the first marker joins the first Kotlin
+    // block, as Kotlin's test infrastructure keeps it.
     // `.java` blocks are collected separately: javac compiles them first (in-process, via the
     // persistent JavaRunner) and their classes join krusty's classpath as an in-memory overlay,
     // mirroring how kotlinc's test infra makes Java sources visible to the Kotlin compile.
@@ -511,8 +512,8 @@ fn compile_multifile(
         }
     }
 
-    // Case-wide directives live in the preamble before the first `// FILE:`, so each unit's
-    // arguments are read from the whole case.
+    // Case-wide directives may sit anywhere in the case, so each unit's arguments are read from
+    // the whole case.
     let compiled = compile_blocks(src, &blocks, cp_jars, &[], jdk_modules, None, &java_classes);
     let mut out = compiled?;
     out.extend(java_classes);
@@ -1365,9 +1366,10 @@ class Registry {\n\
 }\n";
     const PLATFORM: &str = "package folded\n\
 fun box(): String = Registry.value()\n";
+    // The text before the first `// MODULE:` is part of the first module's first file.
+    const LEADING: &str = "// WITH_STDLIB\n// LANGUAGE: +MultiPlatformProjects\n";
     let source = format!(
-        "// WITH_STDLIB\n\
-         // LANGUAGE: +MultiPlatformProjects\n\
+        "{LEADING}\
          // MODULE: common\n\
          // FILE: Common.kt\n\
          {COMMON}\
@@ -1393,7 +1395,7 @@ fun box(): String = Registry.value()\n";
     let reference_output = reference_root.join("classes");
     let common_path = reference_root.join("Common.kt");
     let platform_path = reference_root.join("Platform.kt");
-    fs::write(&common_path, COMMON).expect("write common reference source");
+    fs::write(&common_path, format!("{LEADING}{COMMON}")).expect("write common reference source");
     fs::write(&platform_path, PLATFORM).expect("write platform reference source");
     let arguments = vec![
         "-d".to_string(),

@@ -6,7 +6,7 @@
 //! translation from directives: ordinary settings become kotlinc arguments, while historical
 //! language/API levels use the typed channel which Kotlin's own test runner uses.
 
-use super::{directive, UnitCodegenModes};
+use super::{case_directive_region, directive, UnitCodegenModes};
 use crate::language_version::LanguageVersion;
 
 /// Compiler configuration selected by a box test for one compilation unit.
@@ -28,13 +28,13 @@ pub struct UnitCompilerConfiguration {
 
 /// The kotlinc arguments one compilation unit of a case compiles under: the case-wide arguments of
 /// [`case_kotlinc_arguments`], then the code-generation modes the unit's own Kotlin sources select
-/// ([`UnitCodegenModes::of_unit`]).
+/// ([`UnitCodegenModes::of_unit`]), or else the case selects for every module.
 pub fn unit_kotlinc_arguments<'a>(
     case: &str,
     unit: impl IntoIterator<Item = &'a str>,
 ) -> Result<Vec<String>, String> {
     let mut arguments = case_kotlinc_arguments(case)?;
-    arguments.extend(UnitCodegenModes::of_unit(unit).kotlinc_args());
+    arguments.extend(unit_codegen_modes(case, unit).kotlinc_args());
     Ok(arguments)
 }
 
@@ -47,8 +47,16 @@ pub fn unit_compiler_configuration<'a>(
     let mut configuration = case_compiler_configuration(case)?;
     configuration
         .arguments
-        .extend(UnitCodegenModes::of_unit(unit).kotlinc_args());
+        .extend(unit_codegen_modes(case, unit).kotlinc_args());
     Ok(configuration)
+}
+
+/// The modes one unit compiles under: its own sources first, so a module's directive overrides
+/// one the case sets for every module before its first `// MODULE:` header.
+fn unit_codegen_modes<'a>(case: &str, unit: impl IntoIterator<Item = &'a str>) -> UnitCodegenModes {
+    let mut sources: Vec<&str> = unit.into_iter().collect();
+    sources.push(case_directive_region(case));
+    UnitCodegenModes::of_unit(sources)
 }
 
 fn case_compiler_configuration(src: &str) -> Result<UnitCompilerConfiguration, String> {
@@ -434,6 +442,22 @@ mod tests {
         assert_eq!(
             unit_kotlinc_arguments(case, ["fun b() {}\n"]).unwrap(),
             ["-XXLanguage:+ContextParameters"]
+        );
+    }
+
+    /// A mode set before the first `// MODULE:` header is every module's, as in
+    /// `box/compileKotlinAgainstKotlin/jvm8/defaults/superCall.kt`; a module's own directive wins.
+    #[test]
+    fn a_mode_before_the_first_module_applies_to_every_unit() {
+        let case = "// JVM_DEFAULT_MODE: disable\n// MODULE: lib\n// FILE: lib.kt\n\
+                    // MODULE: main(lib)\n// FILE: main.kt\n";
+        assert_eq!(
+            unit_kotlinc_arguments(case, ["fun b() {}\n"]).unwrap(),
+            ["-jvm-default", "disable"]
+        );
+        assert_eq!(
+            unit_kotlinc_arguments(case, ["// JVM_DEFAULT_MODE: no-compatibility\n"]).unwrap(),
+            ["-jvm-default", "no-compatibility"]
         );
     }
 }

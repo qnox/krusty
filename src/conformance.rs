@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 mod box_jdk;
 mod codegen_modes;
 mod compiler_arguments;
+mod leading_text;
 mod reference_jvm;
 
 pub use box_jdk::{box_jdk_kind, BoxJdk, BoxJdkKind, BoxJdkRoots};
@@ -15,6 +16,8 @@ pub use compiler_arguments::{
     case_kotlinc_arguments, reference_only_kotlinc_arguments, unit_compiler_configuration,
     unit_kotlinc_arguments, UnitCompilerConfiguration,
 };
+pub use leading_text::case_directive_region;
+use leading_text::LeadingText;
 pub use reference_jvm::{
     reference_jvm_acceptance, reference_jvm_properties, ReferenceJvmAcceptance,
 };
@@ -564,6 +567,7 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
     let mut mods: Vec<ModuleBlock> = Vec::new();
     let mut cur_file: Option<(String, bool)> = None; // (name, is_java)
     let mut cur = String::new();
+    let mut leading = LeadingText::default();
     let flush =
         |mods: &mut Vec<ModuleBlock>, cur_file: &mut Option<(String, bool)>, cur: &mut String| {
             if let Some((fname, is_java)) = cur_file.take() {
@@ -580,6 +584,7 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
         let t = line.trim_start();
         if let Some(rest) = t.strip_prefix("// MODULE:") {
             flush(&mut mods, &mut cur_file, &mut cur);
+            leading.start_module(mods.is_empty());
             // Header: `name(dependencies)(friends)(dependsOn)` — kotlinc's test-module syntax.
             let header = rest.trim();
             if header.matches('(').count() > 3 {
@@ -624,6 +629,7 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
                     .next()
                     .unwrap_or(fname)
                     .to_string();
+                leading.open_kotlin_file(&mut cur);
                 cur_file = Some((stem, false));
             } else {
                 return None;
@@ -635,8 +641,11 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
             // Implicit file body straight after a `// MODULE:` header (no `// FILE:`) — KOTLIN by
             // kotlinc's test convention; Java sources always carry an explicit `// FILE: X.java`.
             cur_file = Some((mods.last().unwrap().name.clone(), false));
+            leading.open_kotlin_file(&mut cur);
             cur.push_str(line);
             cur.push('\n');
+        } else {
+            leading.push(line);
         }
     }
     flush(&mut mods, &mut cur_file, &mut cur);
@@ -711,6 +720,7 @@ pub fn kotlin_source_blocks(
         let mut file_name: Option<String> = None;
         let mut ignore_non_kotlin_file = false;
         let mut body = String::new();
+        let mut leading = LeadingText::default();
         let flush = |blocks: &mut Vec<KotlinSourceBlock>,
                      module: &Option<String>,
                      file_name: &mut Option<String>,
@@ -729,6 +739,7 @@ pub fn kotlin_source_blocks(
             let trimmed = line.trim_start();
             if let Some(header) = trimmed.strip_prefix("// MODULE:") {
                 flush(&mut blocks, &module, &mut file_name, &mut body);
+                leading.start_module(module.is_none());
                 let header = header.trim();
                 let name_end = header.find('(').unwrap_or(header.len());
                 module = Some(header[..name_end].trim().to_string());
@@ -737,6 +748,7 @@ pub fn kotlin_source_blocks(
                 flush(&mut blocks, &module, &mut file_name, &mut body);
                 let path = path.trim();
                 if let Some(stem) = path.strip_suffix(".kt") {
+                    leading.open_kotlin_file(&mut body);
                     file_name = Some(stem.rsplit('/').next().unwrap_or(stem).to_string());
                     ignore_non_kotlin_file = false;
                 } else {
@@ -754,8 +766,11 @@ pub fn kotlin_source_blocks(
                 // The testdata convention permits one implicit Kotlin file immediately under a
                 // module header. Name it after the module, just like `split_modules`.
                 file_name = module.clone();
+                leading.open_kotlin_file(&mut body);
                 body.push_str(line);
                 body.push('\n');
+            } else if !ignore_non_kotlin_file {
+                leading.push(line);
             }
         }
         flush(&mut blocks, &module, &mut file_name, &mut body);
@@ -769,14 +784,15 @@ pub fn kotlin_source_blocks(
 }
 
 /// Split a `// FILE:`-partitioned (single-module) test into Kotlin `(stem, content)` and Java
-/// `(leaf name incl. .java, content)` blocks. The preamble before the first marker is directives and
-/// belongs to no block. Non-`.java` files are treated as Kotlin (backend directives filter JS-target
-/// tests before this is reached), keeping the gate's historical behavior.
+/// `(leaf name incl. .java, content)` blocks. The text before the first marker joins the first Kotlin
+/// block ([`LeadingText`]). Non-`.java` files are treated as Kotlin (backend directives filter
+/// JS-target tests before this is reached), keeping the gate's historical behavior.
 pub fn split_files(src: &str) -> (Vec<SourceBlock>, Vec<SourceBlock>) {
     let mut blocks: Vec<SourceBlock> = Vec::new();
     let mut java_blocks: Vec<SourceBlock> = Vec::new();
     let mut cur_name: Option<(String, bool)> = None; // (name, is_java)
     let mut cur = String::new();
+    let mut leading = LeadingText::default();
     let mut flush = |name: Option<(String, bool)>, cur: &mut String| {
         if let Some((n, is_java)) = name {
             if is_java {
@@ -803,10 +819,15 @@ pub fn split_files(src: &str) -> (Vec<SourceBlock>, Vec<SourceBlock>) {
                     .unwrap_or(fname)
                     .to_string()
             };
+            if !is_java {
+                leading.open_kotlin_file(&mut cur);
+            }
             cur_name = Some((name, is_java));
         } else if cur_name.is_some() {
             cur.push_str(line);
             cur.push('\n');
+        } else {
+            leading.push(line);
         }
     }
     flush(cur_name.take(), &mut cur);
@@ -1651,7 +1672,7 @@ fun box(): String = \"OK\"
     }
 
     #[test]
-    fn split_files_kotlin_blocks_by_stem_preamble_excluded() {
+    fn split_files_kotlin_blocks_by_stem_with_the_leading_text_in_the_first() {
         let src = "\
 // WITH_STDLIB
 // FILE: a.kt
@@ -1661,11 +1682,13 @@ fun box(): String = \"OK\"
 ";
         let (kt, java) = split_files(src);
         assert!(java.is_empty());
-        assert_eq!(kt.len(), 2);
-        assert_eq!(kt[0].0, "a");
-        assert_eq!(kt[0].1, "fun a() = 1\n");
-        assert_eq!(kt[1].0, "b");
-        assert_eq!(kt[1].1, "fun box(): String = \"OK\"\n");
+        assert_eq!(
+            kt,
+            vec![
+                ("a".to_string(), "// WITH_STDLIB\nfun a() = 1\n".to_string()),
+                ("b".to_string(), "fun box(): String = \"OK\"\n".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -1708,7 +1731,7 @@ fun box(): String = \"OK\"
                 KotlinSourceBlock {
                     module: None,
                     name: "first".into(),
-                    source: "val first = 1\n".into(),
+                    source: "// TARGET_BACKEND: JS\nval first = 1\n".into(),
                 },
                 KotlinSourceBlock {
                     module: None,
