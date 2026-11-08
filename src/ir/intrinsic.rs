@@ -17,9 +17,6 @@ pub enum IrIntrinsic {
     ArraySize,
     StringGet,
     StringLength,
-    /// `kotlin.Enum.name()` for a receiver that constant evaluation did not fold. A direct enum
-    /// entry never reaches this operation: it is already the entry's name constant.
-    EnumName,
     /// `kotlin.Enum.ordinal` of a constant, read by the shared enum lowering
     /// ([`crate::backend::enums`]) when it builds `values()`. Source reads of `ordinal` stay
     /// ordinary property reads.
