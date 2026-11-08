@@ -141,7 +141,7 @@ impl Body<'_> {
         }
         // The operand stack is empty here. Allocation leaves the instance on it, and the
         // companion getter cannot run on top of that value.
-        self.activate_class(class)?;
+        self.activate_class(class, None)?;
         let object = self.local(REFERENCE);
         self.allocate(class)?;
         self.code.local_tee(object);
@@ -1269,6 +1269,23 @@ pub(super) fn define_class_functions(
                 .global_get(singleton.global)
                 .ref_is_null()
                 .if_(BlockType::Empty);
+            // A companion's getter is its owner's initialization: the owner's superclasses
+            // initialize first, then the companion's own superclasses, then the companion. The
+            // owner itself is in progress here, so the companion's chain does not re-enter it.
+            let owner = class
+                .is_companion
+                .then(|| {
+                    ir.classes
+                        .iter()
+                        .position(|owner| owner.companion_class == Some(class.fq_name_id()))
+                })
+                .flatten()
+                .map(|owner| owner as ClassId);
+            for activated in owner.into_iter().chain([id]) {
+                if let Some(parent) = classes.tables.table(activated).superclass {
+                    body.activate_class(parent, owner)?;
+                }
+            }
             body.allocate(id)?;
             body.code
                 .global_set(singleton.global)
@@ -1699,8 +1716,13 @@ impl Body<'_> {
     ///
     /// JVMS 5.5 initializes a superclass before the subclass. Each class's companion goes
     /// through the singleton getter, which publishes the instance before the companion
-    /// constructor, so a companion that constructs its holder does not re-enter.
-    fn activate_class(&mut self, class: ClassId) -> Result<(), Unsupported> {
+    /// constructor, so a companion that constructs its holder does not re-enter. `initializing`
+    /// is a class whose initialization is already in progress, so activation skips it.
+    fn activate_class(
+        &mut self,
+        class: ClassId,
+        initializing: Option<ClassId>,
+    ) -> Result<(), Unsupported> {
         let mut chain = vec![class];
         loop {
             let parent = self
@@ -1714,7 +1736,9 @@ impl Body<'_> {
             chain.push(parent);
         }
         for &owner in chain.iter().rev() {
-            self.initialize_companion(owner)?;
+            if Some(owner) != initializing {
+                self.initialize_companion(owner)?;
+            }
         }
         Ok(())
     }

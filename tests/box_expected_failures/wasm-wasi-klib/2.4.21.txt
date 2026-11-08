@@ -3438,7 +3438,6 @@ objectExpression/expr1.kt
 objectExpression/expr3.kt
 objectIntrinsics/objects.kt
 objects/companionObjectAccess/companionInitOrderWithSuperclassCrossModule.kt
-objects/companionObjectAccess/companionObjectInitOrderWithSuperclass.kt
 objects/companionObjectAccess/kt27117.kt
 objects/companionObjectAccess/kt27117_lv12.kt
 objects/companionObjectAccess/kt27117_lv13.kt
