@@ -142,6 +142,12 @@ impl ModuleInterfaces {
         result
     }
 
+    /// How many interface members this module numbered. A call through a dependency interface
+    /// takes the next numbers, so it does not reuse one of these.
+    pub(crate) fn count(&self) -> u32 {
+        u32::try_from(self.members.len()).expect("an interface member count fits u32")
+    }
+
     /// The number of one interface member spelling, the same in every file of the module.
     pub(crate) fn number(&self, key: PlanKey) -> Option<u32> {
         self.numbers.get(&key).copied()

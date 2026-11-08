@@ -49,3 +49,18 @@ fn plain_compound_index_assign_still_works() {
 }\n";
     assert_eq!(run(SRC).expect("plain compound index-assign"), "OK");
 }
+
+#[test]
+fn plain_array_store_checks_the_index_after_the_value() {
+    let (sources, java) = krusty::conformance::split_files(include_str!(
+        "box_regressions/arrayStoreIndexAfterValue.kt"
+    ));
+    assert!(java.is_empty());
+    let [(stem, program)] = sources.as_slice() else {
+        panic!("the complete completed-RHS array-store regression")
+    };
+    assert_eq!(stem, "ArrayStoreIndexAfterValue");
+    // A plain element store evaluates the array, the index and the value, in that order, and only
+    // then range-checks the index: the invalid store still logs its completed value.
+    common::expect_box_same_as_kotlinc(program, "ArrayStoreIndexAfterValue");
+}
