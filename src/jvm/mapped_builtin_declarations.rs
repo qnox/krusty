@@ -320,9 +320,18 @@ struct SpecialRealization {
     kind: MappedBuiltinMemberKind,
     physical_owner: TypeName,
     physical_name: &'static str,
+    /// The JVM method is a static helper on `physical_owner` taking the receiver first.
+    receiver_parameter: bool,
 }
 
-fn special_realizations() -> &'static [SpecialRealization] {
+/// The realizations that stay virtual members of the mapped JVM class.
+fn virtual_realizations() -> impl Iterator<Item = &'static SpecialRealization> {
+    all_special_realizations()
+        .iter()
+        .filter(|realization| !realization.receiver_parameter)
+}
+
+fn all_special_realizations() -> &'static [SpecialRealization] {
     static REALIZATIONS: std::sync::OnceLock<Box<[SpecialRealization]>> =
         std::sync::OnceLock::new();
     REALIZATIONS.get_or_init(|| {
@@ -342,8 +351,10 @@ fn special_realizations() -> &'static [SpecialRealization] {
                     Some(kind),
                     Some(physical_owner),
                     Some(physical_name),
+                    dispatch,
                     None,
                 ) = (
+                    fields.next(),
                     fields.next(),
                     fields.next(),
                     fields.next(),
@@ -366,6 +377,14 @@ fn special_realizations() -> &'static [SpecialRealization] {
                         index + 1
                     ),
                 };
+                let receiver_parameter = match dispatch {
+                    None => false,
+                    Some("static") if kind == MappedBuiltinMemberKind::Function => true,
+                    Some(other) => panic!(
+                        "invalid mapped-builtin realization dispatch {other:?} on row {}",
+                        index + 1
+                    ),
+                };
                 Some(SpecialRealization {
                     declaration_owner: type_name(declaration_owner),
                     source_name,
@@ -373,6 +392,7 @@ fn special_realizations() -> &'static [SpecialRealization] {
                     kind,
                     physical_owner: type_name(physical_owner),
                     physical_name,
+                    receiver_parameter,
                 })
             })
             .collect::<Vec<_>>()
@@ -387,13 +407,32 @@ pub(super) fn realization_for_declaration(
     descriptor: &str,
     kind: MappedBuiltinMemberKind,
 ) -> Option<(TypeName, &'static str)> {
-    special_realizations()
-        .iter()
+    virtual_realizations()
         .find(|realization| {
             realization.declaration_owner == declaration_owner
                 && realization.source_name == source_name
                 && realization.descriptor == descriptor
                 && realization.kind == kind
+        })
+        .map(|realization| (realization.physical_owner, realization.physical_name))
+}
+
+/// The static helper (owner, name) that realizes one exact builtin member declaration, called with
+/// the receiver as its first argument (kotlinc's call-based `IrIntrinsicMethods`, such as
+/// `AtomicCompareAndExchange`: `AtomicInt.compareAndExchange` is
+/// `AtomicIntrinsicsKt.compareAndExchange(AtomicInteger, int, int)`).
+pub(super) fn receiver_parameter_realization_for_declaration(
+    declaration_owner: TypeName,
+    source_name: &str,
+    descriptor: &str,
+) -> Option<(TypeName, &'static str)> {
+    all_special_realizations()
+        .iter()
+        .find(|realization| {
+            realization.receiver_parameter
+                && realization.declaration_owner == declaration_owner
+                && realization.source_name == source_name
+                && realization.descriptor == descriptor
         })
         .map(|realization| (realization.physical_owner, realization.physical_name))
 }
@@ -424,8 +463,7 @@ pub(super) fn overridden_call_realizations_for_declaration(
     descriptor: &str,
     kind: MappedBuiltinMemberKind,
 ) -> Vec<crate::libraries::OverriddenCallRealization> {
-    special_realizations()
-        .iter()
+    virtual_realizations()
         .filter(|realization| realization.source_name == source_name)
         .filter(|realization| realization.kind == kind)
         .filter(|realization| {
@@ -466,8 +504,7 @@ pub(super) fn physical_name_for_call(
     source_name: &str,
     descriptor: &str,
 ) -> Option<&'static str> {
-    special_realizations()
-        .iter()
+    virtual_realizations()
         .find(|realization| {
             (realization.declaration_owner == owner || realization.physical_owner == owner)
                 && realization.source_name == source_name
@@ -483,8 +520,7 @@ pub(super) fn source_name_for_realization(
     physical_name: &str,
     descriptor: &str,
 ) -> Option<&'static str> {
-    special_realizations()
-        .iter()
+    virtual_realizations()
         .find(|realization| {
             realization.kind == MappedBuiltinMemberKind::Function
                 && realization.physical_owner == physical_owner
@@ -501,7 +537,7 @@ pub(super) fn is_property_realization(
     physical_name: &str,
     descriptor: &str,
 ) -> bool {
-    special_realizations().iter().any(|realization| {
+    virtual_realizations().any(|realization| {
         realization.kind == MappedBuiltinMemberKind::Property
             && realization.physical_owner == physical_owner
             && realization.source_name == source_name
@@ -547,9 +583,10 @@ pub(super) fn overlay_constructor_semantics(
 #[cfg(test)]
 mod tests {
     use super::{
-        collection_bridge_policy_for_declaration, is_property_realization,
-        overlay_constructor_semantics, physical_name_for_call, realization_for_declaration,
-        special_realizations, CollectionBridgeFailure, MappedBuiltinMemberKind,
+        all_special_realizations, collection_bridge_policy_for_declaration,
+        is_property_realization, overlay_constructor_semantics, physical_name_for_call,
+        realization_for_declaration, receiver_parameter_realization_for_declaration,
+        CollectionBridgeFailure, MappedBuiltinMemberKind,
     };
     use crate::libraries::{CallSig, LibraryMember};
     use crate::types::{type_name, Ty};
@@ -584,12 +621,51 @@ mod tests {
 
     #[test]
     fn special_realization_policy_is_exact_and_identity_qualified() {
-        let rows = special_realizations()
+        let rows = all_special_realizations()
             .iter()
             .copied()
             .collect::<crate::fx_hash::HashSet<_>>();
-        assert_eq!(special_realizations().len(), 16);
-        assert_eq!(rows.len(), special_realizations().len());
+        assert_eq!(all_special_realizations().len(), 55);
+        assert_eq!(rows.len(), all_special_realizations().len());
+
+        let atomic_int = type_name("kotlin/concurrent/atomics/AtomicInt");
+        assert_eq!(
+            realization_for_declaration(
+                atomic_int,
+                "fetchAndAdd",
+                "(I)I",
+                MappedBuiltinMemberKind::Function,
+            ),
+            Some((
+                type_name("java/util/concurrent/atomic/AtomicInteger"),
+                "getAndAdd"
+            ))
+        );
+        assert_eq!(
+            realization_for_declaration(
+                atomic_int,
+                "compareAndExchange",
+                "(II)I",
+                MappedBuiltinMemberKind::Function,
+            ),
+            None,
+            "a static helper realization is not a virtual member of the mapped class"
+        );
+        assert_eq!(
+            receiver_parameter_realization_for_declaration(
+                atomic_int,
+                "compareAndExchange",
+                "(II)I"
+            ),
+            Some((
+                type_name("kotlin/concurrent/internal/AtomicIntrinsicsKt"),
+                "compareAndExchange"
+            ))
+        );
+        assert_eq!(
+            receiver_parameter_realization_for_declaration(atomic_int, "fetchAndAdd", "(I)I"),
+            None
+        );
 
         assert_eq!(
             realization_for_declaration(

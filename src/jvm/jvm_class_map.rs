@@ -946,6 +946,12 @@ pub(super) fn to_jvm_classfile_type_name(internal: TypeName) -> TypeName {
             );
             crate::types::type_name(&runtime)
         }
+    } else if let Some(platform) =
+        java_class(internal).filter(|_| !builtin_ids().jvm_builtin.contains_key(&internal))
+    {
+        // A classifier `JavaToKotlinClassMap` maps only one way (`kotlin.concurrent.atomics`'s
+        // atomics are `java.util.concurrent.atomic` classes) is that JVM class in a classfile.
+        platform
     } else {
         to_jvm_type_name(internal)
     };

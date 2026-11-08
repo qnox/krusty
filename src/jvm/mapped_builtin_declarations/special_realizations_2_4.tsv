@@ -1,7 +1,11 @@
-# Kotlin declaration owner, source name, erased descriptor, declaration kind, JVM owner, JVM name.
+# Kotlin declaration owner, source name, erased descriptor, declaration kind, JVM owner, JVM name,
+# and an optional `static` dispatch: the JVM method is a static helper on the JVM owner that takes
+# the receiver as its first parameter (the call-based intrinsics of IrIntrinsicMethods, such as
+# AtomicCompareAndExchange).
 # PROPERTY rows mirror BuiltinSpecialProperties.PROPERTY_FQ_NAME_TO_JVM_GETTER_NAME_MAP; FUNCTION
 # rows mirror SpecialGenericSignatures.NAME_AND_SIGNATURE_TO_JVM_REPRESENTATION_NAME_MAP.
-# Verified against the supported Kotlin 2.4.0, 2.4.10 and 2.4.20 compiler policies.
+# Verified against the supported Kotlin 2.4.0, 2.4.10 and 2.4.20 compiler policies; the atomics rows
+# against 2.4.21.
 kotlin/collections/Collection	size	()I	property	java/util/Collection	size
 kotlin/collections/Map	size	()I	property	java/util/Map	size
 kotlin/collections/Map	values	()Ljava/util/Collection;	property	java/util/Map	values
@@ -18,3 +22,42 @@ kotlin/Number	toInt	()I	function	java/lang/Number	intValue
 kotlin/Number	toLong	()J	function	java/lang/Number	longValue
 kotlin/Number	toFloat	()F	function	java/lang/Number	floatValue
 kotlin/Number	toDouble	()D	function	java/lang/Number	doubleValue
+kotlin/concurrent/atomics/AtomicInt	load	()I	function	java/util/concurrent/atomic/AtomicInteger	get
+kotlin/concurrent/atomics/AtomicInt	store	(I)V	function	java/util/concurrent/atomic/AtomicInteger	set
+kotlin/concurrent/atomics/AtomicInt	exchange	(I)I	function	java/util/concurrent/atomic/AtomicInteger	getAndSet
+kotlin/concurrent/atomics/AtomicInt	fetchAndAdd	(I)I	function	java/util/concurrent/atomic/AtomicInteger	getAndAdd
+kotlin/concurrent/atomics/AtomicInt	addAndFetch	(I)I	function	java/util/concurrent/atomic/AtomicInteger	addAndGet
+kotlin/concurrent/atomics/AtomicLong	load	()J	function	java/util/concurrent/atomic/AtomicLong	get
+kotlin/concurrent/atomics/AtomicLong	store	(J)V	function	java/util/concurrent/atomic/AtomicLong	set
+kotlin/concurrent/atomics/AtomicLong	exchange	(J)J	function	java/util/concurrent/atomic/AtomicLong	getAndSet
+kotlin/concurrent/atomics/AtomicLong	fetchAndAdd	(J)J	function	java/util/concurrent/atomic/AtomicLong	getAndAdd
+kotlin/concurrent/atomics/AtomicLong	addAndFetch	(J)J	function	java/util/concurrent/atomic/AtomicLong	addAndGet
+kotlin/concurrent/atomics/AtomicBoolean	load	()Z	function	java/util/concurrent/atomic/AtomicBoolean	get
+kotlin/concurrent/atomics/AtomicBoolean	store	(Z)V	function	java/util/concurrent/atomic/AtomicBoolean	set
+kotlin/concurrent/atomics/AtomicBoolean	exchange	(Z)Z	function	java/util/concurrent/atomic/AtomicBoolean	getAndSet
+kotlin/concurrent/atomics/AtomicReference	load	()Ljava/lang/Object;	function	java/util/concurrent/atomic/AtomicReference	get
+kotlin/concurrent/atomics/AtomicReference	store	(Ljava/lang/Object;)V	function	java/util/concurrent/atomic/AtomicReference	set
+kotlin/concurrent/atomics/AtomicReference	exchange	(Ljava/lang/Object;)Ljava/lang/Object;	function	java/util/concurrent/atomic/AtomicReference	getAndSet
+kotlin/concurrent/atomics/AtomicIntArray	loadAt	(I)I	function	java/util/concurrent/atomic/AtomicIntegerArray	get
+kotlin/concurrent/atomics/AtomicIntArray	storeAt	(II)V	function	java/util/concurrent/atomic/AtomicIntegerArray	set
+kotlin/concurrent/atomics/AtomicIntArray	exchangeAt	(II)I	function	java/util/concurrent/atomic/AtomicIntegerArray	getAndSet
+kotlin/concurrent/atomics/AtomicIntArray	compareAndSetAt	(III)Z	function	java/util/concurrent/atomic/AtomicIntegerArray	compareAndSet
+kotlin/concurrent/atomics/AtomicIntArray	fetchAndAddAt	(II)I	function	java/util/concurrent/atomic/AtomicIntegerArray	getAndAdd
+kotlin/concurrent/atomics/AtomicIntArray	addAndFetchAt	(II)I	function	java/util/concurrent/atomic/AtomicIntegerArray	addAndGet
+kotlin/concurrent/atomics/AtomicLongArray	loadAt	(I)J	function	java/util/concurrent/atomic/AtomicLongArray	get
+kotlin/concurrent/atomics/AtomicLongArray	storeAt	(IJ)V	function	java/util/concurrent/atomic/AtomicLongArray	set
+kotlin/concurrent/atomics/AtomicLongArray	exchangeAt	(IJ)J	function	java/util/concurrent/atomic/AtomicLongArray	getAndSet
+kotlin/concurrent/atomics/AtomicLongArray	compareAndSetAt	(IJJ)Z	function	java/util/concurrent/atomic/AtomicLongArray	compareAndSet
+kotlin/concurrent/atomics/AtomicLongArray	fetchAndAddAt	(IJ)J	function	java/util/concurrent/atomic/AtomicLongArray	getAndAdd
+kotlin/concurrent/atomics/AtomicLongArray	addAndFetchAt	(IJ)J	function	java/util/concurrent/atomic/AtomicLongArray	addAndGet
+kotlin/concurrent/atomics/AtomicArray	loadAt	(I)Ljava/lang/Object;	function	java/util/concurrent/atomic/AtomicReferenceArray	get
+kotlin/concurrent/atomics/AtomicArray	storeAt	(ILjava/lang/Object;)V	function	java/util/concurrent/atomic/AtomicReferenceArray	set
+kotlin/concurrent/atomics/AtomicArray	exchangeAt	(ILjava/lang/Object;)Ljava/lang/Object;	function	java/util/concurrent/atomic/AtomicReferenceArray	getAndSet
+kotlin/concurrent/atomics/AtomicArray	compareAndSetAt	(ILjava/lang/Object;Ljava/lang/Object;)Z	function	java/util/concurrent/atomic/AtomicReferenceArray	compareAndSet
+kotlin/concurrent/atomics/AtomicInt	compareAndExchange	(II)I	function	kotlin/concurrent/internal/AtomicIntrinsicsKt	compareAndExchange	static
+kotlin/concurrent/atomics/AtomicLong	compareAndExchange	(JJ)J	function	kotlin/concurrent/internal/AtomicIntrinsicsKt	compareAndExchange	static
+kotlin/concurrent/atomics/AtomicBoolean	compareAndExchange	(ZZ)Z	function	kotlin/concurrent/internal/AtomicIntrinsicsKt	compareAndExchange	static
+kotlin/concurrent/atomics/AtomicReference	compareAndExchange	(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;	function	kotlin/concurrent/internal/AtomicIntrinsicsKt	compareAndExchange	static
+kotlin/concurrent/atomics/AtomicIntArray	compareAndExchangeAt	(III)I	function	kotlin/concurrent/internal/AtomicIntrinsicsKt	compareAndExchange	static
+kotlin/concurrent/atomics/AtomicLongArray	compareAndExchangeAt	(IJJ)J	function	kotlin/concurrent/internal/AtomicIntrinsicsKt	compareAndExchange	static
+kotlin/concurrent/atomics/AtomicArray	compareAndExchangeAt	(ILjava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;	function	kotlin/concurrent/internal/AtomicIntrinsicsKt	compareAndExchange	static

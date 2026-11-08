@@ -136,7 +136,7 @@ impl Classpath {
                             annotations: &m.annotations,
                         },
                     );
-                    crate::libraries::LibraryMember {
+                    let mut member = crate::libraries::LibraryMember {
                         deprecation: None,
                         external_identity: None,
                         external_default_provider: None,
@@ -209,7 +209,11 @@ impl Classpath {
                         plugin_expression: None,
                         stable_declaration: None,
                         source_member: None,
+                    };
+                    if !m.is_property {
+                        realize_through_receiver_parameter(&mut member, internal_id);
                     }
+                    member
                 })
             })
             .into_iter()
@@ -222,6 +226,41 @@ impl Classpath {
         }
         members
     }
+}
+
+/// A builtin member that kotlinc realizes as a call-based intrinsic on a static helper
+/// (`AtomicInt.compareAndExchange` is `AtomicIntrinsicsKt.compareAndExchange(AtomicInteger, II)`):
+/// the receiver becomes the helper's first physical parameter.
+fn realize_through_receiver_parameter(
+    member: &mut crate::libraries::LibraryMember,
+    declaration_owner: TypeName,
+) {
+    let Some((helper, name)) =
+        crate::jvm::mapped_builtin_declarations::receiver_parameter_realization_for_declaration(
+            declaration_owner,
+            &member.name,
+            &member.descriptor,
+        )
+    else {
+        return;
+    };
+    let receiver = crate::jvm::jvm_class_map::to_jvm_classfile_type_name(declaration_owner);
+    member.descriptor = format!("(L{};{}", receiver.render(), &member.descriptor[1..]);
+    member.owner = Some(helper);
+    member.physical_name = Some(name.to_string());
+    member
+        .physical_params
+        .insert(0, Ty::obj_name(declaration_owner));
+    member.physical_parameter_plan = crate::libraries::physical_parameter_plan::parameter_plan(
+        member.params.len(),
+        member.physical_params.len(),
+        true,
+        false,
+    )
+    .ok();
+    member.realization = crate::libraries::MemberRealization::Direct {
+        pass_receiver: true,
+    };
 }
 
 #[cfg(test)]
