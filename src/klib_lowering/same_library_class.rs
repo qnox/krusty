@@ -22,8 +22,10 @@ use crate::ir::{
     ClassId, IrClass, IrConstructorAccess, IrConstructorTarget, IrCtorArg,
     IrCtorParameterProvenance, IrField,
 };
-use crate::klib_libraries::{KlibDeclarationBodies, LocatedClass};
-use crate::libraries::{KlibBodyClassParameters, TypeKind};
+use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies, LocatedClass, LocatedMember};
+use crate::libraries::{
+    KlibBodyClassParameters, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
+};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction,
@@ -112,6 +114,21 @@ pub(super) struct PreparedMember<'a> {
     pub(super) symbol: &'a KlibIrSymbol,
     pub(super) statements: &'a [KlibIrStatement],
     pub(super) header: FunctionHeader,
+    /// Interface members this function overrides, authenticated against the admitted supertypes.
+    pub(super) overrides: Vec<MemberOverride>,
+}
+
+/// An overridden interface member, joined by its checked dependency identity.
+pub(super) struct MemberOverride {
+    pub(super) identity: KlibDependencyCallable,
+    pub(super) owner: TypeName,
+    pub(super) declared_parameters: Vec<Ty>,
+    pub(super) declared_result: Ty,
+}
+
+struct AdmittedInterface {
+    name: TypeName,
+    signature: KlibIrSignature,
 }
 
 /// A file-local class authenticated and not yet added to the unit.
@@ -397,12 +414,20 @@ fn prepare<'a>(
             "a class instance receiver has another declared type",
         ));
     }
+    let scope = MemberScope {
+        types: &types,
+        resolve: &resolve,
+        self_type,
+        bodies: source.bodies,
+        module: source.module,
+        interfaces: &interfaces,
+    };
     let StoredMembers {
         fields,
         stored,
         steps,
         members,
-    } = members_and_storage(arena, class, &types, &resolve, self_type)?;
+    } = members_and_storage(arena, class, &scope)?;
     let (params, defaults, ctor_args) = constructor_parameters(arena, function, &types, &resolve)?;
     let class_type_parameters = formals
         .iter()
@@ -418,7 +443,7 @@ fn prepare<'a>(
         classifier: class_name,
         self_type,
         supertypes,
-        interfaces,
+        interfaces: interfaces.iter().map(|interface| interface.name).collect(),
         fields,
         stored,
         ctor_args,
@@ -456,7 +481,7 @@ fn authenticate_supertypes(
     class: &KlibIrClass,
     types: &KlibTypeParameters,
     resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
-) -> Result<(Vec<Ty>, Vec<TypeName>), KlibBodyDeclineReason> {
+) -> Result<(Vec<Ty>, Vec<AdmittedInterface>), KlibBodyDeclineReason> {
     let mut supertypes = Vec::new();
     let mut interfaces = Vec::new();
     for supertype in &class.supertypes {
@@ -485,7 +510,10 @@ fn authenticate_supertypes(
                 let TyKind::Obj(name, _) = ty.kind() else {
                     return Err(mismatch("an interface supertype is not a class"));
                 };
-                interfaces.push(name);
+                interfaces.push(AdmittedInterface {
+                    name,
+                    signature: classifier.signature.clone(),
+                });
                 supertypes.push(ty);
             }
         }
@@ -500,12 +528,19 @@ struct StoredMembers<'a> {
     members: Vec<PreparedMember<'a>>,
 }
 
+struct MemberScope<'a> {
+    types: &'a KlibTypeParameters,
+    resolve: &'a dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
+    self_type: Ty,
+    bodies: &'a KlibDeclarationBodies,
+    module: &'a str,
+    interfaces: &'a [AdmittedInterface],
+}
+
 fn members_and_storage<'a>(
     arena: &'a KlibIrArena,
     class: &'a KlibIrClass,
-    types: &KlibTypeParameters,
-    resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
-    self_type: Ty,
+    scope: &MemberScope<'_>,
 ) -> Result<StoredMembers<'a>, KlibBodyDeclineReason> {
     let mut fields = Vec::new();
     let mut stored = Vec::new();
@@ -516,7 +551,7 @@ fn members_and_storage<'a>(
         let field = if let Some(field) = member_field(declaration) {
             let index = u32::try_from(fields.len()).expect("a field list fits u32");
             let authenticated = stored_field(field, &mut identities, || {
-                semantic_type_in(arena, types, field.ty, resolve)
+                semantic_type_in(arena, scope.types, field.ty, scope.resolve)
             })?;
             fields.push(
                 IrField::new(authenticated.name, authenticated.ty)
@@ -536,18 +571,12 @@ fn members_and_storage<'a>(
             KlibIrMember::Function(id) => {
                 let function = arena.function(*id);
                 if !function.constructor {
-                    members.push(prepare_member(arena, function, types, resolve, self_type)?);
+                    members.push(prepare_member(arena, function, scope)?);
                 }
             }
             KlibIrMember::Property(property) => {
                 for id in [property.getter, property.setter].into_iter().flatten() {
-                    members.push(prepare_member(
-                        arena,
-                        arena.function(id),
-                        types,
-                        resolve,
-                        self_type,
-                    )?);
+                    members.push(prepare_member(arena, arena.function(id), scope)?);
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {}
@@ -571,9 +600,7 @@ fn members_and_storage<'a>(
 fn prepare_member<'a>(
     arena: &'a KlibIrArena,
     function: &'a KlibIrFunction,
-    types: &KlibTypeParameters,
-    resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
-    self_type: Ty,
+    scope: &MemberScope<'_>,
 ) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
     let statements = match &function.body {
         Some(KlibIrBody::Block(statements)) => statements.as_slice(),
@@ -586,8 +613,115 @@ fn prepare_member<'a>(
         signature: function.base.symbol.signature.clone(),
         symbol: &function.base.symbol,
         statements,
-        header: local_member_header(function, arena, types, self_type, resolve)?,
+        header: local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?,
+        overrides: member_overrides(function, scope)?,
     })
+}
+
+fn member_overrides(
+    function: &KlibIrFunction,
+    scope: &MemberScope<'_>,
+) -> Result<Vec<MemberOverride>, KlibBodyDeclineReason> {
+    let mut overrides = Vec::with_capacity(function.overridden.len());
+    for symbol in &function.overridden {
+        if symbol.kind != KlibIrSymbolKind::Function {
+            return Err(unsupported(
+                "an override of a declaration other than a function",
+            ));
+        }
+        let KlibIrSignature::Public(signature) = &symbol.signature else {
+            return Err(unsupported("an override of a non-public declaration"));
+        };
+        let declaration = KlibDeclarationSignature::Public(signature.clone());
+        let identity = match scope.bodies.callee_origin(scope.module, &declaration) {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "an override this library does not authenticate",
+                ))
+            }
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(mismatch("two libraries serialize one overridden function"))
+            }
+        };
+        let (owner_arena, owner, declared) =
+            match scope.bodies.function_owner(scope.module, &symbol.signature) {
+                LocatedMember::One {
+                    module: owner_module,
+                    arena,
+                    class,
+                    function,
+                } => {
+                    if owner_module != identity.module {
+                        return Err(mismatch("an overridden function is not in its class"));
+                    }
+                    (arena, class, function)
+                }
+                LocatedMember::Several => {
+                    return Err(mismatch("two classes serialize one overridden function"))
+                }
+                LocatedMember::Missing => {
+                    return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                        "an override this library does not authenticate",
+                    ))
+                }
+            };
+        if class_kind(owner.base.flags) != TypeKind::Interface {
+            return Err(unsupported("an override of a class member"));
+        }
+        let Some(interface) = scope
+            .interfaces
+            .iter()
+            .find(|interface| interface.signature == owner.base.symbol.signature)
+        else {
+            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                "an override of a supertype this library does not authenticate",
+            ));
+        };
+        if !declared.type_parameters.is_empty() || declared.constructor {
+            return Err(unsupported(
+                "an override of a generic or constructor declaration",
+            ));
+        }
+        let mut declared_types = KlibTypeParameters::default();
+        for parameter in &owner.type_parameters {
+            if parameter.base.symbol.kind != KlibIrSymbolKind::TypeParameter {
+                return Err(mismatch("an interface type parameter has no symbol"));
+            }
+            let formal = Ty::ty_param(
+                crate::types::metadata_type_parameter(&parameter.name),
+                Ty::nullable(Ty::obj("kotlin/Any")),
+            );
+            if !declared_types.bind(&parameter.base.symbol, formal) {
+                return Err(mismatch("an interface repeats a type parameter"));
+            }
+        }
+        let declared_parameters = declared
+            .regular_parameters
+            .iter()
+            .map(|parameter| {
+                semantic_type_in(owner_arena, &declared_types, parameter.ty, scope.resolve)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if declared_parameters.len() != function.regular_parameters.len() {
+            return Err(unsupported(
+                "an override whose parameters differ from the interface member",
+            ));
+        }
+        let declared_result = semantic_type_in(
+            owner_arena,
+            &declared_types,
+            declared.return_type,
+            scope.resolve,
+        )?;
+        overrides.push(MemberOverride {
+            identity,
+            owner: interface.name,
+            declared_parameters,
+            declared_result,
+        });
+    }
+    Ok(overrides)
 }
 
 fn class_formals(

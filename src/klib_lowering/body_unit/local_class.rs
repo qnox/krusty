@@ -98,6 +98,13 @@ impl<'u, 's> Linker<'u, 's> {
                     },
                 )),
             });
+            publish_overrides(
+                ir,
+                prepared.classifier,
+                function,
+                &member.overrides,
+                self.sources.externals,
+            )?;
         }
         let constructor = super::super::same_library_class::LocalConstructor {
             declaration: prepared.declaration.clone(),
@@ -202,6 +209,80 @@ impl<'u, 's> Linker<'u, 's> {
             defaults,
         ))
     }
+}
+
+fn publish_overrides(
+    ir: &mut IrFile,
+    owner: crate::types::TypeName,
+    function: crate::ir::FunId,
+    overrides: &[super::super::same_library_class::MemberOverride],
+    externals: &HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
+) -> Result<(), KlibBodyDeclineReason> {
+    if overrides.is_empty() {
+        return Ok(());
+    }
+    let implementation = &ir.functions[function as usize];
+    let implementation_parameters = implementation.params.clone();
+    let implementation_result = implementation.ret;
+    let name = implementation.name.clone();
+    for edge in overrides {
+        // The interface table consumes the provider's external identity. A body that calls the
+        // member carries that handle before this class is installed. Without it there is no
+        // checked callee to publish, and the authenticated hierarchy still stands.
+        let Some(external) = externals.get(&edge.identity) else {
+            continue;
+        };
+        if edge.declared_parameters.len() != implementation_parameters.len() {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an override's parameters differ from its interface member".to_owned(),
+            ));
+        }
+        ir.function_overrides
+            .entry(owner)
+            .or_default()
+            .push(crate::ir::IrFunctionOverride {
+                implementation: crate::fir::ResolvedFunctionOverrideTarget::External(
+                    external.target(),
+                ),
+                implementation_function: Some(function),
+                implementation_owner: owner,
+                overridden: crate::fir::ResolvedFunctionOverrideTarget::External(external.target()),
+                overridden_owner: edge.owner,
+                overridden_semantic_role: None,
+                collection_barrier: None,
+                overridden_is_interface: true,
+                name: name.clone(),
+                declared_parameters: edge.declared_parameters.clone(),
+                declared_result: edge.declared_result,
+                applied_parameters: implementation_parameters.clone(),
+                applied_result: implementation_result,
+                implementation_parameters: implementation_parameters.clone(),
+                implementation_parameter_identities: implementation_parameters
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(ordinal, _)| crate::fir::ResolvedParameterIdentity::Unnamed {
+                            ordinal: u32::try_from(ordinal).expect("a parameter ordinal fits u32"),
+                        },
+                    )
+                    .collect(),
+                overridden_parameter_identities: edge
+                    .declared_parameters
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(ordinal, _)| crate::fir::ResolvedParameterIdentity::Unnamed {
+                            ordinal: u32::try_from(ordinal).expect("a parameter ordinal fits u32"),
+                        },
+                    )
+                    .collect(),
+                implementation_result,
+                suspend: false,
+                has_kotlin_superclass_override: false,
+                depth: 1,
+            });
+    }
+    Ok(())
 }
 
 fn class_constructor(

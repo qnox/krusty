@@ -118,6 +118,57 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         })
     }
 
+    /// Dispatch one dependency interface member by the exact override edge each implementor
+    /// published. An implementor without that edge leaves the call to the paths that already
+    /// know the member; this does not recover an implementation by its name.
+    pub(super) fn dependency_interface_member(
+        &mut self,
+        internal: crate::types::TypeName,
+        target: crate::fir::ExternalCallableId,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let declared = self.file.implementors_of(internal);
+        let implementors: Vec<ImplementorArm> = declared
+            .iter()
+            .filter_map(|&class| self.external_override_slot(class, target, signature.params))
+            .collect();
+        if implementors.is_empty() || implementors.len() != declared.len() {
+            return None;
+        }
+        Some(self.dependency_interface_dispatch(&implementors, receiver, args, ret))
+    }
+
+    fn dependency_interface_dispatch(
+        &mut self,
+        implementors: &[ImplementorArm],
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let mut operands = Vec::with_capacity(args.len());
+        for argument in args {
+            let Some(value) = self.expression(*argument)? else {
+                return Ok(None);
+            };
+            if self.terminated {
+                return Ok(None);
+            }
+            operands.push((value, self.physical_type(*argument)));
+        }
+        self.dispatch_by_implementor_with(implementors, object, &operands, ret, |body, _| {
+            // Unreachable when every implementor was tested. The merge fills the carrier.
+            body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
+            Ok(None)
+        })
+    }
+
     pub(super) fn dispatch_by_implementor_with(
         &mut self,
         implementors: &[ImplementorArm],

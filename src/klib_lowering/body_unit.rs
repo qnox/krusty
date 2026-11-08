@@ -1777,6 +1777,12 @@ impl UnitCheckpoint {
             .retain(|_, class| (class.class as usize) < unit.ir.classes.len());
         unit.local_functions
             .retain(|_, function| (function.function as usize) < unit.ir.functions.len());
+        unit.ir.function_overrides.retain(|owner, _| {
+            unit.ir
+                .classes
+                .iter()
+                .any(|class| class.fq_name_id() == *owner)
+        });
     }
 }
 
