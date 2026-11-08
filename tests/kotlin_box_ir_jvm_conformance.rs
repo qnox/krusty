@@ -40,6 +40,8 @@ use super::box_ratchet::{self, Outcome, Platform};
 use super::box_reference_classes;
 use super::common;
 
+#[path = "kotlin_box_ir_jvm_conformance/diagnostics.rs"]
+mod diagnostics;
 #[path = "kotlin_box_ir_jvm_conformance/entry.rs"]
 mod entry;
 use entry::find_box_class;
@@ -437,6 +439,14 @@ fn compile_source(
                 .map(|internal| (internal.to_string(), bytes))
         })
         .collect::<Vec<_>>();
+    diagnostics::report_rejection(
+        box_reference_classes::MAIN_MODULE,
+        inputs
+            .iter()
+            .zip(&stems)
+            .map(|(input, stem)| (input.kind, stem.as_str(), input.text)),
+        &diags,
+    );
     (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
 
@@ -678,6 +688,14 @@ fn compile_blocks_mixed(
                 .map(|internal| (internal.to_string(), bytes))
         })
         .collect::<Vec<_>>();
+    diagnostics::report_rejection(
+        module,
+        inputs
+            .iter()
+            .zip(&stems)
+            .map(|(input, stem)| (input.kind, stem.as_str(), input.text)),
+        &diags,
+    );
     (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
 

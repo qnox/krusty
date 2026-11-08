@@ -829,6 +829,7 @@ dependencies = [
  "krusty-cli",
  "krusty-plugin-host",
  "krusty-plugin-ir",
+ "krusty-test-modules",
  "libc",
  "object 0.40.0",
  "pprof",
@@ -890,6 +891,10 @@ dependencies = [
 
 [[package]]
 name = "krusty-plugin-ir"
+version = "0.0.1"
+
+[[package]]
+name = "krusty-test-modules"
 version = "0.0.1"
 
 [[package]]
