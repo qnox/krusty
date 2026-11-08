@@ -29,6 +29,7 @@ fun box(): String {
     if (any.hashCode() != 5u.hashCode()) return "fail: UInt hashCode"
     if (keep(5uL) != keep(5uL)) return "fail: ULong as Any"
     if (keep(5uL) == keep(5L)) return "fail: ULong equals Long"
+    if (keep(0x1_0000_0001uL).hashCode() != 0x1_0000_0001uL.hashCode()) return "fail: ULong hashCode"
     if (keep(200u.toUByte()).hashCode() != 200u.toUByte().hashCode()) return "fail: UByte hashCode"
     if (keep(60000u.toUShort()).hashCode() != 60000u.toUShort().hashCode()) return "fail: UShort hashCode"
     return "OK"
