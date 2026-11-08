@@ -657,6 +657,8 @@ mod custom_floating_range_membership_e2e;
 mod data_class_component_overload_e2e;
 #[path = "data_class_copy_visibility_e2e.rs"]
 mod data_class_copy_visibility_e2e;
+#[path = "data_class_delegated_member_order_e2e.rs"]
+mod data_class_delegated_member_order_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
 mod data_class_metadata_wiring_e2e;
 #[path = "data_class_nullable_value_class_e2e.rs"]

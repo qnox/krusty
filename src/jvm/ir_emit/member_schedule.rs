@@ -214,13 +214,19 @@ pub(super) fn source_ordered_members<'a>(
             .filter_map(|function| match accessor_owner(function) {
                 Some(property) => (first_accessor(property) == Some(function)).then(|| {
                     (
-                        (function_order(function), 0),
+                        if ir.interface_delegation_forwarders.contains(&function) {
+                            DELEGATED_MEMBER_KEY
+                        } else {
+                            (function_order(function), 0)
+                        },
                         SourceOrderedMember::Property(property),
                     )
                 }),
                 None => Some((
                     if ir.is_jvm_delegate_method(function) {
                         (function_order(function), 3)
+                    } else if ir.interface_delegation_forwarders.contains(&function) {
+                        DELEGATED_MEMBER_KEY
                     } else if lowered_after_generated_members(ir, function) {
                         (u32::MAX, 4)
                     } else if ir.follows_declared_constructors(class.fq_name_id(), function) {
@@ -276,6 +282,12 @@ pub(super) fn source_ordered_members<'a>(
     }
     ordered
 }
+
+/// The schedule key of an `interface by` forwarder. kotlinc generates delegated members after the
+/// class's source declarations and after the structural members it synthesizes itself (a data or
+/// value class's `toString`, `hashCode` and `equals`), so they follow every member without a source
+/// position except the bodies lowered out of members later.
+const DELEGATED_MEMBER_KEY: (u32, u8) = (u32::MAX, 2);
 
 /// Whether `function` is a lambda's or local function's implementation that has no declaration
 /// order of its own. kotlinc lifts those in `LocalDeclarationsLowering`, after a compiler plugin
@@ -543,3 +555,6 @@ pub(super) fn property_annotation_marker_fids(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests;

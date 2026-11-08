@@ -997,19 +997,21 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         &mut prop_source_orders,
     );
     let delegation_members = delegation_function_count + delegation_properties.len();
+    let (synthesized, delegation_functions) = member_order::generated_function_order(
+        ir,
+        &declared_fids,
+        &methods,
+        &method_origins,
+        declared_method_count.min(inferred_method_count)..inferred_method_count,
+        delegation_functions,
+    );
     let member_order = member_order::member_order(
         ir,
         c,
         &prop_source_orders,
         &declared_fids,
         MemberRanges {
-            synthesized: member_order::generated_function_order(
-                ir,
-                &declared_fids,
-                &methods,
-                &method_origins,
-                declared_method_count.min(inferred_method_count)..inferred_method_count,
-            ),
+            synthesized,
             published_functions: inferred_method_count,
             delegation_functions,
             delegation_properties,
