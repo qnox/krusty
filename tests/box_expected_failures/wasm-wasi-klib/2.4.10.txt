@@ -104,7 +104,6 @@ arrays/kt1291.kt
 arrays/kt238.kt
 arrays/kt2997.kt
 arrays/kt33.kt
-arrays/kt34291_16dimensions.kt
 arrays/kt4118.kt
 arrays/kt42932.kt
 arrays/kt47483.kt
@@ -320,13 +319,11 @@ callableReference/adaptedReferences/extensionPropertyWithAnonymousContextFun.kt
 callableReference/adaptedReferences/extensionPropertyWithAnonymousExtensionFun.kt
 callableReference/adaptedReferences/inlineDefault.kt
 callableReference/adaptedReferences/inlineVararg.kt
-callableReference/adaptedReferences/inlineVarargAndDefault.kt
 callableReference/adaptedReferences/inlineVarargInts.kt
 callableReference/adaptedReferences/innerConstructorWithVararg.kt
 callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
 callableReference/adaptedReferences/referenceToFakeOverrideWithTypeParameter.kt
-callableReference/adaptedReferences/referenceToVarargWithDefaults.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithCoercionToUnit.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithDefaultArguments.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithVarargs.kt
@@ -387,7 +384,6 @@ callableReference/callableReferenceOfCompanionConst.kt
 callableReference/callableReferenceOfCompanionProperty.kt
 callableReference/callableReferenceOfKotlinNestedClass.kt
 callableReference/callableReferencetoInnerAndLocal.kt
-callableReference/charArrayOf.kt
 callableReference/equality/conversionCombinations.kt
 callableReference/equality/equalsOnNonCallable.kt
 callableReference/equality/extensionFunctionEquality.kt
@@ -1798,7 +1794,6 @@ functions/kt1038.kt
 functions/kt1199.kt
 functions/kt1413.kt
 functions/kt2929.kt
-functions/kt3214.kt
 functions/kt395.kt
 functions/kt47449.kt
 functions/kt58825_arrayOverloads.kt
@@ -3093,7 +3088,6 @@ mangling/internalOverrideSuperCall.kt
 mangling/multipleConstructors.kt
 mangling/parentheses.kt
 mangling/publicOverrideSuperCall.kt
-mixedNamedPosition/varargs.kt
 mixedNamedPosition/varargsEvaluationOrder.kt
 multiDecl/VarCapturedInObjectLiteral.kt
 multiDecl/component.kt
@@ -3213,7 +3207,6 @@ multiplatform/k2/hmpp/overloadAlias3-3.kt
 multiplatform/k2/hmpp/overloadAliasTwoLibs.kt
 multiplatform/k2/hmpp/propertyAlias3-3.kt
 multiplatform/k2/hmpp/propertyAliasTwoLibs.kt
-multiplatform/k2/hmpp/stdlibRegressions.kt
 multiplatform/k2/hmpp/typealiasNameClash.kt
 multiplatform/k2/hmpp/typealiasReturnTypeIntersectionBound.kt
 multiplatform/k2/internalOverride.kt
@@ -3617,7 +3610,6 @@ ranges/forInIndices/forNullableIntInArrayIndices.kt
 ranges/forInIndices/forNullableIntInCollectionIndices.kt
 ranges/forInIndices/indexOfLast.kt
 ranges/forInIndices/kt12983_forInGenericCollectionIndices.kt
-ranges/forInIndices/kt12983_forInSpecificArrayIndices.kt
 ranges/forInIndices/kt12983_forInSpecificCollectionIndices.kt
 ranges/forInIndices/kt13241_Array.kt
 ranges/forInIndices/kt13241_CharSequence.kt
@@ -4531,7 +4523,6 @@ super/kt3492TraitFun.kt
 super/kt3492TraitProperty.kt
 super/kt4982.kt
 super/superConstructor/kt17464_arrayOf.kt
-super/superConstructor/kt18356_2.kt
 super/traitproperty.kt
 super/unqualifiedSuper.kt
 super/unqualifiedSuperWithDeeperHierarchies.kt

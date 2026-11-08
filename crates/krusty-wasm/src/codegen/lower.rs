@@ -1344,18 +1344,15 @@ impl<'a> Body<'a> {
                 spreads,
                 elements,
             } => {
-                if arrays::is_int_array(array_type) {
-                    self.int_array_literal(&spreads, &elements)?;
-                } else {
-                    self.reference_array_literal(array_type, &spreads, &elements)?;
-                }
+                self.array_literal(array_type, &spreads, &elements)?;
             }
             IrExpr::NewArray { array_type, size } => {
-                if arrays::is_int_array(array_type) {
-                    self.new_int_array(size)?;
-                } else {
+                // Only `IntArray` is allocated by size yet.
+                let array = array_type.non_null();
+                if array.is_reference_array() || array.array_elem() != Some(Ty::Int) {
                     return Err("the expression `NewArray`".into());
                 }
+                self.new_array(array_type, size)?;
             }
             IrExpr::Try {
                 body,
