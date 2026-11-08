@@ -345,6 +345,7 @@ pub fn lower_file(
         dependency_signatures,
         dependency_symbols,
         dependency_singletons,
+        dependency_interface_calls: Vec::new(),
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
     // receivers have a runtime-walkable representation and which shapes still decline; both are read while
@@ -525,6 +526,9 @@ struct FileLowering<'a> {
     /// modules.
     dependency_symbols:
         &'a HashMap<crate::backend::KlibDependencyCallable, super::DependencyExport>,
+    /// Dependency interface members this file calls, numbered after the module's own interfaces.
+    /// The identity bytes are what a dependent implementation records itself under.
+    dependency_interface_calls: Vec<(u32, Vec<u8>)>,
     /// The exported instance entry of each preceding source module's object, by its classifier.
     dependency_singletons: &'a HashMap<crate::types::TypeName, String>,
 }
@@ -1900,7 +1904,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     receiver: Some(receiver),
                     ..
                 } = &**checked_op
-                    && self.reference_property_role(*target).is_some() =>
+                    && self.reads_reference_slot(*target) =>
             {
                 self.reference_property(*target, *receiver)
                     .expect("the selected getter role was checked by the guard")

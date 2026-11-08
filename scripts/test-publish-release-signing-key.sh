@@ -4,7 +4,7 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 fixture=$(mktemp -d)
 trap 'gpgconf --homedir "$fixture/home" --kill gpg-agent 2>/dev/null || true; rm -rf "$fixture"' EXIT
-mkdir -m 700 "$fixture/home"
+mkdir -m 700 "$fixture/home" "$fixture/public-home"
 mkdir "$fixture/bin" "$fixture/dist"
 gpg_() { gpg --homedir "$fixture/home" --batch --quiet --pinentry-mode loopback --passphrase fixture "$@"; }
 gpg_ --quick-gen-key 'Release fixture <fixture@example.invalid>' ed25519 cert never 2>/dev/null
@@ -16,7 +16,11 @@ sums=$fixture/dist/krusty-$version-SHA256SUMS
 certificate=$fixture/dist/krusty-$version-signing-key.asc
 echo '0000  compiler.tar.gz' > "$sums"
 gpg_ --armor --detach-sign --local-user "$signer!" --output "$sums.asc" "$sums"
-gpg_ --armor --export "$root" > "$certificate"
+gpg_ --armor --export "$root" > "$fixture/export.asc"
+# Valid armor headers are transport text; importing and exporting may normalize them without
+# changing a public key. Make that distinction deterministic instead of relying on packet order.
+awk '{ print; if ($0 == "-----BEGIN PGP PUBLIC KEY BLOCK-----") print "Comment: disposable fixture" }' \
+  "$fixture/export.asc" > "$certificate"
 cp "$certificate" "$fixture/root.asc"
 
 cat > "$fixture/bin/curl" <<'CURL'
@@ -76,7 +80,25 @@ run() {
     exit 1
   fi
   if [[ -f $fixture/uploaded.asc ]]; then
-    cmp "$fixture/public.asc" "$fixture/uploaded.asc"
+    # Compare the actual certificate contract, not an ASCII-armored encoding: only the pinned
+    # public primary and signing subkey may be uploaded, and they must verify these checksums.
+    local fingerprints
+    fingerprints=$(gpg --homedir "$fixture/public-home" --batch --with-colons \
+      --show-keys "$fixture/uploaded.asc" 2>/dev/null | awk -F: '$1 == "fpr" { print $10 }')
+    [[ $fingerprints == "$root"$'\n'"$signer" ]]
+    gpg --homedir "$fixture/public-home" --batch --list-packets "$fixture/uploaded.asc" \
+      > "$fixture/uploaded.packets" 2>/dev/null
+    if grep -Fq ':secret ' "$fixture/uploaded.packets"; then
+      echo 'publisher uploaded secret key material' >&2
+      exit 1
+    fi
+    gpg --homedir "$fixture/public-home" --batch --yes --dearmor \
+      --output "$fixture/uploaded.gpg" "$fixture/uploaded.asc"
+    gpgv --homedir "$fixture/public-home" --keyring "$fixture/uploaded.gpg" --status-fd 1 \
+      "$sums.asc" "$sums" > "$fixture/uploaded.status" 2> "$fixture/uploaded.err"
+    awk -v root="$root" -v signer="$signer" \
+      '$2 == "VALIDSIG" && $3 == signer && $NF == root { valid += 1 } END { exit valid != 1 }' \
+      "$fixture/uploaded.status"
   fi
 }
 run present 0 GET

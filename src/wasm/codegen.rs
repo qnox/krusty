@@ -322,6 +322,9 @@ const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy =
 
 #[cfg(test)]
 mod tests {
+    mod companion_declarations;
+    mod reference_array_size;
+
     use super::{WasmBackend, WasmTarget};
     use crate::backend::{Artifact, Entry};
     use crate::diag::DiagSink;
@@ -393,18 +396,18 @@ mod tests {
     }
 
     #[test]
-    fn a_try_with_finally_still_declines_without_an_artifact() {
-        // Wasm backend contract, not a portable semantic claim: finally lowering is a later slice.
+    fn finally_regions_with_nonlocal_transfers_compile_on_both_targets() {
+        // The whole runtime contract is tests/box_regressions/finallyOnEveryExit.kt.
         for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile(
-                target,
-                "fun box(): String = try { \"OK\" } finally { val unused = 0 }",
-            );
-            assert_eq!(outputs, Vec::<Artifact>::new());
-            assert_eq!(
-                diagnostics,
-                ["krusty: the wasm backend does not support a `try` with `finally` yet"]
-            );
+            for source in [
+                "fun box(): String { try { return \"OK\" } finally { val unused = 0 } }",
+                "fun box(): String { while (true) { try { break } finally { val unused = 0 } }; return \"OK\" }",
+                "var keepGoing = true\nfun box(): String { while (keepGoing) { try { keepGoing = false; continue } finally { val unused = 0 } }; return \"OK\" }",
+            ] {
+                let (outputs, diagnostics) = compile(target, source);
+                assert_eq!(diagnostics, Vec::<String>::new());
+                assert_eq!(outputs.len(), 2);
+            }
         }
     }
 
@@ -527,12 +530,12 @@ mod tests {
     fn an_unsupported_construct_declines_the_whole_compilation_by_name() {
         let (outputs, diagnostics) = compile(
             WasmTarget::Js,
-            "fun other(): String = try { \"O\" } finally { val unused = 0 }\nfun box(): String = \"OK\"",
+            "lateinit var pending: String\nfun box(): String = \"OK\"",
         );
         assert_eq!(outputs, Vec::<Artifact>::new());
         assert_eq!(
             diagnostics,
-            ["krusty: the wasm backend does not support a `try` with `finally` yet"]
+            ["krusty: the wasm backend does not support a `lateinit` top-level property yet"]
         );
     }
 

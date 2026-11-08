@@ -108,6 +108,7 @@ fn instance(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda
 /// The `internal val` holding one singleton.
 fn property(name: &str, field: u32, initializer: ExprId) -> IrProperty {
     IrProperty {
+        origin: crate::ir::IrPropertyOrigin::Declaration,
         name: name.to_string(),
         diagnostic_span: None,
         getter_diagnostic_span: None,
@@ -133,8 +134,6 @@ fn property(name: &str, field: u32, initializer: ExprId) -> IrProperty {
         setter_visibility: Visibility::Internal,
         getter: None,
         setter: None,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         needs_access_bridge: false,
         accessor_annotations: Default::default(),
     }

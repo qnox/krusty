@@ -155,7 +155,8 @@ impl Checker<'_> {
                 Some(dependency) => capture.capture_dependency == Some(dependency) || same_source,
                 None => capture.capture_dependency.is_none() && same_source,
             };
-            same_semantic_source.then_some(index)
+            (same_semantic_source && capture.enum_entry_storage == candidate.enum_entry_storage)
+                .then_some(index)
         });
         if let Some(existing) = existing {
             captures[existing].shared_cell |= candidate.shared_cell;
@@ -253,6 +254,7 @@ impl Checker<'_> {
                     captures,
                     capture_bindings,
                     AnonymousObjectCapture {
+                        enum_entry_storage: binding.enum_entry_storage(),
                         name: required.name.clone(),
                         ty: binding.ty,
                         shared_cell: required.shared_cell,
@@ -593,7 +595,7 @@ impl Checker<'_> {
                     self.lexical_binding_by_identity(scope, &capture.name, identity)?;
                 match binding.origin {
                     ReceiverFnValueOrigin::ClassStorage(storage) => Source::ClassStorage(storage),
-                    ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field } => {
+                    ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field, .. } => {
                         Source::EnumEntryProperty {
                             owner,
                             ordinal: field,
@@ -780,6 +782,7 @@ mod tests {
 
     fn capture(owner: TypeName) -> AnonymousObjectCapture {
         AnonymousObjectCapture {
+            enum_entry_storage: None,
             name: "value".into(),
             ty: Ty::String,
             shared_cell: false,

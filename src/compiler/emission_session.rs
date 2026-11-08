@@ -103,7 +103,7 @@ impl<'a, B: Backend> EmissionSession<'a, B> {
                         metadata.record_ir_file(file, &mut metadata_state, diags);
                 },
                 checked_bodies: &mut super::NoObserver,
-                artifacts: &mut |artifact| outputs.push(artifact),
+                artifacts: &mut |_, artifact| outputs.push(artifact),
             },
         );
         if diags.has_errors() {

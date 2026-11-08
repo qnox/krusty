@@ -6,6 +6,24 @@
 
 use super::*;
 
+/// Exact constructor declaration selected for a serializer class named by a checked type-use
+/// annotation. Module and dependency declarations share the same semantic payload; only their
+/// stable identity carrier differs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolvedCustomSerializerConstructorTarget {
+    Module(DeclarationId),
+    External(ExternalCallableId),
+}
+
+/// Frontend-selected construction of a serializer class for an annotated type occurrence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedTypeUseSerializerConstruction {
+    pub serializer: TypeName,
+    pub parameters: Box<[ResolvedTy]>,
+    pub operands: Box<[u32]>,
+    pub target: ResolvedCustomSerializerConstructorTarget,
+}
+
 #[derive(Debug, Default, PartialEq)]
 pub(super) struct SerializationRecords {
     /// Return-value statuses of the exact runtime declarations overridden by serialization-plugin

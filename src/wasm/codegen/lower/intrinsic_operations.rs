@@ -25,6 +25,12 @@ impl Body<'_> {
                 };
                 self.reference_array_set(receiver, *index, *value)
             }
+            IrIntrinsic::ArraySize => {
+                let (Some(receiver), []) = (receiver, args) else {
+                    return Err("an array size read with malformed operands".into());
+                };
+                self.reference_array_size(receiver)
+            }
             IrIntrinsic::PrimitiveCompare { operand, .. } => {
                 let (lhs, rhs) = match (receiver, args) {
                     (None, [lhs, rhs]) => (*lhs, *rhs),
@@ -77,16 +83,19 @@ impl Body<'_> {
                 };
                 self.generated_property_equals(*left, *right, ty)
             }
-            // The frontend publishes the exact `kotlin.Enum.name` declaration as an intrinsic
-            // after ordinary property selection; it reads the same `$Enum` field.
-            IrIntrinsic::EnumName => {
-                let (Some(receiver), []) = (receiver, args) else {
-                    return Err("a malformed `Enum.name` read".to_string());
-                };
-                self.enum_member(crate::backend::enums::BaseMember::Name, receiver)
-            }
             other => Err(format!("a call to the intrinsic {other:?}")),
         }
+    }
+
+    /// Whether `target` is a string's `length`, by its getter's provider realization.
+    pub(super) fn is_string_length_property(&self, target: crate::fir::ExternalPropertyId) -> bool {
+        self.callables
+            .property(target)
+            .and_then(|property| self.callables.callable(property.getter))
+            .is_some_and(|getter| {
+                getter.compiler_operation()
+                    == Some(crate::backend::BackendCompilerIntrinsic::StringLength)
+            })
     }
 
     /// Leave the selected String receiver's UTF-16 storage array on the stack.
