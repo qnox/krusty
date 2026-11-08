@@ -43,11 +43,12 @@ impl ScopeConstructorSelection {
 
 impl Checker<'_> {
     /// Select and record the constructor of `internal` that a bare call reaches. A classifier
-    /// that captures neither an outer instance nor an enclosing declaration's type parameters,
-    /// written by its own name, has its constructors selected as ordinary callable candidates;
-    /// the provider constructor path then materializes only the selected declaration, or
-    /// reports why none applies. A captured type parameter is bound from the call's lexical
-    /// scope, which only the provider path does.
+    /// that captures neither an outer instance nor an enclosing declaration's type parameters
+    /// has its constructors selected as ordinary callable candidates, including when the call
+    /// is written through a type alias. The alias's fixed application supplies the classifier
+    /// arguments it spells and constrains the result. The provider constructor path then
+    /// materializes only the selected declaration, or reports why none applies. A captured
+    /// type parameter is bound from the call's lexical scope, which only the provider path does.
     pub(super) fn record_scope_constructor(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -60,23 +61,35 @@ impl Checker<'_> {
         } else {
             ConstructorPriorityTier::All
         };
+        // A type alias application fixes the classifier arguments it spells; the ones it leaves
+        // open are inferred like any call's, and the applied type constrains the result.
+        let applied = self.alias_constructor_fixed_application(call_args.call, call.alias_target);
+        let alias_type_args = applied
+            .filter(|applied| {
+                applied.kotlin_class_internal() == Some(internal)
+                    && applied.type_args().len() == classifier.type_params().len()
+            })
+            .map(|applied| applied.type_args().to_vec());
+        let explicit_type_args = alias_type_args
+            .as_deref()
+            .unwrap_or(call.explicit_type_args);
+        let expected = Self::alias_constructor_result_constraint(applied, call.expected);
         let shared = (classifier.outer_instance.is_none()
-            && classifier.own_type_parameter_count == classifier.type_params().len()
-            && call.alias_target.is_none())
+            && classifier.own_type_parameter_count == classifier.type_params().len())
         .then(|| {
             let candidates = self.scope_constructor_candidates(
                 scope,
                 call_args,
                 (internal, classifier),
-                (call.explicit_type_args, call.arg_names),
-                (call.expected, priority),
+                (explicit_type_args, call.arg_names),
+                (expected, priority),
             );
             match self.select_callable_candidate(
                 scope,
                 call_args,
-                call.explicit_type_args,
+                explicit_type_args,
                 None,
-                CallResultConstraint::direct(call.expected),
+                CallResultConstraint::direct(expected),
                 candidates.clone(),
             ) {
                 Some(CallableCandidateSelection::Selected(selected)) => {
