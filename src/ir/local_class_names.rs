@@ -482,7 +482,6 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
                 | super::IrIntrinsic::ArraySize
                 | super::IrIntrinsic::StringGet
                 | super::IrIntrinsic::StringLength
-                | super::IrIntrinsic::EnumName
                 | super::IrIntrinsic::EnumOrdinal
                 | super::IrIntrinsic::NullableAnyToString
                 | super::IrIntrinsic::CoroutineContext => {}
@@ -1649,6 +1648,7 @@ impl super::IrFile {
         remap_first_key(&mut self.generated_secondary_constructors, names);
         remap_first_key(&mut self.jvm_companion_property_statics, names);
         remap_first_key(&mut self.jvm_companion_delegate_statics, names);
+        remap_first_key(&mut self.jvm_property_accessor_names, names);
         remap_first_key(&mut self.property_annotation_markers, names);
         remap_first_key(&mut self.external_secondary_super_constructors, names);
         remap_first_key(&mut self.prop_declared_spellings, names);

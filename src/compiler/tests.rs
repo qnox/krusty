@@ -1748,7 +1748,16 @@ fn jvm_production_stream_realizes_source_callable_references() {
         )
         .with_file_stem("SourceReferences")];
     let stems = ["SourceReferences".to_string()];
-    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
+    // `values[0]` selects `IntArray.get`, and kotlinc requires `IntArray`'s JVM supertypes
+    // (`java.io.Serializable`) to be on the classpath to select it.
+    let mut paths = Vec::new();
+    if let Some(stdlib) = crate::jvm::kotlin_stdlib_jar() {
+        paths.push(stdlib);
+    }
+    if let Some(jdk) = crate::jvm::classpath::platform_jdk_modules(None) {
+        paths.push(jdk);
+    }
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,

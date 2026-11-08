@@ -133,15 +133,15 @@ use super::{
     FirConstructorTarget, FirControlTarget, FirControlTargetKind, FirConversion, FirConversionKind,
     FirConvertedValue, FirDefaultValue, FirDelegateCall, FirDelegateDispatchReceiver,
     FirDestructureEntry, FirExpr, FirExprId, FirExprKind, FirImplicitReceiverCapture,
-    FirIndexedAccessKind, FirInterfaceDelegateArgument, FirIntrinsic, FirJumpKind,
-    FirLocalCallableRef, FirLocalClassCapture, FirLocalClassCaptureSource,
-    FirLocalDelegateDispatchParameter, FirLoopHeader, FirPlatformNarrowing, FirPluginOperand,
-    FirPropertyDelegatePlan, FirPropertyReferenceTarget, FirPropertyTarget, FirRangeOperation,
-    FirReceiver, FirReferenceAdaptation, FirSamConversion, FirStatement, FirStatementId,
-    FirStatementKind, FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution,
-    FirUnaryOperation, FirValueParameter, FirVarargElement, InlineBodyStore, LocalBinding,
-    LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId, OriginStore, PropertyId,
-    ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId, SyntheticOriginKind,
+    FirInterfaceDelegateArgument, FirIntrinsic, FirJumpKind, FirLocalCallableRef,
+    FirLocalClassCapture, FirLocalClassCaptureSource, FirLocalDelegateDispatchParameter,
+    FirLoopHeader, FirPlatformNarrowing, FirPluginOperand, FirPropertyDelegatePlan,
+    FirPropertyReferenceTarget, FirPropertyTarget, FirRangeOperation, FirReceiver,
+    FirReferenceAdaptation, FirSamConversion, FirStatement, FirStatementId, FirStatementKind,
+    FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution, FirUnaryOperation,
+    FirValueParameter, FirVarargElement, InlineBodyStore, LocalBinding, LocalCallableId,
+    LocalDelegateBinding, LocalValueId, OriginId, OriginStore, PropertyId, ResolvedCallableHeader,
+    ResolvedModuleIndex, ResolvedTy, SourceFileId, SyntheticOriginKind,
 };
 
 /// The unoptimized expression dispatcher currently reserves about 98 KiB. Checking before the
@@ -696,7 +696,6 @@ impl BodyFirChecker<'_> {
             | FirExprKind::NullableNumericComparison { .. }
             | FirExprKind::InRange { .. }
             | FirExprKind::IndicesContainment { .. }
-            | FirExprKind::IndexedRead { .. }
             | FirExprKind::IndexedWrite { .. }
             | FirExprKind::SafeCall { .. }
             | FirExprKind::Elvis { .. }
@@ -1728,31 +1727,17 @@ impl BodyFirChecker<'_> {
                 } => self.safe_index_read(expression, *receiver, *element)?,
                 Expr::SafeIndexIncDec { .. } => self.safe_index_inc_dec_expr(expression)?,
                 Expr::Index { array, indices } => {
+                    // The checker selected the `get` operator for every subscript read, an
+                    // array's and a string's included.
                     if self.info.resolved_index_get_call(expression).is_some() {
                         self.source_member_operator_call(expression, "get", *array, indices)?
                     } else if self.info.resolved_member(expression).is_some() {
                         self.member_call(expression, *array, indices)?
                     } else {
-                        let receiver_ty = self.info.semantic_ty(*array).non_null();
-                        let kind = if receiver_ty == Ty::String {
-                            FirIndexedAccessKind::String
-                        } else if receiver_ty.array_elem().is_some() {
-                            FirIndexedAccessKind::Array
-                        } else {
-                            return Err(self.failure(
-                                self.file.expr_span(expression),
-                                BodyCheckFailureKind::UnsupportedExpression(ExpressionForm::Index),
-                            ));
-                        };
-                        FirExprKind::IndexedRead {
-                            kind,
-                            receiver: self.expression(*array)?,
-                            indices: indices
-                                .iter()
-                                .map(|index| self.builtin_index(*index))
-                                .collect::<Result<Vec<_>, _>>()?
-                                .into_boxed_slice(),
-                        }
+                        return Err(self.failure(
+                            self.file.expr_span(expression),
+                            BodyCheckFailureKind::UnsupportedExpression(ExpressionForm::Index),
+                        ));
                     }
                 }
                 Expr::If {
@@ -2364,24 +2349,61 @@ impl BodyFirChecker<'_> {
                     // A deferred `val` assigned from an `init` block or a constructor body. The
                     // checker already committed the owner and type; the write is a direct backing
                     // field store, exactly as an initializer would have been.
-                    let target = enum_entry_property
-                        .and_then(|sibling| self.enum_entry_property(sibling))
-                        .or_else(|| self.classifier_property_named(name))
-                        .ok_or_else(|| {
-                            self.failure(
-                                self.file.stmt_spans.get(statement.0 as usize).copied(),
-                                BodyCheckFailureKind::MissingStablePropertyTarget,
-                            )
-                        })?;
-                    FirExprKind::BackingFieldWrite {
-                        target,
-                        dispatch_receiver: self.backing_field_dispatch_receiver(
-                            target,
-                            origin,
+                    let target = match enum_entry_property {
+                        Some(selected) => self.selected_enum_entry_property(*selected),
+                        None => self.classifier_property_named(name),
+                    }
+                    .ok_or_else(|| {
+                        self.failure(
                             self.file.stmt_spans.get(statement.0 as usize).copied(),
-                        )?,
-                        value: self.expression(*value)?,
-                        conversion: None,
+                            BodyCheckFailureKind::MissingStablePropertyTarget,
+                        )
+                    })?;
+                    let dispatch_receiver = self.backing_field_dispatch_receiver(
+                        target,
+                        origin,
+                        self.file.stmt_spans.get(statement.0 as usize).copied(),
+                    )?;
+                    let header = self.index.property(target).ok_or_else(|| {
+                        self.failure(
+                            self.file.stmt_spans.get(statement.0 as usize).copied(),
+                            BodyCheckFailureKind::MissingStablePropertyTarget,
+                        )
+                    })?;
+                    if enum_entry_property.is_some() && header.mutable {
+                        let value_target = self
+                            .index
+                            .signature(header.declaration)
+                            .map(|signature| signature.result)
+                            .ok_or_else(|| {
+                                self.failure(
+                                    self.file.stmt_spans.get(statement.0 as usize).copied(),
+                                    BodyCheckFailureKind::MissingStablePropertyTarget,
+                                )
+                            })?;
+                        let checked_value = self.expression(*value)?;
+                        let conversion = self.selected_value_conversion(
+                            *value,
+                            checked_value,
+                            value_target,
+                            origin,
+                        )?;
+                        FirExprKind::PropertyWrite {
+                            target: FirPropertyTarget::of_module(target),
+                            dispatch_receiver,
+                            extension_receiver: None,
+                            context_arguments: Box::new([]),
+                            value: checked_value,
+                            conversion,
+                            substitutions: Box::new([]),
+                        }
+                    } else {
+                        FirExprKind::BackingFieldWrite {
+                            target,
+                            dispatch_receiver,
+                            value: self.expression(*value)?,
+                            conversion: None,
+                        }
                     }
                 } else if let Some(property) =
                     self.source_property_write(statement, None, *value)?

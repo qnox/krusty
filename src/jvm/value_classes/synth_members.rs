@@ -146,6 +146,15 @@ fn realize_delegator_of_override(
     }
 }
 
+/// Make the generated structural member `function` the box's instance delegator with `body`,
+/// placed where kotlinc emits it: right after the static `-impl` it delegates to. It has no source
+/// position, so the member schedule keeps it in that place.
+fn adopt_delegator(ir: &mut IrFile, function: u32, body: ExprId) -> u32 {
+    ir.functions[function as usize].body = Some(body);
+    ir.fn_source_order.remove(&function);
+    function
+}
+
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in
 /// this pass, not common lowering): `unbox-impl`/`box-impl`/`constructor-impl`/`equals-impl0` plus structural
 /// `equals`/`hashCode`/`toString` (skipped where the user defined one). The plain single-field class
@@ -240,12 +249,13 @@ pub(super) fn synth_value_members(
         };
         member_signatures::record(ir, class_id, accessor, member);
         crate::jvm::method_parameters::prepend_value_class_receiver(ir, accessor, "arg0");
-        let property = &mut ir.classes[class_id as usize].properties[property_index];
-        if is_getter {
-            property.getter_jvm_name = Some(jvm_name);
+        let side = if is_getter {
+            crate::ir::JvmAccessorSide::Getter
         } else {
-            property.setter_jvm_name = Some(jvm_name);
-        }
+            crate::ir::JvmAccessorSide::Setter
+        };
+        let class = ir.classes[class_id as usize].fq_name;
+        ir.set_jvm_property_accessor_name(class, property_index as u32, side, jvm_name);
     }
 
     // User-written Any overrides become the static `-impl` body. Its former receiver slot 0 is exactly
@@ -253,6 +263,13 @@ pub(super) fn synth_value_members(
     // reads inside it are lowered to the carrier later in this pass. The ordinary instance override is
     // synthesized below as the ABI delegator back to this implementation.
     let custom_any_roles = ir.any_member_overrides(internal_name);
+    // Common lowering declares the structural trio every final value class generates. On the JVM
+    // that declaration is the box's instance member, which delegates to the static `-impl` over the
+    // carrier synthesized below; it keeps its identity, so every checked call naming it stays bound.
+    let generated = |role| ir.data_class_member(internal_name, role);
+    let generated_equals = generated(crate::ir::IrDataClassMemberRole::Equals);
+    let generated_hash_code = generated(crate::ir::IrDataClassMemberRole::HashCode);
+    let generated_to_string = generated(crate::ir::IrDataClassMemberRole::ToString);
     // Each source override, by the `Any` member it overrides.
     let mut custom_equals = None;
     let mut custom_hash_code = None;
@@ -586,7 +603,10 @@ pub(super) fn synth_value_members(
             args: vec![fv],
         });
         let ibody = ret_block(ir, call);
-        let fid = add_inst(ir, "toString", vec![], str_ir, ibody);
+        let fid = match generated_to_string {
+            Some(function) => adopt_delegator(ir, function, ibody),
+            None => add_inst(ir, "toString", vec![], str_ir, ibody),
+        };
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, crate::ir::IrValueClassAnyMember::ToString);
@@ -625,7 +645,10 @@ pub(super) fn synth_value_members(
             args: vec![fv],
         });
         let ibody = ret_block(ir, call);
-        let fid = add_inst(ir, "hashCode", vec![], int_ir, ibody);
+        let fid = match generated_hash_code {
+            Some(function) => adopt_delegator(ir, function, ibody),
+            None => add_inst(ir, "hashCode", vec![], int_ir, ibody),
+        };
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, crate::ir::IrValueClassAnyMember::HashCode);
@@ -731,7 +754,10 @@ pub(super) fn synth_value_members(
         });
         let ibody = ret_block(ir, call);
         // `Any.equals` declares `other: Any?`, and an override keeps that parameter type.
-        let fid = add_inst(ir, "equals", vec![Ty::nullable(any_ir)], bool_ir, ibody);
+        let fid = match generated_equals {
+            Some(function) => adopt_delegator(ir, function, ibody),
+            None => add_inst(ir, "equals", vec![Ty::nullable(any_ir)], bool_ir, ibody),
+        };
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, crate::ir::IrValueClassAnyMember::Equals);

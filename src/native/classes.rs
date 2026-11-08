@@ -272,9 +272,6 @@ pub(super) enum Slot {
     /// identity. `hashCode` is the contract sum of `(127 * name.hashCode()) xor value.hashCode()`,
     /// and a program can read it: the corpus computes the same sum in Kotlin and compares.
     AnnotationMember { class: ClassId, member: AnyMember },
-    /// `kotlin.Any`'s three for a VALUE CLASS's box, answered by the value it holds: two boxes of
-    /// one value class are equal when their values are, and `V(x=1)` is how one renders.
-    ValueMember { class: ClassId, member: AnyMember },
     /// A value class's own member, reached through its BOX. The member itself takes the value as
     /// `this` — that is what a value class is — while a vtable is read off an object, so this
     /// entry takes the box, reads the value out of it, and calls the member with that.
@@ -645,20 +642,6 @@ fn layout_class(
             vtable[slot] = Slot::AnnotationMember { class: id, member };
         }
     }
-    // A value class's box answers `kotlin.Any`'s three by the value it holds. One the class
-    // declares itself keeps its own, reached through the unboxing bridge `build` installs.
-    if values.is_value_class(class.fq_name) {
-        value_field(ir, id)?;
-        for (slot, member) in [
-            (0, AnyMember::Equals),
-            (1, AnyMember::HashCode),
-            (2, AnyMember::ToString),
-        ] {
-            if matches!(vtable[slot], Slot::Runtime(_)) {
-                vtable[slot] = Slot::ValueMember { class: id, member };
-            }
-        }
-    }
     Ok(ClassLayout {
         superclass: table.superclass,
         fields,
@@ -944,6 +927,7 @@ mod tests {
         let a = class(&mut ir, "A", "kotlin/Any", 0);
         ir.classes[a as usize].fields = vec![field("v", Ty::Int)];
         ir.classes[a as usize].properties = vec![IrProperty {
+            origin: crate::ir::IrPropertyOrigin::Declaration,
             name: "v".to_string(),
             diagnostic_span: None,
             getter_diagnostic_span: None,
@@ -969,8 +953,6 @@ mod tests {
             setter_visibility: crate::types::Visibility::Public,
             getter: None,
             setter: None,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
             needs_access_bridge: false,
             accessor_annotations: Default::default(),
         }];

@@ -528,6 +528,7 @@ fn materialize_delegation(
                     continue;
                 }
                 ir.classes[class as usize].properties.push(IrProperty {
+                    origin: crate::ir::IrPropertyOrigin::Declaration,
                     name,
                     diagnostic_span: None,
                     getter_diagnostic_span: None,
@@ -553,8 +554,6 @@ fn materialize_delegation(
                     setter_visibility: crate::types::Visibility::Public,
                     getter: Some(getter),
                     setter,
-                    getter_jvm_name: None,
-                    setter_jvm_name: None,
                     needs_access_bridge: false,
                     accessor_annotations: Default::default(),
                 });

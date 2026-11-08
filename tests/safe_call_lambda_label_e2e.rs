@@ -14,3 +14,14 @@ const PROGRAM: &str =
 fn safe_call_lambdas_take_the_callee_label_like_kotlinc() {
     common::expect_box_same_as_kotlinc(PROGRAM, "SafeCallLambdaImplicitLabel");
 }
+
+/// A discarded safe-call `let` whose lambda returns a value through its label and assigns a
+/// captured `var`. The labeled return and the fall-through both have to reach the statement after
+/// the call with the same operand stack; otherwise frame computation declines with `StackHeight`.
+/// The program is the shared regression `discardedSafeCallLetValueReturn.kt`. kotlinc compiles the
+/// body and `box()` returns `OK`.
+#[test]
+fn a_discarded_safe_call_let_with_a_labeled_value_return_computes_frames_like_kotlinc() {
+    const SOURCE: &str = include_str!("box_regressions/discardedSafeCallLetValueReturn.kt");
+    common::expect_box_same_as_kotlinc(SOURCE, "discarded safe-call let value return");
+}

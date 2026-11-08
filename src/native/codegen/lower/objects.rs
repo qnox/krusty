@@ -285,7 +285,6 @@ impl<'a> FileLowering<'a> {
                     Slot::FieldGetter { .. }
                         | Slot::FieldSetter { .. }
                         | Slot::AnnotationMember { .. }
-                        | Slot::ValueMember { .. }
                         | Slot::ValueBridge { .. }
                         | Slot::Bridge { .. }
                         | Slot::FunctionBridge { .. }
@@ -377,14 +376,8 @@ impl<'a> FileLowering<'a> {
                 self.accessors.insert(slot, id);
                 continue;
             }
-            if let Slot::ValueMember { class, member } | Slot::AnnotationMember { class, member } =
-                &slot
-            {
-                let prefix = if matches!(slot, Slot::ValueMember { .. }) {
-                    "box"
-                } else {
-                    "value"
-                };
+            if let Slot::AnnotationMember { class, member } = &slot {
+                let prefix = "value";
                 let base = self.class_base(*class).to_string();
                 let (suffix, params, ret) = match member {
                     AnyMember::Equals => ("equals", vec![any(), any()], Ty::Boolean),
@@ -668,7 +661,6 @@ impl<'a> FileLowering<'a> {
                 Slot::FieldGetter { .. }
                 | Slot::FieldSetter { .. }
                 | Slot::AnnotationMember { .. }
-                | Slot::ValueMember { .. }
                 | Slot::ValueBridge { .. }
                 | Slot::Bridge { .. }
                 | Slot::FunctionBridge { .. }
@@ -1243,9 +1235,6 @@ impl<'a> FileLowering<'a> {
         }
         if let Slot::AnnotationMember { class, member } = slot {
             return self.define_annotation_member(*class, *member, id);
-        }
-        if let Slot::ValueMember { class, member } = slot {
-            return self.define_value_member(*class, *member, id);
         }
         if let Slot::ValueBridge { class, function } = slot {
             return self.define_value_bridge(*class, *function, id);
@@ -2060,6 +2049,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return self.runtime_construction(internal, args, selected);
         }
         if let Some(constructed) = self.value_construction(internal, args) {
+            return constructed;
+        }
+        if let Some(constructed) =
+            self.unsigned_array_carrier_construction(internal, args, selected)
+        {
             return constructed;
         }
         if let Some(constructed) = self.range_class_construction(internal, args) {

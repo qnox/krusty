@@ -159,6 +159,9 @@ impl Backend for WasmBackend {
             return Vec::new();
         }
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
+        // Before default arguments: a constant leaving constructor arguments out is then an
+        // ordinary construction for that lowering.
+        crate::backend::enums::realize(&mut file.ir, crate::backend::enums::Contract::KotlinWasm);
         crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables, |function| {
             file.dependency_exports.callable(function).is_some()
         });
@@ -319,6 +322,9 @@ const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy =
 
 #[cfg(test)]
 mod tests {
+    mod companion_declarations;
+    mod reference_array_size;
+
     use super::{WasmBackend, WasmTarget};
     use crate::backend::{Artifact, Entry};
     use crate::diag::DiagSink;
@@ -390,18 +396,18 @@ mod tests {
     }
 
     #[test]
-    fn a_try_with_finally_still_declines_without_an_artifact() {
-        // Wasm backend contract, not a portable semantic claim: finally lowering is a later slice.
+    fn finally_regions_with_nonlocal_transfers_compile_on_both_targets() {
+        // The whole runtime contract is tests/box_regressions/finallyOnEveryExit.kt.
         for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile(
-                target,
-                "fun box(): String = try { \"OK\" } finally { val unused = 0 }",
-            );
-            assert_eq!(outputs, Vec::<Artifact>::new());
-            assert_eq!(
-                diagnostics,
-                ["krusty: the wasm backend does not support a `try` with `finally` yet"]
-            );
+            for source in [
+                "fun box(): String { try { return \"OK\" } finally { val unused = 0 } }",
+                "fun box(): String { while (true) { try { break } finally { val unused = 0 } }; return \"OK\" }",
+                "var keepGoing = true\nfun box(): String { while (keepGoing) { try { keepGoing = false; continue } finally { val unused = 0 } }; return \"OK\" }",
+            ] {
+                let (outputs, diagnostics) = compile(target, source);
+                assert_eq!(diagnostics, Vec::<String>::new());
+                assert_eq!(outputs.len(), 2);
+            }
         }
     }
 
@@ -524,13 +530,38 @@ mod tests {
     fn an_unsupported_construct_declines_the_whole_compilation_by_name() {
         let (outputs, diagnostics) = compile(
             WasmTarget::Js,
-            "enum class Color { RED }\nfun box(): String = \"OK\"",
+            "lateinit var pending: String\nfun box(): String = \"OK\"",
         );
         assert_eq!(outputs, Vec::<Artifact>::new());
         assert_eq!(
             diagnostics,
-            ["krusty: the wasm backend does not support an enum class (`Color`) yet"]
+            ["krusty: the wasm backend does not support a `lateinit` top-level property yet"]
         );
+    }
+
+    #[test]
+    fn an_enum_class_compiles_to_one_module_on_both_targets() {
+        use crate::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+
+        for target in WasmTarget::ALL {
+            let path = crate::toolchain::kotlin_stdlib_klib(
+                crate::backend::Backend::compilation_target(&WasmBackend::new(target)),
+            )
+            .expect("the exact target stdlib must be provisioned");
+            let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+                path,
+                KlibStdlibSemantics::Wasm,
+            )])
+            .unwrap();
+            let (outputs, diagnostics) = compile_program_with_provider(
+                target,
+                Entry::Box,
+                &["enum class Color { RED }\nfun box(): String = \"OK\""],
+                Box::new(libraries),
+            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
     }
 
     #[test]

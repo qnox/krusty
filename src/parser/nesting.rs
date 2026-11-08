@@ -46,6 +46,9 @@ impl Parser<'_> {
     fn skip_over_deep_rest(&mut self, angle_brackets: bool) {
         let mut depth = 0i32;
         loop {
+            if depth == 0 && self.newline_before() {
+                break;
+            }
             match self.kind() {
                 TokenKind::Eof => break,
                 TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
@@ -70,7 +73,7 @@ impl Parser<'_> {
                     depth -= 1;
                     self.bump();
                 }
-                TokenKind::Newline if depth == 0 => break,
+                TokenKind::Semicolon if depth == 0 => break,
                 _ => {
                     self.bump();
                 }
