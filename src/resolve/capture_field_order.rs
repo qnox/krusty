@@ -65,25 +65,26 @@ pub(super) fn reconcile(
 }
 
 fn same_capture(capture: &AnonymousObjectCapture, exact: &AnonymousObjectCapture) -> bool {
-    match (capture.source, exact.source) {
-        (
-            AnonymousObjectCaptureSource::ClassStorage(left),
-            AnonymousObjectCaptureSource::ClassStorage(right),
-        ) => left.identity == right.identity,
-        (
-            AnonymousObjectCaptureSource::ImplicitReceiver { .. },
-            AnonymousObjectCaptureSource::ImplicitReceiver { .. },
-        )
-        | (
-            AnonymousObjectCaptureSource::EnclosingInstance { .. },
-            AnonymousObjectCaptureSource::EnclosingInstance { .. },
-        ) => capture.same_direct_receiver(exact),
-        (left, right) => {
-            capture.name == exact.name
-                && left == right
-                && capture.lexical_binding == exact.lexical_binding
+    capture.enum_entry_storage == exact.enum_entry_storage
+        && match (capture.source, exact.source) {
+            (
+                AnonymousObjectCaptureSource::ClassStorage(left),
+                AnonymousObjectCaptureSource::ClassStorage(right),
+            ) => left.identity == right.identity,
+            (
+                AnonymousObjectCaptureSource::ImplicitReceiver { .. },
+                AnonymousObjectCaptureSource::ImplicitReceiver { .. },
+            )
+            | (
+                AnonymousObjectCaptureSource::EnclosingInstance { .. },
+                AnonymousObjectCaptureSource::EnclosingInstance { .. },
+            ) => capture.same_direct_receiver(exact),
+            (left, right) => {
+                capture.name == exact.name
+                    && left == right
+                    && capture.lexical_binding == exact.lexical_binding
+            }
         }
-    }
 }
 
 /// A capture keeps its established cell sharing, and its established type while the revisit knows
@@ -476,7 +477,7 @@ impl super::Checker<'_> {
     pub(super) fn record_class_storage_write(&mut self, statement: StmtId, target: Option<Local>) {
         let target = match target.map(|local| (local.origin, local.flow_identity)) {
             Some((ReceiverFnValueOrigin::ClassStorage(storage), _)) => StorageUse::Field(storage),
-            Some((ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field }, _)) => {
+            Some((ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field, .. }, _)) => {
                 StorageUse::EnumEntryField { owner, field }
             }
             Some((ReceiverFnValueOrigin::Local, identity)) => StorageUse::Binding(identity),
@@ -1189,7 +1190,7 @@ impl<'w, 'c> FirstUses<'w, 'c> {
             Some(
                 ExprLowering::EnumEntryStorageRead { owner, field }
                 | ExprLowering::ReceiverFnInvoke {
-                    origin: ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field },
+                    origin: ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field, .. },
                     ..
                 },
             ) => Some(StorageUse::EnumEntryField {

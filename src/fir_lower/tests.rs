@@ -658,6 +658,7 @@ fn external_property_function_reference_is_materialized_without_lookup() {
             dispatch: crate::fir::FirPropertyDispatch::Ordinary,
 
             metadata_constant_read: false,
+            semantic_role: None,
         }),
         setter: None,
         extension_receiver: false,
@@ -759,6 +760,7 @@ fn external_member_extension_property_uses_published_receiver_coordinate() {
                 dispatch: crate::fir::FirPropertyDispatch::Ordinary,
 
                 metadata_constant_read: false,
+                semantic_role: None,
             },
             dispatch_receiver: Some(FirReceiver {
                 value: dispatch,
@@ -835,6 +837,7 @@ fn external_super_property_dispatch_survives_common_lowering() {
                 },
 
                 metadata_constant_read: false,
+                semantic_role: None,
             },
             dispatch_receiver: Some(FirReceiver {
                 value: receiver,

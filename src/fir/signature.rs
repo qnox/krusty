@@ -46,29 +46,14 @@ mod classifier_headers;
 mod declaration_metadata;
 mod serialization_records;
 pub use declaration_metadata::{NoArgSuperConstructor, PropertyAccessor};
+pub use serialization_records::{
+    ResolvedCustomSerializerConstructorTarget, ResolvedTypeUseSerializerConstruction,
+};
 mod file_annotations;
 pub(crate) use file_annotations::FileAnnotationFacts;
 mod result_expectation;
 mod source_inventory;
 mod source_packages;
-
-/// Exact constructor declaration selected for a serializer class named by a checked type-use
-/// annotation. Module and dependency declarations share the same semantic payload; only their
-/// stable identity carrier differs.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ResolvedCustomSerializerConstructorTarget {
-    Module(DeclarationId),
-    External(ExternalCallableId),
-}
-
-/// Frontend-selected construction of a serializer class for an annotated type occurrence.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedTypeUseSerializerConstruction {
-    pub serializer: TypeName,
-    pub parameters: Box<[ResolvedTy]>,
-    pub operands: Box<[u32]>,
-    pub target: ResolvedCustomSerializerConstructorTarget,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SigSubstitution {
@@ -670,6 +655,19 @@ pub trait SignatureSemantics:
         expected: Option<ResolvedTy>,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;
+
+    /// A call argument's materialized type with the formals its own inputs left unfixed named as
+    /// variables of the enclosing call. Formals lexically visible at `scope` are fixed types of
+    /// the enclosing declarations and are kept. Kotlin solves a nested call's open variables in
+    /// the enclosing call's constraint system; the enclosing selection must therefore not read
+    /// them as already-fixed argument types.
+    fn nested_result_variables(
+        &self,
+        _scope: SignatureScope,
+        ty: ResolvedTy,
+    ) -> Result<ResolvedTy, DiagnosticId> {
+        Ok(ty)
+    }
 
     fn select_call(
         &self,

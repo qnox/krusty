@@ -177,7 +177,7 @@ pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
     IrAccessorLines, IrCheckedProperty, IrInlinePropertySplice, IrInlineTypeSubstitution,
     IrMemberKind, IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers,
-    MemberExtProp, PrivatePropertyAccessorCall,
+    IrPropertyOrigin, MemberExtProp, PrivatePropertyAccessorCall,
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
@@ -1872,6 +1872,11 @@ pub struct IrFile {
     /// adaptation boundary records this edge when it creates the call; later representation
     /// analysis consumes the identity and never recognizes an unbox operation by its spelling.
     pub(crate) value_class_unbox_type_operation_edges: crate::fx_hash::HashMap<ExprId, ExprId>,
+    /// JVM null-safe value-class unbox call -> the type operation whose value it unboxes through
+    /// its temporary (`a as X?`: `checkcast X`, then `unbox-impl` unless null). The call reads the
+    /// temporary, so it is not the call's receiver, but it is the same checked box.
+    pub(crate) value_class_null_safe_unbox_type_operation_edges:
+        crate::fx_hash::HashMap<ExprId, ExprId>,
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
