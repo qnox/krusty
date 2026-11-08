@@ -52,13 +52,55 @@ pub(super) fn verify_declined_stdlib_source_with_kotlinc() {
 
 /// The frontend rejection of a call of a required inline dependency function that has no
 /// template. The callee's identity is opaque and assigned per compilation, so it is read back
-/// whole from the message and must be a number; every other character is exact.
+/// whole from the message and must be a number. The `Body` and `UnsupportedExternalCall`
+/// parentheses stay exact. When the provider still holds the selected declaration, the driver
+/// appends that declaration after them; a missing selection leaves nothing after the parentheses.
 pub(super) fn required_inline_rejection(message: &str) -> Option<u32> {
-    message
-        .strip_prefix(
-            "internal error: checked FIR lowering failed: Body(UnsupportedExternalCall(ExternalCallableId(",
-        )?
-        .strip_suffix(")))")?
-        .parse()
-        .ok()
+    let rest = message.strip_prefix(
+        "internal error: checked FIR lowering failed: Body(UnsupportedExternalCall(ExternalCallableId(",
+    )?;
+    let (id, tail) = rest.split_once(")))")?;
+    let id = id.parse().ok()?;
+    if tail.is_empty() {
+        return Some(id);
+    }
+    let described = tail.strip_prefix("; selected dependency owner=")?;
+    (described.contains(", name=")
+        && described.contains(", declaration=")
+        && described.contains(", dependency="))
+    .then_some(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::required_inline_rejection;
+
+    #[test]
+    fn a_required_inline_rejection_reads_the_opaque_id_and_its_selected_declaration() {
+        let message = "internal error: checked FIR lowering failed: Body(UnsupportedExternalCall(ExternalCallableId(88))); selected dependency owner=Some(Package(TypeName(\"\"))), name=\"countOf\", declaration=Some(Public(id)), dependency=Some(dep)";
+        assert_eq!(required_inline_rejection(message), Some(88));
+    }
+
+    #[test]
+    fn a_required_inline_rejection_without_a_retained_declaration_keeps_the_bare_id() {
+        let message = "internal error: checked FIR lowering failed: Body(UnsupportedExternalCall(ExternalCallableId(13)))";
+        assert_eq!(required_inline_rejection(message), Some(13));
+    }
+
+    #[test]
+    fn a_required_inline_rejection_rejects_a_rewritten_tail() {
+        assert_eq!(required_inline_rejection("nope"), None);
+        assert_eq!(
+            required_inline_rejection(
+                "internal error: checked FIR lowering failed: Body(UnsupportedExternalCall(ExternalCallableId(no)))"
+            ),
+            None
+        );
+        assert_eq!(
+            required_inline_rejection(
+                "internal error: checked FIR lowering failed: Body(UnsupportedExternalCall(ExternalCallableId(13))); something else"
+            ),
+            None
+        );
+    }
 }
