@@ -5389,7 +5389,6 @@ when/enumOptimization/nullableEnum.kt
 when/enumOptimization/subjectAny.kt
 when/enumOptimization/withoutElse.kt
 when/exceptionOnNoMatch.kt
-when/exhaustiveBreakContinue.kt
 when/exhaustiveWhenInitialization.kt
 when/exhaustiveWhenReturn.kt
 when/exhaustiveness/exhaustiveWithNegativeEnum.kt
