@@ -78,3 +78,11 @@ fn unsigned_narrow_increment_wraps() {
         "UnsignedNarrowWraparound",
     );
 }
+
+#[test]
+fn unsigned_storage_read_sign_extends() {
+    run(
+        include_str!("box_regressions/UnsignedToSignedNarrowing.kt"),
+        "UnsignedToSignedNarrowing",
+    );
+}

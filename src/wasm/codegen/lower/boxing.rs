@@ -44,7 +44,10 @@ impl Body<'_> {
             )));
         };
         Some((|| {
+            // The argument is the signed carrier, so a `Byte`/`Short` arrives sign-extended.
+            // The unsigned value keeps its own low bits, and a box stores those bits.
             self.value(*argument, underlying)?;
+            self.coerce_emitted_value(underlying, unsigned)?;
             let result = self.type_of(site)?.unwrap_or(unsigned);
             if matches!(carrier(result)?, Some(ValType::Ref { .. })) {
                 self.box_value(unsigned)?;

@@ -87,8 +87,8 @@ impl Body<'_> {
         }
     }
 
-    /// Whether `target` is an unsigned value class's underlying storage property. Reading it
-    /// yields the scalar this target already carries the value as.
+    /// Whether `target` is an unsigned value class's underlying storage property. Its type is
+    /// the signed carrier; the read converts from the zero-extended unsigned value.
     pub(super) fn unsigned_storage_property(&self, target: crate::fir::ExternalPropertyId) -> bool {
         let Some(property) = self.callables.property(target) else {
             return false;

@@ -1453,7 +1453,13 @@ impl<'a> Body<'a> {
                     .property(*target)
                     .map(|property| Ty::obj_name(property.owner).canonical_semantic())
                     .ok_or_else(|| "an unsigned storage read without its property".to_string())?;
+                let Some(signed) = unsigned.scalar_value_repr() else {
+                    return Err("an unsigned storage read with no signed carrier".into());
+                };
+                // `UByte`/`UShort` are carried zero-extended. Their `data` is a `Byte`/`Short`,
+                // which is sign-extended, so `255u.toByte()` is `-1`.
                 self.value(*receiver, unsigned)?;
+                self.coerce_emitted_value(unsigned, signed)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::PropertyWrite {
