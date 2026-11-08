@@ -232,6 +232,13 @@ private fun replaceKotlinJvmCompiles(
             binary.set(project.layout.file(binaryPath.map(::File)))
             refusals.set(compilerChoice)
         }
+        // KGP can put generated classes on the classpath by path and wire their producers onto
+        // the Kotlin task. Every reader needs those predecessors, including the fingerprint that
+        // runs before the replacement. The Kotlin task depends on our replacement, so that is the
+        // one edge a reader must not take back.
+        val compilePrerequisites = project.provider {
+            kotlinTask.dependsOn.filterNot { it is TaskProvider<*> && it.name == replacementName }
+        }
         val classpathFingerprint = project.tasks.register(
             "${kotlinTask.name}KrustyClasspath",
             KrustyClasspathFingerprintTask::class.java,
@@ -239,6 +246,7 @@ private fun replaceKotlinJvmCompiles(
             description = "Fingerprints what ${kotlinTask.path} observes of its classpath"
             libraries.from(kotlinTask.libraries)
             friendPaths.from(kotlinTask.friendPaths)
+            dependsOn(compilePrerequisites)
             binary.set(project.layout.file(binaryPath.map(::File)))
             viewCache.set(File(project.gradle.gradleUserHomeDir, "caches/krusty/dependency-views").absolutePath)
             fingerprint.set(project.layout.buildDirectory.file("krusty/${kotlinTask.name}/classpath-fingerprint.txt"))
@@ -282,15 +290,7 @@ private fun replaceKotlinJvmCompiles(
             description = "${kotlinTask.description ?: kotlinTask.name}, using krusty"
             configureCompilation()
             destinationDirectory.set(kotlinTask.destinationDirectory)
-            // A build that adds a source directory by path wires its generator onto the Kotlin
-            // task (`compileKotlin { dependsOn(generator) }`), not onto the directory. The compile
-            // runs here now, so it needs those dependencies; the Kotlin task's dependency on this
-            // replacement is the one it must not take back.
-            dependsOn(
-                project.provider {
-                    kotlinTask.dependsOn.filterNot { it is TaskProvider<*> && it.name == replacementName }
-                },
-            )
+            dependsOn(compilePrerequisites)
             dependsOn(supportCheck)
             onlyIf("krusty implements everything the compile requests") { !compilerChoice.refuses() }
             onlyIf("the build verifies krusty against kotlinc, which compiles") { !verifying }
