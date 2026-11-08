@@ -14,18 +14,19 @@
 //! static getter of `n$volatile$FU` that every operation calls: `n.incrementAndGet()` becomes
 //! `getN$volatile$FU().incrementAndGet(this)`.
 
-use super::source_facts::{AtomicfuFileFacts, FieldUpdater, UpdaterOperation};
+use super::source_facts::{AtomicValue, AtomicfuFileFacts, FieldUpdater, UpdaterOperation};
 use crate::ir::{
-    Callee, ClassId, ExprId, IrConst, IrExpr, IrFile, IrFunction, IrGeneratedDeclarationDebug,
-    IrGeneratedFunctionMetadataScope, IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
-    IrParameterIdentity,
+    Callee, ClassId, ExprId, IrBinOp, IrConst, IrExpr, IrFile, IrFunction,
+    IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadataScope, IrGeneratedFunctionPublication,
+    IrGeneratedMemberPublication, IrParameterIdentity,
 };
 use crate::plugins::runtime_declarations::BoundRuntimeFunction;
-use crate::types::{type_name, Ty, Visibility};
+use crate::types::{type_name, EqualityMode, Ty, Visibility};
 
 /// What [`lower_declaration`] made of one atomic, for its operations.
 struct LoweredUpdater {
     class: ClassId,
+    value: AtomicValue,
     /// The private static getter of the updater.
     getter: u32,
 }
@@ -55,7 +56,7 @@ fn lower_declaration(ir: &mut IrFile, updater: &FieldUpdater) -> LoweredUpdater 
     let field = atomic
         .backing_field
         .expect("a recorded atomic property has a backing field");
-    let value = updater.value.ty();
+    let value = updater.value.storage();
     let volatile_name = format!("{}$volatile", atomic.name);
 
     // The atomic property stays the class's declaration, which its metadata describes; the
@@ -69,6 +70,7 @@ fn lower_declaration(ir: &mut IrFile, updater: &FieldUpdater) -> LoweredUpdater 
         .with_is_final(false)
         .with_compiler_generated(true);
     let (store, initial) = updater.initializer;
+    let initial = stored_value(ir, updater.value, initial);
     if let IrExpr::SetField { value: stored, .. } = &mut ir.exprs[store as usize] {
         *stored = initial;
     }
@@ -180,7 +182,11 @@ fn lower_declaration(ir: &mut IrFile, updater: &FieldUpdater) -> LoweredUpdater 
     ir.set_method_visibility(getter, Visibility::Private);
     ir.classes[class as usize].methods.push(getter);
     publish(ir, owner, getter, vec![]);
-    LoweredUpdater { class, getter }
+    LoweredUpdater {
+        class,
+        value: updater.value,
+        getter,
+    }
 }
 
 /// `n.op(args)` → `getN$volatile$FU().op(instance, args)`: the read of the atomic becomes the read
@@ -195,8 +201,13 @@ fn lower_operation(ir: &mut IrFile, updater: &LoweredUpdater, operation: &Update
         dispatch_receiver: None,
         args: vec![],
     };
+    let arguments = operation
+        .arguments
+        .iter()
+        .map(|&argument| stored_value(ir, updater.value, argument))
+        .collect::<Vec<_>>();
     let args = std::iter::once(operation.instance)
-        .chain(operation.arguments.iter().copied())
+        .chain(arguments)
         .collect();
     // The backend realizes a plugin's runtime calls among the expressions the plugin adds, so the
     // operation becomes a block whose value is a new call.
@@ -204,10 +215,49 @@ fn lower_operation(ir: &mut IrFile, updater: &LoweredUpdater, operation: &Update
     if let Some(&line) = ir.expr_lines.get(&operation.expression) {
         ir.expr_lines.insert(updated, line);
     }
+    let value = if operation.function.ret == updater.value.storage() {
+        loaded_value(ir, updater.value, updated)
+    } else {
+        updated
+    };
     ir.exprs[operation.expression as usize] = IrExpr::Block {
         stmts: vec![],
-        value: Some(updated),
+        value: Some(value),
     };
+}
+
+/// `value` as the field stores it: a `Boolean` is `if (value) 1 else 0`, as kotlinc's `toInt`
+/// builds it. kotlinc's code generator takes the branch of a constant condition, so a constant is
+/// stored as its `Int` (and a constructor stores no default `0`).
+fn stored_value(ir: &mut IrFile, kind: AtomicValue, value: ExprId) -> ExprId {
+    if kind != AtomicValue::Boolean {
+        return value;
+    }
+    if let IrExpr::Const(IrConst::Boolean(constant)) = ir.exprs[value as usize] {
+        return ir.add_expr(IrExpr::Const(IrConst::Int(i32::from(constant))));
+    }
+    let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+    let converted = ir.add_expr(IrExpr::When {
+        branches: vec![(Some(value), one), (None, zero)],
+    });
+    ir.whens.exhaustive.insert(converted, Ty::Int);
+    converted
+}
+
+/// The atomic's value from what the field stores: a `Boolean` is `stored == 1`, as kotlinc's
+/// `toBoolean` builds it.
+fn loaded_value(ir: &mut IrFile, kind: AtomicValue, stored: ExprId) -> ExprId {
+    if kind != AtomicValue::Boolean {
+        return stored;
+    }
+    let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+    ir.add_expr(IrExpr::Equality {
+        op: IrBinOp::Eq,
+        mode: EqualityMode::Primitive,
+        lhs: stored,
+        rhs: one,
+    })
 }
 
 /// The JVM accessor name of a generated property: `get` + its capitalized name.

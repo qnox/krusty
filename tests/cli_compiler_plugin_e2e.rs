@@ -730,9 +730,9 @@ fn compose_report_destinations_fail_the_compile() {
 #[test]
 fn the_atomicfu_pass_rejects_what_it_does_not_cover() {
     assert_atomicfu_rejects(
-        "atomicfu-boolean",
-        "class Flag { private val set = atomic(false) }\n",
-        "3:22: error: krusty's atomicfu compiler plugin does not support an AtomicBoolean yet",
+        "atomicfu-reference",
+        "class Flag { private val set = atomic<String?>(null) }\n",
+        "3:22: error: krusty's atomicfu compiler plugin does not support an AtomicRef yet",
     );
     assert_atomicfu_rejects(
         "atomicfu-top-level",

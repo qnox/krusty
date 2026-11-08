@@ -59,12 +59,15 @@ pub(super) struct UpdaterOperation {
 pub(super) enum AtomicValue {
     Int,
     Long,
+    /// Stored as an `Int`: `1` for `true`, `0` for `false`.
+    Boolean,
 }
 
 impl AtomicValue {
-    pub(super) fn ty(self) -> Ty {
+    /// The type of the volatile field that stores the value.
+    pub(super) fn storage(self) -> Ty {
         match self {
-            Self::Int => Ty::Int,
+            Self::Int | Self::Boolean => Ty::Int,
             Self::Long => Ty::Long,
         }
     }
@@ -74,7 +77,7 @@ impl AtomicValue {
         type_name(&format!(
             "{FIELD_UPDATERS}/{}",
             match self {
-                Self::Int => "AtomicIntegerFieldUpdater",
+                Self::Int | Self::Boolean => "AtomicIntegerFieldUpdater",
                 Self::Long => "AtomicLongFieldUpdater",
             }
         ))
@@ -96,7 +99,7 @@ fn atomic_type(ty: Ty) -> Option<AtomicType> {
     } else if atomic("AtomicLong") {
         AtomicType::Lowered(AtomicValue::Long)
     } else if atomic("AtomicBoolean") {
-        AtomicType::Unsupported("an AtomicBoolean")
+        AtomicType::Lowered(AtomicValue::Boolean)
     } else if atomic("AtomicRef") {
         AtomicType::Unsupported("an AtomicRef")
     } else if [
@@ -115,25 +118,28 @@ fn atomic_type(ty: Ty) -> Option<AtomicType> {
 }
 
 /// An operation of an atomic class, by the updater function it becomes and the parameters that
-/// function takes after the updated instance. `value` is the atomic's property: a read with no
-/// arguments, a write with one.
+/// function takes after the updated instance, both in the field's storage type. `value` is the
+/// atomic's property: a read with no arguments, a write with one. Only an `Int` or `Long` atomic
+/// has arithmetic.
 fn updater_function(
     name: &str,
     arguments: usize,
-    value: Ty,
+    value: AtomicValue,
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    let stored = value.storage();
+    let arithmetic = matches!(value, AtomicValue::Int | AtomicValue::Long);
     Some(match name {
-        "value" if arguments == 0 => ("get", vec![], value),
-        "value" => ("set", vec![value], Ty::Unit),
-        "lazySet" => ("set", vec![value], Ty::Unit),
-        "compareAndSet" => ("compareAndSet", vec![value, value], Ty::Boolean),
-        "getAndSet" => ("getAndSet", vec![value], value),
-        "getAndIncrement" => ("getAndIncrement", vec![], value),
-        "getAndDecrement" => ("getAndDecrement", vec![], value),
-        "incrementAndGet" => ("incrementAndGet", vec![], value),
-        "decrementAndGet" => ("decrementAndGet", vec![], value),
-        "getAndAdd" => ("getAndAdd", vec![value], value),
-        "addAndGet" => ("addAndGet", vec![value], value),
+        "value" if arguments == 0 => ("get", vec![], stored),
+        "value" => ("set", vec![stored], Ty::Unit),
+        "lazySet" => ("set", vec![stored], Ty::Unit),
+        "compareAndSet" => ("compareAndSet", vec![stored, stored], Ty::Boolean),
+        "getAndSet" => ("getAndSet", vec![stored], stored),
+        "getAndIncrement" if arithmetic => ("getAndIncrement", vec![], stored),
+        "getAndDecrement" if arithmetic => ("getAndDecrement", vec![], stored),
+        "incrementAndGet" if arithmetic => ("incrementAndGet", vec![], stored),
+        "decrementAndGet" if arithmetic => ("decrementAndGet", vec![], stored),
+        "getAndAdd" if arithmetic => ("getAndAdd", vec![stored], stored),
+        "addAndGet" if arithmetic => ("addAndGet", vec![stored], stored),
         _ => return None,
     })
 }
@@ -492,7 +498,6 @@ impl Recorder<'_, '_> {
             };
             receivers.push(receiver);
             let class = self.updaters[updater].class;
-            let value_ty = self.updaters[updater].value.ty();
             if owner_of[expression as usize] != Some(class) {
                 self.reject(
                     span,
@@ -500,7 +505,8 @@ impl Recorder<'_, '_> {
                 );
                 continue;
             }
-            let Some((function, params, ret)) = updater_function(&name, arguments.len(), value_ty)
+            let value = self.updaters[updater].value;
+            let Some((function, params, ret)) = updater_function(&name, arguments.len(), value)
             else {
                 self.reject(span, &format!("the atomic operation `{name}`"));
                 continue;

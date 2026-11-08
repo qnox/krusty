@@ -1372,6 +1372,15 @@ fn atomicfu_field_updaters_are_byte_identical_to_kotlinc() {
     );
 }
 
+/// A class's `Boolean` atomics, which the field stores as an `Int`, are kotlinc's too.
+#[test]
+fn atomicfu_boolean_field_updaters_are_byte_identical_to_kotlinc() {
+    assert_plugin_case_matches_kotlinc(
+        include_str!("box_regressions/atomicfu/booleanFieldUpdaters.kt"),
+        "booleanFieldUpdaters",
+    );
+}
+
 /// Each Compose fixture, JVM-only and so outside the portable box regressions, compiles to exactly
 /// the classes the reference compiler and its Compose plugin emit, byte for byte, and both builds
 /// pass its `box()`, which composes and recomposes the transformed functions through a recording
