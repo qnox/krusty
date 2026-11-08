@@ -15,8 +15,8 @@ use crate::fir::{
     ResolvedPropertyOverrideTarget,
 };
 use crate::ir::{
-    Callee, ClassId, CtorDelegateTarget, FunId, IrLocalPropertyLayout, IrSuperCallKind, IrTypeOp,
-    IrVirtualTarget,
+    Callee, ClassId, CtorDelegateTarget, FunId, IrExpr, IrLocalPropertyLayout, IrSuperCallKind,
+    IrTypeOp, IrVirtualTarget,
 };
 use crate::types::{Ty, TyKind, TypeName};
 
@@ -1085,7 +1085,7 @@ impl Body<'_> {
     /// Whether a call through `member`'s slot on a value statically of type `ty` could reach
     /// `kotlin.Any`'s own member. A type naming a class of this file is answered by that class's
     /// hierarchy; any other reference type (`Any`, a type parameter, an interface) is erased, so
-    /// its value can be an instance of every class here. A scalar's box and `Unit` answer the
+    /// its value can be an instance of every class here or a runtime exception object. A scalar's box and `Unit` answer the
     /// member themselves.
     pub(super) fn may_reach_any_default(
         &self,
@@ -1098,6 +1098,9 @@ impl Body<'_> {
         if !matches!(carrier(ty.non_null())?, Some(ValType::Ref { .. })) {
             return Ok(false);
         }
+        if self.holds_runtime_exception_objects() {
+            return Ok(true);
+        }
         let Some(classes) = self.classes else {
             return Ok(false);
         };
@@ -1106,6 +1109,21 @@ impl Body<'_> {
                 && classes.tables.table(id as ClassId).vtable[member.slot() as usize]
                     == Slot::AnyMember(member)
         }))
+    }
+
+    /// Whether an erased reference of this file can hold a runtime exception object. Those objects
+    /// are built by the exception runtime, not declared by this file's classes, and they answer
+    /// none of `kotlin.Any`'s overridable members. One becomes a value only when this file
+    /// constructs a runtime exception class or binds a thrown exception in a catch clause.
+    fn holds_runtime_exception_objects(&self) -> bool {
+        self.ir.exprs.iter().any(|node| match node {
+            IrExpr::Try { catches, .. } => !catches.is_empty(),
+            IrExpr::New { internal, .. } => self
+                .classifiers
+                .classifier(*internal)
+                .is_some_and(|fact| fact.runtime_exception.is_some()),
+            _ => false,
+        })
     }
 
     /// `lhs == rhs` on objects: `lhs?.equals(rhs) ?: (rhs === null)`.
