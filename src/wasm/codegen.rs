@@ -161,6 +161,7 @@ impl Backend for WasmBackend {
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
         // Before default arguments: a constant leaving constructor arguments out is then an
         // ordinary construction for that lowering.
+        crate::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
         crate::backend::enums::realize(&mut file.ir, crate::backend::enums::Contract::KotlinWasm);
         crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables, |function| {
             file.dependency_exports.callable(function).is_some()

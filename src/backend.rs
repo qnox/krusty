@@ -42,7 +42,7 @@ pub use dependency_metadata::{
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
 pub(crate) use dependency_metadata::{
-    ExportedConstructor, ExportedPropertyAccessor, KlibDependencyCallable,
+    EnumConstant, ExportedConstructor, ExportedPropertyAccessor, KlibDependencyCallable,
 };
 pub(crate) use dependency_signature::{
     instantiate_dependency_signature, DependencyFunctionSignature,

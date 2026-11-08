@@ -220,6 +220,8 @@ pub struct FileInput<'a> {
         &'a HashMap<crate::backend::KlibDependencyCallable, super::DependencyExport>,
     /// The exported instance entry of each preceding source module's object, by its classifier.
     pub dependency_singletons: &'a HashMap<crate::types::TypeName, String>,
+    /// The exported entry answering each constant of a preceding file's enum.
+    pub dependency_enum_constants: &'a HashMap<crate::backend::EnumConstant, String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::native::dependency_references`].
     pub dependency_properties:
@@ -255,6 +257,7 @@ pub fn lower_file(
         dependency_signatures,
         dependency_symbols,
         dependency_singletons,
+        dependency_enum_constants,
         value_classes,
         slot_plan,
         module_facts,
@@ -346,6 +349,7 @@ pub fn lower_file(
         dependency_symbols,
         dependency_singletons,
         dependency_interface_calls: Vec::new(),
+        dependency_enum_constants,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
     // receivers have a runtime-walkable representation and which shapes still decline; both are read while
@@ -531,6 +535,8 @@ struct FileLowering<'a> {
     dependency_interface_calls: Vec<(u32, Vec<u8>)>,
     /// The exported instance entry of each preceding source module's object, by its classifier.
     dependency_singletons: &'a HashMap<crate::types::TypeName, String>,
+    /// The exported entry answering each constant of a preceding file's enum.
+    dependency_enum_constants: &'a HashMap<crate::backend::EnumConstant, String>,
 }
 
 impl<'a> FileLowering<'a> {
@@ -1864,9 +1870,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 value,
             } => self.ref_set(holder, elem, value),
             // The shared enum lowering realized every enum this file declares; what is left names
-            // an enum another file declares, whose constants live there.
-            IrExpr::EnumEntry { classifier, .. }
-            | IrExpr::EnumValues { classifier }
+            // an enum another file declares, whose constants live there. A constant is read
+            // through the entry the declaring file exports.
+            IrExpr::EnumEntry { classifier, name } => {
+                self.dependency_enum_constant(classifier, &name)
+            }
+            IrExpr::EnumValues { classifier }
             | IrExpr::EnumEntries { classifier }
             | IrExpr::EnumValueOf { classifier, .. } => Err(declined!(
                 "an enum another file declares (`{}`)",

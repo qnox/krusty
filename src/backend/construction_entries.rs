@@ -43,7 +43,13 @@ fn instance(ir: &mut IrFile, classifier: crate::types::TypeName) -> Option<FunId
 }
 
 /// A compiler-generated static function of the file returning `value`.
-fn entry(ir: &mut IrFile, name: &str, parameters: Vec<Ty>, result: Ty, value: ExprId) -> FunId {
+pub(super) fn entry(
+    ir: &mut IrFile,
+    name: &str,
+    parameters: Vec<Ty>,
+    result: Ty,
+    value: ExprId,
+) -> FunId {
     let last = ir.add_expr(IrExpr::Return(Some(value)));
     let body = ir.add_expr(IrExpr::Block {
         stmts: vec![last],

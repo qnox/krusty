@@ -125,6 +125,8 @@ pub struct CodegenModule {
     /// The exported entry answering each preceding source module's object instance, by the
     /// object's classifier.
     dependency_singletons: crate::fx_hash::HashMap<crate::backend::DependencyClassifier, String>,
+    /// The exported entry answering each constant of a preceding file's enum.
+    dependency_enum_constants: crate::fx_hash::HashMap<crate::backend::EnumConstant, String>,
     next_dependency_symbol: usize,
     next_dependency_support_object: usize,
     next_disambiguated_source_object: usize,
@@ -232,6 +234,7 @@ impl Backend for CraneliftBackend {
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
         // Before default arguments: a constant leaving constructor arguments out is then an
         // ordinary construction for that lowering.
+        crate::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
         crate::backend::enums::realize(&mut file.ir, crate::backend::enums::Contract::KotlinNative);
         crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables, |function| {
             file.dependency_exports.callable(function).is_some()
@@ -438,6 +441,44 @@ impl Backend for CraneliftBackend {
                 },
             );
         }
+        let mut constants = file.dependency_exports.enum_constant_entries().to_vec();
+        constants.sort_unstable_by_key(|(_, entry)| *entry);
+        for (constant, entry) in constants {
+            let symbol = format!("kt_klib_enum_constant_{}", state.next_dependency_symbol);
+            state.next_dependency_symbol += 1;
+            let signature =
+                match crate::backend::DependencyFunctionSignature::from_ir(&file.ir, entry, None) {
+                    Ok(signature) => signature,
+                    Err(error) => {
+                        diags.error(
+                            crate::diag::Span::new(0, 0),
+                            format!("internal error: {error}"),
+                        );
+                        return Vec::new();
+                    }
+                };
+            if state
+                .dependency_enum_constants
+                .insert(constant, symbol.clone())
+                .is_some()
+            {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    "internal error: two files export one enum constant",
+                );
+                return Vec::new();
+            }
+            dependency_exports.insert(
+                entry,
+                DependencyExportDefinition {
+                    symbol,
+                    signature,
+                    member_receiver: None,
+                    default_entry: None,
+                    dispatch_entry: None,
+                },
+            );
+        }
         let lowered = match lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
@@ -457,6 +498,7 @@ impl Backend for CraneliftBackend {
                 dependency_signatures: &file.dependency_exports,
                 dependency_symbols: &state.dependency_symbols,
                 dependency_singletons: &state.dependency_singletons,
+                dependency_enum_constants: &state.dependency_enum_constants,
             },
             self.target,
             &object_stem,

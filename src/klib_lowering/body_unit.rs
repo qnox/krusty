@@ -175,6 +175,9 @@ pub struct DependencyBodyUnit {
     /// Enum classes whose constants this unit's bodies read, keyed by their constructor. Their
     /// constants are built by the shared enum realization, so none exports a constructor.
     enum_classes: HashMap<KlibDependencyCallable, crate::ir::ClassId>,
+    /// Enum classes an earlier unit of the program materialized and exports the constants of:
+    /// this unit reads them through those exports instead of holding a second copy.
+    realized_enums: HashSet<TypeName>,
     authenticated_singleton_dispatches: HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: HashMap<KlibDependencyCallable, TypeName>,
     /// Private members of value classes, which only this unit's members of their class call.
@@ -204,6 +207,7 @@ impl Default for DependencyBodyUnit {
             functions: HashMap::default(),
             classes: HashMap::default(),
             enum_classes: HashMap::default(),
+            realized_enums: HashSet::default(),
             authenticated_singleton_dispatches: HashMap::default(),
             authenticated_singleton_classifiers: HashMap::default(),
             private_members: HashSet::default(),
@@ -598,6 +602,22 @@ impl DependencyBodyUnit {
         })
     }
 
+    /// A unit that reads the constants of `enums`, which earlier units materialized, through
+    /// their exports.
+    pub(crate) fn reading_realized_enums(enums: impl IntoIterator<Item = TypeName>) -> Self {
+        Self {
+            realized_enums: enums.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+
+    /// The enum classes this unit materialized, whose constants it exports.
+    pub(crate) fn materialized_enums(&self) -> impl Iterator<Item = crate::ir::ClassId> + '_ {
+        let mut classes = self.enum_classes.values().copied().collect::<Vec<_>>();
+        classes.sort_unstable();
+        classes.into_iter()
+    }
+
     /// Classes owned by this closed unit, keyed by their authenticated constructor.
     pub(crate) fn materialized_classes(
         &self,
@@ -623,6 +643,7 @@ impl DependencyBodyUnit {
             functions: &mut self.functions,
             classes: &mut self.classes,
             enum_classes: &mut self.enum_classes,
+            realized_enums: &self.realized_enums,
             authenticated_singleton_dispatches: &mut self.authenticated_singleton_dispatches,
             authenticated_singleton_classifiers: &mut self.authenticated_singleton_classifiers,
             private_members: &mut self.private_members,
@@ -734,6 +755,7 @@ struct Linker<'u, 's> {
     functions: &'u mut HashMap<KlibDependencyCallable, FunId>,
     classes: &'u mut HashMap<KlibDependencyCallable, crate::ir::ClassId>,
     enum_classes: &'u mut HashMap<KlibDependencyCallable, crate::ir::ClassId>,
+    realized_enums: &'u HashSet<TypeName>,
     authenticated_singleton_dispatches: &'u mut HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
     private_members: &'u mut HashSet<KlibDependencyCallable>,
@@ -994,7 +1016,9 @@ impl CallLinker for Linker<'_, '_> {
             entry,
         )?;
         let classifier = class.classifier;
-        self.materialize_enum_class(ir, class)?;
+        if !self.realized_enums.contains(&classifier) {
+            self.materialize_enum_class(ir, class)?;
+        }
         Ok((classifier, name))
     }
 

@@ -719,7 +719,6 @@ compileKotlinAgainstKotlin/companionObjectMember.kt
 compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
-compileKotlinAgainstKotlin/enum.kt
 compileKotlinAgainstKotlin/genericSetter.kt
 compileKotlinAgainstKotlin/inlineClasses/callDeserializedPropertyOnInlineClassType.kt
 compileKotlinAgainstKotlin/inlineClasses/constructorWithInlineClassParametersInBinaryDependencies.kt
@@ -770,7 +769,6 @@ compileKotlinAgainstKotlin/sealedClass.kt
 compileKotlinAgainstKotlin/secondaryConstructors.kt
 compileKotlinAgainstKotlin/simpleValAnonymousObject.kt
 compileKotlinAgainstKotlin/specialBridgesInDependencies.kt
-compileKotlinAgainstKotlin/starImportEnum.kt
 compileKotlinAgainstKotlin/typeAliasesKt13181.kt
 compileKotlinAgainstKotlin/unsignedTypesInAnnotations.kt
 compileKotlinAgainstKotlin/useDeserializedFunInterface.kt
@@ -1737,7 +1735,6 @@ enum/lambdaInDefault.kt
 enum/loop.kt
 enum/multipleModules.kt
 enum/nested.kt
-enum/openMethodNoOverrides.kt
 enum/ordinalsWithEnumEntitiesOverrides.kt
 enum/reorderedArguments.kt
 enum/sortEnumEntries.kt
@@ -3402,7 +3399,6 @@ multiplatform/k2/delegation/delegationToExpectInterface_withNewMembersSameName.k
 multiplatform/k2/delegation/delegationToExpectInterface_withOverrideInDelegated.kt
 multiplatform/k2/delegation/delegationWithIntersection.kt
 multiplatform/k2/enumStaticMethods.kt
-multiplatform/k2/exhaustiveness/commonEnum.kt
 multiplatform/k2/exhaustiveness/commonSealedClass.kt
 multiplatform/k2/expectRefinement.kt
 multiplatform/k2/expectStatic.kt

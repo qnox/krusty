@@ -690,8 +690,9 @@ fn record_class_function_exports(
     Ok(())
 }
 
-/// Record the identity of every constructor of `source` another module may call, and an object
-/// declaration another module may read as a value.
+/// Record the identity of every constructor of `source` another module may call, an object
+/// declaration another module may read as a value, and an enum class another module may read a
+/// constant of.
 ///
 /// The decoded class lists the primary constructor first when the record publishes one, then the
 /// published secondary constructors in record order; `secondary_ordinals` joins each back to its
@@ -725,6 +726,14 @@ fn record_constructor_exports(
             .class_id_by_name(source.fq_name_id())
             .ok_or_else(|| format!("object {} has no IR identity", source.fq_name()))?;
         exports.record_singleton(id);
+    }
+    // Only the declaring file holds an enum's constants, so another module reads each through
+    // the entry this file exports.
+    if source.is_enum && class.visibility != crate::types::Visibility::Private {
+        let id = ir
+            .class_id_by_name(source.fq_name_id())
+            .ok_or_else(|| format!("enum {} has no IR identity", source.fq_name()))?;
+        exports.record_enum(id);
     }
     if source.is_interface
         || source.is_abstract

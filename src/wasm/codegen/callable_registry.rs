@@ -48,6 +48,8 @@ pub(super) struct CallableRegistry {
         HashMap<KlibDependencyCallable, SingletonExtensionUnreadReceiver>,
     /// The entry answering each published object declaration's instance, by its classifier.
     dependency_singletons: HashMap<crate::backend::DependencyClassifier, u32>,
+    /// The entry answering each constant of a published enum.
+    dependency_enum_constants: HashMap<crate::backend::EnumConstant, u32>,
 }
 
 pub(super) struct FileCallTargets {
@@ -65,6 +67,8 @@ pub(super) struct FileCallTargets {
         HashMap<ExternalCallableId, SingletonExtensionUnreadReceiver>,
     /// The instance entry of each other module's object this file reads as a value.
     singletons: HashMap<crate::backend::DependencyClassifier, u32>,
+    /// The entry of each constant of another file's enum this file reads.
+    enum_constants: HashMap<crate::backend::EnumConstant, u32>,
 }
 
 impl CallableRegistry {
@@ -173,6 +177,7 @@ impl CallableRegistry {
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
             singletons: HashMap::default(),
+            enum_constants: HashMap::default(),
         };
         for expression in crate::ir::emitted_body_roots(ir)
             .into_iter()
@@ -207,6 +212,19 @@ impl CallableRegistry {
                             .to_owned()
                     })?;
                     targets.signatures.insert(*target, signature.clone());
+                    continue;
+                }
+                // Another file's enum constant is read through the entry its file publishes.
+                IrExpr::EnumEntry { classifier, name }
+                    if ir.class_id_by_name(*classifier).is_none() =>
+                {
+                    let constant = crate::backend::EnumConstant {
+                        classifier: *classifier,
+                        name: name.clone(),
+                    };
+                    if let Some(&entry) = self.dependency_enum_constants.get(&constant) {
+                        targets.enum_constants.insert(constant, entry);
+                    }
                     continue;
                 }
                 // Another module's object is read through the entry its module publishes.
@@ -413,6 +431,15 @@ impl CallableRegistry {
         exports: &DependencyExportSignatures,
         functions: &[Option<u32>],
     ) -> Result<(), Unsupported> {
+        for (constant, entry) in exports.enum_constant_entries() {
+            let entry = functions
+                .get(*entry as usize)
+                .copied()
+                .flatten()
+                .ok_or_else(|| "an enum constant entry without its function".to_string())?;
+            self.dependency_enum_constants
+                .insert(constant.clone(), entry);
+        }
         for &(classifier, entry) in exports.singleton_entries() {
             let entry = functions
                 .get(entry as usize)
@@ -526,6 +553,20 @@ impl CallableRegistry {
 impl FileCallTargets {
     pub(super) fn module(&self, target: CallableId) -> Option<u32> {
         self.module.get(&target).copied()
+    }
+
+    /// The entry answering the constant `name` of another file's enum `classifier`.
+    pub(super) fn dependency_enum_constant(
+        &self,
+        classifier: crate::backend::DependencyClassifier,
+        name: &str,
+    ) -> Option<u32> {
+        self.enum_constants
+            .get(&crate::backend::EnumConstant {
+                classifier,
+                name: name.into(),
+            })
+            .copied()
     }
 
     /// The entry answering the instance of another module's object `classifier`.
