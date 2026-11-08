@@ -566,3 +566,43 @@ fn closure_mutated_var_reports_failed_cast_for_member_and_extension_calls() {
         ],
     );
 }
+
+#[test]
+fn closure_writes_of_the_smart_cast_type_keep_it_stable() {
+    same_box(
+        "closure_write_conforming",
+        include_str!("box_regressions/closureWriteConformingSmartCast.kt"),
+    );
+}
+
+#[test]
+fn closure_writes_outside_the_smart_cast_type_decline_it() {
+    const SRC: &str = "open class Base { fun base(): Int = 1 }\n\
+fun nullableValueWrite(next: Base?): Int {\n\
+    var value: Base? = Base()\n\
+    val replace = { value = next }\n\
+    if (value != null) {\n\
+        replace()\n\
+        return value.base()\n\
+    }\n\
+    return -1\n\
+}\n\
+fun oneNullWrite(): Int {\n\
+    var text: String? = \"abc\"\n\
+    val replace = { text = null; text = \"a\" }\n\
+    if (text != null) {\n\
+        return text.length\n\
+    }\n\
+    return -1\n\
+}\n\
+fun localFunctionWritesNull(): Int {\n\
+    var text: String? = \"abc\"\n\
+    fun reset() { text = null }\n\
+    if (text != null) {\n\
+        reset()\n\
+        return text.length\n\
+    }\n\
+    return -1\n\
+}\n";
+    same_rejection("closure_write_not_conforming", SRC);
+}

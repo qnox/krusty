@@ -3,7 +3,7 @@
 use crate::fx_hash::HashSet;
 
 use super::capture_storage::ConstructorArgumentUses;
-use super::{Checker, ExprLowering, LambdaCapture};
+use super::{Checker, ExprLowering, LambdaCapture, Ty};
 use crate::ast::{
     ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, File, FunBody, Stmt, StmtId,
 };
@@ -184,8 +184,12 @@ impl<'a> Checker<'a> {
                     .filter(|&lambda| !self.lambda_is_inline_spliced(lambda)))
     }
 
-    /// Whether every relevant capturing-lambda write stores the null literal.
-    pub(super) fn closure_writes_only_null(&self, name: &str, site: Span) -> bool {
+    /// kotlinc's concurrent-assignment rule: a smart cast of `name` to `target` stays stable at
+    /// `site` when every closure write that can interleave with it stores a value already of type
+    /// `target`, so no such write can break the proof. A write whose value has no checked type
+    /// yet, and an increment or decrement, keep the variable unstable.
+    pub(super) fn closure_writes_conform(&self, name: &str, site: Span, target: Ty) -> bool {
+        let context = crate::assignable::TyCtx::new();
         self.fn_closure_reassigned
             .iter()
             .filter(|write| {
@@ -193,9 +197,11 @@ impl<'a> Checker<'a> {
                     && !self.same_materialized_execution(write)
             })
             .all(|write| {
-                write
-                    .value
-                    .is_some_and(|value| matches!(self.file.expr(value), Expr::NullLit))
+                write.value.is_some_and(|value| {
+                    let written = self.expr_types[value.0 as usize];
+                    written != Ty::Error
+                        && crate::assignable::is_subtype(&context, self, written, target)
+                })
             })
     }
 

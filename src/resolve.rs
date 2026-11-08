@@ -20408,12 +20408,18 @@ impl<'a> Checker<'a> {
                             {
                                 // This assignment may be sequential for reads in its own lambda,
                                 // but the closure still invalidates a proof owned by the enclosing
-                                // scope once that closure exists.
-                                if self.capturing_closure_reassigned_before(&name, target_span) {
+                                // scope once that closure exists, unless the value it stores is
+                                // already of the proven type.
+                                let context = crate::assignable::TyCtx::new();
+                                if self.capturing_closure_reassigned_before(&name, target_span)
+                                    && (vt == Ty::Error
+                                        || !crate::assignable::is_subtype(
+                                            &context, self, vt, cur.ty,
+                                        ))
+                                {
                                     scope.decline_cast_at_binding(&name, cur.ty);
                                 }
                                 let flow = narrowing.unwrap_or(declared);
-                                let context = crate::assignable::TyCtx::new();
                                 // The join of the old proof and the new fact: the wider of the two
                                 // when comparable, the declared type otherwise (kotlinc's LUB —
                                 // `if (t != null) { run { t = null } }` rejoins to `String?`).
@@ -41881,6 +41887,9 @@ impl<'a> Checker<'a> {
             return true;
         }
         if let Some((name, _)) = self.closure_mutated_decline(scope, path, site) {
+            if self.closure_writes_conform(&name, site, target) {
+                return true;
+            }
             declined.push((name, target));
         }
         false
@@ -41967,8 +41976,9 @@ impl<'a> Checker<'a> {
             .closure_mutated_decline(scope, &path, site)
             .filter(|(_, ty)| ty.is_nullable())
         {
-            if self.closure_writes_only_null(&name, site) {
-                out.push((path, Ty::nullable(Ty::Nothing)));
+            let proven = Ty::nullable(Ty::Nothing);
+            if self.closure_writes_conform(&name, site, proven) {
+                out.push((path, proven));
             }
         }
     }
