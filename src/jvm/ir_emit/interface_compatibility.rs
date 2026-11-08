@@ -303,7 +303,7 @@ pub(super) fn emit_own_member_forward(
                         c.properties
                             .iter()
                             .find(|property| {
-                                let (getter, setter) = accessor_jvm_names(c, &property.name);
+                                let (getter, setter) = accessor_jvm_names(ir, c, &property.name);
                                 getter == f.name || setter == f.name
                             })
                             .map(|property| property.decl_line)
