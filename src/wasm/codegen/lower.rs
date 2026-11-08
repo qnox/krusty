@@ -1191,6 +1191,13 @@ impl<'a> Body<'a> {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
             IrExpr::TypeOp {
+                op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
+                arg,
+                type_operand,
+            } if matches!(type_operand.non_null().kind(), TyKind::Fun(_)) => {
+                self.function_cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
+            }
+            IrExpr::TypeOp {
                 op: op @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast),
                 arg,
                 type_operand,

@@ -229,6 +229,44 @@ impl Body<'_> {
         self.coerce_emitted_value(any, ret)
     }
 
+    /// `value as F` for a function type `F`: the value, which must be a function value invoked
+    /// with `F`'s arguments. A suspend function type is invoked with its caller's continuation as
+    /// one more argument, so `suspend () -> R` and `(Continuation<R>) -> Any?` share a shape, as
+    /// kotlinc's `SuspendFunction0` is a `Function1`. `null` passes a nullable target.
+    pub(super) fn function_cast(
+        &mut self,
+        arg: u32,
+        target: Ty,
+        non_null: bool,
+    ) -> Result<(), Unsupported> {
+        let TyKind::Fun(signature) = target.non_null().kind() else {
+            return Err("a function cast to a type that is not a function type".into());
+        };
+        let arity = signature.params.len() + usize::from(signature.suspend);
+        let shape = self.runtime.function_shape(self.module, arity);
+        let object = self.runtime.objects.object;
+        self.value(arg, Ty::obj_name(crate::types::wk::any()))?;
+        let value = self.local(REFERENCE);
+        self.code.local_tee(value);
+        if !non_null {
+            self.code.ref_is_null().if_(BlockType::Empty).else_();
+            self.code.local_get(value);
+        }
+        self.code
+            .ref_cast(false, HeapType::Concrete(object))
+            .struct_get(object, 0)
+            .ref_test(false, HeapType::Concrete(shape.table))
+            .if_(BlockType::Empty)
+            .else_()
+            .unreachable()
+            .end();
+        if !non_null {
+            self.code.end();
+        }
+        self.code.local_get(value);
+        Ok(())
+    }
+
     /// Convert the reference on top of `code`'s stack to the carrier of `ty`.
     fn unpack_argument(&mut self, code: &mut Code, ty: Ty) -> Result<(), Unsupported> {
         match carrier(ty)? {
