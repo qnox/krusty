@@ -11,15 +11,7 @@ boxingOptimization/checkcastAndInstanceOf.kt
 boxingOptimization/checkcastAndInstanceOf_before.kt
 boxingOptimization/kt6842.kt
 boxingOptimization/safeCallToPrimitiveEquality3.kt
-builtinFunctions/charSequence.kt
-builtinFunctions/genericParameterBridge/IntMC.kt
-builtinFunctions/genericParameterBridge/mutableCollection.kt
-builtinFunctions/genericParameterBridge/mutableSetInterfaces.kt
-builtinFunctions/genericParameterBridge/notNullAnyMC.kt
-builtinFunctions/genericParameterBridge/notNullParamMC.kt
-builtinFunctions/genericParameterBridge/nullableAnyMC.kt
 builtinFunctions/removeAt.kt
-builtinFunctions/size.kt
 callableReference/kt39612.kt
 capturedVarsOptimization/capturedValInLambdaInitializedOutside.kt
 capturedVarsOptimization/returnValueOfArrayConstructor.kt
@@ -107,7 +99,6 @@ invokedynamic/functionRefToJavaInterface.kt
 invokedynamic/streamApi.kt
 isArrayOf.kt
 javaFields.kt
-javaFieldsWithIntersectionTypes.kt
 javaStatics.kt
 kt10259_2.kt
 kt10259_3.kt
