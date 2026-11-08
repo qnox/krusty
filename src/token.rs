@@ -83,6 +83,9 @@ pub enum TokenKind {
     At,         // @   (annotations)
     // trivia / control
     Newline,
+    /// An explicit `;`. The lexer spells it `Newline`, its role in the line-oriented consumers; the
+    /// parser's token view, which drops physical line breaks, gives it this kind.
+    Semicolon,
     Eof,
     Unknown,
 }

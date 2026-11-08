@@ -71,6 +71,7 @@ pub(crate) fn classifier_application(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::IrClass;
     use crate::metadata::type_encoder::{
         encode_type, StringTable, TypeEncodeError, TypeParameters,
     };
@@ -211,5 +212,75 @@ mod tests {
                 }
             );
         }
+    }
+
+    fn local_class(name: &str, own: &[&str], captured: &[&str], anonymous: bool) -> IrFile {
+        let mut ir = IrFile::default();
+        let mut class = IrClass::synthetic(crate::types::type_name(name));
+        class.is_anonymous_object = anonymous;
+        class.is_local_class = !anonymous;
+        class.type_params = own.iter().map(|name| (*name).to_owned()).collect();
+        class.captured_type_params = captured.iter().map(|name| (*name).to_owned()).collect();
+        ir.classes.push(class);
+        ir
+    }
+
+    #[test]
+    fn an_anonymous_factory_owns_no_arguments_and_has_no_outer_type() {
+        let ir = local_class("app/FileKt$copy$1", &[], &["T"], true);
+        let classifier = ir.classes[0].fq_name;
+
+        assert_eq!(
+            classifier_application(&ir, &NoClassifierFacts, classifier),
+            Ok(ClassifierApplication::LexicalCapture {
+                own_arguments: 0,
+                captured_arguments: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn a_named_local_class_keeps_its_own_arguments_apart_from_enclosing_captures() {
+        let ir = local_class("app/FileKt$enclose$Holder", &["U"], &["T"], false);
+        let classifier = ir.classes[0].fq_name;
+
+        assert_eq!(
+            classifier_application(&ir, &NoClassifierFacts, classifier),
+            Ok(ClassifierApplication::LexicalCapture {
+                own_arguments: 1,
+                captured_arguments: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn a_local_class_without_captures_uses_every_argument() {
+        let ir = local_class("app/FileKt$enclose$Holder", &["U"], &[], false);
+        let classifier = ir.classes[0].fq_name;
+
+        assert_eq!(
+            classifier_application(&ir, &NoClassifierFacts, classifier),
+            Ok(ClassifierApplication::Direct)
+        );
+    }
+
+    #[test]
+    fn an_inner_class_still_names_its_enclosing_instance() {
+        let outer = crate::types::type_name("sample/Outer");
+        let mut ir = IrFile::default();
+        let mut class = IrClass::synthetic(outer.nested_child("Inner"));
+        class.is_inner_class = true;
+        class.type_params = vec!["U".to_owned()];
+        class.captured_type_params = vec!["T".to_owned()];
+        ir.classes.push(class);
+        let classifier = ir.classes[0].fq_name;
+
+        assert_eq!(
+            classifier_application(&ir, &NoClassifierFacts, classifier),
+            Ok(ClassifierApplication::Inner(InnerClassifier {
+                outer,
+                own_arguments: 1,
+            }))
+        );
     }
 }

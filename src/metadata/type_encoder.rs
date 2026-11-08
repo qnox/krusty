@@ -1701,6 +1701,73 @@ mod tests {
     }
 
     #[test]
+    fn a_local_application_encodes_own_arguments_and_omits_lexical_captures() {
+        let classifier = crate::types::type_name("sample/Holder");
+        let lookup = |name| {
+            Ok(if name == classifier {
+                ClassifierApplication::LexicalCapture {
+                    own_arguments: 1,
+                    captured_arguments: 1,
+                }
+            } else {
+                ClassifierApplication::Direct
+            })
+        };
+        let mut strings = StringTable::with_local_classifiers(
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            None,
+            &lookup,
+        );
+        let encoded = encode_type(
+            &mut strings,
+            Ty::obj_args_name(classifier, &[Ty::Int, Ty::String]),
+            &TypeParameters::new(),
+        )
+        .unwrap();
+        let mut own_only = StringTable::default();
+        let expected = encode_type(
+            &mut own_only,
+            Ty::obj_args_name(classifier, &[Ty::Int]),
+            &TypeParameters::new(),
+        )
+        .unwrap();
+
+        assert_eq!(encoded.as_bytes(), expected.as_bytes());
+    }
+
+    #[test]
+    fn a_klib_fragment_keeps_lexical_captures_in_the_semantic_application() {
+        let classifier = crate::types::type_name("sample/Holder");
+        let lookup = |name| {
+            Ok(if name == classifier {
+                ClassifierApplication::LexicalCapture {
+                    own_arguments: 1,
+                    captured_arguments: 1,
+                }
+            } else {
+                ClassifierApplication::Direct
+            })
+        };
+        let application = Ty::obj_args_name(classifier, &[Ty::Int, Ty::String]);
+        let encode = |lookup: &dyn Fn(TypeName) -> Result<ClassifierApplication, TypeName>| {
+            let mut strings = StringTable::klib(lookup);
+            strings.open_type_table();
+            let encoded = encode_type(&mut strings, application, &TypeParameters::new())
+                .expect("the semantic application is metadata")
+                .as_bytes()
+                .to_vec();
+            let table = strings
+                .close_type_table()
+                .map(|table| table.as_bytes().to_vec());
+            (encoded, table)
+        };
+
+        assert_eq!(encode(&lookup), encode(&direct_classifier_application));
+    }
+
+    #[test]
     fn an_intersection_requires_an_explicit_declaration_approximation() {
         let intersection = Ty::intersection(&[
             Ty::obj_args("sample/Box", &[Ty::Int]),
