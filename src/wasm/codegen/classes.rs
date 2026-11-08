@@ -39,7 +39,8 @@ use crate::ir::{ClassId, FunId, IrClass, IrExpr, IrFile, IrLocalPropertyLayout};
 use crate::types::{Ty, TypeName};
 
 use super::super::encode::{
-    Code, CompositeType, FieldType, HeapType, Module, StorageType, SubType, ValType,
+    BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, SubType,
+    ValType,
 };
 use super::super::interface_dispatch::ClassRef;
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
@@ -223,8 +224,9 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
         "a callable reference"
     } else if class.lambda.is_some() || class.sam_wrapper.is_some() {
         "a function value's class"
-    } else if class.is_value {
-        "a value class"
+    // A value class is its box: an ordinary object whose stored field is the underlying value.
+    // A non-null unsigned number stays the scalar carrier; a nullable one, and any reference
+    // array of unsigned elements, uses that value class's own runtime box.
     // An inner class's enclosing instance is already an ordinary constructor-prefix argument and
     // field in checked IR, which this object form can carry like every other reference field.
     // Anonymous superclass operands are also ordinary parameters, without capture storage.
@@ -264,6 +266,7 @@ pub(super) fn declare(
     ir: &IrFile,
     module: &mut Module,
     objects: &mut ObjectRoot,
+    hashing: &super::super::hashing::Hashing,
     functions: &[Option<u32>],
     properties: &RealizedProperties,
     plan: &ModuleSlotPlan,
@@ -364,8 +367,16 @@ pub(super) fn declare(
                 init.ref_null(HeapType::Func);
                 continue;
             };
+            let value_field = single_value_field(&forms, &tables, &enum_rooted, id, class)?;
             let function = match entry {
+                Slot::AnyMember(AnyMember::Equals) if let Some(storage) = value_field => {
+                    value_class_equals(module, storage, ty)
+                }
                 Slot::AnyMember(AnyMember::Equals) => objects.identity_equals,
+                Slot::AnyMember(AnyMember::HashCode) if let Some(storage) = value_field => {
+                    value_class_hash(module, hashing, storage, class.fields[0].ty, ty)
+                        .unwrap_or_else(|| objects.trap(module, ty))
+                }
                 Slot::AnyMember(AnyMember::HashCode | AnyMember::ToString) | Slot::Abstract => {
                     objects.trap(module, ty)
                 }
@@ -494,6 +505,134 @@ fn table_struct(slots: &[Option<u32>], itable: u32) -> CompositeType {
         fields.push(immutable(ValType::nullable(itable)));
     }
     CompositeType::Struct(fields)
+}
+
+/// Where a single-field value class keeps its underlying value.
+#[derive(Clone, Copy)]
+struct ValueStorage {
+    structure: u32,
+    field: u32,
+    value: ValType,
+}
+
+/// The one stored field of a value class, or nothing when `class` is not that shape.
+fn single_value_field(
+    forms: &[ClassForm],
+    tables: &NumberedClassTables,
+    enum_rooted: &[bool],
+    id: ClassId,
+    class: &IrClass,
+) -> Result<Option<ValueStorage>, Unsupported> {
+    if !class.is_value || class.fields.len() != 1 {
+        return Ok(None);
+    }
+    let value = carrier(class.fields[0].ty)?
+        .ok_or_else(|| format!("a `Unit`-typed value class field (`{}`)", class.fq_name()))?;
+    let field =
+        1 + if enum_rooted[id as usize] {
+            ENUM_BASE_FIELDS
+        } else {
+            0
+        } + tables.table(id).first_field;
+    Ok(Some(ValueStorage {
+        structure: forms[id as usize]
+            .structure
+            .expect("a value class has a struct"),
+        field,
+        value,
+    }))
+}
+
+/// `equals` for a single-field value class: another instance of the same box with the same
+/// field value, and nothing else. Two `Meter(3)` boxes are equal; a different class is not.
+/// Floating values compare by their bits, and every NaN equals every other NaN, the same
+/// relation a primitive box uses.
+fn value_class_equals(module: &mut Module, storage: ValueStorage, equals: u32) -> u32 {
+    let function = module.declare();
+    let mut code = Code::default();
+    let heap = HeapType::Concrete(storage.structure);
+    code.local_get(1)
+        .ref_test(false, heap)
+        .if_(BlockType::Value(ValType::I32))
+        .local_get(0)
+        .ref_cast(false, heap)
+        .struct_get(storage.structure, storage.field)
+        .local_get(1)
+        .ref_cast(false, heap)
+        .struct_get(storage.structure, storage.field);
+    let locals = match storage.value {
+        ValType::F32 | ValType::F64 => {
+            // Locals follow the two reference parameters.
+            code.local_set(3).local_set(2);
+            let (ne, bits, bits_eq) = match storage.value {
+                ValType::F32 => (0x5c, 0xbc, crate::wasm::runtime::EQ32),
+                _ => (0x62, 0xbd, crate::wasm::runtime::EQ64),
+            };
+            code.local_get(2).local_get(2).op(ne);
+            code.local_get(3).local_get(3).op(ne);
+            code.op(crate::wasm::runtime::AND32);
+            code.local_get(2).op(bits).local_get(3).op(bits).op(bits_eq);
+            code.op(crate::wasm::runtime::OR32);
+            vec![storage.value, storage.value]
+        }
+        ValType::I32 => {
+            code.op(crate::wasm::runtime::EQ32);
+            Vec::new()
+        }
+        ValType::I64 => {
+            code.op(crate::wasm::runtime::EQ64);
+            Vec::new()
+        }
+        ValType::Ref { .. } => {
+            code.ref_eq();
+            Vec::new()
+        }
+    };
+    code.else_().i32_const(0).end();
+    module.define(
+        function,
+        Function {
+            ty: equals,
+            locals,
+            code,
+        },
+    );
+    function
+}
+
+/// `hashCode` for a single-field value class: the hash of the value it holds. A reference field
+/// is hashed through the object model; a scalar uses the same hash as its primitive box.
+fn value_class_hash(
+    module: &mut Module,
+    hashing: &super::super::hashing::Hashing,
+    storage: ValueStorage,
+    field_ty: Ty,
+    hash_ty: u32,
+) -> Option<u32> {
+    let reference = matches!(storage.value, ValType::Ref { .. });
+    if !reference && !hashing.emit_scalar_hash(&mut Code::default(), field_ty) {
+        return None;
+    }
+    let function = module.declare();
+    let mut code = Code::default();
+    code.local_get(0)
+        .ref_cast(false, HeapType::Concrete(storage.structure))
+        .struct_get(storage.structure, storage.field);
+    if reference {
+        code.call(hashing.hash_code);
+    } else {
+        let hashed = hashing.emit_scalar_hash(&mut code, field_ty);
+        debug_assert!(hashed, "the probe above accepted this scalar");
+    }
+    module.define(
+        function,
+        Function {
+            ty: hash_ty,
+            locals: Vec::new(),
+            code,
+        },
+    );
+    Some(function)
 }
 
 /// The struct fields `class` declares, each mutable: a field is written by the constructor after

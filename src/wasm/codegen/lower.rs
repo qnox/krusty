@@ -188,8 +188,15 @@ pub(super) fn lower_file(
     let classes = if ir.classes.is_empty() {
         None
     } else {
-        let mut classes =
-            super::classes::declare(ir, module, &mut runtime.objects, &indices, properties, plan)?;
+        let mut classes = super::classes::declare(
+            ir,
+            module,
+            &mut runtime.objects,
+            &runtime.hashing,
+            &indices,
+            properties,
+            plan,
+        )?;
         super::interface_members::record(
             &super::interface_members::Recording {
                 ir,
@@ -406,6 +413,10 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
             | Ty::Long
             | Ty::Float
             | Ty::Double
+            | Ty::UByte
+            | Ty::UShort
+            | Ty::UInt
+            | Ty::ULong
             | Ty::Unit
             | Ty::Nothing,
         ) => REFERENCE,
@@ -1239,17 +1250,27 @@ impl<'a> Body<'a> {
             }
             IrExpr::NotNullAssert { operand, .. } => {
                 let operand_carrier = self.carrier_of(operand)?;
+                let result_ty = self.type_of(id)?;
+                // A nullable signed scalar stays declined: its box is the primitive box, and this
+                // backend does not yet unbox one through `!!`. An unsigned number is a value
+                // class, so `!!` reads that value class's own box back to its carrier.
                 if matches!(operand_carrier, Some(ValType::Ref { .. }))
                     && matches!(
                         self.carrier_of(id)?,
                         Some(ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64)
                     )
                 {
-                    return Err(
-                        "a not-null assertion requiring a scalar reference conversion".into(),
-                    );
-                }
-                if let Some(reference @ ValType::Ref { .. }) = operand_carrier {
+                    let Some(result_ty) = result_ty.filter(|ty| ty.is_unsigned()) else {
+                        return Err(
+                            "a not-null assertion requiring a scalar reference conversion".into(),
+                        );
+                    };
+                    let Some(reference) = operand_carrier else {
+                        return Err("an unsigned assertion without a reference carrier".into());
+                    };
+                    self.assert_nonnull_reference(operand, reference)?;
+                    self.unbox(result_ty)?;
+                } else if let Some(reference @ ValType::Ref { .. }) = operand_carrier {
                     self.assert_nonnull_reference(operand, reference)?;
                 } else {
                     self.expression(operand)?;
@@ -1290,6 +1311,7 @@ impl<'a> Body<'a> {
             } => {
                 self.reference_array_literal(array_type, &spreads, &elements)?;
             }
+            IrExpr::NewArray { array_type, size } => self.new_array(array_type, size)?,
             IrExpr::Try {
                 body,
                 catches,
@@ -1397,6 +1419,25 @@ impl<'a> Body<'a> {
                     && self.is_string_length_property(*target) =>
             {
                 self.intrinsic(IrIntrinsic::StringLength, Some(*receiver), &[])?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && self.unsigned_storage_property(*target) =>
+            {
+                let unsigned = self
+                    .callables
+                    .property(*target)
+                    .map(|property| Ty::obj_name(property.owner).canonical_semantic())
+                    .ok_or_else(|| "an unsigned storage read without its property".to_string())?;
+                self.value(*receiver, unsigned)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::PropertyWrite {
@@ -1650,13 +1691,18 @@ impl<'a> Body<'a> {
             left.is_unsigned() || right.is_unsigned()
         };
         // Equality, shifts and the bitwise connectives are sign-agnostic on the carrier (a shift
-        // takes its right-shift kind from `unsigned` below); every other operator needs an
-        // unsigned instruction this lowering does not select yet.
+        // takes its right-shift kind from `unsigned` below). Addition, subtraction and
+        // multiplication have the same bits for a two's-complement unsigned value, so they use
+        // those instructions on purpose. Division, remainder and the signed comparisons still
+        // need an unsigned instruction this lowering does not select yet.
         if unsigned
             && !matches!(
                 op,
                 IrBinOp::Eq
                     | IrBinOp::Ne
+                    | IrBinOp::Add
+                    | IrBinOp::Sub
+                    | IrBinOp::Mul
                     | IrBinOp::Shl
                     | IrBinOp::Shr
                     | IrBinOp::Ushr

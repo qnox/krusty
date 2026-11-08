@@ -23,7 +23,15 @@ fn reference_element(array: Ty) -> Result<Ty, Unsupported> {
         .non_null()
         .array_read_elem()
         .ok_or_else(|| "a reference array with no readable element type".to_string())?;
-    if !matches!(carrier(element)?, Some(ValType::Ref { .. })) {
+    // A reference array stores boxes. An unsigned element is a value class: its box is its own,
+    // and a non-null occurrence still arrives as the scalar carrier. A signed scalar has no such
+    // value-class box here and stays declined.
+    let stored = match carrier(element)? {
+        Some(ValType::Ref { .. }) => true,
+        Some(_) => element.non_null().is_unsigned(),
+        None => false,
+    };
+    if !stored {
         return Err(format!(
             "a reference array requiring scalar boxing for `{}`",
             describe(element)
@@ -68,6 +76,21 @@ impl Body<'_> {
         operation: &IrCheckedOperation,
     ) -> Result<(), Unsupported> {
         self.reference_array_size(array_size_receiver(operation)?)
+    }
+
+    /// `arrayOfNulls<T>(n)` and `Array<T>(n)` before its initializer runs. The backing storage is
+    /// filled with null, which is the initial element of every reference array, including one
+    /// whose element is an unsigned value class.
+    pub(super) fn new_array(&mut self, array: Ty, size: u32) -> Result<(), Unsupported> {
+        reference_element(array)?;
+        let length = self.local(ValType::I32);
+        self.value(size, Ty::Int)?;
+        self.code
+            .local_set(length)
+            .local_get(length)
+            .array_new_default(self.runtime.references);
+        self.wrap_reference_array();
+        Ok(())
     }
 
     pub(super) fn reference_array_literal(

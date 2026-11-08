@@ -928,6 +928,50 @@ fn expect_reference_box(src: &str, stem: &str) {
     );
 }
 
+/// An unsigned number's nullable or reference-array occurrence is that value class's own box,
+/// not the signed primitive box of the same width.
+#[test]
+fn wasm_nullable_unsigned_reference_arrays() {
+    let src = "\
+fun box(): String {\n\
+    val filled = Array(2) { 7u }\n\
+    filled[1] = 9u\n\
+    val empty: Array<UInt?> = Array(2) { null }\n\
+    empty[0] = 5u\n\
+    val literal = arrayOf<UInt?>(1u, null)\n\
+    var sum = 0u\n\
+    for (x in literal) sum += x ?: 0u\n\
+    val ok = filled[0] + filled[1] == 16u && empty[0] == 5u && empty[1] == null && sum == 1u\n\
+    return if (ok) \"OK\" else \"fail\"\n\
+}\n";
+    expect_reference_box(src, "nullableUnsignedReference");
+    expect_wasm_box(src, "nullableUnsignedReference");
+}
+
+/// A source value class is its box object. JVM spells that class with `@JvmInline`; Wasm reads
+/// the `value` keyword alone, as kotlinc-wasm does.
+#[test]
+fn wasm_value_class_reference_array() {
+    let body = "\
+fun box(): String {\n\
+    if (Meter(3) != Meter(3)) return \"meter equality\"\n\
+    if (Meter(3).hashCode() != Meter(3).hashCode()) return \"meter hash\"\n\
+    if (Meter(3).hashCode() == Meter(4).hashCode()) return \"meter hash collision\"\n\
+    val meters: Array<Meter?> = Array(2) { null }\n\
+    meters[1] = Meter(3)\n\
+    val longs: Array<ULong?> = Array(1) { null }\n\
+    longs[0] = 2uL\n\
+    val units: Array<Unit?> = Array(1) { null }\n\
+    units[0] = Unit\n\
+    val ok = meters[1]?.v == 3 && meters[0] == null && longs[0] == 2uL && units[0] == Unit\n\
+    return if (ok) \"OK\" else \"fail\"\n\
+}\n";
+    let jvm = format!("@JvmInline value class Meter(val v: Int)\n{body}");
+    let wasm = format!("value class Meter(val v: Int)\n{body}");
+    expect_reference_box(&jvm, "valueClassReference");
+    expect_wasm_box(&wasm, "valueClassReference");
+}
+
 // PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
 #[test]
 fn wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract() {

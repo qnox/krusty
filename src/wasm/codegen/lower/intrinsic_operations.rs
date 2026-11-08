@@ -87,6 +87,22 @@ impl Body<'_> {
         }
     }
 
+    /// Whether `target` is an unsigned value class's underlying storage property. Reading it
+    /// yields the scalar this target already carries the value as.
+    pub(super) fn unsigned_storage_property(&self, target: crate::fir::ExternalPropertyId) -> bool {
+        let Some(property) = self.callables.property(target) else {
+            return false;
+        };
+        let unsigned = Ty::obj_name(property.owner).canonical_semantic();
+        if !unsigned.is_unsigned() {
+            return false;
+        }
+        let Some(underlying) = unsigned.scalar_value_repr() else {
+            return false;
+        };
+        property.result.canonical_semantic() == underlying
+    }
+
     /// Whether `target` is a string's `length`, by its getter's provider realization.
     pub(super) fn is_string_length_property(&self, target: crate::fir::ExternalPropertyId) -> bool {
         self.callables
