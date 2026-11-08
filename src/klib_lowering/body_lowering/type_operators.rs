@@ -12,7 +12,6 @@ use crate::metadata::klib_ir::tree::{KlibIrExprId, KlibIrTypeId, KlibIrTypeOpera
 use crate::types::{Ty, TyKind};
 
 use super::super::decline::KlibBodyDeclineReason;
-use super::super::klib_types::semantic_type;
 
 impl BodyLowering<'_> {
     /// The type operator `operator` with the type operand `operand` applied to `argument`, typed
@@ -25,7 +24,7 @@ impl BodyLowering<'_> {
         argument: KlibIrExprId,
         ty: Ty,
     ) -> Lowered<ExprId> {
-        let target = semantic_type(self.arena, self.header.type_parameters(), operand)?;
+        let target = self.semantic(operand)?;
         let op = match operator {
             KlibIrTypeOperator::ImplicitCast => return self.implicit_cast(target, argument, ty),
             KlibIrTypeOperator::InstanceOf | KlibIrTypeOperator::NotInstanceOf => {

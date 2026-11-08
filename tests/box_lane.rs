@@ -1144,7 +1144,8 @@ pub fn run(lane: &dyn Lane) {
     super::box_inventory::require_setup(unavailable.as_deref(), provisioned)
         .unwrap_or_else(|error| panic!("{label}: {error}"));
     let corpus = krusty::toolchain::box_corpus_dir().expect("validated corpus setup");
-    let files = super::box_inventory::discover(&corpus).unwrap_or_else(|error| panic!("{error}"));
+    let files = super::box_inventory::discover(&corpus, lane.test_target())
+        .unwrap_or_else(|error| panic!("{error}"));
     let relative = |file: &Path| box_ratchet::corpus_key(&corpus, file);
     let platform = lane.platform();
     let version = krusty::kotlin_version::target();
