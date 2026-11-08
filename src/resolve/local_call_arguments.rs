@@ -105,10 +105,41 @@ impl Checker<'_> {
     ) -> Option<LocalCandidateScore> {
         let context_count = signature.context_count.min(signature.params.len());
         let partial_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
+        // A generic local function is measured against its parameters specialized by what the
+        // arguments infer, as every other generic candidate is; an unbound formal stays a
+        // formal.
+        let parameters = match &signature.generic_sig {
+            Some(generic) => {
+                let mapped = self
+                    .map_local_arguments(signature, context_count, arguments)
+                    .ok()?;
+                let bindings = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
+                    &self.fed_source(),
+                    generic,
+                    mapped.iter().zip(arg_tys).map(|(argument, &actual)| {
+                        (
+                            context_count + argument.value_parameter,
+                            actual,
+                            argument.whole_array,
+                        )
+                    }),
+                    signature.vararg_index,
+                );
+                generic
+                    .params
+                    .get(context_count..)?
+                    .iter()
+                    .map(|parameter| {
+                        crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
+                    })
+                    .collect()
+            }
+            None => signature.params[context_count..].to_vec(),
+        };
         call_applicability::score(
             self,
             scope,
-            &signature.params[context_count..],
+            &parameters,
             &value_call_sig(signature, context_count),
             ArgSlots {
                 args: arguments.args,

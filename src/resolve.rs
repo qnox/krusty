@@ -19379,8 +19379,7 @@ impl<'a> Checker<'a> {
                             context_count,
                             &fname,
                         );
-                        if fit.is_some() && !self.call_already_has_argument_diagnostic(call, args)
-                        {
+                        if fit.is_some() && !self.call_already_has_argument_diagnostic(call, args) {
                             self.diags
                                 .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
                         }
