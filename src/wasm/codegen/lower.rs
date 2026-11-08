@@ -1404,25 +1404,6 @@ impl<'a> Body<'a> {
             }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
-                    receiver: Some(receiver),
-                    arguments,
-                    parameters,
-                    ..
-                } = &**checked_op
-                    && arguments.is_empty()
-                    && parameters.is_empty()
-                    && self
-                        .callables
-                        .dependency_accessor(checked_op)
-                        .is_some_and(|access| {
-                            access.callable.compiler_operation()
-                                == Some(crate::libraries::CompilerIntrinsic::ArraySize)
-                        }) =>
-            {
-                self.array_size(*receiver)?
-            }
-            IrExpr::Checked(ref checked_op)
-                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
                     target,
                     dispatch: crate::ir::IrPropertyDispatch::Ordinary,
                     receiver,

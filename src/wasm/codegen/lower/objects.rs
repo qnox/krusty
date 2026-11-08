@@ -1570,6 +1570,11 @@ impl Body<'_> {
                 "a superclass constructor call with omitted arguments (`{name}`)"
             ));
         }
+        // Construction is this class's initialization. A companion's initializers belong to it,
+        // and the singleton getter is the typed hook: it publishes the instance before the
+        // companion constructor, so a constructor reached from that companion does not re-enter
+        // it. An enum's companion is created after its constants, not from a constructor.
+        self.initialize_companion(class)?;
         for &statement in &declaration.super_arg_prelude {
             self.statement(statement)?;
         }
@@ -1651,6 +1656,9 @@ impl Body<'_> {
                 "a constructor delegating with omitted arguments (`{name}`)"
             ));
         }
+        // A delegation argument may use the companion before the primary constructor runs, so
+        // this constructor asks for it too. The getter is idempotent.
+        self.initialize_companion(class)?;
         for &statement in &secondary.delegate_prelude {
             self.statement(statement)?;
         }
@@ -1680,6 +1688,21 @@ impl Body<'_> {
         if let Some(body) = secondary.body {
             self.statement(body)?;
         }
+        Ok(())
+    }
+
+    /// Run the companion's typed initializer when this class has one. The getter's result is
+    /// unused: construction needs the initialization, not the instance.
+    fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let declaration = &self.ir.classes[class as usize];
+        if declaration.is_enum || declaration.is_enum_entry {
+            return Ok(());
+        }
+        let Some(companion) = declaration.companion_class else {
+            return Ok(());
+        };
+        self.singleton(companion)?;
+        self.code.drop_();
         Ok(())
     }
 }

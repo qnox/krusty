@@ -31,12 +31,6 @@ impl Body<'_> {
                 };
                 self.array_size(receiver)
             }
-            IrIntrinsic::ArraySize => {
-                let (Some(receiver), []) = (receiver, args) else {
-                    return Err("an array size read with malformed operands".into());
-                };
-                self.reference_array_size(receiver)
-            }
             IrIntrinsic::PrimitiveCompare { operand, .. } => {
                 let (lhs, rhs) = match (receiver, args) {
                     (None, [lhs, rhs]) => (*lhs, *rhs),

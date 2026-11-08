@@ -21,6 +21,33 @@ pub(super) fn is_int_array(array: Ty) -> bool {
     !array.is_reference_array() && array.array_elem() == Some(Ty::Int)
 }
 
+/// A getter frame whose length this representation can answer: a reference array, or `IntArray`.
+fn sized_array(source: Ty) -> bool {
+    let source = source.non_null();
+    source.is_reference_array() || is_int_array(source)
+}
+
+/// The complete selected getter frame, before any receiver is evaluated.
+/// The source type is the representation the length is read from.
+fn array_size_receiver(operation: &IrCheckedOperation) -> Result<(u32, Ty), Unsupported> {
+    let IrCheckedOperation::ExternalPropertyRead {
+        dispatch: IrPropertyDispatch::Ordinary,
+        receiver: Some(receiver),
+        arguments,
+        parameters,
+        result: Ty::Int,
+        source_receiver: Some(source),
+        ..
+    } = operation
+    else {
+        return Err("an authenticated array size read with a mismatched getter frame".into());
+    };
+    if !arguments.is_empty() || !parameters.is_empty() || !sized_array(*source) {
+        return Err("an authenticated array size read with a mismatched getter frame".into());
+    }
+    Ok((*receiver, source.non_null()))
+}
+
 fn reference_element(array: Ty) -> Result<Ty, Unsupported> {
     if !array.non_null().is_reference_array() {
         return Err(format!(
@@ -41,26 +68,6 @@ fn reference_element(array: Ty) -> Result<Ty, Unsupported> {
     Ok(element)
 }
 
-/// The complete selected getter frame, before any receiver is evaluated.
-fn array_size_receiver(operation: &IrCheckedOperation) -> Result<u32, Unsupported> {
-    let IrCheckedOperation::ExternalPropertyRead {
-        dispatch: IrPropertyDispatch::Ordinary,
-        receiver: Some(receiver),
-        arguments,
-        parameters,
-        result: Ty::Int,
-        source_receiver: Some(source),
-        ..
-    } = operation
-    else {
-        return Err("an authenticated array size read with a mismatched getter frame".into());
-    };
-    if !arguments.is_empty() || !parameters.is_empty() || !source.non_null().is_reference_array() {
-        return Err("an authenticated array size read with a mismatched getter frame".into());
-    }
-    Ok(*receiver)
-}
-
 impl Body<'_> {
     pub(super) fn is_array_size_property(&self, target: crate::fir::ExternalPropertyId) -> bool {
         self.callables.property(target).is_some_and(|property| {
@@ -72,11 +79,29 @@ impl Body<'_> {
         })
     }
 
+    /// Length of a getter whose dispatch, result, and source receiver are the checked frame.
+    /// `IntArray` reads its own `i32` storage; every other admitted receiver is a reference array.
     pub(super) fn checked_array_size(
         &mut self,
         operation: &IrCheckedOperation,
     ) -> Result<(), Unsupported> {
-        self.reference_array_size(array_size_receiver(operation)?)
+        let (receiver, source) = array_size_receiver(operation)?;
+        let array = self.array_receiver(receiver)?;
+        self.value(receiver, array)?;
+        if is_int_array(source) {
+            if !is_int_array(array) {
+                return Err(
+                    "an authenticated array size read with a mismatched getter frame".into(),
+                );
+            }
+            self.int_array_storage();
+        } else if array.non_null().is_reference_array() {
+            self.reference_array_storage();
+        } else {
+            return Err("an array size read without reference-array storage".into());
+        }
+        self.code.array_len();
+        Ok(())
     }
 
     pub(super) fn reference_array_literal(
@@ -225,22 +250,6 @@ impl Body<'_> {
             .struct_get(object, crate::wasm::reference_arrays::STORAGE_FIELD);
     }
 
-    /// The length of the backing storage selected by a checked reference-array receiver.
-    pub(super) fn reference_array_size(&mut self, receiver: u32) -> Result<(), Unsupported> {
-        let array = self
-            .type_of(receiver)?
-            .ok_or_else(|| "an array receiver without a checked type".to_string())?;
-        // Length belongs to the wrapper's backing storage, independent of its element carrier.
-        // Reading it neither loads nor boxes an element of Array<T>.
-        if !array.non_null().is_reference_array() {
-            return Err("an array size read without reference-array storage".into());
-        }
-        self.value(receiver, array)?;
-        self.reference_array_storage();
-        self.code.array_len();
-        Ok(())
-    }
-
     pub(super) fn array_get(&mut self, receiver: u32, index: u32) -> Result<(), Unsupported> {
         let array = self.array_receiver(receiver)?;
         if is_int_array(array) {
@@ -283,8 +292,34 @@ impl Body<'_> {
     }
 
     pub(super) fn new_int_array(&mut self, size: u32) -> Result<(), Unsupported> {
+        // The size expression runs once. A negative length is `IllegalArgumentException` on the
+        // Kotlin exception path: `array.new_default` would trap, and a trap never reaches `catch`.
         self.value(size, Ty::Int)?;
-        self.code.array_new_default(self.runtime.ints);
+        let length = self.local(ValType::I32);
+        self.code.local_set(length);
+        let exception = self.runtime.exceptions.ensure_class(
+            self.module,
+            self.classifiers,
+            RuntimeExceptionKind::IllegalArgument.classifier(),
+        )?;
+        self.code
+            .local_get(length)
+            .i32_const(0)
+            .op(LT_S32)
+            .if_(BlockType::Empty);
+        self.code.local_get(length).call(self.runtime.string_of_i32);
+        let message = self.local(STRING);
+        self.code.local_set(message);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            exception,
+            Some(message),
+            self.runtime.string,
+        );
+        self.code.throw(self.runtime.exceptions.tag).end();
+        self.code
+            .local_get(length)
+            .array_new_default(self.runtime.ints);
         self.wrap_int_array();
         Ok(())
     }
