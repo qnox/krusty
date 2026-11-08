@@ -97,6 +97,9 @@ pub(crate) fn semantic_call_role(
     {
         return Some(SemanticCallRole::IntrinsicConstNumeric(operation));
     }
+    if super::builtin_member_realization::unsigned_to_string_type(&declaration).is_some() {
+        return Some(SemanticCallRole::KotlinAnyToString);
+    }
     if declaration.owner == crate::types::wk::any() {
         return match (declaration.name, declaration.params, declaration.ret) {
             ("equals", [parameter], Ty::Boolean)
@@ -273,5 +276,68 @@ mod tests {
             None,
             "a reflection-shaped lookalike has no language role"
         );
+    }
+
+    #[test]
+    fn unsigned_decimal_roles_require_the_exact_complete_declaration() {
+        let declaration = |owner| BuiltinMemberDeclaration {
+            owner,
+            name: "toString",
+            params: &[],
+            ret: Ty::String,
+            is_property: false,
+            is_operator: false,
+            is_infix: false,
+            annotations: &[],
+        };
+        for (owner, ty) in [
+            (crate::types::wk::ubyte(), Ty::UByte),
+            (crate::types::wk::ushort(), Ty::UShort),
+            (crate::types::wk::uint(), Ty::UInt),
+            (crate::types::wk::ulong(), Ty::ULong),
+        ] {
+            assert_eq!(
+                super::super::builtin_member_realization::unsigned_to_string_type(&declaration(
+                    owner
+                )),
+                Some(ty),
+            );
+            assert_eq!(
+                semantic_call_role(declaration(owner)),
+                Some(SemanticCallRole::KotlinAnyToString),
+            );
+            for invalid in [
+                BuiltinMemberDeclaration {
+                    owner: crate::types::type_name("sample/UInt"),
+                    ..declaration(owner)
+                },
+                BuiltinMemberDeclaration {
+                    name: "render",
+                    ..declaration(owner)
+                },
+                BuiltinMemberDeclaration {
+                    params: &[Ty::Int],
+                    ..declaration(owner)
+                },
+                BuiltinMemberDeclaration {
+                    ret: ty,
+                    ..declaration(owner)
+                },
+                BuiltinMemberDeclaration {
+                    is_property: true,
+                    ..declaration(owner)
+                },
+                BuiltinMemberDeclaration {
+                    is_operator: true,
+                    ..declaration(owner)
+                },
+                BuiltinMemberDeclaration {
+                    is_infix: true,
+                    ..declaration(owner)
+                },
+            ] {
+                assert_eq!(semantic_call_role(invalid), None);
+            }
+        }
     }
 }
