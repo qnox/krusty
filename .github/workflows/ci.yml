@@ -57,6 +57,10 @@ jobs:
   # Fork PRs still run on ubuntu-latest: self-hosted runners never take fork PR jobs.
   lint:
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # Cancels the rest of a pull request run after a lint failure.
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -94,6 +98,15 @@ jobs:
           tool: just
       - name: lint
         run: just lint
+      # A pull request that fails lint cannot merge, and its run would otherwise keep every other
+      # job queued for the shared hosted runners. Cancel the rest of the run; the required
+      # aggregate still reports the failure. Master and merge-queue runs always run to completion.
+      - name: cancel the rest of a pull request run after a lint failure
+        if: failure() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh run cancel "$GITHUB_RUN_ID"
 
   # krusty-plugin-host is outside the default members and the coverage packages, so its own
   # compiler-independent tests run here. Compiler-dependent plugin integrations run in `ci`.
