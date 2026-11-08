@@ -208,9 +208,11 @@ mod lambda_returns;
 mod lexical_bindings;
 mod lexical_policies;
 mod library_constructor_failure;
+mod local_call_arguments;
 mod local_callable_reference_selection;
 mod local_capture_dependencies;
 mod local_class_scope;
+use local_call_arguments::LocalArguments;
 mod local_extension_applicability;
 mod local_initialization;
 mod local_method_dependencies;
@@ -2123,66 +2125,6 @@ fn erased_arg_defeats_selection<'a>(
         }
     }
     false
-}
-
-fn local_function_candidate_score(
-    signature: &Signature,
-    args: &[ExprId],
-    arg_tys: &[Ty],
-    arg_names: Option<&[Option<String>]>,
-    trailing_lambda: bool,
-    argument_fits: impl Fn(Ty, Ty) -> bool,
-) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
-    let context_count = signature.context_count.min(signature.params.len());
-    let params = &signature.params[context_count..];
-    let names = signature
-        .param_names
-        .get(context_count..)
-        .unwrap_or_default();
-    let defaults = signature
-        .param_defaults
-        .get(context_count..)
-        .unwrap_or_default();
-    if arg_names.is_some() || trailing_lambda {
-        let Ok(slots) = map_call_args(
-            args,
-            arg_names,
-            names,
-            params.len(),
-            signature.required.saturating_sub(context_count),
-            defaults,
-            signature
-                .vararg_index
-                .and_then(|index| index.checked_sub(context_count)),
-            trailing_lambda,
-        ) else {
-            return None;
-        };
-        let mut type_score = 0;
-        let mut omitted = 0;
-        for (index, argument) in slots.iter().enumerate() {
-            let Some(argument) = argument else {
-                omitted += 1;
-                continue;
-            };
-            let source_index = args.iter().position(|candidate| candidate == argument)?;
-            let parameter = *params.get(index)?;
-            let actual = *arg_tys.get(source_index)?;
-            if !argument_fits(parameter, actual) {
-                return None;
-            }
-            type_score += if parameter == actual { 2 } else { 1 };
-        }
-        return Some((type_score, std::cmp::Reverse(omitted), !signature.vararg()));
-    }
-    positional_candidate_score_by(
-        params,
-        signature.vararg(),
-        signature.required.saturating_sub(context_count),
-        defaults,
-        arg_tys,
-        argument_fits,
-    )
 }
 
 /// Simple type name → JVM internal name, split into a SHARED read-only base (the library/classpath
@@ -12617,7 +12559,7 @@ impl<'a> Checker<'a> {
                             param_names: &member.call_sig.param_names,
                             param_defaults: &member.call_sig.param_defaults,
                             required: member.call_sig.required,
-                            vararg: member.call_sig.vararg,
+                            vararg_index: member.call_sig.vararg_index,
                             context_count: member.context_count,
                             ret: member.ret,
                             // The selected member's normalized signature is stable across bounded
@@ -16178,14 +16120,14 @@ impl<'a> Checker<'a> {
                         let ctx_types = &sig.params[..ctx_count];
                         if let Some(sources) = self.select_context_arguments(scope, ctx_types) {
                             let value_count = sig.params.len() - ctx_count;
-                            let required_end =
-                                sig.params.len().saturating_sub(usize::from(sig.vararg()));
                             let missing_required = arg_names.is_none()
                                 && args.len() < value_count
-                                && (ctx_count + args.len()..required_end).any(|i| {
-                                    sig.param_defaults
-                                        .get(i)
-                                        .map_or(i < sig.required, |has_default| !*has_default)
+                                && (ctx_count + args.len()..sig.params.len()).any(|i| {
+                                    sig.vararg_index != Some(i)
+                                        && sig
+                                            .param_defaults
+                                            .get(i)
+                                            .map_or(i < sig.required, |has_default| !*has_default)
                                 });
                             if (!sig.vararg() && args.len() > value_count) || missing_required {
                                 self.arg_tys(scope, args);
@@ -16203,7 +16145,7 @@ impl<'a> Checker<'a> {
                                         param_names: &sig.param_names,
                                         param_defaults: &sig.param_defaults,
                                         required: sig.required,
-                                        vararg: sig.vararg(),
+                                        vararg_index: sig.vararg_index,
                                         context_count: ctx_count,
                                         ret: sig.ret,
                                         source_display,
@@ -16222,86 +16164,24 @@ impl<'a> Checker<'a> {
                             };
                             let trailing_lambda =
                                 self.file.call_has_trailing_lambda.contains(&call.0);
-                            let mapped_slots = if arg_names.is_some() || trailing_lambda {
-                                match map_call_args(
+                            let Some(slots) = self.check_local_call_arguments(
+                                scope,
+                                call,
+                                LocalArguments {
                                     args,
-                                    arg_names.as_deref(),
-                                    &sig.param_names[ctx_count..],
-                                    sig.params.len().saturating_sub(ctx_count),
-                                    sig.required.saturating_sub(ctx_count),
-                                    value_defaults,
-                                    sig.vararg_index
-                                        .and_then(|index| index.checked_sub(ctx_count)),
+                                    names: arg_names.as_deref(),
                                     trailing_lambda,
-                                ) {
-                                    Ok(slots) => Some(slots),
-                                    Err(error) => {
-                                        self.report_call_arg_mapping_error(call, args, error);
-                                        return sig.ret;
-                                    }
-                                }
-                            } else if !sig.vararg() && args.len() < value_count {
-                                Some(
-                                    args.iter()
-                                        .copied()
-                                        .map(Some)
-                                        .chain(std::iter::repeat_n(None, value_count - args.len()))
-                                        .collect(),
-                                )
-                            } else {
-                                None
+                                },
+                                &sig,
+                                ctx_count,
+                                &fname,
+                            ) else {
+                                return sig.ret;
                             };
-                            if let Some(slots) = &mapped_slots {
-                                for (i, argument) in slots.iter().enumerate() {
-                                    if let Some(argument) = argument {
-                                        let parameter_index = ctx_count + i;
-                                        let p = sig.params[parameter_index];
-                                        let aty = self.check_argument_expected(
-                                            scope,
-                                            *argument,
-                                            p,
-                                            sig.lambda_recv
-                                                .get(parameter_index)
-                                                .copied()
-                                                .unwrap_or(false),
-                                            Some(&fname),
-                                        );
-                                        self.expect_assignable(
-                                            p,
-                                            aty,
-                                            self.span(*argument),
-                                            "argument",
-                                        );
-                                    }
-                                }
-                            } else {
-                                for (i, a) in args.iter().enumerate() {
-                                    let p = if sig.vararg() && i >= value_count.saturating_sub(1) {
-                                        sig.params[sig.params.len() - 1]
-                                            .array_read_elem()
-                                            .unwrap_or(Ty::Error)
-                                    } else {
-                                        sig.params[ctx_count + i]
-                                    };
-                                    let parameter_index = ctx_count + i;
-                                    let aty = self.check_argument_expected(
-                                        scope,
-                                        *a,
-                                        p,
-                                        sig.lambda_recv
-                                            .get(parameter_index)
-                                            .copied()
-                                            .unwrap_or(false),
-                                        Some(&fname),
-                                    );
-                                    self.expect_call_arg(scope, p, *a, aty);
-                                }
-                            }
-                            if let Some(slots) = mapped_slots {
-                                if !self.commit_selected_argument_slots(call, slots, value_defaults)
-                                {
-                                    return Ty::Error;
-                                }
+                            if (arg_names.is_some() || trailing_lambda || slots.contains(&None))
+                                && !self.commit_selected_argument_slots(call, slots, value_defaults)
+                            {
+                                return Ty::Error;
                             }
                             self.mark_context_extension_receiver_used(scope, call, &sources);
                             self.mark_local_function_call(
@@ -16325,40 +16205,20 @@ impl<'a> Checker<'a> {
                     if ctx_count == 0 {
                         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
                         if arg_names.is_some() || trailing_lambda {
-                            let slots = match map_call_args(
-                                args,
-                                arg_names.as_deref(),
-                                &sig.param_names,
-                                sig.params.len(),
-                                sig.required,
-                                &sig.param_defaults,
-                                sig.vararg_index,
-                                trailing_lambda,
-                            ) {
-                                Ok(slots) => slots,
-                                Err(error) => {
-                                    self.report_call_arg_mapping_error(call, args, error);
-                                    return sig.ret;
-                                }
+                            let Some(slots) = self.check_local_call_arguments(
+                                scope,
+                                call,
+                                LocalArguments {
+                                    args,
+                                    names: arg_names.as_deref(),
+                                    trailing_lambda,
+                                },
+                                &sig,
+                                0,
+                                &fname,
+                            ) else {
+                                return sig.ret;
                             };
-                            for (index, argument) in slots.iter().enumerate() {
-                                if let Some(argument) = argument {
-                                    let parameter = sig.params[index];
-                                    let actual = self.check_argument_expected(
-                                        scope,
-                                        *argument,
-                                        parameter,
-                                        sig.lambda_recv.get(index).copied().unwrap_or(false),
-                                        Some(&fname),
-                                    );
-                                    self.expect_assignable(
-                                        parameter,
-                                        actual,
-                                        self.span(*argument),
-                                        "argument",
-                                    );
-                                }
-                            }
                             if !self.commit_selected_argument_slots(
                                 call,
                                 slots,
@@ -16407,7 +16267,7 @@ impl<'a> Checker<'a> {
                                 param_names: &sig.param_names,
                                 param_defaults: &sig.param_defaults,
                                 required: sig.required,
-                                vararg: sig.vararg(),
+                                vararg_index: sig.vararg_index,
                                 context_count: ctx_count,
                                 ret: sig.ret,
                                 source_display,
@@ -16420,37 +16280,28 @@ impl<'a> Checker<'a> {
                         // parameter must be checked WITH that parameter's block parameter types
                         // (`check_lambda_with_types`) — exactly as a top-level call does — so a
                         // destructured / `it` lambda parameter gets its real type instead of erased `Any`.
-                        for (i, &a) in args.iter().enumerate() {
-                            let parameter =
-                                sig.vararg_index.filter(|vararg| i >= *vararg).unwrap_or(i);
-                            let p = if sig.vararg_index == Some(parameter) {
-                                sig.params[parameter].array_read_elem().unwrap_or(Ty::Error)
-                            } else {
-                                sig.params[parameter]
-                            };
-                            let aty = self.check_argument_expected(
-                                scope,
-                                a,
-                                p,
-                                sig.lambda_recv.get(parameter).copied().unwrap_or(false),
-                                Some(&fname),
-                            );
-                            self.expect_call_arg(scope, p, a, aty);
-                        }
-                        if omitted_are_optional {
-                            let slots = args
-                                .iter()
-                                .copied()
-                                .map(Some)
-                                .chain(std::iter::repeat_n(None, sig.params.len() - args.len()))
-                                .collect();
-                            if !self.commit_selected_argument_slots(
+                        let Some(slots) = self.check_local_call_arguments(
+                            scope,
+                            call,
+                            LocalArguments {
+                                args,
+                                names: None,
+                                trailing_lambda: false,
+                            },
+                            &sig,
+                            0,
+                            &fname,
+                        ) else {
+                            return sig.ret;
+                        };
+                        if slots.contains(&None)
+                            && !self.commit_selected_argument_slots(
                                 call,
                                 slots,
                                 &sig.param_defaults,
-                            ) {
-                                return Ty::Error;
-                            }
+                            )
+                        {
+                            return Ty::Error;
                         }
                     }
                     let ret = sig.ret;
@@ -16458,22 +16309,40 @@ impl<'a> Checker<'a> {
                     return ret;
                 }
                 if let Some((implicit, selected)) = selected_local_extension {
-                    let arg_tys = candidate_arg_tys
-                        .as_deref()
-                        .expect("a selected local extension has checked argument types");
                     let SelectedLocalExtension {
                         statement: stmt_id,
                         signature,
                         context_args,
                     } = selected;
                     let context_count = signature.context_count.min(signature.params.len());
-                    self.expect_call_args(
+                    let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+                    let Some(slots) = self.check_local_call_arguments(
                         scope,
-                        &signature.params[context_count..],
-                        signature.vararg(),
-                        args,
-                        arg_tys,
-                    );
+                        call,
+                        LocalArguments {
+                            args,
+                            names: arg_names.as_deref(),
+                            trailing_lambda,
+                        },
+                        &signature,
+                        context_count,
+                        &fname,
+                    ) else {
+                        return signature.ret;
+                    };
+                    if arg_names.is_some() || trailing_lambda || slots.contains(&None) {
+                        let Some(value_defaults) = self.require_value_parameter_defaults(
+                            call,
+                            &signature.param_defaults,
+                            context_count,
+                            slots.len(),
+                        ) else {
+                            return Ty::Error;
+                        };
+                        if !self.commit_selected_argument_slots(call, slots, value_defaults) {
+                            return Ty::Error;
+                        }
+                    }
                     self.implicit_receiver_selections
                         .insert(callee, self.implicit_receiver_selection(implicit));
                     self.mark_extension_receiver_used(call, implicit);
@@ -19462,16 +19331,13 @@ impl<'a> Checker<'a> {
                                 return Ty::Error;
                             }
                         }
-                        let required_end = signature
-                            .params
-                            .len()
-                            .saturating_sub(usize::from(signature.vararg()));
                         let missing_required = args.len() < value_count
-                            && (context_count + args.len()..required_end).any(|index| {
-                                signature
-                                    .param_defaults
-                                    .get(index)
-                                    .map_or(index < signature.required, |default| !*default)
+                            && (context_count + args.len()..signature.params.len()).any(|index| {
+                                signature.vararg_index != Some(index)
+                                    && signature
+                                        .param_defaults
+                                        .get(index)
+                                        .map_or(index < signature.required, |default| !*default)
                             });
                         if (!signature.vararg() && args.len() > value_count) || missing_required {
                             let source_display = match self.file.stmt(statement) {
@@ -19490,7 +19356,7 @@ impl<'a> Checker<'a> {
                                     param_names: &signature.param_names,
                                     param_defaults: &signature.param_defaults,
                                     required: signature.required,
-                                    vararg: signature.vararg(),
+                                    vararg_index: signature.vararg_index,
                                     context_count,
                                     ret: signature.ret,
                                     source_display,
@@ -19499,6 +19365,26 @@ impl<'a> Checker<'a> {
                             );
                             return Ty::Error;
                         }
+                        // The arguments map, so an argument's type is what makes the declaration
+                        // inapplicable; its mismatch is the terminal diagnostic.
+                        let fit = self.check_local_call_arguments(
+                            scope,
+                            call,
+                            LocalArguments {
+                                args,
+                                names: arg_names.as_deref(),
+                                trailing_lambda,
+                            },
+                            signature,
+                            context_count,
+                            &fname,
+                        );
+                        if fit.is_some() && !self.call_already_has_argument_diagnostic(call, args)
+                        {
+                            self.diags
+                                .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                        }
+                        return Ty::Error;
                     }
                 }
                 if !had_rejected_callable {
@@ -32302,7 +32188,7 @@ struct DiagnosticFunction<'a> {
     param_names: &'a [String],
     param_defaults: &'a [bool],
     required: usize,
-    vararg: bool,
+    vararg_index: Option<usize>,
     context_count: usize,
     ret: Ty,
     source_display: Option<String>,
@@ -34550,7 +34436,7 @@ impl<'a> Checker<'a> {
                 param_names: &candidate.call_sig.param_names,
                 param_defaults: &candidate.call_sig.param_defaults,
                 required: candidate.call_sig.required,
-                vararg: candidate.call_sig.vararg,
+                vararg_index: candidate.call_sig.vararg_index,
                 context_count: candidate.context_count,
                 ret: candidate.callable.ret,
                 source_display: self.module_source_display(candidate, candidate.callable.ret),
@@ -46901,7 +46787,7 @@ impl<'a> Checker<'a> {
             param_names,
             param_defaults,
             required,
-            vararg,
+            vararg_index,
             context_count,
             ret,
             source_display,
@@ -46910,11 +46796,15 @@ impl<'a> Checker<'a> {
         let value_count = params.len() - context_count;
         let got = args.len();
         let span = self.arity_diagnostic_span(call, args, value_count);
-        let required_end = params.len().saturating_sub(usize::from(vararg));
+        let vararg = vararg_index.is_some();
         let names_complete = param_names.len() == params.len();
         if got < value_count {
-            let missing = (context_count + got..required_end).find(|&index| {
-                if param_defaults.is_empty() {
+            // The vararg may be empty wherever it is declared; every other parameter the
+            // positional arguments do not reach needs a default.
+            let missing = (context_count + got..params.len()).find(|&index| {
+                if vararg_index == Some(index) {
+                    false
+                } else if param_defaults.is_empty() {
                     index < required
                 } else {
                     !param_defaults.get(index).copied().unwrap_or(false)
@@ -46957,7 +46847,7 @@ impl<'a> Checker<'a> {
                         } else {
                             ""
                         };
-                        let vararg = if vararg && index + 1 == params.len() {
+                        let vararg = if vararg_index == Some(index) {
                             "vararg "
                         } else {
                             ""
@@ -56680,7 +56570,7 @@ impl<'a> Checker<'a> {
                             param_names: &candidate.call_sig.param_names,
                             param_defaults: &candidate.call_sig.param_defaults,
                             required: candidate.call_sig.required,
-                            vararg: candidate.call_sig.vararg,
+                            vararg_index: candidate.call_sig.vararg_index,
                             context_count: candidate.context_count,
                             ret: candidate.callable.ret,
                             source_display: None,
@@ -57078,17 +56968,15 @@ impl<'a> Checker<'a> {
             else {
                 continue;
             };
-            let Some(score) = local_function_candidate_score(
+            let Some(score) = self.local_function_candidate_score(
+                scope,
                 &signature,
-                args,
-                arg_tys,
-                argument_names,
-                trailing_lambda,
-                |parameter, actual| {
-                    arg_assignable_simple(parameter, actual)
-                        || self.postponed_call_mentions(parameter)
-                        || self.postponed_call_mentions(actual)
+                LocalArguments {
+                    args,
+                    names: argument_names,
+                    trailing_lambda,
                 },
+                arg_tys,
             ) else {
                 continue;
             };
@@ -57129,17 +57017,15 @@ impl<'a> Checker<'a> {
                 })
                 .filter_map(|candidate| {
                     let signature = &candidate.signature;
-                    let score = local_function_candidate_score(
+                    let score = self.local_function_candidate_score(
+                        scope,
                         signature,
-                        args,
-                        arg_tys,
-                        argument_names,
-                        trailing_lambda,
-                        |parameter, actual| {
-                            arg_assignable_simple(parameter, actual)
-                                || self.postponed_call_mentions(parameter)
-                                || self.postponed_call_mentions(actual)
+                        LocalArguments {
+                            args,
+                            names: argument_names,
+                            trailing_lambda,
                         },
+                        arg_tys,
                     )?;
                     let context_count = signature.context_count.min(signature.params.len());
                     self.select_context_arguments(scope, &signature.params[..context_count])
