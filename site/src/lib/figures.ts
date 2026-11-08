@@ -1,7 +1,8 @@
-// The headline conformance figures. The master build writes them as shields.io endpoint JSON to a
-// gist (see the `release` job in .github/workflows/ci.yml and scripts/conformance-badge.sh); the
-// page reads the same JSON at build time and again in the browser, so it never shows numbers the
-// badges do not.
+// The headline codegen/box figures, as shields.io endpoint JSON (scripts/conformance-badge.sh).
+// The README badges and this page read the same files from the badge gist, which holds the last
+// figures published there. Normal releases now package these files as release assets
+// (scripts/package-release-badges.sh); both readers move to those assets once the first normal
+// release carries them. The page reads the JSON at build time and again in the browser.
 
 export const gist = "https://gist.githubusercontent.com/qnox/dec8149bc4f43b203d6cc9adc14f2026/raw/";
 

@@ -155,7 +155,7 @@ const plugins: { name: string; level: Level; html: string }[] = [
   <section class="band band-alt" id="measured" aria-labelledby="measured-title">
     <div class="wrap">
       <div class="section-head">
-        <p class="eyebrow">Kotlin {newestKotlin} · last published master build</p>
+        <p class="eyebrow">Kotlin {newestKotlin} · as shown on the README badges</p>
         <h2 id="measured-title">Measured against kotlinc's own tests</h2>
         <p>
           Master builds compile Kotlin's <code>codegen/box</code> test suite with krusty and with
@@ -367,8 +367,8 @@ plugins {'{'}
 </Base>
 
 <script define:vars={{ gist }}>
-  // Refresh the figures from the same gist the badges read, so a page built days ago still shows
-  // the latest master build. On failure the build-time figures stay.
+  // Re-read the figures from the source the README badges read, so a page built days ago shows
+  // what the badges show. On failure the build-time figures stay.
   const pattern = /^(\d+(?:\.\d+)?)% \((\d+)\/(\d+)(?: bytes)?\)$/;
   for (const tile of document.querySelectorAll(".figure")) {
     fetch(gist + tile.dataset.file, { cache: "no-cache" })
