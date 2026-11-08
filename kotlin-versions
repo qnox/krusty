@@ -4,8 +4,9 @@
 # e.g. 2.4.21 or 2.5.0-Beta2) — the kotlinc build the differential harness validates against. A
 # pre-release is that exact identity, not an alias of the stable release with the same numbers.
 # Meaning:
-#   * The HIGHEST entry is krusty's headline release version: `krusty <max>-build.<n>` signals the
-#     exact Kotlin it targets (e.g. 2.4.20).
+#   * The newest stable entry is krusty's headline release version: `krusty <max>-build.<n>`
+#     signals that Kotlin (e.g. 2.4.21). A pre-release stays supported and can sort last, but it
+#     is not the headline.
 #   * EVERY entry is validated in parallel by CI against that kotlinc release.
 #
 # Format (whitespace-separated):

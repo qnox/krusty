@@ -653,9 +653,10 @@ install-hooks:
 #
 # The kotlin-versions manifest lists the Kotlin reference versions (major.minor.patch, or the same
 # with -BetaN, -RC, or -RCN) krusty is validated against. The MAX is krusty's headline release
-# version; a pre-release precedes the stable release of the same numbers. Every entry is also
-# tested in parallel by CI against that kotlinc. The build number resets per reference version
-# (commits since its baseline), so 2.4.20-build.3 is the 3rd krusty build supporting Kotlin 2.4.20.
+# version: the newest stable entry. A pre-release precedes the stable release of the same numbers
+# and stays supported, but it is not the headline. Every entry is also tested in parallel by CI
+# against that kotlinc. The build number resets per reference version (commits since its baseline),
+# so 2.4.20-build.3 is the 3rd krusty build supporting Kotlin 2.4.20.
 
 # Supported Kotlin reference versions, oldest first.
 kotlin-versions:
@@ -665,9 +666,10 @@ kotlin-versions:
 supported-kotlin:
     @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh | paste -sd, -
 
-# Highest supported Kotlin reference version — krusty's release version (without the build suffix).
+# Newest stable Kotlin reference version — krusty's release version (without the build suffix).
+# A pre-release can sort last and still not be this version.
 max-version:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh | tail -1
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh | awk '!/-/ { stable = $0 } END { print stable }'
 
 # JSON array of supported Kotlin reference versions, for the GitHub Actions test matrix.
 matrix-json:

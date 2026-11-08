@@ -8,8 +8,9 @@
 //!
 //! The target is process-wide, like the reference toolchain [`crate::toolchain`] already selects:
 //! the `-Xkotlin-reference-version=` flag ([`set_target`]) wins, then `KRUSTY_LANGUAGE_VERSION`
-//! (already part of the build-cache key), then the newest manifest entry. A worker or daemon
-//! therefore serves one reference version for its lifetime.
+//! (already part of the build-cache key), then the newest stable manifest entry. A pre-release
+//! stays supported, but it is not the default. A worker or daemon therefore serves one reference
+//! version for its lifetime.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -93,11 +94,17 @@ impl KotlinVersion {
         versions
     }
 
-    /// The newest reference version the manifest lists: krusty's headline version.
+    /// The newest stable reference version the manifest lists: krusty's headline version, and the
+    /// reference a compilation uses when nothing pins one.
+    ///
+    /// A pre-release sorts after every older stable release, so it can be last in [`Self::supported`]
+    /// without becoming this version. `2.5.0-Beta2` stays supported and does not replace `2.4.21`.
     pub fn newest() -> Self {
         Self::supported()
-            .pop()
-            .expect("the kotlin-versions manifest lists at least one reference version")
+            .into_iter()
+            .rev()
+            .find(|version| version.pre == PreRelease::Stable)
+            .expect("the kotlin-versions manifest lists at least one stable reference version")
     }
 }
 
@@ -378,8 +385,8 @@ mod tests {
         assert!(supported.contains(&KotlinVersion::V2_4_10));
         assert!(supported.contains(&KotlinVersion::V2_4_20));
         assert!(supported.contains(&KotlinVersion::V2_5_0_BETA2));
-        assert_eq!(KotlinVersion::newest(), KotlinVersion::V2_5_0_BETA2);
-        assert_eq!(KotlinVersion::newest(), *supported.last().unwrap());
+        assert_eq!(supported.last().copied(), Some(KotlinVersion::V2_5_0_BETA2));
+        assert_eq!(KotlinVersion::newest(), KotlinVersion::V2_4_21);
         assert_eq!(
             manifest_versions("# c\n2.4.0 a\n\n2.4.10 b # note\n"),
             [KotlinVersion::V2_4_0, KotlinVersion::V2_4_10]
@@ -406,12 +413,17 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_selects_the_target_and_defaults_to_the_newest() {
+    fn the_environment_selects_the_target_and_defaults_to_the_newest_stable() {
         assert_eq!(
             target_from(Some("2.4.10".into())),
             Ok(KotlinVersion::V2_4_10)
         );
+        assert_eq!(target_from(None), Ok(KotlinVersion::V2_4_21));
         assert_eq!(target_from(None), Ok(KotlinVersion::newest()));
+        assert_eq!(
+            target_from(Some("2.5.0-Beta2".into())),
+            Ok(KotlinVersion::V2_5_0_BETA2)
+        );
         assert!(target_from(Some(String::new())).is_err());
         assert!(target_from(Some("2.4.99".into())).is_err());
     }

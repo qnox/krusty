@@ -88,7 +88,7 @@ cat >"$fixture/kotlin-versions" <<EOF
 2.5.0-Beta2 $baseline
 2.4.21 $baseline
 EOF
-expect_output 2.5.0-Beta2 max-version
+expect_output 2.4.21 max-version
 
 if [[ $failures -ne 0 ]]; then
     echo "versioning: $failures failed assertions" >&2
