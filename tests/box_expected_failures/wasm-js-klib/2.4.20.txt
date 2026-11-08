@@ -949,7 +949,6 @@ controlStructures/forInSmartCastToArray.kt
 controlStructures/forNullableCharInString.kt
 controlStructures/forUserType.kt
 controlStructures/kt15726.kt
-controlStructures/kt1688.kt
 controlStructures/kt1742.kt
 controlStructures/kt2147.kt
 controlStructures/kt2291.kt
@@ -974,7 +973,6 @@ controlStructures/tryCatchFinallyChain.kt
 controlStructures/tryCatchInExpressions/complexChain.kt
 controlStructures/tryCatchInExpressions/differentTypes.kt
 controlStructures/tryCatchInExpressions/inlineTryFinally.kt
-controlStructures/tryCatchInExpressions/kt17573_nested.kt
 controlStructures/tryCatchInExpressions/kt8608.kt
 controlStructures/tryCatchInExpressions/multipleCatchBlocks.kt
 controlStructures/tryCatchInExpressions/nonLocalReturnInTryFinally.kt
@@ -982,7 +980,6 @@ controlStructures/tryCatchInExpressions/splitTry.kt
 controlStructures/tryCatchInExpressions/tryCatchAfterWhileTrue.kt
 controlStructures/tryCatchInExpressions/tryFinallyOfTypeUnit.kt
 controlStructures/tryCatchInExpressions/tryInsideTry.kt
-controlStructures/tryFinally.kt
 controlflow/break.kt
 controlflow/break1.kt
 controlflow/for_loops.kt
@@ -1740,7 +1737,6 @@ diagnostics/functions/tailRecursion/recursiveCallInInlineLambda.kt
 diagnostics/functions/tailRecursion/recursiveCallInInlineLambdaWithCapture.kt
 diagnostics/functions/tailRecursion/returnInFinally.kt
 diagnostics/functions/tailRecursion/returnInIfInFinally.kt
-diagnostics/functions/tailRecursion/tailRecursionInFinally.kt
 diagnostics/functions/tailRecursion/tailrecWithExplicitCompanionObjectDispatcher.kt
 diagnostics/functions/tailRecursion/whenWithIs.kt
 diagnostics/vararg/kt4172.kt
@@ -1914,12 +1910,10 @@ fieldRename/constructorAndClassObject.kt
 fieldRename/delegates.kt
 finally/breakAndOuterFinally.kt
 finally/continueAndOuterFinally.kt
-finally/decrementInFinally.kt
 finally/finallyAndFinally.kt
 finally/kt31923_break.kt
 finally/kt31923_continue.kt
 finally/kt31923_return.kt
-finally/kt3549.kt
 finally/kt3706.kt
 finally/kt3867.kt
 finally/kt3874.kt
@@ -5157,7 +5151,6 @@ wasm-new-exception-handling/catch6.kt
 wasm-new-exception-handling/catch7.kt
 wasm-new-exception-handling/catch8.kt
 wasm-new-exception-handling/continueAndOuterFinally.kt
-wasm-new-exception-handling/decrementInFinally.kt
 wasm-new-exception-handling/extend0.kt
 wasm-new-exception-handling/finally1.kt
 wasm-new-exception-handling/finally10.kt
@@ -5174,7 +5167,6 @@ wasm-new-exception-handling/finallyAndFinally.kt
 wasm-new-exception-handling/kt31923_break.kt
 wasm-new-exception-handling/kt31923_continue.kt
 wasm-new-exception-handling/kt31923_return.kt
-wasm-new-exception-handling/kt3549.kt
 wasm-new-exception-handling/kt3706.kt
 wasm-new-exception-handling/kt3867.kt
 wasm-new-exception-handling/kt3874.kt
@@ -5214,7 +5206,6 @@ wasm-old-exception-handling/catch6.kt
 wasm-old-exception-handling/catch7.kt
 wasm-old-exception-handling/catch8.kt
 wasm-old-exception-handling/continueAndOuterFinally.kt
-wasm-old-exception-handling/decrementInFinally.kt
 wasm-old-exception-handling/extend0.kt
 wasm-old-exception-handling/finally1.kt
 wasm-old-exception-handling/finally10.kt
@@ -5231,7 +5222,6 @@ wasm-old-exception-handling/finallyAndFinally.kt
 wasm-old-exception-handling/kt31923_break.kt
 wasm-old-exception-handling/kt31923_continue.kt
 wasm-old-exception-handling/kt31923_return.kt
-wasm-old-exception-handling/kt3549.kt
 wasm-old-exception-handling/kt3706.kt
 wasm-old-exception-handling/kt3867.kt
 wasm-old-exception-handling/kt3874.kt
