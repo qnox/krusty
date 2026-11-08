@@ -1,7 +1,7 @@
 //! Declaration identities shared by source references and independently checked KLIB references.
 
 use crate::backend::{DependencyExportSignatures, KlibDependencyCallable};
-use crate::fir::CallableId;
+use crate::fir::{CallableId, PropertyId};
 use crate::fx_hash::HashMap;
 use crate::ir::{FunId, IrFile};
 use crate::types::{Ty, TypeName};
@@ -16,6 +16,11 @@ pub(in crate::wasm) enum Declaration {
     Local {
         file: u32,
         function: FunId,
+    },
+    /// A source-module property, read as a function value.
+    Property {
+        module: String,
+        property: PropertyId,
     },
     Constructor {
         classifier: TypeName,

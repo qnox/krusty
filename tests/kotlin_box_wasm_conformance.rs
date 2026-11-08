@@ -419,6 +419,30 @@ fun box(): String {
     );
 }
 
+/// Two function values of one property reference, made at different sites, are equal: the
+/// reference is identified by the property it reads, not by the adapter each site allocates.
+#[test]
+fn wasm_property_reference_function_values_are_equal_across_sites() {
+    const SOURCE: &str = r#"
+class Point(val x: Int)
+
+fun value(transform: (Point) -> Int): Any = transform
+
+fun box(): String {
+    val first = value(Point::x)
+    val second = value(Point::x)
+    if (first != second) return "unequal"
+    if (first != value(Point::x)) return "third"
+    if (length(String::length) != length(String::length)) return "dependency"
+    return "OK"
+}
+
+fun length(transform: (String) -> Int): Any = transform
+"#;
+    expect_reference_box(SOURCE, "wasmPropertyReferenceEquality");
+    expect_wasm_box(SOURCE, "wasmPropertyReferenceEquality");
+}
+
 /// What a constructor that reaches back into its own enum finds, as kotlinc-wasm builds an enum:
 /// each constant is published once constructed, and a constant with a body right after its super
 /// call, so its own body already finds it. The expected log is kotlinc-wasm's for this program
