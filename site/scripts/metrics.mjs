@@ -9,7 +9,8 @@
 //   box/native-pct-<kotlin>/native-pct.txt        Native case report   "<pct> <passed> <applicable>"
 //   corpus/runs/<run id>/run.json                 one nightly `oss corpus` run on master:
 //                                                 {"databaseId", "headSha", "createdAt", "url", "conclusion"}
-//   corpus/runs/<run id>/summary.json             that run's `summary` artifact (summarize.py --json)
+//   corpus/runs/<run id>/summary.json             that run's `summary` artifact (summarize.py --json);
+//                                                 a run without it (an older artifact) is left out
 //   corpus/runs/<run id>/projects.tsv             scripts/oss-corpus/projects.tsv at the run's commit
 //   corpus/runs/<run id>/patches.txt              the names in scripts/oss-corpus/patches/ at that commit
 //   coverage-baseline.json                        the coverage gate's recorded floor
@@ -237,7 +238,11 @@ export function corpusHistory(runs) {
 function corpus(dir) {
   const runsDir = join(dir, "corpus", "runs");
   if (!existsSync(runsDir)) return null;
-  const runs = readdirSync(runsDir).map((id) => corpusRun(runsDir, id));
+  // A run whose summary artifact predates summary.json (it held only summary.md) has no
+  // per-project records: it is left out like a run whose artifact expired.
+  const runs = readdirSync(runsDir)
+    .filter((id) => existsSync(join(runsDir, id, "summary.json")))
+    .map((id) => corpusRun(runsDir, id));
   if (runs.length === 0) return null;
   runs.sort((a, b) => (a.measured.date < b.measured.date ? -1 : a.measured.date > b.measured.date ? 1 : 0));
   const latest = runs[runs.length - 1];

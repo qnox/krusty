@@ -68,8 +68,8 @@ jobs:
             while IFS= read -r run; do
               id=$(jq -r .databaseId <<<"$run")
               dir=$in/corpus/runs/$id
-              kept=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts" \
-                --jq '[.artifacts[] | select(.name == "summary" and (.expired | not))] | length')
+              kept=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts" \
+                --jq '.artifacts[] | select(.name == "summary" and (.expired | not)) | .id' | wc -l)
               [ "$kept" -eq 1 ] || continue
               gh run download -R "$GITHUB_REPOSITORY" "$id" -n summary -D "$dir"
               rm -f "$dir/summary.md"
