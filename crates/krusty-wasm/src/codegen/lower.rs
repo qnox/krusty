@@ -1346,14 +1346,7 @@ impl<'a> Body<'a> {
             } => {
                 self.array_literal(array_type, &spreads, &elements)?;
             }
-            IrExpr::NewArray { array_type, size } => {
-                // Only `IntArray` is allocated by size yet.
-                let array = array_type.non_null();
-                if array.is_reference_array() || array.array_elem() != Some(Ty::Int) {
-                    return Err("the expression `NewArray`".into());
-                }
-                self.new_array(array_type, size)?;
-            }
+            IrExpr::NewArray { array_type, size } => self.new_array(array_type, size)?,
             IrExpr::Try {
                 body,
                 catches,
