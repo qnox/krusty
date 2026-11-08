@@ -732,8 +732,6 @@ fn materialize_top_level_property(
                 && property.flags.has(DeclarationFlags::LATEINIT),
             owner: companion_block_owner.map(|class| ir.classes[class as usize].fq_name_id()),
             visibility: property.visibility,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
             erased_declared_ty: None,
             accessors: top_level_accessors(index, &property),
             line: 0,
@@ -1139,8 +1137,6 @@ fn materialize_member_property(
             is_lateinit: false,
             owner: Some(owner),
             visibility: property.visibility,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
             erased_declared_ty: None,
             accessors: crate::ir::IrStaticAccessors::DEFAULT,
             line: 0,
@@ -1297,7 +1293,7 @@ fn materialize_member_property(
             });
             ir.property_initializer_stores.insert(store);
             // kotlinc's initializer store sits at its initializer expression, not the declaration.
-            if let Some(&line) = ir.expr_source_lines.get(&initializer) {
+            if let Some(line) = ir.source_line(initializer) {
                 ir.expr_lines.insert(store, line);
             }
             initialization.entry(class_id).or_default().push((
@@ -1444,6 +1440,11 @@ fn materialize_member_property(
     }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {
+        origin: if property.flags.has(DeclarationFlags::CAPTURE_STORAGE) {
+            crate::ir::IrPropertyOrigin::CaptureStorage
+        } else {
+            crate::ir::IrPropertyOrigin::Declaration
+        },
         name: property.name.clone(),
         diagnostic_span: property.diagnostic_span,
         getter_diagnostic_span: property.getter_diagnostic_span,
@@ -1475,8 +1476,6 @@ fn materialize_member_property(
         setter_visibility: setter_visibility(index, property.declaration, property.visibility),
         getter,
         setter,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         needs_access_bridge: needs_property_reference_bridge,
         accessor_annotations: ir
             .accessor_annotations
@@ -1589,9 +1588,7 @@ pub(super) fn add_accessor_function(ir: &mut IrFile, input: AccessorFunctionInpu
     // A getter returns at the line its value is stated on: after an inlined call there, the return
     // marks that line again, as kotlinc's does. An expression body's recorded exit (its end line)
     // takes precedence, as a function's does.
-    let line = returns_value
-        .then(|| ir.expr_source_lines.get(&value).copied())
-        .flatten();
+    let line = returns_value.then(|| ir.source_line(value)).flatten();
     let crosses_boundary = match result {
         AccessorResult::Delegated(checked) => returns_value && checked != ret,
         AccessorResult::AsDeclared => false,
@@ -1607,7 +1604,7 @@ pub(super) fn add_accessor_function(ir: &mut IrFile, input: AccessorFunctionInpu
     };
     let returned = ir.add_expr(IrExpr::Return(returns_value.then_some(value)));
     if let Some(line) = line {
-        ir.expr_source_lines.insert(returned, line);
+        ir.set_source_line(returned, line);
     }
     if let Some(exit) = ir.accessor_body_exit(value) {
         ir.mark_unit_body_exit(returned, exit);
@@ -2369,12 +2366,10 @@ pub(super) fn accept_inline_accessor_template(
     }
     ir.callable_scopes.extend(lowered.root_block);
     let value = body_value(lowered.roots.into_vec(), Some(origin), ir)?;
-    let line = returns_value
-        .then(|| ir.expr_source_lines.get(&value).copied())
-        .flatten();
+    let line = returns_value.then(|| ir.source_line(value)).flatten();
     let returned = ir.add_expr(IrExpr::Return(returns_value.then_some(value)));
     if let Some(line) = line {
-        ir.expr_source_lines.insert(returned, line);
+        ir.set_source_line(returned, line);
     }
     if let Some(exit) = (!returns_value)
         .then(|| ir.accessor_body_exit(value))

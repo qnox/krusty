@@ -278,9 +278,18 @@ pub enum IrPropertyModality {
     Abstract,
 }
 
+/// Whether a property-shaped signature declares a Kotlin property or only authenticates storage.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum IrPropertyOrigin {
+    #[default]
+    Declaration,
+    CaptureStorage,
+}
+
 #[derive(Clone, Debug)]
 pub struct IrProperty {
     pub name: String,
+    pub origin: IrPropertyOrigin,
     /// Exact source property span for a representation-dependent declaration diagnostic. Generated
     /// properties have no source declaration and leave this absent.
     pub diagnostic_span: Option<crate::diag::Span>,
@@ -345,11 +354,6 @@ pub struct IrProperty {
     /// property). `None` for a plain backing-field property, whose accessor has no source body at all.
     pub getter: Option<FunId>,
     pub setter: Option<FunId>,
-    /// The JVM name a backend must use for the synthesized accessor when the plain spelling is wrong —
-    /// a value-class-typed property's accessor is `@JvmName`-mangled. Stamped by the pass that knows the
-    /// value classes; `None` means the ordinary spelling applies.
-    pub getter_jvm_name: Option<String>,
-    pub setter_jvm_name: Option<String>,
     /// Some use of a private property side reaches it from outside the declaring class — either the
     /// whole property is private, or a write reaches a private default setter. A target records the
     /// representation bridge that preserves that checked access; silently changing the call or
@@ -361,6 +365,41 @@ pub struct IrProperty {
 }
 
 impl IrProperty {
+    /// A public `val` stored in field `field` of its class, with no source declaration: the
+    /// storage a dependency class's declaration records.
+    pub(crate) fn stored_value(name: String, ty: Ty, field: u32) -> Self {
+        Self {
+            name,
+            origin: IrPropertyOrigin::Declaration,
+            diagnostic_span: None,
+            getter_diagnostic_span: None,
+            setter_diagnostic_span: None,
+            context_params: Vec::new(),
+            source_order: 0,
+            decl_line: 0,
+            accessor_lines: super::IrAccessorLines::default(),
+            ty,
+            type_params: Vec::new(),
+            visibility: crate::types::Visibility::Public,
+            return_value_status: Default::default(),
+            annotations: Box::new([]),
+            initializer: None,
+            has_constant_initializer: false,
+            storage_ty: None,
+            backing_field: Some(field),
+            is_var: false,
+            is_open: false,
+            modifiers: Default::default(),
+            delegate_field: None,
+            is_private: false,
+            setter_visibility: crate::types::Visibility::Public,
+            getter: None,
+            setter: None,
+            needs_access_bridge: false,
+            accessor_annotations: Default::default(),
+        }
+    }
+
     /// Whether this mutable declaration has a compiler-default setter whose resolved visibility is
     /// private. This is a stable Kotlin declaration fact: it does not depend on whether a backend has
     /// materialized an accessor function.

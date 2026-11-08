@@ -7,14 +7,12 @@ assert/jvmCrossinlineAssertInLambda.kt
 assert/jvmInline.kt
 assert/jvmInlineLambda.kt
 assert/jvmNestedClass.kt
-boxing/crossinlineSuspend.kt
 boxingOptimization/checkcastAndInstanceOf.kt
 boxingOptimization/checkcastAndInstanceOf_before.kt
 boxingOptimization/kt6842.kt
 boxingOptimization/safeCallToPrimitiveEquality3.kt
 builtinFunctions/charSequence.kt
 builtinFunctions/genericParameterBridge/IntMC.kt
-builtinFunctions/genericParameterBridge/abstractList.kt
 builtinFunctions/genericParameterBridge/mutableCollection.kt
 builtinFunctions/genericParameterBridge/mutableSetInterfaces.kt
 builtinFunctions/genericParameterBridge/notNullAnyMC.kt
@@ -26,7 +24,6 @@ callableReference/kt39612.kt
 capturedVarsOptimization/capturedValInLambdaInitializedOutside.kt
 capturedVarsOptimization/returnValueOfArrayConstructor.kt
 checkcast/kt53465.kt
-collectionStubs.kt
 companion/inlineFunctionObjectCompanionPropertyAccess.kt
 constants/inlineUnsignedIntConstant.kt
 constructors/localPrimaryDefaults.kt
@@ -41,7 +38,6 @@ defaultArguments/maskAndArgumentElimination.kt
 defaultArguments/noAnonymousObjectRegenerationInDefaultStub.kt
 enum/enumEntriesIntrinsicForJava.kt
 falseSmartCast.kt
-fieldsForCapturedValues/constructorOnly.kt
 fieldsForCapturedValues/innerAndOuterThis.kt
 fieldsForCapturedValues/multipleExtensionReceivers.kt
 forLoop/forInCharSequenceWithIndex/forInStringWithIndexWithExplicitlyTypedIndexVariable.kt
@@ -77,11 +73,10 @@ forLoop/unsigned/forInUnsignedArrayWithIndex.kt
 ieee754/smartCastsForDouble.kt
 ieee754/smartCastsForFloat.kt
 inaccessibleTypeInArray.kt
-inline/finallyMarkers.kt
-inline/inlineArgumentSlots.kt
 inline/noFakeVariableForInlineOnlyFun.kt
 inline/reifiedSafeAsWithMutable.kt
 inline/specialEnumFunction.kt
+inline/syntheticPropertyReference.kt
 inlineClasses/boxUnboxInlineClassFromMethodReturnType.kt
 inlineClasses/boxUnboxOnInlinedParameters.kt
 inlineClasses/boxingForNonLocalAndLabeledReturnsOfInlineClasses.kt

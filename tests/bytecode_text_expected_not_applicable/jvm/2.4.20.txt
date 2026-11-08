@@ -4,12 +4,10 @@
 # for this release, which requires kotlinc to pass every other case and no listed one.
 
 # The reference compiler rejects the configuration the case requests: a feature whose first
-# release is no longer supported cannot be disabled, and a test-only feature cannot be enabled
-# from the command line.
+# release is no longer supported (`-EnumEntries`) cannot be disabled.
 enum/enumEntriesMapping.kt
 enum/enumEntriesMultiMapping.kt
 inline/entriesMappingOnCallSite.kt
-inline/syntheticPropertyReference.kt
 
 # The expectation counts label names. JetBrains' test prints each class as its code generator
 # visits it, before ClassWriter, so a label the code generator visits but nothing references keeps

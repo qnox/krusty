@@ -1,5 +1,5 @@
 //! Calls to member suspend functions as suspension points of a body that kotlinc's coroutine
-//! transformer builds the machine of (`docs/JVM_INLINE_BEFORE_CPS.md` §1a).
+//! transformer builds the machine of.
 //!
 //! A call to a member of a class in the same file, on an explicit receiver, on `this`, or on a
 //! suspend lambda's extension receiver, is a plain call like a call to a top-level function. The

@@ -59,4 +59,29 @@ pub struct IrSamTarget {
     /// Semantic identities parallel to `declared_parameters`. Targets format source and generated
     /// roles for their own metadata/debug ABI; common IR never reconstructs them from spelling.
     pub parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
+    /// The interface's own type parameters in declaration order, which the declared shape names.
+    /// A target that writes a class implementing the interface declares them on that class.
+    pub type_parameters: Vec<IrSamTypeParameter>,
+}
+
+/// One type parameter a functional interface declares: its semantic identity, and each declared
+/// upper bound with whether that bound is an interface type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrSamTypeParameter {
+    pub name: String,
+    pub bounds: Vec<(Ty, bool)>,
+}
+
+impl IrSamTypeParameter {
+    /// The checked conversion's type parameter, carried into common IR.
+    pub(crate) fn lowered(parameter: &crate::fir::FirSamTypeParameter) -> Self {
+        Self {
+            name: parameter.name.to_string(),
+            bounds: parameter
+                .bounds
+                .iter()
+                .map(|bound| (bound.ty.get(), bound.is_interface))
+                .collect(),
+        }
+    }
 }

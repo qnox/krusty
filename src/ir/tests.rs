@@ -572,6 +572,7 @@ fn default_stub_uses_external_value_class_metadata_without_a_source_class() {
         internal: wrapper,
         args: vec![argument],
         ctor_params: Some(vec![Ty::Int]),
+        declared_params: None,
         ctor_desc: None,
         external_target: None,
         defaults: Box::new([]),

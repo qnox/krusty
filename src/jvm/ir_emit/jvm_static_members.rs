@@ -198,7 +198,7 @@ fn emit_companion_bridge(
     let declared_nullability::DeclaredNullability {
         result: result_nullability,
         parameters: parameter_nullability,
-    } = override_result_emission::declared_nullability(ir, env.override_results, function);
+    } = override_result_emission::declared_nullability(ir, env, function);
     let nullability_annotated =
         function_annotations::nullability_annotated(ir, function, &annotations);
     let parameter_annotations: &[crate::ir::DeclarationAnnotations] = ir

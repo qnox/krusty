@@ -4,13 +4,13 @@
 //! Pass 2. A real recorded source diagnostic is never deferral: it remains a Pass-1 publication
 //! failure and is emitted for that exact declaration.
 
-use super::ProductionSignatureDiagnostic;
+use super::diagnostics::RetainedFindings;
 use crate::fir::{DeclarationId, DiagnosticId};
 use crate::fx_hash::HashSet;
 
 pub(super) fn retain_or_report(
     diagnostics: &mut crate::diag::DiagSink,
-    recorded: &[ProductionSignatureDiagnostic],
+    findings: RetainedFindings<'_>,
     declaration: DeclarationId,
     diagnostic: Option<DiagnosticId>,
     candidates: &HashSet<DeclarationId>,
@@ -22,6 +22,11 @@ pub(super) fn retain_or_report(
         deferred.insert(declaration);
         return;
     }
-    super::diagnostics::emit_publication_failure(diagnostics, recorded, declaration);
+    super::diagnostics::emit_publication_failure(
+        diagnostics,
+        findings.recorded,
+        declaration,
+        findings.published,
+    );
     failed.push(declaration);
 }

@@ -298,6 +298,40 @@ pub(super) fn declared_receivers(
     receivers
 }
 
+impl ImplicitReceiver {
+    /// The single-entry receiver tower a DECLARATION has during signature evaluation. There is no
+    /// lexical scope to take an identity from: the declaration's own dispatch receiver is the whole
+    /// tower, so it is the current receiver at depth 0.
+    pub(super) fn signature_receiver(ty: Ty) -> Self {
+        ImplicitReceiver {
+            receiver_role: None,
+            ty,
+            declared_ty: ty,
+            identity: (0, 0),
+            extension_receiver: None,
+            class_receiver: true,
+            current: true,
+            receiver_depth: 0,
+        }
+    }
+}
+
+impl ImplicitReceiverSelection {
+    /// Matching selection for a signature-evaluation receiver tower.
+    pub(super) fn signature_receiver(ty: Ty) -> Self {
+        ImplicitReceiverSelection {
+            ty,
+            current: true,
+            receiver_depth: 0,
+            classifier: None,
+            context_binding: None,
+            singleton: None,
+            context_parameter: false,
+            construction_sites: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
