@@ -2364,24 +2364,61 @@ impl BodyFirChecker<'_> {
                     // A deferred `val` assigned from an `init` block or a constructor body. The
                     // checker already committed the owner and type; the write is a direct backing
                     // field store, exactly as an initializer would have been.
-                    let target = enum_entry_property
-                        .and_then(|sibling| self.enum_entry_property(sibling))
-                        .or_else(|| self.classifier_property_named(name))
-                        .ok_or_else(|| {
-                            self.failure(
-                                self.file.stmt_spans.get(statement.0 as usize).copied(),
-                                BodyCheckFailureKind::MissingStablePropertyTarget,
-                            )
-                        })?;
-                    FirExprKind::BackingFieldWrite {
-                        target,
-                        dispatch_receiver: self.backing_field_dispatch_receiver(
-                            target,
-                            origin,
+                    let target = match enum_entry_property {
+                        Some(selected) => self.selected_enum_entry_property(*selected),
+                        None => self.classifier_property_named(name),
+                    }
+                    .ok_or_else(|| {
+                        self.failure(
                             self.file.stmt_spans.get(statement.0 as usize).copied(),
-                        )?,
-                        value: self.expression(*value)?,
-                        conversion: None,
+                            BodyCheckFailureKind::MissingStablePropertyTarget,
+                        )
+                    })?;
+                    let dispatch_receiver = self.backing_field_dispatch_receiver(
+                        target,
+                        origin,
+                        self.file.stmt_spans.get(statement.0 as usize).copied(),
+                    )?;
+                    let header = self.index.property(target).ok_or_else(|| {
+                        self.failure(
+                            self.file.stmt_spans.get(statement.0 as usize).copied(),
+                            BodyCheckFailureKind::MissingStablePropertyTarget,
+                        )
+                    })?;
+                    if enum_entry_property.is_some() && header.mutable {
+                        let value_target = self
+                            .index
+                            .signature(header.declaration)
+                            .map(|signature| signature.result)
+                            .ok_or_else(|| {
+                                self.failure(
+                                    self.file.stmt_spans.get(statement.0 as usize).copied(),
+                                    BodyCheckFailureKind::MissingStablePropertyTarget,
+                                )
+                            })?;
+                        let checked_value = self.expression(*value)?;
+                        let conversion = self.selected_value_conversion(
+                            *value,
+                            checked_value,
+                            value_target,
+                            origin,
+                        )?;
+                        FirExprKind::PropertyWrite {
+                            target: FirPropertyTarget::of_module(target),
+                            dispatch_receiver,
+                            extension_receiver: None,
+                            context_arguments: Box::new([]),
+                            value: checked_value,
+                            conversion,
+                            substitutions: Box::new([]),
+                        }
+                    } else {
+                        FirExprKind::BackingFieldWrite {
+                            target,
+                            dispatch_receiver,
+                            value: self.expression(*value)?,
+                            conversion: None,
+                        }
                     }
                 } else if let Some(property) =
                     self.source_property_write(statement, None, *value)?

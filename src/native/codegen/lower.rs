@@ -1900,7 +1900,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     receiver: Some(receiver),
                     ..
                 } = &**checked_op
-                    && self.reference_property_role(*target).is_some() =>
+                    && self.reads_reference_slot(*target) =>
             {
                 self.reference_property(*target, *receiver)
                     .expect("the selected getter role was checked by the guard")

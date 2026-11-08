@@ -9,6 +9,8 @@ use super::intern;
 static TYPE_PARAMETER_SOURCES: OnceLock<Mutex<HashMap<&'static str, &'static str>>> =
     OnceLock::new();
 static NEXT_METADATA_TYPE_PARAMETER: AtomicU64 = AtomicU64::new(0);
+static NESTED_RESULT_TYPE_VARIABLES: OnceLock<Mutex<crate::fx_hash::HashSet<&'static str>>> =
+    OnceLock::new();
 static CALL_SITE_VARIABLES: OnceLock<Mutex<HashMap<&'static str, CallSiteVariable>>> =
     OnceLock::new();
 static POSTPONED_VARIABLE_ORIGINS: OnceLock<Mutex<HashMap<&'static str, PostponedVariableOrigin>>> =
@@ -112,6 +114,33 @@ pub(crate) fn call_site_type_variable(
             },
         );
     fresh
+}
+
+/// The variable an enclosing call solves for a nested call's formal that the nested call's own
+/// inputs left unfixed (`update(column, wrap("x"))` with `fun <T : Any> wrap(label: String)`). The
+/// nested call's provisional result names it in place of the declaration formal, so enclosing
+/// overload selection reads that argument as a result-only producer rather than as a fixed type.
+pub(crate) fn nested_result_type_variable(declared: &'static str) -> &'static str {
+    let fresh = intern(&format!("\0nested-result:{declared}"));
+    let mut sources = TYPE_PARAMETER_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::default()))
+        .lock()
+        .unwrap();
+    let source = sources.get(declared).copied().unwrap_or(declared);
+    sources.insert(fresh, source);
+    NESTED_RESULT_TYPE_VARIABLES
+        .get_or_init(|| Mutex::new(crate::fx_hash::HashSet::default()))
+        .lock()
+        .unwrap()
+        .insert(fresh);
+    fresh
+}
+
+/// Whether `identity` was produced by [`nested_result_type_variable`].
+pub(crate) fn is_nested_result_type_variable(identity: &str) -> bool {
+    NESTED_RESULT_TYPE_VARIABLES
+        .get()
+        .is_some_and(|variables| variables.lock().unwrap().contains(identity))
 }
 
 /// `ty` with call `site`'s own inference variables expressed as the formals they stand for. A call
