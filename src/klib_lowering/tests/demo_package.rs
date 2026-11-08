@@ -566,6 +566,28 @@ impl Body {
         self.call_signature(signature, arguments, None, ty)
     }
 
+    /// A call of the `demo` function `name` that leaves each `None` argument to its default.
+    pub(super) fn call_omitting(
+        &mut self,
+        name: &str,
+        arguments: Vec<Option<KlibIrExprId>>,
+        ty: T,
+    ) -> KlibIrExprId {
+        let signature = self.signatures[name].clone();
+        self.expr(
+            ty,
+            KlibIrExprKind::Call {
+                access: KlibIrMemberAccess {
+                    symbol: public_symbol(KlibIrSymbolKind::Function, signature),
+                    arguments: KlibIrArguments::Flat(arguments),
+                    type_arguments: Vec::new(),
+                    origin: None,
+                },
+                super_qualifier: None,
+            },
+        )
+    }
+
     /// A call of the generic `demo` function `name` with the serialized type argument
     /// `type_argument` for its `P`.
     pub(super) fn generic_call(

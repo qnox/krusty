@@ -79,6 +79,20 @@ pub(crate) fn names(ir: &IrFile) -> HashSet<TypeName> {
         .collect()
 }
 
+/// Anonymous declarations use their raw class ID even inside an enum entry's namespace.
+/// Enum-entry bodies have a distinct declaration role and keep their member class IDs.
+pub(crate) fn is_anonymous(class: &IrClass) -> bool {
+    class.is_anonymous_object && !class.is_enum_entry
+}
+
+pub(crate) fn anonymous_names(ir: &IrFile) -> HashSet<TypeName> {
+    ir.classes
+        .iter()
+        .filter(|class| is_anonymous(class))
+        .map(|class| class.fq_name_id())
+        .collect()
+}
+
 /// Classifiers in an enum entry body's declaration namespace. Members and class-initializer
 /// objects keep that namespace; a class declared in an executable body starts a raw local ID.
 /// Follow the retained declaration context, since generated naming segments need not be classes.

@@ -1158,13 +1158,11 @@ impl BodyLowering<'_> {
                 property: target,
                 inline_splice,
             } => {
-                self.index
-                    .property(*target)
-                    .ok_or(FirLoweringFailure::MissingProperty(*target))?;
-                let dispatch_class = self.dispatch_class(dispatch_receiver);
+                let (dispatch_receiver, dispatch_class) =
+                    self.module_property_receiver(*target, dispatch_receiver)?;
                 let operation = IrCheckedOperation::PropertyRead {
                     target: *target,
-                    dispatch_receiver: self.receiver(dispatch_receiver)?,
+                    dispatch_receiver,
                     extension_receiver: self.receiver(extension_receiver)?,
                     context_arguments: context_arguments
                         .iter()
@@ -1187,8 +1185,8 @@ impl BodyLowering<'_> {
                 result,
                 extension_receiver_parameter,
                 dispatch,
-
                 metadata_constant_read: _,
+                semantic_role: _,
             } => {
                 let arguments = context_arguments
                     .iter()
@@ -1238,13 +1236,11 @@ impl BodyLowering<'_> {
                 property: target,
                 inline_splice,
             } => {
-                self.index
-                    .property(*target)
-                    .ok_or(FirLoweringFailure::MissingProperty(*target))?;
-                let dispatch_class = self.dispatch_class(dispatch_receiver);
+                let (dispatch_receiver, dispatch_class) =
+                    self.module_property_receiver(*target, dispatch_receiver)?;
                 let operation = IrCheckedOperation::PropertyWrite {
                     target: *target,
-                    dispatch_receiver: self.receiver(dispatch_receiver)?,
+                    dispatch_receiver,
                     extension_receiver: self.receiver(extension_receiver)?,
                     context_arguments: context_arguments
                         .iter()
@@ -1268,8 +1264,8 @@ impl BodyLowering<'_> {
                 result,
                 extension_receiver_parameter,
                 dispatch,
-
                 metadata_constant_read: _,
+                semantic_role: _,
             } => {
                 let parameter = u32::try_from(
                     parameters
@@ -1437,8 +1433,6 @@ pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate
         crate::fir::FirIntrinsic::ArrayGet => crate::ir::IrIntrinsic::ArrayGet,
         crate::fir::FirIntrinsic::ArraySet => crate::ir::IrIntrinsic::ArraySet,
         crate::fir::FirIntrinsic::StringGet => crate::ir::IrIntrinsic::StringGet,
-        crate::fir::FirIntrinsic::StringLength => crate::ir::IrIntrinsic::StringLength,
-        crate::fir::FirIntrinsic::EnumName => crate::ir::IrIntrinsic::EnumName,
         crate::fir::FirIntrinsic::StringPlus => {
             unreachable!("a String.plus call is a concatenation, lowered with its flattened parts")
         }
