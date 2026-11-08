@@ -17,6 +17,7 @@
 //! not stand in for missing sweep setup. Owned fixtures require a JVM oracle before compilation,
 //! and their harness errors, panics and applicability exclusions can never be blessed.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -1002,6 +1003,38 @@ fn owned_fatal_outcomes_cannot_be_blessed_as_box_failures() {
     );
 }
 
+/// `@JvmInline` on an owned portable program is the JVM spelling of a `value class`. Native and
+/// Wasm read the `value` keyword alone, the same expansion `OPTIONAL_JVM_INLINE_ANNOTATION`
+/// gets, so the lane compiles every other declaration and assertion unchanged.
+pub(crate) fn owned_lane_source(source: &str, owned: bool, target: TestTarget) -> Cow<'_, str> {
+    if !owned || matches!(target, TestTarget::Jvm) || !source.contains("@JvmInline") {
+        Cow::Borrowed(source)
+    } else {
+        Cow::Owned(source.replace("@JvmInline", ""))
+    }
+}
+
+#[test]
+fn owned_non_jvm_lane_keeps_the_program_and_drops_the_jvm_spelling() {
+    let source = include_str!("box_regressions/ArrayOfNullsAnyElement.kt");
+    assert_eq!(source.len(), 349);
+    let wasm = owned_lane_source(source, true, TestTarget::WasmJs);
+    assert!(wasm.starts_with(" value class Meter"));
+    assert!(wasm.contains("arrayOfNulls<Meter>"));
+    assert!(wasm.contains("arrayOfNulls<UInt>"));
+    assert!(wasm.contains("arrayOfNulls<ULong>"));
+    assert!(wasm.contains("arrayOfNulls<Unit>"));
+    assert!(!wasm.contains("@JvmInline"));
+    assert_eq!(owned_lane_source(source, true, TestTarget::Jvm), source);
+    assert_eq!(owned_lane_source(source, false, TestTarget::Native), source);
+    let unsigned = include_str!("box_regressions/NullableUnsignedArrayElements.kt");
+    assert_eq!(unsigned.len(), 331);
+    assert_eq!(
+        owned_lane_source(unsigned, true, TestTarget::WasmWasi),
+        unsigned
+    );
+}
+
 fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
     let source = match std::fs::read_to_string(file) {
         Ok(source) => source,
@@ -1035,8 +1068,13 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
     if let Some(reason) = lane.harness_limitation(&source) {
         return Outcome::Harness(reason.to_string());
     }
+    let lane_source = owned_lane_source(
+        &source,
+        super::box_inventory::owned(file),
+        lane.test_target(),
+    );
     if source.contains("// MODULE:") {
-        let prepared = krusty::conformance::prepare_test_source(&source, lane.test_target());
+        let prepared = krusty::conformance::prepare_test_source(&lane_source, lane.test_target());
         let Some(mut modules) = krusty::conformance::split_modules(&prepared) else {
             return Outcome::Harness("unsupported // MODULE: shape".to_string());
         };
@@ -1065,7 +1103,7 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
         }
         return lane.compile_modules_and_run(scratch, stem, &units, &source);
     }
-    let sources = match prepare_sources(&source, stem, lane.test_target()) {
+    let sources = match prepare_sources(&lane_source, stem, lane.test_target()) {
         Ok(sources) => sources,
         Err(outcome) => return outcome,
     };

@@ -14,7 +14,7 @@ mod common;
 mod box_byte_score;
 mod box_inventory;
 #[path = "box_lane.rs"]
-mod box_lane;
+pub(crate) mod box_lane;
 #[path = "box_ratchet.rs"]
 mod box_ratchet;
 #[path = "box_reference_classes.rs"]

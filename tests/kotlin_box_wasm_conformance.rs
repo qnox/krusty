@@ -972,6 +972,24 @@ fun box(): String {\n\
     expect_wasm_box(&wasm, "valueClassReference");
 }
 
+/// The shared `NullableUnsignedArrayElements` program: nullable unsigned elements stay boxed.
+#[test]
+fn wasm_shared_nullable_unsigned_array_program() {
+    let src = include_str!("box_regressions/NullableUnsignedArrayElements.kt");
+    expect_reference_box(src, "NullableUnsignedArrayElements");
+    expect_wasm_box(src, "NullableUnsignedArrayElements");
+}
+
+/// The shared `ArrayOfNullsAnyElement` program. Wasm compiles the `value` keyword spelling the
+/// owned lane prepares from the canonical `@JvmInline` source.
+#[test]
+fn wasm_shared_array_of_nulls_program() {
+    let canonical = include_str!("box_regressions/ArrayOfNullsAnyElement.kt");
+    expect_reference_box(canonical, "ArrayOfNullsAnyElement");
+    let wasm = super::box_lane::owned_lane_source(canonical, true, TestTarget::WasmJs);
+    expect_wasm_box(&wasm, "ArrayOfNullsAnyElement");
+}
+
 // PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
 #[test]
 fn wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract() {
