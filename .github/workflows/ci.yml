@@ -758,9 +758,9 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [native, wasm-js, wasm-wasi]
-    # Independent Wasm targets use scaling hosted capacity, as Native does. A JS ratchet failure
-    # cannot suppress WASI measurement or occupy the same runner before WASI can start.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    # Native retains its prior hosted capacity. Wasm uses the guarded self-hosted pool.
+    # Separate target rows preserve independent measurements.
+    runs-on: ${{ (matrix.target == 'native' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps: *conformance-steps
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
