@@ -419,6 +419,7 @@ pub(super) fn materialize_member_delegate(
     }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {
+        origin: crate::ir::IrPropertyOrigin::Declaration,
         name: property.name.clone(),
         diagnostic_span: property.diagnostic_span,
         getter_diagnostic_span: property.getter_diagnostic_span,
@@ -444,8 +445,6 @@ pub(super) fn materialize_member_delegate(
         setter_visibility: setter_visibility(index, property.declaration, property.visibility),
         getter: Some(getter),
         setter,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         needs_access_bridge: false,
         accessor_annotations: ir
             .accessor_annotations
@@ -780,8 +779,6 @@ fn push_delegate_static(
         is_lateinit: false,
         owner,
         visibility: crate::types::Visibility::Private,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         erased_declared_ty: None,
         accessors: crate::ir::IrStaticAccessors::ABSENT,
         line: 0,
@@ -800,7 +797,7 @@ fn push_delegate_static(
 /// inlined operator's lines are mapped against.
 fn at_property_line(ir: &mut IrFile, call: ExprId, line: u32) {
     if line != 0 {
-        ir.expr_source_lines.insert(call, line);
+        ir.set_source_line(call, line);
     }
 }
 
@@ -808,7 +805,7 @@ fn at_property_line(ir: &mut IrFile, call: ExprId, line: u32) {
 /// type the delegate is stored at.
 fn delegate_storage_read(ir: &mut IrFile, read: IrExpr, storage: Ty) -> ExprId {
     let read = ir.add_expr(read);
-    ir.logical_types.insert(read, storage);
+    ir.set_logical_type(read, storage);
     read
 }
 
@@ -1245,7 +1242,7 @@ fn materialize_delegated_result(
         return expression;
     }
     ir.call_declared_ret.insert(expression, declared);
-    ir.physical_types.insert(expression, declared.erased_recv());
+    ir.set_physical_type(expression, declared.erased_recv());
     ir.add_expr(IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::ImplicitCoercion,
         arg: expression,
@@ -1308,8 +1305,8 @@ mod tests {
         };
         assert!(matches!(ir.expr(*call), IrExpr::MethodCall { .. }));
         assert_eq!(
-            ir.physical_types.get(call),
-            Some(&Ty::obj("kotlin/Any")),
+            ir.physical_type(*call),
+            Some(Ty::obj("kotlin/Any")),
             "the declaration returns its erased T slot before the selected Int result"
         );
     }

@@ -7,7 +7,8 @@
 //! The checker publishes exactly those builtin declarations as typed operations (`Binary`,
 //! `Unary`, a numeric conversion, a `String` intrinsic), or, for a builtin's `toString`, `equals`
 //! and `compareTo`, as an external call it marks intrinsic-const with the override role naming the
-//! operation. Evaluation reads only those facts and the checked types; it never selects a
+//! operation. A read of `String.length` or `Enum.name` stays an ordinary dependency property read
+//! whose getter carries the provider's role. Evaluation reads only those facts and the checked types; it never selects a
 //! declaration or inspects a source spelling.
 //!
 //! An operation kotlinc's interpreter would reject is left alone: an integer division by zero or a
@@ -16,12 +17,15 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::kt_string::{KtString, KtStringBuf};
-use crate::types::Ty;
+use crate::types::{SemanticCallRole, Ty};
+
+mod numeric_operations;
 
 use super::string_concatenation::ConcatenationPart;
 use crate::fir::{
     FirBinaryOperation, FirBody, FirCallArgument, FirCallTarget, FirConstant, FirConversion,
-    FirConversionKind, FirExpr, FirExprId, FirExprKind, FirIntrinsic, FirUnaryOperation,
+    FirConversionKind, FirExpr, FirExprId, FirExprKind, FirIntrinsic, FirPropertyDispatch,
+    FirPropertyTarget, FirReceiver, FirUnaryOperation,
 };
 
 /// A constant value together with the type it has as a value, before any widening to a nullable
@@ -77,6 +81,15 @@ impl ConstantEvaluation {
             | FirExprKind::StringTemplate(_)
             | FirExprKind::Call(_)
             | FirExprKind::ComparisonCall { .. } => true,
+            // A read of a property whose getter has a const-evaluable role (`"a".length`).
+            FirExprKind::PropertyRead {
+                target:
+                    FirPropertyTarget::External {
+                        semantic_role: Some(_),
+                        ..
+                    },
+                ..
+            } => true,
             // An explicit conversion call (`300.toByte()`) is intrinsic-const; an implicit widening
             // (`d + 1.0F`) is not a call kotlinc evaluates and keeps its runtime widening.
             FirExprKind::ImplicitConversion { conversion, .. } => {
@@ -238,6 +251,21 @@ impl ConstantEvaluation {
                 Some(string(text.finish()))
             }
             FirExprKind::Call(call) => self.call_value(body, call),
+            FirExprKind::PropertyRead {
+                target:
+                    FirPropertyTarget::External {
+                        semantic_role: Some(role),
+                        parameters,
+                        dispatch: FirPropertyDispatch::Ordinary,
+                        ..
+                    },
+                dispatch_receiver: Some(receiver),
+                extension_receiver: None,
+                context_arguments,
+                ..
+            } if parameters.is_empty() && context_arguments.is_empty() => {
+                self.property_value(body, *role, *receiver)
+            }
             // `a < b` over a selected `compareTo` is the language operator over that call's result.
             FirExprKind::ComparisonCall { operation, call } => {
                 let FirConstant::Int(order) = self.call_value(body, call)?.value else {
@@ -261,9 +289,6 @@ impl ConstantEvaluation {
         body: &FirBody,
         call: &crate::fir::FirCall,
     ) -> Option<EvaluatedConstant> {
-        if let Some(name) = self.enum_entry_name(body, call) {
-            return Some(name);
-        }
         match &call.target {
             FirCallTarget::Intrinsic { operation, .. } => {
                 let (receiver, arguments) = self.call_operands(body, call)?;
@@ -275,10 +300,16 @@ impl ConstantEvaluation {
             FirCallTarget::External {
                 semantic_role: Some(role),
                 intrinsic_const: true,
+                result,
                 ..
             } => {
                 let (receiver, arguments) = self.call_operands(body, call)?;
-                declared_operation(*role, receiver, &arguments)
+                declared_operation(
+                    *role,
+                    receiver,
+                    &arguments,
+                    result.get().canonical_semantic().non_null(),
+                )
             }
             _ => None,
         }
@@ -305,29 +336,40 @@ impl ConstantEvaluation {
         Some((receiver?, arguments))
     }
 
+    /// The value of a read of an intrinsic-const property, by the role of its selected getter.
+    ///
     /// `Enum.name` on a direct entry is that entry's declaration name. The entry expression is not
     /// itself a constant: evaluating it would initialize the enum. A name read through any other
-    /// receiver, including a safe call's temporary, stays a call.
-    fn enum_entry_name(
-        &self,
+    /// receiver, including a safe call's temporary, stays a read.
+    fn property_value(
+        &mut self,
         body: &FirBody,
-        call: &crate::fir::FirCall,
+        role: SemanticCallRole,
+        receiver: FirReceiver,
     ) -> Option<EvaluatedConstant> {
-        let FirCallTarget::Intrinsic {
-            operation: FirIntrinsic::EnumName,
-            ..
-        } = &call.target
-        else {
-            return None;
-        };
-        let receiver = call.dispatch_receiver?;
-        if receiver.conversion.is_some() {
-            return None;
+        match role {
+            SemanticCallRole::KotlinEnumName => {
+                if receiver.conversion.is_some() {
+                    return None;
+                }
+                let FirExprKind::EnumEntry { name, .. } = &self.operand(body, receiver.value)?.kind
+                else {
+                    return None;
+                };
+                Some(string(KtString::from(name.as_ref())))
+            }
+            SemanticCallRole::KotlinStringLength => {
+                let receiver = self.converted(body, receiver.value, receiver.conversion)?;
+                let FirConstant::String(text) = receiver.value else {
+                    return None;
+                };
+                Some(EvaluatedConstant {
+                    value: FirConstant::Int(i64::try_from(text.len_utf16()).ok()?),
+                    ty: Ty::Int,
+                })
+            }
+            _ => None,
         }
-        let FirExprKind::EnumEntry { name, .. } = &self.operand(body, receiver.value)?.kind else {
-            return None;
-        };
-        Some(string(KtString::from(name.as_ref())))
     }
 
     fn converted(
@@ -440,6 +482,9 @@ fn unary(
             return None;
         };
         return Some(boolean(!value));
+    }
+    if operation == FirUnaryOperation::BitwiseNot && matches!(ty, Ty::UInt | Ty::ULong) {
+        return numeric_operations::unsigned_inverse(&operand, ty);
     }
     // A signed literal is negated before it is narrowed to the checked result type. This ordering
     // is observable at the lower bound: `val b: Byte = -128` has an `Int` literal `128` under the
@@ -564,6 +609,9 @@ fn arithmetic(
             _ => return None,
         }));
     }
+    if matches!(ty, Ty::UInt | Ty::ULong) {
+        return numeric_operations::unsigned_bitwise(operation, &lhs, &rhs, ty);
+    }
     let value = match (number(&lhs)?, number(&rhs)?) {
         (Number::Integral(lhs), Number::Integral(rhs)) => match ty {
             Ty::Int | Ty::Char => {
@@ -681,15 +729,6 @@ fn intrinsic(
             push_text(&receiver, &mut text)?;
             Some(string(text.finish()))
         }
-        (FirIntrinsic::StringLength, receiver, []) => {
-            let FirConstant::String(text) = receiver.value else {
-                return None;
-            };
-            Some(EvaluatedConstant {
-                value: FirConstant::Int(i64::try_from(text.len_utf16()).ok()?),
-                ty: Ty::Int,
-            })
-        }
         // An index outside the string throws at run time, which kotlinc's interpreter leaves to
         // the call.
         (FirIntrinsic::StringGet, receiver, [index]) => {
@@ -737,9 +776,12 @@ fn declared_operation(
     role: crate::types::SemanticCallRole,
     receiver: EvaluatedConstant,
     arguments: &[EvaluatedConstant],
+    result: Ty,
 ) -> Option<EvaluatedConstant> {
-    use crate::types::SemanticCallRole;
     match (role, arguments) {
+        (SemanticCallRole::IntrinsicConstNumeric(operation), _) => {
+            numeric_operations::evaluate(operation, &receiver, arguments, result)
+        }
         (SemanticCallRole::KotlinAnyToString, []) => {
             let mut text = KtStringBuf::new();
             push_text(&receiver, &mut text)?;
@@ -932,6 +974,7 @@ mod tests {
                 crate::types::SemanticCallRole::KotlinComparableCompareTo,
                 text(lhs),
                 &[text(rhs)],
+                Ty::Int,
             )
             .map(|order| order.value)
         };

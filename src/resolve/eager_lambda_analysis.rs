@@ -526,8 +526,7 @@ impl Checker<'_> {
         None
     }
 
-    /// Check `lambda` with the inputs of `inputs` and no expected result, and read its results. The
-    /// check is a probe: its diagnostics are dropped.
+    /// Check `lambda` with the inputs of `inputs` and no expected result, and read its results.
     fn analyze_lambda_eagerly(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -537,22 +536,62 @@ impl Checker<'_> {
     ) -> LambdaResults {
         let context_count = inputs.context_count.min(inputs.params.len());
         let value_start = context_count + usize::from(inputs.has_receiver);
+        self.probe_lambda_results(lambda, |checker| {
+            checker.check_lambda_with_implicit_receivers_labeled(
+                scope,
+                lambda,
+                LambdaShape {
+                    context_types: &inputs.params[..context_count],
+                    extension_receiver: inputs
+                        .has_receiver
+                        .then(|| inputs.params.get(context_count).copied())
+                        .flatten(),
+                    value_types: inputs.params.get(value_start..).unwrap_or_default(),
+                },
+                inputs.suspend,
+                label,
+            );
+        })
+    }
+
+    /// Kotlin's refinement of a most-specific tie by its lambda's result. The lambda is analyzed
+    /// once against the first tied `expectations` entry, as a probe whose diagnostics are dropped,
+    /// and the first entry whose fixed result accepts what the body produced is chosen. Answers its
+    /// position, or `None` when no entry accepts the results.
+    pub(super) fn refine_tie_by_lambda_results(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        (lambda, inputs): (ExprId, &[Ty]),
+        expectations: &[&'static FnSig],
+        label: Option<&str>,
+    ) -> Option<usize> {
+        let first = expectations.first()?;
+        let results = self.probe_lambda_results(lambda, |checker| {
+            checker.check_lambda_with_fixed_function_type_and_params_labeled(
+                scope,
+                lambda,
+                first,
+                inputs,
+                first.has_receiver,
+                label,
+            );
+        });
+        expectations.iter().position(|expected| {
+            self.eager_results_fit_fixed(scope, &results, expected.ret)
+                .is_some()
+        })
+    }
+
+    /// Run `check` over `lambda` as a probe and read its results. The probe's diagnostics are
+    /// dropped.
+    fn probe_lambda_results(
+        &mut self,
+        lambda: ExprId,
+        check: impl FnOnce(&mut Self),
+    ) -> LambdaResults {
         let checkpoint = self.diags.diags.len();
         self.lambda_returns.collect_returns(lambda);
-        self.check_lambda_with_implicit_receivers_labeled(
-            scope,
-            lambda,
-            LambdaShape {
-                context_types: &inputs.params[..context_count],
-                extension_receiver: inputs
-                    .has_receiver
-                    .then(|| inputs.params.get(context_count).copied())
-                    .flatten(),
-                value_types: inputs.params.get(value_start..).unwrap_or_default(),
-            },
-            inputs.suspend,
-            label,
-        );
+        check(self);
         let mut returns = self.lambda_returns.take_collected_returns();
         self.diags.diags.truncate(checkpoint);
         // A labelled `return` without a value, in expression position, returns `Unit`.

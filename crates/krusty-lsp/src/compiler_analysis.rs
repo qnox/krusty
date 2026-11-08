@@ -248,7 +248,7 @@ fn with_ide_inspections(
                 span: diagnostic.span,
                 editor_span: None,
                 identity: None,
-                warning_name: None,
+                name: None,
                 severity: Severity::Warning,
                 kind: DiagnosticKind::Inspection,
                 msg: BOOLEAN_EXPRESSION_SIMPLIFICATION.to_string(),
@@ -322,7 +322,7 @@ fn add_unused_extension_receiver_inspection(
         span: receiver.span,
         editor_span: None,
         identity: None,
-        warning_name: None,
+        name: None,
         severity: Severity::Warning,
         kind: DiagnosticKind::Inspection,
         msg: UNUSED_EXTENSION_RECEIVER.to_string(),
@@ -353,7 +353,7 @@ fn add_unused_extension_property_inspection(
         span: receiver.span,
         editor_span: None,
         identity: None,
-        warning_name: None,
+        name: None,
         severity: Severity::Warning,
         kind: DiagnosticKind::Inspection,
         msg: UNUSED_EXTENSION_RECEIVER.to_string(),
@@ -433,6 +433,22 @@ struct StandaloneKotlinSymbols;
 
 #[cfg(test)]
 impl krusty::symbol_source::SymbolSource for StandaloneKotlinSymbols {
+    // The core declarations this source hands out carry the core provider's identities, so the
+    // core provider answers for them.
+    fn external_callable(
+        &self,
+        identity: krusty::fir::ExternalCallableId,
+    ) -> Option<krusty::libraries::ExternalCallableRealization> {
+        krusty::libraries::EmptySymbolSource.external_callable(identity)
+    }
+
+    fn external_property(
+        &self,
+        identity: krusty::fir::ExternalPropertyId,
+    ) -> Option<krusty::libraries::ExternalPropertyRealization> {
+        krusty::libraries::EmptySymbolSource.external_property(identity)
+    }
+
     fn package_exists(&self, parent: krusty::types::TypeName, name: &str) -> bool {
         krusty::libraries::EmptySymbolSource.package_exists(parent, name)
     }

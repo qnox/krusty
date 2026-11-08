@@ -14,10 +14,10 @@ fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
 cp "$repo/justfile" "$repo/push.just" "$fixture/"
 
-export GIT_AUTHOR_NAME='Anton Efimchuk'
-export GIT_AUTHOR_EMAIL='anton.efimchuk@gmail.com'
-export GIT_COMMITTER_NAME='Anton Efimchuk'
-export GIT_COMMITTER_EMAIL='anton.efimchuk@gmail.com'
+export GIT_AUTHOR_NAME='Version Fixture'
+export GIT_AUTHOR_EMAIL='version@example.invalid'
+export GIT_COMMITTER_NAME='Version Fixture'
+export GIT_COMMITTER_EMAIL='version@example.invalid'
 git -C "$fixture" init -q
 git -C "$fixture" commit --allow-empty -qm 'Version fixture baseline'
 baseline=$(git -C "$fixture" rev-parse HEAD)

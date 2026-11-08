@@ -87,13 +87,12 @@ pub(super) fn emit_selected_construction(
         internal: construction.serializer,
         args: arguments,
         ctor_params: (!declared_here).then(|| construction.parameters.to_vec()),
+        declared_params: Some(construction.parameters),
         ctor_desc: None,
         external_target,
         defaults: Box::new([]),
         default_prefix_count: 0,
     });
-    ir.construction_declared_params
-        .insert(new, construction.parameters);
     if let Some(target) = target {
         ir.construction_targets.insert(new, target);
     }

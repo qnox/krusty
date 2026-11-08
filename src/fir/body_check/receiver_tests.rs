@@ -262,19 +262,17 @@ fn smartcast_this_member_read_keeps_receiver_coordinate_and_checked_conversion()
     else {
         panic!("smart-cast body must remain a checked conditional")
     };
-    let FirExprKind::Call(call) = &body.expr(*then_branch).expect("array size read").kind else {
-        panic!("array size must become a checked intrinsic call")
+    // `size` is the selected `Array.size` declaration, read as an ordinary dependency property.
+    // Only a target backend decides how to realize it.
+    let FirExprKind::PropertyRead {
+        target: FirPropertyTarget::External { .. },
+        dispatch_receiver,
+        ..
+    } = &body.expr(*then_branch).expect("array size read").kind
+    else {
+        panic!("array size must stay a read of the selected dependency property")
     };
-    assert!(matches!(
-        call.target,
-        FirCallTarget::Intrinsic {
-            operation: FirIntrinsic::ArraySize,
-            ..
-        }
-    ));
-    let receiver = call
-        .dispatch_receiver
-        .expect("bare size read must retain its implicit receiver");
+    let receiver = dispatch_receiver.expect("bare size read must retain its implicit receiver");
     assert!(matches!(
         body.expr(receiver.value).map(|expression| &expression.kind),
         Some(FirExprKind::ImplicitReceiver {
@@ -647,13 +645,17 @@ fn companion_property_wins_over_same_named_zero_argument_member_function() {
     );
     let root = body.expr(root_expression(&body)).expect("indexed read");
     assert_eq!(root.ty.get(), Ty::Int);
-    assert!(matches!(
-        root.kind,
-        FirExprKind::IndexedRead {
-            kind: FirIndexedAccessKind::Array,
-            ..
-        }
-    ));
+    let FirExprKind::Call(call) = &root.kind else {
+        panic!("the subscript must be the selected `IntArray.get` call")
+    };
+    let receiver = call
+        .dispatch_receiver
+        .as_ref()
+        .expect("`get` has a dispatch receiver");
+    assert_eq!(
+        body.expr(receiver.value).unwrap().ty.get(),
+        Ty::obj("kotlin/IntArray")
+    );
 }
 
 /// Every `super` call the checker published in `body`, as `(name, declaration)`, in expression

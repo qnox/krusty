@@ -240,12 +240,13 @@ pub(super) fn synth_value_members(
         };
         member_signatures::record(ir, class_id, accessor, member);
         crate::jvm::method_parameters::prepend_value_class_receiver(ir, accessor, "arg0");
-        let property = &mut ir.classes[class_id as usize].properties[property_index];
-        if is_getter {
-            property.getter_jvm_name = Some(jvm_name);
+        let side = if is_getter {
+            crate::ir::JvmAccessorSide::Getter
         } else {
-            property.setter_jvm_name = Some(jvm_name);
-        }
+            crate::ir::JvmAccessorSide::Setter
+        };
+        let class = ir.classes[class_id as usize].fq_name;
+        ir.set_jvm_property_accessor_name(class, property_index as u32, side, jvm_name);
     }
 
     // User-written Any overrides become the static `-impl` body. Its former receiver slot 0 is exactly
@@ -359,6 +360,7 @@ pub(super) fn synth_value_members(
             internal: box_internal,
             args: vec![arg],
             ctor_params: Some(vec![u_ir]),
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),
@@ -880,12 +882,27 @@ pub(super) fn synth_value_members(
                 .iter()
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>();
-            // Omitted arguments are filled by `constructor-impl$default`, as for the primary.
-            if sc.defaults.iter().any(Option::is_some) {
-                let names = names.iter().map(|name| (*name).to_string()).collect();
-                ir.fn_params.insert(
+            // The static takes the constructor's declared parameters as its own, so it owns their
+            // identities. Omitted arguments are filled by `constructor-impl$default`, as for the
+            // primary.
+            let owned_names = names.iter().map(|name| (*name).to_string()).collect();
+            ir.fn_params.insert(
+                constructor,
+                if sc.defaults.iter().any(Option::is_some) {
+                    crate::ir::FnParamInfo::source_defaults(owned_names, sc.defaults.clone())
+                } else {
+                    crate::ir::FnParamInfo::source_names(owned_names)
+                },
+            );
+            // A `vararg` stays one on the static: Java calls it in element form, and its
+            // `Signature` keeps the element's declaration-site wildcards.
+            if let Some(index) = sc.vararg_index {
+                ir.fn_varargs.insert(
                     constructor,
-                    crate::ir::FnParamInfo::source_defaults(names, sc.defaults.clone()),
+                    crate::ir::IrVarargParameter {
+                        index,
+                        is_last: index + 1 == sc.named_params.len(),
+                    },
                 );
             }
             crate::jvm::method_parameters::record_function(ir, constructor, &names, &[]);
@@ -1152,8 +1169,8 @@ fn nested_value_text(
         dispatch_receiver: None,
         args: vec![value],
     });
-    ir.physical_types.insert(call, Ty::String);
-    ir.logical_types.insert(call, Ty::obj_name(nested));
+    ir.set_physical_type(call, Ty::String);
+    ir.set_logical_type(call, Ty::obj_name(nested));
     rendered_value_class_text.insert(call);
     call
 }

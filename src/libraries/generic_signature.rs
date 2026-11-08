@@ -1,4 +1,4 @@
-use crate::types::Ty;
+use crate::types::{Ty, TyParamName};
 
 use super::SemanticPlatform;
 
@@ -7,7 +7,8 @@ use super::SemanticPlatform;
 /// this one declaration-owned contract before resolution consumes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GenericSig {
-    pub formals: Vec<String>,
+    /// Each formal's declaration identity.
+    pub formals: Vec<TyParamName>,
     /// Declared upper bounds, parallel to [`Self::formals`]. An empty slot denotes Kotlin's
     /// implicit nullable `Any?` bound.
     pub formal_bounds: Vec<Vec<Ty>>,
@@ -65,7 +66,7 @@ mod tests {
 
     fn signature(bounds: Vec<Vec<Ty>>) -> GenericSig {
         GenericSig {
-            formals: vec!["T".to_owned()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: bounds,
             receiver: None,
             params: Vec::new(),

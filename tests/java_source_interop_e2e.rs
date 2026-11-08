@@ -405,7 +405,7 @@ fn run_kotlin_first(kotlin: &str, java: &[(&str, &str)]) -> String {
         diagnostics
             .diags
             .iter()
-            .map(|diagnostic| diagnostic.msg.as_str())
+            .map(|diagnostic| diagnostic.message(krusty::diag::DiagnosticNames::Hidden))
             .collect::<Vec<_>>()
     );
     let kotlin_classes = outputs
@@ -443,6 +443,46 @@ fn run_kotlin_first(kotlin: &str, java: &[(&str, &str)]) -> String {
     classes.extend(java_classes);
     let box_class = common::find_box_class(&classes).expect("box() class");
     common::run_box(&classes, &box_class, &jars).expect("box run")
+}
+
+/// One Java source naming a type absent from the classpath (an unbuilt dependency module, a library
+/// that was never downloaded) must not withdraw the module's other Java declarations, nor its own
+/// resolvable members. kotlinc compiles the Kotlin against both Java sources without a diagnostic;
+/// withdrawing every header instead made each Kotlin reference into the module's Java unresolved.
+#[test]
+fn an_unresolved_type_in_one_java_source_keeps_the_module_java_headers() {
+    let result = common::compiler_diagnostics(
+        &[
+            (
+                "p/Good.java",
+                "package p;\npublic class Good { public static String ok() { return \"O\"; } }\n",
+            ),
+            (
+                "p/Partial.java",
+                "package p;\nimport missing.dependency.Absent;\npublic class Partial {\n    \
+                 public static String name() { return \"K\"; }\n    \
+                 public static Absent absent() { return null; }\n}\n",
+            ),
+            (
+                "Main.kt",
+                "package p\n\nfun box(): String = Good.ok() + Partial.name()\n",
+            ),
+        ],
+        &[common::stdlib_jar()],
+    );
+    let mut krusty = errors(&result.krusty_stderr);
+    krusty.extend(errors(&result.krusty_stdout));
+    assert_eq!(
+        errors(&result.reference_stderr),
+        Vec::<ObservedError>::new()
+    );
+    assert_eq!(result.reference_code, 0, "{}", result.reference_stderr);
+    assert_eq!(krusty, Vec::<ObservedError>::new());
+    assert_eq!(
+        result.krusty_code, 0,
+        "{}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
 }
 
 #[test]
@@ -1326,6 +1366,35 @@ fn primary_constructor_parameter_precedes_peer_inherited_nested_classifiers() {
         differential.reference_stderr,
     );
     run_mixed(&java, kotlin);
+}
+
+/// A Java interface's nested class reaches neither a Kotlin sub-interface nor an implementing
+/// class by its simple name, exactly as for a Kotlin interface.
+#[test]
+fn java_interface_nested_class_is_not_inherited_by_sub_interface_or_implementer() {
+    let java = [(
+        "fixtures/Outer.java",
+        "package fixtures; public interface Outer { class Nested {} }",
+    )];
+    let kotlin = "package fixtures\n\
+                  \n\
+                  interface Sub : Outer {\n\
+                  \x20   fun make(): Nested = Nested()\n\
+                  }\n\
+                  \n\
+                  abstract class Impl : Outer {\n\
+                  \x20   fun make(): Nested = Nested()\n\
+                  }\n";
+    let Some((javadir, _)) = compile_java(&java) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let result = common::compiler_diagnostics(
+        &[("JavaInterfaceNestedScope.kt", kotlin)],
+        std::slice::from_ref(&javadir),
+    );
+    cleanup(&javadir);
+    common::expect_identical_rejection(&result, "java_interface_nested_classifier_scope");
 }
 
 #[test]

@@ -332,16 +332,22 @@ pub(super) fn emit_suspend_lambda_class(
 ) -> Vec<u8> {
     let shape = Shape::new(ir, c, lambda);
     let formatter = JvmSignatureFormatter::new(ir, env);
-    let continuation = match JvmSignatureFormatter::nothing_continuation(shape.result) {
+    // The `FunctionN` supertype's arguments are spelled in kotlinc's generic-argument mode: every
+    // declaration-site variance below them is written, `Continuation<-List<+T>>` included, and
+    // the `in` over `Any` is kept. `invoke`'s continuation is a parameter like any other.
+    let supertype_continuation = match JvmSignatureFormatter::nothing_continuation(shape.result) {
         Some(continuation) => continuation.to_string(),
         None => format!(
             "L{CONTINUATION}<-{}>;",
             formatter
-                .ty_at(&shape.result, Wildcards::Suppressed)
+                .ty_at(&shape.result, Wildcards::Generic)
                 .expect("a suspend lambda's result has a JVM signature")
         ),
     };
-    let class_signature = class_signature(&formatter, &shape, &continuation);
+    let continuation = formatter
+        .continuation(shape.result, Wildcards::Declared)
+        .expect("a suspend lambda's result has a JVM signature");
+    let class_signature = class_signature(&formatter, &shape, &supertype_continuation);
     let mut cw = new_writer_generic(&shape.class, Some(&class_signature), SUSPEND_LAMBDA, opts);
     cw.set_signature(&class_signature);
     // An inline or specialized suspend lambda is public: its body is copied into other packages.
@@ -355,6 +361,7 @@ pub(super) fn emit_suspend_lambda_class(
             None => cw.set_enclosing_class(&owner),
         }
     }
+    super::enclosure::start_inline_body_source_map(ir, c, &mut cw);
     env.inner_classes.register(&mut cw);
     cw.add_interface(&jvm_function_interface(shape.arity));
     // kotlinc writes a class's fields after its methods, as the coroutine transformer adds the
@@ -408,6 +415,29 @@ pub(super) fn emit_suspend_lambda_class(
             ("$result".to_string(), OBJECT_DESC.to_string(), 1),
         ],
     );
+    // A lambda that reads a `crossinline` capture keeps its marked body beside the machine, for a
+    // call site that inlines the lambda into it to build its own machine over.
+    let reads_crossinline = ir.class_id_by_name(c.fq_name_id()).is_some_and(|class| {
+        crate::jvm::suspend_inline_functions::suspend_lambda_reads_crossinline_capture(
+            ir, class, lambda,
+        )
+    });
+    if reads_crossinline {
+        emit_placed_method(
+            ir,
+            lambda.invoke_suspend,
+            MethodPlacement::ForInlineCopy {
+                static_owner: StaticOwner::Class(c.fq_name),
+                instance: true,
+                singleton: None,
+                kind: crate::jvm::suspend_inline_functions::ForInlineCopy::SuspendLambda,
+            },
+            &shape.class,
+            facade,
+            &mut cw,
+            env,
+        );
+    }
     if shape.has_create() {
         emit_create(ir, &mut cw, &shape, lambda, env.java_parameters);
     }
@@ -508,6 +538,7 @@ fn lambda_metadata(
         .collect();
     let local_classifiers = crate::metadata::local_classifiers::names(ir);
     let enum_entry_bodies = crate::metadata::local_classifiers::enum_entry_bodies(ir);
+    let anonymous_classifiers = crate::metadata::local_classifiers::anonymous_names(ir);
     let approximate_intersection = |ty| formatter.declaration_approximation(ty);
     let inner_classifier = |classifier| formatter.inner_classifier(classifier);
     let (bytes, strings) = crate::metadata::lambda_function::build(
@@ -521,6 +552,7 @@ fn lambda_metadata(
             type_parameters: &lambda.type_parameters,
             local_classifiers: &local_classifiers,
             enum_entry_bodies: &enum_entry_bodies,
+            anonymous_classifiers: &anonymous_classifiers,
             intersection_approximation: &approximate_intersection,
             inner_classifiers: &inner_classifier,
         },
@@ -543,7 +575,7 @@ fn class_signature(formatter: &JvmSignatureFormatter, shape: &Shape, continuatio
     for parameter in &shape.parameters {
         signature.push_str(
             &formatter
-                .ty_at(&parameter.semantic, Wildcards::Suppressed)
+                .ty_at(&parameter.semantic, Wildcards::Generic)
                 .expect("a suspend lambda's parameter has a JVM signature"),
         );
     }

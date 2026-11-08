@@ -31,6 +31,7 @@ impl Emitter<'_> {
         node: &IrExpr,
         code: &mut CodeBuilder,
     ) {
+        self.mark_suspend_call_line(expression, code);
         if self.emit_discarded_safe_call(expression, node, code) {
             return;
         }
@@ -38,7 +39,7 @@ impl Emitter<'_> {
         // line even when the evaluation leaves no instruction (`Unit`): the next line's mark gives
         // it a `nop` of its own.
         if self.ir.is_jvm_delegate_evaluation(expression) {
-            if let Some(&line) = self.ir.expr_source_lines.get(&expression) {
+            if let Some(line) = self.ir.source_line(expression) {
                 code.mark_line_occupied(line);
             }
         }
@@ -187,7 +188,7 @@ impl Emitter<'_> {
                 // duplicate to discard (`aload; invokestatic checkNotNull`).
                 IrExpr::NotNullAssert {
                     operand,
-                    check: crate::ir::NullCheck::Unnamed,
+                    check: crate::ir::NullCheck::Unnamed { .. },
                 } => {
                     self.emit_value(*operand, code);
                     let check = self.cw.methodref(

@@ -26,6 +26,17 @@ pub(super) struct ReceiverFunctionParts {
     pub(super) values: &'static [Ty],
 }
 
+/// A selected property operand, including safe calls without a parser callee expression.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReceiverFunctionPropertyCallee {
+    Expression(ExprId),
+    EnumEntry {
+        property: EnumEntryProperty,
+        declared_ty: Ty,
+        receiver: Box<ImplicitReceiverSelection>,
+    },
+}
+
 impl Checker<'_> {
     pub(super) fn receiver_function_value(
         &self,
@@ -43,25 +54,34 @@ impl Checker<'_> {
                             enum_entry_property,
                             owner_storage,
                         } => {
-                            let receivers = self.implicit_receivers(scope);
-                            let recorded_is_owner = receivers.iter().any(|receiver| {
-                                receiver.identity == receiver_identity
-                                    && self.receiver_is_assignable(receiver.ty, Ty::obj_name(owner))
-                            });
-                            let receiver_identity = if recorded_is_owner {
+                            let receiver_identity = if enum_entry_property.is_some() {
+                                // The selected entry instance is not identified by assignability to
+                                // its physical subclass owner; keep the recorded semantic receiver.
                                 receiver_identity
                             } else {
-                                receivers
-                                    .into_iter()
-                                    .find(|receiver| {
-                                        receiver.extension_receiver.is_none()
-                                            && self.receiver_is_assignable(
-                                                receiver.ty,
-                                                Ty::obj_name(owner),
-                                            )
-                                    })
-                                    .map(|receiver| receiver.identity)
-                                    .unwrap_or(receiver_identity)
+                                let receivers = self.implicit_receivers(scope);
+                                let recorded_is_owner = receivers.iter().any(|receiver| {
+                                    receiver.identity == receiver_identity
+                                        && self.receiver_is_assignable(
+                                            receiver.ty,
+                                            Ty::obj_name(owner),
+                                        )
+                                });
+                                if recorded_is_owner {
+                                    receiver_identity
+                                } else {
+                                    receivers
+                                        .into_iter()
+                                        .find(|receiver| {
+                                            receiver.extension_receiver.is_none()
+                                                && self.receiver_is_assignable(
+                                                    receiver.ty,
+                                                    Ty::obj_name(owner),
+                                                )
+                                        })
+                                        .map(|receiver| receiver.identity)
+                                        .unwrap_or(receiver_identity)
+                                }
                             };
                             ReceiverFnValueOrigin::DispatchProperty {
                                 owner,
@@ -88,14 +108,21 @@ impl Checker<'_> {
                 .rev()
                 .find(|property| property.name == name)
             {
+                let receiver_identity = if property.enum_entry_property.is_some() {
+                    property.dispatch_receiver_identity?
+                } else {
+                    receiver.identity
+                };
                 return match property.ty.kind() {
                     TyKind::Fun(signature) if signature.has_receiver => Some((
                         signature,
                         ReceiverFnValueOrigin::DispatchProperty {
                             owner: property.owner,
-                            receiver_identity: receiver.identity,
+                            receiver_identity,
                             declared_ty: property.ty,
-                            enum_entry_property: property.enum_entry_property,
+                            enum_entry_property: property
+                                .enum_entry_property
+                                .map(|(selected, _)| selected),
                             owner_storage: false,
                         },
                     )),
@@ -296,10 +323,34 @@ impl Checker<'_> {
                 self.set(*callee, access.property.ty);
                 self.expr_lowers
                     .insert(*callee, ExprLowering::TopLevelPropertyGet(access));
-                Some(*callee)
+                Some(ReceiverFunctionPropertyCallee::Expression(*callee))
             }
             ReceiverFnValueOrigin::DispatchProperty {
-                receiver_identity, ..
+                owner,
+                receiver_identity,
+                declared_ty,
+                enum_entry_property: Some(property),
+                ..
+            } => match self.select_enum_entry_callable_callee(
+                scope,
+                call,
+                EnumEntryStorage { owner, property },
+                Some(receiver_identity),
+                declared_ty,
+            ) {
+                Some(callee) => Some(callee),
+                None => {
+                    self.diags.error(
+                        self.call_callee_name_span(call),
+                        "selected enum-entry property has no declaring receiver",
+                    );
+                    return Some(Ty::Error);
+                }
+            },
+            ReceiverFnValueOrigin::DispatchProperty {
+                receiver_identity,
+                enum_entry_property: None,
+                ..
             } => {
                 let Expr::Call { callee, .. } = self.file.expr(call) else {
                     return None;
@@ -315,11 +366,35 @@ impl Checker<'_> {
                 let property_ty = self.record_property_read(scope, Some(*callee), selection);
                 self.set(*callee, property_ty);
                 self.mark_implicit_receiver_selection(*callee, receiver);
-                Some(*callee)
+                Some(ReceiverFunctionPropertyCallee::Expression(*callee))
             }
-            ReceiverFnValueOrigin::Local
-            | ReceiverFnValueOrigin::ClassStorage(_)
-            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. } => None,
+            ReceiverFnValueOrigin::EnumEntryPropertyStorage {
+                owner,
+                field,
+                declaration,
+            } => match self.select_enum_entry_callable_callee(
+                scope,
+                call,
+                EnumEntryStorage {
+                    owner,
+                    property: EnumEntryProperty {
+                        owner: declaration,
+                        sibling: field,
+                    },
+                },
+                None,
+                Ty::from(TyKind::Fun(signature)),
+            ) {
+                Some(callee) => Some(callee),
+                None => {
+                    self.diags.error(
+                        self.call_callee_name_span(call),
+                        "selected enum-entry property has no declaring receiver",
+                    );
+                    return Some(Ty::Error);
+                }
+            },
+            ReceiverFnValueOrigin::Local | ReceiverFnValueOrigin::ClassStorage(_) => None,
         };
         self.expect_call_args(scope, params, false, args, arg_tys);
         if let Some(context_args) = context_args {
