@@ -1,4 +1,4 @@
-//! Base Throwable realization and structured Kotlin exception transport.
+//! Authenticated Throwable realization and ordered Kotlin exception handlers.
 
 use krusty::backend::BackendCompilerIntrinsic as CompilerIntrinsic;
 use krusty::fir::ExternalCallableId;
@@ -220,18 +220,23 @@ impl Body<'_> {
         if let Some(cleanup) = finally {
             return self.try_finally(body, catches, cleanup, result);
         }
-        let [catch] = catches else {
-            return Err("a `try` without exactly one Throwable catch".into());
-        };
-        let catch_layout = catch
-            .ty
-            .obj_internal()
-            .and_then(|identity| self.classifiers.classifier(identity))
-            .and_then(|fact| fact.runtime_exception);
-        if catch.ty.is_nullable()
-            || !matches!(catch_layout, Some(layout) if layout.kind == krusty::libraries::RuntimeExceptionKind::Throwable)
-        {
-            return Err(format!("a catch of `{}`", describe(catch.ty)));
+        if catches.is_empty() {
+            return Err("a `try` without a catch".into());
+        }
+        let mut handlers = Vec::with_capacity(catches.len());
+        for catch in catches {
+            let identity = catch
+                .ty
+                .obj_internal()
+                .filter(|_| !catch.ty.is_nullable())
+                .ok_or_else(|| format!("a catch of `{}`", describe(catch.ty)))?;
+            // The frozen declaration and its complete authenticated superclass chain own the
+            // physical subtype. Source spelling and handler position never infer its identity.
+            let structure =
+                self.runtime
+                    .exceptions
+                    .ensure_class(self.module, self.classifiers, identity)?;
+            handlers.push((catch, structure));
         }
         let result_block = carrier(result)?.map_or(BlockType::Empty, BlockType::Value);
         self.code.block(result_block);
@@ -253,16 +258,33 @@ impl Body<'_> {
         self.close();
         let caught = self.local(REFERENCE);
         self.code.local_set(caught);
-        let previous = self.values.insert(catch.var, (caught, catch.ty));
-        self.value(catch.body, result)?;
-        match previous {
-            Some(previous) => {
-                self.values.insert(catch.var, previous);
+        for (catch, structure) in handlers {
+            self.code
+                .local_get(caught)
+                .ref_test(false, HeapType::Concrete(structure))
+                .if_(BlockType::Empty);
+            self.open();
+            let previous = self.values.insert(catch.var, (caught, catch.ty));
+            let answer = self.value(catch.body, result);
+            match previous {
+                Some(previous) => {
+                    self.values.insert(catch.var, previous);
+                }
+                None => {
+                    self.values.remove(&catch.var);
+                }
             }
-            None => {
-                self.values.remove(&catch.var);
-            }
+            answer?;
+            // A selected handler leaves the whole try expression. Later siblings cannot catch
+            // exceptions thrown by a handler or steal a value from an earlier matching clause.
+            self.code.br(self.relative(done));
+            self.close();
         }
+        // No Kotlin handler matched. Re-throw the original payload through the same tag so an
+        // enclosing handler observes the original identity; host exceptions never enter here.
+        self.code
+            .local_get(caught)
+            .throw(self.runtime.exceptions.tag);
         self.close();
         Ok(())
     }

@@ -827,6 +827,11 @@ impl<'a> Body<'a> {
             return Ok(());
         }
         let Some(source) = source_ty else {
+            // Restore stack polymorphism after structured control only when completion proves
+            // divergence: an inlined generic result may retain Nothing but complete normally.
+            if self.ir.expr_diverges_by(id, &|_, _| false) {
+                self.code.unreachable();
+            }
             return Ok(());
         };
         if source == Ty::Unit && carrier(target)?.is_some() {
