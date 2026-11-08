@@ -2409,6 +2409,7 @@ reflection/types/useSiteVariance.kt
 regressions/directInvokeNameBasedDestructuring.kt
 regressions/floatingRangeContainsMixedWidths.kt
 regressions/generic.kt
+regressions/inferredDeclarationOpenDependencyBranch.kt
 regressions/kt10143.kt
 regressions/kt15196.kt
 regressions/kt1779.kt
