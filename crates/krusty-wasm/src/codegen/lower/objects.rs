@@ -79,6 +79,19 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// Consume one checked enclosing edge through the producer-certified constructor field.
+    /// The existing field reader evaluates the receiver exactly once and projects its GC layout.
+    pub(super) fn enclosing_instance(
+        &mut self,
+        receiver: u32,
+        inner: TypeName,
+        outer: TypeName,
+    ) -> Result<(), Unsupported> {
+        let (class, field) = super::super::classes::enclosing_field(self.ir, inner, outer)
+            .ok_or_else(|| "an enclosing instance without authenticated storage".to_string())?;
+        self.field_read(receiver, class, field)
+    }
+
     pub(super) fn field_write(
         &mut self,
         receiver: u32,
