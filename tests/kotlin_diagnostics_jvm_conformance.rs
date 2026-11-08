@@ -176,7 +176,7 @@ fn krusty(
     }));
     match compiled {
         Ok(Ok(_)) => Verdict::Accepted,
-        Ok(Err(CompileFailure::Rejected(errors))) => Verdict::Rejected(errors),
+        Ok(Err(CompileFailure::Rejected { errors, .. })) => Verdict::Rejected(errors),
         Ok(Err(CompileFailure::Harness(reason))) => Verdict::Failed(reason),
         Err(panic) => Verdict::Failed(format!("panicked: {}", panic_message(&panic))),
     }

@@ -35,7 +35,7 @@ use rayon::prelude::*;
 use super::box_byte_score;
 use super::box_jvm_compile::{
     compile_blocks, compile_box_case, compile_module_test, compile_multifile, find_box_class,
-    unit_options, CompiledClasses, COROUTINE_HELPERS, T_EMIT,
+    unit_options, CompileFailure, CompiledClasses, COROUTINE_HELPERS, T_EMIT,
 };
 use super::box_ratchet::{self, Outcome, Platform};
 use super::box_reference_classes;
@@ -1323,7 +1323,10 @@ fn kotlin_codegen_box_conformance() {
                             });
                         let compiled = match compiled {
                             Ok(c) if !c.flat.is_empty() => c,
-                            Ok(_) | Err(_) => {
+                            rejected => {
+                                if let Err(CompileFailure::Rejected { report, .. }) = rejected {
+                                    eprintln!("{report}");
+                                }
                                 return (
                                     TestResult::Fail(
                                         "compiler rejected the corpus case".to_string(),

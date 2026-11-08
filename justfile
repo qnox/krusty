@@ -68,13 +68,17 @@ release-tests:
 test-lsp:
     cargo test --profile gate -p krusty-lsp --all-targets
 
-# rustfmt must be clean (the repo is fully formatted; `just fmt` fixes any drift).
+# rustfmt must be clean (the repo is fully formatted; `just fmt` fixes any drift). The e2e target
+# declares its `tests/*_e2e.rs` modules through a macro, which `cargo fmt` does not follow, so those
+# files are passed to rustfmt directly.
 fmt-check:
     cargo fmt --all --check
+    rustfmt --edition 2021 --check tests/*_e2e.rs
 
 # Apply rustfmt across the workspace.
 fmt:
     cargo fmt --all
+    rustfmt --edition 2021 tests/*_e2e.rs
 
 # Emit current clippy findings as a stable, line-number-independent fingerprint set:
 #   <count><TAB><file><TAB><message>   (one per file+message, so a new occurrence bumps the count)
@@ -254,7 +258,7 @@ kotlinc VERSION=`just max-version`:
     url="https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-compiler-${ver}.zip"
     tmp="$(mktemp -d)"
     echo "downloading kotlin-compiler ${ver}…" >&2
-    curl -fsSL "$url" -o "$tmp/kotlinc.zip" || { echo "failed to download $url" >&2; rm -rf "$tmp"; exit 1; }
+    curl -fsSL --retry 3 "$url" -o "$tmp/kotlinc.zip" || { echo "failed to download $url" >&2; rm -rf "$tmp"; exit 1; }
     mkdir -p "$dest"
     if command -v unzip >/dev/null 2>&1; then unzip -q "$tmp/kotlinc.zip" -d "$dest"
     elif command -v python3 >/dev/null 2>&1; then python3 -c "import zipfile; zipfile.ZipFile('$tmp/kotlinc.zip').extractall('$dest')"

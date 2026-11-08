@@ -10,6 +10,8 @@ use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantic
 fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
     let source =
         include_str!("box_regressions/multimodule/dependencyConstructorAllocationExports.kt");
+    let options = krusty::conformance::WasmCompilerOptions::from_source(source)
+        .expect("the original module graph's compilation options");
     let modules =
         krusty::conformance::split_modules(source).expect("the entire shared two-module program");
     let units = krusty::conformance::module_units(&modules);
@@ -31,7 +33,9 @@ fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
             &lane,
             "officialDependencyConstructorAllocation"
         ));
-        let backend = WasmBackend::new(target).with_entry(Entry::Box);
+        let backend = lane
+            .backend(source)
+            .expect("the module graph's Wasm configuration");
         let compilation_target = backend.compilation_target();
         let work = crate::common::scratch_dir().expect("official dependency producer directory");
         assert_eq!(
@@ -46,11 +50,16 @@ fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
         );
         let producer_path = work.join(format!("{producer_stem}.kt"));
         std::fs::write(&producer_path, producer_text).unwrap();
+        let reference_arguments = options
+            .reference_arguments(compilation_target)
+            .iter()
+            .map(|argument| (*argument).to_owned())
+            .collect::<Vec<_>>();
         let (produced, library) = crate::reference_invocation_support::run_reference(
             compilation_target,
             &work,
             &[producer_path],
-            &[],
+            &reference_arguments,
             false,
         )
         .expect("the exact Wasm reference compiler is provisioned");

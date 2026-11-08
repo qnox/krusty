@@ -17,14 +17,21 @@ use super::box_byte_score;
 use super::box_reference_classes;
 use super::common;
 
+#[path = "box_jvm_compile/rejection_report.rs"]
+mod rejection_report;
+
 /// Time spent compiling single-source cases (ns, accumulated across all files and threads).
 pub(super) static T_EMIT: AtomicU64 = AtomicU64::new(0);
 
 /// Why krusty compiled a case to no classes.
 #[derive(Debug)]
 pub(super) enum CompileFailure {
-    /// krusty reported errors: their messages, in the order it reported them.
-    Rejected(Vec<String>),
+    /// krusty reported errors: their messages, in the order it reported them, and the complete
+    /// rendered report of every diagnostic.
+    Rejected {
+        errors: Vec<String>,
+        report: String,
+    },
     /// The harness could not set up or finish the compilation: a command line krusty refuses, a
     /// `// MODULE:` shape it cannot split, javac refusing the case's Java, or a scratch write.
     Harness(String),
@@ -36,17 +43,32 @@ fn harness(reason: impl Into<String>) -> CompileFailure {
     CompileFailure::Harness(reason.into())
 }
 
-/// The classes one krusty compilation emitted, or the errors it reported.
-fn emitted(outputs: Vec<(String, Vec<u8>)>, diags: &DiagSink) -> Compiled<Vec<(String, Vec<u8>)>> {
+/// The classes one krusty compilation of `module` from `inputs` (named by `stems`, in the same
+/// order) emitted, or the errors it reported.
+fn emitted(
+    outputs: Vec<(String, Vec<u8>)>,
+    module: &str,
+    inputs: &[krusty::source::SourceInput<'_>],
+    stems: &[String],
+    diags: &DiagSink,
+) -> Compiled<Vec<(String, Vec<u8>)>> {
     if diags.has_errors() {
-        return Err(CompileFailure::Rejected(
-            diags
+        return Err(CompileFailure::Rejected {
+            errors: diags
                 .diags
                 .iter()
                 .filter(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error)
                 .map(|diagnostic| diagnostic.msg.clone())
                 .collect(),
-        ));
+            report: rejection_report::render(
+                module,
+                inputs
+                    .iter()
+                    .zip(stems)
+                    .map(|(input, stem)| (input.kind, stem.as_str(), input.text)),
+                diags,
+            ),
+        });
     }
     Ok(outputs
         .into_iter()
@@ -220,7 +242,13 @@ fn compile_source(
         &mut diags,
     );
     T_EMIT.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    emitted(outputs, &diags)
+    emitted(
+        outputs,
+        box_reference_classes::MAIN_MODULE,
+        &inputs,
+        &stems,
+        &diags,
+    )
 }
 
 /// The `helpers` package source the Kotlin test infra injects into every `// WITH_COROUTINES` box test
@@ -456,7 +484,7 @@ fn compile_blocks_mixed(
     );
     let backend = options.jvm_backend(cp);
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, module, &mut diags);
-    emitted(outputs, &diags)
+    emitted(outputs, module, &inputs, &stems, &diags)
 }
 
 /// Write emitted `(internal_name, bytes)` classes under `dir` as `internal/name.class` (package dirs
