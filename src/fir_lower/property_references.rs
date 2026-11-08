@@ -219,6 +219,16 @@ impl BodyLowering<'_> {
                 .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))?
             }
         };
+        // A module read is a checked operation whose result is the property's declared type; it
+        // names no type of its own, so its producer records it, as every source read's does.
+        if matches!(
+            target,
+            FirPropertyReferenceTarget::Module(_)
+                | FirPropertyReferenceTarget::SpecializedModule { .. }
+        ) {
+            let declared_type = declared.map_or(property_type, |(_, declared)| declared);
+            self.ir.set_logical_type(read, declared_type.get());
+        }
         let read = match declared {
             Some((_, declared)) if declared != property_type => self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
