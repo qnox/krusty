@@ -4,25 +4,51 @@ use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile, IrIntrinsic};
 use crate::types::{Ty, TypeName};
 
-use super::initializer::{call, entries_type, read_slot};
-use super::Realized;
+use super::initializer::{call, entries_type, read_slot, values_array};
+use super::{Contract, Realized};
 
 /// Rewrite each use in an emitted body, the realization's own bodies included (a constant's
 /// arguments may read another constant), and in every default: the default-argument lowering
 /// copies a function's or constructor's defaults into its entry after this pass
 /// (`annotation class C(val e: E = E.A)`).
-pub(super) fn rewrite(ir: &mut IrFile, realized: &HashMap<TypeName, Realized>) {
-    let mut roots = crate::ir::emitted_body_roots(ir);
-    roots.extend(function_defaults(ir));
-    roots.extend(constructor_defaults(ir));
+pub(super) fn rewrite(ir: &mut IrFile, realized: &HashMap<TypeName, Realized>, contract: Contract) {
     let mut seen = HashSet::default();
-    for root in roots {
+    for root in roots(ir) {
         for expression in crate::ir::value_namespace_expressions(ir, root) {
             if seen.insert(expression) {
-                rewrite_one(ir, realized, expression);
+                rewrite_one(ir, realized, contract, expression);
             }
         }
     }
+}
+
+/// Every root a use can sit under: each emitted body and each default.
+fn roots(ir: &IrFile) -> Vec<ExprId> {
+    let mut roots = crate::ir::emitted_body_roots(ir);
+    roots.extend(function_defaults(ir));
+    roots.extend(constructor_defaults(ir));
+    roots
+}
+
+/// The enums whose `entries` some use of this file reads. Before realization a constant's
+/// arguments are no emitted body yet, so they are scanned too (`A(F.entries.size)`).
+pub(super) fn entries_read(ir: &IrFile) -> HashSet<TypeName> {
+    roots(ir)
+        .into_iter()
+        .chain(entry_arguments(ir))
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+        .filter_map(|expression| entries_of(ir.expr(expression)))
+        .collect()
+}
+
+/// Every enum constant's argument prelude and arguments.
+fn entry_arguments(ir: &IrFile) -> Vec<ExprId> {
+    ir.classes
+        .iter()
+        .flat_map(|class| &class.enum_entries)
+        .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args))
+        .copied()
+        .collect()
 }
 
 /// The defaults of every function this file emits.
@@ -74,7 +100,12 @@ fn entries_of(expression: &IrExpr) -> Option<TypeName> {
     }
 }
 
-fn rewrite_one(ir: &mut IrFile, realized: &HashMap<TypeName, Realized>, expression: ExprId) {
+fn rewrite_one(
+    ir: &mut IrFile,
+    realized: &HashMap<TypeName, Realized>,
+    contract: Contract,
+    expression: ExprId,
+) {
     let replacement = match ir.expr(expression) {
         IrExpr::EnumEntry { classifier, name } => {
             let classifier = *classifier;
@@ -105,9 +136,18 @@ fn rewrite_one(ir: &mut IrFile, realized: &HashMap<TypeName, Realized>, expressi
                 return;
             };
             let build = call(ir, enum_class.initializer, Vec::new(), Ty::Unit);
-            let read = read_slot(ir, enum_class.entries, entries_type(classifier));
+            let entries = enum_class
+                .entries
+                .expect("an enum whose `entries` this file reads keeps them");
+            let mut stmts = vec![build];
+            if contract == Contract::KotlinWasm {
+                stmts.push(build_entries_on_first_read(
+                    ir, classifier, enum_class, entries,
+                ));
+            }
+            let read = read_slot(ir, entries, entries_type(classifier));
             IrExpr::Block {
-                stmts: vec![build],
+                stmts,
                 value: Some(read),
             }
         }
@@ -138,4 +178,37 @@ fn rewrite_one(ir: &mut IrFile, realized: &HashMap<TypeName, Realized>, expressi
     // In place: the expression keeps its identity, and with it its checked type and every fact a
     // target froze for it.
     ir.exprs[expression as usize] = replacement;
+}
+
+/// `if (entries == null) entries = EnumEntriesList(values)`: kotlinc-js/wasm build the list from
+/// `values()` on its first read, so a read from inside a constructor already finds one.
+fn build_entries_on_first_read(
+    ir: &mut IrFile,
+    classifier: TypeName,
+    enum_class: &Realized,
+    entries: u32,
+) -> ExprId {
+    let current = read_slot(ir, entries, Ty::nullable(entries_type(classifier)));
+    let null = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
+    ir.set_logical_type(null, Ty::Null);
+    let missing = ir.add_expr(IrExpr::Equality {
+        op: crate::ir::IrBinOp::Eq,
+        mode: crate::types::EqualityMode::Structural,
+        lhs: current,
+        rhs: null,
+    });
+    ir.set_logical_type(missing, Ty::Boolean);
+    let values = values_array(ir, classifier, &enum_class.slots);
+    let list = ir.add_expr(IrExpr::EnumEntriesList { classifier, values });
+    ir.set_logical_type(list, entries_type(classifier));
+    let store = ir.add_expr(IrExpr::SetStatic {
+        index: entries,
+        value: list,
+    });
+    ir.set_logical_type(store, Ty::Unit);
+    let when = ir.add_expr(IrExpr::When {
+        branches: vec![(Some(missing), store)],
+    });
+    ir.set_logical_type(when, Ty::Unit);
+    when
 }

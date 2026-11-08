@@ -153,6 +153,39 @@ fun box(): String {\n\
     }
 
     #[test]
+    fn js_backend_realizes_a_selected_string_length_read_as_the_string_length() {
+        let (outputs, diags) =
+            compile_js_sources(&[("Main", "fun count(text: String): Int = text.length")]);
+
+        assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
+        assert_eq!(
+            outputs,
+            vec![(
+                "Main.js".to_string(),
+                b"function count(v0) {\n  return v0.length;\n}\n".to_vec(),
+            )]
+        );
+    }
+
+    #[test]
+    fn js_backend_reads_a_selected_enum_name_as_the_entrys_name_field() {
+        let (outputs, diags) = compile_js_sources(&[(
+            "Main",
+            "enum class Side { LEFT }\nfun label(side: Side): String = side.name",
+        )]);
+
+        assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
+        assert_eq!(
+            outputs,
+            vec![(
+                "Main.js".to_string(),
+                b"class Side {\n  constructor() {\n  }\n}\nfunction label(v0) {\n  return v0.name;\n}\n"
+                    .to_vec(),
+            )]
+        );
+    }
+
+    #[test]
     fn js_backend_emits_an_operation_over_a_parameter() {
         let (outputs, diags) = compile_js_sources(&[("Main", "fun box(x: Int): Int = x + 2")]);
 

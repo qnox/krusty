@@ -145,6 +145,7 @@ mod tests {
 
     fn selected_value(source: ClassStorageSource) -> AnonymousObjectCapture {
         AnonymousObjectCapture {
+            enum_entry_storage: None,
             name: "value".into(),
             ty: Ty::String,
             shared_cell: false,
