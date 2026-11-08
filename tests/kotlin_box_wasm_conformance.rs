@@ -1308,3 +1308,6 @@ fn wasm_data_class_unit_property_uses_units_fixed_hash() {
 
 #[path = "wasm_unsigned_decimal.rs"]
 mod unsigned_decimal;
+
+#[path = "wasm_enclosing_instances.rs"]
+mod enclosing_instances;
