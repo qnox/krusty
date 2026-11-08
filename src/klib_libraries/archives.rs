@@ -15,9 +15,7 @@ use super::{
     KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError, KlibLibraries,
     KlibLibraryError,
 };
-use crate::metadata::klib_ir::{
-    read_declaration_trees, read_inlinable_declaration_trees_where, KlibIrDecodeError,
-};
+use crate::metadata::klib_ir::{read_inlinable_declaration_trees_where, KlibIrDecodeError};
 
 /// One compiler input KLIB and the authority the compilation assigned to it.
 pub struct KlibLibraryInput {
@@ -353,12 +351,21 @@ impl<'a> OpenedKlibLibraries<'a> {
             // queries. Prepared-inline IR is decoded independently below: its declaration copies
             // are not allowed to masquerade as the module's complete ordinary IR.
             let main_trees = if record.archive.has_main_ir() {
-                Some(read_declaration_trees(&record.archive).map_err(|error| {
-                    KlibLibrariesOpenError::Declarations {
-                        library: library.to_path_buf(),
-                        error,
-                    }
-                })?)
+                Some(
+                    super::shared_trees::SharedTrees::process()
+                        .main_declaration_trees(&record.archive)
+                        .map_err(|error| match error {
+                            super::shared_trees::SharedTreesError::Fingerprint(error) => {
+                                KlibLibrariesOpenError::Archive(error)
+                            }
+                            super::shared_trees::SharedTreesError::Decode(error) => {
+                                KlibLibrariesOpenError::Declarations {
+                                    library: library.to_path_buf(),
+                                    error,
+                                }
+                            }
+                        })?,
+                )
             } else {
                 None
             };
@@ -370,11 +377,9 @@ impl<'a> OpenedKlibLibraries<'a> {
                     &wanted,
                     record.compiler_builtin_owner,
                 );
-                let body_library =
-                    KlibBodyLibrary::from_manifest(&manifest, trees).ok_or_else(|| {
-                        KlibLibrariesOpenError::MissingUniqueName {
-                            library: library.to_path_buf(),
-                        }
+                let body_library = KlibBodyLibrary::from_manifest_shared(&manifest, trees)
+                    .ok_or_else(|| KlibLibrariesOpenError::MissingUniqueName {
+                        library: library.to_path_buf(),
                     })?;
                 body_libraries.push(body_library);
             } else {

@@ -24,6 +24,7 @@ pub(crate) mod parameter_defaults;
 mod platform;
 mod runtime_exception_layouts;
 mod serialized_references;
+mod shared_trees;
 mod target_intrinsics;
 #[cfg(test)]
 mod tests;
