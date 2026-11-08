@@ -1672,7 +1672,6 @@ mod tests {
         let mut strings = StringTable::with_local_classifiers(
             &Default::default(),
             &Default::default(),
-            &Default::default(),
             None,
             &lookup,
         );
