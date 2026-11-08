@@ -583,3 +583,88 @@ fn a_capture_an_unused_peer_bound_names_declines() {
     assert_eq!(unit.ir().exprs.len(), fresh.ir().exprs.len());
     assert_eq!(lowered_body(&unit, k), lowered_body(&fresh, fresh_k));
 }
+
+#[test]
+fn a_nullable_result_through_a_contravariant_receiver_reads_as_any() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/collections")),
+        "putAll",
+    );
+    let put_all = symbols
+        .callables
+        .functions()
+        .iter()
+        .find(|function| {
+            function.semantic_params().first().is_some_and(|param| {
+                param.kotlin_class_internal() == Some(type_name("kotlin/Array"))
+            })
+        })
+        .expect("`MutableMap.putAll(pairs: Array<out Pair<K, V>>)`");
+    let fact = frozen_function(
+        &libraries,
+        "kotlin/collections",
+        "putAll",
+        put_all.semantic_receiver(),
+        put_all.semantic_params().as_ref(),
+    );
+    let root = fact.klib_body_callable().expect("signed");
+    let providers = [
+        member(&libraries, "kotlin/Array", "iterator"),
+        member(&libraries, "kotlin/collections/Iterator", "hasNext"),
+        member(&libraries, "kotlin/collections/Iterator", "next"),
+        member(&libraries, "kotlin/Pair", "component1"),
+        member(&libraries, "kotlin/Pair", "component2"),
+        member(&libraries, "kotlin/collections/MutableMap", "put"),
+    ];
+    let leaves = providers
+        .each_ref()
+        .map(|provider| provider.klib_body_callable().unwrap());
+    let externals = leaves
+        .iter()
+        .enumerate()
+        .map(|(index, leaf)| {
+            (
+                leaf.identity().clone(),
+                super::super::EmittedDependencyCallable::target_member(
+                    crate::fir::ExternalCallableId::from_raw(100 + index as u32),
+                ),
+            )
+        })
+        .collect();
+    let oracle = crate::symbol_resolver::SourceOracle(&libraries);
+    let facts = KlibCalleeFacts::with_declarations([root], leaves).with_type_oracle(&oracle);
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_function_with_intrinsics_and_externals(
+        root,
+        libraries.declaration_bodies(),
+        &facts,
+        crate::klib_libraries::KlibIntrinsicFacts::empty(),
+        &externals,
+    )
+    .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    // `put(key, value)` on the `MutableMap<in K, in V>` receiver declares `V?`; reading `V`
+    // through `in V` gives `Any?`, which kotlinc serializes as the call's type.
+    let ir = unit.ir();
+    let puts = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, expression)| match expression {
+            IrExpr::Call { callee, .. }
+                if matches!(
+                    &**callee,
+                    crate::ir::Callee::External { target, .. } if target.raw() == 105
+                ) =>
+            {
+                ir.checked_type(index as u32)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(puts, [Ty::nullable(Ty::obj("kotlin/Any"))]);
+}
