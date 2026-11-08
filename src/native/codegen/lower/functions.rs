@@ -174,22 +174,17 @@ fn reference_identity(
         Target::FunctionValueConversion { ordinal } => format!("conversion_{ordinal}"),
         // A property read as a function value is the property reference, equal to every other
         // reference to the same property.
-        Target::Property(property) => match &property.target {
-            crate::fir::FirPropertyReferenceTarget::Module(property)
-            | crate::fir::FirPropertyReferenceTarget::SpecializedModule { property, .. } => {
+        Target::Property(property) => match property.referenced_property() {
+            Some(crate::ir::IrReferencedProperty::Module(property)) => {
                 format!("property_m{}", property.raw())
             }
-            crate::fir::FirPropertyReferenceTarget::External { getter, .. } => {
-                let crate::fir::FirPropertyTarget::External { property, .. } = getter.as_ref()
-                else {
-                    return Err(
-                        "a dependency property reference without its dependency getter".into(),
-                    );
-                };
+            Some(crate::ir::IrReferencedProperty::External(property)) => {
                 format!("property_e{}", property.raw())
             }
-            crate::fir::FirPropertyReferenceTarget::Classifier { .. } => {
-                return Err("a classifier property read as a function value".into());
+            None => {
+                return Err(
+                    "a property read as a function value without its property declaration".into(),
+                );
             }
         },
         Target::FunctionInvoke => format!(

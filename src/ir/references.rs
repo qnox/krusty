@@ -68,7 +68,35 @@ pub struct IrPropertyFunctionReference {
     pub substitutions: Vec<IrCheckedSubstitution>,
 }
 
+/// The property declaration a function-typed property reference reads: the identity two such
+/// references are equal by.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrReferencedProperty {
+    Module(crate::fir::PropertyId),
+    External(crate::fir::ExternalPropertyId),
+}
+
 impl IrPropertyFunctionReference {
+    /// The declaration this reference reads. `None` for a classifier read, and for a dependency
+    /// reference whose getter is not the dependency property's.
+    pub fn referenced_property(&self) -> Option<IrReferencedProperty> {
+        match &self.target {
+            crate::fir::FirPropertyReferenceTarget::Module(property)
+            | crate::fir::FirPropertyReferenceTarget::SpecializedModule { property, .. } => {
+                Some(IrReferencedProperty::Module(*property))
+            }
+            crate::fir::FirPropertyReferenceTarget::External { getter, .. } => {
+                match getter.as_ref() {
+                    crate::fir::FirPropertyTarget::External { property, .. } => {
+                        Some(IrReferencedProperty::External(*property))
+                    }
+                    _ => None,
+                }
+            }
+            crate::fir::FirPropertyReferenceTarget::Classifier { .. } => None,
+        }
+    }
+
     /// The getter is an inline accessor whose body each read splices, so no accessor method
     /// performs the read.
     pub(crate) fn getter_is_spliced(&self) -> bool {
