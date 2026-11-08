@@ -586,8 +586,11 @@ struct PlannedUnit {
 fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<PlannedUnit>, String> {
     let reference_only = reference_only_kotlinc_arguments(src)
         .map_err(|error| format!("reference oracle: {error}"))?;
-    let configuration = |kotlin: &[(String, String)]| {
-        unit_compiler_configuration(src, kotlin.iter().map(|(_, source)| source.as_str()))
+    // A unit's directives are read from all of its sources: the module's leading text, directives
+    // included, travels with its first declared file even when that file is Java.
+    let configuration = |kotlin: &[(String, String)], java: &[(String, String)]| {
+        let sources = kotlin.iter().chain(java).map(|(_, source)| source.as_str());
+        unit_compiler_configuration(src, sources)
             .map(|mut configuration| {
                 configuration
                     .arguments
@@ -606,7 +609,7 @@ fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<Plan
         return module_units(&modules)
             .into_iter()
             .map(|unit| {
-                let configuration = configuration(&unit.files)?;
+                let configuration = configuration(&unit.files, &unit.java_files)?;
                 Ok(PlannedUnit {
                     arguments: configuration.arguments,
                     language_version: configuration.language_version,
@@ -629,7 +632,7 @@ fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<Plan
     if directive(src, "WITH_COROUTINES") {
         kotlin.push(("CoroutineUtil".to_string(), coroutine_helpers.to_string()));
     }
-    let configuration = configuration(&kotlin)?;
+    let configuration = configuration(&kotlin, &java)?;
     Ok(vec![PlannedUnit {
         arguments: configuration.arguments,
         language_version: configuration.language_version,

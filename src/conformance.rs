@@ -620,6 +620,7 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
             if fname.ends_with(".java") {
                 // Keep the full leaf name — javac requires it to match the public class.
                 let leaf = fname.rsplit('/').next().unwrap_or(fname).to_string();
+                leading.open_file(&mut cur);
                 cur_file = Some((leaf, true));
             } else if fname.ends_with(".kt") {
                 let stem = fname
@@ -629,7 +630,7 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
                     .next()
                     .unwrap_or(fname)
                     .to_string();
-                leading.open_kotlin_file(&mut cur);
+                leading.open_file(&mut cur);
                 cur_file = Some((stem, false));
             } else {
                 return None;
@@ -641,7 +642,7 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
             // Implicit file body straight after a `// MODULE:` header (no `// FILE:`) — KOTLIN by
             // kotlinc's test convention; Java sources always carry an explicit `// FILE: X.java`.
             cur_file = Some((mods.last().unwrap().name.clone(), false));
-            leading.open_kotlin_file(&mut cur);
+            leading.open_file(&mut cur);
             cur.push_str(line);
             cur.push('\n');
         } else {
@@ -748,11 +749,13 @@ pub fn kotlin_source_blocks(
                 flush(&mut blocks, &module, &mut file_name, &mut body);
                 let path = path.trim();
                 if let Some(stem) = path.strip_suffix(".kt") {
-                    leading.open_kotlin_file(&mut body);
+                    leading.open_file(&mut body);
                     file_name = Some(stem.rsplit('/').next().unwrap_or(stem).to_string());
                     ignore_non_kotlin_file = false;
                 } else {
-                    // Java, JavaScript, and other backend fixture files are not Kotlin source blocks.
+                    // Java, JavaScript, and other backend fixture files are not Kotlin source
+                    // blocks. The first declared file still takes the leading text with it.
+                    leading.open_file(&mut body);
                     ignore_non_kotlin_file = true;
                 }
             } else if file_name.is_some() {
@@ -766,7 +769,7 @@ pub fn kotlin_source_blocks(
                 // The testdata convention permits one implicit Kotlin file immediately under a
                 // module header. Name it after the module, just like `split_modules`.
                 file_name = module.clone();
-                leading.open_kotlin_file(&mut body);
+                leading.open_file(&mut body);
                 body.push_str(line);
                 body.push('\n');
             } else if !ignore_non_kotlin_file {
@@ -784,8 +787,8 @@ pub fn kotlin_source_blocks(
 }
 
 /// Split a `// FILE:`-partitioned (single-module) test into Kotlin `(stem, content)` and Java
-/// `(leaf name incl. .java, content)` blocks. The text before the first marker joins the first Kotlin
-/// block ([`LeadingText`]). Non-`.java` files are treated as Kotlin (backend directives filter
+/// `(leaf name incl. .java, content)` blocks. The text before the first marker joins the first
+/// declared block, Kotlin or Java ([`LeadingText`]). Non-`.java` files are treated as Kotlin (backend directives filter
 /// JS-target tests before this is reached), keeping the gate's historical behavior.
 pub fn split_files(src: &str) -> (Vec<SourceBlock>, Vec<SourceBlock>) {
     let mut blocks: Vec<SourceBlock> = Vec::new();
@@ -819,9 +822,7 @@ pub fn split_files(src: &str) -> (Vec<SourceBlock>, Vec<SourceBlock>) {
                     .unwrap_or(fname)
                     .to_string()
             };
-            if !is_java {
-                leading.open_kotlin_file(&mut cur);
-            }
+            leading.open_file(&mut cur);
             cur_name = Some((name, is_java));
         } else if cur_name.is_some() {
             cur.push_str(line);

@@ -619,7 +619,12 @@ fn compile_blocks_mixed(
             progress(phase);
         }
     };
-    let mut options = unit_options(case, blocks.iter().map(|(_, source)| source.as_str())).ok()?;
+    // The module's leading directives travel with its first declared file, which may be Java.
+    let unit = blocks
+        .iter()
+        .chain(java_blocks)
+        .map(|(_, source)| source.as_str());
+    let mut options = unit_options(case, unit).ok()?;
     // A folded `dependsOn` chain is a multiplatform compilation even when the fixture does not
     // repeat the feature as a `// LANGUAGE:` directive. The common/platform source roles already
     // carry that topology into the frontend; enable the matching project feature on the exact
