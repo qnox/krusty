@@ -430,21 +430,22 @@ pub fn needs_unmodeled_compiler_flag(src: &str) -> bool {
         || needs_unmodeled_lambda_mode(src)
 }
 
-/// `// JVM_DEFAULT_MODE:` — the `-jvm-default` strategy a test pins, as the compiler models it.
-/// Absent, the test runs under kotlinc's own default (`enable`).
-pub fn jvm_default_mode(src: &str) -> crate::jvm::ir_emit::JvmDefaultMode {
+/// `// JVM_DEFAULT_MODE:` — the `-jvm-default` strategy a source pins, as the compiler models it,
+/// if it pins one; the last recognized directive counts. Absent everywhere, a unit runs under
+/// kotlinc's own default (`enable`).
+pub fn jvm_default_mode(src: &str) -> Option<crate::jvm::ir_emit::JvmDefaultMode> {
     src.lines()
         .filter_map(|l| l.trim().strip_prefix("// JVM_DEFAULT_MODE:"))
         .filter_map(|mode| {
             crate::jvm::ir_emit::JvmDefaultMode::parse(mode.split_whitespace().next()?)
         })
         .next_back()
-        .unwrap_or_default()
 }
 
-/// `// SAM_CONVERSIONS:` — the `-Xsam-conversions` strategy a test pins. Absent, the test runs
-/// under kotlinc's own default (`indy`). The corpus writes the value in uppercase.
-pub fn sam_conversion_mode(src: &str) -> crate::jvm::ir_emit::LambdaMode {
+/// `// SAM_CONVERSIONS:` — the `-Xsam-conversions` strategy a source pins, if it pins one; the
+/// last recognized directive counts. Absent everywhere, a unit runs under kotlinc's own default
+/// (`indy`). The corpus writes the value in uppercase.
+pub fn sam_conversion_mode(src: &str) -> Option<crate::jvm::ir_emit::LambdaMode> {
     src.lines()
         .filter_map(|line| line.trim().strip_prefix("// SAM_CONVERSIONS:"))
         .filter_map(|mode| match mode.split_whitespace().next() {
@@ -457,12 +458,12 @@ pub fn sam_conversion_mode(src: &str) -> crate::jvm::ir_emit::LambdaMode {
             _ => None,
         })
         .next_back()
-        .unwrap_or_default()
 }
 
-/// `// LAMBDAS:` — the `-Xlambdas` strategy a test pins. Absent, the test runs under kotlinc's
-/// own default (`indy`). The corpus writes the value in uppercase.
-pub fn lambda_mode(src: &str) -> crate::jvm::ir_emit::LambdaMode {
+/// `// LAMBDAS:` — the `-Xlambdas` strategy a source pins, if it pins one; the last recognized
+/// directive counts. Absent everywhere, a unit runs under kotlinc's own default (`indy`). The
+/// corpus writes the value in uppercase.
+pub fn lambda_mode(src: &str) -> Option<crate::jvm::ir_emit::LambdaMode> {
     src.lines()
         .filter_map(|line| line.trim().strip_prefix("// LAMBDAS:"))
         .filter_map(|mode| match mode.split_whitespace().next() {
@@ -475,7 +476,6 @@ pub fn lambda_mode(src: &str) -> crate::jvm::ir_emit::LambdaMode {
             _ => None,
         })
         .next_back()
-        .unwrap_or_default()
 }
 
 /// `// LAMBDAS:` values krusty does not model. `class` and `indy` are emitted; a missing or
@@ -1343,7 +1343,7 @@ mod tests {
                 !needs_unmodeled_compiler_flag(&src),
                 "{directive} is modelled and must run"
             );
-            assert_eq!(jvm_default_mode(&src), expected);
+            assert_eq!(jvm_default_mode(&src), Some(expected));
         }
     }
 
@@ -1353,12 +1353,9 @@ mod tests {
         assert!(!needs_unmodeled_compiler_flag(src));
         assert_eq!(
             sam_conversion_mode(src),
-            crate::jvm::ir_emit::LambdaMode::Class
+            Some(crate::jvm::ir_emit::LambdaMode::Class)
         );
-        assert_eq!(
-            sam_conversion_mode("fun box() = \"OK\""),
-            crate::jvm::ir_emit::LambdaMode::Indy
-        );
+        assert_eq!(sam_conversion_mode("fun box() = \"OK\""), None);
         assert!(needs_unmodeled_compiler_flag(
             "// SAM_CONVERSIONS:\nfun box() = \"OK\""
         ));
@@ -1371,11 +1368,11 @@ mod tests {
     fn lambda_class_mode_is_modelled() {
         let src = "// LAMBDAS: CLASS\nfun box() = \"OK\"";
         assert!(!needs_unmodeled_compiler_flag(src));
-        assert_eq!(lambda_mode(src), crate::jvm::ir_emit::LambdaMode::Class);
         assert_eq!(
-            lambda_mode("fun box() = \"OK\""),
-            crate::jvm::ir_emit::LambdaMode::Indy
+            lambda_mode(src),
+            Some(crate::jvm::ir_emit::LambdaMode::Class)
         );
+        assert_eq!(lambda_mode("fun box() = \"OK\""), None);
         assert!(needs_unmodeled_compiler_flag(
             "// LAMBDAS:\nfun box() = \"OK\""
         ));
@@ -1386,8 +1383,9 @@ mod tests {
 
     #[test]
     fn a_test_without_the_directive_runs_under_kotlincs_own_default() {
+        assert_eq!(jvm_default_mode("fun box() = \"OK\""), None);
         assert_eq!(
-            jvm_default_mode("fun box() = \"OK\""),
+            crate::conformance::UnitCodegenModes::of_unit(["fun box() = \"OK\""]).jvm_default,
             crate::jvm::ir_emit::JvmDefaultMode::Enable
         );
     }
@@ -1405,7 +1403,7 @@ mod tests {
                 !needs_unmodeled_compiler_flag(&src),
                 "{directive} is emitted within a compilation and must run"
             );
-            assert_eq!(jvm_default_mode(&src), expected);
+            assert_eq!(jvm_default_mode(&src), Some(expected));
         }
         assert!(!needs_unmodeled_compiler_flag(
             "// JVM_DEFAULT_MODE: disable\n// MODULE: lib\nfun box() = \"OK\""

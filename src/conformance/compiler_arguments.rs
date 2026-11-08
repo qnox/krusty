@@ -51,12 +51,9 @@ pub fn unit_compiler_configuration<'a>(
     Ok(configuration)
 }
 
-/// The modes one unit compiles under: its own sources first, so a module's directive overrides
-/// one the case sets for every module before its first `// MODULE:` header.
+/// The modes one unit of `case` compiles under ([`UnitCodegenModes::of_unit_in_case`]).
 fn unit_codegen_modes<'a>(case: &str, unit: impl IntoIterator<Item = &'a str>) -> UnitCodegenModes {
-    let mut sources: Vec<&str> = unit.into_iter().collect();
-    sources.push(case_directive_region(case));
-    UnitCodegenModes::of_unit(sources)
+    UnitCodegenModes::of_unit_in_case(case_directive_region(case), unit)
 }
 
 fn case_compiler_configuration(src: &str) -> Result<UnitCompilerConfiguration, String> {
@@ -458,6 +455,35 @@ mod tests {
         assert_eq!(
             unit_kotlinc_arguments(case, ["// JVM_DEFAULT_MODE: no-compatibility\n"]).unwrap(),
             ["-jvm-default", "no-compatibility"]
+        );
+    }
+
+    /// A module directive that names kotlinc's own default still overrides the case-wide mode.
+    #[test]
+    fn a_modules_explicit_default_mode_overrides_the_case_mode() {
+        let case = "// LAMBDAS: CLASS\n// SAM_CONVERSIONS: CLASS\n// JVM_DEFAULT_MODE: disable\n\
+                    // MODULE: lib\n// FILE: Lib.kt\n\
+                    // MODULE: main(lib)\n// FILE: Main.kt\n";
+        assert_eq!(
+            unit_kotlinc_arguments(case, ["fun a() {}\n"]).unwrap(),
+            [
+                "-jvm-default",
+                "disable",
+                "-Xlambdas=class",
+                "-Xsam-conversions=class"
+            ]
+        );
+        assert_eq!(
+            unit_kotlinc_arguments(
+                case,
+                ["// LAMBDAS: INDY\n// SAM_CONVERSIONS: INDY\n// JVM_DEFAULT_MODE: enable\n"]
+            )
+            .unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            unit_kotlinc_arguments(case, ["// LAMBDAS: INDY\n"]).unwrap(),
+            ["-jvm-default", "disable", "-Xsam-conversions=class"]
         );
     }
 }

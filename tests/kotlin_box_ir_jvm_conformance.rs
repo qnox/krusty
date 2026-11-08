@@ -1663,6 +1663,77 @@ fn module_codegen_modes_stay_with_their_unit() {
     assert_eq!(gate, reference);
 }
 
+/// Modes written before the first `// MODULE:` are every module's, but a module that names
+/// kotlinc's default (`INDY`, `enable`) keeps it: the library compiles its class lambdas, class SAM
+/// wrappers and `$DefaultImpls` holder, the consumer its indy lambdas and default methods, and
+/// krusty's classes match kotlinc's byte for byte.
+#[test]
+fn a_modules_explicit_default_mode_overrides_the_case_mode() {
+    let source = "// LAMBDAS: CLASS\n\
+                  // SAM_CONVERSIONS: CLASS\n\
+                  // JVM_DEFAULT_MODE: disable\n\
+                  // MODULE: lib\n\
+                  // FILE: Lib.kt\n\
+                  package modes\n\
+                  \n\
+                  fun interface Task { fun run(): String }\n\
+                  interface Label { fun value(): String = \"OK\" }\n\
+                  fun invoke(task: Task): String = task.run()\n\
+                  \n\
+                  // MODULE: main(lib)\n\
+                  // LAMBDAS: INDY\n\
+                  // SAM_CONVERSIONS: INDY\n\
+                  // JVM_DEFAULT_MODE: enable\n\
+                  // FILE: Main.kt\n\
+                  import modes.*\n\
+                  \n\
+                  class Impl : Label\n\
+                  fun box(): String {\n\
+                  \x20   val f: () -> String = { Impl().value() }\n\
+                  \x20   return invoke(Task { f() })\n\
+                  }\n";
+    let reference = box_reference_classes::checked_prepared_box(source, "main")
+        .expect("the reference compiler compiles the case and its box() returns OK");
+    let classpath = common::classpath_jars_for(source);
+    let jdk = common::jdk_modules();
+    let compiled = compile_module_test(source, &classpath, Some(jdk.as_path()), &|_| {})
+        .expect("krusty compiles the case");
+    let class_file = |(_, bytes): &&(String, Vec<u8>)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]);
+    let mut names = BTreeSet::new();
+    for (module, range) in &compiled.module_ranges {
+        let classes: Vec<_> = compiled.flat[range.clone()]
+            .iter()
+            .filter(class_file)
+            .cloned()
+            .collect();
+        names.extend(
+            classes
+                .iter()
+                .map(|(name, _)| (module.clone(), name.trim_end_matches(".class").to_string())),
+        );
+        let expected = reference
+            .module(module)
+            .unwrap_or_else(|| panic!("the reference compiler emits module {module}"));
+        assert_eq!(
+            compare_class_sets(&classes, expected),
+            Ok(()),
+            "module {module}"
+        );
+    }
+    let qualified = |module: &str, name: &str| (module.to_string(), name.to_string());
+    assert_eq!(
+        names,
+        BTreeSet::from([
+            qualified("lib", "modes/Label"),
+            qualified("lib", "modes/Label$DefaultImpls"),
+            qualified("lib", "modes/LibKt"),
+            qualified("lib", "modes/Task"),
+            qualified("main", "Impl"),
+            qualified("main", "MainKt"),
+        ])
+    );
+}
+
 #[test]
 #[cfg(unix)]
 fn peak_process_rss_is_observable() {
