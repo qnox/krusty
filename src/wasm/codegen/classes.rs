@@ -44,6 +44,7 @@ use super::super::encode::{
 };
 use super::super::interface_dispatch::ClassRef;
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
+use super::super::runtime::{AND32, EQ32, EQ64, OR32};
 use super::lower::{carrier, parameter_carrier, Unsupported, STRING};
 
 mod companion_construction;
@@ -260,13 +261,20 @@ fn constructs(ir: &IrFile, name: TypeName) -> bool {
         })
 }
 
+/// Runtime operations a class table installs for `equals` and `hashCode`.
+pub(super) struct MemberRuntime<'a> {
+    pub(super) hashing: &'a super::super::hashing::Hashing,
+    /// `equals` for a reference: the payload's own override, or identity when it has none.
+    pub(super) object_equals: u32,
+}
+
 /// Lay out every class of `ir` in `module`: types, constructors' and accessors' indices, and the
 /// dispatch tables, whose entries name `functions` (the file's function indices, by `FunId`).
 pub(super) fn declare(
     ir: &IrFile,
     module: &mut Module,
     objects: &mut ObjectRoot,
-    hashing: &super::super::hashing::Hashing,
+    members: MemberRuntime<'_>,
     functions: &[Option<u32>],
     properties: &RealizedProperties,
     plan: &ModuleSlotPlan,
@@ -370,11 +378,11 @@ pub(super) fn declare(
             let value_field = single_value_field(&forms, &tables, &enum_rooted, id, class)?;
             let function = match entry {
                 Slot::AnyMember(AnyMember::Equals) if let Some(storage) = value_field => {
-                    value_class_equals(module, storage, ty)
+                    value_class_equals(module, storage, ty, objects.object, members.object_equals)
                 }
                 Slot::AnyMember(AnyMember::Equals) => objects.identity_equals,
                 Slot::AnyMember(AnyMember::HashCode) if let Some(storage) = value_field => {
-                    value_class_hash(module, hashing, storage, class.fields[0].ty, ty)
+                    value_class_hash(module, members.hashing, storage, class.fields[0].ty, ty)
                         .unwrap_or_else(|| objects.trap(module, ty))
                 }
                 Slot::AnyMember(AnyMember::HashCode | AnyMember::ToString) | Slot::Abstract => {
@@ -543,16 +551,37 @@ fn single_value_field(
     }))
 }
 
-/// `equals` for a single-field value class: another instance of the same box with the same
-/// field value, and nothing else. Two `Meter(3)` boxes are equal; a different class is not.
-/// Floating values compare by their bits, and every NaN equals every other NaN, the same
-/// relation a primitive box uses.
-fn value_class_equals(module: &mut Module, storage: ValueStorage, equals: u32) -> u32 {
+/// `equals` for a single-field value class.
+///
+/// The other operand is this class only when it carries the same dispatch table. A recursion
+/// group canonicalizes two structs of one layout into one GC type, so `ref.test` of the struct
+/// cannot separate `First` from `Second`. The table stored in every instance is that class's
+/// identity.
+///
+/// The field then compares as that value does: scalar bits, with every NaN equal to every other
+/// NaN, or ordinary Kotlin equality for a reference. A payload's own `equals` answers, including
+/// a custom override.
+fn value_class_equals(
+    module: &mut Module,
+    storage: ValueStorage,
+    equals: u32,
+    object: u32,
+    object_equals: u32,
+) -> u32 {
     let function = module.declare();
     let mut code = Code::default();
+    let object_heap = HeapType::Concrete(object);
     let heap = HeapType::Concrete(storage.structure);
     code.local_get(1)
-        .ref_test(false, heap)
+        .ref_test(false, object_heap)
+        .if_(BlockType::Value(ValType::I32))
+        .local_get(0)
+        .ref_cast(false, object_heap)
+        .struct_get(object, 0)
+        .local_get(1)
+        .ref_cast(false, object_heap)
+        .struct_get(object, 0)
+        .ref_eq()
         .if_(BlockType::Value(ValType::I32))
         .local_get(0)
         .ref_cast(false, heap)
@@ -565,29 +594,30 @@ fn value_class_equals(module: &mut Module, storage: ValueStorage, equals: u32) -
             // Locals follow the two reference parameters.
             code.local_set(3).local_set(2);
             let (ne, bits, bits_eq) = match storage.value {
-                ValType::F32 => (0x5c, 0xbc, crate::wasm::runtime::EQ32),
-                _ => (0x62, 0xbd, crate::wasm::runtime::EQ64),
+                ValType::F32 => (0x5c, 0xbc, EQ32),
+                _ => (0x62, 0xbd, EQ64),
             };
             code.local_get(2).local_get(2).op(ne);
             code.local_get(3).local_get(3).op(ne);
-            code.op(crate::wasm::runtime::AND32);
+            code.op(AND32);
             code.local_get(2).op(bits).local_get(3).op(bits).op(bits_eq);
-            code.op(crate::wasm::runtime::OR32);
+            code.op(OR32);
             vec![storage.value, storage.value]
         }
         ValType::I32 => {
-            code.op(crate::wasm::runtime::EQ32);
+            code.op(EQ32);
             Vec::new()
         }
         ValType::I64 => {
-            code.op(crate::wasm::runtime::EQ64);
+            code.op(EQ64);
             Vec::new()
         }
         ValType::Ref { .. } => {
-            code.ref_eq();
+            code.call(object_equals);
             Vec::new()
         }
     };
+    code.else_().i32_const(0).end();
     code.else_().i32_const(0).end();
     module.define(
         function,
