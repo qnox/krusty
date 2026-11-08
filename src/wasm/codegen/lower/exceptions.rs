@@ -40,8 +40,41 @@ fn constructor_frame(
     Ok(())
 }
 
-// No cleanup stack is installed for nonlocal control transfers. Check the complete evaluated
-// subtree before emitting anything, conservatively including nested loops and inline bodies.
+/// A jump out of protected code: the function's `return`, or a `br` to the structured instruction
+/// opened at an absolute depth (a loop's `break` or `continue` target).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Transfer {
+    Return,
+    Branch(u32),
+}
+
+/// A `finally` region whose protected code (its `try` body and catch clauses) is being emitted.
+///
+/// A transfer that leaves the region records itself here, stores its ordinal in `pending` and
+/// branches to `exit`, a block outside the region's exception handler. That exit runs one copy of
+/// the cleanup and then resumes the recorded transfer, which an enclosing region may intercept
+/// again. This is the structured form of kotlinc's per-exit `finally` copies: the cleanup never
+/// runs under its own handler, so a throw from it is never cleaned up twice.
+pub(super) struct CleanupFrame {
+    /// The depth of the region's outermost block: a branch to anything shallower leaves it.
+    base: u32,
+    exit: u32,
+    pending: u32,
+    transfers: Vec<Transfer>,
+}
+
+impl CleanupFrame {
+    fn intercepts(&self, transfer: Transfer) -> bool {
+        match transfer {
+            Transfer::Return => true,
+            Transfer::Branch(target) => target < self.base,
+        }
+    }
+}
+
+// A cleanup frame is only needed when protected code can transfer control. Check the complete
+// evaluated subtree before emitting anything, conservatively including nested loops and inline
+// bodies; a transfer that stays inside the region records nothing and costs only the exit block.
 fn finally_has_transfer(exprs: &[IrExpr], roots: impl IntoIterator<Item = u32>) -> bool {
     let mut pending: Vec<_> = roots.into_iter().collect();
     let mut seen = HashSet::default();
@@ -267,6 +300,66 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// Leave the current position by `transfer`. The value of a `return` is on the stack, or in
+    /// the return slot when `parked` (a transfer resumed after a cleanup already holds it there).
+    pub(super) fn control_transfer(
+        &mut self,
+        transfer: Transfer,
+        parked: bool,
+    ) -> Result<(), Unsupported> {
+        let returns_value = transfer == Transfer::Return && carrier(self.result)?.is_some();
+        let intercepted = self
+            .cleanups
+            .last()
+            .is_some_and(|frame| frame.intercepts(transfer));
+        if !intercepted {
+            match transfer {
+                Transfer::Return => {
+                    if parked && returns_value {
+                        let slot = self.return_slot()?;
+                        self.code.local_get(slot);
+                    }
+                    self.code.return_();
+                }
+                Transfer::Branch(target) => {
+                    let depth = self.relative(target);
+                    self.code.br(depth);
+                }
+            }
+            return Ok(());
+        }
+        if returns_value && !parked {
+            let slot = self.return_slot()?;
+            self.code.local_set(slot);
+        }
+        let frame = self.cleanups.last_mut().expect("an intercepting frame");
+        let ordinal = match frame.transfers.iter().position(|known| *known == transfer) {
+            Some(ordinal) => ordinal,
+            None => {
+                frame.transfers.push(transfer);
+                frame.transfers.len() - 1
+            }
+        };
+        let (pending, exit) = (frame.pending, frame.exit);
+        let depth = self.relative(exit);
+        self.code
+            .i32_const(ordinal as i32)
+            .local_set(pending)
+            .br(depth);
+        Ok(())
+    }
+
+    fn return_slot(&mut self) -> Result<u32, Unsupported> {
+        if let Some(slot) = self.return_slot {
+            return Ok(slot);
+        }
+        let ty =
+            carrier(self.result)?.ok_or_else(|| "a parked `return` of no value".to_string())?;
+        let slot = self.local(ty);
+        self.return_slot = Some(slot);
+        Ok(slot)
+    }
+
     fn try_finally(
         &mut self,
         body: u32,
@@ -274,14 +367,10 @@ impl Body<'_> {
         cleanup: u32,
         result: Ty,
     ) -> Result<(), Unsupported> {
-        if finally_has_transfer(
+        let transfers = finally_has_transfer(
             &self.ir.exprs,
-            [body, cleanup]
-                .into_iter()
-                .chain(catches.iter().map(|catch| catch.body)),
-        ) {
-            return Err("a `finally` region with return, break, or continue".into());
-        }
+            std::iter::once(body).chain(catches.iter().map(|catch| catch.body)),
+        );
         let carried = carrier(result)?;
         let cleanup_diverges = finally_input(self.ir, &self.declared, cleanup, true)?;
         let mut protected_diverges =
@@ -293,6 +382,10 @@ impl Body<'_> {
         let saved = carried.map(|ty| self.local(ty));
         self.code.block(BlockType::Empty);
         let done = self.open();
+        let exit = transfers.then(|| {
+            self.code.block(BlockType::Empty);
+            (self.open(), self.local(ValType::I32))
+        });
         self.code.block(BlockType::Value(REFERENCE));
         let handler = self.open();
         self.code.try_table(
@@ -301,11 +394,21 @@ impl Body<'_> {
             self.relative(handler),
         );
         self.open();
-        if catches.is_empty() {
-            self.value(body, result)?;
-        } else {
-            self.try_catch(body, catches, None, result)?;
+        if let Some((exit, pending)) = exit {
+            self.cleanups.push(CleanupFrame {
+                base: done,
+                exit,
+                pending,
+                transfers: Vec::new(),
+            });
         }
+        let protected = if catches.is_empty() {
+            self.value(body, result)
+        } else {
+            self.try_catch(body, catches, None, result)
+        };
+        let frame = exit.and_then(|_| self.cleanups.pop());
+        protected?;
         if protected_diverges {
             self.code.unreachable();
         }
@@ -318,14 +421,34 @@ impl Body<'_> {
         self.close();
         let caught = self.local(REFERENCE);
         self.code.local_set(caught);
-        // Both copies are outside this try_table. A cleanup throw replaces the saved exception;
-        // only completed cleanup rethrows the identical original Kotlin payload. Host traps and
-        // foreign exceptions do not enter the Kotlin tag handler.
+        // Every copy of the cleanup is outside the try_table. A cleanup throw replaces the saved
+        // exception; only completed cleanup rethrows the identical original Kotlin payload. Host
+        // traps and foreign exceptions do not enter the Kotlin tag handler.
         self.statement(cleanup)?;
         self.code
             .local_get(caught)
             .ref_as_non_null()
             .throw(self.runtime.exceptions.tag);
+        if let Some(frame) = frame {
+            // Only a recorded transfer reaches the exit block's end.
+            self.close();
+            if frame.transfers.is_empty() {
+                self.code.unreachable();
+            } else {
+                self.statement(cleanup)?;
+                for (ordinal, transfer) in frame.transfers.iter().enumerate() {
+                    self.code
+                        .local_get(frame.pending)
+                        .i32_const(ordinal as i32)
+                        .op(EQ32)
+                        .if_(BlockType::Empty);
+                    self.open();
+                    self.control_transfer(*transfer, true)?;
+                    self.close();
+                }
+                self.code.unreachable();
+            }
+        }
         self.close();
         self.statement(cleanup)?;
         if let Some(saved) = saved {
