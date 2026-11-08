@@ -40,6 +40,7 @@ jobs:
       - &just-on-path
         id: just-on-path
         name: look for an installed just
+        shell: bash
         run: if command -v just > /dev/null; then echo "found=true" >> "$GITHUB_OUTPUT"; fi
       - &install-just
         if: steps.just-on-path.outputs.found != 'true'
