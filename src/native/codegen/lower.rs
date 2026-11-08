@@ -220,6 +220,8 @@ pub struct FileInput<'a> {
         &'a HashMap<crate::backend::KlibDependencyCallable, super::DependencyExport>,
     /// The exported instance entry of each preceding source module's object, by its classifier.
     pub dependency_singletons: &'a HashMap<crate::types::TypeName, String>,
+    /// The exported getter of each dependency enum entry already realized.
+    pub dependency_enum_entries: &'a HashMap<(crate::types::TypeName, String), String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::native::dependency_references`].
     pub dependency_properties:
@@ -255,6 +257,7 @@ pub fn lower_file(
         dependency_signatures,
         dependency_symbols,
         dependency_singletons,
+        dependency_enum_entries,
         value_classes,
         slot_plan,
         module_facts,
@@ -345,6 +348,7 @@ pub fn lower_file(
         dependency_signatures,
         dependency_symbols,
         dependency_singletons,
+        dependency_enum_entries,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
     // receivers have a runtime-walkable representation and which shapes still decline; both are read while
@@ -527,6 +531,8 @@ struct FileLowering<'a> {
         &'a HashMap<crate::backend::KlibDependencyCallable, super::DependencyExport>,
     /// The exported instance entry of each preceding source module's object, by its classifier.
     dependency_singletons: &'a HashMap<crate::types::TypeName, String>,
+    /// The exported getter of each dependency enum entry already realized.
+    dependency_enum_entries: &'a HashMap<(crate::types::TypeName, String), String>,
 }
 
 impl<'a> FileLowering<'a> {
@@ -1859,9 +1865,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 elem,
                 value,
             } => self.ref_set(holder, elem, value),
-            // A constant of an enum this file does not declare. Its identity is the classifier
-            // and the entry name; the runtime interns one object for that pair.
-            IrExpr::EnumEntry { classifier, name } => self.dependency_enum_entry(classifier, &name),
+            // A constant of an enum this file does not declare. Its declaring file exported the
+            // getter the shared realization built over that enum's own slots.
+            IrExpr::EnumEntry { classifier, name } => self.imported_enum_entry(classifier, &name),
             // `values`, `entries` and `valueOf` of an enum another file declares still need that
             // file's constant list.
             IrExpr::EnumValues { classifier }

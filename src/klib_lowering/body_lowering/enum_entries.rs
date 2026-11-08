@@ -24,7 +24,7 @@ impl BodyLowering<'_> {
         if signature.member_id().is_some() {
             return Err(mismatch("an enum entry carries a member id"));
         }
-        let (classifier, name) = self.linker.enum_entry(symbol)?;
+        let (classifier, name) = self.linker.enum_entry(self.ir, symbol)?;
         if name.is_empty() {
             return Err(mismatch("an enum entry has no name"));
         }

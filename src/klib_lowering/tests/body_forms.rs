@@ -1514,3 +1514,68 @@ fn stdlib_coroutine_suspended_lowers_to_its_enum_entry() {
          kotlin/coroutines/intrinsics/CoroutineSingletons: Nothing}: Nothing}"
     );
 }
+
+/// `CoroutineSingletons` is a dependency enum of three argument-less entries. The second entry's
+/// ordinal is its declaration index, so the proof keeps every entry in serialized order.
+#[test]
+fn stdlib_coroutine_singletons_is_a_simple_enum_in_declaration_order() {
+    use crate::klib_libraries::ProvenEnumClass;
+    use crate::symbol_source::SymbolSource;
+    use crate::types::type_name;
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let class = type_name("kotlin/coroutines/intrinsics/CoroutineSingletons");
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(type_name("kotlin/coroutines/intrinsics")),
+        "COROUTINE_SUSPENDED",
+    );
+    let property = symbols
+        .callables
+        .properties()
+        .iter()
+        .find(|property| property.name == "COROUTINE_SUSPENDED" && property.receiver.is_none())
+        .expect("the top-level COROUTINE_SUSPENDED property");
+    let target = property
+        .getter
+        .external_identity
+        .expect("the getter's provider identity");
+    let mut ir = crate::ir::IrFile::default();
+    ir.add_expr(crate::ir::IrExpr::Call {
+        callee: Box::new(crate::ir::Callee::External {
+            target,
+            default_provider: None,
+            params: property.getter.params.clone(),
+            ret: property.getter.ret,
+            substitutions: Vec::new(),
+            defaults: Vec::new(),
+            extension_receiver_parameter: None,
+        }),
+        dispatch_receiver: None,
+        args: Vec::new(),
+    });
+    let module = crate::backend::CheckedBackendCallables::freeze(&ir, &libraries)
+        .expect("the provider answers for the getter")
+        .callable(target)
+        .expect("the getter is frozen")
+        .klib_body_callable()
+        .expect("signed")
+        .identity()
+        .module
+        .clone();
+    match libraries
+        .declaration_bodies()
+        .proven_simple_enum(&module, class)
+    {
+        ProvenEnumClass::Simple { entries, .. } => assert_eq!(
+            entries,
+            [
+                "COROUTINE_SUSPENDED".to_owned(),
+                "UNDECIDED".to_owned(),
+                "RESUMED".to_owned(),
+            ]
+        ),
+        other => panic!("CoroutineSingletons is not a simple enum: {other:?}"),
+    }
+}

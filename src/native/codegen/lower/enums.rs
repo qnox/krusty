@@ -19,21 +19,27 @@ pub(super) struct EnumBase {
 }
 
 impl BodyLowering<'_, '_, '_> {
-    /// An enum constant declared by another compilation unit: one interned object for this
-    /// classifier and entry name.
-    pub(super) fn dependency_enum_entry(
+    /// An enum constant whose declaring file already realized it. The call is that file's getter:
+    /// the shared realization's initializer and the constant's own slot.
+    pub(super) fn imported_enum_entry(
         &mut self,
         classifier: crate::types::TypeName,
         name: &str,
     ) -> Result<Option<Value>, Unsupported> {
-        let class_name = self.string_literal(classifier.render().as_bytes())?;
-        let entry_name = self.string_literal(name.as_bytes())?;
-        self.runtime_call(
-            "kt_dependency_enum_entry",
-            &[Ty::String, Ty::String],
-            any(),
-            &[class_name, entry_name],
-        )
+        let Some(symbol) = self
+            .file
+            .dependency_enum_entries
+            .get(&(classifier, name.to_owned()))
+        else {
+            return Err(declined!(
+                "an enum another file declares (`{}`)",
+                classifier.render()
+            ));
+        };
+        let id = self.file.import(symbol, &[], Ty::obj_name(classifier))?;
+        let func_ref = self.func_ref(id);
+        let call = self.emit_call(func_ref, &[])?;
+        Ok(Some(self.builder.inst_results(call)[0]))
     }
 
     /// One enum constant: its construction, with `kotlin.Enum`'s storage filled right after the

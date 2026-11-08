@@ -48,6 +48,8 @@ pub(super) struct CallableRegistry {
         HashMap<KlibDependencyCallable, SingletonExtensionUnreadReceiver>,
     /// The entry answering each published object declaration's instance, by its classifier.
     dependency_singletons: HashMap<crate::backend::DependencyClassifier, u32>,
+    /// The getter of each published dependency enum entry.
+    dependency_enum_entries: HashMap<(crate::backend::DependencyClassifier, String), u32>,
 }
 
 pub(super) struct FileCallTargets {
@@ -65,6 +67,8 @@ pub(super) struct FileCallTargets {
         HashMap<ExternalCallableId, SingletonExtensionUnreadReceiver>,
     /// The instance entry of each other module's object this file reads as a value.
     singletons: HashMap<crate::backend::DependencyClassifier, u32>,
+    /// The getter of each other module's enum entry this file reads.
+    enum_entries: HashMap<(crate::backend::DependencyClassifier, String), u32>,
 }
 
 impl CallableRegistry {
@@ -173,6 +177,7 @@ impl CallableRegistry {
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
             singletons: HashMap::default(),
+            enum_entries: HashMap::default(),
         };
         for expression in crate::ir::emitted_body_roots(ir)
             .into_iter()
@@ -215,6 +220,19 @@ impl CallableRegistry {
                 {
                     if let Some(&entry) = self.dependency_singletons.get(classifier) {
                         targets.singletons.insert(*classifier, entry);
+                    }
+                    continue;
+                }
+                IrExpr::EnumEntry { classifier, name }
+                    if ir.class_id_by_name(*classifier).is_none() =>
+                {
+                    if let Some(&entry) = self
+                        .dependency_enum_entries
+                        .get(&(*classifier, name.to_string()))
+                    {
+                        targets
+                            .enum_entries
+                            .insert((*classifier, name.to_string()), entry);
                     }
                     continue;
                 }
@@ -419,6 +437,15 @@ impl CallableRegistry {
                 .ok_or_else(|| "an object instance entry without its function".to_string())?;
             self.dependency_singletons.insert(classifier, entry);
         }
+        for (classifier, name, entry) in exports.enum_entries() {
+            let function = functions
+                .get(*entry as usize)
+                .copied()
+                .flatten()
+                .ok_or_else(|| "an enum entry getter without its function".to_string())?;
+            self.dependency_enum_entries
+                .insert((*classifier, name.clone()), function);
+        }
         for (function, identity) in exports.callables() {
             let emitted = functions
                 .get(function as usize)
@@ -532,6 +559,17 @@ impl FileCallTargets {
         classifier: crate::backend::DependencyClassifier,
     ) -> Option<u32> {
         self.singletons.get(&classifier).copied()
+    }
+
+    /// The getter of another module's enum entry.
+    pub(super) fn dependency_enum_entry(
+        &self,
+        classifier: crate::backend::DependencyClassifier,
+        name: &str,
+    ) -> Option<u32> {
+        self.enum_entries
+            .get(&(classifier, name.to_owned()))
+            .copied()
     }
 
     pub(super) fn external(&self, target: ExternalCallableId) -> Option<u32> {

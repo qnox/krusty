@@ -1217,65 +1217,6 @@ static const char *kt_text_of(KRef self, kt_int *byte_length) {
    descriptor lives in that unit, and identity (`===`) is what a read of the constant promises.
    The intern key is the classifier text plus the entry text. The slot list is not a GC object,
    so a reallocation cannot move a root the collector already holds. */
-typedef struct KtDependencyEnumSlot {
-    KRef object;
-    KRef classifier;
-    struct KtDependencyEnumSlot *next;
-} KtDependencyEnumSlot;
-
-static KtDependencyEnumSlot *kt_dependency_enum_entries;
-
-static const uint32_t kt_dependency_enum_refs[] = {offsetof(KEnum, name)};
-
-static const KType kt_type_dependency_enum = {
-    KT_NAMED("kotlin.", "Enum"),
-    .instance_size = sizeof(KEnum),
-    .reference_count = 1,
-    .reference_offsets = kt_dependency_enum_refs,
-    .super = &kt_type_any,
-    .vtable = kt_any_vtable,
-    .vtable_length = 3,
-};
-
-static bool kt_same_text(KRef left, KRef right) {
-    kt_int left_length = 0;
-    kt_int right_length = 0;
-    const char *left_bytes = kt_text_of(left, &left_length);
-    const char *right_bytes = kt_text_of(right, &right_length);
-    if (left_length != right_length) {
-        return false;
-    }
-    for (kt_int index = 0; index < left_length; index++) {
-        if (left_bytes[index] != right_bytes[index]) {
-            return false;
-        }
-    }
-    return true;
-}
-
-KRef kt_dependency_enum_entry(KRef classifier, KRef name) {
-    if (classifier == NULL || name == NULL) {
-        KT_FAIL("krusty: an enum entry without its classifier or name\n");
-    }
-    for (KtDependencyEnumSlot *slot = kt_dependency_enum_entries; slot != NULL; slot = slot->next) {
-        KEnum *entry = (KEnum *)slot->object;
-        if (kt_same_text(slot->classifier, classifier) && kt_same_text(entry->name, name)) {
-            return slot->object;
-        }
-    }
-    KtDependencyEnumSlot *slot = kt_map(sizeof(KtDependencyEnumSlot));
-    KEnum *entry = kt_gc_allocate(&kt_type_dependency_enum, sizeof(KEnum));
-    entry->name = name;
-    entry->ordinal = 0;
-    slot->object = (KRef)entry;
-    slot->classifier = classifier;
-    kt_gc_add_global_root((void **)&slot->object);
-    kt_gc_add_global_root((void **)&slot->classifier);
-    slot->next = kt_dependency_enum_entries;
-    kt_dependency_enum_entries = slot;
-    return slot->object;
-}
-
 /* `StringBuilder(capacity)`. A capacity is a hint to a builder that grows anyway, but a NEGATIVE
    one is not read as zero. Kotlin's common declaration specifies no exception, and the platforms
    differ, so this runtime throws the type Kotlin/Native does, being a native target: its

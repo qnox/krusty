@@ -37,6 +37,7 @@ use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol};
 use crate::types::{Ty, TypeName};
 
 mod class_construction;
+mod enum_classes;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
 /// leaves and constructor calls have distinct realization contracts.
@@ -177,6 +178,12 @@ pub struct DependencyBodyUnit {
     private_members: HashSet<KlibDependencyCallable>,
     /// The receiver type of each value class member this unit emits, its `this`.
     value_receivers: HashMap<KlibDependencyCallable, Ty>,
+    /// Dependency enums this unit declares, with the authenticated class identity.
+    enum_classes: HashMap<TypeName, (KlibDependencyCallable, crate::ir::ClassId)>,
+    /// One getter per entry of those enums, in declaration order.
+    enum_entry_getters: Vec<(TypeName, String, FunId)>,
+    /// Enums an earlier support unit already realized. This unit reads them through that export.
+    materialized_elsewhere: HashSet<TypeName>,
     builtins: IrBuiltinOperators,
 }
 
@@ -190,6 +197,9 @@ impl Default for DependencyBodyUnit {
             authenticated_singleton_classifiers: HashMap::default(),
             private_members: HashSet::default(),
             value_receivers: HashMap::default(),
+            enum_classes: HashMap::default(),
+            enum_entry_getters: Vec::new(),
+            materialized_elsewhere: HashSet::default(),
             builtins: IrBuiltinOperators::new(),
         }
     }
@@ -525,6 +535,25 @@ impl DependencyBodyUnit {
             .map(|(identity, class)| (self.ir.classes[*class as usize].fq_name, identity))
     }
 
+    /// Enums an earlier unit of this program already realized.
+    pub(crate) fn excluding_materialized(&mut self, classes: &HashSet<TypeName>) {
+        self.materialized_elsewhere.clone_from(classes);
+    }
+
+    /// The authenticated identity of each enum class this unit declares.
+    pub(crate) fn declared_enum_classes(
+        &self,
+    ) -> impl Iterator<Item = (TypeName, &KlibDependencyCallable)> {
+        self.enum_classes
+            .iter()
+            .map(|(classifier, (identity, _))| (*classifier, identity))
+    }
+
+    /// The getter each declared entry publishes, in declaration order.
+    pub(crate) fn enum_entry_getters(&self) -> &[(TypeName, String, FunId)] {
+        &self.enum_entry_getters
+    }
+
     fn lower_reachable<'a>(
         &mut self,
         callable: KlibBodyCallable<'a>,
@@ -538,6 +567,9 @@ impl DependencyBodyUnit {
             authenticated_singleton_classifiers: &mut self.authenticated_singleton_classifiers,
             private_members: &mut self.private_members,
             value_receivers: &mut self.value_receivers,
+            enum_classes: &mut self.enum_classes,
+            enum_entry_getters: &mut self.enum_entry_getters,
+            materialized_elsewhere: &self.materialized_elsewhere,
             pending: &mut pending,
             root: callable,
             active_module: callable.identity().module.clone(),
@@ -622,6 +654,9 @@ struct Linker<'u, 's> {
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
     private_members: &'u mut HashSet<KlibDependencyCallable>,
     value_receivers: &'u mut HashMap<KlibDependencyCallable, Ty>,
+    enum_classes: &'u mut HashMap<TypeName, (KlibDependencyCallable, crate::ir::ClassId)>,
+    enum_entry_getters: &'u mut Vec<(TypeName, String, FunId)>,
+    materialized_elsewhere: &'u HashSet<TypeName>,
     pending: &'u mut VecDeque<PendingBody<'s>>,
     /// The declaration this lowering was asked for, which its own recursive calls select.
     root: KlibBodyCallable<'s>,
@@ -829,7 +864,8 @@ impl CallLinker for Linker<'_, '_> {
     }
 
     fn enum_entry(
-        &self,
+        &mut self,
+        ir: &mut IrFile,
         symbol: &KlibIrSymbol,
     ) -> Result<(TypeName, String), KlibBodyDeclineReason> {
         let KlibIrSignature::Public(signature) = &symbol.signature else {
@@ -870,6 +906,7 @@ impl CallLinker for Linker<'_, '_> {
                 "an enum entry's name disagrees with its signature".to_owned(),
             ));
         }
+        self.declare_enum(ir, classifier, &name)?;
         Ok((classifier, name))
     }
 
@@ -1725,6 +1762,10 @@ impl UnitCheckpoint {
             .retain(|identity| functions.contains_key(identity));
         unit.value_receivers
             .retain(|identity, _| functions.contains_key(identity));
+        unit.enum_classes
+            .retain(|_, (_, class)| (*class as usize) < unit.ir.classes.len());
+        unit.enum_entry_getters
+            .retain(|(_, _, function)| *function < first);
     }
 }
 

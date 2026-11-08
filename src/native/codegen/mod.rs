@@ -125,6 +125,9 @@ pub struct CodegenModule {
     /// The exported entry answering each preceding source module's object instance, by the
     /// object's classifier.
     dependency_singletons: crate::fx_hash::HashMap<crate::backend::DependencyClassifier, String>,
+    /// The exported getter of each dependency enum entry already realized, by its class and name.
+    dependency_enum_entries:
+        crate::fx_hash::HashMap<(crate::backend::DependencyClassifier, String), String>,
     next_dependency_symbol: usize,
     next_dependency_support_object: usize,
     next_disambiguated_source_object: usize,
@@ -438,6 +441,34 @@ impl Backend for CraneliftBackend {
                 },
             );
         }
+        for &(classifier, ref name, entry) in file.dependency_exports.enum_entries() {
+            let symbol = format!("kt_klib_enum_entry_{}", state.next_dependency_symbol);
+            state.next_dependency_symbol += 1;
+            let signature =
+                match crate::backend::DependencyFunctionSignature::from_ir(&file.ir, entry, None) {
+                    Ok(signature) => signature,
+                    Err(error) => {
+                        diags.error(
+                            crate::diag::Span::new(0, 0),
+                            format!("internal error: {error}"),
+                        );
+                        return Vec::new();
+                    }
+                };
+            state
+                .dependency_enum_entries
+                .insert((classifier, name.clone()), symbol.clone());
+            dependency_exports.insert(
+                entry,
+                DependencyExportDefinition {
+                    symbol,
+                    signature,
+                    member_receiver: None,
+                    default_entry: None,
+                    dispatch_entry: None,
+                },
+            );
+        }
         let lowered = match lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
@@ -457,6 +488,7 @@ impl Backend for CraneliftBackend {
                 dependency_signatures: &file.dependency_exports,
                 dependency_symbols: &state.dependency_symbols,
                 dependency_singletons: &state.dependency_singletons,
+                dependency_enum_entries: &state.dependency_enum_entries,
             },
             self.target,
             &object_stem,

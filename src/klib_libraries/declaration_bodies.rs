@@ -45,6 +45,27 @@ pub(crate) enum ProvenEnumEntry {
     Several,
 }
 
+/// A dependency enum whose constants the shared realization can build.
+///
+/// The proof is the serialized class: it extends `kotlin.Enum`, and every entry is a
+/// declaration-order constant with no body and no constructor argument. A second class, a
+/// file-private class, or an entry the common realization does not construct is not a simple
+/// enum.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProvenEnumClass {
+    /// One class, with its entries in serialized declaration order.
+    Simple {
+        identity: KlibDependencyCallable,
+        entries: Vec<String>,
+    },
+    /// No loaded library publishes the class.
+    None,
+    /// More than one library publishes it.
+    Several,
+    /// The class is an enum the common realization does not construct as written.
+    Unsupported(&'static str),
+}
+
 pub(crate) struct KlibClassMember<'a> {
     pub(crate) arena: &'a KlibIrArena,
     pub(crate) class: &'a crate::metadata::klib_ir::tree::KlibIrClass,
@@ -346,6 +367,88 @@ impl KlibDeclarationBodies {
         }
     }
 
+    /// The one simple enum class `classifier` in the producer graph rooted at `module`.
+    ///
+    /// Entry order is the serialized member order, which is Kotlin's declaration order and
+    /// therefore each constant's ordinal. A class that is not this shape is
+    /// [`ProvenEnumClass::Unsupported`] or [`ProvenEnumClass::None`]; the caller declines it
+    /// rather than inventing a constant.
+    pub(crate) fn proven_simple_enum(&self, module: &str, classifier: TypeName) -> ProvenEnumClass {
+        let mut found: Option<(String, Result<SimpleEnumClass, &'static str>)> = None;
+        for module in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&module) else {
+                continue;
+            };
+            for tree in self.libraries[library].trees() {
+                let Some(class) = find_simple_enum(&tree.arena, &tree.declaration, classifier)
+                else {
+                    continue;
+                };
+                if found.is_some() {
+                    return ProvenEnumClass::Several;
+                }
+                found = Some((module.clone(), class));
+            }
+        }
+        let Some((module, class)) = found else {
+            return ProvenEnumClass::None;
+        };
+        let class = match class {
+            Ok(class) => class,
+            Err(reason) => return ProvenEnumClass::Unsupported(reason),
+        };
+        let Some(identity) =
+            declaration_signature(&class.symbol).map(|declaration| KlibDependencyCallable {
+                module,
+                declaration,
+            })
+        else {
+            return ProvenEnumClass::Unsupported("an enum class without a public signature");
+        };
+        ProvenEnumClass::Simple {
+            identity,
+            entries: class.entries,
+        }
+    }
+
+    /// The one simple enum `classifier` among the loaded libraries, each searched only in its own
+    /// trees. A producer graph is not used: a dependent library must not count the same class a
+    /// second time.
+    pub(crate) fn proven_loaded_enum(&self, classifier: TypeName) -> ProvenEnumClass {
+        let mut found = None;
+        for (module, &library) in &self.modules {
+            for tree in self.libraries[library].trees() {
+                let Some(class) = find_simple_enum(&tree.arena, &tree.declaration, classifier)
+                else {
+                    continue;
+                };
+                if found.is_some() {
+                    return ProvenEnumClass::Several;
+                }
+                found = Some((module.clone(), class));
+            }
+        }
+        let Some((module, class)) = found else {
+            return ProvenEnumClass::None;
+        };
+        let class = match class {
+            Ok(class) => class,
+            Err(reason) => return ProvenEnumClass::Unsupported(reason),
+        };
+        let Some(identity) =
+            declaration_signature(&class.symbol).map(|declaration| KlibDependencyCallable {
+                module,
+                declaration,
+            })
+        else {
+            return ProvenEnumClass::Unsupported("an enum class without a public signature");
+        };
+        ProvenEnumClass::Simple {
+            identity,
+            entries: class.entries,
+        }
+    }
+
     /// Modules whose bodies the producer graph rooted at `module` can publish.
     ///
     /// This is the same manifest-edge closure used to resolve serialized calls. It deliberately
@@ -549,6 +652,175 @@ impl KlibDeclarationBodies {
             })
         })
     }
+}
+
+struct SimpleEnumClass {
+    symbol: KlibIrSignature,
+    entries: Vec<String>,
+}
+
+fn find_simple_enum(
+    arena: &KlibIrArena,
+    member: &KlibIrMember,
+    classifier: TypeName,
+) -> Option<Result<SimpleEnumClass, &'static str>> {
+    let mut found = None;
+    walk_simple_enum(arena, member, classifier, &mut found);
+    found
+}
+
+fn walk_simple_enum(
+    arena: &KlibIrArena,
+    member: &KlibIrMember,
+    classifier: TypeName,
+    found: &mut Option<Result<SimpleEnumClass, &'static str>>,
+) {
+    let KlibIrMember::Class(id) = member else {
+        return;
+    };
+    let class = arena.class(*id);
+    if class.base.symbol.kind == KlibIrSymbolKind::Class
+        && class_identity(&class.base.symbol.signature) == Some(classifier)
+    {
+        let proven = prove_simple_enum(arena, class);
+        *found = Some(match found.take() {
+            Some(_) => Err("an enum class is serialized more than once"),
+            None => proven,
+        });
+    }
+    for member in &class.members {
+        walk_simple_enum(arena, member, classifier, found);
+        if let KlibIrMember::EnumEntry(entry) = member {
+            if let Some(nested) = entry.class {
+                walk_simple_enum(arena, &KlibIrMember::Class(nested), classifier, found);
+            }
+        }
+    }
+}
+
+/// `class` is the serialized enum `kotlin.Enum` when every constant is argument-less and body-less.
+fn prove_simple_enum(
+    arena: &KlibIrArena,
+    class: &crate::metadata::klib_ir::tree::KlibIrClass,
+) -> Result<SimpleEnumClass, &'static str> {
+    if !class.type_parameters.is_empty() || class.value_class_representation.is_some() {
+        return Err("an enum class with type parameters or a value representation");
+    }
+    let mut supertypes = class.supertypes.iter().copied();
+    let Some(supertype) = supertypes.next().filter(|_| supertypes.next().is_none()) else {
+        return Err("an enum class without exactly one supertype");
+    };
+    if !is_kotlin_enum(arena, supertype, class) {
+        return Err("a class that does not extend kotlin.Enum");
+    }
+    let mut entries = Vec::new();
+    for member in &class.members {
+        match member {
+            KlibIrMember::EnumEntry(entry) => {
+                if entry.class.is_some() {
+                    return Err("an enum entry with a body");
+                }
+                if let Some(initializer) = entry.initializer {
+                    simple_enum_constructor(arena, initializer, class)?;
+                }
+                if entry.name.is_empty() || entries.iter().any(|name| name == &entry.name) {
+                    return Err("an enum entry without a unique name");
+                }
+                entries.push(entry.name.clone());
+            }
+            KlibIrMember::AnonymousInitializer { statements, .. } if !statements.is_empty() => {
+                return Err("an enum class with an initializer");
+            }
+            KlibIrMember::Class(_) => {
+                return Err("an enum class with a nested classifier");
+            }
+            _ => {}
+        }
+    }
+    if entries.is_empty() {
+        return Err("an enum class with no entries");
+    }
+    Ok(SimpleEnumClass {
+        symbol: class.base.symbol.signature.clone(),
+        entries,
+    })
+}
+
+/// `kotlin.Enum<ThisClass>`: the one supertype a Kotlin enum class records, with the class itself
+/// as the invariant type argument.
+fn is_kotlin_enum(
+    arena: &KlibIrArena,
+    ty: crate::metadata::klib_ir::tree::KlibIrTypeId,
+    class: &crate::metadata::klib_ir::tree::KlibIrClass,
+) -> bool {
+    let KlibIrType::Simple {
+        classifier,
+        nullability,
+        arguments,
+        abbreviation: None,
+        ..
+    } = arena.ty(ty)
+    else {
+        return false;
+    };
+    if !matches!(
+        nullability,
+        crate::metadata::klib_ir::tree::KlibIrNullability::DefinitelyNotNull
+            | crate::metadata::klib_ir::tree::KlibIrNullability::NotSpecified
+    ) || classifier.kind != KlibIrSymbolKind::Class
+        || class_identity(&classifier.signature) != Some(crate::types::wk::kotlin_enum())
+    {
+        return false;
+    }
+    let [crate::metadata::klib_ir::tree::KlibIrTypeArgument::Type {
+        variance: crate::metadata::klib_ir::tree::KlibIrVariance::Invariant,
+        ty: argument,
+    }] = arguments.as_slice()
+    else {
+        return false;
+    };
+    this_class(arena, *argument, class)
+}
+
+fn this_class(
+    arena: &KlibIrArena,
+    ty: crate::metadata::klib_ir::tree::KlibIrTypeId,
+    class: &crate::metadata::klib_ir::tree::KlibIrClass,
+) -> bool {
+    matches!(
+        arena.ty(ty),
+        KlibIrType::Simple {
+            classifier,
+            nullability: crate::metadata::klib_ir::tree::KlibIrNullability::DefinitelyNotNull
+                | crate::metadata::klib_ir::tree::KlibIrNullability::NotSpecified,
+            arguments,
+            abbreviation: None,
+            ..
+        } if arguments.is_empty()
+            && classifier.kind == KlibIrSymbolKind::Class
+            && class_identity(&classifier.signature) == class_identity(&class.base.symbol.signature)
+    )
+}
+
+fn simple_enum_constructor(
+    arena: &KlibIrArena,
+    initializer: crate::metadata::klib_ir::tree::KlibIrExprId,
+    class: &crate::metadata::klib_ir::tree::KlibIrClass,
+) -> Result<(), &'static str> {
+    let KlibIrExprKind::EnumConstructorCall(access) = &arena.expr(initializer).kind else {
+        return Err("an enum entry whose initializer is not its constructor");
+    };
+    if access.type_arguments.iter().any(Option::is_some) || !arguments_are_absent(&access.arguments)
+    {
+        return Err("an enum entry with a constructor argument");
+    }
+    if access.symbol.kind != KlibIrSymbolKind::Constructor
+        || declaration_owner(&access.symbol.signature)
+            != class_identity(&class.base.symbol.signature)
+    {
+        return Err("an enum entry constructed by another class");
+    }
+    Ok(())
 }
 
 fn find_enum_entry(

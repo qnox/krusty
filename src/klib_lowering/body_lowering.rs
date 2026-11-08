@@ -150,9 +150,12 @@ pub(super) trait CallLinker {
     /// Proves that `classifier` is a dependency object, whose value a body may read.
     fn singleton(&self, classifier: TypeName) -> Lowered<()>;
 
-    /// Proves that `symbol` is one enum entry of one class in the body producer's graph, and
-    /// returns that class with the entry's declaration name.
-    fn enum_entry(&self, symbol: &KlibIrSymbol) -> Lowered<(TypeName, String)>;
+    /// Proves that `symbol` is one enum entry of one class in the body producer's graph.
+    ///
+    /// The declaring enum is declared in `ir` the way a source enum is, unless an earlier unit
+    /// already realized it. The result is that class and the entry's declaration name.
+    fn enum_entry(&mut self, ir: &mut IrFile, symbol: &KlibIrSymbol)
+        -> Lowered<(TypeName, String)>;
 
     /// `sub` as the class `owner` it is a subtype of, with the type arguments its hierarchy applies
     /// to `owner`.

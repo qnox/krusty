@@ -141,6 +141,19 @@ pub(super) fn emit_dependencies<B: Backend>(
         !intrinsic_owned
     });
     let mut artifacts = Vec::new();
+    artifacts.extend(emit_referenced_enums(
+        source,
+        symbols,
+        module_facts,
+        bodies,
+        backend,
+        state,
+        support_state,
+        diags,
+    ));
+    if diags.has_errors() {
+        return Vec::new();
+    }
     for (requires_intrinsic_link, mut roots) in [(true, roots), (false, ordinary)] {
         // Intrinsic support may have emitted an ordinary root transitively in the preceding unit.
         roots.retain(|root| !support_state.emitted.contains_key(root.identity()));
@@ -151,6 +164,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             return Vec::new();
         };
         let mut unit = DependencyBodyUnit::default();
+        unit.excluding_materialized(&support_state.materialized_classes.keys().copied().collect());
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
@@ -225,6 +239,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         }
         if unit.callable_functions().next().is_none()
             && unit.allocating_constructors().next().is_none()
+            && unit.enum_entry_getters().is_empty()
         {
             continue;
         }
@@ -250,10 +265,14 @@ pub(super) fn emit_dependencies<B: Backend>(
             return Vec::new();
         }
 
-        let materialized = unit
+        let mut materialized = unit
             .materialized_classes()
             .map(|(classifier, identity)| (classifier, identity.clone()))
             .collect::<Vec<_>>();
+        materialized.extend(
+            unit.declared_enum_classes()
+                .map(|(classifier, identity)| (classifier, identity.clone())),
+        );
         for (classifier, identity) in &materialized {
             // Current-module representation facts take precedence in the checked backend view.
             // They cannot describe an unrelated imported class with the same unqualified key.
@@ -288,6 +307,9 @@ pub(super) fn emit_dependencies<B: Backend>(
             })
             .map(|(identity, function)| (identity.clone(), function))
             .collect::<Vec<_>>();
+        for (classifier, name, function) in unit.enum_entry_getters() {
+            exports.record_enum_entry(*classifier, name.clone(), *function);
+        }
         for (identity, function) in &closed {
             exports.record_callable(*function, identity.clone());
             if let Some(receiver) = unit.value_member_receiver(identity) {
@@ -437,6 +459,153 @@ pub(super) fn emit_dependencies<B: Backend>(
         artifacts.extend(outputs);
     }
     artifacts
+}
+
+/// A source read of a dependency enum entry. The declaring class is realized once, here, before
+/// any body that also reads it, and its entry getters are the export those reads call.
+fn emit_referenced_enums<B: Backend>(
+    source: &CheckedIrFile<'_>,
+    symbols: &PassTwoSymbols,
+    module_facts: &BackendModuleFacts,
+    bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    backend: &B,
+    state: &mut B::State,
+    support_state: &mut DependencySupportState,
+    diags: &mut DiagSink,
+) -> Vec<Artifact> {
+    let mut unit = DependencyBodyUnit::default();
+    unit.excluding_materialized(&support_state.materialized_classes.keys().copied().collect());
+    let platform = symbols.semantic_platform();
+    for classifier in dependency_enum_reads(&source.ir) {
+        if support_state.materialized_classes.contains_key(&classifier) {
+            continue;
+        }
+        match bodies.proven_loaded_enum(classifier) {
+            crate::klib_libraries::ProvenEnumClass::None => continue,
+            crate::klib_libraries::ProvenEnumClass::Several => {
+                diags.error(
+                    Span::new(0, 0),
+                    "cannot realize a dependency enum serialized by more than one producer",
+                );
+                return Vec::new();
+            }
+            crate::klib_libraries::ProvenEnumClass::Unsupported(reason) => {
+                diags.error(
+                    Span::new(0, 0),
+                    format!(
+                        "cannot realize the dependency enum `{}`: {reason}",
+                        classifier.render()
+                    ),
+                );
+                return Vec::new();
+            }
+            crate::klib_libraries::ProvenEnumClass::Simple { .. } => {}
+        }
+        if let Err(reason) = unit.declare_loaded_enum(bodies, classifier) {
+            diags.error(
+                Span::new(0, 0),
+                format!(
+                    "cannot realize the dependency enum `{}`: {reason}",
+                    classifier.render()
+                ),
+            );
+            return Vec::new();
+        }
+    }
+    if unit.enum_entry_getters().is_empty() {
+        return Vec::new();
+    }
+    if let Err(error) = unit.ir().validate_determined_types() {
+        diags.error(
+            Span::new(0, 0),
+            format!("internal error: a dependency enum has an undetermined type: {error:?}"),
+        );
+        return Vec::new();
+    }
+    if let Err(error) = unit.ir().validate_semantic_contracts() {
+        diags.error(
+            Span::new(0, 0),
+            format!("internal error: a dependency enum violates common IR contracts: {error:?}"),
+        );
+        return Vec::new();
+    }
+    let materialized = unit
+        .declared_enum_classes()
+        .map(|(classifier, identity)| (classifier, identity.clone()))
+        .collect::<Vec<_>>();
+    for (classifier, identity) in &materialized {
+        if module_facts.classifier(*classifier).is_some()
+            || module_facts.is_body_local(*classifier)
+            || source.ir.class_id_by_name(*classifier).is_some()
+        {
+            diags.error(
+                Span::new(0, 0),
+                "cannot materialize a dependency class that collides with a current-module classifier",
+            );
+            return Vec::new();
+        }
+        if let Some(previous) = support_state.materialized_classes.get(classifier) {
+            let message = if previous == identity {
+                "cannot materialize an imported class twice in separate dependency support units"
+            } else {
+                "cannot materialize equal classifier names from different KLIB producers in one target program"
+            };
+            diags.error(Span::new(0, 0), message);
+            return Vec::new();
+        }
+    }
+    let mut exports = DependencyExportSignatures::default();
+    for (classifier, name, function) in unit.enum_entry_getters() {
+        exports.record_enum_entry(*classifier, name.clone(), *function);
+    }
+    let callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
+        Ok(callables) => callables,
+        Err(error) => {
+            diags.error(
+                Span::new(0, 0),
+                format!("internal error: cannot freeze a dependency enum: {error:?}"),
+            );
+            return Vec::new();
+        }
+    };
+    let ordinal = support_state.emitted.len();
+    let support_module = format!(
+        "{}$klib_body${}${ordinal}",
+        source.module_name,
+        source.source.raw()
+    );
+    let support = CheckedIrFile {
+        ir: unit.into_ir(),
+        kind: CheckedIrUnitKind::DependencySupport,
+        source: source.source,
+        classifiers: CheckedBackendClassifiers::new(module_facts, platform),
+        callables,
+        dependency_exports: exports,
+        native_plugins: symbols.native_plugins(),
+        module_name: &support_module,
+        stems: source.stems,
+        origins: source.origins,
+    };
+    let outputs = backend.lower_ir_file(support, state, diags);
+    if diags.has_errors() {
+        return Vec::new();
+    }
+    support_state.materialized_classes.extend(materialized);
+    outputs
+}
+
+fn dependency_enum_reads(ir: &crate::ir::IrFile) -> Vec<TypeName> {
+    let mut found = Vec::new();
+    for root in crate::ir::emitted_body_roots(ir) {
+        for expression in crate::ir::value_namespace_expressions(ir, root) {
+            if let IrExpr::EnumEntry { classifier, .. } = ir.expr(expression) {
+                if ir.class_id_by_name(*classifier).is_none() && !found.contains(classifier) {
+                    found.push(*classifier);
+                }
+            }
+        }
+    }
+    found
 }
 
 fn rebound_externals(

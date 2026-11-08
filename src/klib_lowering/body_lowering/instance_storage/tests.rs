@@ -33,7 +33,8 @@ impl CallLinker for NoCalls {
         panic!("no singleton")
     }
     fn enum_entry(
-        &self,
+        &mut self,
+        _: &mut crate::ir::IrFile,
         _: &crate::metadata::klib_ir::KlibIrSymbol,
     ) -> Lowered<(TypeName, String)> {
         panic!("no enum entry")

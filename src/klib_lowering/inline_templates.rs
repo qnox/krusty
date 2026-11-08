@@ -311,7 +311,8 @@ impl CallLinker for TemplateCalls<'_> {
     }
 
     fn enum_entry(
-        &self,
+        &mut self,
+        _ir: &mut crate::ir::IrFile,
         symbol: &KlibIrSymbol,
     ) -> Result<(crate::types::TypeName, String), KlibBodyDeclineReason> {
         if symbol.kind != KlibIrSymbolKind::EnumEntry {

@@ -212,6 +212,9 @@ pub struct DependencyExportSignatures {
     /// target realized it, the entry answering its instance (see `super::construction_entries`).
     singletons: Vec<crate::ir::ClassId>,
     singleton_entries: Vec<(crate::types::TypeName, FunId)>,
+    /// The getter of each dependency enum entry this file realizes. The shared enum realization
+    /// rewrites the getter to the constant's initializer and slot; other files call it.
+    enum_entries: Vec<(crate::types::TypeName, String, FunId)>,
 }
 
 /// One constructor [`DependencyExportSignatures`] publishes: the class and which of its
@@ -338,6 +341,21 @@ impl DependencyExportSignatures {
     /// Every object instance entry a target realized, by the object's classifier.
     pub(crate) fn singleton_entries(&self) -> &[(crate::types::TypeName, FunId)] {
         &self.singleton_entries
+    }
+
+    /// Record the getter of one entry of a dependency enum this file realizes.
+    pub(crate) fn record_enum_entry(
+        &mut self,
+        classifier: crate::types::TypeName,
+        name: String,
+        entry: FunId,
+    ) {
+        self.enum_entries.push((classifier, name, entry));
+    }
+
+    /// Every dependency enum entry getter this file publishes, in declaration order.
+    pub(crate) fn enum_entries(&self) -> &[(crate::types::TypeName, String, FunId)] {
+        &self.enum_entries
     }
 
     /// Record one declaration at the metadata owner that computed its exact identity.
