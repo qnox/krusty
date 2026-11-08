@@ -377,6 +377,68 @@ impl CallLinker for TemplateCalls<'_> {
         })
     }
 
+    fn dependency_override(
+        &self,
+        symbol: &crate::metadata::klib_ir::KlibIrSymbol,
+    ) -> Result<
+        Option<super::body_lowering::object_literals::DependencyOverride>,
+        KlibBodyDeclineReason,
+    > {
+        use super::body_lowering::object_literals::DependencyOverride;
+        use crate::metadata::id_signature::KlibDeclarationSignature;
+        use crate::metadata::klib_ir::KlibIrSignature;
+        let signature = match &symbol.signature {
+            KlibIrSignature::Public(public) => KlibDeclarationSignature::Public(public.clone()),
+            KlibIrSignature::Accessor(accessor) => {
+                KlibDeclarationSignature::Accessor(accessor.clone())
+            }
+            KlibIrSignature::FileLocal { .. } => return Ok(None),
+        };
+        let binding = match self.callees.references.get(self.module, &signature) {
+            KlibReferenceOrigin::Exact(binding) => binding,
+            KlibReferenceOrigin::Ambiguous => {
+                let KlibDeclarationSignature::Public(callee) = &signature else {
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "an object literal overrides an ambiguous accessor".to_owned(),
+                    ));
+                };
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.clone(),
+                )));
+            }
+            KlibReferenceOrigin::Missing => return Ok(None),
+        };
+        let Some((target, realization)) = self
+            .callees
+            .source
+            .external_callable_by_dependency(&binding.declaration)
+        else {
+            return Ok(None);
+        };
+        if let Some(accessor) = &realization.klib_body_accessor {
+            return match accessor.role {
+                crate::libraries::KlibAccessorRole::Getter => {
+                    Ok(Some(DependencyOverride::Property(target)))
+                }
+                crate::libraries::KlibAccessorRole::Setter => {
+                    Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "an object literal overrides a property setter".to_owned(),
+                    ))
+                }
+            };
+        }
+        Ok(Some(DependencyOverride::Function(target)))
+    }
+
+    fn is_interface(&self, name: crate::types::TypeName) -> Result<bool, KlibBodyDeclineReason> {
+        match self.callees.source.classifier(name) {
+            Some(record) => Ok(record.is_interface()),
+            None => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "an object literal's supertype {name:?} is not a selected classifier"
+            ))),
+        }
+    }
+
     fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool {
         let oracle = crate::symbol_resolver::SourceOracle(self.callees.source);
         super::type_evidence::satisfies(Some(&oracle), parameters, argument, bound)

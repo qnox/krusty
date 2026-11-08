@@ -18,6 +18,7 @@ mod demo_package;
 mod elvis_blocks;
 mod for_loop_bindings;
 mod inline_templates;
+mod object_literals;
 mod parameter_defaults;
 mod primitive_calls;
 mod range_membership_producers;
