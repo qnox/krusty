@@ -6,6 +6,90 @@ use krusty::diag::DiagSink;
 use krusty::features::LangFeatures;
 use krusty::source::SourceInput;
 
+/// Each artifact is attributed to the input it was emitted for: a file's nested and anonymous classes
+/// to that file, a multifile part to its own file, and the facade assembled from both parts and the
+/// module file to the module.
+#[test]
+fn jvm_production_stream_attributes_each_artifact_to_its_input() {
+    let inputs = [
+        SourceInput::kotlin(
+            r#"@file:JvmMultifileClass
+            @file:JvmName("Shared")
+
+            class Outer {
+                class Nested
+            }
+
+            fun first(): Any = object {}"#,
+        )
+        .with_file_stem("First"),
+        SourceInput::kotlin(
+            r#"@file:JvmMultifileClass
+            @file:JvmName("Shared")
+
+            fun second(): Int = 2"#,
+        )
+        .with_file_stem("Second"),
+    ];
+    let stems = ["First".to_string(), "Second".to_string()];
+    let mut paths = Vec::new();
+    if let Some(stdlib) = krusty::jvm::kotlin_stdlib_jar() {
+        paths.push(stdlib);
+    }
+    if let Some(jdk) = krusty::jvm::classpath::platform_jdk_modules(None) {
+        paths.push(jdk);
+    }
+    let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(paths));
+    let mut diagnostics = DiagSink::new();
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        krusty::frontend::PlatformProvider::jvm(Box::new(initialized_jvm_libraries(
+            classpath.clone(),
+        ))),
+        &LangFeatures::new(),
+        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
+        &mut diagnostics,
+    );
+
+    let mut origins = std::collections::BTreeMap::new();
+    emit_analyzed_with_origins_to(
+        analysis,
+        &stems,
+        &crate::JvmBackend::new(classpath),
+        "main",
+        &mut diagnostics,
+        &mut |origin, (path, _)| {
+            assert_eq!(origins.insert(path, origin), None);
+        },
+    );
+
+    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+    assert_eq!(
+        origins,
+        std::collections::BTreeMap::from([
+            ("Outer.class".to_string(), ArtifactOrigin::Source(0)),
+            ("Outer$Nested.class".to_string(), ArtifactOrigin::Source(0)),
+            (
+                "Shared__FirstKt.class".to_string(),
+                ArtifactOrigin::Source(0)
+            ),
+            (
+                "Shared__FirstKt$first$1.class".to_string(),
+                ArtifactOrigin::Source(0)
+            ),
+            (
+                "Shared__SecondKt.class".to_string(),
+                ArtifactOrigin::Source(1)
+            ),
+            ("Shared.class".to_string(), ArtifactOrigin::Module),
+            (
+                "META-INF/main.kotlin_module".to_string(),
+                ArtifactOrigin::Module
+            ),
+        ])
+    );
+}
+
 fn initialized_jvm_libraries(
     classpath: std::rc::Rc<krusty::jvm::classpath::Classpath>,
 ) -> krusty::jvm::jvm_libraries::JvmLibraries {
