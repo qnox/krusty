@@ -19,6 +19,7 @@ pub(super) fn normalize(
         RuntimeExceptionKind::IndexOutOfBounds,
         RuntimeExceptionKind::NullPointer,
         RuntimeExceptionKind::IllegalState,
+        RuntimeExceptionKind::IllegalArgument,
     ]
     .into_iter()
     .find(|kind| kind.classifier() == identity)?;

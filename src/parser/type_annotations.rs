@@ -27,11 +27,8 @@ impl Parser<'_> {
                     property_site: None,
                 });
             }
-            // Kotlin permits newlines between the annotation and its type. A semicolon is not
-            // such whitespace and remains for the ordinary type parser to reject.
-            while self.at(TokenKind::Newline) && !self.at_semicolon() {
-                self.bump();
-            }
+            // Physical line breaks are absent from this token view. An explicit semicolon
+            // remains for the ordinary type parser to reject.
         }
         let span = self.tok().span;
         if !annotations.is_empty() {

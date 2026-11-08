@@ -46,7 +46,10 @@ pub(super) fn invocation_is_spliceable(
             else {
                 return false;
             };
-            arg_count == arity
+            // A suspend reference's arity counts its adapter's continuation, as a suspend
+            // literal's does.
+            let suspend = ir.suspend_funs.contains(&impl_fn);
+            arg_count + usize::from(suspend) == arity
                 && ir
                     .functions
                     .get(impl_fn as usize)

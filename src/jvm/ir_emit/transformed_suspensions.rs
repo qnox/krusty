@@ -84,6 +84,27 @@ impl Emitter<'_> {
         true
     }
 
+    /// Write `reads`, the continuation reads of a lambda body a suspend inline call places, as
+    /// the bare fake continuations kotlinc's lambda passes, until
+    /// [`Self::leave_placed_fake_continuations`]. Returns the previous placed-lambda state.
+    pub(super) fn enter_placed_fake_continuations(&mut self, reads: &[ExprId]) -> bool {
+        let caller = self.transformed_suspensions.placed_lambda;
+        if !reads.is_empty() {
+            self.transformed_suspensions
+                .fake_continuations
+                .extend(reads.iter().copied());
+            self.transformed_suspensions.placed_lambda = true;
+        }
+        caller
+    }
+
+    pub(super) fn leave_placed_fake_continuations(&mut self, reads: &[ExprId], caller: bool) {
+        for read in reads {
+            self.transformed_suspensions.fake_continuations.remove(read);
+        }
+        self.transformed_suspensions.placed_lambda = caller;
+    }
+
     /// Whether `e` reads kotlinc's fake continuation rather than the function's own.
     pub(super) fn is_fake_continuation(&self, e: ExprId) -> bool {
         self.transformed_suspensions.fake_continuations.contains(&e)
@@ -167,9 +188,13 @@ impl Emitter<'_> {
                 _ => break,
             };
         }
+        // A point whose resumption delivers a value class's box leaves that class's carrier on both
+        // paths. kotlinc materializes the call at the value class's JVM type, the carrier, for every
+        // consumer: `return foo()` and `bar().s` alike cast it after the paths merge.
         if self
             .transformed_result(e)
             .is_none_or(|result| result == Ty::Unit)
+            || self.transformed_suspensions.resumed_boxes.contains_key(&e)
         {
             return false;
         }

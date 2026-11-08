@@ -212,7 +212,7 @@ pub(super) fn prepare_inline_template(
     } else {
         Ty::Unit
     };
-    ir.logical_types.insert(frame, frame_type);
+    ir.set_logical_type(frame, frame_type);
     Some(frame)
 }
 

@@ -577,3 +577,10 @@ fn lazy_delegate_object_keeps_outer_instance_for_inferred_member() {
         "AnonLazyDelegateOuter",
     );
 }
+
+#[test]
+fn a_forwarded_nested_object_uses_its_anonymous_storage_owners_final_prefix() {
+    const SOURCE: &str = include_str!("box_regressions/captureStorageForwardedNestedObject.kt");
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("ForwardedAnonymousStorageOwner", SOURCE);
+}

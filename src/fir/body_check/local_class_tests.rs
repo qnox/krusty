@@ -1,3 +1,6 @@
+mod anonymous_capture_demand;
+mod enum_entry_properties;
+
 use super::test_support::{checked_function_body, root_expression};
 use super::*;
 use crate::types::TyKind;
@@ -20,45 +23,17 @@ fn checked_streamed_owned_bodies(
     source: &str,
 ) -> (ResolvedModuleIndex, Vec<(BodyOwnerId, FirBody)>) {
     let inputs = [crate::source::SourceInput::kotlin(source).with_file_stem("FirLocalCapture")];
-    let mut diagnostics = crate::diag::DiagSink::new();
-    let mut analysis = crate::frontend::analyze_source_set_with_features(
+    let mut prepared = super::test_support::prepare_fir_source(
         &inputs,
-        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
+        0,
+        Box::new(crate::libraries::EmptySymbolSource),
         &crate::features::LangFeatures::new(),
-        &mut diagnostics,
     );
-    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
-    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
-    let (mut index, mut inline_bodies, _defaults, mut sources) = streamed.module.into_parts();
-    let info = analysis.types[0].as_ref().expect("checked source");
-    crate::resolve::publish_checked_local_signatures(
-        &analysis.files[0],
-        SourceFileId::from_raw(0),
-        &analysis.symbols,
-        info,
-        &mut index,
-    )
-    .expect("local signatures must publish before FIR body checking");
-    let mut session = BodyCheckSession::default();
     let mut sink = StreamedBodySink::default();
-    for work in ordinary {
-        super::driver::check_and_dispatch_bound_body_in_session(
-            crate::fir::BodyCheckUnit {
-                file: &analysis.files[0],
-                info,
-                source: SourceFileId::from_raw(0),
-                index: &index,
-            },
-            work,
-            sources.origins_mut(),
-            &mut inline_bodies,
-            &mut sink,
-            &mut session,
-        )
+    prepared
+        .check_all_bodies(&mut sink)
         .expect("local bodies must become checked FIR");
-    }
-    (index, sink.0)
+    (prepared.index, sink.0)
 }
 
 fn production_frontend_ok(source: &str) {
@@ -366,51 +341,246 @@ fn anonymous_super_argument_carries_the_constructor_prefix_capture_in_fir() {
 
 #[test]
 fn forwarded_nested_anonymous_super_argument_reads_the_live_dispatch_receiver() {
-    let (_, bodies) = checked_streamed_bodies(
+    let (index, bodies) = checked_streamed_bodies(
         "open class X(val fn: () -> Unit)\n\
          open class C(val x: X)\n\
          class B(var value: Int) {\n\
              fun update() { object : C(object : X({ value = 3 }) {}) {}.x.fn() }\n\
          }\n",
     );
-    let receiver_captures = bodies
+    // Super arguments are evaluated in the caller. The anonymous classes forward their
+    // already-built argument; only the lambda owns B and its write, not either class's storage.
+    let objects = bodies
         .iter()
         .flat_map(|body| {
             (0..body.expression_count()).filter_map(move |raw| {
-                let FirExprKind::AnonymousObject(object) =
-                    &body.expr(FirExprId::from_raw(raw as u32))?.kind
-                else {
+                let id = FirExprId::from_raw(raw as u32);
+                let FirExprKind::AnonymousObject(object) = &body.expr(id)?.kind else {
                     return None;
                 };
-                object.captures.iter().find(|capture| {
-                    matches!(
-                        capture.receiver.as_ref(),
-                        Some(crate::fir::FirCapturedReceiver::Enclosing { classifier })
-                            if *classifier == crate::types::type_name("B")
-                    )
-                })
+                Some((body, id, object))
             })
         })
         .collect::<Vec<_>>();
     assert_eq!(
-        receiver_captures.len(),
+        objects.len(),
         2,
-        "the nested lambda must retain both live receiver coordinates: {receiver_captures:?}"
+        "the complete nested anonymous construction"
     );
-    assert!(
-        matches!(
-            &receiver_captures[0].source,
-            FirLocalClassCaptureSource::EnclosingReceiver { path } if path.is_empty()
+    let (caller, outer_id, outer) = objects
+        .iter()
+        .copied()
+        .find(|(_, _, object)| {
+            let classifier = index
+                .classifier_identity(object.declaration)
+                .expect("classifier");
+            index.recorded_direct_supertypes(classifier) == Some(vec![crate::types::type_name("C")])
+        })
+        .expect("outer C subclass");
+    assert!(outer.captures.is_empty());
+    assert!(outer.delegate_arguments.is_empty());
+    let [outer_argument] = outer.super_arguments.as_ref() else {
+        panic!("one complete C superclass argument")
+    };
+    assert_eq!(
+        (outer_argument.slot, outer_argument.type_operator_shells),
+        (0, 0)
+    );
+    let FirExprKind::AnonymousObject(inner) = &caller
+        .expr(outer_argument.value)
+        .expect("forwarded inner object")
+        .kind
+    else {
+        panic!("C receives the already evaluated X subclass")
+    };
+    assert_ne!(inner.declaration, outer.declaration);
+    assert!(inner.captures.is_empty());
+    assert!(inner.delegate_arguments.is_empty());
+    assert_eq!(
+        index.recorded_direct_supertypes(
+            index
+                .classifier_identity(inner.declaration)
+                .expect("inner classifier")
         ),
-        "the outer anonymous object must retain its live enclosing-receiver coordinate: {receiver_captures:?}"
+        Some(vec![crate::types::type_name("X")])
     );
-    assert!(
-        matches!(
-            receiver_captures[1].source,
-            FirLocalClassCaptureSource::DispatchReceiver
-        ),
-        "the nested anonymous object must retain B's live dispatch receiver instead of reinterpreting B's field 0: {receiver_captures:?}"
+    let [inner_argument] = inner.super_arguments.as_ref() else {
+        panic!("one complete X superclass argument")
+    };
+    assert_eq!(
+        (inner_argument.slot, inner_argument.type_operator_shells),
+        (0, 0)
     );
+    let FirExprKind::Lambda { body: lambda, .. } = &caller
+        .expr(inner_argument.value)
+        .expect("forwarded lambda")
+        .kind
+    else {
+        panic!("X receives the caller's already evaluated lambda")
+    };
+    let b = crate::types::type_name("B");
+    let b_declaration = index.classifier_declaration(b).expect("B declaration");
+    let [capture] = lambda.implicit_receiver_captures() else {
+        panic!(
+            "one genuine B receiver capture: {:?}",
+            lambda.implicit_receiver_captures()
+        )
+    };
+    assert_eq!(capture.ty.get(), Ty::obj_name(b));
+    assert_eq!(
+        capture.receiver,
+        crate::fir::FirCapturedReceiver::Enclosing {
+            classifier: b,
+            owner: Some(crate::fir::EnclosingInstanceOwner {
+                declaration: b_declaration,
+                kind: crate::fir::EnclosingInstanceKind::Classifier,
+            }),
+        }
+    );
+    assert_eq!(
+        (capture.enclosing_depth, capture.current, capture.depth),
+        (0, true, 0)
+    );
+    assert!(capture.path.is_empty());
+    let property = |owner, name| {
+        let declaration = index
+            .classifier_declaration(crate::types::type_name(owner))
+            .expect("owner");
+        let properties = index
+            .owned_declarations(declaration)
+            .iter()
+            .copied()
+            .filter(|declaration| index.declaration_name(*declaration) == Some(name))
+            .filter_map(|declaration| index.property_for_declaration(declaration))
+            .collect::<Vec<_>>();
+        let [property] = properties.as_slice() else {
+            panic!("one declared property")
+        };
+        FirPropertyTarget::Module {
+            property: *property,
+            inline_splice: None,
+        }
+    };
+    let writes = (0..lambda.expression_count())
+        .filter_map(
+            |raw| match &lambda.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::PropertyWrite {
+                    target,
+                    dispatch_receiver,
+                    value,
+                    ..
+                } => Some((target, dispatch_receiver, value)),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [(target, dispatch, value)] = writes.as_slice() else {
+        panic!("one complete lambda property write")
+    };
+    assert_eq!(**target, property("B", "value"));
+    assert_eq!(
+        lambda.expr(**value).expect("write value").kind,
+        FirExprKind::Constant(FirConstant::Int(3))
+    );
+    let receiver = lambda
+        .expr(dispatch.as_ref().expect("B dispatch").value)
+        .expect("receiver read");
+    assert_eq!(receiver.ty, capture.ty);
+    assert_eq!(
+        receiver.kind,
+        FirExprKind::CapturedImplicitReceiver {
+            enclosing_depth: 0,
+            current: true,
+            depth: 0,
+            path: Box::new([]),
+        }
+    );
+    let calls = (0..caller.expression_count())
+        .filter_map(
+            |raw| match &caller.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::FunctionInvoke {
+                    callee,
+                    context_arguments,
+                    arguments,
+                    parameter_types,
+                    result,
+                    suspend,
+                } => Some((
+                    callee,
+                    context_arguments,
+                    arguments,
+                    parameter_types,
+                    result,
+                    suspend,
+                )),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [(callee, context, arguments, parameters, result, suspend)] = calls.as_slice() else {
+        panic!("one caller invocation of the forwarded function")
+    };
+    assert!(context.is_empty() && arguments.is_empty() && parameters.is_empty());
+    assert_eq!(result.get(), Ty::Unit);
+    assert!(!**suspend);
+    let FirExprKind::PropertyRead {
+        target,
+        dispatch_receiver: Some(fn_receiver),
+        ..
+    } = &caller.expr(**callee).expect("X.fn read").kind
+    else {
+        panic!("invoke the selected function property")
+    };
+    assert_eq!(*target, property("X", "fn"));
+    let FirExprKind::PropertyRead {
+        target,
+        dispatch_receiver: Some(x_receiver),
+        ..
+    } = &caller.expr(fn_receiver.value).expect("C.x read").kind
+    else {
+        panic!("select the nested X instance")
+    };
+    assert_eq!(*target, property("C", "x"));
+    assert_eq!(x_receiver.value, outer_id);
+}
+
+#[test]
+fn whole_receiver_lifetime_control_keeps_exact_declaring_instance_owners() {
+    let (index, bodies) = checked_streamed_bodies(include_str!(
+        "../../../tests/box_regressions/ReceiverLifetimeContrast.kt"
+    ));
+    let classifier = crate::types::type_name("Owner");
+    let declaration = index
+        .classifier_declaration(classifier)
+        .expect("source Owner");
+    let expected = crate::fir::EnclosingInstanceOwner {
+        declaration,
+        kind: crate::fir::EnclosingInstanceKind::Classifier,
+    };
+    let mut selected = Vec::new();
+    for body in &bodies {
+        for raw in 0..body.expression_count() {
+            if let Some(FirExpr {
+                kind: FirExprKind::AnonymousObject(object),
+                ..
+            }) = body.expr(FirExprId::from_raw(raw as u32))
+            {
+                for capture in &object.captures {
+                    if let Some(crate::fir::FirCapturedReceiver::Enclosing {
+                        classifier: source,
+                        owner,
+                    }) = &capture.receiver
+                    {
+                        assert_eq!(*source, classifier);
+                        assert_eq!(*owner, Some(expected));
+                        assert_eq!(capture.ty.get(), Ty::obj_name(classifier));
+                        selected.push(*owner);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(selected, vec![Some(expected); 5]);
 }
 
 #[test]
@@ -1548,5 +1718,70 @@ fn anonymous_super_forward_records_the_parameter_and_a_local_class_keeps_its_arg
     assert!(
         saw_anonymous && saw_local,
         "both the anonymous forward and the local-class argument must be present"
+    );
+}
+
+#[test]
+fn anonymous_initializer_capture_uses_its_constructor_parameter_without_storage() {
+    let (body, _) = checked_function_body(
+        "fun create(value: Int): Any = object { val value: Int = value }",
+        "create",
+    );
+    let object = (0..body.expression_count())
+        .find_map(
+            |raw| match &body.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::AnonymousObject(object) => Some(object),
+                _ => None,
+            },
+        )
+        .expect("anonymous constructor plan");
+    let [capture] = object.captures.as_ref() else {
+        panic!("one constructor capture expected: {:?}", object.captures)
+    };
+    assert!(!capture.stored);
+    assert_eq!(capture.ty.get(), Ty::Int);
+    assert_eq!(
+        capture.source,
+        FirLocalClassCaptureSource::Value(body.parameters()[0].value)
+    );
+}
+
+#[test]
+fn retained_default_capture_keeps_the_earlier_parameter_and_stored_field() {
+    let source = "interface Token { fun value(): Int }\n\
+        fun copy(value: Int, token: Token = object : Token {\n\
+            override fun value(): Int = value\n\
+        }): Token = token\n";
+    let inputs = [crate::source::SourceInput::kotlin(source).with_file_stem("DefaultCapture")];
+    let mut diagnostics = crate::diag::DiagSink::new();
+    let mut analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
+        &crate::features::LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
+    let (index, _, mut defaults, _) = streamed.module.into_parts();
+    let defaults = defaults.take_for_source(&index, SourceFileId::from_raw(0));
+    assert_eq!(defaults.len(), 1);
+    let body = &defaults[0].1;
+    assert_eq!(body.default_values().len(), 1);
+    assert_eq!(body.default_values()[0].parameter, 1);
+    let FirExprKind::AnonymousObject(object) = &body
+        .expr(body.default_values()[0].value)
+        .expect("checked default value")
+        .kind
+    else {
+        panic!("default value must retain its anonymous constructor")
+    };
+    let [capture] = object.captures.as_ref() else {
+        panic!("one retained capture expected: {:?}", object.captures)
+    };
+    assert!(capture.stored);
+    assert_eq!(capture.ty.get(), Ty::Int);
+    assert_eq!(
+        capture.source,
+        FirLocalClassCaptureSource::Value(body.parameters()[0].value)
     );
 }

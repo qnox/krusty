@@ -7,8 +7,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::super::{
-    workspace_index_uri_bytes, DependencyCandidate, DependencySymbolIndex, IndexedFile,
-    LocatedDependency, MaterializedDefinition, WorkspaceSymbolIndex, MAX_WORKSPACE_INDEX_FILES,
+    DependencyCandidate, DependencySymbolIndex, IndexedFile, LocatedDependency,
+    MaterializedDefinition, WorkspaceSymbolIndex,
 };
 pub use super::analyzed_document::AnalysisBatch;
 use super::implementation::{
@@ -28,43 +28,18 @@ const INTERACTIVE_COMMANDS_BEFORE_LOCATION: usize = 32;
 /// The longest an interactive command can be made to wait: one chunk of index work. Sized to sit
 /// inside a single worker source-set round trip.
 const MAX_INDEX_CHUNK_FILES: usize = 32;
-/// Ceiling on files awaiting indexing, so a pathological workspace cannot grow the queue without
-/// bound. Reaching it drops the excess and marks this generation incomplete for the client log.
-const MAX_QUEUED_INDEX_FILES: usize = MAX_WORKSPACE_INDEX_FILES;
-/// Companion byte ceiling. A count alone is not a memory bound: deeply nested workspaces produce
-/// long URIs, and promotion can retain three copies across both priority chunks and the map.
-const MAX_QUEUED_INDEX_BYTES: usize = 32 * 1024 * 1024;
 /// Symbol chunks are a parse each, not a worker round trip, so a larger chunk still returns to the
 /// command loop quickly enough for an interactive request to overtake it.
 const MAX_SYMBOL_INDEX_CHUNK_FILES: usize = 128;
-/// Byte ceiling on URIs awaiting symbol indexing. Each admitted URI owns two strings until its
-/// chunk is taken: the chunk entry and the dedup key. Symbol chunks are never promoted.
-const MAX_QUEUED_SYMBOL_INDEX_BYTES: usize = 16 * 1024 * 1024;
 /// Symbol chunks run ahead of the diagnostic sweep, but handing a chunk out releases its URIs, so
 /// a watcher can enqueue that file again while the chunk is in flight. One such chunk may run
 /// while a sweep chunk is already waiting. The next dequeue serves the sweep. The re-enqueued URI
 /// stays queued, so the latest write is still indexed after that sweep chunk.
 const SYMBOL_CHUNKS_BEFORE_SWEEP: usize = 1;
 
-fn symbol_queued_uri_bytes(uri: &str) -> usize {
-    workspace_index_uri_bytes(uri).saturating_mul(2)
-}
-
-fn queued_uri_bytes(uri: &str) -> usize {
-    // A queued URI owns the map key and one chunk string. Promotion can temporarily leave the old
-    // sweep string beside a new neighbourhood string, so reserve for all three representations up
-    // front; releasing that reservation with the promoted claim still leaves at most its one-third
-    // stale copy while newly admitted work consumes the rest of the ceiling.
-    workspace_index_uri_bytes(uri).saturating_mul(3)
-}
-
 #[derive(Clone, Copy)]
 struct QueuedIndexEntry {
     priority: IndexPriority,
-    /// Promotion queues a neighbourhood copy ahead of the original sweep copy. The latter remains
-    /// in its chunk until that chunk reaches the front, so its reserved bytes cannot be released
-    /// when the promoted copy is claimed.
-    stale_sweep_copy: bool,
 }
 
 /// Index levels, ordered strictly behind interactive work and behind each other.
@@ -345,13 +320,9 @@ struct CommandState {
     /// queued again, and that later chunk yields to a waiting sweep after
     /// [`SYMBOL_CHUNKS_BEFORE_SWEEP`] symbol chunks.
     symbol_queued: HashSet<String>,
-    symbol_queued_bytes: usize,
     /// The level each queued URI currently belongs to. Promotion rewrites the level here and
     /// queues the URI again; the superseded entry is filtered out when its chunk is handed out.
     queued: HashMap<String, QueuedIndexEntry>,
-    queued_bytes: usize,
-    index_admission_truncated: bool,
-    symbol_admission_truncated: bool,
     /// Files handed out, and files enumerated, since the sweep began. Progress reports the pair so
     /// a large workspace shows movement instead of a constant chunk size.
     indexed_done: usize,
@@ -443,34 +414,14 @@ impl CommandState {
                         {
                             continue;
                         }
-                        // Promotion does not retain another map key, so it must remain possible even
-                        // when the queue is at either admission ceiling. Initial admission reserved
-                        // all three copies, including the sweep string that promotion leaves stale.
+                        // Promotion queues the URI again at the higher level; the sweep copy left in
+                        // its chunk is discarded when that chunk is claimed.
                         Some(entry) => {
                             entry.priority = priority;
-                            entry.stale_sweep_copy = true;
                         }
                         None => {
-                            if self.queued.len() >= MAX_QUEUED_INDEX_FILES {
-                                self.index_admission_truncated = true;
-                                break;
-                            }
-                            let retained_bytes = queued_uri_bytes(&uri);
-                            if retained_bytes
-                                > MAX_QUEUED_INDEX_BYTES.saturating_sub(self.queued_bytes)
-                            {
-                                // A later, shorter URI may still fit the remaining byte budget.
-                                self.index_admission_truncated = true;
-                                continue;
-                            }
-                            self.queued_bytes = self.queued_bytes.saturating_add(retained_bytes);
-                            self.queued.insert(
-                                uri.clone(),
-                                QueuedIndexEntry {
-                                    priority,
-                                    stale_sweep_copy: false,
-                                },
-                            );
+                            self.queued
+                                .insert(uri.clone(), QueuedIndexEntry { priority });
                             // Count admitted work, not queue copies. Promotion adds a higher-priority
                             // copy and leaves the sweep copy stale, but the URI is still processed once.
                             self.indexed_total = self.indexed_total.saturating_add(1);
@@ -494,18 +445,9 @@ impl CommandState {
                 let mut chunk =
                     Vec::with_capacity(MAX_SYMBOL_INDEX_CHUNK_FILES.min(job.uris.len()));
                 for uri in job.uris {
-                    if self.symbol_queued.contains(&uri) {
+                    if !self.symbol_queued.insert(uri.clone()) {
                         continue;
                     }
-                    let bytes = symbol_queued_uri_bytes(&uri);
-                    if bytes
-                        > MAX_QUEUED_SYMBOL_INDEX_BYTES.saturating_sub(self.symbol_queued_bytes)
-                    {
-                        self.symbol_admission_truncated = true;
-                        break;
-                    }
-                    self.symbol_queued_bytes = self.symbol_queued_bytes.saturating_add(bytes);
-                    self.symbol_queued.insert(uri.clone());
                     chunk.push(uri);
                     if chunk.len() == MAX_SYMBOL_INDEX_CHUNK_FILES {
                         self.push_symbol_chunk(std::mem::take(&mut chunk));
@@ -627,12 +569,6 @@ impl CommandState {
         for uri in &job.uris {
             self.symbol_queued.remove(uri);
         }
-        self.symbol_queued_bytes = self.symbol_queued_bytes.saturating_sub(
-            job.uris
-                .iter()
-                .map(|uri| symbol_queued_uri_bytes(uri))
-                .sum::<usize>(),
-        );
         Some(EngineCommand::IndexSymbols(job))
     }
 
@@ -642,26 +578,11 @@ impl CommandState {
         let mut claimed = Vec::with_capacity(job.uris.len());
         for uri in job.uris.drain(..) {
             let owner = self.queued.get(&uri).copied();
+            // Same-priority duplicates are rejected at admission, so an item without a matching
+            // owner is precisely the stale sweep copy left by promotion, and is dropped here.
             if owner.is_some_and(|entry| entry.priority == job.priority) {
-                let entry = self
-                    .queued
-                    .remove(&uri)
-                    .expect("the matching queue owner was just observed");
-                let one_copy = workspace_index_uri_bytes(&uri);
-                let released = if entry.stale_sweep_copy {
-                    // Keep the old sweep string charged until its stale chunk is discarded below.
-                    one_copy.saturating_mul(2)
-                } else {
-                    one_copy.saturating_mul(3)
-                };
-                self.queued_bytes = self.queued_bytes.saturating_sub(released);
+                self.queued.remove(&uri);
                 claimed.push(uri);
-            } else if job.priority == IndexPriority::Sweep {
-                // Same-priority duplicates are rejected at admission, so a sweep item without a
-                // sweep owner is precisely the stale copy left by promotion.
-                self.queued_bytes = self
-                    .queued_bytes
-                    .saturating_sub(workspace_index_uri_bytes(&uri));
             }
         }
         if claimed.is_empty() {
@@ -702,11 +623,7 @@ impl CommandState {
         self.symbols.clear();
         self.symbol_chunks_since_sweep = 0;
         self.symbol_queued.clear();
-        self.symbol_queued_bytes = 0;
         self.queued.clear();
-        self.queued_bytes = 0;
-        self.index_admission_truncated = false;
-        self.symbol_admission_truncated = false;
         self.generation
     }
 
@@ -841,22 +758,6 @@ impl CommandReceiver {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .generation
-    }
-
-    fn index_admission_truncated(&self) -> bool {
-        self.queue
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .index_admission_truncated
-    }
-
-    fn symbol_admission_truncated(&self) -> bool {
-        self.queue
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .symbol_admission_truncated
     }
 
     /// Replace the model generation from inside the engine after a deferred project refresh.
@@ -1159,9 +1060,6 @@ fn run<A: Analysis>(
                     let generation = commands.index_generation();
                     if submitted_sweep_generation != Some(generation) {
                         let dependencies = analyze.dependency_index();
-                        let dependency_class_count = dependencies.class_count();
-                        let dependency_incomplete =
-                            dependency_class_count > 0 && !dependencies.is_complete();
                         if dependencies.class_count() > 0
                             && events
                                 .send(Incoming::Engine(EngineEvent::DependencyIndex {
@@ -1174,41 +1072,12 @@ fn run<A: Analysis>(
                         }
                         submit_workspace_sweep(&mut analyze, &commands);
                         let mut logs = Vec::new();
-                        if dependency_incomplete {
-                            logs.push(format!(
-                                "krusty: dependency symbol index reached its class retention \
-                                 limit ({} of {} max classes retained); dependency-wide symbol \
-                                 search is incomplete",
-                                dependency_class_count,
-                                crate::dependency_symbols::MAX_DEPENDENCY_CLASSES,
-                            ));
-                        }
-                        // Two different ceilings deserve two different lines, each carrying the
-                        // numbers of the limit that actually fired.
-                        if analyze.workspace_index_incomplete() {
+                        if analyze.workspace_scan_incomplete() {
                             logs.push(
-                                "krusty: workspace diagnostic inventory reached its retention \
-                                 limit; background results are incomplete"
+                                "krusty: the workspace scan could not read every source root; \
+                                 sources below an unreadable directory are not indexed"
                                     .to_string(),
                             );
-                        }
-                        if commands.index_admission_truncated() {
-                            logs.push(format!(
-                                "krusty: workspace diagnostic inventory reached its queue limit \
-                                 ({} max files, {} MiB max queued URIs); background results are \
-                                 incomplete",
-                                MAX_QUEUED_INDEX_FILES,
-                                MAX_QUEUED_INDEX_BYTES / (1024 * 1024),
-                            ));
-                        }
-                        // The two queues have their own ceilings, so say which one was reached
-                        // rather than reporting a symbol shortfall as a diagnostic one.
-                        if commands.symbol_admission_truncated() {
-                            logs.push(format!(
-                                "krusty: workspace symbol inventory reached its queue limit \
-                                 ({} MiB of queued URIs); project-wide symbol search is incomplete",
-                                MAX_QUEUED_SYMBOL_INDEX_BYTES / (1024 * 1024),
-                            ));
                         }
                         if !logs.is_empty()
                             && events
@@ -2221,22 +2090,23 @@ mod tests {
         assert_eq!(order, vec!["Neighborhood", "Symbols", "Sweep"]);
     }
 
+    /// A symbol queue admits every distinct URI it is offered, however many and however long.
     #[test]
-    fn a_symbol_queue_overflow_is_reported_as_its_own_limit() {
+    fn the_symbol_queue_admits_every_uri() {
         let mut state = CommandState::default();
-        let uris = (0..(MAX_QUEUED_SYMBOL_INDEX_BYTES / 64 + 8))
-            .map(|index| format!("file:///w/{}/Symbols{index}.kt", "d".repeat(48)))
+        let uris = (0..20_000)
+            .map(|index| format!("file:///w/{}/Symbols{index}.kt", "d".repeat(1024)))
             .collect::<Vec<_>>();
         state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
             generation: 0,
-            uris,
+            uris: uris.clone(),
         }));
 
-        assert!(state.symbol_admission_truncated);
-        assert!(
-            !state.index_admission_truncated,
-            "a symbol shortfall must not be reported as a diagnostic one"
-        );
+        let mut taken = Vec::new();
+        while let Some(EngineCommand::IndexSymbols(job)) = state.take() {
+            taken.extend(job.uris);
+        }
+        assert_eq!(taken, uris);
     }
 
     #[test]
@@ -2271,8 +2141,6 @@ mod tests {
         ));
         assert!(state.take().is_none());
         assert!(state.symbol_queued.is_empty());
-        assert_eq!(state.symbol_queued_bytes, 0);
-        assert!(!state.symbol_admission_truncated);
     }
 
     #[test]
@@ -2323,7 +2191,6 @@ mod tests {
             other => panic!("the in-flight change must still be indexed, got {other:?}"),
         }
         assert!(state.symbol_queued.is_empty());
-        assert_eq!(state.symbol_queued_bytes, 0);
         assert!(state.take().is_none());
     }
 
@@ -2336,7 +2203,6 @@ mod tests {
         }));
         assert!(state.take().is_some());
         assert!(state.symbol_queued.is_empty());
-        assert_eq!(state.symbol_queued_bytes, 0);
 
         state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
             generation: 0,
@@ -2368,7 +2234,6 @@ mod tests {
         assert_eq!(job.generation, generation);
         assert_eq!(job.uris, vec!["file:///w/Same.kt"]);
         assert!(state.symbol_queued.is_empty());
-        assert_eq!(state.symbol_queued_bytes, 0);
     }
 
     #[test]
@@ -2471,24 +2336,6 @@ mod tests {
         assert_eq!(job.uris, vec!["file:///w/A.kt".to_string()]);
     }
 
-    #[test]
-    fn the_index_queue_stops_growing_at_its_bound() {
-        let mut state = CommandState::default();
-        let uris: Vec<String> = (0..(MAX_QUEUED_INDEX_FILES + 10))
-            .map(|index| format!("file:///w/F{index}.kt"))
-            .collect();
-        state.enqueue(EngineCommand::Index(IndexJob {
-            generation: 0,
-            priority: IndexPriority::Sweep,
-            uris,
-        }));
-
-        let mut queued = 0;
-        while let Some(EngineCommand::Index(job)) = state.take() {
-            queued += job.uris.len();
-        }
-        assert_eq!(queued, MAX_QUEUED_INDEX_FILES);
-    }
     #[test]
     fn index_chunks_report_progress_as_working_status() {
         use std::sync::mpsc::sync_channel;
@@ -2686,38 +2533,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sweep_file_can_be_promoted_at_the_admission_ceiling() {
-        let uri = "file:///w/Promoted.kt".to_string();
-        let mut state = CommandState::default();
-        state.queued.insert(
-            uri.clone(),
-            QueuedIndexEntry {
-                priority: IndexPriority::Sweep,
-                stale_sweep_copy: false,
-            },
-        );
-        state.queued_bytes = MAX_QUEUED_INDEX_BYTES;
-        state.sweep.push_back(IndexJob {
-            generation: 0,
-            priority: IndexPriority::Sweep,
-            uris: vec![uri.clone()],
-        });
-
-        state.enqueue(EngineCommand::Index(IndexJob {
-            generation: 0,
-            priority: IndexPriority::Neighborhood,
-            uris: vec![uri.clone()],
-        }));
-
-        let Some(EngineCommand::Index(job)) = state.take() else {
-            panic!("promotion must not be rejected as new admission");
-        };
-        assert_eq!(job.priority, IndexPriority::Neighborhood);
-        assert_eq!(job.uris, [uri]);
-    }
-
-    #[test]
-    fn a_promoted_sweep_copy_stays_charged_until_it_is_discarded() {
+    fn a_promoted_sweep_copy_does_not_run_again() {
         let uri = "file:///w/Promoted.kt".to_string();
         let mut state = CommandState::default();
         state.enqueue(EngineCommand::Index(IndexJob {
@@ -2735,15 +2551,35 @@ mod tests {
             panic!("promoted work must run at neighbourhood priority");
         };
         assert_eq!(job.priority, IndexPriority::Neighborhood);
-        assert!(
-            state.queued_bytes > 0,
-            "the superseded sweep string remains retained in its old chunk"
-        );
         assert!(state.take().is_none(), "the stale sweep copy must not run");
-        assert_eq!(
-            state.queued_bytes, 0,
-            "discarding the stale chunk must release its final URI reservation"
-        );
+    }
+
+    /// The index queue admits every file of a workspace, past the former 200k-file and URI-byte
+    /// ceilings, and hands each out exactly once.
+    #[test]
+    fn the_index_queue_admits_a_workspace_of_any_size() {
+        let mut state = CommandState::default();
+        let long = "x".repeat(4 * 1024);
+        let uris: Vec<String> = (0..250_000)
+            .map(|index| {
+                if index % 1000 == 0 {
+                    format!("file:///w/{long}/F{index}.kt")
+                } else {
+                    format!("file:///w/F{index}.kt")
+                }
+            })
+            .collect();
+        state.enqueue(EngineCommand::Index(IndexJob {
+            generation: 0,
+            priority: IndexPriority::Sweep,
+            uris: uris.clone(),
+        }));
+
+        let mut taken = Vec::with_capacity(uris.len());
+        while let Some(EngineCommand::Index(job)) = state.take() {
+            taken.extend(job.uris);
+        }
+        assert_eq!(taken, uris);
     }
 
     #[test]
@@ -2787,30 +2623,6 @@ mod tests {
         assert_eq!(
             job.generation, 1,
             "the queue stamps the current generation so late results can be rejected"
-        );
-    }
-
-    #[test]
-    fn the_index_queue_stops_growing_at_its_byte_bound() {
-        let mut state = CommandState::default();
-        let long = "x".repeat(4096);
-        let uris: Vec<String> = (0..4096)
-            .map(|index| format!("file:///w/{long}{index}.kt"))
-            .collect();
-        state.enqueue(EngineCommand::Index(IndexJob {
-            generation: 0,
-            priority: IndexPriority::Sweep,
-            uris,
-        }));
-
-        assert!(
-            state.queued_bytes <= MAX_QUEUED_INDEX_BYTES,
-            "the queue bounds retained URI bytes, not just the file count"
-        );
-        assert!(state.queued_bytes > 0, "some work is still admitted");
-        assert!(
-            state.index_admission_truncated,
-            "dropped inventory must be surfaced as incomplete rather than silently omitted"
         );
     }
 

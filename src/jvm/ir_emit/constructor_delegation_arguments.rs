@@ -60,12 +60,7 @@ impl Emitter<'_> {
                 }
                 None => self.emit_consumed_operand(argument, code),
             };
-            let semantic = self
-                .ir
-                .logical_types
-                .get(&argument)
-                .copied()
-                .unwrap_or(source);
+            let semantic = self.ir.logical_type(argument).unwrap_or(source);
             self.adapt_physical_operand(
                 source,
                 semantic,
