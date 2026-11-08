@@ -875,62 +875,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
     fn classifier_type(
         &self,
         declaration: crate::fir::DeclarationId,
-        scope: crate::fir::SignatureScope,
+        _scope: crate::fir::SignatureScope,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        // Build the active lexical type-parameter bindings from stable declaration ownership.
-        // Anonymous/local classifiers copy visible source parameters into their generated header;
-        // those copied slots must bind to the enclosing declaration identities rather than becoming
-        // fresh parameters of the generated classifier.
-        let mut owners = Vec::new();
-        let mut current = Some(scope.owner);
-        while let Some(owner) = current {
-            owners.push(owner);
-            current = self
-                .headers
-                .declarations
-                .anchor(owner)
-                .and_then(|anchor| anchor.owner);
-        }
-        owners.reverse();
-        let mut lexical = crate::fx_hash::HashMap::<&str, Ty>::default();
-        for owner in owners {
-            let semantic = self
-                .callable_signature(owner)
-                .and_then(|signature| signature.generic_sig.as_ref())
-                .map(|generic| {
-                    generic
-                        .formals
-                        .iter()
-                        .zip(&generic.formal_bounds)
-                        .map(|(name, bounds)| {
-                            Ty::ty_param(
-                                name,
-                                bounds
-                                    .first()
-                                    .copied()
-                                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .or_else(|| {
-                    self.classifier_signature(owner).map(|classifier| {
-                        classifier
-                            .type_parameters
-                            .type_params
-                            .iter()
-                            .zip(&classifier.type_parameters.type_param_bounds)
-                            .map(|(name, bound)| Ty::ty_param(name, *bound))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .unwrap_or_default();
-            for (parameter, ty) in self.header_type_parameters(owner).iter().zip(semantic) {
-                if let Some(source) = self.headers.lookup_names.get(parameter.name) {
-                    lexical.insert(source, ty);
-                }
-            }
-        }
         let classifier = self
             .classifier_types
             .get(&declaration)
@@ -940,47 +886,24 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             .table
             .class_by_type_name(classifier)
             .expect("a source classifier expression must retain its resolved class shape");
-        let resolved = {
-            let own_sources = self
-                .header_type_parameters(declaration)
-                .iter()
-                .filter_map(|parameter| self.headers.lookup_names.get(parameter.name));
-            let own = signature
-                .type_parameters
-                .type_params
-                .iter()
-                .zip(&signature.type_parameters.type_param_bounds)
-                .zip(own_sources)
-                .map(|((parameter, bound), source)| {
-                    lexical
-                        .get(source)
-                        .copied()
-                        .unwrap_or_else(|| Ty::ty_param(parameter, *bound))
-                });
-            let captured_sources = self
-                .header_classifier_captures(declaration)
-                .iter()
-                .filter_map(|parameter| self.headers.lookup_names.get(parameter.name))
-                .collect::<Vec<_>>();
-            let captured = signature
-                .captured_type_parameters
-                .type_params
-                .iter()
-                .zip(&signature.captured_type_parameters.type_param_bounds)
-                .enumerate()
-                .map(|(ordinal, (parameter, bound))| {
-                    let source = captured_sources
-                        .get(ordinal)
-                        .copied()
-                        .unwrap_or_else(|| crate::types::type_parameter_source_name(parameter));
-                    lexical
-                        .get(source)
-                        .copied()
-                        .unwrap_or_else(|| Ty::ty_param(parameter, *bound))
-                });
-            let arguments = own.chain(captured).collect::<Vec<_>>();
-            Ty::obj_args_name(classifier, &arguments)
-        };
+        // Signature collection already binds captured slots to their enclosing declarations.
+        // Preserve that semantic order: syntax inventories list outer owners first, whereas
+        // receiver applications list the nearest owner first. Zipping those orders swaps formals.
+        let arguments = signature
+            .type_parameters
+            .type_params
+            .iter()
+            .zip(&signature.type_parameters.type_param_bounds)
+            .chain(
+                signature
+                    .captured_type_parameters
+                    .type_params
+                    .iter()
+                    .zip(&signature.captured_type_parameters.type_param_bounds),
+            )
+            .map(|(parameter, bound)| Ty::ty_param(parameter, *bound))
+            .collect::<Vec<_>>();
+        let resolved = Ty::obj_args_name(classifier, &arguments);
         let resolved = Ok(crate::fir::ResolvedTy::new(resolved)
             .expect("a source classifier self type must be publishable"));
         crate::trace_compiler!(

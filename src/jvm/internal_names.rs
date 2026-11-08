@@ -13,7 +13,7 @@ use crate::fx_hash::{HashMap, HashSet};
 use crate::fir::ResolvedFunctionOverrideTarget;
 use crate::ir::{
     Callee, FunId, IrExpr, IrFile, IrLocalPropertyLayout, IrModuleMemberAccess, IrStaticPlacement,
-    IrVirtualTarget,
+    IrVirtualTarget, JvmAccessorSide,
 };
 use crate::types::{TypeName, Visibility};
 
@@ -55,16 +55,28 @@ pub(crate) fn mangle_internal_members(
         old_names.insert(fid, old);
     }
     crate::jvm::in_place_delegates::follow_internal_getter_names(ir, &old_names);
-    let new_name = |fid: FunId| ir.functions[fid as usize].name.clone();
-    for class in &mut ir.classes {
-        for property in &mut class.properties {
-            if let Some(getter) = property.getter.filter(|fid| old_names.contains_key(fid)) {
-                property.getter_jvm_name = Some(new_name(getter));
-            }
-            if let Some(setter) = property.setter.filter(|fid| old_names.contains_key(fid)) {
-                property.setter_jvm_name = Some(new_name(setter));
-            }
-        }
+    let renamed_accessors = ir
+        .classes
+        .iter()
+        .flat_map(|class| {
+            (0u32..)
+                .zip(&class.properties)
+                .flat_map(move |(index, property)| {
+                    [
+                        (property.getter, JvmAccessorSide::Getter),
+                        (property.setter, JvmAccessorSide::Setter),
+                    ]
+                    .into_iter()
+                    .filter_map(move |(accessor, side)| {
+                        Some((class.fq_name, index, side, accessor?))
+                    })
+                })
+        })
+        .filter(|(.., accessor)| old_names.contains_key(accessor))
+        .collect::<Vec<_>>();
+    for (class, index, side, accessor) in renamed_accessors {
+        let name = ir.functions[accessor as usize].name.clone();
+        ir.set_jvm_property_accessor_name(class, index, side, name);
     }
     // A plain `internal var v` has no accessor function. The emitter synthesizes `getV`/`setV`
     // from the property, so the suffix has to land on that JVM name too.
@@ -421,6 +433,7 @@ fn synthesized_internal_accessors(ir: &IrFile, facade: TypeName) -> Vec<Synthesi
         if member.is_private {
             continue;
         }
+        let realized = ir.jvm_property_accessor_names(class.fq_name, member_index);
         let fresh = |current: &Option<String>, convention: String| {
             Some(current.clone().unwrap_or(convention))
         };
@@ -430,7 +443,7 @@ fn synthesized_internal_accessors(ir: &IrFile, facade: TypeName) -> Vec<Synthesi
             && !declares_jvm_name(Some(&annotations.getter)))
         .then(|| {
             fresh(
-                &member.getter_jvm_name,
+                &realized.getter,
                 crate::names::property_getter_name(&member.name),
             )
         });
@@ -440,7 +453,7 @@ fn synthesized_internal_accessors(ir: &IrFile, facade: TypeName) -> Vec<Synthesi
             && !declares_jvm_name(Some(&annotations.setter)))
         .then(|| {
             fresh(
-                &member.setter_jvm_name,
+                &realized.setter,
                 crate::names::property_setter_name(&member.name),
             )
         });
@@ -500,17 +513,16 @@ fn mangle_companion_block_default_accessors(
         .collect::<Vec<_>>();
     let mut names = Vec::with_capacity(renames.len());
     for (owner, storage, getter, setter) in renames {
-        let storage = &mut ir.statics[storage as usize];
         let getter = getter.then(|| {
-            let old = storage.default_getter_jvm_name();
+            let old = ir.jvm_static_getter_name(storage);
             let new = format!("{old}{suffix}");
-            storage.getter_jvm_name = Some(new.clone());
+            ir.set_jvm_static_accessor_name(storage, JvmAccessorSide::Getter, new.clone());
             (old, new)
         });
         let setter = setter.then(|| {
-            let old = storage.default_setter_jvm_name();
+            let old = ir.jvm_static_setter_name(storage);
             let new = format!("{old}{suffix}");
-            storage.setter_jvm_name = Some(new.clone());
+            ir.set_jvm_static_accessor_name(storage, JvmAccessorSide::Setter, new.clone());
             (old, new)
         });
         names.push(CompanionBlockAccessorNames {
@@ -524,18 +536,31 @@ fn mangle_companion_block_default_accessors(
 
 fn apply_synthesized_accessors(ir: &mut IrFile, accessors: &[SynthesizedAccessor], suffix: &str) {
     for accessor in accessors {
-        let Some(property) = ir
+        let Some(class) = ir
             .classes
-            .get_mut(accessor.class as usize)
-            .and_then(|class| class.properties.get_mut(accessor.member as usize))
+            .get(accessor.class as usize)
+            .filter(|class| (accessor.member as usize) < class.properties.len())
+            .map(|class| class.fq_name)
         else {
             continue;
         };
         if let Some(getter) = &accessor.getter {
-            property.getter_jvm_name = Some(format!("{getter}{suffix}"));
+            let name = format!("{getter}{suffix}");
+            ir.set_jvm_property_accessor_name(
+                class,
+                accessor.member,
+                JvmAccessorSide::Getter,
+                name,
+            );
         }
         if let Some(setter) = &accessor.setter {
-            property.setter_jvm_name = Some(format!("{setter}{suffix}"));
+            let name = format!("{setter}{suffix}");
+            ir.set_jvm_property_accessor_name(
+                class,
+                accessor.member,
+                JvmAccessorSide::Setter,
+                name,
+            );
         }
     }
 }

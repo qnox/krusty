@@ -1257,6 +1257,9 @@ mod value_hash;
 #[path = "wasm_dependency_constructor_exports.rs"]
 mod dependency_constructor_exports;
 
+#[path = "wasm_escaping_closures.rs"]
+mod escaping_closures;
+
 #[test]
 fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
     expect_wasm_box(

@@ -19,6 +19,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 mod absent_arguments;
+pub(super) mod any_members;
 mod arrays;
 mod boxing;
 mod callable_reference_identity;
@@ -32,7 +33,6 @@ mod objects;
 mod scalar_instructions;
 mod shared_cells;
 mod string_conversion;
-pub(super) mod value_hash;
 
 #[cfg(test)]
 use tests::lower_alone;
@@ -1147,8 +1147,12 @@ impl<'a> Body<'a> {
             {
                 self.throwable_message(dispatch_receiver, &args, *ret)?;
             }
-            IrExpr::Call { .. } if value_hash::call_kind(self.ir, self.callables, id).is_some() => {
-                self.value_hash_call(id)?;
+            IrExpr::Call {
+                dispatch_receiver: Some(receiver),
+                args,
+                ..
+            } if let Some(member) = any_members::call_member(self.ir, self.callables, id) => {
+                self.dependency_any_member_call(member, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
