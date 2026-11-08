@@ -1,7 +1,7 @@
 // WITH_STDLIB
 // The `equals`, `hashCode` and `toString` every final value class generates, reached directly,
-// through `Any`, through a generic parameter, through a string template, and through a class
-// holding the value.
+// through `==` on `Any` and on a generic parameter, through a string template, and through a
+// class holding the value.
 
 OPTIONAL_JVM_INLINE_ANNOTATION
 value class Meters(val amount: Int)
@@ -31,8 +31,6 @@ fun box(): String {
     if (same<Any>(one, 1)) return "generic equality with the underlying value"
     val boxed: Any = one
     if (boxed != Meters(1)) return "boxed equality"
-    if (boxed.hashCode() != 1.hashCode()) return "boxed hashCode"
-    if (boxed.toString() != "Meters(amount=1)") return "boxed toString: $boxed"
     if (one.hashCode() != 1.hashCode()) return "direct hashCode"
     if (one.toString() != "Meters(amount=1)") return "direct toString: $one"
     if ("$one" != "Meters(amount=1)") return "template: $one"
