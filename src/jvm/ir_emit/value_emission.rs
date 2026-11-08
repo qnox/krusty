@@ -102,6 +102,13 @@ impl super::Emitter<'_> {
             IrExpr::GetValue(i) => {
                 if self.stack_resident_value == Some(*i) {
                     self.stack_resident_value = None;
+                    // The break that reached this label already pushed the result. A statement
+                    // boundary then resets the linear counter, so a discarded read would see no
+                    // height change and leave the value for a later join (a safe call's null
+                    // path) to disagree with.
+                    if let Some(ty) = self.inline_return_frame_result_type(*i) {
+                        code.set_stack(slot_words(ty));
+                    }
                     return;
                 }
                 if let Some(singleton) = self.singleton_receiver_value(*i) {
@@ -820,7 +827,6 @@ impl super::Emitter<'_> {
                     op @ (crate::ir::IrIntrinsic::ArraySize
                     | crate::ir::IrIntrinsic::StringGet
                     | crate::ir::IrIntrinsic::StringLength
-                    | crate::ir::IrIntrinsic::EnumName
                     | crate::ir::IrIntrinsic::EnumOrdinal
                     | crate::ir::IrIntrinsic::NullableAnyToString) => {
                         self.emit_builtin_member(e, op, dispatch_receiver.unwrap(), args, code)

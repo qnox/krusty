@@ -83,7 +83,6 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         | IrIntrinsic::ArraySize
         | IrIntrinsic::StringGet
         | IrIntrinsic::StringLength
-        | IrIntrinsic::EnumName
         | IrIntrinsic::EnumOrdinal
         | IrIntrinsic::NullableAnyToString
         | IrIntrinsic::CoroutineContext => Ok(()),
