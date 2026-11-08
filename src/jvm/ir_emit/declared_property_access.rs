@@ -14,6 +14,7 @@ impl Emitter<'_> {
         target: crate::fir::PropertyId,
         selected_accessor: Option<&str>,
         selected_interface: bool,
+        receiver: Option<TypeName>,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         let crate::ir::IrLocalPropertyLayout::Member {
             class,
@@ -32,6 +33,7 @@ impl Emitter<'_> {
             Some(*property as usize),
             selected_accessor,
             selected_interface,
+            receiver,
         )
     }
 
@@ -52,6 +54,12 @@ impl Emitter<'_> {
     /// * a `val` has no SETTER, so a `writable` access to one can only be the deferred initialization
     ///   Kotlin permits in a constructor/`init` block, which kotlinc also emits as a `putfield`.
     ///
+    /// The receiver must statically be the declaring class too. kotlinc reaches a member of a
+    /// subclass-typed receiver (`c.x` with `c: C` inside `P`) through its fake override in that
+    /// subclass, which is the accessor `C.getX()`; only the declaring class's own member is its
+    /// backing field. `receiver` is the class the access was selected through, `None` when the
+    /// checker records none (a type-parameter receiver).
+    ///
     /// A `@JvmField` property is reachable this way from ANY class: it has no accessor to call, and
     /// its field carries the declaration's own visibility rather than Kotlin's default `private`.
     pub(super) fn direct_field_access(
@@ -59,6 +67,7 @@ impl Emitter<'_> {
         class: &crate::ir::IrClass,
         declared: Option<&crate::ir::IrProperty>,
         writable: bool,
+        receiver: Option<TypeName>,
     ) -> bool {
         if declared.is_some_and(|p| is_jvm_field(class, &p.name)) {
             return true;
@@ -85,6 +94,7 @@ impl Emitter<'_> {
             return false;
         }
         class.fq_name_matches(&self.owner)
+            && receiver.is_none_or(|receiver| receiver == class.fq_name)
             && !declared.is_some_and(|p| {
                 // kotlinc keeps a non-private `lateinit` property's accessors in-class too: the
                 // getter is where its uninitialized check lives.
@@ -142,6 +152,7 @@ impl Emitter<'_> {
         selected_property: Option<usize>,
         selected_accessor: Option<&str>,
         selected_interface: bool,
+        receiver: Option<TypeName>,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         use crate::jvm::inline::PropertyAccess;
         let class = self.ir.classes.iter().find(|c| c.fq_name == owner)?;
@@ -169,7 +180,7 @@ impl Emitter<'_> {
             self.override_results
                 .boxes_member_property(owner, index as u32)
         });
-        let direct_field = self.direct_field_access(class, declared, false);
+        let direct_field = self.direct_field_access(class, declared, false, receiver);
         if let Some(getter) = declared.and_then(|p| p.getter) {
             let f = &self.ir.functions[getter as usize];
             // Another class reads a private getter through its bridge, kotlinc's `access$<getter>`.
@@ -207,9 +218,16 @@ impl Emitter<'_> {
         let accessor_name = if class.is_annotation {
             name.to_string()
         } else {
-            declared
-                .and_then(|p| p.getter_jvm_name.clone())
-                .or_else(|| selected_accessor.map(str::to_string))
+            declared_index
+                .and_then(|index| {
+                    self.ir.jvm_property_accessor_name(
+                        class.fq_name,
+                        index as u32,
+                        crate::ir::JvmAccessorSide::Getter,
+                    )
+                })
+                .or(selected_accessor)
+                .map(str::to_string)
                 .unwrap_or_else(|| crate::names::property_getter_name(name))
         };
         // The accessor's descriptor comes from the accessor ITSELF, not from the field: an accessor may
@@ -252,7 +270,7 @@ impl Emitter<'_> {
         // A private property reached from outside its class goes through the synthetic bridge; there is no
         // accessor and the field itself is unreachable. A write may have marked a public property whose
         // default setter alone is private; its reads still use the public getter.
-        if let Some(declared) = declared.filter(|p| {
+        if let Some((index, declared)) = declared_index.zip(declared).filter(|(_, p)| {
             p.is_private
                 && p.needs_access_bridge
                 && self.static_owner != Some(StaticOwner::Class(class.fq_name))
@@ -263,7 +281,12 @@ impl Emitter<'_> {
                 .map_or(declared.ty, |f| f.ty);
             let d = type_descriptor(jvm_declared_ty(&ty));
             return Some(static_accessors::member_property_access_bridge(
-                self.ir, class, owner, declared, &d, true,
+                self.ir,
+                class,
+                owner,
+                index as u32,
+                &d,
+                true,
             ));
         }
         // A class of THIS compilation is answered from its declaration, always — never by falling through
@@ -289,12 +312,13 @@ impl Emitter<'_> {
         // Outside the declaring class the backing field is private, so the read goes through the
         // accessor — the one synthesized for this declaration, which carries no IR method of its own.
         if !direct_field {
-            let return_ty = declared
-                .map(|property| {
+            let return_ty = declared_index
+                .zip(declared)
+                .map(|(index, property)| {
                     if boxed_getter {
                         jvm_declared_ty(&Ty::nullable(property.ty))
                     } else {
-                        declared_property_accessor_jvm(self.ir, property, field)
+                        declared_property_accessor_jvm(self.ir, class, index as u32, field)
                     }
                 })
                 .unwrap_or_else(|| jvm_value_ty(&field.ty));
@@ -324,6 +348,7 @@ impl Emitter<'_> {
     pub(super) fn local_property_write_access(
         &self,
         target: crate::fir::PropertyId,
+        receiver: Option<TypeName>,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         let crate::ir::IrLocalPropertyLayout::Member {
             class,
@@ -339,7 +364,13 @@ impl Emitter<'_> {
         debug_assert_eq!(class.fq_name, *owner);
         let index = *property as usize;
         let declared = class.properties.get(index)?;
-        self.realize_declared_property_write_access(class, *owner, name, Some((index, declared)))
+        self.realize_declared_property_write_access(
+            class,
+            *owner,
+            name,
+            Some((index, declared)),
+            receiver,
+        )
     }
 
     /// The write analogue of [`Self::declared_property_read_access`] for a node that carries no
@@ -349,6 +380,7 @@ impl Emitter<'_> {
         &self,
         owner: TypeName,
         name: &str,
+        receiver: Option<TypeName>,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         let class = self.ir.classes.iter().find(|c| c.fq_name == owner)?;
         let declared = class
@@ -356,7 +388,7 @@ impl Emitter<'_> {
             .iter()
             .position(|property| property.name == name)
             .map(|index| (index, &class.properties[index]));
-        self.realize_declared_property_write_access(class, owner, name, declared)
+        self.realize_declared_property_write_access(class, owner, name, declared, receiver)
     }
 
     fn realize_declared_property_write_access(
@@ -365,6 +397,7 @@ impl Emitter<'_> {
         owner: TypeName,
         name: &str,
         declared: Option<(usize, &crate::ir::IrProperty)>,
+        receiver: Option<TypeName>,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         use crate::jvm::inline::PropertyAccess;
         if let Some((index, _)) = declared {
@@ -375,9 +408,17 @@ impl Emitter<'_> {
             }
         }
         // The write analogue: a declared setter is user code and must not be bypassed.
+        let declared_index = declared.map(|(index, _)| index as u32);
+        let realized_setter = declared_index.and_then(|index| {
+            self.ir.jvm_property_accessor_name(
+                class.fq_name,
+                index,
+                crate::ir::JvmAccessorSide::Setter,
+            )
+        });
         let declared = declared.map(|(_, property)| property);
-        let direct_field = self.direct_field_access(class, declared, true);
-        if let Some(declared) = declared.filter(|p| {
+        let direct_field = self.direct_field_access(class, declared, true, receiver);
+        if let Some((index, declared)) = declared_index.zip(declared).filter(|(_, p)| {
             p.needs_access_bridge && self.static_owner != Some(StaticOwner::Class(class.fq_name))
         }) {
             let ty = declared
@@ -386,7 +427,7 @@ impl Emitter<'_> {
                 .map_or(declared.ty, |f| f.ty);
             let d = type_descriptor(jvm_declared_ty(&ty));
             return Some(static_accessors::member_property_access_bridge(
-                self.ir, class, owner, declared, &d, false,
+                self.ir, class, owner, index, &d, false,
             ));
         }
         if let Some(setter) = declared.and_then(|p| p.setter) {
@@ -398,9 +439,8 @@ impl Emitter<'_> {
             return Some(self.declared_setter_access(class, owner, setter));
         }
         let field = property_access::declared_property_field(class, declared, name);
-        let setter_name = declared
-            .and_then(|p| p.setter_jvm_name.clone())
-            .unwrap_or_else(|| crate::names::property_setter_name(name));
+        let setter_name =
+            realized_setter.map_or_else(|| crate::names::property_setter_name(name), str::to_owned);
         let setter = declared
             .is_none()
             .then(|| {
@@ -483,10 +523,14 @@ impl Emitter<'_> {
             let function = &self.ir.functions[setter as usize];
             return Some(PropertyAccess::Accessor {
                 owner: companion,
-                name: declaration
-                    .setter_jvm_name
-                    .clone()
-                    .unwrap_or_else(|| function.name.clone()),
+                name: self
+                    .ir
+                    .jvm_property_accessor_name(
+                        companion,
+                        property,
+                        crate::ir::JvmAccessorSide::Setter,
+                    )
+                    .map_or_else(|| function.name.clone(), str::to_owned),
                 descriptor: method_descriptor(&[jvm_declared_ty(&function.params[0])], Ty::Unit),
                 is_static: false,
                 is_interface: false,

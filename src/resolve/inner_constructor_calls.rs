@@ -357,7 +357,7 @@ impl Checker<'_> {
                 ))
             }
             Ok(LibraryConstructorSelection::Rejected) => Some(Ty::Error),
-            Ok(LibraryConstructorSelection::NoMatch) => {
+            Ok(LibraryConstructorSelection::NoMatch(_)) => {
                 crate::trace_compiler!(
                     "resolve",
                     "bound inner constructor no match call={call:?} classifier={}",

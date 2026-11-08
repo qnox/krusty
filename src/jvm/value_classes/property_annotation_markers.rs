@@ -21,15 +21,21 @@ pub(super) fn rename(ir: &mut IrFile, under: &Under) {
             .iter()
             .find(|class| class.fq_name_id() == owner)
             .expect("a property annotation marker retains its declaring class");
-        let getter = if let Some(property) = class
-            .properties
-            .iter()
-            .find(|property| property.source_order == source_order)
+        let getter = if let Some((index, property)) = (0u32..)
+            .zip(&class.properties)
+            .find(|(_, property)| property.source_order == source_order)
         {
             property
                 .getter
                 .map(|getter| ir.functions[getter as usize].name.clone())
-                .or_else(|| property.getter_jvm_name.clone())
+                .or_else(|| {
+                    ir.jvm_property_accessor_name(
+                        class.fq_name,
+                        index,
+                        crate::ir::JvmAccessorSide::Getter,
+                    )
+                    .map(str::to_owned)
+                })
                 .unwrap_or_else(|| crate::names::property_getter_name(&property.name))
         } else if let Some(property) = ir.member_ext_props.get(&owner).and_then(|properties| {
             properties
