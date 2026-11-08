@@ -65,6 +65,12 @@ impl TParams {
             .unwrap_or_else(|| Ty::obj("kotlin/Any"))
     }
 
+    /// The semantic identity of the parameter written `name`: the identity its binding carries,
+    /// or the spelling itself for a parameter bound to a substitution rather than to itself.
+    pub(crate) fn identity(&self, name: &str) -> crate::types::TyParamName {
+        crate::types::TyParamName::new(self.bound(name).ty_param_name().unwrap_or(name))
+    }
+
     /// Build directly from explicit name→type bindings — a SUBSTITUTION (concrete types), not an
     /// erasure. Used to map a generic method's type parameters to their receiver-supplied / inferred
     /// concrete types so `ty_of_ref` realizes `T`/`R` to `String`/`Int` rather than the erased `Object`.
@@ -295,16 +301,16 @@ impl TParams {
             resolve: &dyn Fn(&str) -> Option<TypeName>,
             visiting: &mut crate::fx_hash::HashSet<String>,
         ) -> Ty {
+            // The declaration's own formals shadow an enclosing declaration's same-named ones:
+            // in `class C<T> { fun <T, S : T?> f() }` the bound of `S` is the function's `T`.
             tparam_bound_semantic_with(bound, resolve, &mut |candidate| {
-                if let Some(ty) = enclosing(candidate) {
-                    return Some(ty);
-                }
-                names.iter().any(|name| name == candidate).then(|| {
-                    Ty::ty_param(
+                if names.iter().any(|name| name == candidate) {
+                    return Some(Ty::ty_param(
                         candidate,
                         parameter_bound(candidate, names, bounds, resolve, enclosing, visiting),
-                    )
-                })
+                    ));
+                }
+                enclosing(candidate)
             })
         }
         fn parameter_bound(

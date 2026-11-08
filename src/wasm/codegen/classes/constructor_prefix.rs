@@ -1,7 +1,7 @@
 //! Constructor-prefix transport proved by common IR, separately from physical field ordinals.
 
-use crate::fir::ClassCaptureIdentity;
-use crate::ir::{ClassId, IrCtorArg, IrCtorParameterProvenance, IrFile};
+use crate::fir::{ClassCaptureIdentity, EnclosingInstanceKind};
+use crate::ir::{ClassId, IrCapturedReceiver, IrCtorArg, IrCtorParameterProvenance, IrFile};
 use crate::types::TyKind;
 
 pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
@@ -63,11 +63,13 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
                 argument
                     .capture
                     .as_ref()
-                    .is_some_and(|capture| capture.receiver.is_none())
-                    && !matches!(
-                        argument.capture_identity,
-                        Some(ClassCaptureIdentity::Receiver(_))
-                    )
+                    .is_some_and(|capture| match capture.receiver.as_ref() {
+                        None => !matches!(
+                            argument.capture_identity,
+                            Some(ClassCaptureIdentity::Receiver(_))
+                        ),
+                        Some(receiver) => enclosing_receiver(ir, argument, receiver),
+                    })
                     && argument.capture_identity
                         == ir.class_capture_identities.get(&(id, parameter)).copied()
                     && capture_parameter(ir, id, parameter, argument)
@@ -81,6 +83,70 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
             _ => false,
         }
     })
+}
+
+// A source enclosing receiver is an ordinary reference only after its selected declaration,
+// semantic classifier and closure identity survived checking together. Other receiver profiles
+// still need their own transport contract; neither a field ordinal nor a type bound proves one.
+fn enclosing_receiver(ir: &IrFile, argument: &IrCtorArg, receiver: &IrCapturedReceiver) -> bool {
+    let IrCapturedReceiver::Enclosing {
+        classifier,
+        owner: Some(owner),
+    } = receiver
+    else {
+        return false;
+    };
+    if argument.capture_identity.is_none()
+        || !matches!(argument.ty.kind(), TyKind::Obj(name, _) if name == *classifier)
+    {
+        return false;
+    }
+    if ir
+        .checked_classifier_classes
+        .contains_key(&owner.declaration)
+        && ir
+            .checked_enum_entry_classes
+            .contains_key(&owner.declaration)
+    {
+        return false;
+    }
+    let registry = match owner.kind {
+        EnclosingInstanceKind::Classifier => &ir.checked_classifier_classes,
+        EnclosingInstanceKind::EnumEntry => &ir.checked_enum_entry_classes,
+    };
+    let Some(&selected) = registry.get(&owner.declaration) else {
+        return false;
+    };
+    let Some(class) = ir.classes.get(selected as usize) else {
+        return false;
+    };
+    let declared_receiver = match owner.kind {
+        EnclosingInstanceKind::Classifier => class.fq_name_id() == *classifier,
+        EnclosingInstanceKind::EnumEntry => {
+            let Some(entry) = ir.checked_enum_entry_bodies.get(&owner.declaration) else {
+                return false;
+            };
+            let Some(enumeration) = ir.classes.get(entry.class as usize) else {
+                return false;
+            };
+            entry.declaration == owner.declaration
+                && enumeration.is_enum
+                && enumeration.fq_name_id() == *classifier
+                && class.is_enum_entry
+                && class.superclass == *classifier
+                && enumeration
+                    .enum_entries
+                    .get(entry.ordinal as usize)
+                    .and_then(|entry| entry.subclass)
+                    == Some(class.fq_name_id())
+        }
+    };
+    declared_receiver
+        && registry
+            .values()
+            .filter(|&&class| class == selected)
+            .count()
+            == 1
 }
 
 // The positive producer-owned role identifies an explicit post-super initializer. Its field

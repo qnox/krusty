@@ -914,7 +914,9 @@ impl Checker<'_> {
         declaration: crate::fir::DeclarationId,
     ) {
         self.checking_local_method_dependencies.remove(&declaration);
-        self.checked_local_method_dependencies.insert(declaration);
+        if self.postponed_call_constraints.is_empty() {
+            self.checked_local_method_dependencies.insert(declaration);
+        }
     }
 
     pub(super) fn registered_local_method_is_complete(

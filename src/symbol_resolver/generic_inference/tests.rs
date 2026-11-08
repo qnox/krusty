@@ -14,33 +14,6 @@ fn a_single_generic_lower_bound_keeps_platform_flexibility() {
 }
 
 #[test]
-fn identity_evidence_is_published_without_changing_ordinary_unification() {
-    let any = Ty::nullable(Ty::obj("kotlin/Any"));
-    let t = Ty::ty_param("owner:T", any);
-    let function = Ty::fun(vec![t], t);
-
-    let mut ordinary = GSigBinds::default();
-    unify_ty(function, function, &mut ordinary);
-    assert!(ordinary.is_empty());
-
-    let mut identity = GSigBinds::default();
-    collect_generic_identity_bindings(function, function, &["owner:T".to_string()], &mut identity);
-    assert_eq!(identity.get("owner:T"), Some(&t));
-}
-
-#[test]
-fn identity_evidence_does_not_bind_a_different_declaration_variable() {
-    let any = Ty::nullable(Ty::obj("kotlin/Any"));
-    let declared = Ty::ty_param("callee:T", any);
-    let actual = Ty::ty_param("caller:T", any);
-    let mut identity = GSigBinds::default();
-
-    collect_generic_identity_bindings(declared, actual, &["callee:T".to_string()], &mut identity);
-
-    assert!(identity.is_empty());
-}
-
-#[test]
 fn a_type_parameter_is_not_rebound_to_its_own_definitely_non_null_face() {
     let any = Ty::nullable(Ty::obj("kotlin/Any"));
     let formal = Ty::ty_param("scope-a:R", any);
@@ -76,7 +49,10 @@ fn provisional_error_result_does_not_bind_a_generic_formal() {
     assert!(!inferred.contains_key("R"));
 
     let signature = GenericSig {
-        formals: vec!["T".to_string(), "R".to_string()],
+        formals: vec![
+            crate::types::TyParamName::new("T"),
+            crate::types::TyParamName::new("R"),
+        ],
         formal_bounds: vec![vec![], vec![]],
         receiver: None,
         params: vec![declared],
@@ -101,7 +77,7 @@ fn typed_function_input_supplies_tightest_contravariant_binding() {
     let any = Ty::nullable(Ty::obj("kotlin/Any"));
     let formal = Ty::ty_param("T", any);
     let signature = GenericSig {
-        formals: vec!["T".to_string()],
+        formals: vec![crate::types::TyParamName::new("T")],
         formal_bounds: vec![vec![any]],
         receiver: None,
         params: vec![Ty::fun(vec![formal], Ty::Unit)],
@@ -143,7 +119,8 @@ fn dependent_applied_bounds_wait_for_complete_call_bindings() {
     );
     assert_eq!(inferred.bound_violation, None);
     assert_eq!(inferred.bindings.get("callee:B"), Some(&actual));
-    assert_eq!(inferred.bindings.get("callee:A"), None);
+    // `B <: Marker<A>` with `B := Marker<Int>` is itself evidence for `A`.
+    assert_eq!(inferred.bindings.get("callee:A"), Some(&Ty::Int));
     let mut completed = inferred.bindings;
     completed.insert("callee:A".into(), Ty::Int);
     assert_eq!(
@@ -159,6 +136,70 @@ fn dependent_applied_bounds_wait_for_complete_call_bindings() {
         }),
         Some((Ty::obj_args("test/Marker", &[Ty::String]), actual)),
     );
+}
+
+/// `<T : Any, E : Key<T>?, V : T?> match(key: Expr<E>, value: Expr<V>)`.
+fn keyed_match_signature() -> GenericSig {
+    let any = Ty::obj("kotlin/Any");
+    let t = Ty::ty_param("callee:T", any);
+    let key_bound = Ty::nullable(Ty::obj_args("test/Key", &[t]));
+    let e = Ty::ty_param("callee:E", key_bound);
+    let v = Ty::ty_param("callee:V", Ty::nullable(t));
+    GenericSig {
+        formals: vec!["callee:T".into(), "callee:E".into(), "callee:V".into()],
+        formal_bounds: vec![vec![any], vec![key_bound], vec![Ty::nullable(t)]],
+        receiver: None,
+        params: vec![
+            Ty::obj_args("test/Expr", &[e]),
+            Ty::obj_args("test/Expr", &[v]),
+        ],
+        ret: Ty::Unit,
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    }
+}
+
+#[test]
+fn a_classifier_bound_constrains_the_formal_it_mentions() {
+    let signature = keyed_match_signature();
+    let caller_t = Ty::ty_param("caller:T", Ty::obj("kotlin/Any"));
+    let caller_v = Ty::ty_param("caller:V", Ty::nullable(caller_t));
+    let key = Ty::obj_args("test/Key", &[caller_t]);
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [
+            (0, Ty::obj_args("test/Expr", &[key]), false),
+            (1, Ty::obj_args("test/Expr", &[caller_v]), false),
+        ],
+        None,
+    );
+    assert_eq!(inferred.bound_violations, Vec::new());
+    assert_eq!(inferred.bindings.get("callee:E"), Some(&key));
+    assert_eq!(inferred.bindings.get("callee:V"), Some(&caller_v));
+    assert_eq!(inferred.bindings.get("callee:T"), Some(&caller_t));
+}
+
+#[test]
+fn a_caller_variable_reaches_a_classifier_bound_through_its_own_bound() {
+    let signature = keyed_match_signature();
+    let caller_t = Ty::ty_param("caller:T", Ty::obj("kotlin/Any"));
+    let caller_v = Ty::ty_param("caller:V", Ty::nullable(caller_t));
+    let caller_e = Ty::ty_param(
+        "caller:E",
+        Ty::nullable(Ty::obj_args("test/Key", &[caller_t])),
+    );
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [
+            (0, Ty::obj_args("test/Expr", &[caller_e]), false),
+            (1, Ty::obj_args("test/Expr", &[caller_v]), false),
+        ],
+        None,
+    );
+    assert_eq!(inferred.bound_violations, Vec::new());
+    assert_eq!(inferred.bindings.get("callee:E"), Some(&caller_e));
+    assert_eq!(inferred.bindings.get("callee:T"), Some(&caller_t));
 }
 
 #[test]
@@ -229,7 +270,7 @@ fn an_open_dependent_bound_does_not_hide_a_concrete_bound_violation() {
 fn bound_violation_retains_the_prior_valid_argument_solution() {
     let formal = Ty::ty_param("T", Ty::Int);
     let signature = GenericSig {
-        formals: vec!["T".to_string()],
+        formals: vec![crate::types::TyParamName::new("T")],
         formal_bounds: vec![vec![Ty::Int]],
         receiver: None,
         params: vec![formal, formal],
@@ -262,7 +303,10 @@ fn selected_bindings_publish_formals_implied_by_dependent_bounds() {
     let t1 = Ty::ty_param("T1", c);
     let t2 = Ty::ty_param("T2", t1);
     let signature = GenericSig {
-        formals: vec!["T1".to_string(), "T2".to_string()],
+        formals: vec![
+            crate::types::TyParamName::new("T1"),
+            crate::types::TyParamName::new("T2"),
+        ],
         formal_bounds: vec![vec![c], vec![t1]],
         receiver: None,
         params: vec![t2],
@@ -290,7 +334,10 @@ fn argument_merge_completes_dependent_formal_before_intersection_bounds() {
     let x = Ty::ty_param("X", comparable_uint);
     let t = Ty::ty_param("T", x);
     let signature = GenericSig {
-        formals: vec!["T".to_string(), "X".to_string()],
+        formals: vec![
+            crate::types::TyParamName::new("T"),
+            crate::types::TyParamName::new("X"),
+        ],
         formal_bounds: vec![vec![x], vec![comparable_uint, uint]],
         receiver: None,
         params: vec![t],
@@ -319,7 +366,7 @@ fn postponed_platform_argument_preserves_an_expected_non_null_binding() {
     let list = Ty::obj_args("kotlin/collections/MutableList", &[Ty::String]);
     let flexible_list = Ty::platform_nullable(list);
     let signature = GenericSig {
-        formals: vec!["R".to_string()],
+        formals: vec![crate::types::TyParamName::new("R")],
         formal_bounds: vec![vec![any]],
         receiver: None,
         params: vec![r],
@@ -357,7 +404,7 @@ fn projected_receiver_binding_can_widen_to_a_nullable_argument_constraint() {
     let any = Ty::nullable(Ty::obj("kotlin/Any"));
     let k = Ty::ty_param("K", any);
     let signature = GenericSig {
-        formals: vec!["K".to_string()],
+        formals: vec![crate::types::TyParamName::new("K")],
         formal_bounds: vec![vec![]],
         receiver: Some(Ty::out_projection(k)),
         params: vec![k],
@@ -393,7 +440,10 @@ fn partially_specified_type_arguments_fix_only_written_positions() {
     let k = Ty::ty_param("K", Ty::nullable(Ty::obj("kotlin/Any")));
     let t = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
     let signature = GenericSig {
-        formals: vec!["K".to_string(), "T".to_string()],
+        formals: vec![
+            crate::types::TyParamName::new("K"),
+            crate::types::TyParamName::new("T"),
+        ],
         formal_bounds: vec![vec![], vec![]],
         receiver: None,
         params: vec![Ty::fun(vec![k], t)],
@@ -474,7 +524,10 @@ fn callable_reference_expectation_keeps_inputs_fixed_and_postpones_results() {
     let t = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
     let r = Ty::ty_param("R", Ty::nullable(Ty::obj("kotlin/Any")));
     let signature = GenericSig {
-        formals: vec!["T".to_string(), "R".to_string()],
+        formals: vec![
+            crate::types::TyParamName::new("T"),
+            crate::types::TyParamName::new("R"),
+        ],
         formal_bounds: vec![vec![], vec![]],
         receiver: None,
         params: vec![Ty::fun(vec![t], r)],
@@ -495,7 +548,7 @@ fn callable_reference_expectation_keeps_inputs_fixed_and_postpones_results() {
     assert_eq!(expected.get("T"), Some(&Ty::String));
     assert!(!expected.contains_key("R"));
 
-    let selected = crate::fx_hash::HashSet::from_iter(["R".to_string()]);
+    let selected = crate::fx_hash::HashSet::from_iter([crate::types::TyParamName::new("R")]);
     let expected = callable_reference_expected_bindings(
         &crate::libraries::EmptySymbolSource,
         &signature,
@@ -511,7 +564,7 @@ fn callable_reference_expectation_keeps_inputs_fixed_and_postpones_results() {
 fn callable_reference_expectation_keeps_invariant_expected_result_equalities() {
     let r = Ty::ty_param("R", Ty::nullable(Ty::obj("kotlin/Any")));
     let signature = GenericSig {
-        formals: vec!["R".to_string()],
+        formals: vec![crate::types::TyParamName::new("R")],
         formal_bounds: vec![vec![]],
         receiver: None,
         params: vec![Ty::fun(vec![], r)],
@@ -542,7 +595,7 @@ fn nested_flexible_result_occurrence_is_an_expected_equality() {
     let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
     let variable = Ty::ty_param("T", any);
     let signature = GenericSig {
-        formals: vec!["T".to_string()],
+        formals: vec![crate::types::TyParamName::new("T")],
         formal_bounds: vec![vec![any]],
         receiver: None,
         params: vec![Ty::platform_nullable(variable)],
@@ -564,7 +617,7 @@ fn nested_flexible_result_occurrence_is_an_expected_equality() {
             expected,
             &expected_bindings,
         ),
-        crate::fx_hash::HashSet::from_iter(["T".to_string()])
+        crate::fx_hash::HashSet::from_iter([crate::types::TyParamName::new("T")])
     );
 }
 
@@ -573,7 +626,7 @@ fn root_flexible_result_occurrence_is_not_an_expected_equality() {
     let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
     let variable = Ty::ty_param("T", any);
     let signature = GenericSig {
-        formals: vec!["T".to_string()],
+        formals: vec![crate::types::TyParamName::new("T")],
         formal_bounds: vec![vec![any]],
         receiver: None,
         params: vec![Ty::platform_nullable(variable)],
@@ -608,7 +661,7 @@ fn contravariant_nested_flexible_occurrence_is_not_an_expected_equality() {
     let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
     let variable = Ty::ty_param("T", any);
     let signature = GenericSig {
-        formals: vec!["T".to_string()],
+        formals: vec![crate::types::TyParamName::new("T")],
         formal_bounds: vec![vec![any]],
         receiver: None,
         params: vec![Ty::platform_nullable(variable)],
@@ -637,7 +690,7 @@ fn projected_expected_result_does_not_widen_an_argument_binding() {
     let nullable_any = Ty::nullable(any);
     let x = Ty::ty_param("X", nullable_any);
     let signature = GenericSig {
-        formals: vec!["X".to_string()],
+        formals: vec![crate::types::TyParamName::new("X")],
         formal_bounds: vec![vec![]],
         receiver: None,
         params: vec![Ty::obj_args("test/Box", &[x])],
@@ -673,7 +726,10 @@ fn whole_vararg_array_inference_descends_through_out_projection() {
     let k = Ty::ty_param("K", Ty::nullable(Ty::obj("kotlin/Any")));
     let v = Ty::ty_param("V", Ty::nullable(Ty::obj("kotlin/Any")));
     let signature = GenericSig {
-        formals: vec!["K".to_string(), "V".to_string()],
+        formals: vec![
+            crate::types::TyParamName::new("K"),
+            crate::types::TyParamName::new("V"),
+        ],
         formal_bounds: vec![vec![], vec![]],
         receiver: None,
         params: vec![Ty::obj_args(
@@ -711,7 +767,10 @@ fn inferred_dependency_materializes_an_otherwise_unobserved_bound_formal() {
     let any = Ty::obj("kotlin/Any");
     let e = Ty::ty_param("E", any);
     let signature = GenericSig {
-        formals: vec!["T".to_string(), "E".to_string()],
+        formals: vec![
+            crate::types::TyParamName::new("T"),
+            crate::types::TyParamName::new("E"),
+        ],
         formal_bounds: vec![vec![Ty::obj_args("test/KFunction", &[e])], vec![any]],
         receiver: None,
         params: vec![Ty::obj_args("test/A", &[e])],
@@ -728,7 +787,7 @@ fn inferred_dependency_materializes_an_otherwise_unobserved_bound_formal() {
     );
 
     let plain = GenericSig {
-        formals: vec!["T".to_string()],
+        formals: vec![crate::types::TyParamName::new("T")],
         formal_bounds: vec![vec![any]],
         receiver: None,
         params: vec![],
@@ -758,7 +817,7 @@ fn captured_self_bound_keeps_denotable_caller_type_parameters() {
     let captured_self = Ty::star_projection(Ty::obj_args("test/Entity", &[data, self_formal]));
     let method = Ty::ty_param("method:T", captured_self);
     let signature = GenericSig {
-        formals: vec!["method:T".to_string()],
+        formals: vec![crate::types::TyParamName::new("method:T")],
         formal_bounds: vec![vec![captured_self]],
         receiver: Some(Ty::obj_args("test/Entity", &[data, captured_self])),
         params: vec![nullable_any],
@@ -791,7 +850,7 @@ fn projected_expected_argument_solves_the_return_variable() {
     let formal = Ty::ty_param("T", any);
     let star = Ty::star_projection(any);
     let signature = GenericSig {
-        formals: vec!["T".to_string()],
+        formals: vec![crate::types::TyParamName::new("T")],
         formal_bounds: vec![Vec::new()],
         receiver: None,
         params: vec![],
@@ -830,7 +889,7 @@ fn expected_result_cannot_replace_a_recursive_declared_bound() {
     let comparable = Ty::obj_args("kotlin/Comparable", &[bound_formal]);
     let formal = Ty::ty_param("T", comparable);
     let signature = GenericSig {
-        formals: vec!["T".to_string()],
+        formals: vec![crate::types::TyParamName::new("T")],
         formal_bounds: vec![vec![comparable]],
         receiver: None,
         params: vec![],
@@ -853,7 +912,7 @@ fn expected_result_can_intersect_an_independent_declared_bound() {
     let bound = Ty::obj("test/Bound");
     let formal = Ty::ty_param("T", bound);
     let signature = GenericSig {
-        formals: vec!["T".to_string()],
+        formals: vec![crate::types::TyParamName::new("T")],
         formal_bounds: vec![vec![bound]],
         receiver: None,
         params: vec![],
@@ -890,7 +949,7 @@ fn flexible_member_return_seeds_the_receivers_symbolic_argument() {
 fn nullable_any_bound_signature(params: Vec<Ty>, ret: Ty) -> GenericSig {
     let any = Ty::obj("kotlin/Any");
     GenericSig {
-        formals: vec!["R".to_string()],
+        formals: vec![crate::types::TyParamName::new("R")],
         formal_bounds: vec![vec![any]],
         receiver: None,
         params,
@@ -944,7 +1003,7 @@ fn nullable_formal_drops_unneeded_dnn_provenance_when_its_bound_accepts_the_call
     let caller = Ty::ty_param("caller:T", nullable_any);
     let formal = Ty::ty_param("callee:R", nullable_any);
     let signature = GenericSig {
-        formals: vec!["callee:R".to_string()],
+        formals: vec![crate::types::TyParamName::new("callee:R")],
         formal_bounds: vec![vec![nullable_any]],
         receiver: None,
         params: vec![Ty::nullable(formal)],
@@ -1050,7 +1109,7 @@ fn nullable_input_fixes_a_root_flexible_variable_before_expected_result_inferenc
     let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
     let variable = Ty::ty_param("T", any);
     let signature = GenericSig {
-        formals: vec!["T".to_string()],
+        formals: vec![crate::types::TyParamName::new("T")],
         formal_bounds: vec![vec![any]],
         receiver: None,
         params: vec![Ty::platform_nullable(variable)],
@@ -1077,7 +1136,7 @@ fn a_structural_argument_owns_the_binding_before_a_nullable_flexible_slot() {
     let variable = Ty::ty_param("T", any);
     let slot = |argument| Ty::obj_args("sample/Slot", &[argument]);
     let signature = GenericSig {
-        formals: vec!["T".to_string()],
+        formals: vec![crate::types::TyParamName::new("T")],
         formal_bounds: vec![vec![any]],
         receiver: None,
         params: vec![slot(variable), Ty::platform_nullable(variable)],
@@ -1109,7 +1168,10 @@ fn a_bound_propagation_that_records_nothing_reaches_its_fixed_point() {
     let r = Ty::ty_param("R", any);
     let t = Ty::ty_param("T", r);
     let signature = GenericSig {
-        formals: vec!["R".to_string(), "T".to_string()],
+        formals: vec![
+            crate::types::TyParamName::new("R"),
+            crate::types::TyParamName::new("T"),
+        ],
         formal_bounds: vec![vec![], vec![r]],
         receiver: Some(Ty::obj_args("kotlin/Result", &[t])),
         params: vec![r],
@@ -1140,7 +1202,7 @@ fn a_definitely_non_null_argument_joins_its_own_parameter_to_that_parameter() {
     let formal_s = Ty::ty_param("S", formal_t);
     let inv = |argument: Ty| Ty::obj_args("Inv", &[argument]);
     let signature = GenericSig {
-        formals: vec!["T".to_string(), "S".to_string()],
+        formals: vec!["T".into(), "S".into()],
         formal_bounds: vec![vec![nullable_any], vec![formal_t]],
         receiver: None,
         params: vec![
@@ -1165,4 +1227,68 @@ fn a_definitely_non_null_argument_joins_its_own_parameter_to_that_parameter() {
     assert_eq!(inferred.bindings.get("T"), Some(&caller_t));
     assert_eq!(inferred.bindings.get("S"), Some(&caller_s));
     assert!(inferred.bound_violations.is_empty());
+}
+
+/// `class Nest<T> : Link<Nest<List<T>>>`: every application reaches `Link` one level deeper.
+struct ExpandingNest;
+
+impl crate::symbol_source::SymbolSource for ExpandingNest {
+    fn symbols(
+        &self,
+        namespace: crate::symbol_source::SymbolNamespace,
+        name: &str,
+    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+        let identity = namespace.existing_classifier(name);
+        let classifier = identity
+            .filter(|identity| identity.matches("test/Nest"))
+            .map(|_| {
+                let any = Ty::nullable(Ty::obj("kotlin/Any"));
+                let mut classifier = crate::libraries::LibraryType::declaration_header();
+                classifier.type_parameters =
+                    crate::types::TypeParameters::invariant(vec!["T".to_string()], vec![vec![any]]);
+                classifier.own_type_parameter_count = 1;
+                let deeper = Ty::obj_args("kotlin/collections/List", &[Ty::ty_param("T", any)]);
+                classifier.supertype_templates = vec![Ty::obj_args(
+                    "test/Link",
+                    &[Ty::obj_args("test/Nest", &[deeper])],
+                )];
+                std::sync::Arc::new(classifier)
+            });
+        std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+            classifier_name: classifier.as_ref().and(identity),
+            classifier,
+            ..crate::libraries::ResolvedSymbols::default()
+        })
+    }
+}
+
+#[test]
+fn mutually_recursive_classifier_bounds_stop_at_the_incorporation_depth() {
+    // `fun <A : Link<B>, B : Link<A>> f(a: A)` called as `f(Nest<String>())`.
+    let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let a = Ty::ty_param("callee:A", any);
+    let b = Ty::ty_param("callee:B", any);
+    let a_bound = Ty::obj_args("test/Link", &[b]);
+    let b_bound = Ty::obj_args("test/Link", &[a]);
+    let signature = GenericSig {
+        formals: vec!["callee:A".into(), "callee:B".into()],
+        formal_bounds: vec![vec![a_bound], vec![b_bound]],
+        receiver: None,
+        params: vec![Ty::ty_param("callee:A", a_bound)],
+        ret: Ty::Unit,
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let actual = Ty::obj_args("test/Nest", &[Ty::String]);
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &ExpandingNest,
+        &signature,
+        [(0, actual, false)],
+        None,
+    );
+    let list = |element| Ty::obj_args("kotlin/collections/List", &[element]);
+    assert_eq!(inferred.lower_inputs.get("callee:A"), Some(&vec![actual]));
+    assert_eq!(
+        inferred.lower_inputs.get("callee:B"),
+        Some(&vec![Ty::obj_args("test/Nest", &[list(Ty::String)])])
+    );
 }

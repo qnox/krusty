@@ -131,6 +131,18 @@ pub enum FirSamMethod {
 pub struct FirPlatformNarrowing {
     /// The checked producer's name; `None` for a value kotlinc cannot name, such as a block's.
     pub message: Option<Box<str>>,
+    /// The consumer the narrowed value reaches.
+    pub site: FirPlatformNarrowingSite,
+}
+
+/// Where a narrowed platform value is consumed. kotlinc's `-Xno-receiver-assertions` removes the
+/// checks of exactly the values that reach an extension receiver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirPlatformNarrowingSite {
+    /// An argument, an assignment, a returned value or any other non-receiver consumer.
+    Value,
+    /// The receiver of an extension call, written or through an operator convention.
+    ExtensionReceiver,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -227,13 +239,8 @@ pub enum FirIntrinsic {
     },
     ArrayGet,
     ArraySet,
-    ArraySize,
     StringGet,
-    StringLength,
     StringPlus,
-    /// `kotlin.Enum.name` on a receiver. Constant evaluation replaces a direct enum entry with
-    /// that entry's declaration name; every other receiver lowers to the property's call.
-    EnumName,
     NullableAnyToString,
     PrimitiveCompare {
         operand: ResolvedTy,
@@ -289,6 +296,11 @@ pub enum FirCallTarget {
         default_provider: Option<ExternalCallableId>,
         receiver: Option<ResolvedTy>,
         declared_receiver: Option<ResolvedTy>,
+        /// A member's dispatch receiver applied as the member's declaring class, when the
+        /// receiver's own classifier is a subclass of a generic declaring class: `Base<String>`
+        /// for `Derived : Base<String>`. A call binds the declaring class's type parameters from
+        /// its arguments. `None` when the receiver already names the declaring class.
+        declaring_receiver: Option<ResolvedTy>,
         parameters: Box<[ResolvedTy]>,
         result: ResolvedTy,
         declared_result: Option<ResolvedTy>,
@@ -2180,6 +2192,19 @@ impl FirBody {
 
     pub fn platform_narrowing(&self, id: FirPlatformNarrowingId) -> Option<&FirPlatformNarrowing> {
         self.platform_narrowings.get(id.raw() as usize)
+    }
+
+    /// The number of narrowings recorded so far, which [`Self::consume_narrowings_at`] reads as
+    /// the start of the narrowings one guard records.
+    pub fn platform_narrowing_count(&self) -> usize {
+        self.platform_narrowings.len()
+    }
+
+    /// Record that every narrowing from `start` on guards a value consumed at `site`.
+    pub fn consume_narrowings_at(&mut self, start: usize, site: FirPlatformNarrowingSite) {
+        for narrowing in &mut self.platform_narrowings[start..] {
+            narrowing.site = site;
+        }
     }
 
     /// Finalize the complete capture ABI of every nested callable. A body must forward both values

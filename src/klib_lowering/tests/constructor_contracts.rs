@@ -126,6 +126,7 @@ fn klib_constructor_class_contract_survives_declared_and_frozen_views() {
         internal: owner,
         args: vec![first, second],
         ctor_params: Some(vec![Ty::Int, Ty::String]),
+        declared_params: None,
         ctor_desc: None,
         external_target: Some(target),
         defaults: Box::new([]),

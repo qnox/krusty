@@ -286,10 +286,9 @@ impl ProductionSignatureSemantics<'_> {
                     .get(parameter.name)
                     .ok_or_else(Self::failure)?;
                 let semantic = visible.bound(source_name);
-                let formal = semantic
-                    .ty_param_name()
-                    .ok_or_else(Self::failure)?
-                    .to_owned();
+                let formal = crate::types::TyParamName::new(
+                    semantic.ty_param_name().ok_or_else(Self::failure)?,
+                );
                 let mut bounds = vec![semantic
                     .ty_param_bound()
                     .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))];
@@ -310,78 +309,6 @@ impl ProductionSignatureSemantics<'_> {
                 return_policy: crate::libraries::GenericReturnPolicy::Exact,
             })
         })?
-    }
-
-    /// Property type parameters in the order the whole-table scans used to prefer them: a top-level
-    /// source property, then a top-level extension, then a member extension. The first recorded
-    /// declaration wins, including a property with no formals, so a miss still means "not a
-    /// property" and falls through to the header-only parameters.
-    fn property_type_parameters(
-        &self,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<super::DeclarationTypeParameters> {
-        let missing = self
-            .property_type_parameters_by_declaration
-            .borrow()
-            .is_none();
-        if missing {
-            let mut parameters = crate::fx_hash::HashMap::default();
-            let record = |parameters: &mut crate::fx_hash::HashMap<
-                crate::fir::DeclarationId,
-                super::DeclarationTypeParameters,
-            >,
-                          declaration: crate::fir::DeclarationId,
-                          formals: &[String],
-                          formal_bounds: &[Ty]| {
-                parameters
-                    .entry(declaration)
-                    .or_insert_with(|| super::DeclarationTypeParameters {
-                        formals: formals.to_vec(),
-                        bounds: formal_bounds
-                            .iter()
-                            .copied()
-                            .map(|bound| vec![bound])
-                            .collect(),
-                    });
-            };
-            for property in self.table.source_props.values() {
-                if let Some(declaration) = property.stable_declaration {
-                    record(
-                        &mut parameters,
-                        declaration,
-                        &property.formals,
-                        &property.formal_bounds,
-                    );
-                }
-            }
-            for property in self.table.ext_props.values().flatten() {
-                if let Some(declaration) = property.stable_declaration {
-                    record(
-                        &mut parameters,
-                        declaration,
-                        &property.formals,
-                        &property.formal_bounds,
-                    );
-                }
-            }
-            for class in self.table.classes.values() {
-                for property in class.member_ext_props.values().flatten() {
-                    if let Some(declaration) = property.stable_declaration() {
-                        record(
-                            &mut parameters,
-                            declaration,
-                            property.type_params(),
-                            property.type_param_bounds(),
-                        );
-                    }
-                }
-            }
-            *self.property_type_parameters_by_declaration.borrow_mut() = Some(parameters);
-        }
-        self.property_type_parameters_by_declaration
-            .borrow()
-            .as_ref()
-            .and_then(|parameters| parameters.get(&declaration).cloned())
     }
 
     pub(super) fn with_signature_type_scope<T>(
@@ -859,6 +786,14 @@ impl ProductionSignatureSemantics<'_> {
 }
 
 impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
+    fn nested_result_variables(
+        &self,
+        scope: crate::fir::SignatureScope,
+        ty: crate::fir::ResolvedTy,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        self.open_nested_result_variables(scope, ty)
+    }
+
     fn enter_scoped_receiver(
         &self,
         declaration: crate::fir::DeclarationId,
@@ -940,62 +875,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
     fn classifier_type(
         &self,
         declaration: crate::fir::DeclarationId,
-        scope: crate::fir::SignatureScope,
+        _scope: crate::fir::SignatureScope,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        // Build the active lexical type-parameter bindings from stable declaration ownership.
-        // Anonymous/local classifiers copy visible source parameters into their generated header;
-        // those copied slots must bind to the enclosing declaration identities rather than becoming
-        // fresh parameters of the generated classifier.
-        let mut owners = Vec::new();
-        let mut current = Some(scope.owner);
-        while let Some(owner) = current {
-            owners.push(owner);
-            current = self
-                .headers
-                .declarations
-                .anchor(owner)
-                .and_then(|anchor| anchor.owner);
-        }
-        owners.reverse();
-        let mut lexical = crate::fx_hash::HashMap::<&str, Ty>::default();
-        for owner in owners {
-            let semantic = self
-                .callable_signature(owner)
-                .and_then(|signature| signature.generic_sig.as_ref())
-                .map(|generic| {
-                    generic
-                        .formals
-                        .iter()
-                        .zip(&generic.formal_bounds)
-                        .map(|(name, bounds)| {
-                            Ty::ty_param(
-                                name,
-                                bounds
-                                    .first()
-                                    .copied()
-                                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .or_else(|| {
-                    self.classifier_signature(owner).map(|classifier| {
-                        classifier
-                            .type_parameters
-                            .type_params
-                            .iter()
-                            .zip(&classifier.type_parameters.type_param_bounds)
-                            .map(|(name, bound)| Ty::ty_param(name, *bound))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .unwrap_or_default();
-            for (parameter, ty) in self.header_type_parameters(owner).iter().zip(semantic) {
-                if let Some(source) = self.headers.lookup_names.get(parameter.name) {
-                    lexical.insert(source, ty);
-                }
-            }
-        }
         let classifier = self
             .classifier_types
             .get(&declaration)
@@ -1005,47 +886,24 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             .table
             .class_by_type_name(classifier)
             .expect("a source classifier expression must retain its resolved class shape");
-        let resolved = {
-            let own_sources = self
-                .header_type_parameters(declaration)
-                .iter()
-                .filter_map(|parameter| self.headers.lookup_names.get(parameter.name));
-            let own = signature
-                .type_parameters
-                .type_params
-                .iter()
-                .zip(&signature.type_parameters.type_param_bounds)
-                .zip(own_sources)
-                .map(|((parameter, bound), source)| {
-                    lexical
-                        .get(source)
-                        .copied()
-                        .unwrap_or_else(|| Ty::ty_param(parameter, *bound))
-                });
-            let captured_sources = self
-                .header_classifier_captures(declaration)
-                .iter()
-                .filter_map(|parameter| self.headers.lookup_names.get(parameter.name))
-                .collect::<Vec<_>>();
-            let captured = signature
-                .captured_type_parameters
-                .type_params
-                .iter()
-                .zip(&signature.captured_type_parameters.type_param_bounds)
-                .enumerate()
-                .map(|(ordinal, (parameter, bound))| {
-                    let source = captured_sources
-                        .get(ordinal)
-                        .copied()
-                        .unwrap_or_else(|| crate::types::type_parameter_source_name(parameter));
-                    lexical
-                        .get(source)
-                        .copied()
-                        .unwrap_or_else(|| Ty::ty_param(parameter, *bound))
-                });
-            let arguments = own.chain(captured).collect::<Vec<_>>();
-            Ty::obj_args_name(classifier, &arguments)
-        };
+        // Signature collection already binds captured slots to their enclosing declarations.
+        // Preserve that semantic order: syntax inventories list outer owners first, whereas
+        // receiver applications list the nearest owner first. Zipping those orders swaps formals.
+        let arguments = signature
+            .type_parameters
+            .type_params
+            .iter()
+            .zip(&signature.type_parameters.type_param_bounds)
+            .chain(
+                signature
+                    .captured_type_parameters
+                    .type_params
+                    .iter()
+                    .zip(&signature.captured_type_parameters.type_param_bounds),
+            )
+            .map(|(parameter, bound)| Ty::ty_param(parameter, *bound))
+            .collect::<Vec<_>>();
+        let resolved = Ty::obj_args_name(classifier, &arguments);
         let resolved = Ok(crate::fir::ResolvedTy::new(resolved)
             .expect("a source classifier self type must be publishable"));
         crate::trace_compiler!(
@@ -4508,21 +4366,17 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
 
     fn make_contextual_function_type(
         &self,
-        declaration: crate::fir::DeclarationId,
+        function: crate::fir::ContextualFunctionSite,
         parameters: &[crate::fir::ResolvedTy],
         result: crate::fir::ResolvedTy,
         context_count: u32,
         has_receiver: bool,
         suspend: bool,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let bindings = self
-            .completed_scoped_constraints
-            .borrow_mut()
-            .remove(&declaration)
-            .unwrap_or_default();
+        let bindings = self.complete_contextual_function(function);
         crate::trace_compiler!(
             "signature",
-            "make contextual function declaration={declaration:?} parameters={:?} result={:?} bindings={bindings:?}",
+            "make contextual function {function:?} parameters={:?} result={:?} bindings={bindings:?}",
             parameters.iter().map(|parameter| parameter.get()).collect::<Vec<_>>(),
             result.get(),
         );

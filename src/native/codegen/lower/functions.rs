@@ -119,7 +119,9 @@ fn reference_identity(
     file: &FileLowering<'_>,
     reference: &crate::ir::IrCallableReference,
 ) -> Result<ReferenceIdentity, Unsupported> {
-    use crate::ir::IrCallableReferenceTarget as Target;
+    use crate::ir::{
+        IrCallableReferenceTarget as Target, IrConstructorReferenceDeclaration as Constructor,
+    };
     let bound = if reference.bound_receiver.is_some() {
         "b"
     } else {
@@ -132,11 +134,20 @@ fn reference_identity(
                 declaration.marker(reference.bound_receiver.is_some()),
             ));
         }
-        Target::Constructor { classifier } => {
-            format!(
-                "c{}",
-                super::super::super::symbols::c_identifier(&classifier.render())
-            )
+        Target::Constructor { declaration, .. } => {
+            let declaration = match declaration {
+                Constructor::Module(declaration) => {
+                    ReferenceDeclaration::constructor(file.module_name, *declaration)
+                }
+                Constructor::External(declaration) => {
+                    dependency_reference_declaration(file, *declaration)?.ok_or(
+                        "a constructor reference without its module-qualified dependency identity",
+                    )?
+                }
+            };
+            return Ok(ReferenceIdentity::Program(
+                declaration.marker(reference.bound_receiver.is_some()),
+            ));
         }
         Target::Local {
             owner,
@@ -153,18 +164,7 @@ fn reference_identity(
         // The provider's own identity for the declaration, which is what two `Boolean::not`
         // written in two files share — and the only thing about it this side is entitled to read.
         Target::External { declaration, .. } => {
-            let fact = file.callables.callable(*declaration).ok_or_else(|| {
-                Unsupported::from("a callable reference without frozen declaration facts")
-            })?;
-            if let Some(identity) = &fact.dependency_callable {
-                let declaration = match file.dependency_symbols.get(identity) {
-                    Some(export) => export.reference_declaration.clone().ok_or_else(|| {
-                        Unsupported::from("an emitted dependency reference without its declaration marker identity")
-                    })?,
-                    // An authenticated KLIB declaration without a retained source export owns
-                    // its module-qualified serialized identity, including runtime declarations.
-                    None => ReferenceDeclaration::dependency(identity),
-                };
+            if let Some(declaration) = dependency_reference_declaration(file, *declaration)? {
                 return Ok(ReferenceIdentity::Program(
                     declaration.marker(reference.bound_receiver.is_some()),
                 ));
@@ -194,6 +194,29 @@ fn reference_identity(
     )))
 }
 
+fn dependency_reference_declaration(
+    file: &FileLowering<'_>,
+    declaration: crate::ir::ExternalCallableId,
+) -> Result<Option<ReferenceDeclaration>, Unsupported> {
+    let fact = file
+        .callables
+        .callable(declaration)
+        .ok_or("a callable reference without frozen declaration facts")?;
+    let Some(identity) = &fact.dependency_callable else {
+        return Ok(None);
+    };
+    let declaration = match file.dependency_symbols.get(identity) {
+        Some(export) => export
+            .reference_declaration
+            .clone()
+            .ok_or("an emitted dependency reference without its declaration marker identity")?,
+        // An authenticated KLIB declaration without a retained source export owns its exact
+        // module-qualified serialized identity, including runtime declarations.
+        None => ReferenceDeclaration::dependency(identity),
+    };
+    Ok(Some(declaration))
+}
+
 /// Physical fields of a closure. A reference's equality receiver is always a semantic object,
 /// even when the adapter passes its unboxed primitive or value-class carrier to the target.
 #[derive(Clone)]
@@ -219,7 +242,7 @@ pub(super) struct LambdaItems {
 /// model applies to fields, for the same reason: the collector is told where the references are
 /// and must be told the truth.
 fn layout(
-    values: &super::super::super::value_classes::NativeValueClasses,
+    values: &crate::backend::value_classes::ValueClassInventory,
     types: &[Ty],
 ) -> (Vec<u32>, u32, Vec<u32>) {
     let mut offsets = Vec::with_capacity(types.len());

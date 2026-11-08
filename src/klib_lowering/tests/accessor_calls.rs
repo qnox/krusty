@@ -144,7 +144,11 @@ fn getter_leaves_reject_malformed_class_and_property_headers() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(linked.property, selected.accessor().unwrap().property);
+    assert!(matches!(
+        linked.target,
+        super::super::body_lowering::LinkedAccessorTarget::External(property)
+            if property == selected.accessor().unwrap().property
+    ));
     assert_eq!(linked.ret, selected.ret());
     assert!(!linked.write);
     for change in [

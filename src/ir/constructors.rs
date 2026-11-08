@@ -100,6 +100,11 @@ pub struct IrSecondaryCtor {
     pub delegate: CtorDelegateTarget,
     /// kotlinc marks this ctor `ACC_SYNTHETIC` (0x1000) — e.g. a `@Serializable` deserialization ctor.
     pub synthetic: bool,
+    /// A HIDDEN-deprecated generated constructor that the platform's own language may still call:
+    /// kotlinc's no-arg plugin constructor, hidden from Kotlin callers but reachable by
+    /// reflection-driven platform frameworks (KT-80649). A backend states that visibility in its
+    /// own terms.
+    pub platform_visible: bool,
     /// A DECLARED parameter was value-class-typed (recorded by the value-class pass before erasure):
     /// the ctor gets kotlinc's PRIVATE + public synthetic `(…, DefaultConstructorMarker)` ABI, and
     /// its metadata record names the marker form.
@@ -231,7 +236,10 @@ pub struct IrConstructorCapture {
 pub enum IrCapturedReceiver {
     /// The instance of the enclosing class `classifier`: the class whose member the capture is
     /// written in, or one further out when the capture is in a local class's member.
-    Enclosing { classifier: TypeName },
+    Enclosing {
+        classifier: TypeName,
+        owner: Option<crate::fir::EnclosingInstanceOwner>,
+    },
     /// The extension receiver of the named callable with this source name, and whether that
     /// callable is a local function or the declaration the capture is written in.
     Callable {

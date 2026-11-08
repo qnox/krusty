@@ -1,6 +1,7 @@
 //! Build-tool project model used by the language server.
 
 pub mod bsp;
+pub mod classpath_presence;
 pub mod detect;
 pub mod fingerprint;
 pub mod gradle;
