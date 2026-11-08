@@ -429,7 +429,6 @@ callableReference/equality/overloadedFunctionEquality.kt
 callableReference/equality/suspendFunctionEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorIsKFunction.kt
-callableReference/funInterfaceConstructor/funInterfaceConstructorOfImplicitKFunctionType.kt
 callableReference/function/booleanNotIntrinsic.kt
 callableReference/function/classMemberFromCompanionObject.kt
 callableReference/function/coercionToUnit.kt
@@ -1861,7 +1860,6 @@ extensionFunctions/kt1953.kt
 extensionFunctions/kt1953_class.kt
 extensionFunctions/kt23675.kt
 extensionFunctions/kt3285.kt
-extensionFunctions/kt4228.kt
 extensionFunctions/kt475.kt
 extensionFunctions/kt606.kt
 extensionFunctions/kt865.kt
@@ -1968,7 +1966,6 @@ funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype.kt
 funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype2.kt
 funInterface/equality/localFunctionReferences.kt
 funInterface/funConversionInVararg.kt
-funInterface/funInterfaceCallInLambda.kt
 funInterface/funInterfaceInheritance.kt
 funInterface/funInterfaceTypealias.kt
 funInterface/funInterfaceWithSuspendMethod.kt
@@ -2119,7 +2116,6 @@ inference/capturedSelfInsideIntersection2.kt
 inference/capturedSelfInsideIntersection3.kt
 inference/capturedTypeWhenSubject.kt
 inference/capturedTypesSubstitutionIntoAbbreviation.kt
-inference/eagerLambdaAnalysisSamAndLambda.kt
 inference/eagerLambdaAnalysisSuspendAndNotSuspend.kt
 inference/eagerLambdaAnalysisSuspendAndSam.kt
 inference/earlierReifiedFix.kt
@@ -4773,17 +4769,12 @@ safeCall/primitiveNotEqSafeCall.kt
 safeCall/safeCallEqPrimitive.kt
 safeCall/safeCallNotEqPrimitive.kt
 safeCall/safeCallOnLong.kt
-sam/approximation/approxToIntermediateType.kt
-sam/approximation/approxToSingleUpperBound.kt
-sam/approximation/impossibleToApproxToRepresentable.kt
-sam/approximation/impossibleToApproxToRepresentable2.kt
 sam/constructors/comparator.kt
 sam/constructors/nonLiteralComparator.kt
 sam/constructors/sameWrapperClass2.kt
 sam/constructors/suspendSamConstructorAdaptation.kt
 sam/funInterfaceExtendsSuspendFunction.kt
 sam/funInterfaceExtendsSuspendFunction2.kt
-sam/kt51821.kt
 sam/kt59858.kt
 sam/kt63564.kt
 sam/kt64116.kt
