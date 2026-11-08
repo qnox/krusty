@@ -1724,7 +1724,6 @@ enum/enumEntryReferenceFromInnerClassConstructor2.kt
 enum/enumMultiModule.kt
 enum/enumValueOf.kt
 enum/enumWithLambdaParameter.kt
-enum/inclassobj.kt
 enum/initEntriesInCompanionObject.kt
 enum/initEntriesInCompanionObject2.kt
 enum/initEntriesInValueOf.kt
