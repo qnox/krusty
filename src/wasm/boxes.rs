@@ -28,6 +28,12 @@ enum Primitive {
     Long,
     Float,
     Double,
+    // An unsigned number is a value class. Its box is its own struct, never the signed primitive
+    // box of the same width: `UInt` and `Int` compare, hash and answer `is` as different types.
+    UByte,
+    UShort,
+    UInt,
+    ULong,
 }
 
 impl Primitive {
@@ -41,6 +47,10 @@ impl Primitive {
             TyKind::LONG => Self::Long,
             TyKind::FLOAT => Self::Float,
             TyKind::DOUBLE => Self::Double,
+            TyKind::UBYTE => Self::UByte,
+            TyKind::USHORT => Self::UShort,
+            TyKind::UINT => Self::UInt,
+            TyKind::ULONG => Self::ULong,
             _ => return None,
         })
     }
@@ -55,12 +65,16 @@ impl Primitive {
             Self::Long => Ty::Long,
             Self::Float => Ty::Float,
             Self::Double => Ty::Double,
+            Self::UByte => Ty::UByte,
+            Self::UShort => Ty::UShort,
+            Self::UInt => Ty::UInt,
+            Self::ULong => Ty::ULong,
         }
     }
 
     fn value(self) -> ValType {
         match self {
-            Self::Long => ValType::I64,
+            Self::Long | Self::ULong => ValType::I64,
             Self::Float => ValType::F32,
             Self::Double => ValType::F64,
             _ => ValType::I32,
@@ -123,7 +137,8 @@ pub(super) struct Boxes {
 
 impl Runtime {
     /// The box of `ty`'s values, declared on first use; `None` for a type that is not boxed as a
-    /// primitive (an unsigned number is a value class, whose box is its own).
+    /// primitive. An unsigned number is a value class, so it has its own box rather than the
+    /// signed primitive box of the same width.
     pub(super) fn box_form(&mut self, module: &mut Module, ty: Ty) -> Option<BoxForm> {
         let primitive = Primitive::of(ty)?;
         if let Some(form) = self.boxes.forms.get(&primitive) {

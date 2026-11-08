@@ -161,6 +161,12 @@ impl Body<'_> {
         if !defaults.is_empty() {
             return Err("a constructor call with omitted arguments".to_string());
         }
+        // `UInt(n)` and the other unsigned constructors store the bits they are given. This
+        // target carries that value as the scalar, and boxes it only where the construction's
+        // own type is a reference.
+        if let Some(lowered) = self.unsigned_value_construction(site, internal, args) {
+            return lowered;
+        }
         let Some((declaration, kind, message)) = external
             .and_then(|target| self.callables.callable(target))
             .and_then(|fact| match fact.compiler_operation() {
