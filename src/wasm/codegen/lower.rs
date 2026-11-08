@@ -1402,8 +1402,26 @@ impl<'a> Body<'a> {
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
             }
+            // A constant of an enum this module does not declare as a class. One global per
+            // classifier and entry name, so two reads are one object.
+            IrExpr::EnumEntry { classifier, name } => {
+                self.dependency_enum_entry(classifier, &name)?;
+            }
             other => return Err(describe_node(&other)),
         }
+        Ok(())
+    }
+
+    /// Load the interned object of an enum constant another file declares.
+    fn dependency_enum_entry(
+        &mut self,
+        classifier: crate::types::TypeName,
+        name: &str,
+    ) -> Result<(), Unsupported> {
+        let global = self
+            .runtime
+            .dependency_enum_entry(self.module, classifier, name);
+        self.code.global_get(global);
         Ok(())
     }
 

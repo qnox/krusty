@@ -26,13 +26,14 @@ use crate::fir::ExternalCallableId;
 use crate::ir::{Callee, FunId, IrFile};
 use crate::klib_libraries::{
     KlibCalleeOrigin, KlibDeclarationBodies, KlibIntrinsicCallable, KlibIntrinsicFacts,
+    ProvenEnumEntry,
 };
 use crate::libraries::{KlibBodyCallable, KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrField, KlibIrFunction, KlibIrStatement,
 };
-use crate::metadata::klib_ir::KlibIrSymbol;
+use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol};
 use crate::types::{Ty, TypeName};
 
 mod class_construction;
@@ -825,6 +826,51 @@ impl CallLinker for Linker<'_, '_> {
         Err(KlibBodyDeclineReason::UnsupportedOperation(
             "an object value",
         ))
+    }
+
+    fn enum_entry(
+        &self,
+        symbol: &KlibIrSymbol,
+    ) -> Result<(TypeName, String), KlibBodyDeclineReason> {
+        let KlibIrSignature::Public(signature) = &symbol.signature else {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a file-private enum entry",
+            ));
+        };
+        let (classifier, name) = match self
+            .sources
+            .bodies
+            .proven_enum_entry(&self.active_module, symbol)
+        {
+            ProvenEnumEntry::One { classifier, name } => (classifier, name),
+            ProvenEnumEntry::None => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "the serialized enum entry is selected as no enum entry".to_owned(),
+                ))
+            }
+            ProvenEnumEntry::Several => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an enum entry is serialized by more than one class".to_owned(),
+                ))
+            }
+        };
+        let owner = super::klib_types::member_owner(signature)?;
+        if owner != classifier {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an enum entry's declaring class disagrees with its signature".to_owned(),
+            ));
+        }
+        let declared = signature
+            .declaration()
+            .segments()
+            .last()
+            .map(String::as_str);
+        if declared != Some(name.as_str()) {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an enum entry's name disagrees with its signature".to_owned(),
+            ));
+        }
+        Ok((classifier, name))
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {

@@ -19,6 +19,23 @@ pub(super) struct EnumBase {
 }
 
 impl BodyLowering<'_, '_, '_> {
+    /// An enum constant declared by another compilation unit: one interned object for this
+    /// classifier and entry name.
+    pub(super) fn dependency_enum_entry(
+        &mut self,
+        classifier: crate::types::TypeName,
+        name: &str,
+    ) -> Result<Option<Value>, Unsupported> {
+        let class_name = self.string_literal(classifier.render().as_bytes())?;
+        let entry_name = self.string_literal(name.as_bytes())?;
+        self.runtime_call(
+            "kt_dependency_enum_entry",
+            &[Ty::String, Ty::String],
+            any(),
+            &[class_name, entry_name],
+        )
+    }
+
     /// One enum constant: its construction, with `kotlin.Enum`'s storage filled right after the
     /// allocation, or on the published allocation it constructs in place, so a constructor reading
     /// `name` or `ordinal` finds them.

@@ -1444,3 +1444,73 @@ fn stdlib_range_literal_negation_lowers_past_the_membership() {
     );
     assert_unit_is_empty(&unit);
 }
+
+/// `COROUTINE_SUSPENDED`'s getter is a read of the `CoroutineSingletons` entry of that name.
+/// The KLIB form is `GetEnumValue`; the common node is that entry.
+#[test]
+fn stdlib_coroutine_suspended_lowers_to_its_enum_entry() {
+    use crate::backend::CheckedBackendCallables;
+    use crate::ir::{Callee, IrExpr, IrFile};
+    use crate::symbol_source::{SymbolNamespace, SymbolSource};
+    use crate::types::type_name;
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/coroutines/intrinsics")),
+        "COROUTINE_SUSPENDED",
+    );
+    let property = symbols
+        .callables
+        .properties()
+        .iter()
+        .find(|property| property.name == "COROUTINE_SUSPENDED" && property.receiver.is_none())
+        .expect("the top-level COROUTINE_SUSPENDED property");
+    let target = property
+        .getter
+        .external_identity
+        .expect("the getter's provider identity");
+    let mut ir = IrFile::default();
+    ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::External {
+            target,
+            default_provider: None,
+            params: property.getter.params.clone(),
+            ret: property.getter.ret,
+            substitutions: Vec::new(),
+            defaults: Vec::new(),
+            extension_receiver_parameter: None,
+        }),
+        dispatch_receiver: None,
+        args: Vec::new(),
+    });
+    let fact = CheckedBackendCallables::freeze(&ir, &libraries)
+        .expect("the provider answers for the getter")
+        .callable(target)
+        .expect("the getter is frozen")
+        .clone();
+    let oracle = crate::symbol_resolver::SourceOracle(&libraries);
+    let facts = KlibCalleeFacts::default().with_type_oracle(&oracle);
+    let mut unit = DependencyBodyUnit::default();
+    let function = unit
+        .lower_function(
+            fact.klib_body_callable().expect("signed"),
+            libraries.declaration_bodies(),
+            &facts,
+        )
+        .unwrap_or_else(|decline| {
+            panic!(
+                "{decline}; property {}; getter {}",
+                super::type_name_of(property.ty),
+                super::type_name_of(property.getter.ret)
+            )
+        });
+    validated(unit.ir());
+    assert_eq!(
+        lowered_body(&unit, function),
+        "scope {scope {return@Some(0) enum \
+         kotlin/coroutines/intrinsics/CoroutineSingletons.COROUTINE_SUSPENDED: \
+         kotlin/coroutines/intrinsics/CoroutineSingletons: Nothing}: Nothing}"
+    );
+}

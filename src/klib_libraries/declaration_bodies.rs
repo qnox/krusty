@@ -18,7 +18,9 @@ use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrExprKind, KlibIrFunction, KlibIrMember, KlibIrStatement,
     KlibIrType,
 };
-use crate::metadata::klib_ir::{KlibIrModuleTrees, KlibIrSignature, KlibIrSymbolKind};
+use crate::metadata::klib_ir::{
+    KlibIrModuleTrees, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind,
+};
 use crate::types::{type_name_child, TypeName};
 
 /// The decoded function declarations of a set of KLIB libraries, joined by exact signature.
@@ -30,6 +32,17 @@ pub struct KlibDeclarationBodies {
     /// The producer-declared module graph. These are manifest `depends` edges, not the roles the
     /// current compilation assigned its inputs.
     dependencies: HashMap<String, Vec<String>>,
+}
+
+/// What a search for one serialized enum entry found in a producer graph.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProvenEnumEntry {
+    /// Exactly one class publishes the entry.
+    One { classifier: TypeName, name: String },
+    /// No class publishes it.
+    None,
+    /// More than one class publishes it, or its class has no public identity.
+    Several,
 }
 
 pub(crate) struct KlibClassMember<'a> {
@@ -303,6 +316,36 @@ impl KlibDeclarationBodies {
         found == Some(true)
     }
 
+    /// The one enum entry in the producer graph rooted at `module` whose symbol is `symbol`.
+    ///
+    /// The entry is a serialized `EnumEntry` member of exactly one class. A second class, or an
+    /// entry whose enclosing class has no public identity, is [`ProvenEnumEntry::Several`]: the
+    /// caller declines rather than picking one.
+    pub(crate) fn proven_enum_entry(&self, module: &str, symbol: &KlibIrSymbol) -> ProvenEnumEntry {
+        let mut found = None;
+        let mut several = false;
+        for module in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&module) else {
+                continue;
+            };
+            for tree in self.libraries[library].trees() {
+                find_enum_entry(
+                    &tree.arena,
+                    &tree.declaration,
+                    symbol,
+                    None,
+                    &mut found,
+                    &mut several,
+                );
+            }
+        }
+        match (found, several) {
+            (Some((classifier, name)), false) => ProvenEnumEntry::One { classifier, name },
+            (_, true) => ProvenEnumEntry::Several,
+            (None, false) => ProvenEnumEntry::None,
+        }
+    }
+
     /// Modules whose bodies the producer graph rooted at `module` can publish.
     ///
     /// This is the same manifest-edge closure used to resolve serialized calls. It deliberately
@@ -505,6 +548,48 @@ impl KlibDeclarationBodies {
                 )
             })
         })
+    }
+}
+
+fn find_enum_entry(
+    arena: &KlibIrArena,
+    member: &KlibIrMember,
+    symbol: &KlibIrSymbol,
+    enclosing: Option<TypeName>,
+    found: &mut Option<(TypeName, String)>,
+    several: &mut bool,
+) {
+    match member {
+        KlibIrMember::Class(id) => {
+            let class = arena.class(*id);
+            let identity = class_identity(&class.base.symbol.signature);
+            for member in &class.members {
+                find_enum_entry(arena, member, symbol, identity, found, several);
+            }
+        }
+        KlibIrMember::EnumEntry(entry) => {
+            if &entry.base.symbol == symbol {
+                match enclosing {
+                    Some(classifier) => {
+                        if found.replace((classifier, entry.name.clone())).is_some() {
+                            *several = true;
+                        }
+                    }
+                    None => *several = true,
+                }
+            }
+            if let Some(class) = entry.class {
+                find_enum_entry(
+                    arena,
+                    &KlibIrMember::Class(class),
+                    symbol,
+                    enclosing,
+                    found,
+                    several,
+                );
+            }
+        }
+        _ => {}
     }
 }
 

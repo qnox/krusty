@@ -35,6 +35,7 @@ use crate::types::TypeName;
 pub(crate) use archives::OpenedKlibLibraries;
 pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics};
 pub(crate) use declaration_bodies::KlibCalleeOrigin;
+pub(crate) use declaration_bodies::ProvenEnumEntry;
 pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub use declaration_signatures::KlibLibraryError;
 pub use serialized_references::{

@@ -1859,10 +1859,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 elem,
                 value,
             } => self.ref_set(holder, elem, value),
-            // The shared enum lowering realized every enum this file declares; what is left names
-            // an enum another file declares, whose constants live there.
-            IrExpr::EnumEntry { classifier, .. }
-            | IrExpr::EnumValues { classifier }
+            // A constant of an enum this file does not declare. Its identity is the classifier
+            // and the entry name; the runtime interns one object for that pair.
+            IrExpr::EnumEntry { classifier, name } => self.dependency_enum_entry(classifier, &name),
+            // `values`, `entries` and `valueOf` of an enum another file declares still need that
+            // file's constant list.
+            IrExpr::EnumValues { classifier }
             | IrExpr::EnumEntries { classifier }
             | IrExpr::EnumValueOf { classifier, .. } => Err(declined!(
                 "an enum another file declares (`{}`)",

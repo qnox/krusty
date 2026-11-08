@@ -7,7 +7,8 @@
 //! declines by its name. The forms are lowered by responsibility: blocks and the source block
 //! shape of a body ([`blocks`]), the blocks of calls a prepared body inlined
 //! ([`compiler_blocks`]), calls of built-in operators and dependency functions
-//! ([`calls`]), constructor calls ([`constructions`]), `if`/`when` chains and `&&`/`||` ([`conditionals`]), loops and their jumps
+//! ([`calls`]), constructor calls and object values ([`constructions`]), enum entry reads
+//! ([`enum_entries`]), `if`/`when` chains and `&&`/`||` ([`conditionals`]), loops and their jumps
 //! ([`loops`]), string templates ([`string_templates`]) and type operators
 //! ([`type_operators`]).
 
@@ -24,6 +25,7 @@ mod compiler_blocks;
 mod conditionals;
 mod constructions;
 mod elvis_blocks;
+mod enum_entries;
 mod instance_storage;
 mod loops;
 mod range_membership;
@@ -147,6 +149,10 @@ pub(super) trait CallLinker {
 
     /// Proves that `classifier` is a dependency object, whose value a body may read.
     fn singleton(&self, classifier: TypeName) -> Lowered<()>;
+
+    /// Proves that `symbol` is one enum entry of one class in the body producer's graph, and
+    /// returns that class with the entry's declaration name.
+    fn enum_entry(&self, symbol: &KlibIrSymbol) -> Lowered<(TypeName, String)>;
 
     /// `sub` as the class `owner` it is a subtype of, with the type arguments its hierarchy applies
     /// to `owner`.
@@ -524,7 +530,10 @@ impl<'a> BodyLowering<'a> {
                 let ty = self.ty(expression, "class literal")?;
                 return self.class_reference(class, *class_type, ty);
             }
-            KlibIrExprKind::GetEnumValue(_) => return unsupported("an enum entry"),
+            KlibIrExprKind::GetEnumValue(symbol) => {
+                let ty = self.ty(expression, "enum entry")?;
+                return self.enum_entry(symbol, ty);
+            }
             KlibIrExprKind::Break { loop_id, label: _ } => {
                 let ty = self.ty(expression, "`break`")?;
                 (self.jump(*loop_id, ty, false)?, ty)

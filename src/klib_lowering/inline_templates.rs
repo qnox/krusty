@@ -37,6 +37,7 @@ use crate::libraries::{
 };
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::KlibIrBody;
+use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::SemanticCallableOwner;
 use crate::types::{InlineExpansionMode, InlineParameterModifier, Ty, TyKind};
 
@@ -306,6 +307,40 @@ impl CallLinker for TemplateCalls<'_> {
             _ => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
                 "the serialized object {classifier:?} is selected as no object"
             ))),
+        }
+    }
+
+    fn enum_entry(
+        &self,
+        symbol: &KlibIrSymbol,
+    ) -> Result<(crate::types::TypeName, String), KlibBodyDeclineReason> {
+        if symbol.kind != KlibIrSymbolKind::EnumEntry {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an enum entry read names a symbol that is not an enum entry".to_owned(),
+            ));
+        }
+        let KlibIrSignature::Public(signature) = &symbol.signature else {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a file-private enum entry",
+            ));
+        };
+        let classifier = member_owner(signature)?;
+        let name = signature
+            .declaration()
+            .segments()
+            .last()
+            .map(String::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch("an enum entry has no name".to_owned())
+            })?;
+        match self.callees.source.classifier(classifier) {
+            Some(record) if record.is_enum() && record.is_enum_entry(name) => {
+                Ok((classifier, name.to_owned()))
+            }
+            _ => Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the serialized enum entry is selected as no enum entry".to_owned(),
+            )),
         }
     }
 

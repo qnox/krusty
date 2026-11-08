@@ -570,6 +570,9 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
         } => format!("{completion:?}({})", render(ir, *producer)),
         IrExpr::UnitInstance => "Unit".to_owned(),
         IrExpr::SingletonValue { classifier } => format!("object {}", classifier.render()),
+        IrExpr::EnumEntry { classifier, name } => {
+            format!("enum {}.{}", classifier.render(), name)
+        }
         IrExpr::Checked(checked) => match checked.as_ref() {
             // A dependency property read, with its dispatch and operands in full. Its identity is
             // its provider's numbering, so a test comparing two providers' lowerings asserts the

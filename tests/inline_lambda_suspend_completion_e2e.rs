@@ -7,15 +7,14 @@
 //! function's body, the callee reads the caller's continuation local and gets no such local.
 //! Both shapes are written below, for a plain inline lambda and for a suspend one.
 //!
-//! PLATFORM-SPECIFIC: Native and Wasm do not lower
-//! `kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED.<get-COROUTINE_SUSPENDED>` yet. Its KLIB
-//! body reads an enum entry, so this program stays on the JVM leaf.
+//! The complete lib/main program is the shared box inventory. This leaf compares JVM class
+//! bytes and debug-local scopes against kotlinc; those comparisons are JVM-specific.
 
 use super::common;
 
 fn with_program(test: impl FnOnce(&str, &str)) {
     let modules = krusty::conformance::split_modules(include_str!(
-        "fixtures/inline_lambda_suspend_completion/inlineLambdaSuspendCompletion.kt"
+        "box_regressions/multimodule/inlineLambdaSuspendCompletion.kt"
     ))
     .expect("the complete inline-lambda continuation program");
     let [producer, consumer] = modules.as_slice() else {

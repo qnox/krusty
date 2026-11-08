@@ -23,15 +23,18 @@ use crate::fx_hash::HashMap;
 use super::boxes::Boxes;
 use super::callable_references::CallableReferences;
 use super::encode::{
-    BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
+    BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, SubType,
+    ValType,
 };
 use super::exception_transport::ExceptionTransport;
 use super::function_values::FunctionShapes;
 use super::hashing::Hashing;
 use super::host::Host;
 use super::identity::IdentityObjects;
+use super::objects::immutable;
 use super::objects::ObjectRoot;
 use super::reference_arrays::ReferenceArrays;
+use crate::types::TypeName;
 
 /// Where a host write's bytes are staged in linear memory. The first 16 bytes are left for the
 /// host's own use (a WASI iovec).
@@ -72,6 +75,18 @@ pub(super) struct Runtime {
     pub(super) callable_references: CallableReferences,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
+    /// One struct type and dispatch table for enum constants another file declares.
+    dependency_enum: Option<DependencyEnumShape>,
+    /// The global holding each such constant, by its enum and entry name.
+    dependency_enum_entries: HashMap<(TypeName, String), u32>,
+}
+
+/// The object shape of an enum constant another file declares: a `kotlin.Any` object, one per
+/// classifier and entry name in this module.
+#[derive(Clone, Copy)]
+struct DependencyEnumShape {
+    structure: u32,
+    table: u32,
 }
 
 impl Runtime {
@@ -141,6 +156,8 @@ impl Runtime {
             functions: FunctionShapes::default(),
             callable_references,
             constants: HashMap::default(),
+            dependency_enum: None,
+            dependency_enum_entries: HashMap::default(),
         };
         runtime.define_string_equals(module);
         runtime.define_object_equals(module);
@@ -608,6 +625,58 @@ impl Runtime {
                 },
             );
         }
+    }
+
+    /// The global holding one enum constant another file declares. Every read of the same
+    /// classifier and entry name in this module loads the same object.
+    pub(super) fn dependency_enum_entry(
+        &mut self,
+        module: &mut Module,
+        classifier: TypeName,
+        name: &str,
+    ) -> u32 {
+        let key = (classifier, name.to_owned());
+        if let Some(&global) = self.dependency_enum_entries.get(&key) {
+            return global;
+        }
+        let shape = self.dependency_enum_shape(module);
+        let mut init = Code::default();
+        init.global_get(shape.table).struct_new(shape.structure);
+        let global = module.constant_global(ValType::reference(shape.structure), init);
+        self.dependency_enum_entries.insert(key, global);
+        global
+    }
+
+    fn dependency_enum_shape(&mut self, module: &mut Module) -> DependencyEnumShape {
+        if let Some(shape) = self.dependency_enum {
+            return shape;
+        }
+        let any_table = self.objects.any_table;
+        let object = self.objects.object;
+        let itable_type = self.objects.itable;
+        let [_, _, to_string_ty] = self.objects.any_slot_types;
+        let equals = self.objects.identity_equals;
+        let structure = module.subtype(SubType {
+            composite: CompositeType::Struct(vec![immutable(ValType::reference(any_table))]),
+            supertype: Some(object),
+            open: false,
+        });
+        let hash_code = self.identity.hash_code;
+        let to_string = self.objects.trap(module, to_string_ty);
+        let (_, itable) = self
+            .objects
+            .interfaces
+            .class(module, itable_type, vec![structure]);
+        let mut init = Code::default();
+        for function in [equals, hash_code, to_string] {
+            module.reference_function(function);
+            init.ref_func(function);
+        }
+        init.global_get(itable).struct_new(any_table);
+        let table = module.constant_global(ValType::reference(any_table), init);
+        let shape = DependencyEnumShape { structure, table };
+        self.dependency_enum = Some(shape);
+        shape
     }
 }
 
