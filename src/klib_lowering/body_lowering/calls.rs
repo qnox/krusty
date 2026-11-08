@@ -650,8 +650,12 @@ impl BodyLowering<'_> {
             }
         };
         // A result read through a projected receiver argument (`Array<out T>.get`) is that
-        // projection's read type, as a source call's result is.
-        let ret = substitute(callee.ret).projection_read_ty();
+        // projection's read type, as a source call's result is; a nullable result reads its
+        // projection the same way (`MutableMap<in K, in V>.put` answers `Any?`).
+        let ret = match substitute(callee.ret).kind() {
+            crate::types::TyKind::Nullable(inner) => Ty::nullable(inner.projection_read_ty()),
+            _ => substitute(callee.ret).projection_read_ty(),
+        };
         let ret = if self.linker.same_type(ret, ty) {
             ty
         } else {
