@@ -194,16 +194,26 @@ pub(super) trait CallLinker {
 
     /// The dependency declaration a prepared object's member overrides, when `symbol` names one.
     ///
-    /// The record carries that declaration's classifier and its declared and applied signatures.
-    /// `supertypes` are the object's, and the applied signature is the declaration viewed through
-    /// the one whose hierarchy reaches the classifier. `None` leaves the member without an edge.
+    /// The record is the shared override: the declaring classifier, and the declared and applied
+    /// signatures. `supertypes` are the object's. `property` selects a getter edge rather than a
+    /// function edge. `None` leaves the member without an edge.
     fn dependency_override(
         &self,
         symbol: &KlibIrSymbol,
         supertypes: &[Ty],
-    ) -> Lowered<Option<object_literals::DependencyOverride>> {
-        let _ = (symbol, supertypes);
+        property: bool,
+    ) -> Lowered<Option<super::same_library_class::MemberOverride>> {
+        let _ = (symbol, supertypes, property);
         Ok(None)
+    }
+
+    /// The provider callable `identity` publishes an override edge as.
+    fn external_override(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Lowered<crate::fir::ExternalCallableId> {
+        let _ = identity;
+        unsupported("an object literal override")
     }
 
     /// Whether the selected classifier `name` is an interface.
@@ -282,8 +292,6 @@ pub(super) struct BodyLowering<'a> {
     instance_storage: Option<instance_storage::InstanceStorageFrame<'a>>,
     /// Enclosing values a member of an object literal reads through its constructor fields.
     captures: HashMap<KlibIrSymbol, object_literals::CaptureField>,
-    /// File-local classes this body has lowered, so a use of one is the class just declared.
-    local_classes: HashMap<KlibIrSymbol, TypeName>,
     /// The member function whose `return`s are being lowered, when that is not the template.
     member_return: Option<KlibIrSymbol>,
     /// The result type of [`Self::member_return`].
@@ -316,7 +324,6 @@ impl<'a> BodyLowering<'a> {
             erasure_coercions: HashSet::default(),
             instance_storage: None,
             captures: HashMap::default(),
-            local_classes: HashMap::default(),
             member_return: None,
             member_result: None,
         }
@@ -660,7 +667,7 @@ impl<'a> BodyLowering<'a> {
         let ty = expression
             .ty
             .ok_or(KlibBodyDeclineReason::UntypedExpression(form))?;
-        self.resolve_type(ty)
+        self.semantic(ty)
     }
 
     /// A type used in this body, including a non-public class of the body's own library.
@@ -671,45 +678,6 @@ impl<'a> BodyLowering<'a> {
             id,
             &|signature| self.linker.local_class(signature),
         )
-    }
-
-    /// `id` as a semantic type. A file-local class lowered in this body is that class; every
-    /// other type goes through [`Self::semantic`].
-    pub(super) fn resolve_type(
-        &self,
-        id: crate::metadata::klib_ir::tree::KlibIrTypeId,
-    ) -> Lowered<Ty> {
-        if let Some(local) = self.local_classifier_type(id)? {
-            return Ok(local);
-        }
-        self.semantic(id)
-    }
-
-    fn local_classifier_type(
-        &self,
-        id: crate::metadata::klib_ir::tree::KlibIrTypeId,
-    ) -> Lowered<Option<Ty>> {
-        use crate::metadata::klib_ir::tree::{KlibIrNullability, KlibIrType};
-        let KlibIrType::Simple {
-            classifier,
-            nullability,
-            arguments,
-            ..
-        } = self.arena.ty(id)
-        else {
-            return Ok(None);
-        };
-        let Some(name) = self.local_classes.get(classifier).copied() else {
-            return Ok(None);
-        };
-        if !arguments.is_empty() {
-            return Err(mismatch("a local class is applied to type arguments"));
-        }
-        let ty = Ty::obj_name(name);
-        Ok(Some(match nullability {
-            KlibIrNullability::MarkedNullable => Ty::nullable(ty),
-            KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull => ty,
-        }))
     }
 
     /// Whether `actual` is an anonymous or local class declared in this body and `expected` is
@@ -744,12 +712,6 @@ impl<'a> BodyLowering<'a> {
     /// type is expected, is a conversion the body must state.
     fn operand(&mut self, id: KlibIrExprId, expected: Ty) -> Lowered<ExprId> {
         let lowered = self.expression(id)?;
-        self.checked_operand(lowered, expected)
-    }
-
-    /// `lowered` where `expected` is required: the value itself when it already has that type, or
-    /// the widening or supertype coercion checked FIR lowering places.
-    fn checked_operand(&mut self, lowered: ExprId, expected: Ty) -> Lowered<ExprId> {
         let actual = self.lowered_type(lowered);
         if is_value_of(actual, expected) {
             return Ok(lowered);
@@ -950,17 +912,14 @@ impl<'a> BodyLowering<'a> {
     /// declaration: a named variable in the next value slot, with no type of its own.
     fn variable(&mut self, id: KlibIrVariableId) -> Lowered<ExprId> {
         let variable = self.arena.variable(id);
+        let ty = self.semantic(variable.ty)?;
         let initializer =
             variable
                 .initializer
                 .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
                     "a variable without an initializer",
                 ))?;
-        // The initializer can declare the local class this variable is typed as. Resolve the
-        // variable's type only after that class exists.
-        let init = self.expression(initializer)?;
-        let ty = self.resolve_type(variable.ty)?;
-        let init = self.checked_operand(init, ty)?;
+        let init = self.operand(initializer, ty)?;
         // Initializers can declare locals of their own. Allocate the enclosing declaration only
         // after those locals, as checked FIR does, and keep its symbol invisible until then.
         let local = self.locals.slot(variable, ty)?;

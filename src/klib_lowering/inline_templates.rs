@@ -131,6 +131,7 @@ fn lower(
     let mut calls = TemplateCalls {
         module: &callable.identity().module,
         callees,
+        bodies,
     };
     if declaration.suspend {
         return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
@@ -260,6 +261,8 @@ struct TemplateCalls<'a> {
     /// The template's declaring module, whose producer graph resolves its calls.
     module: &'a str,
     callees: TemplateCallees<'a>,
+    /// The prepared bodies of the template's library, which name its file-local classes.
+    bodies: &'a KlibDeclarationBodies,
 }
 
 impl TemplateCalls<'_> {
@@ -377,17 +380,34 @@ impl CallLinker for TemplateCalls<'_> {
         })
     }
 
+    fn local_class(
+        &self,
+        signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Result<Option<crate::types::TypeName>, KlibBodyDeclineReason> {
+        super::same_library_class::classifier(self.bodies, self.module, signature)
+    }
+
+    fn external_override(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<ExternalCallableId, KlibBodyDeclineReason> {
+        self.callees
+            .source
+            .external_callable_by_dependency(identity)
+            .map(|(target, _)| target)
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "an override whose declaration handle was not registered".to_owned(),
+                )
+            })
+    }
+
     fn dependency_override(
         &self,
         symbol: &crate::metadata::klib_ir::KlibIrSymbol,
         supertypes: &[crate::types::Ty],
-    ) -> Result<
-        Option<super::body_lowering::object_literals::DependencyOverride>,
-        KlibBodyDeclineReason,
-    > {
-        use super::body_lowering::object_literals::{
-            authenticated_override, DependencyOverrideKind,
-        };
+        property: bool,
+    ) -> Result<Option<super::same_library_class::MemberOverride>, KlibBodyDeclineReason> {
         use crate::metadata::id_signature::KlibDeclarationSignature;
         use crate::metadata::klib_ir::KlibIrSignature;
         let signature = match &symbol.signature {
@@ -438,47 +458,41 @@ impl CallLinker for TemplateCalls<'_> {
                 }
             }
         };
-        let Some((target, realization)) = self
+        let Some((_, realization)) = self
             .callees
             .source
             .external_callable_by_dependency(&binding.declaration)
         else {
             return Ok(None);
         };
-        let kind = if let Some(accessor) = &realization.klib_body_accessor {
-            match accessor.role {
-                crate::libraries::KlibAccessorRole::Getter => DependencyOverrideKind::Property,
-                crate::libraries::KlibAccessorRole::Setter => {
-                    return Err(KlibBodyDeclineReason::SignatureMismatch(
-                        "an object literal overrides a property setter".to_owned(),
-                    ))
-                }
-            }
-        } else {
-            DependencyOverrideKind::Function
-        };
-        let Some(crate::types::SemanticCallableOwner::Classifier(owner)) =
-            realization.declaration_owner
-        else {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "an override's declaration has no classifier owner".to_owned(),
-            ));
-        };
-        let interface = match self.callees.source.classifier(owner) {
-            Some(classifier) => classifier.is_interface(),
-            None => {
+        let accessor = realization
+            .klib_body_accessor
+            .as_ref()
+            .map(|accessor| matches!(accessor.role, crate::libraries::KlibAccessorRole::Getter));
+        match accessor {
+            Some(false) => {
                 return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "an override's declaring classifier is not a selected class".to_owned(),
+                    "an object literal overrides a property setter".to_owned(),
                 ))
             }
-        };
-        authenticated_override(
+            Some(true) if !property => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a function overrides a property".to_owned(),
+                ))
+            }
+            None if property => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a property overrides a function".to_owned(),
+                ))
+            }
+            Some(true) | None => {}
+        }
+        super::same_library_class::realized_member_override(
+            binding.declaration,
             &realization,
-            target,
-            kind,
-            interface,
+            property,
             supertypes,
-            |sub, owner| self.applied_supertype(sub, owner),
+            &|sub, owner| self.applied_supertype(sub, owner),
         )
         .map(Some)
     }
