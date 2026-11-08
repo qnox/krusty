@@ -678,3 +678,65 @@ fn klib_target_primitive_hash_codes_are_native_dependency_leaves() {
         }
     }
 }
+
+/// Each primitive iterator's own `next()` is the provider's primitive-iterator operation, and
+/// Native realizes that operation itself. A stdlib body that walks a primitive array
+/// (`IntArray.contentHashCode` iterates its receiver) therefore reaches a target leaf rather than
+/// the iterator's ordinary member body, which a dependency support unit has no contract to emit.
+#[test]
+fn klib_target_primitive_iterator_nexts_are_native_dependency_leaves() {
+    use crate::backend::Backend;
+    use crate::native::{CraneliftBackend, NativeTarget};
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let backend = CraneliftBackend::new(NativeTarget::ALL[0]);
+    let capability = |operation| backend.realizes_dependency_intrinsic(operation);
+    for iterator in [
+        "kotlin/collections/BooleanIterator",
+        "kotlin/collections/CharIterator",
+        "kotlin/collections/ByteIterator",
+        "kotlin/collections/ShortIterator",
+        "kotlin/collections/IntIterator",
+        "kotlin/collections/LongIterator",
+        "kotlin/collections/FloatIterator",
+        "kotlin/collections/DoubleIterator",
+    ] {
+        let classifier = libraries.classifier(type_name(iterator)).unwrap();
+        let selected = classifier.declared_callables["next"]
+            .functions()
+            .iter()
+            .map(|candidate| {
+                libraries
+                    .external_callable(candidate.callable.external_identity.unwrap())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let [provider] = selected.as_slice() else {
+            panic!("{iterator} declares one `next()`: {selected:?}");
+        };
+        let selected = provider.klib_body_callable().unwrap();
+        assert_eq!(
+            selected.compiler_intrinsic(),
+            Some(CompilerIntrinsic::PrimitiveIteratorNext),
+            "{iterator}"
+        );
+        for facts in [
+            KlibCalleeFacts::new([selected]),
+            KlibCalleeFacts::with_declarations([], [selected]),
+        ] {
+            assert_eq!(
+                facts
+                    .target_intrinsic(
+                        selected.identity(),
+                        libraries.declaration_bodies(),
+                        &capability
+                    )
+                    .unwrap(),
+                Some(CompilerIntrinsic::PrimitiveIteratorNext),
+                "{iterator}"
+            );
+        }
+    }
+}
