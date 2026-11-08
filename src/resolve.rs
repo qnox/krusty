@@ -33,6 +33,11 @@ use scope::ScopeKind;
 use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns};
 
 mod abstract_obligations;
+mod argument_parameter_mapping;
+use argument_parameter_mapping::{
+    call_argument_parameter_indices, call_argument_parameter_indices_result,
+    named_whole_array_varargs,
+};
 mod call_site_publication;
 mod constructor_references;
 mod implicit_source_member_lambda;
@@ -322,7 +327,7 @@ mod selected_argument_commitment;
 mod selected_result_publication;
 use selected_argument_commitment::{
     indexed_operator_argument_parameters, indexed_operator_argument_slots, SelectedArgumentBinding,
-    SelectedArgumentCommitment,
+    SelectedArgumentCommitment, SelectedParameters,
 };
 mod erased_overload_keys;
 mod signature_collection;
@@ -4107,74 +4112,6 @@ fn take_unanimous_mapping_error<T>(
         .iter()
         .all(|(failure, _)| *failure == first)
         .then(|| failures.swap_remove(0))
-}
-
-fn call_argument_parameter_indices(
-    argument_count: usize,
-    parameter_count: usize,
-    names: Option<&[Option<String>]>,
-    trailing_lambda: bool,
-    sig: &CallSig,
-) -> Option<Vec<usize>> {
-    call_argument_parameter_indices_result(
-        argument_count,
-        parameter_count,
-        names,
-        trailing_lambda,
-        sig,
-    )
-    .ok()
-}
-
-fn call_argument_parameter_indices_result(
-    argument_count: usize,
-    parameter_count: usize,
-    names: Option<&[Option<String>]>,
-    trailing_lambda: bool,
-    sig: &CallSig,
-) -> Result<Vec<usize>, CallArgMappingFailure> {
-    // Map stable source indices rather than expression/type values. Expressions may be repeated
-    // syntactically and partial types deliberately contain several identical `None` entries for
-    // postponed lambdas; indices make the inversion unambiguous for every call origin.
-    let arguments = (0..argument_count).collect::<Vec<_>>();
-    let slots = map_call_args(
-        &arguments,
-        names,
-        &sig.param_names,
-        parameter_count,
-        sig.required,
-        &sig.param_defaults,
-        sig.vararg_index,
-        trailing_lambda,
-    )?;
-    let indices = arguments
-        .into_iter()
-        .map(|argument| {
-            slots
-                .iter()
-                .position(|slot| *slot == Some(argument))
-                .or(sig.vararg_index)
-                .expect("successful argument mapping must assign every argument")
-        })
-        .collect::<Vec<_>>();
-    Ok(indices)
-}
-
-fn named_whole_array_varargs(
-    argument_map: &[usize],
-    names: Option<&[Option<String>]>,
-    sig: &CallSig,
-) -> Vec<bool> {
-    argument_map
-        .iter()
-        .enumerate()
-        .map(|(argument, &parameter)| {
-            sig.vararg_index == Some(parameter)
-                && names
-                    .and_then(|names| names.get(argument))
-                    .is_some_and(Option::is_some)
-        })
-        .collect()
 }
 
 fn map_param_list_args(
@@ -11230,6 +11167,7 @@ impl<'a> Checker<'a> {
             ) else {
                 return ClassifierValueCall::Checked(Ty::Error);
             };
+            let site_params = shape.call_site_params(&selected.applied_call_site_params());
             if !self.expect_selected_call_args(
                 scope,
                 CallArgs {
@@ -11237,8 +11175,11 @@ impl<'a> Checker<'a> {
                     args,
                     arg_tys: &argument_types,
                 },
-                &shape.params,
-                &shape.params,
+                SelectedParameters {
+                    applied: &shape.params,
+                    declared: &shape.params,
+                    call_site: site_params.as_deref(),
+                },
                 &shape.call_sig,
                 None,
             ) {
@@ -12659,8 +12600,11 @@ impl<'a> Checker<'a> {
                 args,
                 arg_tys,
             },
-            &params,
-            &params,
+            SelectedParameters {
+                applied: &params,
+                declared: &params,
+                call_site: None,
+            },
             &cs,
             None,
         ) {
@@ -13361,6 +13305,7 @@ impl<'a> Checker<'a> {
                 ) else {
                     return Ty::Error;
                 };
+                let site_params = shape.call_site_params(&selected.applied_call_site_params());
                 if !self.expect_selected_call_args(
                     scope,
                     CallArgs {
@@ -13368,8 +13313,11 @@ impl<'a> Checker<'a> {
                         args,
                         arg_tys: &argument_types,
                     },
-                    &shape.params,
-                    &shape.params,
+                    SelectedParameters {
+                        applied: &shape.params,
+                        declared: &shape.params,
+                        call_site: site_params.as_deref(),
+                    },
                     &shape.call_sig,
                     None,
                 ) {
@@ -14424,8 +14372,11 @@ impl<'a> Checker<'a> {
                                         args,
                                         arg_tys: &arg_tys,
                                     },
-                                    &m.params,
-                                    &m.params,
+                                    SelectedParameters {
+                                        applied: &m.params,
+                                        declared: &m.params,
+                                        call_site: None,
+                                    },
                                     &m.call_sig,
                                     None,
                                 ) {
@@ -14501,8 +14452,11 @@ impl<'a> Checker<'a> {
                                     args,
                                     arg_tys: &arg_tys,
                                 },
-                                &member.params,
-                                &member.params,
+                                SelectedParameters {
+                                    applied: &member.params,
+                                    declared: &member.params,
+                                    call_site: None,
+                                },
                                 &member.call_sig,
                                 None,
                             ) {
@@ -14669,8 +14623,11 @@ impl<'a> Checker<'a> {
                                 args,
                                 arg_tys: &arg_tys,
                             },
-                            &shape.params,
-                            &shape.params,
+                            SelectedParameters {
+                                applied: &shape.params,
+                                declared: &shape.params,
+                                call_site: None,
+                            },
                             &shape.call_sig,
                             None,
                         ) {
@@ -18911,6 +18868,7 @@ impl<'a> Checker<'a> {
                 let top_level = top_level_sam_pick
                     .map(|(info, bindings)| {
                         CallableCandidateSelection::Selected(Box::new(SelectedCallable {
+                            call_site_params: info.callable.params.clone(),
                             info,
                             bindings,
                             intersection_bindings: HashMap::default(),
@@ -32319,6 +32277,9 @@ struct InapplicableTopLevelCall<'a> {
 
 struct SelectedCallable {
     info: crate::libraries::FunctionInfo,
+    /// `info.callable.params` over the call's own variables: a variable selection left unsolved is
+    /// still this call's, never the declared formal `info` publishes it as.
+    call_site_params: Vec<Ty>,
     bindings: crate::symbol_resolver::GSigBinds,
     intersection_bindings: HashMap<String, Vec<Ty>>,
     /// Position in the exact family passed to `select_callable_candidate`. A postponed call can
@@ -35908,15 +35869,18 @@ impl<'a> Checker<'a> {
                 let Some(&declared_parameter) = signature.params.get(parameter) else {
                     continue;
                 };
-                let declared_parameter = if candidate.call_sig.vararg_index == Some(parameter)
-                    && !self.file.is_spread_arg(args[argument])
-                {
-                    declared_parameter
-                        .array_read_elem()
-                        .unwrap_or(declared_parameter)
-                } else {
-                    declared_parameter
-                };
+                // A spread or named array is the whole vararg array; any other argument is one
+                // element. The parameter view and the constraint below must agree on that.
+                let whole_array = whole_arrays.get(argument).copied().unwrap_or(false)
+                    || self.file.is_spread_arg(args[argument]);
+                let declared_parameter =
+                    if candidate.call_sig.vararg_index == Some(parameter) && !whole_array {
+                        declared_parameter
+                            .array_read_elem()
+                            .unwrap_or(declared_parameter)
+                    } else {
+                        declared_parameter
+                    };
                 let open_formal = nested_producer_bindings::open_variable(
                     &signature,
                     type_args,
@@ -36000,7 +35964,7 @@ impl<'a> Checker<'a> {
                     crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
                         &source,
                         &signature,
-                        [(parameter, nested_actual, false)],
+                        [(parameter, nested_actual, whole_array)],
                         candidate.call_sig.vararg_index,
                     );
                 let mut inferred_nested = nested_constraints.bindings;
@@ -38469,6 +38433,7 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         let SelectedCallable {
             info: mut selected,
+            call_site_params,
             bindings: mut selected_bindings,
             mut intersection_bindings,
             ..
@@ -38555,6 +38520,7 @@ impl<'a> Checker<'a> {
                     .is_some()
             })
             .collect::<crate::fx_hash::HashSet<_>>();
+        let site_params = shape.call_site_params(&call_site_params);
         let selected_arguments_valid =
             self.with_lambda_mutation(selected.flags.inline.can_inline(), |checker| {
                 checker.expect_selected_call_args(
@@ -38564,8 +38530,11 @@ impl<'a> Checker<'a> {
                         args,
                         arg_tys,
                     },
-                    &shape.params,
-                    &declared_params,
+                    SelectedParameters {
+                        applied: &shape.params,
+                        declared: &declared_params,
+                        call_site: site_params.as_deref(),
+                    },
                     &shape.call_sig,
                     (!expectations.is_empty()).then_some(&expectations),
                 )
@@ -38592,6 +38561,15 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     if !infer_all_arguments && postponed_result_arguments.contains(argument) {
+                        continue;
+                    }
+                    // A nested call that commitment left open still types as its own variables:
+                    // the enclosing call completes both, so it is not evidence for this call yet.
+                    if postponed_result_arguments.contains(argument)
+                        && self
+                            .unbound_contextual_result_signature(*argument)
+                            .is_some()
+                    {
                         continue;
                     }
                     let actual = self.expr_types[argument.0 as usize];
@@ -56246,6 +56224,7 @@ impl<'a> Checker<'a> {
             argument_names,
         )?;
         let declared_params = shape.declared_params(&selected.semantic_params());
+        let site_params = shape.call_site_params(&selected.applied_call_site_params());
         if !self.expect_selected_call_args(
             scope,
             CallArgs {
@@ -56253,8 +56232,11 @@ impl<'a> Checker<'a> {
                 args,
                 arg_tys,
             },
-            &shape.params,
-            &declared_params,
+            SelectedParameters {
+                applied: &shape.params,
+                declared: &declared_params,
+                call_site: site_params.as_deref(),
+            },
             &shape.call_sig,
             None,
         ) {
@@ -57053,8 +57035,11 @@ impl<'a> Checker<'a> {
                 args,
                 arg_tys: &arg_tys,
             },
-            &visible_params,
-            &declared_params,
+            SelectedParameters {
+                applied: &visible_params,
+                declared: &declared_params,
+                call_site: None,
+            },
             &shape.call_sig,
             None,
         );
@@ -58350,8 +58335,11 @@ impl<'a> Checker<'a> {
                 args,
                 arg_tys: &arg_tys,
             },
-            &contextual.params,
-            &contextual.declared_params(declared.unwrap_or(&member.params)),
+            SelectedParameters {
+                applied: &contextual.params,
+                declared: &contextual.declared_params(declared.unwrap_or(&member.params)),
+                call_site: None,
+            },
             &contextual.call_sig,
             None,
         )

@@ -2699,20 +2699,6 @@ pub fn run_box_corpus_case(rel: &str) -> Option<String> {
     run_box(&classes, &box_class, &cp)
 }
 
-#[allow(dead_code)]
-pub fn box_corpus_case_backend_outcome(rel: &str) -> Option<BackendOutcome> {
-    let src = krusty::conformance::prepare_test_source(
-        &std::fs::read_to_string(box_corpus_dir()?.join(rel)).ok()?,
-        krusty::conformance::TestTarget::Jvm,
-    );
-    if src.contains("// FILE:") || src.contains("// MODULE:") {
-        return None;
-    }
-    let jdk = jdk_modules();
-    let cp = classpath_jars_for(&src);
-    backend_outcome_in_process(&src, "P", &cp, Some(jdk.as_path()))
-}
-
 // --- Persistent javac+run server ------------------------------------------
 //
 // Tests that exercise a hand-written Java driver (e.g. invoking a krusty-compiled `suspend` function

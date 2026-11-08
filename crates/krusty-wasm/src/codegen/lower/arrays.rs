@@ -1,6 +1,11 @@
 //! Reference-element array storage and checked reads, owned by the Wasm representation boundary.
 
+use krusty::backend::BackendCompilerIntrinsic;
+use krusty::ir::{IrCheckedOperation, IrPropertyDispatch};
 use krusty::libraries::RuntimeExceptionKind;
+
+#[cfg(test)]
+mod tests;
 
 use super::*;
 
@@ -27,7 +32,44 @@ fn reference_element(array: Ty) -> Result<Ty, Unsupported> {
     Ok(element)
 }
 
+/// The complete selected getter frame, before any receiver is evaluated.
+fn array_size_receiver(operation: &IrCheckedOperation) -> Result<u32, Unsupported> {
+    let IrCheckedOperation::ExternalPropertyRead {
+        dispatch: IrPropertyDispatch::Ordinary,
+        receiver: Some(receiver),
+        arguments,
+        parameters,
+        result: Ty::Int,
+        source_receiver: Some(source),
+        ..
+    } = operation
+    else {
+        return Err("an authenticated array size read with a mismatched getter frame".into());
+    };
+    if !arguments.is_empty() || !parameters.is_empty() || !source.non_null().is_reference_array() {
+        return Err("an authenticated array size read with a mismatched getter frame".into());
+    }
+    Ok(*receiver)
+}
+
 impl Body<'_> {
+    pub(super) fn is_array_size_property(&self, target: krusty::fir::ExternalPropertyId) -> bool {
+        self.callables.property(target).is_some_and(|property| {
+            self.callables
+                .callable(property.getter)
+                .is_some_and(|getter| {
+                    getter.compiler_operation() == Some(BackendCompilerIntrinsic::ArraySize)
+                })
+        })
+    }
+
+    pub(super) fn checked_array_size(
+        &mut self,
+        operation: &IrCheckedOperation,
+    ) -> Result<(), Unsupported> {
+        self.reference_array_size(array_size_receiver(operation)?)
+    }
+
     pub(super) fn reference_array_literal(
         &mut self,
         array: Ty,
@@ -175,6 +217,22 @@ impl Body<'_> {
         self.code
             .ref_cast(false, HeapType::Concrete(object))
             .struct_get(object, crate::reference_arrays::STORAGE_FIELD);
+    }
+
+    /// The length of the backing storage selected by a checked reference-array receiver.
+    pub(super) fn reference_array_size(&mut self, receiver: u32) -> Result<(), Unsupported> {
+        let array = self
+            .type_of(receiver)?
+            .ok_or_else(|| "an array receiver without a checked type".to_string())?;
+        // Length belongs to the wrapper's backing storage, independent of its element carrier.
+        // Reading it neither loads nor boxes an element of Array<T>.
+        if !array.non_null().is_reference_array() {
+            return Err("an array size read without reference-array storage".into());
+        }
+        self.value(receiver, array)?;
+        self.reference_array_storage();
+        self.code.array_len();
+        Ok(())
     }
 
     pub(super) fn reference_array_get(

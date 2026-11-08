@@ -332,8 +332,6 @@ callableReference/adaptedReferences/contextFunctionWithPassedSuperType.kt
 callableReference/adaptedReferences/contextFunctionWithSam.kt
 callableReference/adaptedReferences/contextPropertyWithSam.kt
 callableReference/adaptedReferences/contextTypeWithSam.kt
-callableReference/adaptedReferences/defaultAfterVararg.kt
-callableReference/adaptedReferences/emptyVarargAndDefault.kt
 callableReference/adaptedReferences/extensionFunctionAdaptedReferences.kt
 callableReference/adaptedReferences/extensionFunctionAnonymous.kt
 callableReference/adaptedReferences/extensionInSamWithPassedSupertype.kt
@@ -351,7 +349,6 @@ callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
 callableReference/adaptedReferences/referenceToFakeOverrideWithTypeParameter.kt
 callableReference/adaptedReferences/referenceToVarargWithDefaults.kt
-callableReference/adaptedReferences/simpleEmptyVararg.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithCoercionToUnit.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithDefaultArguments.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithVarargs.kt
@@ -3094,7 +3091,6 @@ inlineSizeReduction/simpleReturnFunction.kt
 inlineSizeReduction/this.kt
 inlineSizeReduction/valAssignment.kt
 inlineSizeReduction/valDeclaration.kt
-inlineSizeReduction/varargTemporaryVar.kt
 inlineStdlib/callableRefToFunInCurrentModule.kt
 innerClass/doubleInner.kt
 innerClass/getOuterVal.kt
@@ -3824,7 +3820,6 @@ ranges/forInIndices/forInPrimitiveArrayIndices.kt
 ranges/forInIndices/forNullableIntInArrayIndices.kt
 ranges/forInIndices/forNullableIntInCollectionIndices.kt
 ranges/forInIndices/indexOfLast.kt
-ranges/forInIndices/kt12983_forInGenericArrayIndices.kt
 ranges/forInIndices/kt12983_forInGenericCollectionIndices.kt
 ranges/forInIndices/kt12983_forInSpecificArrayIndices.kt
 ranges/forInIndices/kt12983_forInSpecificCollectionIndices.kt
@@ -4620,7 +4615,6 @@ reified/reifiedIntersectionTypeArgument.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/reifiedNullableNothing1.kt
 reified/reifiedNullableNothing2.kt
-reified/reifiedNullableNothing3.kt
 reified/reifiedNullableNothing4.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 reified/reifiedTypeArgumentWithRecursion.kt
@@ -4945,7 +4939,6 @@ vararg/evaluationOrder.kt
 vararg/inlineClassArraysAsNamedArgumentInVararg.kt
 vararg/kt10926.kt
 vararg/kt37715.kt
-vararg/kt37779.kt
 vararg/kt581.kt
 vararg/kt6192.kt
 vararg/kt796_797.kt
