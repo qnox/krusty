@@ -4,7 +4,7 @@
 # The metrics page (krustythecompiler.dev/metrics/) is built from the latest successful master CI
 # run's box reports, the `summary` artifacts of the recent nightly `oss corpus` runs and the coverage
 # baseline. Each finished corpus run triggers this workflow, and the schedule rebuilds the page every
-# night even when the corpus run does not finish. The README badges' shields.io endpoints
+# night even when the corpus run does not finish. The shields.io badge endpoints
 # (krustythecompiler.dev/badges/) are packaged from the same CI run.
 # One-time setup: Settings -> Pages -> Source: "GitHub Actions", Custom domain: krustythecompiler.dev.
 name: pages
@@ -12,7 +12,12 @@ name: pages
 on:
   push:
     branches: [master]
-    paths: ["site/**", ".github/workflows/pages.yml"]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+      # The badge endpoints are packaged by these scripts.
+      - "scripts/package-release-badges.sh"
+      - "scripts/conformance-badge.sh"
   schedule:
     - cron: '0 7 * * *'
   workflow_run:
@@ -88,7 +93,7 @@ jobs:
       - name: build
         working-directory: site
         run: npm ci && npm run build && npm test
-      # The shields.io endpoints the README badges read (krustythecompiler.dev/badges/*.json), from
+      # The shields.io badge endpoints (krustythecompiler.dev/badges/*.json), from
       # the same CI run as the metrics page, packaged the way a release packages its badge assets.
       # This deploy is their only writer. Without a CI run with box reports none are published, and
       # the badges say so rather than show an old figure.
