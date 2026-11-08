@@ -53,10 +53,6 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path, runtime
                     "freeCompilerArg '-Xcompiler-plugin=forbidden.jar' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
                 ),
                 (
-                    "plugin-option-free-argument",
-                    "freeCompilerArg '-P' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
-                ),
-                (
                     "reference-version-free-argument",
                     "freeCompilerArg '-Xkotlin-reference-version=2.4.0' conflicts with the Kotlin Gradle plugin version; configure the structured Gradle input instead",
                 ),

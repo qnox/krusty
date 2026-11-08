@@ -79,12 +79,12 @@ fun box(): String {
 #[test]
 fn immediate_literals_preserve_operand_order_captures_and_local_returns() {
     common::expect_box_same_as_kotlinc(
-        include_str!("fixtures/immediateLambdaEscapingOperands.kt"),
+        include_str!("box_regressions/immediateLambdaEscapingOperands.kt"),
         "immediate_function_literal_operands",
     );
     // PLATFORM: retain escaped function values through Native's closure allocation/invoke ABI.
     common::expect_native_box(
-        include_str!("fixtures/immediateLambdaEscapingOperands.kt"),
+        include_str!("box_regressions/immediateLambdaEscapingOperands.kt"),
         "immediate_function_literal_operands",
         "OK",
     );
