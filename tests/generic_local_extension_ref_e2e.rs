@@ -683,3 +683,11 @@ fn a_kotlinc_provider_uses_the_shared_adapted_reference_specificity() {
         Some(reference.as_str()),
     );
 }
+
+#[test]
+fn a_covariant_local_extension_combines_receiver_and_value_constraints() {
+    expect_box_same_as_kotlinc(
+        include_str!("box_regressions/regressions/LocalExtensionJointInference.kt"),
+        "LocalExtensionJointInference",
+    );
+}

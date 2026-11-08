@@ -473,9 +473,16 @@ pub(super) struct Body {
     pub(super) params: Vec<(KlibIrSymbol, T)>,
     pub(super) signatures: HashMap<&'static str, KlibPublicIdSignature>,
     pub(super) next_slot: u32,
+    /// The serialized default of each parameter that declares one, by parameter index.
+    pub(super) defaults: HashMap<usize, KlibIrExprId>,
 }
 
 impl Body {
+    /// Declare `value` as the serialized default of parameter `index`.
+    pub(super) fn default(&mut self, index: usize, value: KlibIrExprId) {
+        self.defaults.insert(index, value);
+    }
+
     pub(super) fn ty(&mut self, ty: T) -> KlibIrTypeId {
         if let Some((_, id)) = self.types.iter().find(|(known, _)| *known == ty) {
             return *id;
@@ -557,6 +564,28 @@ impl Body {
     pub(super) fn call(&mut self, name: &str, arguments: Vec<KlibIrExprId>, ty: T) -> KlibIrExprId {
         let signature = self.signatures[name].clone();
         self.call_signature(signature, arguments, None, ty)
+    }
+
+    /// A call of the `demo` function `name` that leaves each `None` argument to its default.
+    pub(super) fn call_omitting(
+        &mut self,
+        name: &str,
+        arguments: Vec<Option<KlibIrExprId>>,
+        ty: T,
+    ) -> KlibIrExprId {
+        let signature = self.signatures[name].clone();
+        self.expr(
+            ty,
+            KlibIrExprKind::Call {
+                access: KlibIrMemberAccess {
+                    symbol: public_symbol(KlibIrSymbolKind::Function, signature),
+                    arguments: KlibIrArguments::Flat(arguments),
+                    type_arguments: Vec::new(),
+                    origin: None,
+                },
+                super_qualifier: None,
+            },
+        )
     }
 
     /// A call of the generic `demo` function `name` with the serialized type argument
@@ -983,17 +1012,19 @@ fn demo_module(
                 params: params.clone(),
                 signatures: signatures.clone(),
                 next_slot: 1000 * slot,
+                defaults: HashMap::default(),
             };
             let statements = build(name, &mut body);
             let parameters = params
                 .iter()
                 .zip(PARAMETER_NAMES)
-                .map(|((symbol, ty), name)| KlibIrParameter {
+                .enumerate()
+                .map(|(index, ((symbol, ty), name))| KlibIrParameter {
                     base: base(symbol.clone()),
                     name: name.to_owned(),
                     ty: body.ty(*ty),
                     vararg_element_type: None,
-                    default_value: None,
+                    default_value: body.defaults.get(&index).copied(),
                 })
                 .collect();
             let return_type = body.ty(ret);
@@ -1102,7 +1133,29 @@ pub(super) fn source_body_with_stdlib(source: &str, name: &str, arity: usize) ->
     rendered_function(&ir, name, arity)
 }
 
+/// Each published parameter default of the source function `name` of `arity` parameters, as
+/// checked FIR lowering lowers `source`.
+pub(super) fn source_defaults_with_stdlib(
+    source: &str,
+    name: &str,
+    arity: usize,
+) -> Vec<Option<String>> {
+    let ir =
+        crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(source, "KlibBodyEquivalent");
+    let function = source_function(&ir, name, arity);
+    ir.param_defaults(function)
+        .expect("the source declaration publishes its defaults")
+        .iter()
+        .map(|default| default.map(|default| render(&ir, default)))
+        .collect()
+}
+
 fn rendered_function(ir: &crate::ir::IrFile, name: &str, arity: usize) -> String {
+    let function = source_function(ir, name, arity);
+    render(ir, ir.functions[function as usize].body.expect("a body"))
+}
+
+fn source_function(ir: &crate::ir::IrFile, name: &str, arity: usize) -> crate::ir::FunId {
     let functions = ir
         .fn_source_names
         .iter()
@@ -1114,7 +1167,7 @@ fn rendered_function(ir: &crate::ir::IrFile, name: &str, arity: usize) -> String
     let [function] = functions.as_slice() else {
         panic!("expected one source `{name}`, found {}", functions.len());
     };
-    render(ir, ir.functions[*function as usize].body.expect("a body"))
+    *function
 }
 
 pub(super) fn lowered_f(demo: &Demo) -> String {

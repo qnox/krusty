@@ -12,16 +12,20 @@ mod closure_frames;
 mod closure_producers;
 mod constructor_calls;
 mod constructor_contracts;
+mod constructor_exports;
 mod control_forms;
 mod demo_package;
 mod elvis_blocks;
+mod for_loop_bindings;
 mod inline_templates;
+mod parameter_defaults;
 mod primitive_calls;
 mod range_membership_producers;
 mod returnable_blocks;
 mod safe_calls;
 mod target_calls;
 mod target_members;
+mod value_class_members;
 mod varargs;
 
 use super::*;
@@ -298,7 +302,8 @@ pub(super) fn type_name_of(ty: Ty) -> String {
 /// logical type, a return's depth (`@0`), a stable (`!`) or mutable (`~`) binding read, a `when`'s
 /// exhaustiveness (`exhaustive:`), a callable scope (`scope`) and a recorded negation
 /// (`negation`), a short circuit (`and`, `or`) and a written cast (`written`). A call names its
-/// callee by source name, so two units' bodies compare whatever order their functions were
+/// callee by source name, and a call leaving arguments to their defaults the parameters it omits
+/// (`omitting`), so two units' bodies compare whatever order their functions were
 /// declared in, and a loop label by its order of appearance (`@L0`), so two lowerings that name
 /// their loops differently compare.
 pub(super) fn render(ir: &IrFile, expression: ExprId) -> String {
@@ -418,15 +423,48 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
         }
         IrExpr::Call {
             callee: call_callee,
-            dispatch_receiver: None,
+            dispatch_receiver,
             args,
         } if let Callee::Local(function) = &**call_callee => {
+            let receiver = dispatch_receiver.map_or(String::new(), |receiver| {
+                format!("{}.", render(ir, receiver))
+            });
             let args = args
                 .iter()
                 .map(|argument| render(ir, *argument))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("call {}({args})", ir.fn_source_names[function])
+            format!("call {receiver}{}({args})", ir.fn_source_names[function])
+        }
+        IrExpr::Call {
+            callee: call_callee,
+            dispatch_receiver: None,
+            args,
+        } if let Callee::LocalWithDefaults { function, defaults } = &**call_callee => {
+            let args = args
+                .iter()
+                .map(|argument| render(ir, *argument))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "call {}({args}) omitting {defaults:?}",
+                ir.fn_source_names[function]
+            )
+        }
+        IrExpr::Call {
+            callee: call_callee,
+            dispatch_receiver: None,
+            args,
+        } if let Callee::LocalWithDefaults { function, defaults } = &**call_callee => {
+            let args = args
+                .iter()
+                .map(|argument| render(ir, *argument))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "call {}({args}; defaults {defaults:?})",
+                ir.fn_source_names[function]
+            )
         }
         IrExpr::InvokeFunction { func, args, .. } => {
             let operands = std::iter::once(func)
@@ -548,6 +586,33 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
         IrExpr::UnitInstance => "Unit".to_owned(),
         IrExpr::SingletonValue { classifier } => format!("object {}", classifier.render()),
         IrExpr::Checked(checked) => match checked.as_ref() {
+            // A dependency property read, with its dispatch and operands in full. Its identity is
+            // its provider's numbering, so a test comparing two providers' lowerings asserts the
+            // declaration each identity denotes itself.
+            crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                target: _,
+                dispatch,
+                receiver,
+                arguments,
+                parameters,
+                result,
+                source_receiver,
+            } => format!(
+                "{}.read<{dispatch:?}>({}; {}): {} on {}",
+                receiver.map_or("_".to_owned(), |receiver| render(ir, receiver)),
+                arguments
+                    .iter()
+                    .map(|argument| render(ir, *argument))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                parameters
+                    .iter()
+                    .map(|parameter| type_name_of(*parameter))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                type_name_of(*result),
+                source_receiver.map_or("_".to_owned(), type_name_of),
+            ),
             crate::ir::IrCheckedOperation::RangeContains {
                 operation,
                 value,
@@ -569,6 +634,15 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             ),
             other => panic!("a lowered body holds no {other:?}"),
         },
+        IrExpr::GetField {
+            receiver,
+            class,
+            index,
+        } => format!(
+            "{}.{}",
+            render(ir, *receiver),
+            ir.classes[*class as usize].fields[*index as usize].name
+        ),
         other => panic!("a lowered body holds no {other:?}"),
     };
     match ir.logical_type(expression) {

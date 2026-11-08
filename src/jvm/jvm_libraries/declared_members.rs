@@ -31,7 +31,7 @@ impl JvmLibraries {
         let class = self.cp.find_name(classifier);
         if let Some(class) = class.as_deref() {
             if class.meta.class_kind.is_some() {
-                return kotlin_annotation_members(classifier, class);
+                return kotlin_annotation_members(classifier, class, self.cp.class_members(class));
             }
         }
         if let Some(builtin) = self.cp.builtin_classifier_name(classifier) {
@@ -110,17 +110,21 @@ impl JvmLibraries {
 
 /// A Kotlin annotation class's members: a property for each parameter of its primary
 /// constructor, the constructor, and its nested classifiers.
-fn kotlin_annotation_members(classifier: TypeName, class: &ClassInfo) -> Option<DeclaredMembers> {
+fn kotlin_annotation_members(
+    classifier: TypeName,
+    class: &ClassInfo,
+    members: &crate::jvm::metadata::KotlinMembers,
+) -> Option<DeclaredMembers> {
     let meta = &class.meta;
-    if meta.class_kind != Some(TypeKind::Annotation) || !meta.class_functions.is_empty() {
+    if meta.class_kind != Some(TypeKind::Annotation) || !members.class_functions.is_empty() {
         return None;
     }
-    let constructor = meta
+    let constructor = members
         .constructors
         .iter()
         .find(|constructor| constructor.primary)?;
     let parameters = &constructor.params;
-    let properties = meta
+    let properties = members
         .class_properties
         .iter()
         .map(|property| {

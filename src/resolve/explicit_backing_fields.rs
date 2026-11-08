@@ -85,7 +85,7 @@ impl Checker<'_> {
                 })
                 .filter(|ty| !ty.mentions_error() && !ty.mentions_pending());
 
-            let property_suppression_depth = self.push_declaration_policies(
+            let property_suppression_depth = self.push_property_declaration_policies(
                 field_scope,
                 &property.annotations,
                 &property.annotation_args,

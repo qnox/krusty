@@ -103,7 +103,17 @@ fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
         &mut diags,
     );
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
-    (artifacts, diags.diags.into_iter().map(|d| d.msg).collect())
+    (
+        artifacts,
+        diags
+            .diags
+            .into_iter()
+            .map(|d| {
+                d.message(krusty::diag::DiagnosticNames::Hidden)
+                    .into_owned()
+            })
+            .collect(),
+    )
 }
 
 /// Compile, link with krusty's linker, and run; the process outcome is the caller's to judge.

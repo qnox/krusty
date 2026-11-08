@@ -124,6 +124,90 @@ fn jvm_production_stream_captures_anonymous_receiver_in_accessor_lambda() {
     );
 }
 
+/// Each artifact is attributed to the input it was emitted for: a file's nested and anonymous classes
+/// to that file, a multifile part to its own file, and the facade assembled from both parts and the
+/// module file to the module.
+#[test]
+fn jvm_production_stream_attributes_each_artifact_to_its_input() {
+    let inputs = [
+        SourceInput::kotlin(
+            r#"@file:JvmMultifileClass
+            @file:JvmName("Shared")
+
+            class Outer {
+                class Nested
+            }
+
+            fun first(): Any = object {}"#,
+        )
+        .with_file_stem("First"),
+        SourceInput::kotlin(
+            r#"@file:JvmMultifileClass
+            @file:JvmName("Shared")
+
+            fun second(): Int = 2"#,
+        )
+        .with_file_stem("Second"),
+    ];
+    let stems = ["First".to_string(), "Second".to_string()];
+    let mut paths = Vec::new();
+    if let Some(stdlib) = crate::jvm::kotlin_stdlib_jar() {
+        paths.push(stdlib);
+    }
+    if let Some(jdk) = crate::jvm::classpath::platform_jdk_modules(None) {
+        paths.push(jdk);
+    }
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        crate::frontend::PlatformProvider::jvm(Box::new(initialized_jvm_libraries(
+            classpath.clone(),
+        ))),
+        &LangFeatures::new(),
+        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
+        &mut diagnostics,
+    );
+
+    let mut origins = std::collections::BTreeMap::new();
+    emit_analyzed_with_origins_to(
+        analysis,
+        &stems,
+        &crate::jvm::JvmBackend::new(classpath),
+        "main",
+        &mut diagnostics,
+        &mut |origin, (path, _)| {
+            assert_eq!(origins.insert(path, origin), None);
+        },
+    );
+
+    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+    assert_eq!(
+        origins,
+        std::collections::BTreeMap::from([
+            ("Outer.class".to_string(), ArtifactOrigin::Source(0)),
+            ("Outer$Nested.class".to_string(), ArtifactOrigin::Source(0)),
+            (
+                "Shared__FirstKt.class".to_string(),
+                ArtifactOrigin::Source(0)
+            ),
+            (
+                "Shared__FirstKt$first$1.class".to_string(),
+                ArtifactOrigin::Source(0)
+            ),
+            (
+                "Shared__SecondKt.class".to_string(),
+                ArtifactOrigin::Source(1)
+            ),
+            ("Shared.class".to_string(), ArtifactOrigin::Module),
+            (
+                "META-INF/main.kotlin_module".to_string(),
+                ArtifactOrigin::Module
+            ),
+        ])
+    );
+}
+
 struct SharedClassCaptureBackend;
 
 struct PackageDeclarationBackend;
@@ -199,7 +283,7 @@ fn unattributed_signature_failure_reports_one_deterministic_internal_error() {
     );
     assert!(diagnostic.identity.is_none());
     assert_eq!(
-        diagnostics.render_all(&[("Recovery.kt", "")]),
+        diagnostics.render_all(&[("Recovery.kt", "")], crate::diag::DiagnosticNames::Hidden),
         "Recovery.kt:1:1: error: internal error: module signatures were not finalized and no source diagnostic explains it\n"
     );
 }

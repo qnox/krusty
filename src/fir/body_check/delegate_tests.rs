@@ -10,7 +10,10 @@ fn expressions(body: &FirBody) -> impl Iterator<Item = &FirExpr> {
     })
 }
 
-fn assert_production_frontend_accepts(source: &str) {
+fn production_analysis(
+    source: &str,
+    diagnostics: &mut crate::diag::DiagSink,
+) -> crate::frontend::SourceSetAnalysis {
     let inputs = [crate::source::SourceInput::kotlin(source).with_file_stem("DelegateFir")];
     let stems = ["DelegateFir".to_string()];
     let mut paths = Vec::new();
@@ -21,8 +24,7 @@ fn assert_production_frontend_accepts(source: &str) {
         paths.push(jdk);
     }
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
-    let mut diagnostics = crate::diag::DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
@@ -30,13 +32,60 @@ fn assert_production_frontend_accepts(source: &str) {
         )),
         &crate::features::LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
-        &mut diagnostics,
-    );
+        diagnostics,
+    )
+}
 
+fn assert_production_frontend_accepts(source: &str) {
+    let mut diagnostics = crate::diag::DiagSink::new();
+    let analysis = production_analysis(source, &mut diagnostics);
     let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
-
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+}
+
+fn checked_production_function_body(source: &str, function_name: &str) -> FirBody {
+    struct FunctionBody<'a> {
+        name: &'a str,
+        selected: Option<FirBody>,
+    }
+
+    impl crate::compiler::CheckedBodyObserver for FunctionBody<'_> {
+        fn begin_module(&mut self, _module: crate::compiler::ObservedModule<'_>) {}
+
+        fn observe(&mut self, observed: crate::compiler::ObservedBody<'_>) {
+            let declaration = DeclarationId::from_raw(observed.owner.raw());
+            if observed
+                .declarations
+                .function(observed.file, declaration)
+                .is_some_and(|function| function.name == self.name)
+            {
+                assert!(
+                    self.selected.is_none(),
+                    "one selected function body expected"
+                );
+                self.selected = Some(observed.body.clone());
+            }
+        }
+    }
+
+    let mut diagnostics = crate::diag::DiagSink::new();
+    let analysis = production_analysis(source, &mut diagnostics);
+    let mut observer = FunctionBody {
+        name: function_name,
+        selected: None,
+    };
+    crate::compiler::lower_analyzed_observing(
+        analysis,
+        &["DelegateFir".to_string()],
+        "main",
+        &mut observer,
+        &mut diagnostics,
+    );
+    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+    observer
+        .selected
+        .expect("the production pass checks the selected body")
 }
 
 #[test]
@@ -308,6 +357,12 @@ fn member_extension_delegate_keeps_its_independent_dispatch_receiver() {
             crate::fir::FirLocalDelegateDispatchParameter::ImplicitReceiver(
                 crate::fir::FirCapturedReceiver::Enclosing {
                     classifier: crate::types::type_name("Scope"),
+                    owner: Some(crate::fir::EnclosingInstanceOwner {
+                        declaration: index
+                            .classifier_declaration(crate::types::type_name("Scope"))
+                            .expect("the selected dispatch owner's declaration"),
+                        kind: crate::fir::EnclosingInstanceKind::Classifier,
+                    }),
                 },
             )
         ),
@@ -364,6 +419,83 @@ fn local_class_inferred_callable_property_is_visible_to_the_enclosing_body() {
             return Local("O").read()
         }"#,
     );
+}
+
+#[test]
+fn an_anonymous_member_with_its_own_delegate_does_not_capture_an_unused_outer_delegate() {
+    let body = checked_production_function_body(
+        &format!(
+            "{DELEGATE}fun make(): String {{
+                val outer by Delegate(\"O\")
+                val holder = object {{
+                    fun read(): String {{ val inner by Delegate(\"K\"); return inner }}
+                }}
+                return outer + holder.read()
+            }}"
+        ),
+        "make",
+    );
+    let [outer] = body.local_delegate_plans() else {
+        panic!("the enclosing body retains its own delegate plan")
+    };
+    assert_eq!(outer.storage_type.get(), Ty::obj("Delegate"));
+    assert_eq!(outer.property_type.get(), Ty::String);
+    assert_eq!(local_delegate_access_plans(&body), [outer.declaration]);
+    let objects = expressions(&body)
+        .filter_map(|expression| match &expression.kind {
+            FirExprKind::AnonymousObject(object) => Some(object),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [object] = objects.as_slice() else {
+        panic!("one anonymous member owner expected")
+    };
+    assert!(object.captures.is_empty(), "{:?}", object.captures);
+}
+
+#[test]
+fn an_anonymous_member_read_captures_the_selected_delegate_storage_identity() {
+    let body = checked_production_function_body(
+        &format!(
+            "{DELEGATE}fun make(): Any {{
+                val outer by Delegate(\"OK\")
+                return object {{ fun read(): String = outer }}
+            }}"
+        ),
+        "make",
+    );
+    let [outer] = body.local_delegate_plans() else {
+        panic!("the selected outer property retains its semantic delegate plan")
+    };
+    assert_eq!(outer.storage_type.get(), Ty::obj("Delegate"));
+    assert_eq!(outer.property_type.get(), Ty::String);
+    let objects = expressions(&body)
+        .filter_map(|expression| match &expression.kind {
+            FirExprKind::AnonymousObject(object) => Some(object),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [object] = objects.as_slice() else {
+        panic!("one anonymous member owner expected")
+    };
+    let [capture] = object.captures.as_ref() else {
+        panic!(
+            "one selected delegate storage capture expected: {:?}",
+            object.captures
+        )
+    };
+    assert!(capture.stored);
+    assert!(!capture.shared_cell);
+    assert_eq!(capture.ty, outer.storage_type);
+    let FirExprKind::Block { statements, .. } = &body.expr(root_expression(&body)).unwrap().kind
+    else {
+        panic!("function body must remain a checked block")
+    };
+    let FirStatementKind::Local { target, .. } = &body.statement(statements[0]).unwrap().kind
+    else {
+        panic!("the first local owns the delegate storage")
+    };
+    assert_eq!(capture.source, FirLocalClassCaptureSource::Value(*target));
 }
 
 #[test]

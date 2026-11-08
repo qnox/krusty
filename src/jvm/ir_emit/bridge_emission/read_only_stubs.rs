@@ -10,20 +10,23 @@
 //! follows the stub; an implementation of it gets kotlinc's final special bridge under the JVM
 //! name, `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE`, and the erased bridge forwards to that.
 
+use super::super::value_class_adapters::emit_value_class_box_adapter;
 use super::super::{
-    box_prim_free, discard, emit_return, finish_code_sig, jvm_tys, load, local_variable_desc,
+    box_prim_free, discard, emit_return, finish_code_sig, load, local_variable_desc,
     method_descriptor, slot_words, unbox_prim_from, ClassWriter, CodeBuilder, EmitEnv,
     JvmSignatureFormatter,
 };
 use crate::ir::{IrClass, IrFile};
+use crate::jvm::bridge_adaptations::ValueClassAdapter;
 use crate::jvm::collection_barriers::BarrierOutcome;
 use crate::jvm::read_only_collection_stubs::{ReadOnlyStub, StubBarrier, StubBody};
-use crate::types::Ty;
+use crate::types::{wk, Ty};
 
 const MESSAGE: &str = "Operation is not supported for read-only collection";
 const EXCEPTION: &str = "java/lang/UnsupportedOperationException";
 
-/// The stubs follow the class's declared members, in the mutable declarations' member order.
+/// The stubs follow the class's declared members, in the mutable declarations' member order. Each
+/// is written once: a value class writes its stubs ahead of its bridges.
 pub(super) fn emit_stubs(ir: &IrFile, class: &IrClass, cw: &mut ClassWriter, env: &EmitEnv<'_>) {
     let formatter = JvmSignatureFormatter::new(ir, env);
     let stubs = env
@@ -31,28 +34,33 @@ pub(super) fn emit_stubs(ir: &IrFile, class: &IrClass, cw: &mut ClassWriter, env
         .read_only_stubs
         .for_class(class.fq_name_id());
     for stub in stubs.iter().filter(|stub| stub.body == StubBody::Throwing) {
-        let parameters = jvm_tys(&stub.parameters);
-        let descriptor = method_descriptor(&parameters, stub.physical_result());
+        let parameters = &stub.realized.parameters;
+        let descriptor = method_descriptor(parameters, stub.realized.result);
+        // A value class's stubs are written before its representation members.
+        if cw.has_method(&stub.realized.name, &descriptor) {
+            continue;
+        }
+        let signature_parameters = stub.signature_parameters();
         let signature_result = stub.signature_result();
         let signature = if stub.declaration_site_wildcards {
             formatter.method_positions_with_declaration_site_wildcards(
-                &stub.parameters,
+                &signature_parameters,
                 &signature_result,
             )
         } else {
-            formatter.method_positions(&stub.parameters, &signature_result)
+            formatter.method_positions(&signature_parameters, &signature_result)
         }
         .filter(|signature| *signature != descriptor);
         let method = ThrowingMethod {
-            name: &stub.physical_name,
-            parameters: &parameters,
+            name: &stub.realized.name,
+            parameters,
             parameter_names: &stub.parameter_names,
             descriptor: &descriptor,
             signature: signature.as_deref(),
         };
         emit_throwing::<0x0001>(class, cw, &method);
         if stub.is_renamed() && stub.bridge.is_some() {
-            emit_stub_bridge(class, cw, stub);
+            emit_stub_bridge(class, cw, &formatter, stub);
         }
     }
 }
@@ -63,10 +71,11 @@ pub(super) fn emit_stubs(ir: &IrFile, class: &IrClass, cw: &mut ClassWriter, env
 /// because kotlinc appends the stubs after every other member.
 pub(super) struct StubBridges<'a> {
     pending: Vec<&'a ReadOnlyStub>,
+    formatter: JvmSignatureFormatter<'a>,
 }
 
 impl<'a> StubBridges<'a> {
-    pub(super) fn of(class: &IrClass, env: &'a EmitEnv<'_>) -> Self {
+    pub(super) fn of(ir: &'a IrFile, class: &IrClass, env: &'a EmitEnv<'_>) -> Self {
         let mut pending: Vec<&ReadOnlyStub> = env
             .collection_members
             .read_only_stubs
@@ -83,7 +92,10 @@ impl<'a> StubBridges<'a> {
             StubBody::Implemented { order, .. } => (0, *order),
             StubBody::Throwing => (1, 0),
         });
-        Self { pending }
+        Self {
+            pending,
+            formatter: JvmSignatureFormatter::new(ir, env),
+        }
     }
 
     /// Emit the bridges of the class's own members declared before the member whose ordinary
@@ -97,19 +109,24 @@ impl<'a> StubBridges<'a> {
             )
             .count();
         for stub in self.pending.drain(..ready) {
-            emit_stub_bridge(class, cw, stub);
+            emit_stub_bridge(class, cw, &self.formatter, stub);
         }
     }
 
     /// Emit every bridge not yet emitted.
     pub(super) fn emit_rest(self, class: &IrClass, cw: &mut ClassWriter) {
-        for stub in self.pending {
-            emit_stub_bridge(class, cw, stub);
+        for stub in &self.pending {
+            emit_stub_bridge(class, cw, &self.formatter, stub);
         }
     }
 }
 
-fn emit_stub_bridge(class: &IrClass, cw: &mut ClassWriter, stub: &ReadOnlyStub) {
+fn emit_stub_bridge(
+    class: &IrClass,
+    cw: &mut ClassWriter,
+    formatter: &JvmSignatureFormatter<'_>,
+    stub: &ReadOnlyStub,
+) {
     if let StubBody::Implemented {
         target,
         target_result,
@@ -120,6 +137,7 @@ fn emit_stub_bridge(class: &IrClass, cw: &mut ClassWriter, stub: &ReadOnlyStub) 
             name: &stub.name,
             parameters: target,
             result: *target_result,
+            result_box: None,
         };
         if stub.is_renamed() {
             // kotlinc's special bridge: the implementation under the builtin's JVM name.
@@ -163,38 +181,15 @@ fn emit_stub_bridge(class: &IrClass, cw: &mut ClassWriter, stub: &ReadOnlyStub) 
             );
             return;
         };
-        // kotlinc's special bridge of a type-safe declaration is final, not synthetic, and tests
-        // each checked argument before the call. When the implementation's reference result is
-        // narrower than the erased one, it is two methods: a final synthetic copy at the erased
-        // descriptor, then the final bridge at the implementation's result
-        // (`Object remove(Object)`, then `Integer remove(Object)`).
-        let checked = Some((barrier, stub.override_parameters.as_slice()));
-        let narrower =
-            target.result != *result && target.result.is_reference() && result.is_reference();
-        if !narrower {
-            emit_forwarding::<{ 0x0001 | 0x0010 | 0x0040 }>(
-                class, cw, &target, &method, *result, checked,
-            );
-            return;
-        }
-        emit_forwarding::<{ 0x0001 | 0x0010 | 0x0040 | 0x1000 }>(
-            class, cw, &target, &method, *result, checked,
+        emit_type_safe_special_bridges(
+            class,
+            cw,
+            &target,
+            &method,
+            *result,
+            (barrier, &stub.override_parameters),
+            None,
         );
-        let narrowed = method_descriptor(parameters, target.result);
-        if !cw.has_method(&stub.physical_name, &narrowed) {
-            let special = ThrowingMethod {
-                descriptor: &narrowed,
-                ..method
-            };
-            emit_forwarding::<{ 0x0001 | 0x0010 | 0x0040 }>(
-                class,
-                cw,
-                &target,
-                &special,
-                target.result,
-                checked,
-            );
-        }
         return;
     }
     let (parameters, result) = stub
@@ -214,23 +209,102 @@ fn emit_stub_bridge(class: &IrClass, cw: &mut ClassWriter, stub: &ReadOnlyStub) 
     };
     if stub.type_safe {
         // A type-safe stub already takes the erased parameters: its bridge calls it.
-        let stub_parameters = jvm_tys(&stub.parameters);
         let target = Target {
-            name: &stub.physical_name,
-            parameters: &stub_parameters,
-            result: stub.physical_result(),
+            name: &stub.realized.name,
+            parameters: &stub.realized.parameters,
+            result: stub.realized.result,
+            result_box: stub.realized.result_box,
         };
+        // A stub renamed by its value-class result leaves the declaration's special bridges to
+        // kotlinc's bridge lowering, which checks each argument against the stub's own `Any?`.
+        // The final special bridge declares the stub's semantic result (`Z<Int>?`).
+        if let Some(barrier) = stub
+            .barrier
+            .filter(|_| stub.realized.name != stub.physical_name)
+        {
+            let narrowed = method_descriptor(parameters, target.result);
+            let signature = formatter
+                .method_positions(&stub.parameters, &stub.signature_result())
+                .filter(|signature| *signature != narrowed);
+            emit_type_safe_special_bridges(
+                class,
+                cw,
+                &target,
+                &method,
+                *result,
+                (barrier, &stub.parameters),
+                signature.as_deref(),
+            );
+            return;
+        }
         emit_forwarding::<{ 0x0001 | 0x0040 | 0x1000 }>(class, cw, &target, &method, *result, None);
         return;
     }
     emit_throwing::<{ 0x0001 | 0x0040 | 0x1000 }>(class, cw, &method);
 }
 
-/// The member a bridge forwards to, by its JVM name and physical descriptor.
-struct Target<'a> {
-    name: &'a str,
-    parameters: &'a [Ty],
-    result: Ty,
+/// kotlinc's special bridge of a type-safe declaration is final, not synthetic, and tests each
+/// checked argument against the target's declared parameter before the call. When the target's
+/// reference result is narrower than the erased one, it is two methods: a final synthetic copy at
+/// the erased descriptor, then the final bridge at the target's result (`Object remove(Object)`,
+/// then `Integer remove(Object)`), the latter with its generic `signature`, if any.
+fn emit_type_safe_special_bridges(
+    class: &IrClass,
+    cw: &mut ClassWriter,
+    target: &Target<'_>,
+    method: &ThrowingMethod<'_>,
+    erased_result: Ty,
+    (barrier, declared): (StubBarrier, &[Ty]),
+    signature: Option<&str>,
+) {
+    let checked = Some((barrier, declared));
+    let narrower = target.result != erased_result
+        && target.result.is_reference()
+        && erased_result.is_reference();
+    if !narrower {
+        emit_forwarding::<{ 0x0001 | 0x0010 | 0x0040 }>(
+            class,
+            cw,
+            target,
+            method,
+            erased_result,
+            checked,
+        );
+        return;
+    }
+    emit_forwarding::<{ 0x0001 | 0x0010 | 0x0040 | 0x1000 }>(
+        class,
+        cw,
+        target,
+        method,
+        erased_result,
+        checked,
+    );
+    let narrowed = method_descriptor(method.parameters, target.result);
+    if !cw.has_method(method.name, &narrowed) {
+        let special = ThrowingMethod {
+            descriptor: &narrowed,
+            signature,
+            ..*method
+        };
+        emit_forwarding::<{ 0x0001 | 0x0010 | 0x0040 }>(
+            class,
+            cw,
+            target,
+            &special,
+            target.result,
+            checked,
+        );
+    }
+}
+
+/// The member a bridge forwards to, by its JVM name and physical descriptor, and the value class
+/// whose carrier it returns where an erased reference result expects the box.
+pub(super) struct Target<'a> {
+    pub(super) name: &'a str,
+    pub(super) parameters: &'a [Ty],
+    pub(super) result: Ty,
+    pub(super) result_box: Option<ValueClassAdapter>,
 }
 
 /// The bridge of an implemented member: each erased argument is cast or unboxed to the
@@ -238,7 +312,7 @@ struct Target<'a> {
 /// result is discarded for a `void` bridge (a `Nothing` member's `Void`) or boxed back to the
 /// erased result when that is a reference. A type-safe declaration's bridge first tests each
 /// checked argument against its declared type.
-fn emit_forwarding<const ACCESS: u16>(
+pub(super) fn emit_forwarding<const ACCESS: u16>(
     class: &IrClass,
     cw: &mut ClassWriter,
     target: &Target<'_>,
@@ -247,7 +321,7 @@ fn emit_forwarding<const ACCESS: u16>(
     barrier: Option<(StubBarrier, &[Ty])>,
 ) {
     let targets = target.parameters;
-    cw.reserve_method_pool(bridge.name, bridge.descriptor, None, &[]);
+    cw.reserve_method_pool(bridge.name, bridge.descriptor, bridge.signature, &[]);
     let words: u16 = bridge.parameters.iter().map(|ty| slot_words(*ty)).sum();
     let mut code = CodeBuilder::new(1 + words);
     if let Some((barrier, declared)) = barrier {
@@ -300,7 +374,15 @@ fn emit_forwarding<const ACCESS: u16>(
             erased_result.is_reference(),
             "a read-only collection bridge returns an erased reference, got {erased_result:?}"
         );
-        if result.is_jvm_scalar() {
+        if let Some(value_class) = target.result_box {
+            emit_value_class_box_adapter(
+                cw,
+                &mut code,
+                value_class.owner,
+                result,
+                value_class.null_preserving,
+            );
+        } else if result.is_jvm_scalar() {
             box_prim_free(cw, &mut code, result);
         }
     }
@@ -311,7 +393,7 @@ fn emit_forwarding<const ACCESS: u16>(
         bridge.descriptor,
         &mut code,
         1 + words,
-        None,
+        bridge.signature,
     );
     let line = if class.decl_start_line == 0 {
         class.decl_line
@@ -329,6 +411,8 @@ fn emit_forwarding<const ACCESS: u16>(
 
 /// kotlinc's test of one checked argument at `slot` against the declared type it reaches the
 /// implementation as: `instanceof` of its class, which a `null` passes when the type admits it.
+/// Every argument is an `Any?`: kotlinc lowers that test to `arg == null || arg != null` and its
+/// codegen keeps only the null test, which reaches the call on both of its branches.
 fn emit_type_check(
     cw: &mut ClassWriter,
     code: &mut CodeBuilder,
@@ -337,6 +421,13 @@ fn emit_type_check(
     physical: Ty,
     outcome: BarrierOutcome,
 ) {
+    if declared.is_nullable() && declared.non_null().obj_internal() == Some(wk::any()) {
+        let next = code.new_label();
+        code.aload(slot);
+        code.ifnonnull(next);
+        code.bind(next);
+        return;
+    }
     let class = cw.class_ref(&declared.jvm_boxed_ref().map_or_else(
         || crate::jvm::names::instanceof_internal_name(physical),
         crate::jvm::names::instanceof_internal_name,
@@ -372,12 +463,15 @@ fn method_locals(class: &IrClass, method: &ThrowingMethod) -> Vec<(String, Strin
     locals
 }
 
-struct ThrowingMethod<'a> {
-    name: &'a str,
-    parameters: &'a [Ty],
-    parameter_names: &'a [String],
-    descriptor: &'a str,
-    signature: Option<&'a str>,
+#[derive(Clone, Copy)]
+/// A method a stub or bridge writes: its JVM name, parameters with their names, descriptor, and
+/// generic signature.
+pub(super) struct ThrowingMethod<'a> {
+    pub(super) name: &'a str,
+    pub(super) parameters: &'a [Ty],
+    pub(super) parameter_names: &'a [String],
+    pub(super) descriptor: &'a str,
+    pub(super) signature: Option<&'a str>,
 }
 
 fn emit_throwing<const ACCESS: u16>(

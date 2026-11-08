@@ -18,7 +18,7 @@ pub(crate) fn unify_receiver_from_symbols(
     receiver: Ty,
     bindings: &mut GSigBinds,
 ) {
-    let bound_before = bindings.keys().cloned().collect::<Vec<_>>();
+    let bound_before = bindings.keys().copied().collect::<Vec<_>>();
     unify_ty_from_symbols(source, declared, receiver, bindings);
     let mut occurrences = Vec::new();
     receiver_occurrence_constraints(
@@ -30,7 +30,7 @@ pub(crate) fn unify_receiver_from_symbols(
     );
     let mut formals = Vec::<&String>::new();
     for (formal, _, _) in &occurrences {
-        if !formals.contains(&formal) && !bound_before.contains(formal) {
+        if !formals.contains(&formal) && !bound_before.iter().any(|bound| **bound == **formal) {
             formals.push(formal);
         }
     }
@@ -52,7 +52,7 @@ pub(crate) fn unify_receiver_from_symbols(
         } else {
             continue;
         };
-        solved.insert(formal.clone(), solution);
+        solved.insert(formal.into(), solution);
     }
     bindings.extend(solved);
 }

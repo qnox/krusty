@@ -48,6 +48,7 @@ mod class_lambda_reflection;
 mod class_literals;
 mod class_mode_lambda_members;
 mod class_pool_seed;
+mod collection_to_array;
 mod companion_blocks;
 mod comparison_branches;
 mod condition_emission;
@@ -66,6 +67,7 @@ mod declaration_types;
 mod declared_nullability;
 mod declared_property_access;
 mod declared_property_accessor;
+use declared_property_accessor::accessor_jvm_names;
 mod default_impls;
 mod delegated_property_array;
 mod field_nullability;
@@ -635,25 +637,6 @@ impl JvmDefaultMode {
     }
 }
 
-/// Drop every implicit not-null guard on a narrowed platform value.
-///
-/// `-Xno-call-assertions` removes the null checks kotlinc emits where a Java call's `T!` result is
-/// committed to a declared non-null type. The guard is an expression wrapper, so it is removed by
-/// rewriting the node into its operand's value: `x!!` is a SOURCE assertion the flag leaves alone.
-pub(crate) fn strip_call_assertions(ir: &mut IrFile) {
-    for expr in &mut ir.exprs {
-        let IrExpr::NotNullAssert { operand, check } = expr else {
-            continue;
-        };
-        if check.is_implicit() {
-            *expr = IrExpr::Block {
-                stmts: Vec::new(),
-                value: Some(*operand),
-            };
-        }
-    }
-}
-
 /// The primary constructor's JVM descriptor: every constructor argument, property-backed or plain.
 fn primary_ctor_descriptor(ir: &IrFile, c: &IrClass) -> String {
     format!("({})V", primary_ctor_parameter_descs(ir, c))
@@ -737,27 +720,6 @@ fn value_class_is_readable(ir: &IrFile, fq_name: crate::types::TypeName) -> bool
     }
     !ir.module_source_value_classes.contains(&fq_name)
         || ir.module_readable_value_classes.contains(&fq_name)
-}
-
-/// The JVM accessor spellings a class's synthesized property accessors are emitted under: the value-class
-/// pass's stamp when the plain convention is not the physical ABI (`val k: K` → `getK-XLNMDGE`), else the
-/// convention itself. The constant-pool seeder, the debug tables (`LineNumberTable`/`LocalVariableTable`)
-/// and the `@Metadata` record all key on the accessor by NAME, so they must ask the same question the
-/// emission does — a seeded/annotated `getK` beside an emitted `getK-XLNMDGE` interns a constant nothing
-/// uses, drops the accessor's debug info, and (in the record) advertises a method that does not exist.
-/// The convention itself is [`crate::names::property_getter_name`] — the same helper the accessor
-/// EMISSION uses, so a Kotlin `is`-prefixed property (`val isOpen`, whose accessor keeps the source
-/// name rather than becoming `getIsOpen`) is spelled one way everywhere.
-fn accessor_jvm_names(c: &crate::ir::IrClass, field_name: &str) -> (String, String) {
-    let declaration = c.properties.iter().find(|p| p.name == field_name);
-    (
-        declaration
-            .and_then(|p| p.getter_jvm_name.clone())
-            .unwrap_or_else(|| crate::names::property_getter_name(field_name)),
-        declaration
-            .and_then(|p| p.setter_jvm_name.clone())
-            .unwrap_or_else(|| crate::names::property_setter_name(field_name)),
-    )
 }
 
 /// The primary constructor's declared annotations in class-file order — RUNTIME-visible first, then
@@ -846,7 +808,7 @@ fn attach_synth_nullability(
         let Some(a) = ann(hoisted.ty) else {
             continue;
         };
-        let (getter, setter) = accessor_jvm_names(c, &property.name);
+        let (getter, setter) = accessor_jvm_names(ir, c, &property.name);
         let pd = desc(hoisted.ty);
         if property
             .getter
@@ -886,16 +848,16 @@ fn attach_synth_nullability(
         let Some(a) = declared_property_annotation(c, index) else {
             continue;
         };
-        let (getter, setter) = accessor_jvm_names(c, &f.name);
+        let (getter, setter) = accessor_jvm_names(ir, c, &f.name);
         // The accessor's own descriptor: an explicit backing field (`val x: Any? field: String`)
         // stores a narrower type than the getter returns.
         let accessor_desc = c
             .properties
             .iter()
-            .find(|property| property.backing_field == Some(index as u32))
+            .position(|property| property.backing_field == Some(index as u32))
             .map_or_else(
                 || desc(f.ty),
-                |property| desc(declared_property_accessor_jvm(ir, property, f)),
+                |property| desc(declared_property_accessor_jvm(ir, c, property as u32, f)),
             );
         cw.set_method_nullability(&getter, &format!("(){accessor_desc}"), Some(a), &[]);
         if !f.is_final() {
@@ -2428,8 +2390,7 @@ fn emit_class(
         markers: &markers,
         byte_parity,
     };
-    // A value class's declared members and `Any` overrides precede its private primary `<init>`,
-    // which its generated representation members follow; every other class starts with `<init>`.
+    // A value class's members precede its `<init>`, which the representation members follow.
     let (before_primary, after_primary) = split_around_primary_constructor(
         ir,
         c,
@@ -2439,6 +2400,7 @@ fn emit_class(
         emit_scheduled_member(&member_emission, member, &mut cw);
     }
     if c.is_value {
+        bridge_emission::emit_value_class_stubs(ir, c, &mut cw, env);
         inherited_default_forwarders::emit_value_class_inherited_defaults(ir, c, &mut cw, env);
     }
     seed_value_ctor_after_members(byte_parity, pool_seed(), &mut cw);
@@ -2812,6 +2774,7 @@ fn emit_class(
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
     accessor_emission_order::emit(ir, c, &fq_name, facade, env, &mut cw);
+    collection_to_array::emit(c, &mut cw, env);
     if !static_storage(ir, c) {
         static_fields::emit_class_static_initializer(
             ir,
@@ -2997,18 +2960,6 @@ fn finish_code_sig<const ACCESS: u16>(
     code.ensure_locals(locals);
     code.link();
     cw.add_method_sig(ACCESS, name, desc, code, signature);
-}
-
-/// `Arrays.equals`/`Arrays.hashCode`/`Arrays.toString` parameter descriptor for an array member: a
-/// primitive specialized array has its own overload (`[I`), a reference `Array<T>` uses
-/// `[Ljava/lang/Object;` (array covariance lets a `String[]`/`Enum[]` flow in). Keyed off the array
-/// KIND (its class), not the element — `Array<Int>` is a reference `Integer[]`, not `[I`.
-fn arrays_param_desc(array: Ty) -> String {
-    if array.is_reference_array() {
-        "[Ljava/lang/Object;".to_string()
-    } else {
-        type_descriptor(array)
-    }
 }
 
 /// Emit an `interface`: `ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT`, extends `java/lang/Object`. A method
@@ -3839,6 +3790,7 @@ fn emit_enum_class(
         static_accessors::class_declaration_line(c),
         &mut cw,
     );
+    collection_to_array::emit(c, &mut cw, env);
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
     // their names, descriptors and body constants between the entry constants and `<clinit>`, so
     // building the initializer earlier claimed those pool slots first.
@@ -4250,7 +4202,7 @@ fn emit_placed_method(
     let declared_nullability::DeclaredNullability {
         result: ret_ann,
         parameters: param_anns,
-    } = override_result_emission::declared_nullability(ir, e.override_results, fid);
+    } = override_result_emission::declared_nullability(ir, env, fid);
     let emitted_param_anns = holder_receiver.map_or_else(
         || param_anns.clone(),
         |_| {
@@ -5387,8 +5339,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_value_expression(&mut self, e: u32, code: &mut CodeBuilder) {
-        debug_lines::begin_expression(self.ir, e, code);
-        self.mark_value_expression_start(e, code);
+        self.mark_value_entry_lines(e, code);
         // Mark a machine-owned suspension at its post-splice location.
         let suspension = self.machine_before(e, code);
         self.open_transformed_suspension(e, code);

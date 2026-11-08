@@ -7,7 +7,6 @@
 use super::class_headers::{self, ClassMemberHeader};
 use super::decline::KlibBodyDeclineReason;
 use super::klib_types::semantic_type;
-use crate::fx_hash::HashSet;
 use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies};
 use crate::libraries::{
     KlibBodyCallable, KlibClassStorage, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
@@ -40,6 +39,7 @@ fn mismatch(detail: &str) -> KlibBodyDeclineReason {
 pub(super) fn plan<'a, 'b>(
     selected: KlibBodyCallable<'a>,
     bodies: &'b KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
 ) -> Result<Option<ClassInitialization<'a, 'b>>, KlibBodyDeclineReason> {
     let header = class_headers::authenticate(selected, bodies)?;
     let contract = header.contract;
@@ -95,7 +95,9 @@ pub(super) fn plan<'a, 'b>(
         .this_receiver
         .as_ref()
         .ok_or_else(|| mismatch("a materialized class has no serialized instance receiver"))?;
-    if semantic_type(header.arena, &header.types, receiver.ty)? != contract.self_type() {
+    if semantic_type(header.arena, &header.types, receiver.ty)?
+        != class_headers::declared_receiver(contract)
+    {
         return Err(mismatch(
             "a class instance receiver has another declared type",
         ));
@@ -121,36 +123,18 @@ pub(super) fn plan<'a, 'b>(
             values,
         } => dispatch_receiver.is_none() && extension_receiver.is_none() && values.is_empty(),
     };
-    let delegate = match &access.symbol.signature {
-        KlibIrSignature::Public(signature) => bodies.callee_origin(
-            &contract.module,
-            &KlibDeclarationSignature::Public(signature.clone()),
-        ),
-        _ => {
-            return Err(mismatch(
-                "an ordinary class delegates to a non-public constructor",
-            ))
+    let root = match &access.symbol.signature {
+        KlibIrSignature::Public(signature) => {
+            super::ir_builtins::root_constructor(signature, || {
+                callees.validate_root_constructor(&contract.module, signature, bodies)
+            })?
         }
+        _ => false,
     };
-    let KlibCalleeOrigin::Exact(delegate) = delegate else {
-        return Err(mismatch(
-            "a superclass constructor has no unique producer identity",
-        ));
-    };
-    let superclass = bodies
-        .class_member_header(
-            &delegate,
-            &crate::metadata::id_signature::KlibPublicIdSignature::classifier(
-                crate::types::wk::any(),
-            ),
-        )
-        .map_err(mismatch)?;
     if access.symbol.kind != KlibIrSymbolKind::Constructor
         || !no_operands
         || !access.type_arguments.is_empty()
-        || !superclass.is_some_and(|member| {
-            member.function.constructor && member.function.regular_parameters.is_empty()
-        })
+        || !root
         || !matches!(&header.arena.expr(*initialize).kind,
             KlibIrExprKind::InstanceInitializerCall(class) if class == &header.class.base.symbol)
     {
@@ -158,41 +142,28 @@ pub(super) fn plan<'a, 'b>(
             "an ordinary class does not delegate to Any and initialize its own instance",
         ));
     }
-    let mut fields = Vec::new();
-    let mut field_declarations = Vec::new();
     let mut steps = Vec::new();
-    let mut identities = HashSet::default();
-    for member in &header.class.members {
-        if let KlibIrMember::AnonymousInitializer { base, statements } = member {
-            if base.flags != 0 {
-                return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                    "a static or flagged class initializer",
-                ));
+    let storage =
+        super::class_storage::authenticate(&header, declared_superclass, |member, field| {
+            if let KlibIrMember::AnonymousInitializer { base, statements } = member {
+                if base.flags != 0 {
+                    return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                        "a static or flagged class initializer",
+                    ));
+                }
+                steps.push(InitializationStep::Block(statements));
             }
-            steps.push(InitializationStep::Block(statements));
-        }
-        let field = super::class_storage::member_field(member);
-        let Some(field) = field else { continue };
-        let index = u32::try_from(fields.len()).expect("a field list fits u32");
-        fields.push(super::class_storage::declared_field(
-            &header,
-            field,
-            &mut identities,
-        )?);
-        field_declarations.push(field);
-        if let Some(value) = field.initializer {
-            steps.push(InitializationStep::Field { index, value });
-        }
-    }
-    let storage = KlibClassStorage {
-        declaration: header.contract.clone(),
-        superclass: declared_superclass,
-        fields,
-    };
+            if let Some((index, field)) = field {
+                if let Some(value) = field.initializer {
+                    steps.push(InitializationStep::Field { index, value });
+                }
+            }
+            Ok(())
+        })?;
     Ok(Some(ClassInitialization {
         header,
-        field_declarations,
-        storage,
+        field_declarations: storage.field_declarations,
+        storage: storage.storage,
         steps,
     }))
 }
@@ -201,8 +172,9 @@ pub(super) fn plan<'a, 'b>(
 pub(super) fn constructor_initialization_callees(
     selected: KlibBodyCallable<'_>,
     bodies: &KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
 ) -> Result<Option<Vec<KlibDependencyCallable>>, KlibBodyDeclineReason> {
-    let Some(plan) = plan(selected, bodies)? else {
+    let Some(plan) = plan(selected, bodies, callees)? else {
         return Ok(None);
     };
     let mut roots = Vec::new();

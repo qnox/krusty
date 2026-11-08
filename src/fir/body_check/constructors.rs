@@ -374,8 +374,18 @@ impl BodyFirChecker<'_> {
         )?;
         let outer_receiver = self.constructor_outer_receiver(expression, outer)?;
         let origin = self.expression_origin(expression)?;
-        let external_capture_arguments =
-            self.external_constructor_capture_arguments(declaration, origin)?;
+        let capture_plan = match self.info.expr_lowers.get(&expression) {
+            Some(ExprLowering::ConstructorCaptures(plan)) => Some(plan.as_ref().clone()),
+            _ => None,
+        };
+        let external_capture_arguments = self.external_constructor_capture_arguments(
+            declaration,
+            origin,
+            self.file
+                .expr_span(expression)
+                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
+            capture_plan.as_ref(),
+        )?;
         let outer_parameter =
             if outer_receiver.is_some() {
                 let outer = self
@@ -1183,10 +1193,50 @@ fn add_constructor_delegation(
             })
             .transpose()?
             .flatten();
-        Ok::<_, BodyCheckFailure>((arguments, outer_receiver))
+        let external_capture_arguments = match (&resolved.target, &target) {
+            (
+                ResolvedCtorDelegationTarget::Super { .. },
+                FirConstructorTarget::Module { declaration, .. },
+            ) => {
+                let declaration = checker
+                    .index
+                    .callable(*declaration)
+                    .ok_or_else(|| {
+                        checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    })?
+                    .declaration;
+                let owner = checker
+                    .index
+                    .enclosing_classifier(declaration)
+                    .ok_or_else(|| {
+                        checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    })?
+                    .declaration;
+                if checker.index.owns_local_capture_environment(owner) {
+                    if !checker.session.class_bodies.contains_key(&owner) {
+                        return Err(checker
+                            .failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget));
+                    }
+                    Some(
+                        checker
+                            .external_constructor_capture_arguments(
+                                declaration,
+                                origin,
+                                span,
+                                resolved.capture_plan.as_ref(),
+                            )?
+                            .unwrap_or_default(),
+                    )
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        Ok::<_, BodyCheckFailure>((arguments, outer_receiver, external_capture_arguments))
     })();
     checker.constructor_prefix_capture_access = previous_capture_access;
-    let (checked_arguments, outer_receiver) = checked_sources?;
+    let (checked_arguments, outer_receiver, external_capture_arguments) = checked_sources?;
     if resolved.outer_receiver.is_some() != outer_receiver.is_some() {
         return Err(checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget));
     }
@@ -1214,7 +1264,7 @@ fn add_constructor_delegation(
             })?,
             outer_parameter,
             outer_receiver,
-            external_capture_arguments: None,
+            external_capture_arguments,
             parameter_types: checker
                 .published_parameter_types(Some(span), resolved.target.params())?,
             arguments: checked_arguments,
@@ -1362,6 +1412,9 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
     let owner = BodyOwnerId::from_raw(work.target.raw());
     let mut checker = BodyFirChecker::new(unit, owner, span, origins, session);
     checker.constructor_prefix_capture_access = true;
+    checker
+        .bind_signature_constructor_capture_prefix(active, work.target, span)
+        .map_err(CheckedBodyDriverFailure::Check)?;
     bind_parameters_and_check_defaults(
         &mut checker,
         &parameters,

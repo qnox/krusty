@@ -1177,6 +1177,13 @@ impl<'a> CommonIrBodySink<'a> {
             };
             let class = &mut self.ir.classes[class as usize];
             for argument in &mut class.ctor_args {
+                if let crate::ir::IrCtorParameterProvenance::InterfaceDelegate { field, .. } =
+                    &mut argument.provenance
+                {
+                    *field = field
+                        .checked_add(1)
+                        .expect("inner-class field index overflow");
+                }
                 if let Some(field) = &mut argument.field_index {
                     *field = field
                         .checked_add(1)
@@ -1608,6 +1615,7 @@ impl<'a> CommonIrBodySink<'a> {
             .and_then(|root| body.statement(*root))
             .map_or(OriginId::from_raw(0), |statement| statement.origin);
         let expected_result = self.ir.functions[function as usize].ret;
+        let close_line = body.close_line();
         let lowered = lower_body_with_context(body, index, self.ir, &mut self.lowering_context)
             .map_err(FirFileLoweringFailure::Body)?;
         let result = lowered
@@ -1712,6 +1720,9 @@ impl<'a> CommonIrBodySink<'a> {
             self.ir.fn_continuation_ordinal.insert(function, ordinal);
         }
         self.ir.functions[function as usize].body = Some(body);
+        if close_line != 0 {
+            self.ir.fn_close_lines.insert(function, close_line);
+        }
 
         self.attach_callable_defaults(
             callable,

@@ -128,20 +128,16 @@ impl BodyLowering<'_> {
             Some(_) => return unsupported("an unmodelled constructor semantic role"),
             None => {}
         }
-        let construction = self.ir.add_expr(IrExpr::New {
+        Ok(self.ir.add_expr(IrExpr::New {
             internal: linked.declaration.classifier,
             args,
             ctor_params: Some(params),
+            declared_params: Some(linked.declaration.declared_parameters().into()),
             ctor_desc: None,
             external_target: Some(linked.target),
             defaults: defaults.into_boxed_slice(),
             default_prefix_count: 0,
-        });
-        self.ir.construction_declared_params.insert(
-            construction,
-            linked.declaration.declared_parameters().into(),
-        );
-        Ok(construction)
+        }))
     }
 }
 

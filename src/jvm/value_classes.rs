@@ -15,6 +15,7 @@ mod call_arguments;
 mod call_result_boundaries;
 mod call_results;
 mod class_annotations;
+pub(crate) mod collection_stub_replacements;
 mod constructor_arguments;
 mod constructor_bodies;
 mod declaration_inventory;
@@ -41,7 +42,6 @@ mod property_annotation_markers;
 mod property_references;
 mod reference_returns;
 mod representation;
-use representation::is_ref;
 mod result_tail_boxing;
 mod return_unboxing;
 mod sam_names;
@@ -72,11 +72,11 @@ pub(crate) use member_names::{member_signature_is_mangled, suspend_lambda_invoke
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::*;
 use operand_nullness::{operand_nonnull, operand_null_only};
-use representation::erase;
 pub(crate) use representation::{
-    boxed_value_class_carrier, boxed_value_class_names, boxed_value_class_underlying,
-    instance_representation, is_boxed_value_class, type_operation_internal_name,
+    boxed_value_class_carrier, boxed_value_class_underlying, instance_representation,
+    is_boxed_value_class, type_operation_internal_name,
 };
+use representation::{erase, is_ref};
 use result_tail_boxing::box_vc_tail;
 use suspend_results::{record_suspend_results, suspend_result_representation};
 use unboxing_rewrites::{narrow_wrap, unbox_call, unbox_wrap, unbox_wrap_nullable};
@@ -1856,9 +1856,9 @@ pub(crate) fn lower_value_classes(
                 args,
                 ctor_params,
                 ctor_desc: None,
-                external_target: _,
                 defaults,
                 default_prefix_count,
+                ..
             } if under.contains_key(internal) => {
                 let owner = *internal;
                 let u = under
@@ -2325,7 +2325,7 @@ pub(crate) fn lower_value_classes(
                 ir.record_realized_member_target(id, constructor, None);
                 // The construction becomes a static `constructor-impl` call over the same checked
                 // declaration parameters. A generic `T` parameter consumes its argument as a box.
-                if let Some(parameters) = ir.construction_declared_params.remove(&id) {
+                if let Some(parameters) = ir.construction_declared_params(id).map(Box::from) {
                     ir.call_declared_params.insert(id, parameters);
                 }
                 Some(expr)
@@ -3564,22 +3564,7 @@ pub(crate) fn lower_value_classes(
         if erased {
             property.ty = erase(&declared, &under);
         }
-        // The SETTER's name is decided by its parameter, not by the storage: a value-class
-        // parameter always contributes to the hash, whether the field behind it holds the carrier
-        // or the box. `var nullableScalar: Crate?` keeps a boxed field AND takes
-        // `setNullableScalar-<hash>(Crate)`, which tying the two decisions together left unmangled.
-        // (The getter keeps its plain name: a value-class RESULT alone contributes no hash inside a
-        // file class.)
-        if property.is_var && property.is_facade_owned() && !property.accessors.any_declared() {
-            property.setter_jvm_name = Some(vc_mangle(
-                &crate::names::property_setter_name(&property.name),
-                std::slice::from_ref(&declared),
-                &Ty::Unit,
-                &under,
-                false,
-                false,
-            ));
-        }
+        accessor_names::stamp_facade_setter(ir, si as u32, declared, &under);
     }
 
     let lambda_implementation_ids: HashSet<u32> = ir

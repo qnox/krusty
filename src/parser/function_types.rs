@@ -15,7 +15,7 @@ impl Parser<'_> {
     /// no `->` follows. The cursor is on the `(`.
     pub(super) fn parse_function_type_parameters(&mut self) -> Vec<TypeRef> {
         self.bump(); // '('
-        self.skip_newlines();
+        self.skip_semicolons();
         let mut params = Vec::new();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             // Optional parameter name `name: Type`.
@@ -40,9 +40,9 @@ impl Parser<'_> {
             if !self.eat(TokenKind::Comma) {
                 break;
             }
-            self.skip_newlines();
+            self.skip_semicolons();
         }
-        self.skip_newlines();
+        self.skip_semicolons();
         self.expect(TokenKind::RParen, "')'");
         params
     }

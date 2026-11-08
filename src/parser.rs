@@ -1,6 +1,6 @@
 //! Stage B: tokens → arena AST. Recursive descent for decls/stmts, Pratt for expressions with the
-//! Kotlin precedence table. Newlines (their own token) act as statement/expression terminators;
-//! they are skipped after binary operators and between statements/declarations.
+//! Kotlin precedence table. Line breaks are not tokens: each token records whether one precedes it,
+//! and only the line-sensitive grammar points consult that (see `parser/line_breaks.rs`).
 
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
@@ -28,6 +28,7 @@ mod for_loops;
 mod function_types;
 mod incdec;
 mod interface_delegation;
+mod label_syntax;
 mod lambda_literals;
 mod lexical_type_parameters;
 mod line_breaks;
@@ -93,7 +94,7 @@ fn parse_with_features_and_script(
     // would allocate and free a fresh grown segment — per statement. With it, the per-level
     // checks in `parse_bp` are a stack-pointer read that only grows on genuinely deep nesting.
     crate::wide_stack::on_wide_stack(|| p.parse_file());
-    p.skip_newlines();
+    p.skip_semicolons();
     if !p.at(TokenKind::Eof) || p.i + 1 != p.t.len() {
         p.diags.error(
             p.tok().span,
@@ -609,7 +610,14 @@ pub(crate) fn expanded_type_alias_target(
 
 struct Parser<'a> {
     src: &'a str,
-    t: &'a [Token],
+    /// The tokens the grammar reads: the lexer's tokens without physical line breaks. An explicit
+    /// `;` remains (as `TokenKind::Semicolon`, the lexer's spelling of it). Line breaks are recorded in
+    /// `newline_before` instead, which the few line-sensitive grammar points consult; everywhere
+    /// else Kotlin's grammar treats a line break as whitespace. See `parser/line_breaks.rs`.
+    t: Vec<Token>,
+    /// Whether a physical line break separates `t[i]` from the token before it (always true at
+    /// end of input), as kotlinc's `newlineBeforeCurrentToken`.
+    newline_before: Vec<bool>,
     i: usize,
     file: File,
     diags: &'a mut DiagSink,
@@ -787,9 +795,11 @@ impl<'a> Parser<'a> {
     ) -> Self {
         let mut file = File::default();
         file.is_script = script.is_some();
+        let (t, newline_before) = line_breaks::grammar_tokens(src, tokens);
         Self {
             src,
-            t: tokens,
+            t,
+            newline_before,
             i: 0,
             file,
             diags,
@@ -830,31 +840,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn push_lexical_type_params(
-        &mut self,
-        params: &[String],
-        bounds: &[(String, TypeRef)],
-    ) -> usize {
-        self.lexical_type_parameters.push(params, bounds)
-    }
-
-    fn pop_lexical_type_params(&mut self, old_len: usize) {
-        self.lexical_type_parameters.pop(old_len);
-    }
-
-    fn current_lexical_type_params(&self) -> Vec<String> {
-        self.lexical_type_parameters.names()
-    }
-
-    fn cut_lexical_type_parameter_scope(&mut self) -> LexicalTypeParameters {
-        std::mem::take(&mut self.lexical_type_parameters)
-    }
-
-    fn restore_lexical_type_parameter_scope(&mut self, scope: LexicalTypeParameters) {
-        debug_assert!(self.lexical_type_parameters.names().is_empty());
-        self.lexical_type_parameters = scope;
-    }
-
     // ---- cursor helpers ----
     fn kind(&self) -> TokenKind {
         self.t[self.i].kind
@@ -890,6 +875,26 @@ impl<'a> Parser<'a> {
             && token.text(self.src) == keyword
             && !self.token_is_escaped_ident(token)
     }
+    /// Whether `token` can be a declaration name: an identifier that is not one of kotlinc's hard
+    /// keywords the lexer spells as identifiers (a backticked name always can be).
+    fn token_is_name(&self, token: Token) -> bool {
+        token.kind == TokenKind::Ident
+            && (self.token_is_escaped_ident(token)
+                || !matches!(
+                    token.text(self.src),
+                    "as" | "break"
+                        | "continue"
+                        | "interface"
+                        | "is"
+                        | "object"
+                        | "super"
+                        | "this"
+                        | "throw"
+                        | "try"
+                        | "typealias"
+                        | "typeof"
+                ))
+    }
     fn token_is_modifier(&self, token: Token) -> bool {
         token.kind == TokenKind::Ident
             && is_modifier(token.text(self.src))
@@ -924,7 +929,6 @@ impl<'a> Parser<'a> {
         if self.i + 1 < self.t.len() {
             self.i += 1;
         }
-        self.skip_insignificant_newlines();
         t
     }
     fn eat(&mut self, k: TokenKind) -> bool {
@@ -964,11 +968,10 @@ impl<'a> Parser<'a> {
             false
         }
     }
-    /// True when the current token is a `;` (the lexer emits it as a `Newline`, but its source text is
-    /// `";"` — distinguishing an explicit statement terminator from a plain line break). Used to detect
-    /// an EMPTY loop body (`while (c);`), which must not swallow the following statement as the body.
+    /// True when the current token is an explicit `;`. Used to detect an EMPTY loop body
+    /// (`while (c);`), which must not swallow the following statement as the body.
     fn at_semicolon(&self) -> bool {
-        self.at(TokenKind::Newline) && self.text() == ";"
+        self.at(TokenKind::Semicolon)
     }
     /// Parse a loop body after the header's closing `)`. An explicit `;` is an EMPTY body (`while (c);`,
     /// `for (…);`) — consumed here so the following statement is NOT mistaken for the body; otherwise the
@@ -986,7 +989,7 @@ impl<'a> Parser<'a> {
                 sp,
             )
         } else {
-            self.skip_newlines();
+            self.skip_semicolons();
             self.parse_branch(false)
         }
     }
@@ -1053,13 +1056,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_file_with_declaration_sink(&mut self, sink: &mut impl FnMut(&mut Parser<'a>)) {
-        self.skip_newlines();
+        self.skip_semicolons();
         if self.at(TokenKind::KwPackage) {
             self.bump();
             self.file.package = Some(self.parse_qualified_name());
         }
         loop {
-            self.skip_newlines();
+            self.skip_semicolons();
             if self.at(TokenKind::Eof) {
                 break;
             }
@@ -1087,7 +1090,7 @@ impl<'a> Parser<'a> {
             self.begin_declaration_prefix();
             let mut mods = if self.at(TokenKind::At) || self.at_modifier() {
                 let m = self.skip_decl_prefix();
-                self.skip_newlines();
+                self.skip_semicolons();
                 m
             } else {
                 Vec::new()
@@ -1379,15 +1382,8 @@ impl<'a> Parser<'a> {
         }
         let mut j = open + 1;
         loop {
-            while self
-                .t
-                .get(j)
-                .is_some_and(|token| token.kind == TokenKind::Newline)
-            {
-                if self.t[j].text(self.src) == ";" {
-                    return None;
-                }
-                j += 1;
+            if self.t.get(j)?.kind == TokenKind::Semicolon {
+                return None;
             }
             if self.t.get(j)?.kind == TokenKind::RParen {
                 return Some(j + 1);
@@ -1444,10 +1440,10 @@ impl<'a> Parser<'a> {
                         return saw_type.then_some(j + 1);
                     }
                     TokenKind::Eof => return None,
-                    TokenKind::Newline if token.text(self.src) == ";" => return None,
+                    TokenKind::Semicolon => return None,
                     _ => {}
                 }
-                saw_type |= !matches!(token.kind, TokenKind::Newline);
+                saw_type = true;
                 j += 1;
             }
         }
@@ -1622,7 +1618,6 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         self.expect(TokenKind::Eq, "'='");
-        self.skip_plain_newlines();
         let target = self.parse_type();
         let end = self.t[self.i.saturating_sub(1)].span;
         crate::ast::TypeAliasDecl {
@@ -1651,7 +1646,6 @@ impl<'a> Parser<'a> {
     /// grammar begins with `=`, so looking past the newlines cannot swallow anything but this
     /// property's own initializer.
     fn eat_initializer_eq(&mut self) -> Option<Span> {
-        self.skip_plain_newlines_before(TokenKind::Eq);
         self.eat_span(TokenKind::Eq)
     }
 
@@ -1723,7 +1717,6 @@ impl<'a> Parser<'a> {
     fn primary_constructor_header_follows(&self) -> bool {
         let mut i = self.i;
         loop {
-            i = self.after_plain_newlines(i);
             let Some(token) = self.t.get(i) else {
                 return false;
             };
@@ -1773,10 +1766,8 @@ impl<'a> Parser<'a> {
         if !self.eat(TokenKind::LParen) {
             return (None, annotations);
         }
-        self.skip_plain_newlines();
         while self.at(TokenKind::At) {
             annotations.extend(self.parse_accessor_annotation());
-            self.skip_plain_newlines();
         }
         let name = if self.at(TokenKind::Ident) {
             let n = self.text().to_string();
@@ -1785,20 +1776,15 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        self.skip_plain_newlines();
         // Keep accepting the historical optional type annotation for recovery/compatibility, but use
         // the ordinary type parser so a complex type cannot desynchronize the enclosing class body.
         if self.eat(TokenKind::Colon) {
-            self.skip_plain_newlines();
             let _ = self.parse_type();
-            self.skip_plain_newlines();
         }
         // Kotlin permits a trailing comma in a multiline parameter list. There is exactly one setter
         // parameter, so consume only the comma; a second parameter remains visible to `expect` as an
         // error instead of being silently accepted.
-        if self.eat(TokenKind::Comma) {
-            self.skip_plain_newlines();
-        }
+        self.eat(TokenKind::Comma);
         self.expect(TokenKind::RParen, "')'");
         (name, annotations)
     }
@@ -1806,7 +1792,7 @@ impl<'a> Parser<'a> {
     /// Parse a getter body after its `()`: `= expr` or `{ block }`.
     fn parse_accessor_body(&mut self) -> FunBody {
         if self.eat(TokenKind::Eq) {
-            self.skip_newlines();
+            self.skip_semicolons();
             FunBody::Expr(self.parse_expr())
         } else if self.at(TokenKind::LBrace) {
             FunBody::Block(self.parse_block_expr(false))
@@ -1842,12 +1828,13 @@ impl<'a> Parser<'a> {
         // `companion object Named` names itself; a bare `companion object` is named by its `object`
         // keyword, which is where the reference compiler points every diagnostic about it. The
         // `companion` keyword is a modifier on that declaration, not the declaration's own token.
-        let name_span = if has_object_keyword && self.at(TokenKind::Ident) {
+        let named = has_object_keyword && self.token_is_name(self.tok());
+        let name_span = if named {
             self.tok().span
         } else {
             object_keyword.unwrap_or(start)
         };
-        let simple_name = if has_object_keyword && self.at(TokenKind::Ident) {
+        let simple_name = if named {
             self.bump().text(self.src).to_string()
         } else {
             "Companion".to_string()
@@ -1868,7 +1855,7 @@ impl<'a> Parser<'a> {
         let mut type_aliases = Vec::new();
         if self.eat_optional_declaration_body_open() {
             loop {
-                self.skip_newlines();
+                self.skip_semicolons();
                 let mods = self.parse_member_decl_prefix();
                 if self.parse_and_register_nested_classifier(&name, &mods, false) {
                     continue;
@@ -1984,14 +1971,13 @@ impl<'a> Parser<'a> {
         let mut ctor_open_offset = 0u32;
         // `NL* primaryConstructor`: the `constructor` keyword may also start on a later line.
         if self.primary_constructor_header_follows() {
-            self.skip_newlines();
+            self.skip_semicolons();
         }
         if self.at(TokenKind::Ident) && self.keyword_text("constructor") {
             ctor_open_offset = self.tok().span.lo;
             self.bump();
         }
         // `NL* primaryConstructor`: the parameter list may start on a later line.
-        self.skip_plain_newlines_before(TokenKind::LParen);
         if ctor_open_offset == 0 && self.at(TokenKind::LParen) {
             ctor_open_offset = self.tok().span.lo;
         }
@@ -2019,14 +2005,9 @@ impl<'a> Parser<'a> {
         let mut secondary_ctors: Vec<SecondaryCtor> = Vec::new();
         let mut type_aliases = Vec::new();
         if self.eat_optional_declaration_body_open() {
-            // `enum class E {; ... }` has no entries. The lexer represents `;` and a physical line
-            // break with the same token kind, but retains the source spelling; consume the separator
-            // run once and remember whether it explicitly ended the entry list.
-            let mut members_only = false;
-            while self.at(TokenKind::Newline) {
-                members_only |= self.text() == ";";
-                self.bump();
-            }
+            // `enum class E {; ... }` has no entries: a leading `;` ends the empty entry list.
+            let members_only = self.at(TokenKind::Semicolon);
+            self.skip_semicolons();
             if !members_only {
                 loop {
                     let (entry_ann_names, entry_ann_args) = self.parse_enum_entry_prefix();
@@ -2051,7 +2032,7 @@ impl<'a> Parser<'a> {
                     let mut init_order = Vec::new();
                     if self.eat(TokenKind::LBrace) {
                         let entry_nested_start = self.file.decls.len();
-                        self.skip_newlines();
+                        self.skip_semicolons();
                         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                             let bmods = self.parse_member_decl_prefix();
                             let entry_owner = format!("{name}.{entry_name}");
@@ -2102,7 +2083,7 @@ impl<'a> Parser<'a> {
                                     self.bump();
                                 }
                             }
-                            self.skip_newlines();
+                            self.skip_semicolons();
                         }
                         self.expect(TokenKind::RBrace, "'}'");
                         // Classifiers are parser-hoisted out of an enum-entry body. Retain the
@@ -2150,17 +2131,14 @@ impl<'a> Parser<'a> {
                         props: bprops,
                         init_order,
                     });
-                    self.skip_newlines();
+                    self.skip_semicolons();
                     if !self.eat(TokenKind::Comma) {
                         break;
                     }
-                    // After a trailing comma, the `;` (lexed as a newline) still ends the entry
-                    // list: `A, ; constructor(…)` declares a member, not an entry `constructor`.
-                    let mut ends_entries = false;
-                    while self.at(TokenKind::Newline) {
-                        ends_entries |= self.text() == ";";
-                        self.bump();
-                    }
+                    // After a trailing comma, a `;` still ends the entry list: `A, ; constructor(…)`
+                    // declares a member, not an entry `constructor`.
+                    let ends_entries = self.at(TokenKind::Semicolon);
+                    self.skip_semicolons();
                     if ends_entries {
                         break;
                     }
@@ -2168,7 +2146,7 @@ impl<'a> Parser<'a> {
             }
             // Members follow a `;` separator (lexed as a newline): `enum class C { A, B; fun f() … }`.
             loop {
-                self.skip_newlines();
+                self.skip_semicolons();
                 let emods = self.parse_member_decl_prefix();
                 if self.parse_and_register_nested_classifier(&name, &emods, true) {
                     continue;
@@ -2210,7 +2188,7 @@ impl<'a> Parser<'a> {
                     _ => break,
                 }
             }
-            self.skip_newlines();
+            self.skip_semicolons();
             if !self.at(TokenKind::RBrace) {
                 self.diags
                     .error(self.tok().span, "expected an enum member declaration");
@@ -2336,7 +2314,6 @@ impl<'a> Parser<'a> {
             self.push_lexical_type_params(&type_params, &type_param_bounds);
         while self.at(TokenKind::At) {
             let _ = self.parse_annotation(); // receiver use-site annotation
-            self.skip_plain_newlines();
         }
         let (receiver, name) = self.parse_receiver_and_declaration_name("extension function name");
         let name_span = self.declaration_name_span;
@@ -2365,9 +2342,9 @@ impl<'a> Parser<'a> {
         // breaks to find it, restoring the position if what follows is neither — an abstract/no-body
         // function (no valid member/declaration begins with a bare `=` or `{`, so this is unambiguous).
         let body_save = self.i;
-        self.skip_newlines();
+        self.skip_semicolons();
         let body = if self.eat(TokenKind::Eq) {
-            self.skip_newlines();
+            self.skip_semicolons();
             FunBody::Expr(self.parse_expr())
         } else if self.at(TokenKind::LBrace) {
             FunBody::Block(self.parse_block_expr(false))
@@ -2413,7 +2390,7 @@ impl<'a> Parser<'a> {
         self.begin_declaration_prefix();
         let mut modifiers = if self.at(TokenKind::At) || self.at_modifier() {
             let modifiers = self.skip_decl_prefix();
-            self.skip_newlines();
+            self.skip_semicolons();
             modifiers
         } else {
             Vec::new()
@@ -2428,7 +2405,6 @@ impl<'a> Parser<'a> {
         let mut i = self.i;
         let mut saw_context = false;
         loop {
-            i = self.after_plain_newlines(i);
             let token = self.t.get(i)?;
             if token.kind == TokenKind::At {
                 i = self.annotation_end_at(i)?;
@@ -2488,14 +2464,14 @@ impl<'a> Parser<'a> {
         let mut args = Vec::new();
         let mut names: Vec<Option<String>> = Vec::new();
         let mut name_spans: Vec<Option<Span>> = Vec::new();
-        self.skip_newlines();
+        self.skip_semicolons();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             if self.at_named_arg() {
                 let name_span = self.syntactic_ident_span(self.tok());
                 let n = self.text().to_string();
                 self.bump(); // name
                 self.bump(); // '='
-                self.skip_newlines();
+                self.skip_semicolons();
                 names.push(Some(n));
                 name_spans.push(Some(name_span));
             } else {
@@ -2508,11 +2484,11 @@ impl<'a> Parser<'a> {
                 self.file.spread_arg_ids.insert(arg.0);
             }
             args.push(arg);
-            self.skip_newlines();
+            self.skip_semicolons();
             if !self.eat(TokenKind::Comma) {
                 break;
             }
-            self.skip_newlines();
+            self.skip_semicolons();
         }
         self.no_trailing_lambda = outer_trailing_lambda_guard;
         (args, names, name_spans)
@@ -2739,7 +2715,6 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         // `class`, then the name — the grammar lets it follow on a later line (`value class⏎N(…)`).
         self.bump();
-        self.skip_plain_newlines();
         let name = self.ident_or_error("class name");
         let name_span = self.declaration_name_span;
         let (type_params, _, _, type_param_bounds, type_param_variances) = if self.at(TokenKind::Lt)
@@ -2765,7 +2740,7 @@ impl<'a> Parser<'a> {
         let mut ctor_open_offset = 0u32;
         let mut primary_ctor_visibility_span = None;
         if self.primary_constructor_header_follows() {
-            self.skip_newlines();
+            self.skip_semicolons();
             ctor_open_offset = self.tok().span.lo;
             if self.at(TokenKind::At) || self.at_modifier() {
                 let prefix_start = self.i;
@@ -2796,7 +2771,6 @@ impl<'a> Parser<'a> {
         let mut ctor_close_lo = 0u32;
         // `NL* primaryConstructor`: the parameter list may start on a later line, even after a
         // KDoc comment between the class name and `(`.
-        self.skip_plain_newlines_before(TokenKind::LParen);
         let primary_ctor_open = self.tok().span.lo;
         if ctor_open_offset == 0 && self.at(TokenKind::LParen) {
             ctor_open_offset = primary_ctor_open;
@@ -2808,7 +2782,7 @@ impl<'a> Parser<'a> {
         let mut primary_constructor_parameters_span = None;
         let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
         if has_primary_ctor_parens {
-            self.skip_newlines();
+            self.skip_semicolons();
             while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
                 let declaration_start = self.tok().span.lo;
                 let mut pannos = Vec::new();
@@ -2841,10 +2815,10 @@ impl<'a> Parser<'a> {
                 let pspan = self.tok().span;
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
-                self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
+                self.skip_semicolons(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
                 let ty = self.parse_vararg_aware_type(is_vararg);
                 let default = if self.eat(TokenKind::Eq) {
-                    self.skip_newlines();
+                    self.skip_semicolons();
                     Some(self.parse_expr())
                 } else {
                     None
@@ -2875,11 +2849,11 @@ impl<'a> Parser<'a> {
                     annotations: pannos,
                     annotation_args: pannos_args,
                 });
-                self.skip_newlines();
+                self.skip_semicolons();
                 if !self.eat(TokenKind::Comma) {
                     break;
                 }
-                self.skip_newlines();
+                self.skip_semicolons();
             }
             // The byte offset of the primary ctor's `)` — rewritten to a source LINE by the
             // decl-line post-pass; kotlinc maps the ctor `$default`'s `return` to it.
@@ -2912,7 +2886,7 @@ impl<'a> Parser<'a> {
         let mut type_aliases = Vec::new();
         if self.eat_optional_declaration_body_open() {
             loop {
-                self.skip_newlines();
+                self.skip_semicolons();
                 let mods = self.parse_member_decl_prefix();
                 let is_abstract = mods.iter().any(|m| m == "abstract");
                 // All representable nested classifier kinds share one registration path. Keeping
@@ -3055,10 +3029,9 @@ impl<'a> Parser<'a> {
         // Kotlin declaration headers permit physical line breaks before the supertype-list colon.
         // The shared lookahead deliberately stops at `;`, which terminates the declaration even though
         // the lexer represents it with the same token kind as a line break.
-        self.skip_plain_newlines_before(TokenKind::Colon);
         if self.eat(TokenKind::Colon) {
             loop {
-                self.skip_newlines();
+                self.skip_semicolons();
                 let sup_span = self.tok().span;
                 let mut supertype_annotations = Vec::new();
                 while self.at(TokenKind::At) {
@@ -3067,7 +3040,6 @@ impl<'a> Parser<'a> {
                         self.record_type_annotation_arguments(annotation.span, arguments);
                         supertype_annotations.push(annotation);
                     }
-                    self.skip_plain_newlines();
                 }
                 // Keyed by the annotated reference's span start, which for a supertype is `sup_span`.
                 if !supertype_annotations.is_empty() {
@@ -3243,6 +3215,8 @@ impl<'a> Parser<'a> {
                 Vec::new(),
             )
         };
+        let lexical_type_param_lens =
+            self.push_lexical_type_params(&type_params, &type_param_bounds);
         let (supertypes, _base, _base_span, _base_type_args, _base_args, _) =
             self.parse_supertypes();
         // `interface I<T> where T : Bound` — generic constraints after the supertype list, before the
@@ -3255,7 +3229,7 @@ impl<'a> Parser<'a> {
         let mut type_aliases = Vec::new();
         if self.eat_optional_declaration_body_open() {
             loop {
-                self.skip_newlines();
+                self.skip_semicolons();
                 let imods = self.parse_member_decl_prefix();
                 // Nested classifiers (`class`/`object`/`interface`/`enum class`/…) share the class-body
                 // registration funnel: a nested classifier's identity comes from its lexical owner, not
@@ -3324,6 +3298,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
+        self.pop_lexical_type_params(lexical_type_param_lens);
         ClassDecl {
             name_span,
             primary_ctor_visibility: Visibility::Public,
@@ -3392,7 +3367,7 @@ impl<'a> Parser<'a> {
         let mut init_order: Vec<ClassInit> = Vec::new();
         let mut type_aliases = Vec::new();
         loop {
-            self.skip_newlines();
+            self.skip_semicolons();
             let mods = self.parse_member_decl_prefix();
             if self.parse_and_register_nested_classifier(owner, &mods, true) {
                 continue;
@@ -3528,7 +3503,7 @@ impl<'a> Parser<'a> {
         let mut type_aliases = Vec::new();
         if self.eat_optional_declaration_body_open() {
             loop {
-                self.skip_newlines();
+                self.skip_semicolons();
                 let mods = self.parse_member_decl_prefix();
                 // Named singletons exclude `inner` classes, which require an enclosing instance.
                 // Anonymous objects publish their classifier owner after `parse_object_body`.
@@ -3888,7 +3863,7 @@ impl<'a> Parser<'a> {
             let mut receiver = self.parse_type();
             let receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
             receiver.span = Span::new(receiver_start, receiver_hi);
-            self.expect_receiver_dot();
+            self.expect(TokenKind::Dot, "'.'");
             return (Some(receiver), self.ident_or_error(name_context));
         }
 
@@ -3896,7 +3871,7 @@ impl<'a> Parser<'a> {
         let first = self.ident_or_error(name_context);
         let dot_follows = self
             .t
-            .get(self.after_plain_newlines(self.i))
+            .get(self.i)
             .is_some_and(|token| token.kind == TokenKind::Dot);
         if !dot_follows && !self.at(TokenKind::Lt) && !self.at(TokenKind::Question) {
             return (None, first);
@@ -3909,7 +3884,7 @@ impl<'a> Parser<'a> {
         };
         let mut nullable = self.eat_type_nullable();
         let mut receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
-        self.expect_receiver_dot();
+        self.expect(TokenKind::Dot, "'.'");
         let mut receiver_name = first;
 
         let declaration_name = loop {
@@ -3931,8 +3906,8 @@ impl<'a> Parser<'a> {
                 applied.extend(receiver_targs);
                 receiver_targs = applied;
                 receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
-                self.expect_receiver_dot();
-            } else if self.eat_receiver_dot() {
+                self.expect(TokenKind::Dot, "'.'");
+            } else if self.eat(TokenKind::Dot) {
                 receiver_name.push('.');
                 receiver_name.push_str(&segment);
                 nullable = false;
@@ -3979,7 +3954,7 @@ impl<'a> Parser<'a> {
     fn infix_operand_follows(&self) -> bool {
         self.t
             .get(self.i + 1..)
-            .and_then(|rest| rest.iter().find(|t| t.kind != TokenKind::Newline))
+            .and_then(|rest| rest.iter().find(|t| t.kind != TokenKind::Semicolon))
             .is_some_and(|t| starts_expr(t.kind))
     }
 
@@ -3994,7 +3969,7 @@ impl<'a> Parser<'a> {
             let name = name.to_string();
             let lspan = self.file.expr_spans[recv.0 as usize];
             self.bump(); // infix function name
-            self.skip_newlines();
+            self.skip_semicolons();
             let rhs = self.parse_bp(9);
             let rspan = self.file.expr_spans[rhs.0 as usize];
             let callee = self.file.add_expr(
@@ -4019,7 +3994,7 @@ impl<'a> Parser<'a> {
     /// Parse an optional `@label` reference after `break`/`continue` (`break@outer`). Returns the label
     /// name, or `None` for an unlabeled `break`/`continue`.
     fn parse_loop_label_ref(&mut self) -> Option<String> {
-        if self.at(TokenKind::At) {
+        if self.at_label_reference() {
             self.bump(); // '@'
             if self.at(TokenKind::Ident) {
                 let l = self.text().to_string();

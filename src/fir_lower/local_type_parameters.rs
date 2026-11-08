@@ -152,7 +152,8 @@ impl Closure<'_> {
             | TyKind::Null
             | TyKind::Nothing
             | TyKind::Error
-            | TyKind::Pending => {}
+            | TyKind::Pending
+            | TyKind::Var(..) => {}
         }
     }
 }

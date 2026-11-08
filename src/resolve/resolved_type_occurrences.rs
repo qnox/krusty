@@ -12,7 +12,7 @@ mod tests;
 
 fn rewrite_spelling_deferred_bound_occurrences(
     spelling: &mut crate::spelling::Spelled,
-    semantic_bounds: &crate::fx_hash::HashMap<String, Ty>,
+    semantic_bounds: &crate::types::TyParamBindings,
 ) {
     for (semantic, argument) in &mut spelling.alias_args {
         *semantic = crate::types::ty_with_transitive_param_bounds(*semantic, semantic_bounds);
@@ -35,7 +35,7 @@ impl Checker<'_> {
     fn rewrite_deferred_bound_occurrences(
         &mut self,
         reference: &TypeRef,
-        semantic_bounds: &crate::fx_hash::HashMap<String, Ty>,
+        semantic_bounds: &crate::types::TyParamBindings,
     ) {
         let occurrence = (reference.span.lo, reference.span.hi);
         if let Some((semantic, _)) = self.resolved_type_bounds.get_mut(&occurrence) {
@@ -114,7 +114,7 @@ impl Checker<'_> {
             .enumerate()
             .map(|(ordinal, &identity)| {
                 (
-                    identity.to_string(),
+                    crate::types::TyParamName::from(identity),
                     checked[ordinal].first().copied().unwrap_or(implicit),
                 )
             })
@@ -598,7 +598,7 @@ impl Checker<'_> {
                     u32::try_from(ordinal).expect("too many type parameters"),
                 )?;
                 Some((
-                    index.type_parameter_semantic_name(parameter)?.to_string(),
+                    crate::types::TyParamName::from(index.type_parameter_semantic_name(parameter)?),
                     stable[ordinal].first().copied().unwrap_or(implicit),
                 ))
             })
