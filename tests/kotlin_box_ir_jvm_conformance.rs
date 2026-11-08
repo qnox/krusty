@@ -1332,7 +1332,7 @@ fn kotlin_codegen_box_conformance() {
                                         "compiler rejected the corpus case".to_string(),
                                     ),
                                     None,
-                                )
+                                );
                             }
                         };
                         t_compile.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);

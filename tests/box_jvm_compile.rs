@@ -28,10 +28,7 @@ pub(super) static T_EMIT: AtomicU64 = AtomicU64::new(0);
 pub(super) enum CompileFailure {
     /// krusty reported errors: their messages, in the order it reported them, and the complete
     /// rendered report of every diagnostic.
-    Rejected {
-        errors: Vec<String>,
-        report: String,
-    },
+    Rejected { errors: Vec<String>, report: String },
     /// The harness could not set up or finish the compilation: a command line krusty refuses, a
     /// `// MODULE:` shape it cannot split, javac refusing the case's Java, or a scratch write.
     Harness(String),
