@@ -45,11 +45,12 @@ use super::super::interface_dispatch::ClassRef;
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
 use super::lower::{carrier, parameter_carrier, Unsupported, STRING};
 
-mod companion_construction;
 mod constructor_prefix;
 
 #[cfg(test)]
 mod annotation_class_tests;
+#[cfg(test)]
+mod companion_construction_tests;
 #[cfg(test)]
 mod constructor_prefix_tests;
 
