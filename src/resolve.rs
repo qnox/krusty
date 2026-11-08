@@ -213,6 +213,7 @@ mod lambda_returns;
 mod lexical_bindings;
 mod lexical_policies;
 mod library_constructor_failure;
+mod local_call_applicability;
 mod local_callable_reference_selection;
 mod local_capture_dependencies;
 mod local_class_scope;
@@ -2128,66 +2129,6 @@ fn erased_arg_defeats_selection<'a>(
         }
     }
     false
-}
-
-fn local_function_candidate_score(
-    signature: &Signature,
-    args: &[ExprId],
-    arg_tys: &[Ty],
-    arg_names: Option<&[Option<String>]>,
-    trailing_lambda: bool,
-    argument_fits: impl Fn(Ty, Ty) -> bool,
-) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
-    let context_count = signature.context_count.min(signature.params.len());
-    let params = &signature.params[context_count..];
-    let names = signature
-        .param_names
-        .get(context_count..)
-        .unwrap_or_default();
-    let defaults = signature
-        .param_defaults
-        .get(context_count..)
-        .unwrap_or_default();
-    if arg_names.is_some() || trailing_lambda {
-        let Ok(slots) = map_call_args(
-            args,
-            arg_names,
-            names,
-            params.len(),
-            signature.required.saturating_sub(context_count),
-            defaults,
-            signature
-                .vararg_index
-                .and_then(|index| index.checked_sub(context_count)),
-            trailing_lambda,
-        ) else {
-            return None;
-        };
-        let mut type_score = 0;
-        let mut omitted = 0;
-        for (index, argument) in slots.iter().enumerate() {
-            let Some(argument) = argument else {
-                omitted += 1;
-                continue;
-            };
-            let source_index = args.iter().position(|candidate| candidate == argument)?;
-            let parameter = *params.get(index)?;
-            let actual = *arg_tys.get(source_index)?;
-            if !argument_fits(parameter, actual) {
-                return None;
-            }
-            type_score += if parameter == actual { 2 } else { 1 };
-        }
-        return Some((type_score, std::cmp::Reverse(omitted), !signature.vararg()));
-    }
-    positional_candidate_score_by(
-        params,
-        signature.vararg(),
-        signature.required.saturating_sub(context_count),
-        defaults,
-        arg_tys,
-        argument_fits,
-    )
 }
 
 /// Simple type name → JVM internal name, split into a SHARED read-only base (the library/classpath
@@ -56758,27 +56699,25 @@ impl<'a> Checker<'a> {
             else {
                 continue;
             };
+            let Some(scored) = local_call_applicability::score(
+                self,
+                scope,
+                &signature,
+                args,
+                arg_tys,
+                argument_names,
+                trailing_lambda,
+            ) else {
+                continue;
+            };
+            let signature = scored.signature;
             let context_count = signature.context_count.min(signature.params.len());
             let Some(context_args) =
                 self.select_context_arguments(scope, &signature.params[..context_count])
             else {
                 continue;
             };
-            let Some(score) = local_function_candidate_score(
-                &signature,
-                args,
-                arg_tys,
-                argument_names,
-                trailing_lambda,
-                |parameter, actual| {
-                    arg_assignable_simple(parameter, actual)
-                        || self.postponed_call_mentions(parameter)
-                        || self.postponed_call_mentions(actual)
-                },
-            ) else {
-                continue;
-            };
-            applicable.push((score, statement, signature, context_args));
+            applicable.push((scored.rank, statement, signature, context_args));
         }
         let Some(best) = applicable.iter().map(|(score, ..)| *score).max() else {
             return LocalExtensionSelection::None;
@@ -56815,21 +56754,18 @@ impl<'a> Checker<'a> {
                 })
                 .filter_map(|candidate| {
                     let signature = &candidate.signature;
-                    let score = local_function_candidate_score(
+                    let scored = local_call_applicability::score(
+                        self,
+                        scope,
                         signature,
                         args,
                         arg_tys,
                         argument_names,
                         trailing_lambda,
-                        |parameter, actual| {
-                            arg_assignable_simple(parameter, actual)
-                                || self.postponed_call_mentions(parameter)
-                                || self.postponed_call_mentions(actual)
-                        },
                     )?;
-                    let context_count = signature.context_count.min(signature.params.len());
-                    self.select_context_arguments(scope, &signature.params[..context_count])
-                        .map(|_| (score, candidate.clone()))
+                    let context_count = scored.signature.context_count.min(scored.signature.params.len());
+                    self.select_context_arguments(scope, &scored.signature.params[..context_count])
+                        .map(|_| (scored.rank, candidate.clone()))
                 })
                 .collect::<Vec<_>>();
             if let Some(best) = applicable.iter().map(|(score, _)| *score).max() {
