@@ -483,7 +483,7 @@ impl Parser<'_> {
             unreachable!("a safe index assignment target is a safe index");
         };
         let operator = self.bump().span;
-        self.skip_newlines();
+        self.skip_semicolons();
         let value = self.parse_unlabelled_expr();
         self.file.value_operator_spans.insert(value.0, operator);
         self.finish_assignment_stmt(
@@ -518,7 +518,7 @@ impl Parser<'_> {
             unreachable!("a compound safe index assignment target is a safe index");
         };
         self.bump();
-        self.skip_newlines();
+        self.skip_semicolons();
         let rhs = self.parse_unlabelled_expr();
         let value = self.file.add_expr(
             Expr::Binary {
