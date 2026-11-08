@@ -8,6 +8,9 @@ mod box_jdk;
 mod codegen_modes;
 mod compiler_arguments;
 mod reference_jvm;
+mod wasm_options;
+
+pub use wasm_options::WasmCompilerOptions;
 
 pub use box_jdk::{box_jdk_kind, BoxJdk, BoxJdkKind, BoxJdkRoots};
 pub use codegen_modes::{unsupported_codegen_mode_directive, UnitCodegenModes};
