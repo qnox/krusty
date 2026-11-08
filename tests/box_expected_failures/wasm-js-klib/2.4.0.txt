@@ -332,8 +332,6 @@ callableReference/adaptedReferences/contextFunctionWithPassedSuperType.kt
 callableReference/adaptedReferences/contextFunctionWithSam.kt
 callableReference/adaptedReferences/contextPropertyWithSam.kt
 callableReference/adaptedReferences/contextTypeWithSam.kt
-callableReference/adaptedReferences/defaultAfterVararg.kt
-callableReference/adaptedReferences/emptyVarargAndDefault.kt
 callableReference/adaptedReferences/extensionFunctionAdaptedReferences.kt
 callableReference/adaptedReferences/extensionFunctionAnonymous.kt
 callableReference/adaptedReferences/extensionInSamWithPassedSupertype.kt
@@ -351,7 +349,6 @@ callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
 callableReference/adaptedReferences/referenceToFakeOverrideWithTypeParameter.kt
 callableReference/adaptedReferences/referenceToVarargWithDefaults.kt
-callableReference/adaptedReferences/simpleEmptyVararg.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithCoercionToUnit.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithDefaultArguments.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithVarargs.kt
@@ -605,7 +602,6 @@ classes/kt343.kt
 classes/kt471.kt
 classes/kt496.kt
 classes/kt500.kt
-classes/kt501.kt
 classes/kt504.kt
 classes/kt508.kt
 classes/kt5347.kt
@@ -636,7 +632,6 @@ closures/captureInSuperConstructorCall/properValueCapturedByClosure2.kt
 closures/capturedVarsOptimization/capturedVarsOfSize2.kt
 closures/capturedVarsOptimization/closureBoxedVarOptimizations.kt
 closures/capturedVarsOptimization/kt44347.kt
-closures/capturedVarsOptimization/kt45446.kt
 closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
 closures/closureCapturingGenericParam.kt
@@ -882,9 +877,7 @@ controlStructures/forInSequenceWithIndex/forInSequenceWithIndexWithExplicitlyTyp
 controlStructures/forInSmartCastToArray.kt
 controlStructures/forNullableCharInString.kt
 controlStructures/forUserType.kt
-controlStructures/kt14839.kt
 controlStructures/kt15726.kt
-controlStructures/kt1688.kt
 controlStructures/kt1742.kt
 controlStructures/kt2147.kt
 controlStructures/kt2291.kt
@@ -904,39 +897,18 @@ controlStructures/kt8148_continue.kt
 controlStructures/kt910.kt
 controlStructures/longRange.kt
 controlStructures/quicksort.kt
-controlStructures/returnsNothing/inlineMethod.kt
-controlStructures/returnsNothing/tryCatch.kt
 controlStructures/slowDsl/slowHtmlLikeDsl.kt
-controlStructures/tcbInEliminatedCondition.kt
 controlStructures/tryCatchFinallyChain.kt
-controlStructures/tryCatchInExpressions/catch.kt
 controlStructures/tryCatchInExpressions/complexChain.kt
-controlStructures/tryCatchInExpressions/deadTryCatch.kt
 controlStructures/tryCatchInExpressions/differentTypes.kt
-controlStructures/tryCatchInExpressions/expectException.kt
-controlStructures/tryCatchInExpressions/inlineTryCatch.kt
-controlStructures/tryCatchInExpressions/inlineTryExpr.kt
 controlStructures/tryCatchInExpressions/inlineTryFinally.kt
-controlStructures/tryCatchInExpressions/kt17572.kt
-controlStructures/tryCatchInExpressions/kt17572_2.kt
-controlStructures/tryCatchInExpressions/kt17572_2_ext.kt
-controlStructures/tryCatchInExpressions/kt17572_ext.kt
-controlStructures/tryCatchInExpressions/kt17572_nested.kt
-controlStructures/tryCatchInExpressions/kt17573_nested.kt
 controlStructures/tryCatchInExpressions/kt8608.kt
-controlStructures/tryCatchInExpressions/kt9644try.kt
 controlStructures/tryCatchInExpressions/multipleCatchBlocks.kt
 controlStructures/tryCatchInExpressions/nonLocalReturnInTryFinally.kt
 controlStructures/tryCatchInExpressions/splitTry.kt
-controlStructures/tryCatchInExpressions/try.kt
-controlStructures/tryCatchInExpressions/tryAfterTry.kt
-controlStructures/tryCatchInExpressions/tryAndBreak.kt
-controlStructures/tryCatchInExpressions/tryAndContinue.kt
 controlStructures/tryCatchInExpressions/tryCatchAfterWhileTrue.kt
 controlStructures/tryCatchInExpressions/tryFinallyOfTypeUnit.kt
-controlStructures/tryCatchInExpressions/tryInsideCatch.kt
 controlStructures/tryCatchInExpressions/tryInsideTry.kt
-controlStructures/tryFinally.kt
 controlflow/break.kt
 controlflow/break1.kt
 controlflow/for_loops.kt
@@ -1477,7 +1449,6 @@ dataflow/uninitialized_val.kt
 deadCodeElimination/emptyVariableRange.kt
 deadCodeElimination/intersectingVariableRange.kt
 deadCodeElimination/intersectingVariableRangeInFinally.kt
-deadCodeElimination/kt14357.kt
 defaultArguments/complexInheritance.kt
 defaultArguments/constructor/anonymousObjectAsDefaultParam.kt
 defaultArguments/constructor/kt30517.kt
@@ -1674,10 +1645,8 @@ diagnostics/functions/tailRecursion/realStringEscape.kt
 diagnostics/functions/tailRecursion/realStringRepeat.kt
 diagnostics/functions/tailRecursion/recursiveCallInInlineLambda.kt
 diagnostics/functions/tailRecursion/recursiveCallInInlineLambdaWithCapture.kt
-diagnostics/functions/tailRecursion/returnInCatch.kt
 diagnostics/functions/tailRecursion/returnInFinally.kt
 diagnostics/functions/tailRecursion/returnInIfInFinally.kt
-diagnostics/functions/tailRecursion/tailRecursionInFinally.kt
 diagnostics/functions/tailRecursion/whenWithIs.kt
 diagnostics/vararg/kt4172.kt
 directInvokeOptimization/boundInnerContructorRef.kt
@@ -1746,7 +1715,6 @@ enum/toString.kt
 enum/vCallNoEntryClass.kt
 enum/vCallWithEntryClass.kt
 enum/valueOf2.kt
-enum/valueof.kt
 enum/values.kt
 enum/varargParam.kt
 escapeAnalysis/recursion.kt
@@ -1783,9 +1751,6 @@ exceptions/kt69534.kt
 exceptions/rethrow.kt
 exceptions/throw0.kt
 exceptions/throw_from_catch.kt
-exclExcl/genericNull.kt
-exclExcl/kt48440.kt
-exclExcl/kt48440_2.kt
 extensionFunctions/classMethodCallExtensionSuper.kt
 extensionFunctions/defaultMethodInterfaceCallExtensionSuper.kt
 extensionFunctions/delegatedPropertyWithExtensionType.kt
@@ -1849,12 +1814,10 @@ fieldRename/constructorAndClassObject.kt
 fieldRename/delegates.kt
 finally/breakAndOuterFinally.kt
 finally/continueAndOuterFinally.kt
-finally/decrementInFinally.kt
 finally/finallyAndFinally.kt
 finally/kt31923_break.kt
 finally/kt31923_continue.kt
 finally/kt31923_return.kt
-finally/kt3549.kt
 finally/kt3706.kt
 finally/kt3867.kt
 finally/kt3874.kt
@@ -1971,8 +1934,6 @@ functions/bigArity/function255.kt
 functions/bigArity/instanceOfCallableReference.kt
 functions/bigArity/invokeLambda.kt
 functions/bigArity/subclass.kt
-functions/coerceVoidToArray.kt
-functions/coerceVoidToObject.kt
 functions/defaultargs1.kt
 functions/functionExpression/functionExpression.kt
 functions/functionExpression/functionExpressionWithThisReference.kt
@@ -1980,7 +1941,6 @@ functions/functionExpression/functionLiteralExpression.kt
 functions/invoke/castFunctionToExtension.kt
 functions/invoke/invoke.kt
 functions/invoke/kt3190.kt
-functions/invoke/kt3297.kt
 functions/kt1038.kt
 functions/kt1199.kt
 functions/kt1413.kt
@@ -2121,7 +2081,6 @@ inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/Generi
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/Int.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/IntersectionType.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/LocalClass.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/NothingYieldCase.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/NullableTypeParameter.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/SuspendingFunction.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/TypeParameter.kt
@@ -2144,7 +2103,6 @@ inference/safeCastWithElvis.kt
 inference/suspendExtensionRecevierFromConstraint.kt
 inference/tryCatchAtAssignment.kt
 inference/tryCatchAtAssignmentWithSmartCast.kt
-inference/tryWithAssignmentAndNothingTypedCatch.kt
 inference/unsafeVarianceCodegen.kt
 inference/whenAtAssignmentWithSmartCast.kt
 inference/whenAtAssignmentWithSmartCastInsideCapturedLambda.kt
@@ -3133,7 +3091,6 @@ inlineSizeReduction/simpleReturnFunction.kt
 inlineSizeReduction/this.kt
 inlineSizeReduction/valAssignment.kt
 inlineSizeReduction/valDeclaration.kt
-inlineSizeReduction/varargTemporaryVar.kt
 inlineStdlib/callableRefToFunInCurrentModule.kt
 innerClass/doubleInner.kt
 innerClass/getOuterVal.kt
@@ -3258,10 +3215,8 @@ lateinit/localCapturedNotInitialized.kt
 lateinit/localInitialized.kt
 lateinit/localNotInitialized.kt
 lateinit/notInitialized.kt
-lazyCodegen/exceptionInFieldInitializer.kt
 lazyCodegen/optimizations/negateObjectComp.kt
 lazyCodegen/optimizations/negateObjectComp2.kt
-lazyCodegen/tryCatchExpression.kt
 literals/listof1.kt
 literals/strdedup1.kt
 localClass/innerTakesCapturedFromOuter.kt
@@ -3460,7 +3415,6 @@ nameBasedDestructuring/shortFormLoopsAndLambdas.kt
 nonLocalReturns/kt9644let.kt
 nonLocalReturns/suspendConversion.kt
 nothingValue/nothingValueException.kt
-nothingValue/toStringOnNothing.kt
 nullCheckOptimization/trivialInstanceOf.kt
 object/constructor0.kt
 object/fields.kt
@@ -3866,7 +3820,6 @@ ranges/forInIndices/forInPrimitiveArrayIndices.kt
 ranges/forInIndices/forNullableIntInArrayIndices.kt
 ranges/forInIndices/forNullableIntInCollectionIndices.kt
 ranges/forInIndices/indexOfLast.kt
-ranges/forInIndices/kt12983_forInGenericArrayIndices.kt
 ranges/forInIndices/kt12983_forInGenericCollectionIndices.kt
 ranges/forInIndices/kt12983_forInSpecificArrayIndices.kt
 ranges/forInIndices/kt12983_forInSpecificCollectionIndices.kt
@@ -4582,12 +4535,10 @@ regressions/kt10143.kt
 regressions/kt15196.kt
 regressions/kt1779.kt
 regressions/kt1800.kt
-regressions/kt18779.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
 regressions/kt2470.kt
 regressions/kt24913.kt
-regressions/kt3107.kt
 regressions/kt32949.kt
 regressions/kt33638.kt
 regressions/kt344.kt
@@ -4664,7 +4615,6 @@ reified/reifiedIntersectionTypeArgument.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/reifiedNullableNothing1.kt
 reified/reifiedNullableNothing2.kt
-reified/reifiedNullableNothing3.kt
 reified/reifiedNullableNothing4.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 reified/reifiedTypeArgumentWithRecursion.kt
@@ -4989,7 +4939,6 @@ vararg/evaluationOrder.kt
 vararg/inlineClassArraysAsNamedArgumentInVararg.kt
 vararg/kt10926.kt
 vararg/kt37715.kt
-vararg/kt37779.kt
 vararg/kt581.kt
 vararg/kt6192.kt
 vararg/kt796_797.kt
@@ -5009,7 +4958,6 @@ wasm-new-exception-handling/catch6.kt
 wasm-new-exception-handling/catch7.kt
 wasm-new-exception-handling/catch8.kt
 wasm-new-exception-handling/continueAndOuterFinally.kt
-wasm-new-exception-handling/decrementInFinally.kt
 wasm-new-exception-handling/extend0.kt
 wasm-new-exception-handling/finally1.kt
 wasm-new-exception-handling/finally10.kt
@@ -5026,7 +4974,6 @@ wasm-new-exception-handling/finallyAndFinally.kt
 wasm-new-exception-handling/kt31923_break.kt
 wasm-new-exception-handling/kt31923_continue.kt
 wasm-new-exception-handling/kt31923_return.kt
-wasm-new-exception-handling/kt3549.kt
 wasm-new-exception-handling/kt3706.kt
 wasm-new-exception-handling/kt3867.kt
 wasm-new-exception-handling/kt3874.kt
@@ -5066,7 +5013,6 @@ wasm-old-exception-handling/catch6.kt
 wasm-old-exception-handling/catch7.kt
 wasm-old-exception-handling/catch8.kt
 wasm-old-exception-handling/continueAndOuterFinally.kt
-wasm-old-exception-handling/decrementInFinally.kt
 wasm-old-exception-handling/extend0.kt
 wasm-old-exception-handling/finally1.kt
 wasm-old-exception-handling/finally10.kt
@@ -5083,7 +5029,6 @@ wasm-old-exception-handling/finallyAndFinally.kt
 wasm-old-exception-handling/kt31923_break.kt
 wasm-old-exception-handling/kt31923_continue.kt
 wasm-old-exception-handling/kt31923_return.kt
-wasm-old-exception-handling/kt3549.kt
 wasm-old-exception-handling/kt3706.kt
 wasm-old-exception-handling/kt3867.kt
 wasm-old-exception-handling/kt3874.kt
@@ -5124,10 +5069,8 @@ when/enumOptimization/nestedWhenInResult.kt
 when/enumOptimization/nullability.kt
 when/enumOptimization/subjectAny.kt
 when/enumOptimization/withoutElse.kt
-when/exceptionOnNoMatch.kt
 when/exhaustiveBreakContinue.kt
 when/exhaustiveness/exhaustiveWithNegativeEnum.kt
-when/exhaustiveness/exhaustiveWithNegativeSealed.kt
 when/guard/whenWithGuard.kt
 when/inferredTypeParameters.kt
 when/is.kt
