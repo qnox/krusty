@@ -325,8 +325,11 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
 - Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter
   of an enclosing declaration by id alone (`Type.type_parameter`). Ids come from kotlinc's
   per-declaration interner: the class's own parameters first, then each captured one on first use,
-  and a member's first use is numbered in that member's own scope. Test:
-  `tests/metadata_captured_type_parameters_e2e.rs`.
+  and a member's first use is numbered in that member's own scope. A use-site application of that
+  classifier records only its own arguments. Lexical captures are not type arguments and are not
+  `Type.outer_type`; an `inner` class still writes its enclosing instance there. Tests:
+  `tests/metadata_captured_type_parameters_e2e.rs`,
+  `tests/facade_local_classifier_metadata_e2e.rs`.
 - Nested and inner classes (kotlinc 2.4.0, 2.4.10, 2.4.20): a nested class, inner or not, is
   serialized under its outer classes, so every enclosing class's parameters hold the ids before its
   own, outermost first. The class header (type-parameter bounds, supertypes, the inline-class
