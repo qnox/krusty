@@ -1130,7 +1130,7 @@ impl<'a> Body<'a> {
                 let (Some(receiver), [index]) = (dispatch_receiver, args.as_slice()) else {
                     return Err("an authenticated array read with malformed operands".into());
                 };
-                self.reference_array_get(receiver, *index)?;
+                self.array_get(receiver, *index)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1278,7 +1278,7 @@ impl<'a> Body<'a> {
                 spreads,
                 elements,
             } => {
-                self.reference_array_literal(array_type, &spreads, &elements)?;
+                self.array_literal(array_type, &spreads, &elements)?;
             }
             IrExpr::Try {
                 body,

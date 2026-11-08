@@ -20,6 +20,7 @@ mod object_equality;
 
 use crate::fx_hash::HashMap;
 
+use super::array_objects::ArrayObjects;
 use super::boxes::Boxes;
 use super::callable_references::CallableReferences;
 use super::encode::{
@@ -31,7 +32,6 @@ use super::hashing::Hashing;
 use super::host::Host;
 use super::identity::IdentityObjects;
 use super::objects::ObjectRoot;
-use super::reference_arrays::ReferenceArrays;
 
 /// Where a host write's bytes are staged in linear memory. The first 16 bytes are left for the
 /// host's own use (a WASI iovec).
@@ -45,9 +45,8 @@ pub(super) struct Runtime {
     pub(super) chars: u32,
     /// `(struct (field (ref $chars)))`.
     pub(super) string: u32,
-    /// Reference-element array storage shared by every applied Kotlin `Array<T>`.
-    pub(super) references: u32,
-    pub(super) arrays: ReferenceArrays,
+    /// Every Kotlin array classifier's object type; `Array<T>` shares one reference storage.
+    pub(super) arrays: ArrayObjects,
     pub(super) string_equals: u32,
     pub(super) object_equals: u32,
     pub(super) string_concat: u32,
@@ -114,13 +113,12 @@ impl Runtime {
             mutable: true,
         }));
         let identity = IdentityObjects::declare(module, &objects);
-        let arrays = ReferenceArrays::declare(module, &mut objects, &identity, references);
+        let arrays = ArrayObjects::declare(module, &mut objects, &identity, references);
         let object_equals = module.declare();
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
         let mut runtime = Self {
             chars,
             string,
-            references,
             arrays,
             string_equals: module.declare(),
             object_equals,
