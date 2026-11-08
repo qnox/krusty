@@ -179,10 +179,6 @@ pub(super) fn accept_active_debug_metadata(
                 ir.function_position_mut(ir_function).decl_line = Some(function.decl_line);
                 ir.function_position_mut(ir_function).signature_line = Some(function.sig_line);
                 ir.function_position_mut(ir_function).signature_offset = Some(function.span.lo);
-                if function.body_lines.close != 0 {
-                    ir.function_position_mut(ir_function).close_line =
-                        Some(function.body_lines.close);
-                }
                 if function.body_lines.end != 0 {
                     ir.function_position_mut(ir_function).end_line = Some(function.body_lines.end);
                 }

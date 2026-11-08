@@ -14,6 +14,14 @@ pub(super) struct ReceiverCallRejections {
 }
 
 impl ReceiverCallRejections {
+    pub(super) fn type_rejected_candidates(&self) -> &[crate::libraries::FunctionInfo] {
+        if self.has_mapping_failure() {
+            &[]
+        } else {
+            &self.candidates
+        }
+    }
+
     pub(super) fn has_mapping_failure(&self) -> bool {
         self.mapping_failure.is_some()
     }
