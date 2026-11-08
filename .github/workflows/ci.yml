@@ -1114,6 +1114,7 @@ jobs:
   # Every covered master commit builds its own immutable release artifacts, even after master
   # advances. All six platforms can build concurrently on their hosted runners.
   build-release:
+    needs: [ci-and-conformance]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     strategy:
       fail-fast: false
