@@ -32,7 +32,7 @@ use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignatu
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrField, KlibIrFunction, KlibIrStatement,
 };
-use crate::metadata::klib_ir::KlibIrSymbol;
+use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol};
 use crate::types::{Ty, TypeName};
 
 mod class_construction;
@@ -176,6 +176,8 @@ pub struct DependencyBodyUnit {
     private_members: HashSet<KlibDependencyCallable>,
     /// The receiver type of each value class member this unit emits, its `this`.
     value_receivers: HashMap<KlibDependencyCallable, Ty>,
+    /// File-local classes materialized for bodies of their own library.
+    local_classes: HashMap<KlibIrSignature, super::same_library_class::MaterializedLocalClass>,
     builtins: IrBuiltinOperators,
 }
 
@@ -189,6 +191,7 @@ impl Default for DependencyBodyUnit {
             authenticated_singleton_classifiers: HashMap::default(),
             private_members: HashSet::default(),
             value_receivers: HashMap::default(),
+            local_classes: HashMap::default(),
             builtins: IrBuiltinOperators::new(),
         }
     }
@@ -537,6 +540,7 @@ impl DependencyBodyUnit {
             authenticated_singleton_classifiers: &mut self.authenticated_singleton_classifiers,
             private_members: &mut self.private_members,
             value_receivers: &mut self.value_receivers,
+            local_classes: &mut self.local_classes,
             pending: &mut pending,
             root: callable,
             active_module: callable.identity().module.clone(),
@@ -621,6 +625,8 @@ struct Linker<'u, 's> {
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
     private_members: &'u mut HashSet<KlibDependencyCallable>,
     value_receivers: &'u mut HashMap<KlibDependencyCallable, Ty>,
+    local_classes:
+        &'u mut HashMap<KlibIrSignature, super::same_library_class::MaterializedLocalClass>,
     pending: &'u mut VecDeque<PendingBody<'s>>,
     /// The declaration this lowering was asked for, which its own recursive calls select.
     root: KlibBodyCallable<'s>,
@@ -716,14 +722,44 @@ impl CallLinker for Linker<'_, '_> {
         }))
     }
 
+    fn local_class(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> Result<Option<TypeName>, KlibBodyDeclineReason> {
+        super::same_library_class::classifier(self.sources.bodies, &self.active_module, signature)
+    }
+
+    fn link_local_constructor(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibIrSignature,
+    ) -> Result<super::same_library_class::LocalConstructor, KlibBodyDeclineReason> {
+        let module = self.active_module.clone();
+        let bodies = self.sources.bodies;
+        let callees = self.sources.callees;
+        super::same_library_class::link(
+            super::same_library_class::LocalClassSource {
+                bodies,
+                module: &module,
+                validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
+            },
+            callee,
+            ir,
+            self.local_classes,
+        )
+    }
+
     fn is_subtype(
         &self,
         parameters: &super::klib_types::KlibTypeParameters,
         sub: Ty,
         sup: Ty,
     ) -> bool {
-        self.sources.callees.is_subtype(parameters, sub, sup)
-            || super::callable_references::function_supertype(sub, sup)
+        let callees = self.sources.callees;
+        super::same_library_class::is_subtype(&self.local_classes, sub, sup, &|sub, sup| {
+            callees.is_subtype(parameters, sub, sup)
+                || super::callable_references::function_supertype(sub, sup)
+        })
     }
 
     fn link_reference(
@@ -1679,6 +1715,8 @@ impl UnitCheckpoint {
             .retain(|identity| functions.contains_key(identity));
         unit.value_receivers
             .retain(|identity, _| functions.contains_key(identity));
+        unit.local_classes
+            .retain(|_, class| (class.class as usize) < unit.ir.classes.len());
     }
 }
 

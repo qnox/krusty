@@ -15,8 +15,8 @@ use crate::klib::KlibManifest;
 use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
-    KlibIrArena, KlibIrBody, KlibIrExprKind, KlibIrFunction, KlibIrMember, KlibIrStatement,
-    KlibIrType,
+    KlibIrArena, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction, KlibIrMember,
+    KlibIrStatement, KlibIrType,
 };
 use crate::metadata::klib_ir::{KlibIrModuleTrees, KlibIrSignature, KlibIrSymbolKind};
 use crate::types::{type_name_child, TypeName};
@@ -403,6 +403,30 @@ impl KlibDeclarationBodies {
             .owners
             .get(&(identity.module.clone(), signature.clone()))?;
         self.libraries[library].function(&signature)
+    }
+
+    /// The file-local class `module` itself serializes under `signature`.
+    ///
+    /// A file-local identity is meaningful only in the library that wrote it. Producer
+    /// dependencies are not searched: the same file and slot in another library are a different
+    /// declaration.
+    pub(crate) fn module_local_class<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].local_class(signature)
+    }
+
+    /// The file-local function `module` itself serializes under `signature`.
+    pub(crate) fn module_local_function<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a KlibIrArena, &'a KlibIrFunction)> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].local_function(signature)
     }
 
     /// Whether the exact serialized declaration intentionally carries an executable body.
