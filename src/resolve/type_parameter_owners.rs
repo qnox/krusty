@@ -613,13 +613,32 @@ impl Checker<'_> {
             context,
             &|parameter| self.diagnostic_type_parameter_name(parameter, numbering, false),
             &|classifier| {
-                let index = self.resolved_index?;
-                let declaration = index.classifier_declaration(classifier)?;
-                index
-                    .local_class_name_provenance(declaration)?
-                    .segments
-                    .last()
-                    .cloned()
+                if let Some(written) =
+                    crate::jvm::java_stub::unresolved_evidence_spelling(classifier)
+                {
+                    return Some(written);
+                }
+                if let Some(index) = self.resolved_index {
+                    if let Some(declaration) = index.classifier_declaration(classifier) {
+                        return index
+                            .local_class_name_provenance(declaration)?
+                            .segments
+                            .last()
+                            .cloned();
+                    }
+                }
+                // A class the compile can see keeps its simple name. One nothing declares keeps
+                // the qualified name its signature recorded; a root-package spelling stays the
+                // segment.
+                if self.fed_source().classifier(classifier).is_some()
+                    || crate::types::builtin_semantic(classifier).is_some()
+                {
+                    return None;
+                }
+                let qualified = classifier
+                    .parent()
+                    .is_some_and(|parent| parent != crate::types::TypeName::ROOT);
+                qualified.then(|| classifier.render().replace(['/', '$'], "."))
             },
             &|lower| {
                 crate::assignable::platform_shape_upper_bound(

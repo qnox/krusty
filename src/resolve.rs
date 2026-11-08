@@ -14724,6 +14724,19 @@ impl<'a> Checker<'a> {
                         self.set(receiver, classifier_receiver);
                         return rejected;
                     }
+                    // One static whose arguments do not map (`bounded(Any())` against a method
+                    // with no value parameter) still owns the failure: the unbound type parameter
+                    // and the extra argument, not an unresolved static.
+                    if self.report_single_candidate_excess_arguments(
+                        call,
+                        &explicit_type_args,
+                        &rejected_candidates,
+                        args,
+                    ) {
+                        self.diags.sort_source_order_from(call_diagnostics);
+                        self.set(receiver, classifier_receiver);
+                        return Ty::Error;
+                    }
                     if self.resolved_type_name(classifier).is_some() {
                         if self.libraries.inherits_classifier_callables(classifier) {
                             let owner = match self.file.expr(receiver) {
@@ -30353,6 +30366,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         narrowed_this_member: HashMap::default(),
         script_receiver_members: HashSet::default(),
         resolved_calls: HashMap::default(),
+        rejected_dependency_signatures: HashMap::default(),
         unbound_value_lambda_call_formals: HashMap::default(),
         open_lambda_result_call_formals: HashMap::default(),
         postponed_diagnostics: PostponedDiagnostics::default(),
@@ -32866,6 +32880,9 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Declared return and value-parameter types of a dependency candidate a call rejected.
+    /// Missing classes in that signature are still reported; type-parameter bounds are not stored.
+    rejected_dependency_signatures: HashMap<ExprId, Vec<Ty>>,
     /// Unsolved callee-owned formals used as ordinary lambda inputs, or whose provisional lambda
     /// result solution still depends on another call's open variable. Receiver-lambda builder
     /// inference has separate body-constraint semantics and is deliberately absent here.

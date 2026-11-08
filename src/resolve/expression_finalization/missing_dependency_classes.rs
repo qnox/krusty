@@ -30,7 +30,7 @@ impl Checker<'_> {
             self.collect_missing_classes(ty, &mut missing);
         }
         for class in missing {
-            let class = access_control::owner_display(class);
+            let class = missing_class_display(class);
             self.diags.error_named(
                 span,
                 crate::diag::names::MISSING_DEPENDENCY_CLASS,
@@ -75,6 +75,13 @@ impl Checker<'_> {
         match self.file.expr(expression) {
             Expr::Call { callee, .. } => {
                 let span = self.missing_supertype_callee_span(*callee);
+                if let Some(types) = self.rejected_dependency_signatures.get(&expression) {
+                    if self.resolved_calls.get(&expression).is_none()
+                        && self.resolved_constructors.get(&expression).is_none()
+                    {
+                        return Some((span, types.clone()));
+                    }
+                }
                 if let Some(constructor) = self.resolved_constructors.get(&expression) {
                     let member = match constructor {
                         ResolvedConstructor::Source { .. } => return None,
@@ -117,6 +124,31 @@ impl Checker<'_> {
                     span,
                     std::iter::once(ret).chain(params.iter().copied()).collect(),
                 ))
+            }
+            // `value[index]` is the selected `get`, or a built-in array read that records no call.
+            // A declaration-site `List<Absent>` or `Absent[]` names the element only after
+            // substitution, so the expression's type is examined as well as the selected signature.
+            Expr::Index { array, .. } => {
+                let span = self.span(expression);
+                let mut types = self
+                    .indexed_or_safe_call_types(expression, span)
+                    .map(|(_, types)| types)
+                    .unwrap_or_default();
+                if types.is_empty() {
+                    let receiver = self.expr_types.get(array.0 as usize).copied()?;
+                    receiver.array_elem()?;
+                }
+                if let Some(element) = self.expr_types.get(expression.0 as usize).copied() {
+                    types.push(element);
+                }
+                (!types.is_empty()).then_some((span, types))
+            }
+            Expr::SafeCall {
+                name,
+                args: Some(_),
+                ..
+            } => {
+                self.indexed_or_safe_call_types(expression, self.member_name_span(expression, name))
             }
             Expr::Member { name, .. }
             | Expr::SafeCall {
@@ -176,6 +208,56 @@ impl Checker<'_> {
             _ => None,
         }
     }
+
+    /// Signature types of a selected dependency `get` or safe call, using the substituted return
+    /// type so a type argument such as `Absent` is visible.
+    fn indexed_or_safe_call_types(
+        &self,
+        expression: ExprId,
+        span: Span,
+    ) -> Option<(Span, Vec<Ty>)> {
+        if let Some(types) = self.rejected_dependency_signatures.get(&expression) {
+            if self.resolved_calls.get(&expression).is_none() {
+                return Some((span, types.clone()));
+            }
+        }
+        let call = self.resolved_calls.get(&expression)?;
+        let (identity, declared_params) = match call {
+            ResolvedCall::Member(selected) => (
+                selected.member.external_identity,
+                selected.member.params.as_slice(),
+            ),
+            ResolvedCall::Companion(member) => (member.external_identity, member.params.as_slice()),
+            ResolvedCall::Extension(call) => (
+                call.callable.external_identity,
+                call.callable.params.as_slice(),
+            ),
+            ResolvedCall::TopLevel(call) => (
+                call.callable.external_identity,
+                call.callable.params.as_slice(),
+            ),
+            ResolvedCall::MemberExtension {
+                external_identity,
+                params,
+                ..
+            } => (*external_identity, params.as_slice()),
+            ResolvedCall::LocalFunction(_) => return None,
+        };
+        dependency(identity)?;
+        let mut types = vec![call.ret()];
+        types.extend(declared_params.iter().copied());
+        if let Some(result) = self.expr_types.get(expression.0 as usize).copied() {
+            types.push(result);
+        }
+        Some((span, types))
+    }
+}
+
+/// `class` as a missing-class diagnostic names it. Unresolved Java evidence keeps the written
+/// spelling; it is not the internal name of the placeholder package.
+fn missing_class_display(class: TypeName) -> String {
+    crate::jvm::java_stub::unresolved_evidence_spelling(class)
+        .unwrap_or_else(|| access_control::owner_display(class))
 }
 
 /// Whether a selected declaration is a dependency's, which is the only kind whose signature can name

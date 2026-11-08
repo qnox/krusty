@@ -62,6 +62,47 @@ fn unresolved_internal(name: &str) -> String {
     name.replace('.', "/")
 }
 
+/// Package identity of a type reference that did not resolve to one classifier.
+///
+/// A resolved classifier is its own internal name. An unresolved or ambiguous reference is not that
+/// identity, even when a root-package class is spelled the same way: nesting the written name here
+/// keeps `classifier()` from authenticating the placeholder. The segment under this package is the
+/// written spelling diagnostics report.
+const UNRESOLVED_EVIDENCE_PACKAGE: &str = "~unresolved";
+
+/// The written spelling of an unresolved or ambiguous Java reference stored under
+/// [`UNRESOLVED_EVIDENCE_PACKAGE`], or `None` when `class` is an ordinary classifier identity.
+pub(crate) fn unresolved_evidence_spelling(class: crate::types::TypeName) -> Option<String> {
+    let sentinel = crate::types::type_name(UNRESOLVED_EVIDENCE_PACKAGE);
+    let mut parts = Vec::new();
+    let mut current = class;
+    loop {
+        if current == sentinel {
+            if parts.is_empty() {
+                return None;
+            }
+            parts.reverse();
+            return Some(parts.join("."));
+        }
+        if current == crate::types::TypeName::ROOT {
+            return None;
+        }
+        parts.push(current.segment());
+        current = current.parent()?;
+    }
+}
+
+/// How a Java type reference resolved, before a stub turns it into a binary name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum JavaTypeLookup {
+    /// One classifier.
+    Resolved(String),
+    /// No declaration has this name.
+    Unresolved,
+    /// More than one member type is visible. Not a license to pick a same-spelled root class.
+    Ambiguous,
+}
+
 /// Generate stub classes for Java sources.
 pub fn stub_classes(
     sources: &[(String, String)],
@@ -356,11 +397,73 @@ impl Resolver<'_> {
             .map(|resolved| resolved.internal)
     }
 
-    /// The internal name a type reference carries in a stub: the declaration it resolves to, or, in
-    /// lenient mode, the written name of a type nothing declares (see [`StubMode::Lenient`]).
+    /// The internal name a type reference carries in a stub.
+    ///
+    /// A unique classifier keeps its internal name. An unresolved or ambiguous reference is not a
+    /// classifier identity: lenient mode keeps the written spelling only when that spelling is not
+    /// already a resolved class, and otherwise nests it under [`UNRESOLVED_EVIDENCE_PACKAGE`] so a
+    /// root-package class of the same spelling cannot satisfy it.
     fn type_internal(&self, name: &str) -> Option<String> {
-        self.internal_of(name)
-            .or_else(|| self.mode.is_lenient().then(|| unresolved_internal(name)))
+        match self.lookup_type(name) {
+            JavaTypeLookup::Resolved(internal) => Some(internal),
+            JavaTypeLookup::Unresolved | JavaTypeLookup::Ambiguous if self.mode.is_lenient() => {
+                Some(self.unresolved_evidence(name))
+            }
+            JavaTypeLookup::Unresolved | JavaTypeLookup::Ambiguous => None,
+        }
+    }
+
+    /// Written spelling of a reference that is not a resolved classifier.
+    ///
+    /// When that spelling is already some class's internal name, the reference cannot use it: the
+    /// class reader would treat the descriptor as that class.
+    fn unresolved_evidence(&self, name: &str) -> String {
+        let written = unresolved_internal(name);
+        if (self.resolve)(&written) {
+            format!("{UNRESOLVED_EVIDENCE_PACKAGE}/{written}")
+        } else {
+            written
+        }
+    }
+
+    fn lookup_type(&self, name: &str) -> JavaTypeLookup {
+        let Some(resolved) = self.internal_of_with_depth(name) else {
+            return if self.member_reference_is_ambiguous(name) {
+                JavaTypeLookup::Ambiguous
+            } else {
+                JavaTypeLookup::Unresolved
+            };
+        };
+        JavaTypeLookup::Resolved(resolved.internal)
+    }
+
+    /// Whether a member-type lookup of `name` is ambiguous, including a qualified segment.
+    ///
+    /// `internal_of_with_depth` answers `None` for both "nothing declares this" and "two member
+    /// types do". Those are not the same fact: only the second must stay ambiguous when a
+    /// root-package class happens to use the spelling.
+    fn member_reference_is_ambiguous(&self, name: &str) -> bool {
+        let mut segments = name.split('.');
+        let Some(head) = segments.next() else {
+            return false;
+        };
+        for current in self.lexical_owners() {
+            match self.member_type(current, head) {
+                MemberTypeLookup::Ambiguous => return true,
+                MemberTypeLookup::Found(mut internal) => {
+                    for segment in segments {
+                        match self.qualified_member_type(&internal, segment) {
+                            MemberTypeLookup::Ambiguous => return true,
+                            MemberTypeLookup::Found(member) => internal = member,
+                            MemberTypeLookup::Absent => return false,
+                        }
+                    }
+                    return false;
+                }
+                MemberTypeLookup::Absent => {}
+            }
+        }
+        false
     }
 
     fn internal_of_with_depth(&self, name: &str) -> Option<ResolvedJavaName> {
@@ -2545,5 +2648,62 @@ mod tests {
         let both = "package p; public abstract class Both implements lib.A, lib.B { \
              public abstract Item item(); }";
         assert!(stubs_in(&world, &[("Both.java", both)]).is_none());
+    }
+
+    /// An ambiguous inherited member type is not the root-package class of the same spelling, and
+    /// neither is an unresolved import. Both stay evidence that no single classifier was selected.
+    #[test]
+    fn lenient_unresolved_and_ambiguous_types_are_not_a_same_spelled_root_class() {
+        let world = DeclaredWorld(&[
+            declared("java/lang/Object"),
+            declared("Item"),
+            declared("Absent"),
+            Declared {
+                name: "lib/A",
+                supertypes: &[],
+                members: &[("Item", "lib/A$Item", Visibility::Public)],
+            },
+            declared("lib/A$Item"),
+            Declared {
+                name: "lib/B",
+                supertypes: &[],
+                members: &[("Item", "lib/B$Item", Visibility::Public)],
+            },
+            declared("lib/B$Item"),
+        ]);
+        let sources = vec![
+            (
+                "Both.java".to_string(),
+                "package p; public abstract class Both implements lib.A, lib.B { \
+                 public abstract Item item(); }"
+                    .to_string(),
+            ),
+            (
+                "Partial.java".to_string(),
+                "package p; import missing.dependency.Absent; \
+                 public class Partial { public Absent absent() { return null; } }"
+                    .to_string(),
+            ),
+        ];
+        let out = stub_classes(&sources, StubMode::Lenient, &world)
+            .expect("lenient stubs keep the declarations");
+        let both = out
+            .iter()
+            .find(|(name, _)| name == "p/Both")
+            .and_then(|(_, bytes)| parse_class(bytes).ok())
+            .expect("Both");
+        assert!(both.method("item", "()L~unresolved/Item;").is_some());
+        assert!(both.method("item", "()LItem;").is_none());
+        assert_eq!(
+            unresolved_evidence_spelling(crate::types::type_name("~unresolved/Item")).as_deref(),
+            Some("Item")
+        );
+        let partial = out
+            .iter()
+            .find(|(name, _)| name == "p/Partial")
+            .and_then(|(_, bytes)| parse_class(bytes).ok())
+            .expect("Partial");
+        assert!(partial.method("absent", "()L~unresolved/Absent;").is_some());
+        assert!(partial.method("absent", "()LAbsent;").is_none());
     }
 }

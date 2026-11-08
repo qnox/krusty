@@ -96,6 +96,30 @@ fn rejected_candidate_argument_shape(
         .collect()
 }
 
+fn type_mentions_formal(ty: Ty, formal: &str) -> bool {
+    match ty.kind() {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => name.as_str() == formal,
+        TyKind::Obj(_, arguments) => arguments
+            .iter()
+            .any(|argument| type_mentions_formal(*argument, formal)),
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner)
+        | TyKind::DefinitelyNotNull(inner) => type_mentions_formal(inner, formal),
+        TyKind::Fun(signature) => signature
+            .params
+            .iter()
+            .chain(std::iter::once(&signature.ret))
+            .any(|part| type_mentions_formal(*part, formal)),
+        TyKind::Intersection(parts) => parts.iter().any(|part| type_mentions_formal(*part, formal)),
+        _ => false,
+    }
+}
+
 impl Checker<'_> {
     pub(super) fn assignability_error_message(
         &self,
@@ -147,6 +171,95 @@ impl Checker<'_> {
         Some(msg)
     }
 
+    /// Remember a rejected dependency candidate's declared signature so a missing class in it is
+    /// still reported. Bounds stay out: `bounded(Any())` is an inference failure, not a missing
+    /// class, even when the bound names a class that is absent.
+    fn note_rejected_dependency_signatures(
+        &mut self,
+        call: ExprId,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) {
+        let mut types = Vec::new();
+        for candidate in candidates {
+            if candidate.callable.external_identity.is_none() {
+                continue;
+            }
+            let (ret, params) = if let Some(signature) = candidate.generic_sig.as_ref() {
+                (signature.ret, signature.params.as_slice())
+            } else {
+                (candidate.callable.ret, candidate.callable.params.as_slice())
+            };
+            types.push(ret);
+            types.extend(params.iter().copied());
+        }
+        if !types.is_empty() {
+            self.rejected_dependency_signatures.insert(call, types);
+        }
+    }
+
+    /// A single static candidate that has more source arguments than value parameters. The extra
+    /// argument does not map, so the mapped-candidate path reports nothing; the candidate still
+    /// owns the unbound type parameter and the arity error.
+    pub(super) fn report_single_candidate_excess_arguments(
+        &mut self,
+        call: ExprId,
+        type_args: &[Ty],
+        candidates: &[crate::libraries::FunctionInfo],
+        args: &[ExprId],
+    ) -> bool {
+        let [candidate] = candidates else {
+            return false;
+        };
+        if candidate.call_sig.vararg_index.is_some() {
+            return false;
+        }
+        let value_count = candidate
+            .callable
+            .params
+            .len()
+            .saturating_sub(candidate.context_count);
+        if args.len() <= value_count {
+            return false;
+        }
+        if let Some(signature) = candidate.generic_sig.as_ref() {
+            for formal in signature.formals.iter().skip(type_args.len()) {
+                let constrained = signature
+                    .params
+                    .iter()
+                    .take(value_count)
+                    .any(|parameter| type_mentions_formal(*parameter, formal.as_str()));
+                if constrained {
+                    continue;
+                }
+                self.diags.error(
+                    self.call_callee_name_span(call),
+                    format!(
+                        "cannot infer type for type parameter '{}'. Specify it explicitly.",
+                        crate::types::type_parameter_source_name(formal)
+                    ),
+                );
+            }
+        }
+        let display =
+            super::declaration_rendering::declared_static_function(&self.fed_source(), candidate);
+        self.report_function_arity(
+            call,
+            super::DiagnosticFunction {
+                name: &candidate.callable.name,
+                params: &candidate.callable.params,
+                param_names: &candidate.call_sig.param_names,
+                param_defaults: &candidate.call_sig.param_defaults,
+                required: candidate.callable.params.len(),
+                vararg: false,
+                context_count: candidate.context_count,
+                ret: candidate.callable.ret,
+                source_display: Some(display),
+            },
+            args,
+        );
+        true
+    }
+
     /// When overload selection rejects a family by type but exactly one declaration has a valid
     /// source-argument mapping, report that declaration's mapped argument errors. This diagnostic
     /// step is origin-neutral: top-level and extension candidates carry the same semantic shape and
@@ -163,6 +276,7 @@ impl Checker<'_> {
         candidates: &[crate::libraries::FunctionInfo],
     ) -> Option<Ty> {
         let type_args = constraints.type_args;
+        self.note_rejected_dependency_signatures(call, candidates);
         let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let checkpoint = self.diags.diags.len();

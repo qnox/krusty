@@ -1068,6 +1068,12 @@ impl AnalysisWorker {
         }
     }
 
+    /// Analyses this process has completed. A support probe that compiled disk sources advances it;
+    /// the empty-support short-circuit does not.
+    pub fn completed_analysis_count(&self) -> usize {
+        self.analyses
+    }
+
     pub fn set_language_settings(&mut self, language: LanguageSettings) {
         self.language = language;
     }
