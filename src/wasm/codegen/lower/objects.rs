@@ -32,6 +32,11 @@ use super::{carrier, Body, FileContext, Unsupported, STRING};
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
 const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
+mod override_bridges;
+
+#[cfg(test)]
+mod tests;
+
 impl Body<'_> {
     fn file_classes(&self) -> Result<&FileClasses, Unsupported> {
         self.classes
@@ -87,9 +92,11 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// `C(args)`: a new instance of `C`, then the constructor `selected` names run on it.
+    /// `C(args)`: a new instance of `C`, then the constructor the construction at `site` selects
+    /// run on it.
     pub(super) fn construction(
         &mut self,
+        site: u32,
         internal: crate::types::TypeName,
         args: &[u32],
         selected: Option<&[Ty]>,
@@ -109,26 +116,20 @@ impl Body<'_> {
         if declaration.is_object || declaration.is_companion {
             return Err(format!("construction of the object declaration `{name}`"));
         }
+        let ordinal = crate::backend::selected_constructor(self.ir, site, class, selected)
+            .ok_or_else(|| format!("a call to an unknown constructor of `{name}`"))?;
         let form = &self.file_classes()?.forms[class as usize];
-        let primary: Vec<Ty> = declaration.ctor_args.iter().map(|arg| arg.ty).collect();
-        let (constructor, params) = match selected {
-            None => (form.constructor, primary),
-            Some(selected) => match declaration.secondary_ctors.iter().position(|candidate| {
-                candidate.params == selected || {
-                    let mut physical = candidate.prefix_params.clone();
-                    physical.extend(candidate.params.iter().copied());
-                    !candidate.prefix_params.is_empty() && physical == selected
-                }
-            }) {
-                Some(ordinal) => {
-                    let secondary = &declaration.secondary_ctors[ordinal];
-                    let mut params = secondary.prefix_params.clone();
-                    params.extend(secondary.params.iter().copied());
-                    (Some(form.secondaries[ordinal]), params)
-                }
-                None if primary == selected => (form.constructor, primary),
-                None => return Err(format!("a call to an unknown constructor of `{name}`")),
-            },
+        let (constructor, params) = match ordinal.checked_sub(1) {
+            None => (
+                form.constructor,
+                declaration.ctor_args.iter().map(|arg| arg.ty).collect(),
+            ),
+            Some(index) => {
+                let secondary = &declaration.secondary_ctors[index as usize];
+                let mut params = secondary.prefix_params.clone();
+                params.extend(secondary.params.iter().copied());
+                (Some(form.secondaries[index as usize]), params)
+            }
         };
         let constructor =
             constructor.ok_or_else(|| format!("a primary constructor `{name}` lacks"))?;
@@ -164,6 +165,7 @@ impl Body<'_> {
             chain.push(parent);
         }
         self.code.global_get(table);
+        self.enum_base_fields(class)?;
         for &owner in chain.iter().rev() {
             for field in &self.ir.classes[owner as usize].fields {
                 let value = carrier(field.ty)?.ok_or("a `Unit`-typed field")?;
@@ -179,6 +181,12 @@ impl Body<'_> {
         &mut self,
         classifier: crate::types::TypeName,
     ) -> Result<(), Unsupported> {
+        if self.ir.class_id_by_name(classifier).is_none() {
+            if let Some(entry) = self.calls.dependency_singleton(classifier) {
+                self.code.call(entry);
+                return Ok(());
+            }
+        }
         let singleton = self
             .classes
             .and(self.ir.class_id_by_name(classifier))
@@ -250,7 +258,7 @@ impl Body<'_> {
         if params.len() != args.len() {
             return Err("a call whose arguments do not match its parameters".into());
         }
-        self.dispatch(class, slot, receiver, args, &params)
+        self.dispatch(class, slot, receiver, args, &params, Some(function))
     }
 
     /// Dispatch a member-extension property's recorded accessor. Its extension receiver and any
@@ -307,7 +315,7 @@ impl Body<'_> {
             .tables
             .slot(class, &key)
             .ok_or_else(|| "a member-extension property with no dispatch slot".to_string())?;
-        self.dispatch(class, slot, receiver, args, &params)
+        self.dispatch(class, slot, receiver, args, &params, Some(function))
     }
 
     /// A call through `slot` of the table of `receiver`, statically of `class`.
@@ -318,6 +326,7 @@ impl Body<'_> {
         receiver: u32,
         args: &[u32],
         params: &[Ty],
+        function: Option<FunId>,
     ) -> Result<(), Unsupported> {
         let classes = self.file_classes()?;
         let ty = classes
@@ -332,8 +341,11 @@ impl Body<'_> {
         let this = self.local(REFERENCE);
         self.value(receiver, self.object_type(class))?;
         self.code.local_tee(this);
-        for (arg, param) in args.iter().zip(params) {
-            self.value(*arg, *param)?;
+        for (parameter, (&arg, &param)) in args.iter().zip(params).enumerate() {
+            match function {
+                Some(function) => self.function_argument(function, parameter as u32, arg)?,
+                None => self.value(arg, param)?,
+            }
         }
         self.code.local_get(this);
         self.table_of_object();
@@ -538,8 +550,8 @@ impl Body<'_> {
             return Err("a call whose arguments do not match its parameters".into());
         }
         self.value(receiver, Ty::obj_name(owner))?;
-        for (arg, param) in args.iter().zip(params) {
-            self.value(*arg, param)?;
+        for (parameter, &arg) in args.iter().enumerate() {
+            self.function_argument(function, parameter as u32, arg)?;
         }
         let function = self.emitted_function(function)?;
         self.code.call(function);
@@ -724,7 +736,7 @@ impl Body<'_> {
                 .slot(class, &SlotKey::Getter(target))
         });
         if let Some(slot) = slot {
-            return self.dispatch(class, slot, receiver, &[], &[]);
+            return self.dispatch(class, slot, receiver, &[], &[], None);
         }
         if let Some(getter) = property.getter {
             return self.direct_member_call(getter, receiver, &[]);
@@ -796,7 +808,7 @@ impl Body<'_> {
                 .slot(class, &SlotKey::Setter(target))
         });
         if let Some(slot) = slot {
-            return self.dispatch(class, slot, receiver, &[value], &[property.ty]);
+            return self.dispatch(class, slot, receiver, &[value], &[property.ty], None);
         }
         if let Some(setter) = property.setter {
             return self.direct_member_call(setter, receiver, &[value]);
@@ -943,10 +955,36 @@ impl Body<'_> {
     /// `is`, `!is` and `as?`.
     pub(super) fn type_test(
         &mut self,
+        operation: u32,
         op: IrTypeOp,
         arg: u32,
         target: Ty,
     ) -> Result<(), Unsupported> {
+        if self
+            .ir
+            .is_reified_template_operation(self.scope, operation, target)
+        {
+            // Only a reified declaration's own template tests its unsubstituted parameter; every
+            // executed expansion tests the call's type argument instead. The template keeps the
+            // operand's effects and then traps, as the declaration's own unlowerable body does.
+            // Copied or otherwise executable code that still names the parameter is refused below.
+            self.statement(arg)?;
+            self.code.unreachable();
+            return Ok(());
+        }
+        if self.type_of(arg)? == Some(Ty::Unit)
+            && matches!(op, IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf)
+        {
+            // `Unit` has no carrier, so its one instance is known statically: it is a `Unit` and
+            // an `Any`, and implements nothing else.
+            let tested = target.non_null();
+            let is = tested == Ty::Unit
+                || matches!(tested.kind(), TyKind::Obj(name, _) if name == crate::types::wk::any());
+            self.statement(arg)?;
+            self.code
+                .i32_const(i32::from(is == matches!(op, IrTypeOp::InstanceOf)));
+            return Ok(());
+        }
         if !matches!(self.carrier_of(arg)?, Some(ValType::Ref { .. }) | None) {
             return Err(format!(
                 "a type test of a `{}` value",
@@ -1021,7 +1059,11 @@ impl Body<'_> {
 
     /// Whether a call through `member`'s slot on a value statically of `class` could reach
     /// `kotlin.Any`'s own member, which this module has no body for.
-    fn reaches_any_default(&self, class: ClassId, member: AnyMember) -> Result<bool, Unsupported> {
+    pub(super) fn reaches_any_default(
+        &self,
+        class: ClassId,
+        member: AnyMember,
+    ) -> Result<bool, Unsupported> {
         let classes = self.file_classes()?;
         Ok(self.ir.classes.iter().enumerate().any(|(id, candidate)| {
             let id = id as ClassId;
@@ -1040,57 +1082,38 @@ impl Body<'_> {
         }))
     }
 
+    /// Whether a call through `member`'s slot on a value statically of type `ty` could reach
+    /// `kotlin.Any`'s own member. A type naming a class of this file is answered by that class's
+    /// hierarchy; any other reference type (`Any`, a type parameter, an interface) is erased, so
+    /// its value can be an instance of every class here. A scalar's box and `Unit` answer the
+    /// member themselves.
+    pub(super) fn may_reach_any_default(
+        &self,
+        ty: Ty,
+        member: AnyMember,
+    ) -> Result<bool, Unsupported> {
+        if let Some(class) = self.class_of_type(ty) {
+            return self.reaches_any_default(class, member);
+        }
+        if !matches!(carrier(ty.non_null())?, Some(ValType::Ref { .. })) {
+            return Ok(false);
+        }
+        let Some(classes) = self.classes else {
+            return Ok(false);
+        };
+        Ok(self.ir.classes.iter().enumerate().any(|(id, class)| {
+            !class.is_interface
+                && classes.tables.table(id as ClassId).vtable[member.slot() as usize]
+                    == Slot::AnyMember(member)
+        }))
+    }
+
     /// `lhs == rhs` on objects: `lhs?.equals(rhs) ?: (rhs === null)`.
     pub(super) fn object_equality(&mut self, lhs: u32, rhs: u32) -> Result<(), Unsupported> {
-        // Both operands run once, left first, even when the left value is null. The static
-        // type can be Any: the GC representation, not that type, selects the equality body.
-        let (left, right) = (self.local(REFERENCE), self.local(REFERENCE));
+        // The shared runtime dispatch begins only after both operands have run, left first.
         self.value(lhs, any())?;
-        self.code.local_set(left);
         self.value(rhs, any())?;
-        self.code.local_set(right);
-        let any_table = self.runtime.objects.any_table;
-        let equals = self.runtime.objects.any_slot_types[0];
-        self.code
-            .local_get(left)
-            .ref_is_null()
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(right)
-            .ref_is_null()
-            .else_()
-            .local_get(left)
-            .ref_test(false, STRING_HEAP)
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(right)
-            .ref_test(false, STRING_HEAP)
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(left)
-            .ref_cast(false, STRING_HEAP)
-            .local_get(right)
-            .ref_cast(false, STRING_HEAP)
-            .call(self.runtime.string_equals)
-            .else_()
-            .i32_const(0)
-            .end()
-            .else_()
-            .local_get(left)
-            .ref_test(false, HeapType::Concrete(self.runtime.objects.object))
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(left)
-            .local_get(right)
-            .local_get(left);
-        self.table_of_object();
-        self.code
-            .struct_get(any_table, AnyMember::Equals.slot())
-            .call_ref(equals)
-            .else_()
-            // Non-object eq references have no virtual override: their default is identity.
-            .local_get(left)
-            .local_get(right)
-            .ref_eq()
-            .end()
-            .end()
-            .end();
+        self.code.call(self.runtime.object_equals);
         Ok(())
     }
 
@@ -1132,7 +1155,7 @@ struct InterfaceCall {
 }
 
 /// `kotlin.Any`, the type every class value is read as before its class is tested.
-fn any() -> Ty {
+pub(super) fn any() -> Ty {
     Ty::obj_name(crate::types::wk::any())
 }
 
@@ -1171,6 +1194,10 @@ pub(super) fn define_class_functions(
                 declared.extend(ir.declared_value_slot_types(root));
             }
             let mut body = Body::new(context, module, runtime, &parameters, declared, Ty::Unit);
+            body.scope = crate::ir::IrEnclosure::Constructor {
+                class: id,
+                ordinal: 0,
+            };
             body.primary_constructor(id)?;
             let lowered = body.finish();
             define(module, constructor, &parameters, lowered)?;
@@ -1190,6 +1217,10 @@ pub(super) fn define_class_functions(
                 declared.extend(ir.declared_value_slot_types(root));
             }
             let mut body = Body::new(context, module, runtime, &parameters, declared, Ty::Unit);
+            body.scope = crate::ir::IrEnclosure::Constructor {
+                class: id,
+                ordinal: ordinal as u32 + 1,
+            };
             body.secondary_constructor(id, ordinal)?;
             let lowered = body.finish();
             define(module, constructor, &parameters, lowered)?;
@@ -1253,7 +1284,7 @@ pub(super) fn define_class_functions(
             },
         );
     }
-    Ok(())
+    override_bridges::define_override_bridges(context, classes, module, runtime)
 }
 
 /// Define the program-wide entries reserved for ordinary member properties of this source file.
@@ -1484,18 +1515,24 @@ impl Body<'_> {
         Ok((form.secondaries[index], params))
     }
 
-    /// Call `constructor`, taking `params`, on `this` with `args`.
+    /// Call `constructor`, taking `params`, on `this` with the first `forwarded` parameters of
+    /// this constructor and then `args`.
     fn delegate(
         &mut self,
         constructor: u32,
         params: &[Ty],
+        forwarded: usize,
         args: &[u32],
     ) -> Result<(), Unsupported> {
-        if params.len() != args.len() {
-            return Err("a constructor delegation with omitted arguments".to_string());
+        if params.len() != forwarded + args.len() {
+            return Err("a constructor delegation of a different arity".to_string());
         }
         self.code.local_get(0);
-        for (arg, param) in args.iter().zip(params) {
+        for parameter in 1..=forwarded {
+            self.code
+                .local_get(u32::try_from(parameter).expect("too many parameters"));
+        }
+        for (arg, param) in args.iter().zip(&params[forwarded..]) {
             self.value(*arg, *param)?;
         }
         self.code.call(constructor);
@@ -1547,7 +1584,7 @@ impl Body<'_> {
             Some(parent) => {
                 let (constructor, params) =
                     self.constructor_of(parent, declaration.super_ctor.ordinal)?;
-                self.delegate(constructor, &params, &declaration.super_args)?;
+                self.delegate(constructor, &params, 0, &declaration.super_args)?;
             }
             None if !declaration.super_args.is_empty() => {
                 return Err(format!("a superclass constructor call (`{name}`)"));
@@ -1600,15 +1637,17 @@ impl Body<'_> {
             self.statement(statement)?;
         }
         match &secondary.delegate {
+            // A `this(…)` passes on the prefix every constructor of the class takes.
             CtorDelegateTarget::This { target, .. } => {
                 let (constructor, params) = self.constructor_of(class, target.ordinal)?;
-                self.delegate(constructor, &params, &secondary.delegate_args)?;
+                let forwarded = secondary.prefix_params.len();
+                self.delegate(constructor, &params, forwarded, &secondary.delegate_args)?;
             }
             CtorDelegateTarget::Super { target, .. } => {
                 match self.file_classes()?.tables.table(class).superclass {
                     Some(parent) => {
                         let (constructor, params) = self.constructor_of(parent, target.ordinal)?;
-                        self.delegate(constructor, &params, &secondary.delegate_args)?;
+                        self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
                     }
                     None if !secondary.delegate_args.is_empty() => {
                         return Err(format!("a superclass constructor call (`{name}`)"));

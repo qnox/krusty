@@ -563,7 +563,7 @@ impl UnmatchedActual {
 /// The modifier words a function writes between `actual` and `fun`, in the reference compiler's
 /// measured order: `external` precedes `override`, and `inline` precedes `operator`, `infix` and
 /// `suspend`. Each was measured alone and the ordering pairs that are legal Kotlin were measured
-/// together; see `docs/SPEC.md`.
+/// together.
 fn callable_modifiers(function: &crate::ast::FunDecl) -> String {
     [
         ("external", function.is_external()),
@@ -766,11 +766,11 @@ fn render_extension_property(
         return Err("has a type that did not resolve");
     }
     let formals = if signature.formal_names.is_empty() {
-        &signature.formals
+        signature.formals.iter().map(ToString::to_string).collect()
     } else {
-        &signature.formal_names
+        signature.formal_names.clone()
     };
-    let formals = type_parameters(formals, &|index| {
+    let formals = type_parameters(&formals, &|index| {
         signature
             .formal_bounds
             .get(index)

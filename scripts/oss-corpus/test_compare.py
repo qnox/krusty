@@ -121,11 +121,12 @@ class VerifyBuild(unittest.TestCase):
             # :e's verify compile was listed and wrote no record.
             listed.append(f':e:compileKotlin\t{checkout}/e/build/krusty/verify/compileKotlin.json\n')
             write(f'{work}/logs/p.verify.records.tsv', ''.join(listed).encode())
-            subprocess.run([sys.executable, os.path.join(HERE, 'compare.py'), work, 'p', '0', '1'],
+            subprocess.run([sys.executable, os.path.join(HERE, 'compare.py'), work, 'p', '0', '0', '0', '1'],
                            check=True, stdout=subprocess.DEVNULL)
             with open(f'{out}/compare.json') as f:
                 summary = json.load(f)
         self.assertEqual(summary['verify_exit'], 1)
+        self.assertEqual(summary['tests']['exit'], dict(kotlinc=0, krusty=0))
         self.assertEqual([(r['task'], r['error'], r['verify']) for r in summary['rows']], [
             (':a:compileKotlin', "a/A.kt:3:5: error: unresolved reference 'foo'.", dict(
                 status='failed', errors=["a/A.kt:3:5: error: unresolved reference 'foo'.",

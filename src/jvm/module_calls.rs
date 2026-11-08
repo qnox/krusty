@@ -1,7 +1,7 @@
 use crate::fir::{CallableId, PropertyId};
 use crate::ir::{
     Callee, ExprId, IrCheckedOperation, IrClassifierKind, IrExpr, IrFile, IrFunction,
-    IrModuleProperty, IrModuleSource, IrStaticPlacement,
+    IrModuleProperty, IrModuleSource, IrStaticPlacement, JvmAccessorSide,
 };
 use crate::jvm::inline::PropertyAccess;
 use crate::jvm::property_realizations::PropertyRealizations;
@@ -13,6 +13,9 @@ use super::default_call_operands::{DefaultCallOperand, DefaultCallOperands};
 
 #[cfg(test)]
 mod tests;
+
+mod super_accessors;
+pub(super) use super_accessors::SuperAccessors;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ModuleRealizationTarget {
@@ -183,19 +186,33 @@ pub(super) fn applied_jvm_name(
 /// source-written accessor is an ordinary function, which [`realize_declared_function_names`]
 /// renames.
 fn realize_default_accessor_names(ir: &mut IrFile) -> Result<(), ModuleRealizationTarget> {
-    for class in &mut ir.classes {
+    let mut property_names = Vec::new();
+    for class in &ir.classes {
         let failure = ModuleRealizationTarget::Classifier(class.fq_name);
-        for property in &mut class.properties {
+        for (index, property) in (0u32..).zip(&class.properties) {
             let annotations = &property.accessor_annotations;
             let getter = applied_jvm_name(Some(&annotations.getter)).map_err(|()| failure)?;
             let setter = applied_jvm_name(Some(&annotations.setter)).map_err(|()| failure)?;
             if let Some(getter) = getter.filter(|_| property.getter.is_none()) {
-                property.getter_jvm_name = Some(getter.to_owned());
+                property_names.push((
+                    class.fq_name,
+                    index,
+                    JvmAccessorSide::Getter,
+                    getter.to_owned(),
+                ));
             }
             if let Some(setter) = setter.filter(|_| property.setter.is_none()) {
-                property.setter_jvm_name = Some(setter.to_owned());
+                property_names.push((
+                    class.fq_name,
+                    index,
+                    JvmAccessorSide::Setter,
+                    setter.to_owned(),
+                ));
             }
         }
+    }
+    for (class, index, side, name) in property_names {
+        ir.set_jvm_property_accessor_name(class, index, side, name);
     }
     let mut names = Vec::new();
     for (index, storage) in ir.statics.iter().enumerate() {
@@ -214,12 +231,11 @@ fn realize_default_accessor_names(ir: &mut IrFile) -> Result<(), ModuleRealizati
         }
     }
     for (index, getter, setter) in names {
-        let storage = &mut ir.statics[index];
-        if getter.is_some() {
-            storage.getter_jvm_name = getter;
+        if let Some(getter) = getter {
+            ir.set_jvm_static_accessor_name(index as u32, JvmAccessorSide::Getter, getter);
         }
-        if setter.is_some() {
-            storage.setter_jvm_name = setter;
+        if let Some(setter) = setter {
+            ir.set_jvm_static_accessor_name(index as u32, JvmAccessorSide::Setter, setter);
         }
     }
     Ok(())
@@ -567,8 +583,10 @@ pub(super) fn realize_default_calls(
 /// opcodes.
 pub(super) fn realize_super_calls(
     ir: &mut IrFile,
+    classifiers: &dyn crate::backend::BackendClassifierSource,
     callables: &crate::backend::CheckedBackendCallables,
     property_realizations: &mut PropertyRealizations,
+    accessors: &mut SuperAccessors,
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
 ) -> Result<(), ModuleRealizationTarget> {
     for raw in 0..ir.exprs.len() {
@@ -584,6 +602,7 @@ pub(super) fn realize_super_calls(
             continue;
         };
         let Callee::Super {
+            qualifier,
             owner,
             dispatch_owner,
             enclosing_dispatch,
@@ -686,81 +705,110 @@ pub(super) fn realize_super_calls(
             None => (name, descriptor, source),
         };
         if enclosing_dispatch {
-            let class = ir
-                .classes
-                .iter()
-                .position(|class| class.fq_name_id() == dispatch_owner)
-                .ok_or(ModuleRealizationTarget::Classifier(dispatch_owner))?;
-            let receiver = ir.add_expr(IrExpr::GetValue(0));
-            let bridge_arguments = (0..params.len())
-                .map(|parameter| {
-                    ir.add_expr(IrExpr::GetValue(
-                        u32::try_from(parameter + 1).expect("too many super parameters"),
-                    ))
-                })
-                .collect::<Vec<_>>();
-            let invocation = match realization {
-                crate::libraries::MemberRealization::Dispatch => ir.add_expr(IrExpr::Call {
-                    callee: Box::new(Callee::Special {
-                        owner,
-                        name,
-                        descriptor,
-                        interface,
-                        source_member,
-                        source,
-                    }),
-                    dispatch_receiver: Some(receiver),
-                    args: bridge_arguments,
-                }),
-                // As for a direct `super` call below, the receiver stays the dispatch receiver,
-                // so a receiver-first holder static loads it at its own class.
-                crate::libraries::MemberRealization::Direct { pass_receiver } => {
-                    ir.add_expr(IrExpr::Call {
-                        callee: Box::new(Callee::Static {
+            let selected = SuperAccessors::select(
+                ir,
+                classifiers,
+                super_accessors::AccessorRequest {
+                    parent: dispatch_owner,
+                    qualifier,
+                    invocation_owner: owner,
+                    kind,
+                    declaration,
+                    interface,
+                    direct_receiver: match realization {
+                        crate::libraries::MemberRealization::Dispatch => None,
+                        crate::libraries::MemberRealization::Direct { pass_receiver } => {
+                            Some(pass_receiver)
+                        }
+                        _ => return Err(ModuleRealizationTarget::Classifier(owner)),
+                    },
+                    parameters: &params,
+                    result: ret,
+                    descriptor: &descriptor,
+                },
+            )?;
+            let function = if let Some(function) = accessors.existing(&selected) {
+                function
+            } else {
+                let class = ir
+                    .classes
+                    .iter()
+                    .position(|class| class.fq_name_id() == dispatch_owner)
+                    .ok_or(ModuleRealizationTarget::Classifier(dispatch_owner))?;
+                let receiver = ir.add_expr(IrExpr::GetValue(0));
+                let bridge_arguments = (0..params.len())
+                    .map(|parameter| {
+                        ir.add_expr(IrExpr::GetValue(
+                            u32::try_from(parameter + 1).expect("too many super parameters"),
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                let invocation = match realization {
+                    crate::libraries::MemberRealization::Dispatch => ir.add_expr(IrExpr::Call {
+                        callee: Box::new(Callee::Special {
                             owner,
                             name,
                             descriptor,
-                            inline: crate::libraries::InlineKind::None,
+                            interface,
+                            source_member,
+                            source,
                         }),
-                        dispatch_receiver: pass_receiver.then_some(receiver),
+                        dispatch_receiver: Some(receiver),
                         args: bridge_arguments,
+                    }),
+                    // As for a direct `super` call below, the receiver stays the dispatch receiver,
+                    // so a receiver-first holder static loads it at its own class.
+                    crate::libraries::MemberRealization::Direct { pass_receiver } => {
+                        ir.add_expr(IrExpr::Call {
+                            callee: Box::new(Callee::Static {
+                                owner,
+                                name,
+                                descriptor,
+                                inline: crate::libraries::InlineKind::None,
+                            }),
+                            dispatch_receiver: pass_receiver.then_some(receiver),
+                            args: bridge_arguments,
+                        })
+                    }
+                    crate::libraries::MemberRealization::Intrinsic(_)
+                    | crate::libraries::MemberRealization::RangeConstruction { .. } => {
+                        return Err(source.map_or(
+                            ModuleRealizationTarget::Classifier(owner),
+                            ModuleRealizationTarget::Callable,
+                        ));
+                    }
+                };
+                let body = if ret == crate::types::Ty::Unit {
+                    let returned = ir.add_expr(IrExpr::Return(None));
+                    ir.add_expr(IrExpr::Block {
+                        stmts: vec![invocation, returned],
+                        value: None,
                     })
-                }
-                crate::libraries::MemberRealization::Intrinsic(_)
-                | crate::libraries::MemberRealization::RangeConstruction { .. } => {
-                    return Err(source.map_or(
-                        ModuleRealizationTarget::Classifier(owner),
-                        ModuleRealizationTarget::Callable,
-                    ));
-                }
+                } else {
+                    let returned = ir.add_expr(IrExpr::Return(Some(invocation)));
+                    ir.add_expr(IrExpr::Block {
+                        stmts: vec![returned],
+                        value: None,
+                    })
+                };
+                let mut bridge_params = Vec::with_capacity(params.len() + 1);
+                bridge_params.push(crate::types::Ty::obj_name(dispatch_owner));
+                bridge_params.extend(params);
+                let function = ir.add_fun(IrFunction {
+                    // Temporary JVM name until the recorded invocation has its final mapped name.
+                    name: format!("access$pending${}", ir.functions.len()),
+                    params: bridge_params,
+                    ret,
+                    body: Some(body),
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks: Vec::new(),
+                });
+                ir.classes[class].methods.push(function);
+                ir.synthetic_methods.insert(function);
+                accessors.record(selected, function, invocation);
+                function
             };
-            let body = if ret == crate::types::Ty::Unit {
-                let returned = ir.add_expr(IrExpr::Return(None));
-                ir.add_expr(IrExpr::Block {
-                    stmts: vec![invocation, returned],
-                    value: None,
-                })
-            } else {
-                let returned = ir.add_expr(IrExpr::Return(Some(invocation)));
-                ir.add_expr(IrExpr::Block {
-                    stmts: vec![returned],
-                    value: None,
-                })
-            };
-            let mut bridge_params = Vec::with_capacity(params.len() + 1);
-            bridge_params.push(crate::types::Ty::obj_name(dispatch_owner));
-            bridge_params.extend(params);
-            let function = ir.add_fun(IrFunction {
-                name: format!("$fir$access$super${raw}"),
-                params: bridge_params,
-                ret,
-                body: Some(body),
-                is_static: true,
-                dispatch_receiver: None,
-                param_checks: Vec::new(),
-            });
-            ir.classes[class].methods.push(function);
-            ir.synthetic_methods.insert(function);
             let mut bridge_call_arguments = Vec::with_capacity(args.len() + 1);
             bridge_call_arguments.push(
                 dispatch_receiver.ok_or(ModuleRealizationTarget::Classifier(dispatch_owner))?,
@@ -830,12 +878,20 @@ pub(super) fn realize(
     classifiers: &dyn crate::backend::BackendClassifierSource,
     callables: &crate::backend::CheckedBackendCallables,
     property_realizations: &mut PropertyRealizations,
+    super_accessors: &mut SuperAccessors,
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
 ) -> Result<(), ModuleRealizationTarget> {
     let facades = &file_classes.containers[..];
     realize_declared_function_names(ir)?;
     realize_default_accessor_names(ir)?;
-    realize_super_calls(ir, callables, property_realizations, jvm_default)?;
+    realize_super_calls(
+        ir,
+        classifiers,
+        callables,
+        property_realizations,
+        super_accessors,
+        jvm_default,
+    )?;
     prepare_inherited_default_calls(ir)?;
     for raw in 0..ir.exprs.len() {
         // A property accessor call keeps its declaration's parameter vector (contexts, receiver,

@@ -30,8 +30,10 @@ pub(super) fn realize(
 }
 
 /// Realize the calls native plugins generated, from expression `first` on, to the runtime
-/// declarations they selected at the handoff. The file's own dependency calls were realized at
-/// lowering; any other expression a plugin appended keeps its own realization path.
+/// declarations they selected at the handoff, and the file's calls to declarations a plugin's
+/// transform appended parameters to, which the plugin has now passed. The file's other dependency
+/// calls were realized at lowering; any other expression a plugin appended keeps its own
+/// realization path.
 pub(super) fn realize_plugin_runtime_calls(
     ir: &mut IrFile,
     classifiers: &dyn crate::backend::BackendClassifierSource,
@@ -55,31 +57,38 @@ pub(super) fn realize_plugin_runtime_calls(
 enum Realized {
     /// Every dependency call and construction of the file.
     File,
-    /// The calls to plugin-selected runtime declarations among the expressions from `first` on.
+    /// The calls to plugin-selected runtime declarations among the expressions from `first` on,
+    /// and every call to a declaration with appended parameters.
     PluginRuntimeCalls { first: usize },
 }
 
 impl Realized {
-    fn first(self) -> usize {
-        match self {
-            Self::File => 0,
-            Self::PluginRuntimeCalls { first } => first,
-        }
-    }
-
+    /// Whether this pass realizes `expression`, the one at `index`. A call to a declaration a
+    /// plugin's transform appended parameters to waits for the plugin pass, which runs after the
+    /// plugin has passed them.
     fn includes(
         self,
+        index: usize,
         expression: &IrExpr,
         callables: &crate::backend::CheckedBackendCallables,
     ) -> bool {
+        let target = match expression {
+            IrExpr::Call { callee, .. } => match **callee {
+                Callee::External { target, .. } => Some(target),
+                _ => None,
+            },
+            _ => None,
+        };
+        let appended =
+            target.is_some_and(|target| !callables.plugin_runtime_appended(target).is_empty());
         match self {
-            Self::File => true,
-            Self::PluginRuntimeCalls { .. } => matches!(
-                expression,
-                IrExpr::Call { callee, .. }
-                    if matches!(**callee, Callee::External { target, .. }
-                        if callables.is_plugin_runtime_callable(target))
-            ),
+            Self::File => !appended,
+            Self::PluginRuntimeCalls { first } => {
+                appended
+                    || (index >= first
+                        && target
+                            .is_some_and(|target| callables.is_plugin_runtime_callable(target)))
+            }
         }
     }
 }
@@ -98,11 +107,13 @@ fn realize_expressions(
     let dispatch_classifiers =
         crate::jvm::member_dispatch::CheckedDispatchClassifiers::new(ir, classifiers);
     let expression_count = ir.exprs.len();
-    for index in realized.first()..expression_count {
-        if !realized.includes(&ir.exprs[index], callables) {
+    let mut realized_calls = Vec::new();
+    for index in 0..expression_count {
+        if !realized.includes(index, &ir.exprs[index], callables) {
             continue;
         }
         let expression = u32::try_from(index).expect("too many common IR expressions");
+        realized_calls.push(expression);
         let (defaults, default_prefix_count) = match &ir.exprs[index] {
             IrExpr::New {
                 defaults,
@@ -301,7 +312,7 @@ fn realize_expressions(
             };
             *args = realized_arguments;
             args.extend(realization_operands);
-            *ctor_desc = Some(if let Some(default) = default {
+            *ctor_desc = Some(Box::from(if let Some(default) = default {
                 default.descriptor.clone()
             } else if let Some(constructor) = constructor {
                 constructor.descriptor.clone()
@@ -312,7 +323,7 @@ fn realize_expressions(
                 )
             } else {
                 callable.descriptor
-            });
+            }));
             *external_target = None;
             *defaults = Box::new([]);
             *default_prefix_count = 0;
@@ -543,7 +554,7 @@ fn realize_expressions(
                 ir.ext_call_source_receiver.remove(&expression);
                 operation.commit(ir, expression);
                 if matches!(result.canonical_semantic().non_null(), Ty::UInt | Ty::ULong) {
-                    ir.logical_types.insert(expression, result);
+                    ir.set_logical_type(expression, result);
                 }
                 continue;
             }
@@ -847,8 +858,10 @@ fn realize_expressions(
                 true,
                 inline_modifiers,
             )?;
-            let physical_call =
-                bridge_external_result(ir, index, callable.physical_ret, semantic_ret);
+            // The invoked operation is the provider's `$default` bridge, so its descriptor result is
+            // the physical value on the stack. An inherited provider can erase a generic result
+            // (`Base<T>.f$default(...): Object`) that the selected override returns as `int`.
+            let physical_call = bridge_external_result(ir, index, default.ret, semantic_ret);
             default_call_operands.record(physical_call, operand_plan);
             default_call_operands.record_declaration(
                 physical_call,
@@ -1447,6 +1460,25 @@ fn realize_expressions(
             ir.semantic_call_roles.insert(realized_call, role);
         }
     }
+    // A dependency call this target realized as a builtin operation is that operation's source
+    // call, so it states its line as kotlinc's intrinsic of the operation does.
+    for expression in realized_calls {
+        let IrExpr::Call { callee, .. } = &ir.exprs[expression as usize] else {
+            continue;
+        };
+        let Callee::Intrinsic { ret, .. } = **callee else {
+            continue;
+        };
+        if ir.source_line(expression).is_some() {
+            ir.builtin_calls
+                .entry(expression)
+                .or_insert_with(|| crate::ir::IrBuiltinCall {
+                    kind: crate::ir::IrBuiltinCallKind::Intrinsic,
+                    result: ret,
+                    operands: Vec::new(),
+                });
+        }
+    }
     for (owner, target) in &mut ir.external_super_constructors {
         let uses_defaults = ir
             .super_constructor_default_arguments
@@ -1630,7 +1662,7 @@ fn publish_inline_substitutions(
             }
             signature.formals.get(ordinal as usize).map(|name| {
                 (
-                    name.clone(),
+                    name.to_string(),
                     substitution.value,
                     substitution.reified_runtime,
                     substitution.reified,
@@ -1714,8 +1746,8 @@ pub(super) fn bridge_external_result(
     // value-class lowering needs both facts on the cloned operation to distinguish an erased generic
     // read (`Iterator<X>.next(): Object`, which returns a boxed `X`) from a declaration whose value-
     // class result is already returned as its unboxed carrier.
-    ir.logical_types.insert(call, semantic);
-    ir.physical_types.insert(call, physical);
+    ir.set_logical_type(call, semantic);
+    ir.set_physical_type(call, physical);
     ir.exprs[index] = IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::ImplicitCoercion,
         arg: call,

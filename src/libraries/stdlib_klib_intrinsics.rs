@@ -19,6 +19,15 @@ pub(crate) enum StdlibKlibIntrinsic {
 }
 
 impl StdlibKlibIntrinsic {
+    /// Every identity the common stdlib KLIB can carry a role for.
+    pub(crate) const ALL: [Self; 5] = [
+        Self::DoubleRangeTo,
+        Self::FloatRangeTo,
+        Self::DoubleRangeUntil,
+        Self::FloatRangeUntil,
+        Self::EnumEntries,
+    ];
+
     pub(crate) fn compiler_intrinsic(self) -> CompilerIntrinsic {
         match self {
             Self::DoubleRangeTo
@@ -127,7 +136,7 @@ fn enum_entries_signature(formal: &str) -> GenericSig {
     let bound = Ty::obj_args("kotlin/Enum", &[parameter_in_bound]);
     let parameter = Ty::ty_param(formal, bound);
     GenericSig {
-        formals: vec![formal.to_string()],
+        formals: vec![crate::types::TyParamName::new(formal)],
         formal_bounds: vec![vec![bound]],
         receiver: None,
         params: Vec::new(),
@@ -149,7 +158,7 @@ fn normalized_enum_entries_signature(formal: &str) -> GenericSig {
     let parameter = Ty::ty_param(formal, primary_bound);
     let declared_bound = Ty::obj_args("kotlin/Enum", &[parameter]);
     GenericSig {
-        formals: vec![formal.to_string()],
+        formals: vec![crate::types::TyParamName::new(formal)],
         formal_bounds: vec![vec![declared_bound]],
         receiver: None,
         params: Vec::new(),

@@ -1,14 +1,21 @@
-//! Line-break handling shared by the grammar.
+//! Line breaks in the grammar.
 //!
-//! The lexer represents a physical line break and an explicit `;` both as `Newline`. Kotlin's
-//! grammar allows `NL*` in specific positions and treats a break before `||`, `&&`, or `?:` as a
-//! continuation; these operations keep every caller on the same rules.
+//! Kotlin treats a line break as whitespace except at a few grammar points, kotlinc's
+//! `newlineBeforeCurrentToken` checks. The parser therefore reads tokens without physical line
+//! breaks and records, per token, whether one preceded it; an explicit `;` stays a token. Only the
+//! points below consult that record:
 //!
-//! Inside `(…)` and `[…]` a line break is not a terminator at all: kotlinc's parser disables
-//! newlines there and re-enables them in every `{…}` body nested inside (lambda, block, `when`
-//! body, object literal). [`Parser::with_newlines_insignificant`] and
-//! [`Parser::with_newlines_significant`] keep that mode, and `bump` honours it, so `(a\n+ b)` and
-//! `f(x\nor y)` continue the expression exactly as kotlinc does.
+//! * an expression is interrupted by a line break unless the next token continues it
+//!   ([`Parser::interrupted_with_newline`]): binary operators, postfix operations, calls, index
+//!   brackets, and trailing lambdas do not cross a line;
+//! * a statement or optional trailing element may end at a line break
+//!   ([`Parser::at_eol_or_semicolon`]), as `return` does before a value on the next line;
+//! * a call suffix after a selector, and a label reference, stay on their line.
+//!
+//! Inside `(…)` and `[…]` a line break is not significant at all: kotlinc disables newlines there
+//! and re-enables them in every `{…}` body nested inside (lambda, block, `when` body, object
+//! literal). [`Parser::with_newlines_insignificant`] and [`Parser::with_newlines_significant`]
+//! keep that mode, so `(a\n+ b)` and `f(x\nor y)` continue the expression exactly as kotlinc does.
 
 use super::*;
 
@@ -33,102 +40,87 @@ impl Parser<'_> {
         parse: impl FnOnce(&mut Self) -> T,
     ) -> T {
         let outer = std::mem::replace(&mut self.newlines_insignificant, insignificant);
-        self.skip_insignificant_newlines();
         let result = parse(self);
         self.newlines_insignificant = outer;
-        self.skip_insignificant_newlines();
         result
     }
 
-    /// While line breaks are insignificant, the cursor never rests on one. An explicit `;` is kept:
-    /// it is a token, not whitespace.
-    pub(super) fn skip_insignificant_newlines(&mut self) {
-        if self.newlines_insignificant {
-            self.skip_plain_newlines();
+    /// Whether a physical line break precedes the current token where line breaks are significant:
+    /// outside `(…)`/`[…]`, or in a `{…}` body nested inside them. kotlinc's
+    /// `newlineBeforeCurrentToken`.
+    pub(super) fn newline_before(&self) -> bool {
+        self.newline_before_at(self.i)
+    }
+
+    /// [`Self::newline_before`] for the token at `index`.
+    pub(super) fn newline_before_at(&self, index: usize) -> bool {
+        !self.newlines_insignificant && self.newline_before.get(index).copied().unwrap_or(true)
+    }
+
+    /// Whether a line break before the current token ends the expression being parsed: kotlinc's
+    /// `interruptedWithNewLine`. Only member access (`.`, `?.`), a cast (`as`, `as?`), `:`, elvis
+    /// (`?:`), `&&`, and `||` continue an expression across a line break; any other operator, call
+    /// parenthesis, index bracket, or trailing lambda on the next line starts a new statement.
+    pub(super) fn interrupted_with_newline(&self) -> bool {
+        self.newline_before() && !self.at_newline_continuation()
+    }
+
+    fn at_newline_continuation(&self) -> bool {
+        match self.kind() {
+            TokenKind::Dot | TokenKind::Colon | TokenKind::AndAnd | TokenKind::OrOr => true,
+            TokenKind::Question => self
+                .t
+                .get(self.i + 1)
+                .is_some_and(|token| matches!(token.kind, TokenKind::Dot | TokenKind::Colon)),
+            TokenKind::Ident => self.keyword_text("as"),
+            _ => false,
         }
     }
 
-    pub(super) fn skip_newlines(&mut self) {
-        while self.at(TokenKind::Newline) {
+    /// kotlinc's `EOL_OR_SEMICOLON`: an explicit `;`, a line break before the current token, or the
+    /// end of input. This is where a statement or an optional trailing element may end.
+    pub(super) fn at_eol_or_semicolon(&self) -> bool {
+        self.at(TokenKind::Semicolon) || self.at(TokenKind::Eof) || self.newline_before()
+    }
+
+    /// An empty span where the previous token ends: the position of syntax the source leaves
+    /// implicit (a deferred local's default value), which belongs to the line it is implied on
+    /// rather than to whatever token starts the next one.
+    pub(super) fn implied_span(&self) -> Span {
+        let end = self
+            .i
+            .checked_sub(1)
+            .map_or(self.tok().span.lo, |previous| self.t[previous].span.hi);
+        Span::new(end, end)
+    }
+
+    /// Skip explicit `;` separators. A line break is not a token here; see the module docs.
+    pub(super) fn skip_semicolons(&mut self) {
+        while self.at(TokenKind::Semicolon) {
             self.bump();
         }
     }
+}
 
-    /// Return the first token after physical line breaks at `index`, stopping at an explicit `;`.
-    ///
-    /// The lexer deliberately represents both forms as `Newline`, so grammar lookahead must use this
-    /// helper instead of open-coding a token-kind loop whenever a construct permits `NL*` but not a
-    /// semicolon. Keeping that distinction here prevents declaration callers from gradually acquiring
-    /// different continuation rules.
-    pub(super) fn after_plain_newlines(&self, mut index: usize) -> usize {
-        while self
-            .t
-            .get(index)
-            .is_some_and(|token| token.kind == TokenKind::Newline && token.text(self.src) != ";")
-        {
-            index += 1;
+/// The lexer's tokens without physical line breaks, with whether one preceded each kept token.
+/// An explicit `;`, which the lexer spells `Newline`, is kept as `Semicolon`: it is a token, not
+/// whitespace.
+pub(super) fn grammar_tokens(src: &str, tokens: &[Token]) -> (Vec<Token>, Vec<bool>) {
+    let mut kept = Vec::with_capacity(tokens.len());
+    let mut newline_before = Vec::with_capacity(tokens.len());
+    let mut pending_newline = false;
+    for token in tokens {
+        let mut token = *token;
+        if token.kind == TokenKind::Newline {
+            if token.text(src) != ";" {
+                pending_newline = true;
+                continue;
+            }
+            token.kind = TokenKind::Semicolon;
         }
-        index
+        newline_before.push(pending_newline || token.kind == TokenKind::Eof);
+        kept.push(token);
+        pending_newline = false;
     }
-
-    /// Advance over physical line breaks while preserving an explicit semicolon as a declaration
-    /// boundary. Mutating callers share the same lexer distinction as lookahead callers through
-    /// `after_plain_newlines`; there must not be a second newline-scanning implementation here.
-    pub(super) fn skip_plain_newlines(&mut self) {
-        self.i = self.after_plain_newlines(self.i);
-    }
-
-    /// Consume physical line breaks only when `expected` follows them. A failed lookahead leaves the
-    /// parser at the original newline so the enclosing declaration can terminate normally.
-    pub(super) fn skip_plain_newlines_before(&mut self, expected: TokenKind) {
-        let next = self.after_plain_newlines(self.i);
-        if self.t.get(next).is_some_and(|token| token.kind == expected) {
-            self.i = next;
-        }
-    }
-
-    /// Consume the `.` that ends a declaration's receiver type (or one of its qualifier segments),
-    /// with the line breaks Kotlin allows on either side of it: `receiverType NL* '.' NL*`.
-    pub(super) fn eat_receiver_dot(&mut self) -> bool {
-        self.skip_plain_newlines_before(TokenKind::Dot);
-        let dot = self.eat(TokenKind::Dot);
-        if dot {
-            self.skip_plain_newlines();
-        }
-        dot
-    }
-
-    /// [`Self::eat_receiver_dot`], reporting a missing `.`.
-    pub(super) fn expect_receiver_dot(&mut self) {
-        if !self.eat_receiver_dot() {
-            self.diags.error(self.tok().span, "expected '.'");
-        }
-    }
-
-    /// Kotlin treats a newline before `||`, `&&`, or `?:` as a line CONTINUATION, not a statement
-    /// terminator (`cond\n  && other`, `x\n  ?: default`): the operator cannot begin a statement, so
-    /// the expression keeps going. Peek past the newline(s); if such an operator follows, consume them
-    /// so the binary/elvis loop sees the operator on the same logical line. (`+`/`-`/`*` deliberately do
-    /// NOT continue — kotlinc parses a leading `-x` as a fresh unary-prefix statement, per the grammar
-    /// which allows `NL*` before `||`/`&&`/elvis but not before the additive/multiplicative operators.)
-    pub(super) fn skip_newlines_before_continuation_op(&mut self) {
-        if !self.at(TokenKind::Newline) {
-            return;
-        }
-        let mut j = self.i;
-        while self.t.get(j).is_some_and(|t| t.kind == TokenKind::Newline) {
-            j += 1;
-        }
-        let continues = match self.t.get(j).map(|t| t.kind) {
-            Some(TokenKind::OrOr | TokenKind::AndAnd) => true,
-            Some(TokenKind::Question) => self
-                .t
-                .get(j + 1)
-                .is_some_and(|t| t.kind == TokenKind::Colon),
-            _ => false,
-        };
-        if continues {
-            self.skip_newlines();
-        }
-    }
+    (kept, newline_before)
 }

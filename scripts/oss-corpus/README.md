@@ -31,6 +31,22 @@ excludes it, so only the listed compilations are verified rather than every modu
 `compare.py` adds each compilation's verify outcome and all of its errors. Android modules take part only in a project
 that names a variant in `projects.tsv`, and then only that variant's compiles.
 
+After each measured build, an unmeasured test build runs the project's own JVM tests on the classes
+that build compiled. `outputs.py --keep` first snapshots the measured outputs and leaves them in
+place for it; `outputs.py --clear` then removes them and lists every file under them the test build
+wrote, rewrote or deleted (a compile task that ran again, say). The snapshot, and so the byte
+comparison, is always the measured build's; when a test build changed it, its tests did not run on
+the measured classes, and the project's test comparison is reported unavailable instead. `corpus.init.gradle` adds the
+`corpusTest` task, which depends on every JVM `Test` task of the projects whose compiles are
+compared (an Android project's unit tests of its variant only). In a test build no test task is up
+to date or taken from the build cache, a failing test does not fail its task, and the init script
+lists each test task with its JUnit XML report directory and the compile tasks it depends on,
+directly or through an upstream module's jar. Test builds run online, since the warm-up downloads
+only what compiling needs, and stop after `$CORPUS_TEST_TIMEOUT` seconds (3600 by default).
+`testruns.py` compares only the tests that passed on kotlinc's classes, and counts how many of them
+pass, fail, are skipped or do not run on krusty's; a test task whose compilations krusty built
+every one of runs krusty's classes only, and those tasks are totalled apart.
+
 Both builds are measured. `measure.py` runs each one as the child subreaper of everything it starts,
 so the Gradle, Kotlin and krusty processes and the daemons that outlive the build are all counted: it
 records wall time, CPU time, and the peak of their summed resident memory (sampled every 100 ms,
@@ -50,18 +66,18 @@ and the report lists the top ones across the corpus with a link to each project'
 compilations built, identical classes, the reason for every miss, every error the verify build
 reported (grouped by cause: the message without its location, with quoted text and numbers masked,
 counted across the corpus and listed in full per project; a project whose verify build recorded
-nothing is reported as unverified, not left out), what both builds cost, krusty's
-hotspots, and the Gradle and compiler plugins the corpus uses. The nightly run, and a manual run
-with `publish` set, records the results on the `corpus-results` branch with `publish.py`:
-`README.md` is the scoreboard, `projects/<name>/` holds each project's latest result (a project a
-run could not measure keeps its previous one), and `history.tsv` gets one line per project per run.
+nothing is reported as unverified, not left out), the projects' tests that pass on krusty's classes,
+what both builds cost, krusty's hotspots, and the Gradle and compiler plugins the corpus uses.
+Each `corpus-<project>` workflow artifact holds that project's comparison and logs. The `summary`
+artifact holds `summary.md` and `summary.json` for the results produced by this run; the job summary
+displays the same Markdown report.
 
 Setup fails fast: a failed fetch, a checkout that is not the pinned commit, a patch that does not
 apply, or a Kotlin version pin that does not match exactly one assignment (`pin.py`) stops the run
-before either build. `test_compare.py`, `test_setup.py`, `test_summarize.py`, `test_publish.py`,
-`test_measure.py` and `test_hotspots.py` cover the comparison, the output inventory, the pin
-rewrite, the setup failures, the report, the results branch, the build measurement and the stack
-folding.
+before either build. `test_compare.py`, `test_setup.py`, `test_summarize.py`, `test_workflow.py`,
+`test_measure.py`, `test_hotspots.py` and `test_testruns.py` cover the comparison, the test runs,
+the output inventory, the pin rewrite, the setup failures, the report artifacts, the build
+measurement and the stack folding.
 
 `run.sh` rewrites each project's Kotlin version pin to the newest release in `kotlin-versions`.
 These projects carry a patch for that bump:
@@ -97,3 +113,32 @@ Run one project locally with:
 ```text
 scripts/oss-corpus/run.sh <name> <work dir> <krusty binary> <plugin repository> <plugin version>
 ```
+
+## Warm benchmark
+
+The corpus builds above are cold: each starts without a Gradle or Kotlin daemon and pays for its
+own JVM warm-up. A developer's build does not, so `bench.sh` measures what an edit loop costs with
+a warm Gradle daemon, with kotlinc running in the Kotlin daemon with incremental compilation, the
+way the Kotlin Gradle plugin runs it by default:
+
+```text
+scripts/oss-corpus/bench.sh <name> <work dir> <krusty binary> <plugin repository> <plugin version>
+```
+
+A krusty probe build first finds the compilations krusty builds today (`bench.py plan`): only those
+are benchmarked, both compilers build exactly that task set, and both builds must succeed. Each
+compiler then gets its own session against its own Gradle and Kotlin daemons (`bench.py session`),
+which it starts under a Gradle user home and Kotlin daemon directory of its own, checks that every
+build ran in, and stops, leaving any other daemon on the machine alone: unrecorded
+warm-up builds, clean builds (`--rerun-tasks`), and an edit loop that changes one Kotlin file
+between builds, first without changing its ABI (the body of a private function) and then with an
+ABI change (a public function renamed). The file is the median-sized source of the benchmarked
+main compilation with the most sources, or `$BENCH_EDIT`. Recorded builds run offline and without
+the build cache. `$BENCH_WARMUPS`, `$BENCH_CLEAN_RUNS` and `$BENCH_EDIT_RUNS` set the run counts.
+
+Each build records its wall time, the time of the benchmarked compile tasks, the peak of the summed
+resident memory of every process the session started (the warm daemons included, sampled every
+100 ms, by kind) and what stays resident afterwards. `bench.py report` writes
+`<work dir>/bench/<name>.json` with the median times and highest peak memory of each scenario and
+prints a Markdown table. krusty compiles a whole compilation each time its task is out of date,
+while kotlinc recompiles only what changed: the edit loop measures that difference as it is.

@@ -55,6 +55,7 @@ names! {
     java_void => "java/lang/Void",
     java_enum => "java/lang/Enum",
     kotlin_enum => "kotlin/Enum",
+    kotlin_throwable => "kotlin/Throwable",
     uint => "kotlin/UInt",
     ulong => "kotlin/ULong",
     kotlin_jvm_intrinsics => "kotlin/jvm/internal/Intrinsics",

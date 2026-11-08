@@ -1,4 +1,4 @@
-//! Base Throwable realization and structured catch-only Kotlin exception transport.
+//! Base Throwable realization and structured Kotlin exception transport.
 
 use crate::backend::BackendCompilerIntrinsic as CompilerIntrinsic;
 use crate::fir::ExternalCallableId;
@@ -6,6 +6,77 @@ use crate::ir::IrCatch;
 use crate::types::TypeName;
 
 use super::*;
+
+#[cfg(test)]
+mod tests;
+
+/// The selected constructor's complete source frame, independent of a target descriptor.
+fn constructor_frame(
+    internal: TypeName,
+    selected: Option<&[Ty]>,
+    argument_count: usize,
+    kind: crate::libraries::RuntimeExceptionKind,
+    message: bool,
+    declaration: &crate::backend::BackendCallableFact,
+) -> Result<(), Unsupported> {
+    let message_parameter = [Ty::nullable(Ty::String)];
+    let parameters = if message { &message_parameter[..] } else { &[] };
+    if internal != kind.classifier()
+        || declaration.declaration_owner
+            != Some(crate::types::SemanticCallableOwner::Classifier(internal))
+        || declaration.kind != crate::libraries::ExternalCallableKind::Constructor
+        || declaration.params != parameters
+        || selected != Some(parameters)
+        || argument_count != parameters.len()
+        || declaration.ret != Ty::Unit
+        || declaration.context_count != 0
+        || declaration.source_receiver.is_some()
+        || declaration.generic_sig.is_some()
+    {
+        return Err(
+            "an authenticated exception constructor with a mismatched declaration frame".into(),
+        );
+    }
+    Ok(())
+}
+
+// No cleanup stack is installed for nonlocal control transfers. Check the complete evaluated
+// subtree before emitting anything, conservatively including nested loops and inline bodies.
+fn finally_has_transfer(exprs: &[IrExpr], roots: impl IntoIterator<Item = u32>) -> bool {
+    let mut pending: Vec<_> = roots.into_iter().collect();
+    let mut seen = HashSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if matches!(
+            exprs[id as usize],
+            IrExpr::Return(_) | IrExpr::Break { .. } | IrExpr::Continue { .. }
+        ) {
+            return true;
+        }
+        crate::ir::for_each_child(exprs, id, &mut |child| pending.push(child));
+    }
+    false
+}
+
+// Validate the actual use, not the logical Nothing type: discarded bottom values may complete.
+fn finally_input(
+    ir: &IrFile,
+    declared: &HashMap<u32, Ty>,
+    input: u32,
+    discarded: bool,
+) -> Result<bool, Unsupported> {
+    let diverges = if discarded {
+        ir.expr_discarding_diverges_by(input, &|_, _| false)
+    } else {
+        ir.expr_diverges_by(input, &|_, _| false)
+    };
+    if expression_type(ir, declared, input)?.is_none() && !diverges {
+        return Err("a `finally` region without a proven completion carrier".into());
+    }
+    Ok(diverges)
+}
 
 impl Body<'_> {
     /// A reference assertion keeps its precise heap carrier and evaluates its input once. Its
@@ -43,21 +114,39 @@ impl Body<'_> {
 
     pub(super) fn new_object(
         &mut self,
+        site: u32,
         internal: TypeName,
         args: &[u32],
         params: Option<&[Ty]>,
         external: Option<ExternalCallableId>,
         defaults: &[u32],
     ) -> Result<(), Unsupported> {
+        // The shared default-argument lowering rewrites every construction with omitted
+        // arguments it can realize to construct through its constructor's entry.
         if !defaults.is_empty() {
             return Err("a constructor call with omitted arguments".to_string());
         }
-        let operation = external
+        let Some((declaration, kind, message)) = external
             .and_then(|target| self.callables.callable(target))
-            .and_then(|fact| fact.compiler_operation());
-        let Some(CompilerIntrinsic::ThrowableConstructor { message }) = operation else {
-            return self.construction(internal, args, params);
+            .and_then(|fact| match fact.compiler_operation() {
+                Some(CompilerIntrinsic::ThrowableConstructor { kind, message }) => {
+                    Some((fact, kind, message))
+                }
+                _ => None,
+            })
+        else {
+            if let Some(constructed) =
+                external.and_then(|target| self.dependency_construction(target, internal, args))
+            {
+                return constructed;
+            }
+            return self.construction(site, internal, args, params);
         };
+        constructor_frame(internal, params, args.len(), kind, message, declaration)?;
+        let structure =
+            self.runtime
+                .exceptions
+                .ensure_class(self.module, self.classifiers, internal)?;
         let message = match (message, args) {
             (false, []) => None,
             (true, [message]) => {
@@ -70,9 +159,12 @@ impl Body<'_> {
                 return Err("an authenticated Throwable constructor with malformed operands".into())
             }
         };
-        self.runtime
-            .exceptions
-            .construct(&mut self.code, message, self.runtime.string);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            structure,
+            message,
+            self.runtime.string,
+        );
         Ok(())
     }
 
@@ -125,8 +217,8 @@ impl Body<'_> {
         finally: Option<u32>,
         result: Ty,
     ) -> Result<(), Unsupported> {
-        if finally.is_some() {
-            return Err("a `try` with `finally`".into());
+        if let Some(cleanup) = finally {
+            return self.try_finally(body, catches, cleanup, result);
         }
         let [catch] = catches else {
             return Err("a `try` without exactly one Throwable catch".into());
@@ -172,6 +264,78 @@ impl Body<'_> {
             }
         }
         self.close();
+        Ok(())
+    }
+
+    fn try_finally(
+        &mut self,
+        body: u32,
+        catches: &[IrCatch],
+        cleanup: u32,
+        result: Ty,
+    ) -> Result<(), Unsupported> {
+        if finally_has_transfer(
+            &self.ir.exprs,
+            [body, cleanup]
+                .into_iter()
+                .chain(catches.iter().map(|catch| catch.body)),
+        ) {
+            return Err("a `finally` region with return, break, or continue".into());
+        }
+        let carried = carrier(result)?;
+        let cleanup_diverges = finally_input(self.ir, &self.declared, cleanup, true)?;
+        let mut protected_diverges =
+            finally_input(self.ir, &self.declared, body, carried.is_none())?;
+        for catch in catches {
+            protected_diverges &=
+                finally_input(self.ir, &self.declared, catch.body, carried.is_none())?;
+        }
+        let saved = carried.map(|ty| self.local(ty));
+        self.code.block(BlockType::Empty);
+        let done = self.open();
+        self.code.block(BlockType::Value(REFERENCE));
+        let handler = self.open();
+        self.code.try_table(
+            BlockType::Empty,
+            self.runtime.exceptions.tag,
+            self.relative(handler),
+        );
+        self.open();
+        if catches.is_empty() {
+            self.value(body, result)?;
+        } else {
+            self.try_catch(body, catches, None, result)?;
+        }
+        if protected_diverges {
+            self.code.unreachable();
+        }
+        if let Some(saved) = saved {
+            self.code.local_set(saved);
+        }
+        self.code.br(self.relative(done));
+        self.close();
+        self.code.unreachable();
+        self.close();
+        let caught = self.local(REFERENCE);
+        self.code.local_set(caught);
+        // Both copies are outside this try_table. A cleanup throw replaces the saved exception;
+        // only completed cleanup rethrows the identical original Kotlin payload. Host traps and
+        // foreign exceptions do not enter the Kotlin tag handler.
+        self.statement(cleanup)?;
+        self.code
+            .local_get(caught)
+            .ref_as_non_null()
+            .throw(self.runtime.exceptions.tag);
+        self.close();
+        self.statement(cleanup)?;
+        if let Some(saved) = saved {
+            self.code.local_get(saved);
+        }
+        // A structured join must not turn proven noncompletion into a reachable empty stack.
+        // Logical Nothing alone is insufficient after inline control-flow rewriting.
+        if cleanup_diverges || protected_diverges {
+            self.code.unreachable();
+        }
         Ok(())
     }
 }

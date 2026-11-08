@@ -277,7 +277,7 @@ pub(super) fn preserve_replacement_logical_type(
     original: ExprId,
     replacement: ExprId,
 ) {
-    if let Some(ty) = ir.logical_types.get(&original).copied() {
-        ir.logical_types.entry(replacement).or_insert(ty);
+    if let Some(ty) = ir.logical_type(original) {
+        ir.set_logical_type_if_absent(replacement, ty);
     }
 }
