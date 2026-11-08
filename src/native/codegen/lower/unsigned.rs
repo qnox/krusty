@@ -361,7 +361,7 @@ impl BodyLowering<'_, '_, '_> {
                     return Err(declined!("an unsigned `hashCode` with no signed value"));
                 };
                 let hashed = if signed == Ty::Long {
-                    let high = self.builder.ins().ushr_imm(left, 32);
+                    let high = self.builder.ins().ushr_imm_u(left, 32);
                     self.builder.ins().bxor(left, high)
                 } else {
                     left
