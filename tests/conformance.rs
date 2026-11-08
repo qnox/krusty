@@ -22,8 +22,8 @@ mod box_lane;
 mod box_ratchet;
 #[path = "box_reference_classes.rs"]
 mod box_reference_classes;
-#[path = "box_vendored_e2e.rs"]
-mod box_vendored_e2e;
+#[path = "box_vendored.rs"]
+mod box_vendored;
 #[path = "bytecode_corpus.rs"]
 mod bytecode_corpus;
 mod dependency_template_rejections;
@@ -41,8 +41,8 @@ mod kotlin_bytecode_text_conformance;
 mod kotlin_cli_jvm_conformance;
 #[path = "common/kotlin_native_multimodule.rs"]
 mod kotlin_native_multimodule_support;
-#[path = "kotlinc_argument_conformance_e2e.rs"]
-mod kotlinc_argument_conformance_e2e;
+#[path = "kotlinc_argument_conformance.rs"]
+mod kotlinc_argument_conformance;
 #[path = "common/reference_targets/invocation.rs"]
 mod reference_invocation_support;
 #[path = "common/reference_recording.rs"]
