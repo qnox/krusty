@@ -49,8 +49,8 @@ pub(super) enum LibraryConstructorFailure {
         /// it after reporting the argument error lets the enclosing expectation diagnose an
         /// independent result-type contradiction; no constructor target is committed to FIR.
         result: Option<Ty>,
-        /// kotlinc's `constructor(...): Name` rendering of the rejected declaration.
-        rendered: String,
+        /// The selector's exact instantiated candidates and typed rejection evidence.
+        rejections: std::sync::Arc<RejectedProviderConstructors>,
     },
     TypeArgumentMismatch {
         expected: Ty,
@@ -66,6 +66,15 @@ pub(super) enum LibraryConstructorFailure {
 }
 
 impl LibraryConstructorFailure {
+    pub(super) fn retained_provider_constructors(
+        &self,
+    ) -> Option<std::sync::Arc<RejectedProviderConstructors>> {
+        match self {
+            Self::TypeMismatch { rejections, .. } => Some(std::sync::Arc::clone(rejections)),
+            _ => None,
+        }
+    }
+
     pub(super) fn mapping(
         failure: CallArgMappingFailure,
         params: Vec<Ty>,

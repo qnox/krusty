@@ -118,3 +118,57 @@ fn a_dependency_function_type_and_default_keep_the_complete_candidate_header() {
         "complete dependency candidate diagnostic"
     );
 }
+
+#[test]
+fn rejected_function_value_candidates_keep_the_most_specific_diagnostic_owner() {
+    let cases = [
+        "fun f(label: (Any, String) -> Unit) {\nfun label(x: Int, y: String) {}\nlabel(\"bad\", 1)\n}",
+        "fun f(label: (String, String) -> Unit) {\nfun label(x: Any, y: String) {}\nlabel(1, 2)\n}",
+    ];
+    assert_error_parity(&cases);
+}
+
+#[test]
+fn rejected_source_constructors_keep_declaration_genericity_and_complete_mapping() {
+    let cases = [
+        "class label<T>(val x: T, val y: Boolean)\nfun f(label: (String, String) -> Unit) { label(1, \"bad\") }",
+        "class label(val x: Boolean, val y: Boolean = true)\nfun f(label: (Int) -> Unit) { label(\"bad\") }",
+        "class label(val x: Boolean, val y: Boolean)\nfun f(label: (Int, Int) -> Unit) { label(\"bad\", \"bad\") }",
+    ];
+    assert_error_parity(&cases);
+}
+
+// PLATFORM-SPECIFIC: the consumer imports the official JVM producer's classfiles.
+#[test]
+fn rejected_provider_constructors_keep_declaration_genericity_and_complete_mapping() {
+    let library = common::compile_libs_build(
+        "deferred-provider-specificity",
+        &[(
+            "Library.kt",
+            "package provider\nclass label<T>(val x: T, val y: Boolean)\nclass pair(val x: Boolean, val y: Boolean)\n",
+        )],
+    )
+    .expect("build complete provider declaration library");
+    let classpath = [
+        library
+            .reference_out()
+            .expect("official provider library")
+            .to_path_buf(),
+        common::stdlib_jar(),
+    ];
+    let cases = [
+        "import provider.label\nfun f(label: (String, String) -> Unit) { label(1, \"bad\") }",
+        "import provider.pair\nfun f(pair: (Int, Int) -> Unit) { pair(\"bad\", \"bad\") }",
+    ];
+    for (index, source) in cases.iter().enumerate() {
+        let file = format!("provider_specificity_{index}.kt");
+        let result = common::compiler_diagnostics(&[(file.as_str(), *source)], &classpath);
+        assert_ne!(result.reference_code, 0, "reference accepted {source:?}");
+        assert_ne!(result.krusty_code, 0, "product accepted {source:?}");
+        let mut observed = complete_errors(&result.krusty_stderr, false);
+        observed.extend(complete_errors(&result.krusty_stdout, false));
+        let expected = complete_errors(&result.reference_stderr, true);
+        assert!(!expected.is_empty(), "reference emitted no errors");
+        assert_eq!(observed, expected, "complete provider diagnostic");
+    }
+}

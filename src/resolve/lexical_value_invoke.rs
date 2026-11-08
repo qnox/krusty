@@ -34,9 +34,27 @@ pub(super) struct DeferredInvokePeers<'a> {
     /// Top-level functions and other receiver-less candidates.
     pub(super) later: &'a [crate::libraries::FunctionInfo],
     /// Same-file constructors whose arguments were considered and rejected.
-    pub(super) source_constructors: Option<(&'a [CtorDelegationCandidate], &'a str)>,
-    /// A provider constructor that mapped and then rejected an argument type.
-    pub(super) provider_constructor: Option<&'a LibraryConstructorFailure>,
+    pub(super) source_constructors: Option<SourceConstructorRejections<'a>>,
+    /// Exact provider constructor attempts, including mapping declines but rendering only their
+    /// positively recorded type rejections.
+    pub(super) provider_constructors: &'a [std::sync::Arc<RejectedProviderConstructors>],
+}
+
+pub(super) struct SourceConstructorRejections<'a> {
+    pub(super) candidates: &'a [CtorDelegationCandidate],
+    pub(super) rejected: &'a [ConstructorCandidateRejection],
+    pub(super) name: &'a str,
+    pub(super) generic: bool,
+}
+
+/// An assessed type-inapplicable declaration. Mapping and genericity stay typed until the common
+/// specificity operation has chosen the diagnostic owner; rendered headers never drive selection.
+struct RejectedInvokeCandidate {
+    display: String,
+    declared_arguments: Vec<Ty>,
+    generic: bool,
+    mismatches: Vec<constructor_arguments::ConstructorArgumentMismatch>,
+    invoke: bool,
 }
 
 impl Checker<'_> {
@@ -163,61 +181,109 @@ impl Checker<'_> {
             .collect();
         let parameters = Self::callable_ref_parameters(&signature.params, &invoke_sig.param_names);
         let suspend = if signature.suspend { "suspend " } else { "" };
-        let Some(invoke) = self.rejected_type_mismatch_section(
+        let Some(mut invoke) = self.rejected_type_mismatch_candidate(
             call_args,
-            &format!(
+            format!(
                 "{suspend}fun invoke({parameters}): {}",
                 signature.ret.source_name()
             ),
             &signature.params,
+            &signature.params,
             &invoke_sig,
+            false,
         ) else {
             return false;
         };
+        invoke.invoke = true;
         let (nearer_lexical, farther_lexical) = Self::lexical_functions_around_value(scope, name);
-        let (constructors, constructor_name) = peers.source_constructors.unwrap_or((&[], ""));
-        let provider_constructor = match peers.provider_constructor {
-            Some(LibraryConstructorFailure::TypeMismatch {
-                rendered,
-                expected,
-                actual,
-                ..
-            }) => self.rendered_argument_mismatch_section(rendered, *expected, *actual),
-            _ => None,
-        };
-        let nearer = nearer_lexical
+        let mut candidates = nearer_lexical
             .iter()
             .filter_map(|callable| self.lexical_callable_type_mismatch(call_args, callable))
             .collect::<Vec<_>>();
-        let farther = farther_lexical
-            .iter()
-            .filter_map(|callable| self.lexical_callable_type_mismatch(call_args, callable))
-            .chain(
-                peers
-                    .receiver
-                    .iter()
-                    .chain(peers.later)
-                    .filter_map(|candidate| {
-                        self.function_candidate_type_mismatch(call_args, name, candidate)
-                    }),
-            )
-            .chain(constructors.iter().filter_map(|candidate| {
-                self.constructor_type_mismatch(call_args, constructor_name, candidate)
-            }))
-            .chain(provider_constructor)
-            .collect::<Vec<_>>();
-        if nearer.is_empty() && farther.is_empty() {
-            return false;
+        candidates.push(invoke);
+        candidates.extend(
+            farther_lexical
+                .iter()
+                .filter_map(|callable| self.lexical_callable_type_mismatch(call_args, callable)),
+        );
+        candidates.extend(
+            peers
+                .receiver
+                .iter()
+                .chain(peers.later)
+                .filter_map(|candidate| {
+                    self.function_candidate_type_mismatch(call_args, name, candidate)
+                }),
+        );
+        if let Some(group) = peers.source_constructors {
+            for rejection in group.rejected {
+                let candidate = &group.candidates[rejection.candidate_index];
+                candidates.extend(self.rejected_constructor_candidate(
+                    call_args,
+                    Self::constructor_candidate_display(group.name, candidate),
+                    rejection,
+                    group.generic,
+                ));
+            }
         }
-        let mut message = String::from(INAPPLICABLE_OVERLOAD_PREFIX);
-        for section in &nearer {
-            message.push_str(section);
+        for group in peers.provider_constructors {
+            for (candidate, rejection) in group.type_mismatches() {
+                candidates.extend(self.rejected_constructor_candidate(
+                    call_args,
+                    Self::constructor_candidate_display(
+                        group.classifier().nested_segment_ref(),
+                        candidate,
+                    ),
+                    rejection,
+                    group.generic(),
+                ));
+            }
         }
-        message.push_str(&invoke);
-        for section in &farther {
-            message.push_str(section);
+        crate::symbol_resolver::retain_most_specific_declarations(
+            &self.fed_source(),
+            None,
+            &mut candidates,
+            |candidate| {
+                (
+                    None,
+                    candidate.declared_arguments.as_slice(),
+                    candidate.generic,
+                    None,
+                )
+            },
+        );
+        if let [candidate] = candidates.as_slice() {
+            if candidate.invoke {
+                // The existing invoke commitment owns its contextual argument checks and spans.
+                return false;
+            }
+            for mismatch in &candidate.mismatches {
+                let argument = call_args.args[mismatch.source_argument];
+                self.report_assignability_error(
+                    mismatch.expected,
+                    self.suspend_converted_argument(mismatch.expected, mismatch.actual),
+                    self.span(argument),
+                    "argument",
+                );
+            }
+        } else {
+            let mut message = String::from(INAPPLICABLE_OVERLOAD_PREFIX);
+            for candidate in &candidates {
+                message.push_str(&format!("\n\n{}:", candidate.display));
+                for mismatch in &candidate.mismatches {
+                    let reason = self
+                        .rejected_argument_reason(mismatch)
+                        .expect("an assessed type mismatch has a diagnostic reason");
+                    message.push_str("\n  ");
+                    let mut chars = reason.chars();
+                    if let Some(first) = chars.next() {
+                        message.extend(first.to_uppercase());
+                    }
+                    message.extend(chars);
+                }
+            }
+            self.diags.error(span, message);
         }
-        self.diags.error(span, message);
         true
     }
 
@@ -250,7 +316,7 @@ impl Checker<'_> {
         &self,
         call_args: CallArgs<'_>,
         callable: &LexicalCallable,
-    ) -> Option<String> {
+    ) -> Option<RejectedInvokeCandidate> {
         let LexicalCallableOrigin::Local(statement) = callable.origin else {
             return None;
         };
@@ -261,15 +327,6 @@ impl Checker<'_> {
             return None;
         }
         let signature = &callable.signature;
-        // A generic callable is a different failure from a concrete type mismatch. kotlinc leaves
-        // it out of the none-applicable set and reports the deferred value's own argument.
-        if signature
-            .generic_sig
-            .as_ref()
-            .is_some_and(|generic| !generic.formals.is_empty())
-        {
-            return None;
-        }
         let context_count = signature.context_count.min(signature.params.len());
         let call_sig = signature.call_sig().suffix(context_count);
         let parameters = &signature.params[context_count..];
@@ -291,40 +348,48 @@ impl Checker<'_> {
             .iter()
             .map(|&parameter| crate::symbol_resolver::ty_subst_keep_unbound(parameter, &bindings))
             .collect::<Vec<_>>();
-        self.rejected_type_mismatch_section(
+        self.rejected_type_mismatch_candidate(
             call_args,
-            &super::source_signature_display::source_function_display(
+            super::source_signature_display::source_function_display(
                 self.file,
                 function,
                 signature.ret,
             ),
             &parameters,
+            &signature.params[context_count..],
             &call_sig,
+            signature
+                .generic_sig
+                .as_ref()
+                .is_some_and(|signature| !signature.formals.is_empty()),
         )
     }
 
-    fn constructor_type_mismatch(
+    fn rejected_constructor_candidate(
         &self,
         call_args: CallArgs<'_>,
-        class_name: &str,
-        candidate: &CtorDelegationCandidate,
-    ) -> Option<String> {
-        if class_name.is_empty() {
+        display: String,
+        rejection: &ConstructorCandidateRejection,
+        generic: bool,
+    ) -> Option<RejectedInvokeCandidate> {
+        let mismatches = rejection
+            .mapped_mismatches
+            .iter()
+            .copied()
+            .filter(|mismatch| self.rejected_argument_reason(mismatch).is_some())
+            .collect::<Vec<_>>();
+        if mismatches.is_empty() {
             return None;
         }
-        let parameters = candidate.target.params();
-        let call_sig = CallSig::metadata_member(
-            parameters.len(),
-            candidate.param_names.clone(),
-            candidate.defaults.clone(),
-            candidate.vararg,
-        );
-        self.rejected_type_mismatch_section(
-            call_args,
-            &Self::constructor_candidate_display(class_name, candidate),
-            parameters,
-            &call_sig,
-        )
+        assert_eq!(rejection.argument_slots.len(), call_args.args.len());
+        assert_eq!(rejection.declared_arguments.len(), call_args.args.len());
+        Some(RejectedInvokeCandidate {
+            display,
+            declared_arguments: rejection.declared_arguments.clone(),
+            generic,
+            mismatches,
+            invoke: false,
+        })
     }
 
     pub(super) fn constructor_candidate_display(
@@ -355,32 +420,22 @@ impl Checker<'_> {
         format!("constructor({rendered}): {class_name}")
     }
 
-    fn rendered_argument_mismatch_section(
+    fn rejected_argument_reason(
         &self,
-        display: &str,
-        expected: Ty,
-        actual: Ty,
+        mismatch: &constructor_arguments::ConstructorArgumentMismatch,
     ) -> Option<String> {
-        if display.is_empty()
-            || actual == Ty::Error
-            || expected == Ty::Error
-            || actual.mentions_pending()
-            || expected.mentions_pending()
+        if mismatch.actual == Ty::Error
+            || mismatch.expected == Ty::Error
+            || mismatch.actual.mentions_pending()
+            || mismatch.expected.mentions_pending()
         {
             return None;
         }
-        let reason = self.assignability_error_message(
-            expected,
-            self.suspend_converted_argument(expected, actual),
+        self.assignability_error_message(
+            mismatch.expected,
+            self.suspend_converted_argument(mismatch.expected, mismatch.actual),
             "argument",
-        )?;
-        let mut section = format!("\n\n{display}:\n  ");
-        let mut chars = reason.chars();
-        if let Some(first) = chars.next() {
-            section.extend(first.to_uppercase());
-        }
-        section.extend(chars);
-        Some(section)
+        )
     }
 
     fn function_candidate_type_mismatch(
@@ -388,11 +443,8 @@ impl Checker<'_> {
         call_args: CallArgs<'_>,
         name: &str,
         candidate: &crate::libraries::FunctionInfo,
-    ) -> Option<String> {
+    ) -> Option<RejectedInvokeCandidate> {
         let signature = candidate.semantic_signature();
-        if !signature.formals.is_empty() {
-            return None;
-        }
         let context_count = candidate.context_count.min(signature.params.len());
         let call_sig = candidate.call_sig.suffix(context_count);
         let parameters = &signature.params[context_count..];
@@ -411,7 +463,14 @@ impl Checker<'_> {
         let display = self
             .source_callable_display(candidate)
             .unwrap_or_else(|| Self::generic_callable_display(name, candidate));
-        self.rejected_type_mismatch_section(call_args, &display, &parameters, &call_sig)
+        self.rejected_type_mismatch_candidate(
+            call_args,
+            display,
+            &parameters,
+            &signature.params[context_count..],
+            &call_sig,
+            !signature.formals.is_empty(),
+        )
     }
 
     fn rejected_generic_argument_bindings(
@@ -460,20 +519,21 @@ impl Checker<'_> {
         .unwrap_or_default()
     }
 
-    /// The candidate section kotlinc prints for a mapped call whose argument types do not fit.
-    /// `None` when the arguments do not map, or when no argument has a concrete type mismatch:
-    /// those failures are not peers of a deferred function value.
-    fn rejected_type_mismatch_section(
+    /// Assess only mapped argument-type contradictions. Keep declaration shapes separate from
+    /// inferred expectations: applicability and declaration specificity answer different questions.
+    fn rejected_type_mismatch_candidate(
         &self,
         CallArgs {
             call,
             args,
             arg_tys,
         }: CallArgs<'_>,
-        display: &str,
+        display: String,
         parameters: &[Ty],
+        declared: &[Ty],
         signature: &CallSig,
-    ) -> Option<String> {
+        generic: bool,
+    ) -> Option<RejectedInvokeCandidate> {
         let names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let mapping = call_argument_parameter_indices(
@@ -484,48 +544,48 @@ impl Checker<'_> {
             signature,
         )?;
         let whole_arrays = named_whole_array_varargs(&mapping, names, signature);
-        let mut section = format!("\n\n{display}:");
-        let mut mismatched = false;
+        let mut declared_arguments = Vec::with_capacity(mapping.len());
+        let mut mismatches = Vec::new();
         for (source, parameter) in mapping.into_iter().enumerate() {
-            let declared = parameters[parameter];
-            let expected = if signature.vararg_index == Some(parameter)
+            let element = signature.vararg_index == Some(parameter)
                 && !self.file.is_spread_arg(args[source])
-                && !whole_arrays[source]
-            {
-                declared.array_read_elem().unwrap_or(declared)
+                && !whole_arrays[source];
+            let expected = parameters[parameter];
+            let declared = *declared.get(parameter)?;
+            let expected = if element {
+                expected.array_read_elem()?
+            } else {
+                expected
+            };
+            let declared = if element {
+                declared.array_read_elem()?
             } else {
                 declared
             };
+            declared_arguments.push(declared);
             let actual = arg_tys[source];
-            if actual == Ty::Error
-                || expected == Ty::Error
-                || actual.mentions_pending()
-                || expected.mentions_pending()
-            {
-                continue;
-            }
             if signature.parameter_admits(parameter, expected, actual)
                 && self.receiver_is_assignable(actual, expected)
                 && !self.function_value_rejected(args[source], expected, actual)
             {
                 continue;
             }
-            let Some(reason) = self.assignability_error_message(
+            let mismatch = constructor_arguments::ConstructorArgumentMismatch {
+                source_argument: source,
                 expected,
-                self.suspend_converted_argument(expected, actual),
-                "argument",
-            ) else {
-                continue;
+                actual,
             };
-            section.push_str("\n  ");
-            let mut chars = reason.chars();
-            if let Some(first) = chars.next() {
-                section.extend(first.to_uppercase());
+            if self.rejected_argument_reason(&mismatch).is_some() {
+                mismatches.push(mismatch);
             }
-            section.extend(chars);
-            mismatched = true;
         }
-        mismatched.then_some(section)
+        (!mismatches.is_empty()).then_some(RejectedInvokeCandidate {
+            display,
+            declared_arguments,
+            generic,
+            mismatches,
+            invoke: false,
+        })
     }
 
     /// Commit a deferred function value after every later level of the call tower declined: its
