@@ -51,10 +51,10 @@ jobs:
   # Lint and coverage are independent merge gates. Give each its own runner so the clean Clippy
   # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
-  # Heavy builds (the coverage build in ci, the binary producers and build-release) and Native
-  # conformance run on GitHub-hosted runners. Other jobs use a self-hosted runner with one size label
-  # (rust-4c-8gb, helper-1c-1gb). Fork PRs run on ubuntu-latest: self-hosted runners never take
-  # fork PR jobs.
+  # TEMP (2026-11-07): GHA hosted queue is backed up — temporarily run the heavy ubuntu-latest
+  # jobs on self-hosted rust-4c-8gb too (same fork guard). Revert once the hosted backlog clears;
+  # then dual-label + route enforce can choose GHA vs own. route stays on ubuntu-latest.
+  # Fork PRs still run on ubuntu-latest: self-hosted runners never take fork PR jobs.
   lint:
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
@@ -100,7 +100,7 @@ jobs:
   plugin-host:
     # GitHub-hosted: these tests ran out of memory on the 8 GB self-hosted runners, and GitHub's
     # Linux runners (16 GB) had free slots.
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -300,7 +300,7 @@ jobs:
   # matrix waits for the slowest required build instead of serializing every unrelated target graph
   # on one runner. Consumers never compile krusty again.
   build-conformance-bin:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -366,7 +366,7 @@ jobs:
           if-no-files-found: error
 
   build-tool-bins:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     outputs:
       # Every consumer already waits for this artifact family. Publish the manifest-derived matrix
       # here instead of scheduling a separate ten-second runner solely for these two values.
@@ -425,9 +425,13 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [jvm]
-    # Cold reflective box cases share the fixed per-case execution deadline. Hosted capacity
-    # keeps JVM conformance independent of the heterogeneous self-hosted build fleet.
-    runs-on: ubuntu-latest
+    # Cold reflective box() calls share one deadline. Hosted runners and forks keep 2s. The 8 GB
+    # pool missed it once: functions/functionNtoString.kt on Kotlin 2.4.0, while the same source
+    # passed for 2.4.10, 2.4.20, and 2.4.21. Give that pool 8s. The client round-trip wait stays
+    # 8s above the JVM deadline.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    env:
+      KRUSTY_BOX_CASE_TIMEOUT_MS: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '2000' || '8000' }}
     steps: &conformance-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
@@ -756,9 +760,9 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [native, wasm-js, wasm-wasi]
-    # Independent Wasm targets use scaling hosted capacity, as Native does. A JS ratchet failure
-    # cannot suppress WASI measurement or occupy the same runner before WASI can start.
-    runs-on: ubuntu-latest
+    # Native retains its prior hosted capacity. Wasm uses the guarded self-hosted pool.
+    # Separate target rows preserve independent measurements.
+    runs-on: ${{ (matrix.target == 'native' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps: *conformance-steps
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
@@ -814,7 +818,7 @@ jobs:
   build-gradle-plugin:
     # GitHub-hosted: a one- or two-minute producer that the gradle matrix waits for; in the
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -990,7 +994,7 @@ jobs:
   build-maven-plugin:
     # GitHub-hosted: a one- or two-minute producer that the maven matrix waits for; in the
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1199,7 +1203,7 @@ jobs:
     needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
     # Publication runs Gradle to build and sign Maven Central and Plugin Portal artifacts.
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     # Shorter than either lock's TTL; only dead jobs' locks may be taken over.
     timeout-minutes: 25
     permissions:

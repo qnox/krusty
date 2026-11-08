@@ -13,6 +13,8 @@ mod class_header_newline_e2e;
 mod companion_static_initializer_line_e2e;
 #[path = "../decl_body_on_next_line_e2e.rs"]
 mod decl_body_on_next_line_e2e;
+#[path = "../deferred_local_line_e2e.rs"]
+mod deferred_local_line_e2e;
 #[path = "../elvis_newline_continuation_e2e.rs"]
 mod elvis_newline_continuation_e2e;
 #[path = "../enum_entry_argument_lines_e2e.rs"]

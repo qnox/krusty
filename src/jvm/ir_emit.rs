@@ -67,6 +67,7 @@ mod declaration_types;
 mod declared_nullability;
 mod declared_property_access;
 mod declared_property_accessor;
+use declared_property_accessor::accessor_jvm_names;
 mod default_impls;
 mod delegated_property_array;
 mod field_nullability;
@@ -722,27 +723,6 @@ fn value_class_is_readable(ir: &IrFile, fq_name: crate::types::TypeName) -> bool
         || ir.module_readable_value_classes.contains(&fq_name)
 }
 
-/// The JVM accessor spellings a class's synthesized property accessors are emitted under: the value-class
-/// pass's stamp when the plain convention is not the physical ABI (`val k: K` → `getK-XLNMDGE`), else the
-/// convention itself. The constant-pool seeder, the debug tables (`LineNumberTable`/`LocalVariableTable`)
-/// and the `@Metadata` record all key on the accessor by NAME, so they must ask the same question the
-/// emission does — a seeded/annotated `getK` beside an emitted `getK-XLNMDGE` interns a constant nothing
-/// uses, drops the accessor's debug info, and (in the record) advertises a method that does not exist.
-/// The convention itself is [`crate::names::property_getter_name`] — the same helper the accessor
-/// EMISSION uses, so a Kotlin `is`-prefixed property (`val isOpen`, whose accessor keeps the source
-/// name rather than becoming `getIsOpen`) is spelled one way everywhere.
-fn accessor_jvm_names(c: &crate::ir::IrClass, field_name: &str) -> (String, String) {
-    let declaration = c.properties.iter().find(|p| p.name == field_name);
-    (
-        declaration
-            .and_then(|p| p.getter_jvm_name.clone())
-            .unwrap_or_else(|| crate::names::property_getter_name(field_name)),
-        declaration
-            .and_then(|p| p.setter_jvm_name.clone())
-            .unwrap_or_else(|| crate::names::property_setter_name(field_name)),
-    )
-}
-
 /// The primary constructor's declared annotations in class-file order — RUNTIME-visible first, then
 /// the BINARY-retained invisible ones. The pool seeder and the `@Metadata` mirror both read this
 /// single sequence, so the two halves cannot drift apart.
@@ -829,7 +809,7 @@ fn attach_synth_nullability(
         let Some(a) = ann(hoisted.ty) else {
             continue;
         };
-        let (getter, setter) = accessor_jvm_names(c, &property.name);
+        let (getter, setter) = accessor_jvm_names(ir, c, &property.name);
         let pd = desc(hoisted.ty);
         if property
             .getter
@@ -869,16 +849,16 @@ fn attach_synth_nullability(
         let Some(a) = declared_property_annotation(c, index) else {
             continue;
         };
-        let (getter, setter) = accessor_jvm_names(c, &f.name);
+        let (getter, setter) = accessor_jvm_names(ir, c, &f.name);
         // The accessor's own descriptor: an explicit backing field (`val x: Any? field: String`)
         // stores a narrower type than the getter returns.
         let accessor_desc = c
             .properties
             .iter()
-            .find(|property| property.backing_field == Some(index as u32))
+            .position(|property| property.backing_field == Some(index as u32))
             .map_or_else(
                 || desc(f.ty),
-                |property| desc(declared_property_accessor_jvm(ir, property, f)),
+                |property| desc(declared_property_accessor_jvm(ir, c, property as u32, f)),
             );
         cw.set_method_nullability(&getter, &format!("(){accessor_desc}"), Some(a), &[]);
         if !f.is_final() {
