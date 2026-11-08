@@ -6,7 +6,7 @@ use super::common;
 
 #[test]
 fn nested_interface_delegate_operands_keep_their_construction_lifetimes() {
-    let source = include_str!("box_regressions/interfaceDelegateCaptureLifetimes.kt");
+    let source = include_str!("../box_regressions/interfaceDelegateCaptureLifetimes.kt");
     common::expect_box_same_as_kotlinc(source, "interfaceDelegateCaptureLifetimes");
     assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
         "interfaceDelegateCaptureLifetimes.kt",
@@ -61,7 +61,7 @@ fn assert_complete_abi_and_metadata(classes: &common::ClassSets) {
 
 #[test]
 fn enum_entry_property_receivers_keep_their_owner_across_spilled_writes() {
-    let source = include_str!("box_regressions/enumEntryPropertyReceiverWrites.kt");
+    let source = include_str!("../box_regressions/enumEntryPropertyReceiverWrites.kt");
     common::expect_box_same_as_kotlinc(source, "enumEntryPropertyReceiverWrites");
     assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
         "enumEntryPropertyReceiverWrites.kt",
@@ -71,7 +71,7 @@ fn enum_entry_property_receivers_keep_their_owner_across_spilled_writes() {
 
 #[test]
 fn an_enum_entry_property_keeps_its_owner_through_an_anonymous_inner_class() {
-    let source = include_str!("box_regressions/deepInnerClassInEnumEntryClass2.kt");
+    let source = include_str!("../box_regressions/deepInnerClassInEnumEntryClass2.kt");
     common::expect_box_same_as_kotlinc(source, "deepInnerClassInEnumEntryClass2");
     assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
         "deepInnerClassInEnumEntryClass2.kt",
@@ -81,7 +81,7 @@ fn an_enum_entry_property_keeps_its_owner_through_an_anonymous_inner_class() {
 
 #[test]
 fn an_enum_entry_capture_calls_its_declared_custom_setter() {
-    let source = include_str!("box_regressions/enumEntryPropertyCustomSetter.kt");
+    let source = include_str!("../box_regressions/enumEntryPropertyCustomSetter.kt");
     common::expect_box_same_as_kotlinc(source, "enumEntryPropertyCustomSetter");
     assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
         "enumEntryPropertyCustomSetter.kt",
@@ -91,7 +91,7 @@ fn an_enum_entry_capture_calls_its_declared_custom_setter() {
 
 #[test]
 fn an_enum_entry_function_property_keeps_its_selected_receiver() {
-    let source = include_str!("box_regressions/enumEntryReceiverFunctionProperty.kt");
+    let source = include_str!("../box_regressions/enumEntryReceiverFunctionProperty.kt");
     common::expect_box_same_as_kotlinc(source, "enumEntryReceiverFunctionProperty");
     assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
         "enumEntryReceiverFunctionProperty.kt",
