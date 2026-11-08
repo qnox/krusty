@@ -5,7 +5,7 @@ These `.kt` files are copied **verbatim** from the JetBrains/Kotlin compiler tes
 and contributors). They are the canonical `fun box(): String → "OK"` conformance tests.
 
 Only the cases that fall within krusty's currently supported language subset are vendored here, so
-they run in normal `cargo test` (see `tests/box_vendored_e2e.rs`). The **full** suite (10,009 cases)
+they run in normal `cargo test` (see `tests/box_vendored.rs`). The **full** suite (10,009 cases)
 is run directly against the provisioned Kotlin box corpus by `tests/kotlin_box_conformance.rs`, which
 skips everything krusty can't yet compile and asserts krusty never miscompiles a case it accepts.
 

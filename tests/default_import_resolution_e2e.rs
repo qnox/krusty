@@ -6,6 +6,9 @@
 
 use super::common;
 
+#[path = "default_import_resolution_e2e/bare_call_past_receiver_only_level.rs"]
+mod bare_call_past_receiver_only_level;
+
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
 }

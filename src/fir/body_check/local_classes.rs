@@ -86,6 +86,23 @@ impl BodyFirChecker<'_> {
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))
     }
 
+    // The existing storage channel carries an entry-local ordinal; keep its declaration-ancestry
+    // projection here. Explicit selected-property reads use their recorded entry declaration.
+    fn enum_entry_property(&self, sibling: u32) -> Option<PropertyId> {
+        let mut owner = crate::fir::DeclarationId::from_raw(self.body.owner().raw());
+        loop {
+            let anchor = self.index.declaration_anchor(owner)?;
+            if anchor.kind == crate::fir::DeclarationKind::EnumEntry {
+                break;
+            }
+            owner = anchor.owner?;
+        }
+        let declaration =
+            self.index
+                .owned_declaration(owner, crate::fir::DeclarationKind::Property, sibling)?;
+        self.index.property_for_declaration(declaration)
+    }
+
     pub(super) fn selected_enum_entry_storage_owner(
         &self,
         expected: crate::types::TypeName,

@@ -9,10 +9,12 @@
 //! `remove(int)` bridge and the erased one. The override check sees applied supertypes, so a
 //! `MutableListIterator<String>` result implements `listIterator`.
 //!
-//! The mutable-only JDK defaults (`replaceAll`, `sort`, and on Java 21 the `SequencedCollection`
-//! members) are stubbed after them. An abstract class's fake-override bridges are a later
-//! realization, which these comparisons leave out by exact spelling; they compare every other
-//! member, the `toArray` pair and the declared `containsAll` override included, byte for byte.
+//! The JDK defaults `java.util.List` declares for the mutable face only (`replaceAll`, `sort`, the
+//! `SequencedCollection` members) are stubs too, with an erased bridge where the descriptor
+//! differs (`addFirst(Object)`). An abstract class materializes the read-only members it leaves
+//! abstract (`abstract int indexOf(String)`, `abstract int getSize()`) with their final special
+//! bridges. These comparisons compare every member, the `toArray` pair and the declared
+//! `containsAll` override included, byte for byte, except the `Any` spellings listed per test.
 
 use super::common;
 
@@ -91,8 +93,9 @@ abstract class Row : List<String> {
 
 const ABSTRACT_INT_ITERATOR: &str = "abstract class Row : ListIterator<Int>\n";
 
-/// The fake-override members an abstract class's unimplemented read-only members get.
-const ABSTRACT_FAKE_OVERRIDE_BRIDGES: &[&str] = &[
+/// The members an abstract `List<String>` materializes for the read-only members it leaves
+/// abstract, each with its final special bridge.
+const ABSTRACT_MEMBERS: &[&str] = &[
     "public abstract boolean contains(java.lang.String);",
     "public final boolean contains(java.lang.Object);",
     "public abstract int indexOf(java.lang.String);",
@@ -185,9 +188,15 @@ fn a_list_gets_kotlincs_mutable_list_stubs() {
             "public java.lang.String set(int, java.lang.String);",
             "public java.lang.String remove(int);",
             "public java.lang.Object remove(int);",
+            "public void replaceAll(java.util.function.UnaryOperator<java.lang.String>);",
+            "public void sort(java.util.Comparator<? super java.lang.String>);",
+            "public void addFirst(java.lang.String);",
+            "public java.lang.String removeLast();",
             "public boolean add(java.lang.Object);",
             "public void add(int, java.lang.Object);",
             "public java.lang.Object set(int, java.lang.Object);",
+            "public void addFirst(java.lang.Object);",
+            "public java.lang.Object removeLast();",
         ],
         &[],
     );
@@ -210,6 +219,10 @@ fn a_primitive_list_boxes_set_but_not_remove_at_like_kotlinc() {
             "public boolean add(java.lang.Object);",
             "public void add(int, java.lang.Object);",
             "public java.lang.Object set(int, java.lang.Object);",
+            "public void addLast(java.lang.Integer);",
+            "public java.lang.Integer removeFirst();",
+            "public void addLast(java.lang.Object);",
+            "public java.lang.Object removeFirst();",
         ],
         &[],
     );
@@ -276,8 +289,12 @@ fn an_abstract_list_also_gets_list_iterator_and_sub_list_stubs_like_kotlinc() {
             "public java.util.ListIterator<java.lang.String> listIterator();",
             "public java.util.ListIterator<java.lang.String> listIterator(int);",
             "public java.util.List<java.lang.String> subList(int, int);",
-        ],
-        ABSTRACT_FAKE_OVERRIDE_BRIDGES,
+        ]
+        .iter()
+        .chain(ABSTRACT_MEMBERS)
+        .copied()
+        .collect::<Vec<_>>(),
+        &[],
     );
 }
 
@@ -292,8 +309,10 @@ fn an_abstract_generic_list_needs_no_erased_bridges_like_kotlinc() {
             "public T remove(int);",
             "public java.util.ListIterator<T> listIterator();",
             "public java.util.List<T> subList(int, int);",
+            "public abstract int getSize();",
+            "public final int size();",
         ],
-        &["public abstract int getSize();", "public final int size();"],
+        &[],
     );
 }
 
@@ -304,8 +323,12 @@ fn a_source_list_iterator_result_implements_list_iterator_like_kotlinc() {
         &[
             "public java.util.ListIterator<java.lang.String> listIterator(int);",
             "public java.util.List<java.lang.String> subList(int, int);",
-        ],
-        ABSTRACT_FAKE_OVERRIDE_BRIDGES,
+        ]
+        .iter()
+        .chain(ABSTRACT_MEMBERS)
+        .copied()
+        .collect::<Vec<_>>(),
+        &[],
     );
 }
 

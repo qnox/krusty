@@ -63,14 +63,12 @@ impl Parser<'_> {
             self.push_lexical_type_params(&type_params, &type_param_bounds);
         while self.at(TokenKind::At) {
             let _ = self.parse_annotation(); // receiver use-site annotation
-            self.skip_plain_newlines();
         }
         let (receiver, name) = self.parse_receiver_and_declaration_name("property name");
         let name_span = self.declaration_name_span;
         let ty = if self.eat(TokenKind::Colon) {
             // `… (':' NL* type)?` — the type may start on the next line, which is where a formatter
             // puts a long generic one. An explicit `;` still ends the declaration.
-            self.skip_plain_newlines();
             Some(self.parse_type())
         } else {
             None
@@ -79,7 +77,7 @@ impl Parser<'_> {
         type_param_bounds.extend(self.parse_where_clause(&type_params, &name));
         let init_operator = self.eat_initializer_eq();
         let mut init = if init_operator.is_some() {
-            self.skip_newlines();
+            self.skip_semicolons();
             Some(self.parse_expr())
         } else {
             None
@@ -90,14 +88,13 @@ impl Parser<'_> {
         // `val x: T by <expr>` — a delegated property (in place of `= init`). Reads/writes route through
         // the delegate's `getValue`/`setValue` operators.
         let delegate_start = self.i;
-        self.skip_plain_newlines();
         let mut delegate_by_span = None;
         let delegate = if init.is_none() && self.at(TokenKind::Ident) && self.keyword_text("by") {
             // The `by` keyword owns every diagnostic about the delegate as a delegate — kotlinc
             // anchors "cannot serve as a delegate" here, not on the expression or the property.
             delegate_by_span = Some(self.tok().span);
             self.bump(); // 'by'
-            self.skip_newlines();
+            self.skip_semicolons();
             Some(self.parse_expr())
         } else {
             self.i = delegate_start;
@@ -118,13 +115,13 @@ impl Parser<'_> {
         let mut accessor_external = false;
         'accessors: loop {
             let save = self.i;
-            self.skip_newlines();
+            self.skip_semicolons();
             let accessor_declaration_start = self.tok().span.lo;
             let mut visibility = None;
             let mut is_inline = false;
             let mut is_external = false;
             loop {
-                self.skip_newlines();
+                self.skip_semicolons();
                 if self.at(TokenKind::At) {
                     let Some(end) = self.annotation_end_at(self.i) else {
                         self.i = save;
@@ -178,7 +175,7 @@ impl Parser<'_> {
                 };
                 let field_init_operator = self.eat_span(TokenKind::Eq);
                 let field_init = if field_init_operator.is_some() {
-                    self.skip_newlines();
+                    self.skip_semicolons();
                     Some(self.parse_expr())
                 } else {
                     None
@@ -248,7 +245,7 @@ impl Parser<'_> {
                     self.t[self.i.saturating_sub(1)].span.hi,
                 );
                 let body = if self.eat(TokenKind::Eq) {
-                    self.skip_newlines();
+                    self.skip_semicolons();
                     Some(FunBody::Expr(self.parse_expr()))
                 } else if self.at(TokenKind::LBrace) {
                     Some(FunBody::Block(self.parse_block_expr(false)))

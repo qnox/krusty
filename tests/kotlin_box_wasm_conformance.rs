@@ -433,6 +433,53 @@ fun box(): String {
     );
 }
 
+/// What a constructor that reaches back into its own enum finds, as kotlinc-wasm builds an enum:
+/// each constant is published once constructed, and a constant with a body right after its super
+/// call, so its own body already finds it. The expected log is kotlinc-wasm's for this program
+/// (2.4.21; wasm-js and wasm-wasi agree), taken by running it there. Kotlin/Native publishes every
+/// constant before constructing any (`native_enum_publication_e2e`), so this is target-owned.
+#[test]
+fn wasm_enum_constants_are_published_once_constructed() {
+    expect_wasm_box(
+        r##"
+var log = ""
+
+fun describe(x: Any?, self: Any): String = when {
+    x == null -> "null"
+    x === self -> "self"
+    else -> "other"
+}
+
+fun seen(self: Any): String =
+    "[" + describe(E.C, self) + describe(E.A, self) + describe(E.B, self) + "]"
+
+enum class E(val tag: Int) {
+    C(3),
+    A(1),
+    B(2) {
+        init { log += "body" + seen(this) }
+    };
+
+    init { log += ordinal.toString() + seen(this) }
+}
+
+fun box(): String {
+    E.A
+    val values = E.values()
+    val missing = try {
+        E.valueOf("D").name
+    } catch (e: Throwable) {
+        e.message
+    }
+    val result = log + "#" + values[0].name + values[1].name + values[2].name + "#" + missing
+    val expected = "0[nullnullnull]1[othernullnull]2[otherothernull]body[otherotherself]#CAB#No enum constant E.D"
+    return if (result == expected) "OK" else result
+}
+"##,
+        "wasmEnumPublication",
+    );
+}
+
 /// A same-module `@InlineOnly` wrapper is never emitted, so its function-typed parameter reaches no
 /// Wasm signature while its lambda expands through common IR. The lambda's ordinary assignments to
 /// a captured `var` are checked as `Unit` statements and must leave nothing on the stack: inside an
@@ -1099,6 +1146,21 @@ fn wasm_declines_a_generated_hash_that_can_reach_the_identity_hash() {
         "wasmGeneratedHashOfAnErasedProperty",
         reason,
     );
+    // Runtime exception objects come from the exception runtime rather than this file's classes,
+    // and an erased property can hold one that the file constructs or catches.
+    expect_wasm_decline(
+        "data class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
+         fun box(): String = if (Holder(IllegalStateException()).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfAConstructedRuntimeException",
+        reason,
+    );
+    expect_wasm_decline(
+        "data class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
+         fun caught(text: String?): Any = try { text!! } catch (e: NullPointerException) { e }\n\
+         fun box(): String = if (Holder(caught(null)).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfACaughtRuntimeException",
+        reason,
+    );
 }
 
 #[test]
@@ -1194,12 +1256,13 @@ fn wasm_a_generated_hash_of_an_erased_property_dispatches_when_every_class_has_a
     );
 }
 
+/// Enum classes realize through the shared enum pass, so the program the Wasm lanes used to
+/// decline by name now runs.
 #[test]
-fn wasm_declines_an_enum_class_by_name() {
-    expect_wasm_decline(
+fn wasm_runs_an_enum_class() {
+    expect_wasm_box(
         "enum class Color { RED }\nfun box(): String = \"OK\"",
         "wasmClassesEnum",
-        "an enum class (`Color`)",
     );
 }
 
@@ -1208,3 +1271,14 @@ mod value_hash;
 
 #[path = "wasm_dependency_constructor_exports.rs"]
 mod dependency_constructor_exports;
+
+#[path = "wasm_escaping_closures.rs"]
+mod escaping_closures;
+
+#[test]
+fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
+    expect_wasm_box(
+        include_str!("box_regressions/finallyValueAndKotlinThrow.kt"),
+        "wasmFinallyValueAndKotlinThrow",
+    );
+}

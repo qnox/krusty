@@ -40,14 +40,15 @@ pub(super) fn emit_stubs(ir: &IrFile, class: &IrClass, cw: &mut ClassWriter, env
         if cw.has_method(&stub.realized.name, &descriptor) {
             continue;
         }
+        let signature_parameters = stub.signature_parameters();
         let signature_result = stub.signature_result();
         let signature = if stub.declaration_site_wildcards {
             formatter.method_positions_with_declaration_site_wildcards(
-                &stub.parameters,
+                &signature_parameters,
                 &signature_result,
             )
         } else {
-            formatter.method_positions(&stub.parameters, &signature_result)
+            formatter.method_positions(&signature_parameters, &signature_result)
         }
         .filter(|signature| *signature != descriptor);
         let method = ThrowingMethod {
@@ -299,11 +300,11 @@ fn emit_type_safe_special_bridges(
 
 /// The member a bridge forwards to, by its JVM name and physical descriptor, and the value class
 /// whose carrier it returns where an erased reference result expects the box.
-struct Target<'a> {
-    name: &'a str,
-    parameters: &'a [Ty],
-    result: Ty,
-    result_box: Option<ValueClassAdapter>,
+pub(super) struct Target<'a> {
+    pub(super) name: &'a str,
+    pub(super) parameters: &'a [Ty],
+    pub(super) result: Ty,
+    pub(super) result_box: Option<ValueClassAdapter>,
 }
 
 /// The bridge of an implemented member: each erased argument is cast or unboxed to the
@@ -311,7 +312,7 @@ struct Target<'a> {
 /// result is discarded for a `void` bridge (a `Nothing` member's `Void`) or boxed back to the
 /// erased result when that is a reference. A type-safe declaration's bridge first tests each
 /// checked argument against its declared type.
-fn emit_forwarding<const ACCESS: u16>(
+pub(super) fn emit_forwarding<const ACCESS: u16>(
     class: &IrClass,
     cw: &mut ClassWriter,
     target: &Target<'_>,
@@ -463,12 +464,14 @@ fn method_locals(class: &IrClass, method: &ThrowingMethod) -> Vec<(String, Strin
 }
 
 #[derive(Clone, Copy)]
-struct ThrowingMethod<'a> {
-    name: &'a str,
-    parameters: &'a [Ty],
-    parameter_names: &'a [String],
-    descriptor: &'a str,
-    signature: Option<&'a str>,
+/// A method a stub or bridge writes: its JVM name, parameters with their names, descriptor, and
+/// generic signature.
+pub(super) struct ThrowingMethod<'a> {
+    pub(super) name: &'a str,
+    pub(super) parameters: &'a [Ty],
+    pub(super) parameter_names: &'a [String],
+    pub(super) descriptor: &'a str,
+    pub(super) signature: Option<&'a str>,
 }
 
 fn emit_throwing<const ACCESS: u16>(
