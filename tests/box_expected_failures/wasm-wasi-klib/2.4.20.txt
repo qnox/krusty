@@ -831,7 +831,6 @@ controlStructures/breakContinueInExpressions/inlinedBreakContinue/lambdaPassedTo
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/loopWithinInlineFunction.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/stdlibFunctions.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValueNested.kt
-controlStructures/breakContinueInExpressions/kt17384.kt
 controlStructures/breakContinueInExpressions/kt45704_elvisInInlineFun.kt
 controlStructures/breakContinueInExpressions/popSizes.kt
 controlStructures/breakContinueInExpressions/tryFinally1.kt
@@ -864,7 +863,6 @@ controlStructures/forInArrayWithIndex/forInArrayWithIndexBreakAndContinue.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexContinuesAsUnmodified.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNoElementVar.kt
-controlStructures/forInArrayWithIndex/forInArrayWithIndexNoIndexOrElementVar.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNoIndexVar.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNotDestructured.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexWithExplicitlyTypedIndexVariable.kt
@@ -2084,7 +2082,6 @@ increment/argumentWithSideEffects.kt
 increment/arrayElement.kt
 increment/augmentedAssignmentWithComplexRhs.kt
 increment/classVarargGetSet.kt
-increment/classVarargGetSetEvaluationOrder.kt
 increment/classWithGetSet.kt
 increment/genericClassWithGetSet.kt
 increment/mutableListElement.kt
@@ -3326,8 +3323,6 @@ localClass/signatureConflictHiddenByTypeParameter.kt
 localClass/tryCatch.kt
 localClass/virtualCallFromConstructor.kt
 localClasses/anonymousObjectInExtension.kt
-localClasses/closureOfInnerLocalClass.kt
-localClasses/closureOfLambdaInLocalClass.kt
 localClasses/closureWithSelfInstantiation.kt
 localClasses/defaultParameterInConstructor.kt
 localClasses/inExtensionFunction.kt
@@ -3382,11 +3377,6 @@ multiDecl/forIterator/longIterator/MultiDeclForComponentMemberExtensionsInExtens
 multiDecl/forRange/UnderscoreNamesDontCallComponent.kt
 multiDecl/forRange/explicitRangeToWithDot/long/MultiDeclForComponentExtensions.kt
 multiDecl/kt9828_hashMap.kt
-multiDecl/nameBasedDestructuringFullForm.kt
-multiDecl/nameBasedDestructuringShortForm.kt
-multiDecl/nameBasedDestructuringUnderscoreWithRenaming.kt
-multiDecl/positionalDestructuringFullForm.kt
-multiDecl/positionalDestructuringShortForm.kt
 multiplatform/k2/aliasSuperTypeInLazy.kt
 multiplatform/k2/annotations/expectAnnotationCallInLibrary.kt
 multiplatform/k2/annotations/optionalExpectationAnnotation.kt
@@ -4771,7 +4761,6 @@ secondaryConstructors/generics.kt
 secondaryConstructors/innerClasses.kt
 secondaryConstructors/innerClassesInheritance.kt
 secondaryConstructors/localClasses.kt
-secondaryConstructors/varargs.kt
 secondaryConstructors/withReturnUnit.kt
 serialization/deserializedMembers.kt
 serialization/serializedCharConstant.kt
@@ -5182,7 +5171,6 @@ when/enumOptimization/nestedWhenInResult.kt
 when/enumOptimization/nullability.kt
 when/enumOptimization/subjectAny.kt
 when/enumOptimization/withoutElse.kt
-when/exhaustiveBreakContinue.kt
 when/exhaustiveness/exhaustiveWithNegativeEnum.kt
 when/guard/whenWithGuard.kt
 when/inferredTypeParameters.kt
