@@ -2,9 +2,9 @@
 # with the Bazel registry (krustythecompiler.dev/bazel-registry) generated from the GitHub releases.
 # The release job dispatches this workflow after each release, so the registry lists it.
 # The metrics page (krustythecompiler.dev/metrics/) is built from the latest successful master CI
-# run's box reports, the corpus-results branch and the coverage baseline. The nightly corpus run
-# dispatches this workflow once it has published, and the schedule rebuilds the page every night
-# even when the corpus run does not finish.
+# run's box reports, the `summary` artifacts of the recent nightly `oss corpus` runs and the coverage
+# baseline. Each finished corpus run triggers this workflow, and the schedule rebuilds the page every
+# night even when the corpus run does not finish.
 # One-time setup: Settings -> Pages -> Source: "GitHub Actions", Custom domain: krustythecompiler.dev.
 name: pages
 
@@ -14,11 +14,15 @@ on:
     paths: ["site/**", ".github/workflows/pages.yml"]
   schedule:
     - cron: '0 7 * * *'
+  workflow_run:
+    workflows: [oss corpus]
+    types: [completed]
+    branches: [master]
   workflow_dispatch:
 
 permissions:
   contents: read
-  # Downloads the box reports of the latest master CI run for the metrics page.
+  # Downloads the box reports and corpus summaries of the master runs for the metrics page.
   actions: read
   pages: write
   id-token: write
@@ -29,7 +33,7 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, rust-4c-8gb]
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -47,12 +51,31 @@ jobs:
         run: |
           set -euo pipefail
           in=$RUNNER_TEMP/metrics
-          mkdir -p "$in/corpus" "$in/box"
+          mkdir -p "$in/corpus/runs" "$in/box"
           cp coverage-baseline.json "$in/"
-          if git fetch -q --depth 1 origin corpus-results; then
-            git show FETCH_HEAD:results.json > "$in/corpus/results.json"
-            git show FETCH_HEAD:history.tsv > "$in/corpus/history.tsv"
-          fi
+          # The nightly corpus runs whose summary artifact is still kept, newest first; a run that
+          # stopped before its summary job, or whose artifact expired, has none and is left out.
+          # The newest also records what it built: the project list and the patches at its commit.
+          newest=
+          gh run list -R "$GITHUB_REPOSITORY" --workflow oss-corpus.yml --branch master --event schedule \
+            --status completed --limit 60 --json databaseId,headSha,createdAt,url,conclusion --jq '.[] | @json' |
+            while IFS= read -r run; do
+              id=$(jq -r .databaseId <<<"$run")
+              dir=$in/corpus/runs/$id
+              kept=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts" \
+                --jq '[.artifacts[] | select(.name == "summary" and (.expired | not))] | length')
+              [ "$kept" -eq 1 ] || continue
+              gh run download -R "$GITHUB_REPOSITORY" "$id" -n summary -D "$dir"
+              rm -f "$dir/summary.md"
+              printf '%s\n' "$run" > "$dir/run.json"
+              if [ -z "$newest" ]; then
+                newest=$id
+                sha=$(jq -r .headSha <<<"$run")
+                git fetch -q --depth 1 origin "$sha"
+                git show "$sha:scripts/oss-corpus/projects.tsv" > "$dir/projects.tsv"
+                git ls-tree --name-only "$sha" scripts/oss-corpus/patches/ | xargs -r -n1 basename > "$dir/patches.txt"
+              fi
+            done
           run=$(gh run list -R "$GITHUB_REPOSITORY" --workflow ci.yml --branch master --event push \
             --status success --limit 1 --json databaseId,headSha,createdAt,url --jq '.[0] // empty')
           if [ -n "$run" ]; then

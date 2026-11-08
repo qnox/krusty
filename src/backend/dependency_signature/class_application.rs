@@ -43,7 +43,7 @@ pub(super) fn apply(
             || fact
                 .generic_sig
                 .as_ref()
-                .is_some_and(|callable| callable.formals.iter().any(|formal| formal == identity))
+                .is_some_and(|callable| callable.formals.contains(&identity))
         {
             return Err("a dependency class application repeats a formal identity");
         }

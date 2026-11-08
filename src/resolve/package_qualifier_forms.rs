@@ -61,8 +61,11 @@ impl Checker<'_> {
                 }
             });
             if let Some(span) = span {
-                self.diags
-                    .error(span, PARENTHESIZED_PACKAGE_QUALIFIER.to_string());
+                self.diags.error_named(
+                    span,
+                    crate::diag::names::PARENTHESIZED_PACKAGE_QUALIFIER_ERROR,
+                    PARENTHESIZED_PACKAGE_QUALIFIER,
+                );
             }
         }
     }
@@ -142,12 +145,12 @@ impl Checker<'_> {
         let (span, name, warning) = match form {
             PackageForm::Parenthesized(span) => (
                 span,
-                crate::diag::CompilerWarningName::ParenthesizedPackageQualifier,
+                crate::diag::names::PARENTHESIZED_PACKAGE_QUALIFIER_WARNING,
                 self.file.parenthesized_package_qualifier_warning.clone(),
             ),
             PackageForm::TypeArguments(span) => (
                 span,
-                crate::diag::CompilerWarningName::TypeArgumentsNotAllowedInPackageQualifier,
+                crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING,
                 self.file.package_qualifier_type_arguments_warning.clone(),
             ),
         };

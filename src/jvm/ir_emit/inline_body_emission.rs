@@ -116,8 +116,8 @@ impl Emitter<'_> {
         let saved_slots = std::mem::take(&mut self.slots);
         // The body numbers its values from zero again: none of them is a constructor-property
         // parameter of the class whose initializer hosts the call. A value the caller left on the
-        // stack (a duplicated safe-call receiver) is in that caller's namespace too, so a body
-        // read of the same index must load the body's slot instead of consuming it.
+        // stack (a landed inline return result) is in that caller's namespace too, so a body read
+        // of the same index must load the body's slot instead of consuming it.
         let saved_resident = self.stack_resident_value.take();
         let saved_initializer_class = self.constructor_initializer_class.take();
         let saved_var_types = std::mem::replace(

@@ -448,11 +448,7 @@ pub(super) fn plan(
     let reference_lines = ir
         .callable_reference_names
         .iter()
-        .filter_map(|(expression, class)| {
-            ir.expr_source_lines
-                .get(expression)
-                .map(|line| (*class, *line))
-        })
+        .filter_map(|(expression, class)| ir.source_line(*expression).map(|line| (*class, line)))
         .collect::<HashMap<_, _>>();
     let root_lines = synthesized_companion_accessor_lines(ir);
     // A constructor delegation is no expression the walk meets; kotlinc meets it at its call.
@@ -822,11 +818,7 @@ impl Walk<'_> {
         // Post-order: an operand's use precedes the use of the call or store consuming it.
         let mut stack = vec![(root, line, false)];
         while let Some((expression, inherited, expanded)) = stack.pop() {
-            let line = ir
-                .expr_source_lines
-                .get(&expression)
-                .copied()
-                .unwrap_or(inherited);
+            let line = ir.source_line(expression).unwrap_or(inherited);
             if !expanded {
                 // Kotlin discovers a store's target after its receiver but before its assigned
                 // value. Keep that local lowering order instead of globally preferring every
@@ -1439,10 +1431,11 @@ pub(super) fn member_property_access_bridge(
     ir: &IrFile,
     class: &crate::ir::IrClass,
     owner: TypeName,
-    property: &crate::ir::IrProperty,
+    property_index: u32,
     value: &str,
     read: bool,
 ) -> crate::jvm::inline::PropertyAccess {
+    let property = &class.properties[property_index as usize];
     let owner_spelling = owner.render();
     let declared_accessor = if read {
         property.getter.is_some()
@@ -1453,7 +1446,14 @@ pub(super) fn member_property_access_bridge(
     let exposed = property
         .backing_field
         .and_then(|index| class.fields.get(index as usize))
-        .map(|field| type_descriptor(declared_property_accessor_jvm(ir, property, field)))
+        .map(|field| {
+            type_descriptor(declared_property_accessor_jvm(
+                ir,
+                class,
+                property_index,
+                field,
+            ))
+        })
         .unwrap_or_else(|| value.to_string());
     let carried = if declared_accessor {
         exposed.as_str()
@@ -1605,6 +1605,7 @@ impl Accessor<'_> {
     ) -> bool {
         let ir = self.ir;
         let owner = &ir.classes[class as usize];
+        let property_index = property;
         let property = &owner.properties[property as usize];
         let declared = if write {
             property.setter.is_some()
@@ -1621,7 +1622,7 @@ impl Accessor<'_> {
         let internal = owner.fq_name.render();
         let field_ty = jvm_value_ty(&field.ty);
         let field_descriptor = type_descriptor(field_ty);
-        let ty = declared_property_accessor_jvm(ir, property, field);
+        let ty = declared_property_accessor_jvm(ir, owner, property_index, field);
         let physical = instance_field_jvm_name(
             ir,
             self.run,

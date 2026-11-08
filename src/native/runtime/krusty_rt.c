@@ -260,9 +260,10 @@ void kt_no_when_branch_matched(void) {
     kt_throw(kt_throwable_new(&kt_type_no_when_branch_matched_exception, NULL));
 }
 
-/* `Color.valueOf("NOPE")` — Kotlin's `IllegalArgumentException`, naming the constant asked for. */
+/* `Color.valueOf("NOPE")` — Kotlin's `IllegalArgumentException`, naming the constant asked for in
+   Kotlin/Native's own words (`valueOfForEnum`). */
 void kt_no_such_enum_constant(KRef name) {
-    KRef message = kt_string_plus(kt_string_utf8("No enum constant ", 17), name);
+    KRef message = kt_string_plus(kt_string_utf8("Invalid enum value name: ", 25), name);
     kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception, message));
 }
 

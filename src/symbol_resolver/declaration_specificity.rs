@@ -47,30 +47,69 @@ fn declaration_maxima(
     let classifier_shapes = receivers
         .iter()
         .zip(parameter_shapes)
-        .map(|(receiver, parameters)| {
-            receiver
-                .iter()
-                .chain(parameters.iter())
-                .map(|parameter| {
-                    let parameter = parameter.non_null();
-                    parameter
-                        .kotlin_class_internal()
-                        .map_or(parameter, Ty::obj_name)
-                })
-                .collect::<Vec<_>>()
-        })
+        .map(|(receiver, parameters)| classifier_shape(*receiver, parameters))
         .collect::<Vec<_>>();
     let borrowed = classifier_shapes
         .iter()
         .map(Vec::as_slice)
         .collect::<Vec<_>>();
     let mut maximal = most_specific_indices(&borrowed, |_, left, right| {
-        left == right || super::resolution_subtype(src, left, right)
+        classifier_at_least_as_specific(src, left, right)
     });
     if maximal.iter().any(|index| !generic[*index]) {
         maximal.retain(|index| !generic[*index]);
     }
     maximal
+}
+
+/// A declaration's receiver and value parameters as the classifiers specificity compares.
+fn classifier_shape(receiver: Option<Ty>, parameters: &[Ty]) -> Vec<Ty> {
+    receiver
+        .iter()
+        .chain(parameters.iter())
+        .map(|parameter| {
+            let parameter = parameter.non_null();
+            parameter
+                .kotlin_class_internal()
+                .map_or(parameter, Ty::obj_name)
+        })
+        .collect()
+}
+
+fn classifier_at_least_as_specific(src: &dyn SymbolSource, left: Ty, right: Ty) -> bool {
+    left == right || super::resolution_subtype(src, left, right)
+}
+
+/// Whether two declarations are each at least as specific as the other, the only relation in
+/// which Kotlin's omitted-default and vararg discrimination may choose between them. Each side's
+/// type parameters are open variables while the other side is checked against it, so
+/// `(Int) -> T1` and `(Int) -> T2` are equally specific; type arguments are compared in full, so
+/// `(Int) -> String` and `(Int) -> Int` are not.
+pub(crate) fn declarations_equally_specific(
+    src: &dyn SymbolSource,
+    (left_receiver, left): (Option<Ty>, &[Ty]),
+    (right_receiver, right): (Option<Ty>, &[Ty]),
+) -> bool {
+    let left = left_receiver
+        .iter()
+        .chain(left)
+        .copied()
+        .collect::<Vec<_>>();
+    let right = right_receiver
+        .iter()
+        .chain(right)
+        .copied()
+        .collect::<Vec<_>>();
+    let open = crate::types::TyParamBindings::default();
+    let at_least_as_specific = |specific: Ty, general: Ty| {
+        specific == general
+            || super::resolution_subtype(src, specific, crate::types::ty_subst(general, &open))
+    };
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(&right)
+            .all(|(&l, &r)| at_least_as_specific(l, r) && at_least_as_specific(r, l))
 }
 
 /// Retain declarations after semantic specificity, then apply non-genericity only as a tiebreaker.
@@ -176,4 +215,31 @@ fn retain_earliest_intersection_member<T>(
         index += 1;
         keep
     });
+}
+
+/// kotlinc's second most-specific pass (`discriminateGenerics`): when declarations are left tied,
+/// a non-generic one is more specific than a generic one, and two generic ones are incomparable.
+/// A generic declaration that a call instantiates to a non-generic one's parameters (`make<T>(T)`
+/// and `make(Int)` for `make(0)`) therefore loses to it instead of making the call ambiguous.
+pub(super) fn discriminate_generics<T: Copy>(
+    selection: super::overload_selection::CandidateSelectionWithTies<T>,
+    generic: impl Fn(T) -> bool,
+) -> super::overload_selection::CandidateSelectionWithTies<T> {
+    use super::overload_selection::CandidateSelectionWithTies;
+    let CandidateSelectionWithTies::Ambiguous(tied) = selection else {
+        return selection;
+    };
+    if tied.iter().all(|&candidate| !generic(candidate)) {
+        return CandidateSelectionWithTies::Ambiguous(tied);
+    }
+    let non_generic = tied
+        .iter()
+        .copied()
+        .filter(|&candidate| !generic(candidate))
+        .collect::<Vec<_>>();
+    match non_generic.as_slice() {
+        [] => CandidateSelectionWithTies::Ambiguous(tied),
+        [selected] => CandidateSelectionWithTies::Selected(*selected),
+        _ => CandidateSelectionWithTies::Ambiguous(non_generic),
+    }
 }

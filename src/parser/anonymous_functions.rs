@@ -38,7 +38,7 @@ impl Parser<'_> {
         let mut param_spans = vec![start; params.len()];
         // A context parameter's anonymity is its context kind; the roles describe value parameters.
         let mut roles = vec![LambdaParameterRole::Named; params.len()];
-        self.skip_newlines();
+        self.skip_semicolons();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             let parameter_span = self.tok().span;
             // `_` marks an unused parameter; keep the name so the arity is preserved.
@@ -58,11 +58,11 @@ impl Parser<'_> {
             params.push(name);
             param_spans.push(parameter_span);
             param_types.push(ty);
-            self.skip_newlines();
+            self.skip_semicolons();
             if !self.eat(TokenKind::Comma) {
                 break;
             }
-            self.skip_newlines();
+            self.skip_semicolons();
         }
         self.expect(TokenKind::RParen, "')'");
         // An explicit return type (`: T`) drives the desugared lambda's function type — recorded below

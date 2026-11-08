@@ -34,7 +34,6 @@ mod runtime;
 mod symbols;
 mod target;
 mod target_contract;
-mod value_classes;
 
 #[cfg(test)]
 pub(crate) use codegen::COUNTED_LOOPS;
