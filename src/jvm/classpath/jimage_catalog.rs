@@ -47,10 +47,8 @@ impl JimageIndex {
             let Some(package) = self.names.parent(class) else {
                 continue;
             };
-            catalog.classes.push(class);
-            if package != NameTree::ROOT {
-                catalog.packages.entry(package).or_default().has_classes = true;
-            }
+            catalog.add_class(class);
+            catalog.packages.entry(package).or_default().has_classes = true;
         }
         catalog.complete = !self.locations.is_empty();
         catalog

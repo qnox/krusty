@@ -9,7 +9,7 @@ use krusty::features::{
 };
 use krusty::language_version::LanguageVersion;
 
-use super::{ArgumentProblem, CliWarning, WarningName};
+use super::{ArgumentProblem, CliWarning};
 use crate::kotlinc_arguments::{ArgumentSpec, Disposition, Origin, Recorded, ValueKind};
 
 /// One `-XXLanguage:` argument kotlinc accepted (`ManualLanguageFeatureSetting`).
@@ -255,10 +255,12 @@ pub(super) fn manual_setting_checks(
             cannot_disable.join(", ")
         )
     });
+    // kotlinc reports this one before it reads `-Xwarning-level`, so no level reaches it.
     let warning = (!pre_release.is_empty()).then(|| CliWarning {
-        name: None,
+        name: Some(krusty::diag::names::COMPILER_ARGUMENTS_WARNING),
+        leveled: false,
         message: format!(
-            "following manually enabled features will force generation of pre-release binaries: {}",
+            "Following manually enabled features will force generation of pre-release binaries: {}",
             pre_release.join(", ")
         ),
     });
@@ -297,18 +299,20 @@ pub(super) fn redundancy_warnings(
             .any(|toggle| necessary(toggle.if_value_is.as_deref(), value, &toggle.feature, false));
         warnings.push(if disables_stable {
             CliWarning {
-                name: Some(WarningName::CliArgDisablesStableFeature),
+                name: Some(krusty::diag::names::CLI_ARG_DISABLES_STABLE_FEATURE),
+                leveled: true,
                 message: format!(
-                    "the argument '{rendered}' disables a stable language feature for the current \
+                    "The argument '{rendered}' disables a stable language feature for the current \
                      language version {language_version}. Future support for this mode is not \
                      guaranteed."
                 ),
             }
         } else {
             CliWarning {
-                name: Some(WarningName::RedundantCliArg),
+                name: Some(krusty::diag::names::REDUNDANT_CLI_ARG),
+                leveled: true,
                 message: format!(
-                    "the argument '{rendered}' is redundant for the current language version \
+                    "The argument '{rendered}' is redundant for the current language version \
                      {language_version}."
                 ),
             }

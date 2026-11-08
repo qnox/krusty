@@ -49,7 +49,7 @@ public typealias InvalidBound = Bound<String>
                 0,
                 Span::new(missing, missing + 27),
                 Severity::Error,
-                "visibility must be specified in explicit API mode.",
+                "Visibility must be specified in explicit API mode.",
             ),
             (
                 0,

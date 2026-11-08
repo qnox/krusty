@@ -70,19 +70,31 @@ fn lower_single_source_into(
         .unwrap();
     sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
         .unwrap();
+    let source = crate::fir::SourceFileId::from_raw(0);
+    let mut cursor = crate::fir::ActiveSourceCursor::new(source, &index);
+    let active = cursor
+        .bind_next(&analysis.files[0], source, &index)
+        .expect("single-source lowering must bind the live parser arena");
+    assert!(
+        cursor.is_finished(),
+        "single-source parser binding is complete"
+    );
+    let mut session = crate::fir::BodyCheckSession::default();
     for work in ordinary {
         let mut indexed_sink = sink.indexed(&index);
-        crate::fir::check_and_dispatch_body(
+        crate::fir::check_and_dispatch_active_body_in_session(
             crate::fir::BodyCheckUnit {
                 file: &analysis.files[0],
                 info: analysis.types[0].as_ref().expect("checked type info"),
                 source: crate::fir::SourceFileId::from_raw(0),
                 index: &index,
             },
+            &active,
             work,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut indexed_sink,
+            &mut session,
         )
         .unwrap();
     }

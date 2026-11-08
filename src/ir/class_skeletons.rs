@@ -12,6 +12,7 @@ impl IrClass {
     /// semantic payload it owns (for example `prop_ref`); target passes choose representation.
     pub fn synthetic(fq_name: TypeName) -> Self {
         Self {
+            declaration_context: None,
             declaration_name: None,
             fq_name,
             is_source_declared: false,
@@ -124,6 +125,18 @@ impl IrClass {
         let context_count =
             u32::try_from(context_arguments.len()).expect("too many classifier context parameters");
         Self {
+            declaration_context: (!flags.has(crate::fir::DeclarationFlags::COMPILER_GENERATED))
+                .then_some(
+                    if flags.has(crate::fir::DeclarationFlags::CLASSIFIER_MEMBER) {
+                        super::IrClassDeclarationContext::Member
+                    } else if flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+                        || flags.has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT)
+                    {
+                        super::IrClassDeclarationContext::Executable
+                    } else {
+                        super::IrClassDeclarationContext::TopLevel
+                    },
+                ),
             fq_name: header.classifier,
             declaration_name: header.declaration_name.clone(),
             is_source_declared: true,

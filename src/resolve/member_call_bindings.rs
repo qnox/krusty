@@ -66,11 +66,7 @@ impl Checker<'_> {
             bindings.insert(formal, actual);
         }
         if let Some(fixed) = call.fixed_bindings {
-            bindings.extend(
-                fixed
-                    .iter()
-                    .map(|(formal, actual)| (formal.clone(), *actual)),
-            );
+            bindings.extend(fixed.iter().map(|(formal, actual)| (*formal, *actual)));
         }
         let context_count = member.context_count.min(signature.params.len());
         let explicitly_named = |parameter: usize| {

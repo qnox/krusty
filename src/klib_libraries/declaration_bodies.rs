@@ -274,7 +274,8 @@ impl KlibDeclarationBodies {
     /// Whether exactly one producer-reachable module serializes `classifier` with no
     /// object-initialization work. The checked receiver separately proves that this exact classifier
     /// is a singleton. This body-side proof admits only an `Any`-delegating empty constructor,
-    /// literal field initialization and an empty anonymous initializer. An absent, multiply owned,
+    /// literal field initialization and an empty anonymous initializer; member functions do no
+    /// initialization work. An absent, multiply owned,
     /// inherited, or executable initializer grants no authority.
     pub(crate) fn singleton_initialization_is_inert(
         &self,
@@ -544,7 +545,7 @@ fn find_class(
                             .is_none_or(|initializer| inert_initializer(arena, initializer))
                     })
                 }
-                KlibIrMember::Function(function) => arena.function(*function).constructor,
+                // A member function, the constructor aside, runs only when it is called.
                 _ => true,
             });
         *found = Some(found.unwrap_or(true) && inert);

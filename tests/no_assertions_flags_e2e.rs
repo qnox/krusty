@@ -285,3 +285,56 @@ fn no_param_assertions_secondary_constructor_is_identical_to_kotlincs() {
         );
     }
 }
+
+/// Platform values that reach an extension receiver, written (`getProperty(...).ext()`), through a
+/// local, merged from a conditional and through an operator convention, beside platform values that
+/// reach an ordinary argument. `-Xno-receiver-assertions` removes only the first group's checks.
+const RECEIVER_SOURCE: &str = r#"
+operator fun StringBuilder.plusAssign(s: String) { append(s) }
+fun String.ext(): Int = length
+fun written(): Int = java.lang.System.getProperty("k").ext()
+fun local(): Int {
+    val s = java.lang.System.getProperty("k")
+    return s.ext()
+}
+fun merged(flag: Boolean): Int =
+    (if (flag) java.lang.System.getProperty("k") else java.lang.System.getenv("k")).ext()
+fun property(thread: Thread): Int = thread.name.ext()
+fun operator(map: java.util.HashMap<String, String>): Int {
+    val builder = StringBuilder()
+    builder += map.getOrDefault("a", "b")
+    return builder.length
+}
+fun argument(): Int = Integer.valueOf(java.lang.System.getProperty("k")) + "x".ext()
+fun box(): String = "OK"
+"#;
+
+fn implicit_null_checks(classes: &[(String, Vec<u8>)], tag: &str) -> usize {
+    intrinsic_calls(classes, "checkNotNullExpressionValue", tag)
+        + intrinsic_calls(classes, "checkNotNull:", tag)
+}
+
+#[test]
+fn no_receiver_assertions_is_identical_to_kotlincs() {
+    let flag = Some("-Xno-receiver-assertions");
+    let reference_default = compile_reference(RECEIVER_SOURCE, "Receivers", None);
+    let reference_without = compile_reference(RECEIVER_SOURCE, "Receivers", flag);
+    let with_receivers = implicit_null_checks(&reference_default, "kotlinc default receivers");
+    let without_receivers = implicit_null_checks(&reference_without, "kotlinc without receivers");
+    assert!(
+        with_receivers > without_receivers && without_receivers > 0,
+        "the fixture must make kotlinc drop the receiver checks and keep the argument checks: \
+         {with_receivers} with, {without_receivers} without"
+    );
+    for (flag, reference) in [(None, reference_default), (flag, reference_without)] {
+        let krusty = compile_krusty(RECEIVER_SOURCE, "Receivers", flag);
+        assert_eq!(class_names(&krusty), class_names(&reference));
+        for ((name, ours), (_, theirs)) in krusty.iter().zip(&reference) {
+            assert!(
+                ours == theirs,
+                "{name} differs from kotlinc's build under {}",
+                flag.unwrap_or("default options")
+            );
+        }
+    }
+}
