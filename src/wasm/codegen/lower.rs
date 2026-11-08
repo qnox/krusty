@@ -628,8 +628,6 @@ struct Body<'a> {
     loops: Vec<Loop>,
     /// The `finally` regions whose protected code encloses the current position, innermost last.
     cleanups: Vec<exceptions::CleanupFrame>,
-    /// The local a `return` crossing a `finally` region parks its value in while cleanup runs.
-    return_slot: Option<u32>,
     /// The executable scope whose code this body emits: the function, the class's constructor or
     /// singleton, or the file's static initializer. Only the template ownership of a reified
     /// type operation reads it.
@@ -689,7 +687,6 @@ impl<'a> Body<'a> {
             depth: 0,
             loops: Vec::new(),
             cleanups: Vec::new(),
-            return_slot: None,
             scope: crate::ir::IrEnclosure::File,
             enum_base: None,
         }
@@ -1008,7 +1005,7 @@ impl<'a> Body<'a> {
                     }
                     (None, None) => {}
                 }
-                self.control_transfer(exceptions::Transfer::Return, false)?;
+                self.control_transfer(exceptions::Transfer::Return, None)?;
             }
             IrExpr::When { branches } => self.when(id, &branches)?,
             IrExpr::While {
@@ -1020,11 +1017,11 @@ impl<'a> Body<'a> {
             } => self.while_(cond, body, update, post_test, label)?,
             IrExpr::Break { label } => {
                 let target = self.find_loop(label.as_deref())?.exit;
-                self.control_transfer(exceptions::Transfer::Branch(target), false)?;
+                self.control_transfer(exceptions::Transfer::Branch(target), None)?;
             }
             IrExpr::Continue { label } => {
                 let target = self.find_loop(label.as_deref())?.next;
-                self.control_transfer(exceptions::Transfer::Branch(target), false)?;
+                self.control_transfer(exceptions::Transfer::Branch(target), None)?;
             }
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(id, op, lhs, rhs)?,
             IrExpr::Equality { op, mode, lhs, rhs } => self.equality(op, mode, lhs, rhs)?,

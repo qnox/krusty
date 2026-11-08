@@ -60,6 +60,8 @@ pub(super) struct CleanupFrame {
     base: u32,
     exit: u32,
     pending: u32,
+    /// The value of the pending `return`, once protected code returns one.
+    return_slot: Option<u32>,
     transfers: Vec<Transfer>,
 }
 
@@ -323,13 +325,16 @@ impl Body<'_> {
     }
 
     /// Leave the current position by `transfer`. The value of a `return` is on the stack, or in
-    /// the return slot when `parked` (a transfer resumed after a cleanup already holds it there).
+    /// `parked`, the slot of the region whose cleanup just ran and is now resuming the return.
     pub(super) fn control_transfer(
         &mut self,
         transfer: Transfer,
-        parked: bool,
+        parked: Option<u32>,
     ) -> Result<(), Unsupported> {
-        let returns_value = transfer == Transfer::Return && carrier(self.result)?.is_some();
+        let carried = match transfer {
+            Transfer::Return => carrier(self.result)?,
+            Transfer::Branch(_) => None,
+        };
         let intercepted = self
             .cleanups
             .last()
@@ -337,9 +342,8 @@ impl Body<'_> {
         if !intercepted {
             match transfer {
                 Transfer::Return => {
-                    if parked && returns_value {
-                        let slot = self.return_slot()?;
-                        self.code.local_get(slot);
+                    if let (Some(_), Some(parked)) = (carried, parked) {
+                        self.code.local_get(parked);
                     }
                     self.code.return_();
                 }
@@ -350,8 +354,24 @@ impl Body<'_> {
             }
             return Ok(());
         }
-        if returns_value && !parked {
-            let slot = self.return_slot()?;
+        if let Some(ty) = carried {
+            // Each region owns the value of the return it holds pending. A return that a nested
+            // region's cleanup starts and then cancels writes only that region's slot, so this
+            // region resumes its own value.
+            let slot = match self.cleanups.last().and_then(|frame| frame.return_slot) {
+                Some(slot) => slot,
+                None => {
+                    let slot = self.local(ty);
+                    self.cleanups
+                        .last_mut()
+                        .expect("an intercepting frame")
+                        .return_slot = Some(slot);
+                    slot
+                }
+            };
+            if let Some(parked) = parked {
+                self.code.local_get(parked);
+            }
             self.code.local_set(slot);
         }
         let frame = self.cleanups.last_mut().expect("an intercepting frame");
@@ -369,17 +389,6 @@ impl Body<'_> {
             .local_set(pending)
             .br(depth);
         Ok(())
-    }
-
-    fn return_slot(&mut self) -> Result<u32, Unsupported> {
-        if let Some(slot) = self.return_slot {
-            return Ok(slot);
-        }
-        let ty =
-            carrier(self.result)?.ok_or_else(|| "a parked `return` of no value".to_string())?;
-        let slot = self.local(ty);
-        self.return_slot = Some(slot);
-        Ok(slot)
     }
 
     fn try_finally(
@@ -421,6 +430,7 @@ impl Body<'_> {
                 base: done,
                 exit,
                 pending,
+                return_slot: None,
                 transfers: Vec::new(),
             });
         }
@@ -465,7 +475,7 @@ impl Body<'_> {
                         .op(EQ32)
                         .if_(BlockType::Empty);
                     self.open();
-                    self.control_transfer(*transfer, true)?;
+                    self.control_transfer(*transfer, frame.return_slot)?;
                     self.close();
                 }
                 self.code.unreachable();
