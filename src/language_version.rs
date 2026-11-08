@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn language_level_maps_to_the_kotlin_metadata_version() {
         assert_eq!(LanguageVersion::V2_2.metadata_version(), [2, 2, 0]);
-        assert_eq!(LanguageVersion::default(), LanguageVersion::V2_4);
+        assert_eq!(LanguageVersion::default(), LanguageVersion::V2_5);
         assert_eq!(
             LanguageVersion::default_for(KotlinVersion::V2_4_0),
             LanguageVersion::V2_4

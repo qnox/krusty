@@ -1302,12 +1302,12 @@ mod tests {
         let o = parse_args(&[
             "-include-runtime",
             "-api-version",
-            "2.0",
+            "2.4",
             "-Xsomething",
             "f.kt",
         ]);
         assert_eq!(o.sources, vec!["f.kt".to_string()]);
-        assert_eq!(o.language_settings.api_version, LanguageVersion::V2_0);
+        assert_eq!(o.language_settings.api_version, LanguageVersion::V2_4);
         assert_eq!(o.ignored, Vec::<String>::new());
         assert_eq!(
             o.errors,
@@ -1386,18 +1386,31 @@ mod tests {
         assert!(stamp.errors.is_empty(), "{:?}", stamp.errors);
         assert!(stamp.ignored.is_empty(), "{:?}", stamp.ignored);
 
-        for experimental in [LanguageVersion::V2_5, LanguageVersion::V2_6] {
+        let compiler = krusty::kotlin_version::target();
+        let policy = krusty::features::LanguageVersionPolicy::for_release(compiler)
+            .unwrap_or_else(|| panic!("{compiler} has no language policy"));
+        for &experimental in policy.supported() {
+            if policy.language(experimental).unwrap().stable {
+                continue;
+            }
             let parsed = parse_args(&["-language-version", &experimental.to_string(), "f.kt"]);
-            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            assert!(
+                parsed.errors.is_empty(),
+                "{experimental}: {:?}",
+                parsed.errors
+            );
             assert_eq!(parsed.language_settings.language_version, experimental);
             assert_eq!(parsed.language_settings.api_version, experimental);
-            assert_eq!(parsed.warnings.len(), 1);
+            assert_eq!(parsed.warnings.len(), 1, "{experimental}");
         }
 
-        let supported = "2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, 2.5 (experimental), 2.6 (experimental)";
+        let supported = LanguageVersion::supported_text_for(compiler);
         for bad in [
             "banana", "2", "2.4.0", "2.x", "-2.2", "+2.2", "0.0", "2.7", "999.1", "",
         ] {
+            if LanguageVersion::parse_supported_for(bad, compiler).is_some() {
+                continue;
+            }
             let language = parse_args(&["-language-version", bad, "f.kt"]);
             assert_eq!(
                 language.errors,
