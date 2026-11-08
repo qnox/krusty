@@ -1076,8 +1076,9 @@ static KRef kt_storage_element(KRef array, kt_int at) {
 
 /* An unsigned array is a value class over the signed array of its width, so its `toString` is the
    value class's own, `UIntArray(storage=[1, -1])`: its simple name and the storage's `toString`,
-   which kotlinc renders by content. Its `equals` and `hashCode` are the storage's, and an array's
-   are identity, which this object's own identity is. */
+   which kotlinc renders by content. Its `equals` is the storage's, an array's identity, which this
+   object's own identity is. Its `hashCode` is still `kotlin.Any`'s identity hash, an existing gap:
+   kotlinc hashes the storage by CONTENTS (`Arrays.hashCode` on the JVM). */
 static KRef kt_unsigned_array_to_string(KRef self) {
     const KType *type = self->header.type;
     KRef builder = kt_string_builder_new();

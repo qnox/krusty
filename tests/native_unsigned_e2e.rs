@@ -422,32 +422,17 @@ fn a_float_converted_to_an_unsigned_type_is_declined() {
 
 /// An unsigned array renders as the value class it is: `UIntArray(storage=[…])`, the storage being
 /// the SIGNED array it wraps, so an element past the signed maximum renders as its negative bits.
-/// Its `equals` and `hashCode` are the storage's, which for an array is identity, so two arrays
-/// with the same elements are distinct and one array is equal to itself.
+/// Its `equals` is the storage's, which for an array is identity, so two arrays with the same
+/// elements are distinct and one array is equal to itself. Its `hashCode` is NOT identity under
+/// kotlinc: `UIntArray.hashCode-impl` is `java.util.Arrays.hashCode` of the storage, a contents
+/// hash. Native still hashes an unsigned array by identity, an existing gap this fixture does not
+/// detect: it only checks that the hash is stable.
 ///
-/// The oracle is kotlinc itself, compiling and running this same `box()`. krusty's own JVM backend
-/// is not asked: it calls `UByteArray.toString` virtually on the unboxed `byte[]`, which the
-/// verifier rejects -- a separate JVM defect of the same unboxed-value-class family noted above.
+/// The program is the shared box fixture, which every conformance lane also runs. The oracle is
+/// kotlinc itself, compiling and running that same `box()`.
 #[test]
 fn an_unsigned_array_renders_as_a_value_class_over_its_signed_storage() {
-    let source = "@file:OptIn(ExperimentalUnsignedTypes::class)\n\
-         fun box(): String {\n\
-         \x20   val b = ubyteArrayOf(1u, 200u)\n\
-         \x20   if (b.toString() != \"UByteArray(storage=[1, -56])\") return \"fail ubyte: $b\"\n\
-         \x20   val s = ushortArrayOf(1u, 65535u)\n\
-         \x20   if (s.toString() != \"UShortArray(storage=[1, -1])\") return \"fail ushort: $s\"\n\
-         \x20   val i = uintArrayOf(1u, 4000000000u)\n\
-         \x20   if (i.toString() != \"UIntArray(storage=[1, -294967296])\") return \"fail uint: $i\"\n\
-         \x20   val l = ulongArrayOf(1uL, 18446744073709551615uL)\n\
-         \x20   if (l.toString() != \"ULongArray(storage=[1, -1])\") return \"fail ulong: $l\"\n\
-         \x20   if (\"$i\" != \"UIntArray(storage=[1, -294967296])\") return \"fail template: $i\"\n\
-         \x20   if (UIntArray(0).toString() != \"UIntArray(storage=[])\") return \"fail empty\"\n\
-         \x20   if (i != i || !i.equals(i)) return \"fail self equality\"\n\
-         \x20   if (i == uintArrayOf(1u, 4000000000u)) return \"fail content equality\"\n\
-         \x20   if (b == ubyteArrayOf(1u, 200u) || l == ulongArrayOf(1uL, 18446744073709551615uL)) return \"fail content equality\"\n\
-         \x20   if (i.hashCode() != i.hashCode()) return \"fail hash stability\"\n\
-         \x20   return \"OK\"\n\
-         }\n";
+    let source = include_str!("box_regressions/unsignedArrayRendering.kt");
     assert_eq!(
         kotlinc_box_result(source),
         "OK",

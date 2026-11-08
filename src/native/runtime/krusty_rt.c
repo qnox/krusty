@@ -147,7 +147,9 @@ static const KType *const kt_char_sequence_interfaces[] = {&kt_type_char_sequenc
                               .vtable_length = 3};
 
 /* An array type. Its members are compared by IDENTITY, which is what Kotlin's `==` on arrays means,
-   so `members` is `kotlin.Any`'s vtable or one sharing its identity `equals` and `hashCode`. */
+   so `members` is `kotlin.Any`'s vtable or one sharing its identity `equals` and its `hashCode`.
+   For an unsigned array that identity `hashCode` is an existing gap: kotlinc hashes its storage by
+   contents. */
 #define KT_ARRAY_TYPE(identifier, package, simple, stride, references, members)                    \
     const KType identifier = {KT_NAMED(package, simple),                                           \
                               .instance_size = sizeof(KArray),                                     \
