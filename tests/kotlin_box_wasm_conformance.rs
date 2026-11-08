@@ -419,6 +419,53 @@ fun box(): String {
     );
 }
 
+/// What a constructor that reaches back into its own enum finds, as kotlinc-wasm builds an enum:
+/// each constant is published once constructed, and a constant with a body right after its super
+/// call, so its own body already finds it. The expected log is kotlinc-wasm's for this program
+/// (2.4.21; wasm-js and wasm-wasi agree), taken by running it there. Kotlin/Native publishes every
+/// constant before constructing any (`native_enum_publication_e2e`), so this is target-owned.
+#[test]
+fn wasm_enum_constants_are_published_once_constructed() {
+    expect_wasm_box(
+        r##"
+var log = ""
+
+fun describe(x: Any?, self: Any): String = when {
+    x == null -> "null"
+    x === self -> "self"
+    else -> "other"
+}
+
+fun seen(self: Any): String =
+    "[" + describe(E.C, self) + describe(E.A, self) + describe(E.B, self) + "]"
+
+enum class E(val tag: Int) {
+    C(3),
+    A(1),
+    B(2) {
+        init { log += "body" + seen(this) }
+    };
+
+    init { log += ordinal.toString() + seen(this) }
+}
+
+fun box(): String {
+    E.A
+    val values = E.values()
+    val missing = try {
+        E.valueOf("D").name
+    } catch (e: Throwable) {
+        e.message
+    }
+    val result = log + "#" + values[0].name + values[1].name + values[2].name + "#" + missing
+    val expected = "0[nullnullnull]1[othernullnull]2[otherothernull]body[otherotherself]#CAB#No enum constant E.D"
+    return if (result == expected) "OK" else result
+}
+"##,
+        "wasmEnumPublication",
+    );
+}
+
 /// A same-module `@InlineOnly` wrapper is never emitted, so its function-typed parameter reaches no
 /// Wasm signature while its lambda expands through common IR. The lambda's ordinary assignments to
 /// a captured `var` are checked as `Unit` statements and must leave nothing on the stack: inside an
@@ -622,6 +669,35 @@ fn wasm_nested_source_and_dependency_arguments_share_boxing() {
             "nested source argument on {}",
             target.name(),
         );
+    }
+}
+
+#[test]
+fn wasm_class_properties_export_their_checked_accessors() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/classPropertyDependencyExports.kt"),
+            "classPropertyDependencyExports",
+        ),
+        (
+            include_str!("box_regressions/delegatedPropertyDependencyExports.kt"),
+            "delegatedPropertyDependencyExports",
+        ),
+    ] {
+        super::box_reference_classes::checked_box(source, stem)
+            .expect("pinned kotlinc must run the whole property export module graph");
+        let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+        let units = krusty::conformance::module_units(&modules);
+        for target in WasmTarget::ALL {
+            let lane = WasmLane { target };
+            assert!(focused_wasm_lane_available(&lane, stem));
+            assert_eq!(
+                lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+                Outcome::Pass,
+                "{stem} on {}",
+                target.name()
+            );
+        }
     }
 }
 
@@ -987,14 +1063,143 @@ fn wasm_declines_kotlin_any_rendering_it_has_no_body_for() {
     );
 }
 
+// A generated hash dispatches a property's value through its table's `hashCode` slot. A class
+// that keeps `kotlin.Any`'s identity hash has no body there, whether the property names that class
+// or erases it to `Any`, which can hold an instance of every class in the file. Each `Holder`
+// renders itself, since its generated `toString` would reach `Any`'s rendering first.
 #[test]
-fn wasm_declines_an_enum_class_by_name() {
+fn wasm_declines_a_generated_hash_that_can_reach_the_identity_hash() {
+    let reason = "`kotlin.Any.hashCode`'s identity hash";
     expect_wasm_decline(
+        "class Plain\ndata class Holder(val value: Plain) { override fun toString() = \"Holder\" }\n\
+         fun box(): String = if (Holder(Plain()).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfAClassProperty",
+        reason,
+    );
+    expect_wasm_decline(
+        "class Plain\ndata class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
+         fun box(): String = if (Holder(Plain()).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfAnErasedProperty",
+        reason,
+    );
+}
+
+#[test]
+fn wasm_generated_members_keep_the_whole_portable_scalar_and_reference_control() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassEqualsAndHashCode.kt"),
+        "wasmDataClassEqualsAndHashCode",
+    );
+}
+
+#[test]
+fn wasm_generated_members_preserve_closure_identity() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassClosureIdentity.kt"),
+        "wasmDataClassClosureIdentity",
+    );
+}
+
+#[test]
+fn wasm_generated_members_keep_erased_array_hashes_stable_through_mutation() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassErasedArrayIdentityHash.kt"),
+        "wasmDataClassErasedArrayIdentityHash",
+    );
+}
+
+#[test]
+fn wasm_generated_members_compare_callable_declarations_and_receivers() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/dataClassErasedClosureIdentity.kt"),
+            "wasmDataClassErasedClosureIdentity",
+        ),
+        (
+            include_str!("box_regressions/dataClassCallableReferenceEquality.kt"),
+            "wasmDataClassCallableReferenceEquality",
+        ),
+        (
+            include_str!("box_regressions/dataClassCallableReferenceSelfEquality.kt"),
+            "wasmDataClassCallableReferenceSelfEquality",
+        ),
+        (
+            include_str!("box_regressions/dataClassOverloadedConstructorReferences.kt"),
+            "wasmDataClassOverloadedConstructorReferences",
+        ),
+        (
+            include_str!("box_regressions/constructorReferenceDeclaredSignature.kt"),
+            "wasmConstructorReferenceDeclaredSignature",
+        ),
+        (
+            include_str!("box_regressions/dataClassNullableBoundReference.kt"),
+            "wasmDataClassNullableBoundReference",
+        ),
+    ] {
+        expect_wasm_box(source, stem);
+    }
+}
+
+#[test]
+fn wasm_callable_references_share_identity_across_independent_module_analyses() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/dataClassReferenceAcrossModules.kt"),
+            "wasmDataClassReferenceAcrossModules",
+        ),
+        (
+            include_str!("box_regressions/constructorReferenceAcrossModules.kt"),
+            "wasmConstructorReferenceAcrossModules",
+        ),
+    ] {
+        super::box_reference_classes::checked_box(source, stem)
+            .expect("the exact Kotlin compiler must run the whole reference-identity fixture");
+        let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+        let units = krusty::conformance::module_units(&modules);
+        for target in WasmTarget::ALL {
+            let lane = WasmLane { target };
+            assert!(focused_wasm_lane_available(&lane, stem));
+            assert_eq!(
+                lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+                Outcome::Pass,
+                "{stem} on {}",
+                target.name(),
+            );
+        }
+    }
+}
+
+#[test]
+fn wasm_a_generated_hash_of_an_erased_property_dispatches_when_every_class_has_a_body() {
+    expect_wasm_box(
+        include_str!("box_regressions/dataClassErasedPropertyHash.kt"),
+        "wasmGeneratedHashOfAnErasedPropertyWithBodies",
+    );
+}
+
+/// Enum classes realize through the shared enum pass, so the program the Wasm lanes used to
+/// decline by name now runs.
+#[test]
+fn wasm_runs_an_enum_class() {
+    expect_wasm_box(
         "enum class Color { RED }\nfun box(): String = \"OK\"",
         "wasmClassesEnum",
-        "an enum class (`Color`)",
     );
 }
 
 #[path = "wasm_value_hash.rs"]
 mod value_hash;
+
+#[path = "wasm_dependency_constructor_exports.rs"]
+mod dependency_constructor_exports;
+
+#[path = "wasm_escaping_closures.rs"]
+mod escaping_closures;
+
+#[test]
+fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
+    expect_wasm_box(
+        include_str!("box_regressions/finallyValueAndKotlinThrow.kt"),
+        "wasmFinallyValueAndKotlinThrow",
+    );
+}

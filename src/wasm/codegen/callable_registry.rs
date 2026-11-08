@@ -280,7 +280,9 @@ impl CallableRegistry {
                     if !defaults.is_empty() && default_entry.is_none() {
                         continue;
                     }
-                    if super::lower::value_hash::call_kind(ir, callables, expression).is_some() {
+                    if super::lower::any_members::call_member(ir, callables, expression).is_some() {
+                        // `kotlin.Any`'s members, and the declarations overriding them, are
+                        // realized through the receiver's own representation.
                         continue;
                     }
                     if callable
@@ -718,6 +720,7 @@ mod tests {
             klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            declares_parameter_defaults: false,
             annotations: Box::new([]),
         }
     }

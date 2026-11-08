@@ -1051,13 +1051,12 @@ impl SerializationPlugin {
                 internal: construction.serializer,
                 args,
                 ctor_params: (!declared_here).then(|| construction.parameters.to_vec()),
+                declared_params: Some(construction.parameters.clone()),
                 ctor_desc: None,
                 external_target,
                 defaults: Box::new([]),
                 default_prefix_count: 0,
             });
-            ir.construction_declared_params
-                .insert(new, construction.parameters.clone());
             if let Some(target) = target {
                 ir.construction_targets.insert(new, target);
             }
@@ -2355,6 +2354,15 @@ mod tests {
                 crate::ir::IrGeneratedClassRole::SerializationSerializer,
             )
             .expect("generic serializer class");
+        let serializer = ir.classes[ser_id as usize].fq_name_id();
+        assert_eq!(
+            ir.declared_class_self_type(serializer),
+            Some(Ty::obj_args_name(
+                serializer,
+                &[Ty::ty_param("T", Ty::nullable(class_ty("kotlin/Any")))],
+            )),
+            "the generated declaration retains its full applied receiver type"
+        );
         let tps_fid =
             GeneratedSerializerMembers::declared(&ir, ir.classes[ser_id as usize].fq_name_id())
                 .type_parameter_serializers;

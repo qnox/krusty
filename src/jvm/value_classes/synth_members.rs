@@ -240,12 +240,13 @@ pub(super) fn synth_value_members(
         };
         member_signatures::record(ir, class_id, accessor, member);
         crate::jvm::method_parameters::prepend_value_class_receiver(ir, accessor, "arg0");
-        let property = &mut ir.classes[class_id as usize].properties[property_index];
-        if is_getter {
-            property.getter_jvm_name = Some(jvm_name);
+        let side = if is_getter {
+            crate::ir::JvmAccessorSide::Getter
         } else {
-            property.setter_jvm_name = Some(jvm_name);
-        }
+            crate::ir::JvmAccessorSide::Setter
+        };
+        let class = ir.classes[class_id as usize].fq_name;
+        ir.set_jvm_property_accessor_name(class, property_index as u32, side, jvm_name);
     }
 
     // User-written Any overrides become the static `-impl` body. Its former receiver slot 0 is exactly
@@ -359,6 +360,7 @@ pub(super) fn synth_value_members(
             internal: box_internal,
             args: vec![arg],
             ctor_params: Some(vec![u_ir]),
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),

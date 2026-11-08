@@ -178,9 +178,17 @@ fn collect_class_bytes(
         .collect();
     let mut toplevel_names = HashSet::default();
     let mut ext_names = HashSet::default();
-    for function in crate::jvm::metadata::package_functions(&class)
+    let members = class
+        .meta
+        .members
+        .decode(&class.methods, &class.meta.type_parameter_scope)
+        .map_err(|error| {
+            ClassMetadataLoadError::Class(type_name(internal), ReadError::BadKotlinMetadata(error))
+        })?;
+    for function in members
+        .package_functions
         .iter()
-        .chain(crate::jvm::metadata::class_functions(&class).iter())
+        .chain(members.class_functions.iter())
     {
         if function.is_extension() {
             ext_names.insert(function.jvm_name.clone());

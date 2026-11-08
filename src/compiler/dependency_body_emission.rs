@@ -30,10 +30,15 @@ mod emitted_roots;
 #[derive(Default)]
 pub(super) struct DependencySupportState {
     snapshot: Option<crate::libraries::DependencyBodySnapshot>,
-    emitted: HashMap<KlibDependencyCallable, Option<PublishedSingletonDispatch>>,
-    /// Until constructor exports connect support units, do not emit distinct physical copies of
-    /// one logical class, or alias equal classifier names from different producer modules.
+    emitted: HashMap<KlibDependencyCallable, PublishedDependency>,
+    /// One physical realization per exact logical class; equal names cannot alias producers.
     materialized_classes: HashMap<TypeName, KlibDependencyCallable>,
+}
+
+#[derive(Clone, Copy)]
+enum PublishedDependency {
+    Body(Option<PublishedSingletonDispatch>),
+    AllocatingConstructor,
 }
 
 #[derive(Clone, Copy)]
@@ -218,7 +223,9 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         }
-        if unit.callable_functions().next().is_none() {
+        if unit.callable_functions().next().is_none()
+            && unit.allocating_constructors().next().is_none()
+        {
             continue;
         }
         if requires_intrinsic_link && !links_emitted_support(unit.ir(), &externals) {
@@ -262,7 +269,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             if let Some(previous) = support_state.materialized_classes.get(classifier) {
                 let message = if previous == identity {
-                    "cannot materialize an imported class in separate dependency support units before constructor exports are available"
+                    "cannot materialize an imported class twice in separate dependency support units"
                 } else {
                     "cannot materialize equal classifier names from different KLIB producers in one target program"
                 };
@@ -309,6 +316,30 @@ pub(super) fn emit_dependencies<B: Backend>(
                 );
             }
         }
+        let constructors = unit
+            .allocating_constructors()
+            .map(|(identity, class)| (identity.clone(), class))
+            .collect::<Vec<_>>();
+        for (identity, class) in &constructors {
+            if unit
+                .ir()
+                .declared_class_self_type(unit.ir().classes[*class as usize].fq_name)
+                .is_none()
+            {
+                diags.error(
+                    Span::new(0, 0),
+                    "internal error: an allocating constructor lost its checked class self type",
+                );
+                return Vec::new();
+            }
+            exports.record_constructor(
+                crate::backend::ExportedConstructor {
+                    class: *class,
+                    secondary: None,
+                },
+                identity.clone(),
+            );
+        }
         let mut published = Vec::with_capacity(closed.len());
         for (identity, _) in &closed {
             let Some((_external, realization)) = platform.external_callable_by_dependency(identity)
@@ -343,7 +374,29 @@ pub(super) fn emit_dependencies<B: Backend>(
                     return Vec::new();
                 }
             };
-            published.push((identity.clone(), singleton_dispatch));
+            published.push((
+                identity.clone(),
+                PublishedDependency::Body(singleton_dispatch),
+            ));
+        }
+        for (identity, _) in &constructors {
+            let Some((_, realization)) = platform.external_callable_by_dependency(identity) else {
+                diags.error(
+                    Span::new(0, 0),
+                    "internal error: an allocating constructor has no exact provider declaration",
+                );
+                return Vec::new();
+            };
+            if realization.dependency_callable.as_ref() != Some(identity)
+                || realization.kind != crate::libraries::ExternalCallableKind::Constructor
+            {
+                diags.error(
+                    Span::new(0, 0),
+                    "internal error: an allocating constructor changed its provider role",
+                );
+                return Vec::new();
+            }
+            published.push((identity.clone(), PublishedDependency::AllocatingConstructor));
         }
         let callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
             Ok(callables) => callables,
@@ -388,11 +441,11 @@ pub(super) fn emit_dependencies<B: Backend>(
 
 fn rebound_externals(
     platform: &dyn crate::libraries::SemanticPlatform,
-    emitted: &HashMap<KlibDependencyCallable, Option<PublishedSingletonDispatch>>,
+    emitted: &HashMap<KlibDependencyCallable, PublishedDependency>,
     diags: &mut DiagSink,
 ) -> Option<HashMap<KlibDependencyCallable, EmittedDependencyCallable>> {
     let mut rebound = HashMap::with_capacity_and_hasher(emitted.len(), Default::default());
-    for (identity, singleton_dispatch) in emitted {
+    for (identity, published) in emitted {
         let Some((external, realization)) = platform.external_callable_by_dependency(identity)
         else {
             diags.error(
@@ -408,14 +461,24 @@ fn rebound_externals(
             );
             return None;
         }
-        rebound.insert(
-            identity.clone(),
-            EmittedDependencyCallable::new(
-                external,
-                singleton_dispatch.map(|dispatch| dispatch.ty),
-                singleton_dispatch.map(|dispatch| dispatch.classifier),
-            ),
-        );
+        let constructor = realization.kind == crate::libraries::ExternalCallableKind::Constructor;
+        let rebound_callable = match published {
+            PublishedDependency::AllocatingConstructor if constructor => {
+                EmittedDependencyCallable::allocating_constructor(external)
+            }
+            PublishedDependency::Body(singleton_dispatch) if !constructor => {
+                EmittedDependencyCallable::new(
+                    external,
+                    singleton_dispatch.map(|dispatch| dispatch.ty),
+                    singleton_dispatch.map(|dispatch| dispatch.classifier),
+                )
+            }
+            _ => {
+                diags.error(Span::new(0, 0), "internal error: the current module provider changed an emitted dependency role");
+                return None;
+            }
+        };
+        rebound.insert(identity.clone(), rebound_callable);
     }
     Some(rebound)
 }

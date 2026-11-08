@@ -109,24 +109,10 @@ impl BodyLowering<'_, '_, '_> {
         Ok(None)
     }
 
-    /// Whether an external property is one of `kotlin.Enum`'s two, and which.
-    ///
-    /// The property reaches here as an opaque identity; what it names is recovered through the
-    /// getter frozen at the frontend/backend boundary. Emission consumes that selected identity;
-    /// it never reopens the provider or looks the property up by spelling.
-    pub(super) fn enum_member_name(
-        &self,
-        target: crate::fir::ExternalPropertyId,
-    ) -> Option<&'static str> {
-        let property = self.file.callables.property(target)?;
-        let getter = self.file.callables.callable(property.getter)?;
-        super::super::super::intrinsics::enum_member(getter.physical_owner, &property.name)
-    }
-
     /// `name` and `ordinal`, which every enum constant answers from its own storage.
     pub(super) fn enum_member(
         &mut self,
-        member: &str,
+        member: crate::backend::enums::BaseMember,
         receiver: u32,
     ) -> Result<Option<Value>, Unsupported> {
         let Some(object) = self.receiver(receiver)? else {
@@ -134,13 +120,13 @@ impl BodyLowering<'_, '_, '_> {
         };
         self.null_check(object)?;
         Ok(Some(match member {
-            "name" => self.builder.ins().load(
+            crate::backend::enums::BaseMember::Name => self.builder.ins().load(
                 types::I64,
                 trusted(),
                 object,
                 model::ENUM_NAME_OFFSET as i32,
             ),
-            _ => self.builder.ins().load(
+            crate::backend::enums::BaseMember::Ordinal => self.builder.ins().load(
                 types::I32,
                 trusted(),
                 object,

@@ -10,6 +10,11 @@ in Android as the Android sample, each from a pinned commit with its own Gradle 
    modules. A plugin build that rejects a multiplatform module leaves its compile tasks to
    kotlinc, and the init script reports each as a fallback. Compiler arguments are never captured
    or replayed.
+3. **Verify:** the same build in the krusty plugin's verify mode. Every compilation compiles with
+   kotlinc, as in the reference build, and krusty compiles each one beside it, against kotlinc's
+   classes of the compilations it depends on. A krusty failure therefore never keeps a dependent
+   compilation from being compiled, and each compilation's record holds every error krusty
+   reported. The verify build exists for those errors; its classes and cost are not compared.
 
 `corpus.init.gradle` adds the `corpusCompile` task, which depends on every non-Android Kotlin/JVM
 compile task, lists each with its output directory, and records the Gradle and compiler plugins
@@ -19,8 +24,28 @@ task inside the Gradle root; the next build therefore starts without them. `comp
 the class files of every compile task the reference build listed, byte for byte, and reports apart
 a listed task kotlinc wrote no class for. A compile task the plugin leaves to kotlinc (an
 unsupported compiler plugin or option) counts as a miss, with the plugin's reason; a compile krusty
-fails counts as a miss with the first error it logged. Android modules take part only in a project
+fails counts as a miss with the first error it logged. With `$CORPUS_VERIFY_RECORDS` set,
+`corpusCompile` also runs the plugin's verify compile (`<task>KrustyVerify`) of each listed task
+and lists the record each writes; `run.sh` names `krustyVerify`, which turns verify mode on, and
+excludes it, so only the listed compilations are verified rather than every module and variant.
+`compare.py` adds each compilation's verify outcome and all of its errors. Android modules take part only in a project
 that names a variant in `projects.tsv`, and then only that variant's compiles.
+
+After each measured build, an unmeasured test build runs the project's own JVM tests on the classes
+that build compiled. `outputs.py --keep` first snapshots the measured outputs and leaves them in
+place for it; `outputs.py --clear` then removes them and lists every file under them the test build
+wrote, rewrote or deleted (a compile task that ran again, say). The snapshot, and so the byte
+comparison, is always the measured build's; when a test build changed it, its tests did not run on
+the measured classes, and the project's test comparison is reported unavailable instead. `corpus.init.gradle` adds the
+`corpusTest` task, which depends on every JVM `Test` task of the projects whose compiles are
+compared (an Android project's unit tests of its variant only). In a test build no test task is up
+to date or taken from the build cache, a failing test does not fail its task, and the init script
+lists each test task with its JUnit XML report directory and the compile tasks it depends on,
+directly or through an upstream module's jar. Test builds run online, since the warm-up downloads
+only what compiling needs, and stop after `$CORPUS_TEST_TIMEOUT` seconds (3600 by default).
+`testruns.py` compares only the tests that passed on kotlinc's classes, and counts how many of them
+pass, fail, are skipped or do not run on krusty's; a test task whose compilations krusty built
+every one of runs krusty's classes only, and those tasks are totalled apart.
 
 Both builds are measured. `measure.py` runs each one as the child subreaper of everything it starts,
 so the Gradle, Kotlin and krusty processes and the daemons that outlive the build are all counted: it
@@ -38,18 +63,21 @@ binary keeps frame pointers), `hotspots.py` folds the krusty processes' call sta
 and the report lists the top ones across the corpus with a link to each project's flame graph.
 
 `summarize.py` turns the per-project results into the run's report: stars, Kotlin and Java lines,
-compilations built, identical classes, the reason for every miss, what both builds cost, krusty's
-hotspots, and the Gradle and compiler plugins the corpus uses. The nightly run, and a manual run
-with `publish` set, records the results on the `corpus-results` branch with `publish.py`:
-`README.md` is the scoreboard, `projects/<name>/` holds each project's latest result (a project a
-run could not measure keeps its previous one), and `history.tsv` gets one line per project per run.
+compilations built, identical classes, the reason for every miss, every error the verify build
+reported (grouped by cause: the message without its location, with quoted text and numbers masked,
+counted across the corpus and listed in full per project; a project whose verify build recorded
+nothing is reported as unverified, not left out), the projects' tests that pass on krusty's classes,
+what both builds cost, krusty's hotspots, and the Gradle and compiler plugins the corpus uses.
+Each `corpus-<project>` workflow artifact holds that project's comparison and logs. The `summary`
+artifact holds `summary.md` and `summary.json` for the results produced by this run; the job summary
+displays the same Markdown report.
 
 Setup fails fast: a failed fetch, a checkout that is not the pinned commit, a patch that does not
 apply, or a Kotlin version pin that does not match exactly one assignment (`pin.py`) stops the run
-before either build. `test_compare.py`, `test_setup.py`, `test_summarize.py`, `test_publish.py`,
-`test_measure.py` and `test_hotspots.py` cover the comparison, the output inventory, the pin
-rewrite, the setup failures, the report, the results branch, the build measurement and the stack
-folding.
+before either build. `test_compare.py`, `test_setup.py`, `test_summarize.py`, `test_workflow.py`,
+`test_measure.py`, `test_hotspots.py` and `test_testruns.py` cover the comparison, the test runs,
+the output inventory, the pin rewrite, the setup failures, the report artifacts, the build
+measurement and the stack folding.
 
 `run.sh` rewrites each project's Kotlin version pin to the newest release in `kotlin-versions`.
 These projects carry a patch for that bump:

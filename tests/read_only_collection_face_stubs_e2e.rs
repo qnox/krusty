@@ -148,6 +148,7 @@ const STUBS: &[&str] = &[
     "public boolean removeAll(java.util.Collection<?>);",
     "public boolean retainAll(java.util.Collection<?>);",
     "public void clear();",
+    "public boolean removeIf(java.util.function.Predicate<? super java.lang.String>);",
     "public final int size();",
     "public final boolean contains(java.lang.Object);",
     "public boolean add(java.lang.Object);",

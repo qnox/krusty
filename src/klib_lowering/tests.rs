@@ -12,9 +12,11 @@ mod closure_frames;
 mod closure_producers;
 mod constructor_calls;
 mod constructor_contracts;
+mod constructor_exports;
 mod control_forms;
 mod demo_package;
 mod elvis_blocks;
+mod for_loop_bindings;
 mod inline_templates;
 mod parameter_defaults;
 mod primitive_calls;
@@ -449,6 +451,21 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
                 ir.fn_source_names[function]
             )
         }
+        IrExpr::Call {
+            callee: call_callee,
+            dispatch_receiver: None,
+            args,
+        } if let Callee::LocalWithDefaults { function, defaults } = &**call_callee => {
+            let args = args
+                .iter()
+                .map(|argument| render(ir, *argument))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "call {}({args}; defaults {defaults:?})",
+                ir.fn_source_names[function]
+            )
+        }
         IrExpr::InvokeFunction { func, args, .. } => {
             let operands = std::iter::once(func)
                 .chain(args)
@@ -569,6 +586,33 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
         IrExpr::UnitInstance => "Unit".to_owned(),
         IrExpr::SingletonValue { classifier } => format!("object {}", classifier.render()),
         IrExpr::Checked(checked) => match checked.as_ref() {
+            // A dependency property read, with its dispatch and operands in full. Its identity is
+            // its provider's numbering, so a test comparing two providers' lowerings asserts the
+            // declaration each identity denotes itself.
+            crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                target: _,
+                dispatch,
+                receiver,
+                arguments,
+                parameters,
+                result,
+                source_receiver,
+            } => format!(
+                "{}.read<{dispatch:?}>({}; {}): {} on {}",
+                receiver.map_or("_".to_owned(), |receiver| render(ir, receiver)),
+                arguments
+                    .iter()
+                    .map(|argument| render(ir, *argument))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                parameters
+                    .iter()
+                    .map(|parameter| type_name_of(*parameter))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                type_name_of(*result),
+                source_receiver.map_or("_".to_owned(), type_name_of),
+            ),
             crate::ir::IrCheckedOperation::RangeContains {
                 operation,
                 value,

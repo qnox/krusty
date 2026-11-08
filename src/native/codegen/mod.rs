@@ -232,11 +232,17 @@ impl Backend for CraneliftBackend {
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
         // Before default arguments: a constant leaving constructor arguments out is then an
         // ordinary construction for that lowering.
-        crate::backend::enums::realize(&mut file.ir);
+        crate::backend::enums::realize(&mut file.ir, crate::backend::enums::Contract::KotlinNative);
         crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables, |function| {
             file.dependency_exports.callable(function).is_some()
         });
         crate::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
+        if let Err(error) =
+            crate::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)
+        {
+            report_decline(&lower::Unsupported::from(error), &file, diags);
+            return Vec::new();
+        }
         crate::backend::dispatch_entries::realize(&mut file.ir, &file.dependency_exports);
         // A local or anonymous classifier arrives with an opaque identity; this target names it
         // from its provenance as Kotlin/Native does. There is no facade class here, so a
@@ -348,8 +354,13 @@ impl Backend for CraneliftBackend {
                 .then(|| format!("{symbol}__dispatch"));
             let reference_declaration = match file.kind {
                 crate::backend::CheckedIrUnitKind::Source => {
-                    match ReferenceDeclaration::source_export(&file.ir, file.module_name, callable)
-                    {
+                    match ReferenceDeclaration::source_export(
+                        &file.ir,
+                        file.module_name,
+                        callable,
+                        &file.dependency_exports,
+                        identity,
+                    ) {
                         Ok(identity) => identity,
                         Err(error) => {
                             diags.error(crate::diag::Span::new(0, 0), error);

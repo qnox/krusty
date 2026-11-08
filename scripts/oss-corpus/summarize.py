@@ -6,8 +6,9 @@ usage: summarize.py [--stars <stars.tsv>] [--plugins <dir>] [--json <out.json>] 
 
 `--stars` lists `<name>\t<stars>` per project. `--plugins` is searched for the `<name>.plugins.tsv`
 plugin surveys the reference builds wrote. The report has the per-project table, the reasons for
-every missed compilation, what each build cost, and the Gradle and Kotlin compiler plugins the
-corpus uses most.
+every missed compilation, every error krusty's verify compiles reported grouped by cause, the
+projects' own tests run on krusty's classes, what each build cost, and the Gradle and Kotlin compiler
+plugins the corpus uses most.
 """
 import argparse
 import collections
@@ -102,6 +103,107 @@ def misses(project):
     return reasons.most_common()
 
 
+QUOTED = {quote: re.compile(f'{quote}[^{quote}]*{quote}') for quote in ("'", '`', '"')}
+
+
+def cause(error):
+    """An error reduced to its cause: its message without the location before `error: `, with
+    quoted text and numbers masked. `A.kt:3:5: error: unresolved reference 'bar'.` becomes
+    `unresolved reference '…'.`. A quote character that does not pair up is an apostrophe and stays."""
+    message = error.split(': error: ', 1)[1] if ': error: ' in error else error.removeprefix('error: ')
+    for quote, spans in QUOTED.items():
+        if message.count(quote) % 2 == 0:
+            message = spans.sub(f'{quote}…{quote}', message)
+    return re.sub(r'\b\d+\b', 'N', message.strip())
+
+
+def error_causes(project):
+    """Every distinct error krusty's verify compiles of a project reported, grouped by cause:
+    [(cause, [(error, [compilation task paths])])], the cause seen in the most compilations first."""
+    found = collections.defaultdict(lambda: collections.defaultdict(list))
+    for row in project['rows']:
+        for error in dict.fromkeys((row.get('verify') or {}).get('errors', [])):
+            found[cause(error)][error].append(row['task'])
+    ranked = [(c, sorted(errors.items())) for c, errors in found.items()]
+
+    def compilations(entry):
+        return len({task for _, tasks in entry[1] for task in tasks})
+    return sorted(ranked, key=lambda entry: (-compilations(entry), -len(entry[1]), entry[0]))
+
+
+def counted(number, noun):
+    return f'{number} {noun}' + ('' if number == 1 else 's')
+
+
+def code(text):
+    """`text` as inline code, fenced by more backticks than it holds in a row."""
+    fence = '`' * (max((len(run) for run in re.findall('`+', text)), default=0) + 1)
+    padding = ' ' if text.startswith('`') or text.endswith('`') else ''
+    return f'{fence}{padding}{text}{padding}{fence}'
+
+
+def verification(project):
+    """How far the verify build of a project got, or None for a result measured before the corpus
+    ran one (it has no `verify_exit`): the build's exit code, and how many compilations have a
+    verify record and how many have none (no verify compile, or one that wrote no record)."""
+    if project.get('verify_exit') is None:
+        return None
+    verified = sum(1 for r in project['rows']
+                   if r.get('verify') and r['verify']['status'] != 'no record')
+    return dict(exit=project['verify_exit'], verified=verified, unverified=len(project['rows']) - verified)
+
+
+def errors_section(projects):
+    """Every error krusty reported when it compiled each compilation on its own, grouped by cause:
+    one table across the corpus, then, for every project the verify build ran for, its errors under
+    their cause with the compilations that reported them, or that it verified nothing."""
+    measured = [p for p in projects if verification(p) is not None]
+    if not measured:
+        return []
+    out = ['', '## krusty errors', '',
+           'The verify build compiles every compilation with kotlinc, and krusty compiles each one on its own',
+           'beside it, against kotlinc\'s classes of the compilations it depends on (the krusty plugin\'s',
+           'verify mode). One failure therefore never hides the next: these are all the errors krusty',
+           'reported, grouped by cause, the message without its location and with quoted text and numbers',
+           'masked. A result measured before the corpus ran the verify build is left out.', '']
+    causes = {p['name']: error_causes(p) for p in measured}
+    corpus = collections.defaultdict(lambda: [set(), set(), set()])
+    for name, ranked in causes.items():
+        for c, errors in ranked:
+            corpus[c][0].add(name)
+            corpus[c][1].update((name, task) for _, tasks in errors for task in tasks)
+            corpus[c][2].update((name, error) for error, _ in errors)
+    if corpus:
+        out += ['| Cause | Projects | Compilations | Errors |', '| --- | ---: | ---: | ---: |']
+        for c, (names, tasks, errors) in sorted(
+                corpus.items(), key=lambda kv: (-len(kv[1][0]), -len(kv[1][1]), -len(kv[1][2]), kv[0])):
+            cell = code(c).replace('|', '\\|')
+            out.append(f'| {cell} | {len(names)} | {len(tasks)} | {len(errors)} |')
+    else:
+        out.append('No verified compilation reported an error.')
+    for p in measured:
+        ranked = causes[p['name']]
+        state = verification(p)
+        if not state['verified']:
+            out += ['', f"- **{p['name']}**: no compilation verified (verify build exit {state['exit']})"]
+            continue
+        failed = {task for _, errors in ranked for _, tasks in errors for task in tasks}
+        summary = (f"{counted(sum(len(errors) for _, errors in ranked), 'error')} in "
+                   f"{counted(len(failed), 'compilation')}, {counted(len(ranked), 'cause')}; "
+                   f"{state['verified']} of {counted(len(p['rows']), 'compilation')} verified")
+        if state['exit']:
+            summary += f" (verify build exit {state['exit']})"
+        out += ['', f"<details><summary><b>{p['name']}</b>: {summary}</summary>", '']
+        if not ranked:
+            out.append('None.')
+        for c, errors in ranked:
+            out.append(f'- {code(c)}')
+            for error, tasks in errors:
+                out.append(f"  - {code(error)} in {', '.join(code(task) for task in tasks)}")
+        out += ['', '</details>']
+    return out
+
+
 def share(part, whole):
     return f' ({100 * part / whole:.1f}%)' if whole else ''
 
@@ -164,6 +266,62 @@ def cost_section(projects):
              for key in ('built_compile_seconds', 'compile_seconds', 'wall_seconds', 'cpu_seconds')}
     out.append(f"| **Total** | **{total['built_compile_seconds']}** | **{total['compile_seconds']}** | | | "
                f"**{total['wall_seconds']}** | **{total['cpu_seconds']}** |")
+    return out
+
+
+def passing(t):
+    """`passed / passing on kotlinc's classes (share)` of a test total."""
+    return f"{t['passed']:,} / {t['passed_kotlinc']:,}{share(t['passed'], t['passed_kotlinc'])}"
+
+
+def unavailable_reasons(entry):
+    """Why one test build's results cannot be compared."""
+    if entry.get('inventory') == 'missing':
+        yield 'listed no test task (it failed before Gradle planned its tasks)'
+    if 'changed' in entry:
+        yield ('was not checked against the measured classes' if entry['changed'] is None
+               else f"changed {entry['changed']:,} measured output files")
+
+
+def test_section(projects):
+    """The projects' own tests run on krusty's classes against the same tests run on kotlinc's: of
+    the tests that passed on kotlinc's classes, how many pass, fail, are skipped or do not run on
+    krusty's, over every test task and over the tasks that run classes krusty built only; and the
+    first tests of each project that stopped passing."""
+    tested = [p for p in projects if p.get('tests') and not p['tests'].get('unavailable')]
+    unavailable = [p for p in projects if p.get('tests') and p['tests'].get('unavailable')]
+    if not tested and not unavailable:
+        return []
+    out = ['', '## Project tests', '',
+           'Each project\'s own JVM tests run after each build, on the classes it compiled. Only a test that passed on',
+           'kotlinc\'s classes is compared. A test task runs on *krusty\'s classes only* when krusty built every',
+           'compilation it runs; the other tasks also run classes kotlinc compiled.',
+           '',
+           '| Project | Test builds (kotlinc / krusty exit) | Passing on krusty\'s classes, all tasks | Fail | Skipped |'
+           ' Not run | Passing, tasks on krusty\'s classes only |',
+           '| --- | --- | ---: | ---: | ---: | ---: | ---: |']
+    totals = {scope: collections.Counter() for scope in ('total', 'krusty_classes')}
+    for p in tested:
+        t, own = p['tests']['total'], p['tests']['krusty_classes']
+        exits = p['tests']['exit']
+        out.append(f"| {p['name']} | {exits.get('kotlinc')} / {exits.get('krusty')} | {passing(t)} | "
+                   f"{t['failed']:,} | {t['skipped']:,} | {t['not_run']:,} | "
+                   f"{passing(own)} in {own['tasks']} / {t['tasks']} tasks |")
+        for scope in totals:
+            totals[scope].update(p['tests'][scope])
+    for p in unavailable:
+        reasons = '; '.join(f'the {mode} test build {why}' for mode, entry in p['tests']['unavailable'].items()
+                            for why in unavailable_reasons(entry))
+        out.append(f"| {p['name']} | {p['tests']['exit'].get('kotlinc')} / {p['tests']['exit'].get('krusty')} | "
+                   f"unavailable: {reasons} | | | | |")
+    t, own = totals['total'], totals['krusty_classes']
+    out.append(f"| **Total** | | **{passing(t)}** | **{t['failed']:,}** | **{t['skipped']:,}** | "
+               f"**{t['not_run']:,}** | **{passing(own)} in {own['tasks']} / {t['tasks']} tasks** |")
+    lost = [(p['name'], task) for p in tested for task in p['tests']['tasks'] if task['not_passing']]
+    if lost:
+        out += ['', 'First tests that pass on kotlinc\'s classes and not on krusty\'s:', '']
+        for name, task in lost:
+            out.append(f"- **{name}** `{task['task']}`: " + ', '.join(f'`{n}`' for n in task['not_passing']))
     return out
 
 
@@ -233,6 +391,9 @@ def report(projects, stars, surveys, title):
     if not any_miss:
         out.append('None.')
 
+    out += errors_section(projects)
+
+    out += test_section(projects)
     out += cost_section(projects)
     out += hotspot_section(projects)
 
@@ -271,6 +432,9 @@ def main():
     if args.json:
         with open(args.json, 'w') as f:
             json.dump(dict(projects=[dict(p, stars=stars.get(p['name']), misses=misses(p),
+                                          errors=[dict(cause=c, errors=[dict(error=e, compilations=t) for e, t in errors])
+                                                  for c, errors in error_causes(p)],
+                                          verification=verification(p),
                                           plugins=surveys.get(p['name'], {})) for p in projects]),
                       f, indent=1)
 

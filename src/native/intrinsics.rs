@@ -766,21 +766,6 @@ pub(super) fn float_predicate(owner: DeclarationOwner, name: &str) -> Option<Flo
     }
 }
 
-/// Which member of `kotlin.Enum` an accessor names, or `None` for anything else.
-///
-/// Every enum constant answers `name` and `ordinal` from the storage its base contributes. The
-/// accessor arrives as the property's Kotlin name, so these are the only two spellings.
-pub(super) fn enum_member(owner: TypeName, accessor: &str) -> Option<&'static str> {
-    if !classifier_matches(owner, "kotlin/Enum") {
-        return None;
-    }
-    match accessor {
-        "name" => Some("name"),
-        "ordinal" => Some("ordinal"),
-        _ => None,
-    }
-}
-
 /// Whether a declaration's owner is the file facade `lazy` and `Lazy.getValue` live in. Both are
 /// top-level declarations of `kotlin`, so they reach a backend as members of `kotlin/LazyKt`.
 pub(super) fn is_lazy_facade(owner: DeclarationOwner) -> bool {

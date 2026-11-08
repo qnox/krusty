@@ -406,6 +406,7 @@ mod tests {
             internal: interface,
             args: vec![value],
             ctor_params: Some(vec![Ty::String]),
+            declared_params: None,
             ctor_desc: None,
             external_target: Some(ExternalCallableId::from_raw(7)),
             defaults: Box::new([]),

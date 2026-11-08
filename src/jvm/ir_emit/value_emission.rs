@@ -102,6 +102,13 @@ impl super::Emitter<'_> {
             IrExpr::GetValue(i) => {
                 if self.stack_resident_value == Some(*i) {
                     self.stack_resident_value = None;
+                    // The break that reached this label already pushed the result. A statement
+                    // boundary then resets the linear counter, so a discarded read would see no
+                    // height change and leave the value for a later join (a safe call's null
+                    // path) to disagree with.
+                    if let Some(ty) = self.inline_return_frame_result_type(*i) {
+                        code.set_stack(slot_words(ty));
+                    }
                     return;
                 }
                 if let Some(singleton) = self.singleton_receiver_value(*i) {
@@ -217,6 +224,7 @@ impl super::Emitter<'_> {
                 internal,
                 args,
                 ctor_params,
+                declared_params: _,
                 ctor_desc,
                 external_target: _,
                 defaults: default_parameters,
@@ -258,7 +266,7 @@ impl super::Emitter<'_> {
                         // Every parameter of a verbatim descriptor is a supplied operand; the
                         // descriptor, not the argument count, says how many there are.
                         let parameters = self.constructor_physical_params(e, d).len();
-                        (d.clone(), false, parameters, parameters)
+                        (d.to_string(), false, parameters, parameters)
                     } else {
                         let mut field_tys: Vec<Ty> = match ctor_params {
                             Some(ps) => jvm_tys(&capture_order::physical_for(
@@ -819,7 +827,6 @@ impl super::Emitter<'_> {
                     op @ (crate::ir::IrIntrinsic::ArraySize
                     | crate::ir::IrIntrinsic::StringGet
                     | crate::ir::IrIntrinsic::StringLength
-                    | crate::ir::IrIntrinsic::EnumName
                     | crate::ir::IrIntrinsic::EnumOrdinal
                     | crate::ir::IrIntrinsic::NullableAnyToString) => {
                         self.emit_builtin_member(e, op, dispatch_receiver.unwrap(), args, code)

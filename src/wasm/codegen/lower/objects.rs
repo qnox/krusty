@@ -165,6 +165,7 @@ impl Body<'_> {
             chain.push(parent);
         }
         self.code.global_get(table);
+        self.enum_base_fields(class)?;
         for &owner in chain.iter().rev() {
             for field in &self.ir.classes[owner as usize].fields {
                 let value = carrier(field.ty)?.ok_or("a `Unit`-typed field")?;
@@ -1058,7 +1059,11 @@ impl Body<'_> {
 
     /// Whether a call through `member`'s slot on a value statically of `class` could reach
     /// `kotlin.Any`'s own member, which this module has no body for.
-    fn reaches_any_default(&self, class: ClassId, member: AnyMember) -> Result<bool, Unsupported> {
+    pub(super) fn reaches_any_default(
+        &self,
+        class: ClassId,
+        member: AnyMember,
+    ) -> Result<bool, Unsupported> {
         let classes = self.file_classes()?;
         Ok(self.ir.classes.iter().enumerate().any(|(id, candidate)| {
             let id = id as ClassId;
@@ -1077,57 +1082,38 @@ impl Body<'_> {
         }))
     }
 
+    /// Whether a call through `member`'s slot on a value statically of type `ty` could reach
+    /// `kotlin.Any`'s own member. A type naming a class of this file is answered by that class's
+    /// hierarchy; any other reference type (`Any`, a type parameter, an interface) is erased, so
+    /// its value can be an instance of every class here. A scalar's box and `Unit` answer the
+    /// member themselves.
+    pub(super) fn may_reach_any_default(
+        &self,
+        ty: Ty,
+        member: AnyMember,
+    ) -> Result<bool, Unsupported> {
+        if let Some(class) = self.class_of_type(ty) {
+            return self.reaches_any_default(class, member);
+        }
+        if !matches!(carrier(ty.non_null())?, Some(ValType::Ref { .. })) {
+            return Ok(false);
+        }
+        let Some(classes) = self.classes else {
+            return Ok(false);
+        };
+        Ok(self.ir.classes.iter().enumerate().any(|(id, class)| {
+            !class.is_interface
+                && classes.tables.table(id as ClassId).vtable[member.slot() as usize]
+                    == Slot::AnyMember(member)
+        }))
+    }
+
     /// `lhs == rhs` on objects: `lhs?.equals(rhs) ?: (rhs === null)`.
     pub(super) fn object_equality(&mut self, lhs: u32, rhs: u32) -> Result<(), Unsupported> {
-        // Both operands run once, left first, even when the left value is null. The static
-        // type can be Any: the GC representation, not that type, selects the equality body.
-        let (left, right) = (self.local(REFERENCE), self.local(REFERENCE));
+        // The shared runtime dispatch begins only after both operands have run, left first.
         self.value(lhs, any())?;
-        self.code.local_set(left);
         self.value(rhs, any())?;
-        self.code.local_set(right);
-        let any_table = self.runtime.objects.any_table;
-        let equals = self.runtime.objects.any_slot_types[0];
-        self.code
-            .local_get(left)
-            .ref_is_null()
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(right)
-            .ref_is_null()
-            .else_()
-            .local_get(left)
-            .ref_test(false, STRING_HEAP)
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(right)
-            .ref_test(false, STRING_HEAP)
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(left)
-            .ref_cast(false, STRING_HEAP)
-            .local_get(right)
-            .ref_cast(false, STRING_HEAP)
-            .call(self.runtime.string_equals)
-            .else_()
-            .i32_const(0)
-            .end()
-            .else_()
-            .local_get(left)
-            .ref_test(false, HeapType::Concrete(self.runtime.objects.object))
-            .if_(BlockType::Value(ValType::I32))
-            .local_get(left)
-            .local_get(right)
-            .local_get(left);
-        self.table_of_object();
-        self.code
-            .struct_get(any_table, AnyMember::Equals.slot())
-            .call_ref(equals)
-            .else_()
-            // Non-object eq references have no virtual override: their default is identity.
-            .local_get(left)
-            .local_get(right)
-            .ref_eq()
-            .end()
-            .end()
-            .end();
+        self.code.call(self.runtime.object_equals);
         Ok(())
     }
 

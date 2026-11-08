@@ -72,6 +72,8 @@ mod inline_copies;
 mod suspension_points;
 pub use suspension_points::{IrIntrinsicSuspensionPoint, IrValueClassSuspendResult};
 mod intrinsic;
+mod jvm_accessor_names;
+pub(crate) use jvm_accessor_names::{JvmAccessorNames, JvmAccessorSide};
 mod jvm_delegate_realization;
 mod jvm_static_realization;
 mod lambda_classes;
@@ -177,12 +179,12 @@ pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
     IrAccessorLines, IrCheckedProperty, IrInlinePropertySplice, IrInlineTypeSubstitution,
     IrMemberKind, IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers,
-    MemberExtProp, PrivatePropertyAccessorCall,
+    IrPropertyOrigin, MemberExtProp, PrivatePropertyAccessorCall,
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
-    FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable, PropRef,
-    ReflectedCallable,
+    FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable,
+    IrConstructorReferenceDeclaration, PropRef, ReflectedCallable,
 };
 pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
@@ -559,7 +561,13 @@ pub enum IrExpr {
         /// absent; `defaults` identifies their source-value ordinals.
         args: Vec<ExprId>,
         ctor_params: Option<Vec<Ty>>,
-        ctor_desc: Option<String>,
+        /// The selected constructor declaration's own parameter types, operand for operand with
+        /// `args` (an inner class's outer instance and the leading context parameters included),
+        /// before any call-site substitution: `Holder<T>(T)` called as `Holder(Money(7))` keeps
+        /// `T` here while `ctor_params` says `Money`. `None` for a construction a phase
+        /// synthesized without a checked declaration, which carries only its `ctor_params`.
+        declared_params: Option<Box<[Ty]>>,
+        ctor_desc: Option<Box<str>>,
         /// Exact dependency constructor declaration awaiting target realization. Mutually exclusive
         /// with `ctor_desc`; source/module constructions leave it absent.
         external_target: Option<crate::fir::ExternalCallableId>,
@@ -1680,6 +1688,12 @@ pub struct IrFile {
     /// `x$delegate`. Kept apart from `jvm_companion_property_statics`: the delegate is storage the
     /// property's accessors read, not the property itself.
     jvm_companion_delegate_statics: crate::fx_hash::HashMap<(TypeName, u32), u32>,
+    /// Exact class property declaration → the JVM names realized for its default accessors.
+    /// Populated only by JVM realization passes; see [`jvm_accessor_names`].
+    jvm_property_accessor_names:
+        crate::fx_hash::HashMap<(TypeName, u32), jvm_accessor_names::JvmAccessorNames>,
+    /// Static index → the JVM names realized for its default accessors. JVM-populated only.
+    jvm_static_accessor_names: crate::fx_hash::HashMap<u32, jvm_accessor_names::JvmAccessorNames>,
     /// User annotations applied to FUNCTIONS (top-level and members share the `functions` arena),
     /// by function id, retaining the resolved semantic retention. A side table rather than a field on [`IrFunction`], for the
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
@@ -1866,6 +1880,11 @@ pub struct IrFile {
     /// adaptation boundary records this edge when it creates the call; later representation
     /// analysis consumes the identity and never recognizes an unbox operation by its spelling.
     pub(crate) value_class_unbox_type_operation_edges: crate::fx_hash::HashMap<ExprId, ExprId>,
+    /// JVM null-safe value-class unbox call -> the type operation whose value it unboxes through
+    /// its temporary (`a as X?`: `checkcast X`, then `unbox-impl` unless null). The call reads the
+    /// temporary, so it is not the call's receiver, but it is the same checked box.
+    pub(crate) value_class_null_safe_unbox_type_operation_edges:
+        crate::fx_hash::HashMap<ExprId, ExprId>,
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
@@ -2473,11 +2492,6 @@ pub struct IrFile {
     /// stay the Kotlin types; this plan is only the physical slot a selected argument edge is
     /// adapted to. Mask and marker operands are not entries.
     pub physical_call_parameters: crate::fx_hash::HashMap<ExprId, Box<[Ty]>>,
-    /// Construction `ExprId` → the selected constructor's declared semantic parameter types in
-    /// argument order. A generic constructor can consume a value-class box through bare `T` even
-    /// when its physical descriptor and that value class's carrier are both `Object`; JVM emission
-    /// consumes this identity-backed fact instead of reinterpreting the descriptor.
-    pub(crate) construction_declared_params: crate::fx_hash::HashMap<ExprId, Box<[Ty]>>,
     /// Construction `ExprId` → the selected module constructor.
     pub(crate) construction_targets: crate::fx_hash::HashMap<ExprId, IrConstructorTarget>,
     /// Realized static call `ExprId` → the operand index its extension receiver was placed at. A
@@ -2736,7 +2750,8 @@ impl IrFile {
             internal,
             args,
             ctor_params: None,
-            ctor_desc: Some(ctor_desc.into()),
+            declared_params: None,
+            ctor_desc: Some(ctor_desc.into().into_boxed_str()),
             external_target: None,
             defaults: Box::new([]),
             default_prefix_count: 0,
@@ -2749,6 +2764,7 @@ impl IrFile {
             internal,
             args,
             ctor_params: Some(params),
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),
@@ -2792,6 +2808,17 @@ impl IrFile {
     }
     pub fn expr(&self, id: ExprId) -> &IrExpr {
         &self.exprs[id as usize]
+    }
+
+    /// The selected constructor declaration's own parameter types a construction carries; `None`
+    /// for a construction synthesized without a checked declaration, or for another node.
+    pub(crate) fn construction_declared_params(&self, construction: ExprId) -> Option<&[Ty]> {
+        match self.expr(construction) {
+            IrExpr::New {
+                declared_params, ..
+            } => declared_params.as_deref(),
+            _ => None,
+        }
     }
     pub fn add_expr(&mut self, mut e: IrExpr) -> ExprId {
         let id = self.exprs.len() as u32;

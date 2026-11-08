@@ -65,8 +65,31 @@ impl Body<'_> {
                 };
                 self.string_of(value)
             }
+            IrIntrinsic::GeneratedPropertyHash { ty } => {
+                let (None, [value]) = (receiver, args) else {
+                    return Err("a malformed generated property hash".to_string());
+                };
+                self.generated_property_hash(*value, ty)
+            }
+            IrIntrinsic::GeneratedPropertyEquals { ty } => {
+                let (None, [left, right]) = (receiver, args) else {
+                    return Err("a malformed generated property comparison".to_string());
+                };
+                self.generated_property_equals(*left, *right, ty)
+            }
             other => Err(format!("a call to the intrinsic {other:?}")),
         }
+    }
+
+    /// Whether `target` is a string's `length`, by its getter's provider realization.
+    pub(super) fn is_string_length_property(&self, target: crate::fir::ExternalPropertyId) -> bool {
+        self.callables
+            .property(target)
+            .and_then(|property| self.callables.callable(property.getter))
+            .is_some_and(|getter| {
+                getter.compiler_operation()
+                    == Some(crate::backend::BackendCompilerIntrinsic::StringLength)
+            })
     }
 
     /// Leave the selected String receiver's UTF-16 storage array on the stack.

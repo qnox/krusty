@@ -250,6 +250,7 @@ fn run_backend_passes_after_plugins(
     )
     .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
+    crate::jvm::platform_visible_constructors::realize(ir);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
     // declaration that has no class-file form. Before the value-class pass, which renames a marker
     // together with its mangled getter.
@@ -1630,6 +1631,7 @@ pub fn facade_package_metadata_from_ir(
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let local_classifiers = crate::metadata::local_classifiers::names(ir);
     let enum_entry_bodies = crate::metadata::local_classifiers::enum_entry_bodies(ir);
+    let anonymous_classifiers = crate::metadata::local_classifiers::anonymous_names(ir);
     let functions = ir
         .package_functions
         .iter()
@@ -1707,7 +1709,7 @@ pub fn facade_package_metadata_from_ir(
                     setter.is_some() || ir.has_jvm_default_static_setter(*storage),
                     *getter,
                     *setter,
-                    Some(&ir.statics[*storage as usize]),
+                    Some(*storage),
                 ),
                 Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
                     getter, setter, ..
@@ -1754,7 +1756,7 @@ pub fn facade_package_metadata_from_ir(
             let getter = has_getter.then(|| {
                 (
                     accessor_jvm_name(getter_function).unwrap_or_else(|| match storage {
-                        Some(storage) => storage.default_getter_jvm_name(),
+                        Some(storage) => ir.jvm_static_getter_name(storage),
                         None => crate::jvm::names::property_getter_name(&declaration.name),
                     }),
                     value_class_accessor_descriptor(ir, getter_function)
@@ -1766,7 +1768,7 @@ pub fn facade_package_metadata_from_ir(
                 parameters.push_str(&value_descriptor);
                 (
                     accessor_jvm_name(setter_function).unwrap_or_else(|| match storage {
-                        Some(storage) => storage.default_setter_jvm_name(),
+                        Some(storage) => ir.jvm_static_setter_name(storage),
                         None => crate::jvm::names::property_setter_name(&declaration.name),
                     }),
                     value_class_accessor_descriptor(ir, setter_function)
@@ -1847,6 +1849,7 @@ pub fn facade_package_metadata_from_ir(
             inner_classifiers: &inner_classifier,
             local_classifiers,
             enum_entry_bodies,
+            anonymous_classifiers,
         },
         metadata_stamp,
         annotations_in_metadata,
@@ -2230,8 +2233,6 @@ mod tests {
             is_lateinit: false,
             owner: None,
             visibility: crate::types::Visibility::Public,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
             erased_declared_ty: None,
             accessors: crate::ir::IrStaticAccessors::ABSENT,
             line: 0,
@@ -2291,14 +2292,17 @@ mod tests {
             Some(metadata.k),
             "a/AKt",
             None,
-            &[],
         )
         .expect("decode generated facade metadata");
 
-        let [property] = decoded.package_properties.as_ref() else {
+        let members = decoded
+            .members
+            .decode(&[], &decoded.type_parameter_scope)
+            .expect("decode generated facade members");
+        let [property] = members.package_properties.as_ref() else {
             panic!(
                 "expected one package property, got {:?}",
-                decoded.package_properties
+                members.package_properties
             );
         };
         assert_eq!(property.name, "topLevel");

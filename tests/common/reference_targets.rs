@@ -18,7 +18,7 @@ use std::process::Command;
 
 use krusty::compilation_target::CompilationTarget;
 
-use super::reference_recording_support::{kotlin_native_root, recorded};
+use super::reference_recording_support::recorded;
 
 /// What a compiler did with a source set: whether it accepted it, and every error it reported in
 /// emission order. Each error is one complete block, `file:line:column: message`, with any further
@@ -147,12 +147,11 @@ enum Output {
     Program,
 }
 
-struct Reference {
-    status: i32,
-    stderr: String,
-}
+#[path = "reference_targets/invocation.rs"]
+mod invocation;
+use invocation::Reference;
 
-/// Run the non-JVM reference compiler for `target`. `None` when it is not provisioned.
+/// Run the same compiler for recorded rejection outcomes and freshly imported producer artifacts.
 fn run_reference(
     target: CompilationTarget,
     work: &Path,
@@ -160,62 +159,8 @@ fn run_reference(
     args: &[String],
     output: Output,
 ) -> Option<Reference> {
-    let out = work.join("reference-out");
-    let mut command = match target {
-        CompilationTarget::Jvm => {
-            panic!("the JVM reference compiler runs through `reference_compiler_run`")
-        }
-        CompilationTarget::Native => {
-            let mut command = Command::new(kotlin_native_root()?.join("bin/kotlinc-native"));
-            match output {
-                Output::Library => command.args(["-p", "library", "-o"]).arg(&out),
-                Output::Program => command
-                    .args(["-p", "program", "-o"])
-                    .arg(work.join("program")),
-            };
-            command
-        }
-        CompilationTarget::Js | CompilationTarget::WasmJs | CompilationTarget::WasmWasi => {
-            assert!(
-                matches!(output, Output::Library),
-                "only Kotlin/Native programs are run by this oracle"
-            );
-            let lib = krusty::toolchain::kotlinc_lib_dir()
-                .expect("the kotlinc distribution is provisioned for every test run");
-            let bin = lib.with_file_name("bin");
-            let (compiler, stdlib, flags): (_, _, &[&str]) = match target {
-                CompilationTarget::Js => ("kotlinc-js", "kotlin-stdlib-js.klib", &[]),
-                CompilationTarget::WasmJs => (
-                    "kotlinc-wasm",
-                    "kotlin-stdlib-wasm-js.klib",
-                    &["-Xwasm-target=wasm-js"],
-                ),
-                _ => (
-                    "kotlinc-wasm",
-                    "kotlin-stdlib-wasm-wasi.klib",
-                    &["-Xwasm-target=wasm-wasi"],
-                ),
-            };
-            let mut command = Command::new(bin.join(compiler));
-            command
-                .args(flags)
-                .args(["-Xir-produce-klib-dir", "-libraries"])
-                .arg(lib.join(stdlib))
-                .arg("-ir-output-dir")
-                .arg(&out)
-                .args(["-ir-output-name", "reference"]);
-            command
-        }
-    };
-    let output = command
-        .args(args)
-        .args(paths)
-        .output()
-        .expect("run the reference compiler");
-    Some(Reference {
-        status: output.status.code().unwrap_or(-1),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
+    invocation::run_reference(target, work, paths, args, matches!(output, Output::Program))
+        .map(|(run, _)| run)
 }
 
 #[cfg(test)]

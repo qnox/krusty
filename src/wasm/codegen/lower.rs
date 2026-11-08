@@ -19,17 +19,20 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 mod absent_arguments;
+pub(super) mod any_members;
 mod arrays;
 mod boxing;
+mod callable_reference_identity;
 mod dependency_exports;
+mod enums;
 mod exceptions;
 mod function_values;
+mod generated_members;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
 mod shared_cells;
 mod string_conversion;
-pub(super) mod value_hash;
 
 #[cfg(test)]
 use tests::lower_alone;
@@ -39,6 +42,7 @@ pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
+        || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
@@ -155,6 +159,10 @@ pub(super) fn lower_file(
         signatures.push(Some(module.func_type(params, results)));
     }
     let indices = callable_registry.declare_file(ir, module)?;
+    let reference_file =
+        runtime
+            .callable_references
+            .begin_file(module_name, ir, dependency_exports)?;
     let call_targets = callable_registry.file_calls(ir, callables, module)?;
     let inert_singleton_bindings = crate::backend::inert_staged_singleton_bindings(
         ir,
@@ -204,6 +212,7 @@ pub(super) fn lower_file(
         array_range_checks,
         classifiers,
         module_name,
+        reference_file,
         numbers: plan.interfaces(),
         ir,
         functions: &indices,
@@ -349,6 +358,8 @@ struct FileContext<'a> {
     array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
+    /// Backend namespace of this file's local callable declarations.
+    reference_file: u32,
     /// The module-wide numbers of the module's interface members.
     numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
@@ -384,6 +395,20 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         TyKind::DOUBLE => ValType::F64,
         TyKind::STRING | TyKind::Null => STRING,
         TyKind::Nullable(Ty::String) => STRING,
+        // Nullable scalars keep their semantic type until this representation boundary. They
+        // use the same boxes as erased values; nullable Unit can hold its singleton or null.
+        TyKind::Nullable(
+            Ty::Boolean
+            | Ty::Byte
+            | Ty::Short
+            | Ty::Char
+            | Ty::Int
+            | Ty::Long
+            | Ty::Float
+            | Ty::Double
+            | Ty::Unit
+            | Ty::Nothing,
+        ) => REFERENCE,
         // Every object, interface and `Any` value, and a type parameter's: a reference the
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
@@ -568,6 +593,7 @@ struct Body<'a> {
     array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
+    reference_file: u32,
     numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
     module: &'a mut Module,
@@ -604,6 +630,9 @@ struct Body<'a> {
     /// singleton, or the file's static initializer. Only the template ownership of a reified
     /// type operation reads it.
     scope: crate::ir::IrEnclosure,
+    /// `kotlin.Enum`'s `name` and `ordinal` for the enum constant whose construction is being
+    /// lowered, taken by that construction's allocation.
+    enum_base: Option<(Box<str>, u32)>,
 }
 
 impl<'a> Body<'a> {
@@ -627,6 +656,7 @@ impl<'a> Body<'a> {
         );
         Self {
             module_name: context.module_name,
+            reference_file: context.reference_file,
             array_range_checks: context.array_range_checks,
             classifiers: context.classifiers,
             numbers: context.numbers,
@@ -655,6 +685,7 @@ impl<'a> Body<'a> {
             depth: 0,
             loops: Vec::new(),
             scope: crate::ir::IrEnclosure::File,
+            enum_base: None,
         }
     }
 
@@ -1116,8 +1147,12 @@ impl<'a> Body<'a> {
             {
                 self.throwable_message(dispatch_receiver, &args, *ret)?;
             }
-            IrExpr::Call { .. } if value_hash::call_kind(self.ir, self.callables, id).is_some() => {
-                self.value_hash_call(id)?;
+            IrExpr::Call {
+                dispatch_receiver: Some(receiver),
+                args,
+                ..
+            } if let Some(member) = any_members::call_member(self.ir, self.callables, id) => {
+                self.dependency_any_member_call(member, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1134,7 +1169,7 @@ impl<'a> Body<'a> {
                 && defaults.is_empty()
                 && self.scalar_operation_of(*target).is_some() =>
             {
-                self.scalar_operation_call(*target, dispatch_receiver, params, *ret, &args)?;
+                self.scalar_operation_call(id, *target, dispatch_receiver, params, *ret, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1231,6 +1266,16 @@ impl<'a> Body<'a> {
                     &defaults,
                 )?;
             }
+            IrExpr::EnumConstant {
+                name,
+                ordinal,
+                construction,
+                published: None,
+                ..
+            } => self.enum_constant(&name, ordinal, construction)?,
+            IrExpr::NoSuchEnumConstant { classifier, name } => {
+                self.no_such_enum_constant(classifier, name)?
+            }
             IrExpr::Throw { operand } => self.throw_value(operand)?,
             IrExpr::Vararg {
                 array_type,
@@ -1297,6 +1342,19 @@ impl<'a> Body<'a> {
             {
                 self.property_read(*target, *dispatch_receiver)?
             }
+            // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from
+            // the `$Enum` fields its struct leads with.
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && let Some(member) =
+                        crate::backend::enums::base_member(self.callables, *target) =>
+            {
+                self.enum_member(member, *receiver)?
+            }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
                     target,
@@ -1311,6 +1369,21 @@ impl<'a> Body<'a> {
                     && self.is_throwable_message_property(*target) =>
             {
                 self.throwable_message(*receiver, arguments, *result)?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && self.is_string_length_property(*target) =>
+            {
+                self.intrinsic(IrIntrinsic::StringLength, Some(*receiver), &[])?;
             }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::PropertyWrite {
@@ -1563,10 +1636,20 @@ impl<'a> Body<'a> {
         } else {
             left.is_unsigned() || right.is_unsigned()
         };
+        // Equality, shifts and the bitwise connectives are sign-agnostic on the carrier (a shift
+        // takes its right-shift kind from `unsigned` below); every other operator needs an
+        // unsigned instruction this lowering does not select yet.
         if unsigned
             && !matches!(
                 op,
-                IrBinOp::Eq | IrBinOp::Ne | IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr
+                IrBinOp::Eq
+                    | IrBinOp::Ne
+                    | IrBinOp::Shl
+                    | IrBinOp::Shr
+                    | IrBinOp::Ushr
+                    | IrBinOp::BitAnd
+                    | IrBinOp::BitOr
+                    | IrBinOp::BitXor
             )
         {
             return Err(format!("an ordinary operator on `{}`", describe(left)));

@@ -212,6 +212,7 @@ pub(super) fn descriptor_property(
     source_order: u32,
 ) -> IrProperty {
     IrProperty {
+        origin: crate::ir::IrPropertyOrigin::Declaration,
         name: "descriptor".to_string(),
         diagnostic_span: None,
         getter_diagnostic_span: None,
@@ -237,8 +238,6 @@ pub(super) fn descriptor_property(
         setter_visibility: Visibility::Public,
         getter: Some(getter),
         setter: None,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         needs_access_bridge: false,
         accessor_annotations: Default::default(),
     }
