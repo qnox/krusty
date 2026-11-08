@@ -827,6 +827,11 @@ impl<'a> Body<'a> {
             return Ok(());
         }
         let Some(source) = source_ty else {
+            // Restore stack polymorphism after structured control only when completion proves
+            // divergence: an inlined generic result may retain Nothing but complete normally.
+            if self.ir.expr_diverges_by(id, &|_, _| false) {
+                self.code.unreachable();
+            }
             return Ok(());
         };
         if source == Ty::Unit && carrier(target)?.is_some() {
@@ -1342,6 +1347,13 @@ impl<'a> Body<'a> {
             {
                 self.property_read(*target, *dispatch_receiver)?
             }
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } =
+                    &**checked_op
+                    && self.is_array_size_property(*target) =>
+            {
+                self.checked_array_size(checked_op)?;
+            }
             // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from
             // the `$Enum` fields its struct leads with.
             IrExpr::Checked(ref checked_op)
@@ -1354,13 +1366,6 @@ impl<'a> Body<'a> {
                         crate::backend::enums::base_member(self.callables, *target) =>
             {
                 self.enum_member(member, *receiver)?
-            }
-            IrExpr::Checked(ref checked_op)
-                if let crate::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } =
-                    &**checked_op
-                    && self.is_array_size_property(*target) =>
-            {
-                self.checked_array_size(checked_op)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
