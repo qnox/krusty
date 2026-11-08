@@ -2047,9 +2047,29 @@ fn positional_candidate_score(
         vararg,
         required,
         defaults,
-        arg_tys,
+        PositionalArguments {
+            types: arg_tys,
+            spread: &[],
+        },
         arg_assignable_simple,
     )
+}
+
+/// A local function call's source arguments: the call, its argument expressions and their names.
+#[derive(Clone, Copy)]
+struct LocalCallArguments<'a> {
+    call: ExprId,
+    args: &'a [ExprId],
+    names: Option<&'a [Option<String>]>,
+}
+
+/// A call's positional argument types, and which of them are spreads (`*array`). A spread passes
+/// its whole array to the vararg, so it is measured against the array, not its element. An empty
+/// `spread` marks no argument as a spread.
+#[derive(Clone, Copy)]
+struct PositionalArguments<'a> {
+    types: &'a [Ty],
+    spread: &'a [bool],
 }
 
 fn positional_candidate_score_by(
@@ -2057,9 +2077,10 @@ fn positional_candidate_score_by(
     vararg: bool,
     required: usize,
     defaults: &[bool],
-    arg_tys: &[Ty],
+    arguments: PositionalArguments<'_>,
     argument_fits: impl Fn(Ty, Ty) -> bool,
 ) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
+    let arg_tys = arguments.types;
     let has_default = |index| defaults.get(index).copied().unwrap_or(index >= required);
     if vararg {
         let Some((array, fixed)) = params.split_last() else {
@@ -2079,11 +2100,13 @@ fn positional_candidate_score_by(
             &argument_fits,
         )?;
         let element = array.array_elem().unwrap_or(Ty::Error);
-        for actual in &arg_tys[fixed_provided..] {
-            if !argument_fits(element, *actual) {
+        for (index, actual) in arg_tys.iter().enumerate().skip(fixed_provided) {
+            let spread = arguments.spread.get(index).copied().unwrap_or(false);
+            let expected = if spread { *array } else { element };
+            if !argument_fits(expected, *actual) {
                 return None;
             }
-            type_score += if element == *actual { 2 } else { 1 };
+            type_score += if expected == *actual { 2 } else { 1 };
         }
         return Some((
             type_score,
@@ -2131,6 +2154,7 @@ fn local_function_candidate_score(
     arg_tys: &[Ty],
     arg_names: Option<&[Option<String>]>,
     trailing_lambda: bool,
+    is_spread: impl Fn(ExprId) -> bool,
     argument_fits: impl Fn(Ty, Ty) -> bool,
 ) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
     let context_count = signature.context_count.min(signature.params.len());
@@ -2144,43 +2168,61 @@ fn local_function_candidate_score(
         .get(context_count..)
         .unwrap_or_default();
     if arg_names.is_some() || trailing_lambda {
+        let vararg = signature
+            .vararg_index
+            .and_then(|index| index.checked_sub(context_count));
+        let sources = (0..args.len()).collect::<Vec<_>>();
         let Ok(slots) = map_call_args(
-            args,
+            &sources,
             arg_names,
             names,
             params.len(),
             signature.required.saturating_sub(context_count),
             defaults,
-            signature
-                .vararg_index
-                .and_then(|index| index.checked_sub(context_count)),
+            vararg,
             trailing_lambda,
         ) else {
             return None;
         };
+        let omitted = slots.iter().filter(|slot| slot.is_none()).count();
         let mut type_score = 0;
-        let mut omitted = 0;
-        for (index, argument) in slots.iter().enumerate() {
-            let Some(argument) = argument else {
-                omitted += 1;
-                continue;
+        for (source, &argument) in args.iter().enumerate() {
+            // An argument no slot holds is a further element of the vararg it follows.
+            let parameter = slots
+                .iter()
+                .position(|slot| *slot == Some(source))
+                .or(vararg)?;
+            let declared = *params.get(parameter)?;
+            let named = arg_names
+                .and_then(|names| names.get(source))
+                .is_some_and(Option::is_some);
+            let element = vararg == Some(parameter) && !named && !is_spread(argument);
+            let expected = if element {
+                declared.array_elem().unwrap_or(Ty::Error)
+            } else {
+                declared
             };
-            let source_index = args.iter().position(|candidate| candidate == argument)?;
-            let parameter = *params.get(index)?;
-            let actual = *arg_tys.get(source_index)?;
-            if !argument_fits(parameter, actual) {
+            let actual = *arg_tys.get(source)?;
+            if !argument_fits(expected, actual) {
                 return None;
             }
-            type_score += if parameter == actual { 2 } else { 1 };
+            type_score += if expected == actual { 2 } else { 1 };
         }
         return Some((type_score, std::cmp::Reverse(omitted), !signature.vararg()));
     }
+    let spread = args
+        .iter()
+        .map(|&argument| is_spread(argument))
+        .collect::<Vec<_>>();
     positional_candidate_score_by(
         params,
         signature.vararg(),
         signature.required.saturating_sub(context_count),
         defaults,
-        arg_tys,
+        PositionalArguments {
+            types: arg_tys,
+            spread: &spread,
+        },
         argument_fits,
     )
 }
@@ -16259,51 +16301,18 @@ impl<'a> Checker<'a> {
                             } else {
                                 None
                             };
-                            if let Some(slots) = &mapped_slots {
-                                for (i, argument) in slots.iter().enumerate() {
-                                    if let Some(argument) = argument {
-                                        let parameter_index = ctx_count + i;
-                                        let p = sig.params[parameter_index];
-                                        let aty = self.check_argument_expected(
-                                            scope,
-                                            *argument,
-                                            p,
-                                            sig.lambda_recv
-                                                .get(parameter_index)
-                                                .copied()
-                                                .unwrap_or(false),
-                                            Some(&fname),
-                                        );
-                                        self.expect_assignable(
-                                            p,
-                                            aty,
-                                            self.span(*argument),
-                                            "argument",
-                                        );
-                                    }
-                                }
-                            } else {
-                                for (i, a) in args.iter().enumerate() {
-                                    let p = if sig.vararg() && i >= value_count.saturating_sub(1) {
-                                        sig.params[sig.params.len() - 1]
-                                            .array_read_elem()
-                                            .unwrap_or(Ty::Error)
-                                    } else {
-                                        sig.params[ctx_count + i]
-                                    };
-                                    let parameter_index = ctx_count + i;
-                                    let aty = self.check_argument_expected(
-                                        scope,
-                                        *a,
-                                        p,
-                                        sig.lambda_recv
-                                            .get(parameter_index)
-                                            .copied()
-                                            .unwrap_or(false),
-                                        Some(&fname),
-                                    );
-                                    self.expect_call_arg(scope, p, *a, aty);
-                                }
+                            if !self.check_local_call_arguments(
+                                scope,
+                                LocalCallArguments {
+                                    call,
+                                    args,
+                                    names: arg_names.as_deref(),
+                                },
+                                &sig,
+                                ctx_count,
+                                &fname,
+                            ) {
+                                return Ty::Error;
                             }
                             if let Some(slots) = mapped_slots {
                                 if !self.commit_selected_argument_slots(call, slots, value_defaults)
@@ -16349,23 +16358,18 @@ impl<'a> Checker<'a> {
                                     return sig.ret;
                                 }
                             };
-                            for (index, argument) in slots.iter().enumerate() {
-                                if let Some(argument) = argument {
-                                    let parameter = sig.params[index];
-                                    let actual = self.check_argument_expected(
-                                        scope,
-                                        *argument,
-                                        parameter,
-                                        sig.lambda_recv.get(index).copied().unwrap_or(false),
-                                        Some(&fname),
-                                    );
-                                    self.expect_assignable(
-                                        parameter,
-                                        actual,
-                                        self.span(*argument),
-                                        "argument",
-                                    );
-                                }
+                            if !self.check_local_call_arguments(
+                                scope,
+                                LocalCallArguments {
+                                    call,
+                                    args,
+                                    names: arg_names.as_deref(),
+                                },
+                                &sig,
+                                0,
+                                &fname,
+                            ) {
+                                return Ty::Error;
                             }
                             if !self.commit_selected_argument_slots(
                                 call,
@@ -16428,22 +16432,18 @@ impl<'a> Checker<'a> {
                         // parameter must be checked WITH that parameter's block parameter types
                         // (`check_lambda_with_types`) — exactly as a top-level call does — so a
                         // destructured / `it` lambda parameter gets its real type instead of erased `Any`.
-                        for (i, &a) in args.iter().enumerate() {
-                            let parameter =
-                                sig.vararg_index.filter(|vararg| i >= *vararg).unwrap_or(i);
-                            let p = if sig.vararg_index == Some(parameter) {
-                                sig.params[parameter].array_read_elem().unwrap_or(Ty::Error)
-                            } else {
-                                sig.params[parameter]
-                            };
-                            let aty = self.check_argument_expected(
-                                scope,
-                                a,
-                                p,
-                                sig.lambda_recv.get(parameter).copied().unwrap_or(false),
-                                Some(&fname),
-                            );
-                            self.expect_call_arg(scope, p, a, aty);
+                        if !self.check_local_call_arguments(
+                            scope,
+                            LocalCallArguments {
+                                call,
+                                args,
+                                names: None,
+                            },
+                            &sig,
+                            0,
+                            &fname,
+                        ) {
+                            return Ty::Error;
                         }
                         if omitted_are_optional {
                             let slots = args
@@ -47078,6 +47078,67 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Check a local function's arguments against `sig` once it is selected. Arguments address the
+    /// parameters after the `context_count` context parameters. An element of the vararg is checked
+    /// against its element type; a spread or a named vararg argument passes the whole array and is
+    /// checked against the array, as every other selected call checks it. Returns false, after
+    /// reporting it, when the arguments do not map onto the parameters.
+    fn check_local_call_arguments(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: LocalCallArguments<'_>,
+        sig: &Signature,
+        context_count: usize,
+        fname: &str,
+    ) -> bool {
+        let LocalCallArguments {
+            call,
+            args,
+            names: arg_names,
+        } = call;
+        let parameter_indices = (context_count..sig.params.len()).collect::<Vec<_>>();
+        let call_sig = sig.call_sig().select_parameters(&parameter_indices);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let parameters = match call_argument_parameter_indices_result(
+            args.len(),
+            parameter_indices.len(),
+            arg_names,
+            trailing_lambda,
+            &call_sig,
+        ) {
+            Ok(parameters) => parameters,
+            Err(error) => {
+                self.report_call_arg_mapping_error(call, args, error);
+                return false;
+            }
+        };
+        let whole_array = named_whole_array_varargs(&parameters, arg_names, &call_sig);
+        for (source, (&argument, &value)) in args.iter().zip(&parameters).enumerate() {
+            let parameter = context_count + value;
+            let declared = sig.params[parameter];
+            let in_vararg = call_sig.vararg_index == Some(value);
+            let whole = in_vararg && (whole_array[source] || self.file.is_spread_arg(argument));
+            let expected = if in_vararg && !whole {
+                declared.array_read_elem().unwrap_or(Ty::Error)
+            } else {
+                declared
+            };
+            let actual = self.check_argument_expected(
+                scope,
+                argument,
+                expected,
+                sig.lambda_recv.get(parameter).copied().unwrap_or(false),
+                Some(fname),
+            );
+            if whole {
+                self.expect_whole_array_vararg_arg(Some(scope), argument, actual, declared);
+            } else {
+                self.expect_call_arg(scope, expected, argument, actual);
+            }
+        }
+        true
+    }
+
     fn expect_indexed_operator_params(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -57107,6 +57168,7 @@ impl<'a> Checker<'a> {
                 arg_tys,
                 argument_names,
                 trailing_lambda,
+                |argument| self.file.is_spread_arg(argument),
                 |parameter, actual| {
                     arg_assignable_simple(parameter, actual)
                         || self.postponed_call_mentions(parameter)
@@ -57158,6 +57220,7 @@ impl<'a> Checker<'a> {
                         arg_tys,
                         argument_names,
                         trailing_lambda,
+                        |argument| self.file.is_spread_arg(argument),
                         |parameter, actual| {
                             arg_assignable_simple(parameter, actual)
                                 || self.postponed_call_mentions(parameter)

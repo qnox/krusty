@@ -2,6 +2,8 @@
 
 use super::common;
 
+#[path = "../local_vararg_primitive_spread_e2e.rs"]
+mod local_vararg_primitive_spread_e2e;
 #[path = "../vararg_argument_line_numbers_e2e.rs"]
 mod vararg_argument_line_numbers_e2e;
 #[path = "../vararg_constructor_property_e2e.rs"]
