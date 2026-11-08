@@ -1200,3 +1200,11 @@ fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
         "wasmFinallyValueAndKotlinThrow",
     );
 }
+
+#[test]
+fn wasm_data_class_unit_property_uses_units_fixed_hash() {
+    expect_wasm_box(
+        include_str!("box_regressions/knownPrimaryConstructorRoles.kt"),
+        "wasmKnownPrimaryConstructorRoles",
+    );
+}

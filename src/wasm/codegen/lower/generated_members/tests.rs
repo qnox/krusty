@@ -1,4 +1,4 @@
-use crate::ir::{Callee, IrConst, IrExpr, IrFile, IrFunction, IrIntrinsic};
+use crate::ir::{Callee, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrIntrinsic};
 use crate::types::Ty;
 use crate::wasm::WasmTarget;
 
@@ -57,5 +57,36 @@ fn an_unrelated_emitted_lambda_does_not_prevent_hashing_an_erased_primitive() {
             super::super::lower_alone(&ir, &properties, &mut started).map(|_| ()),
             Ok(())
         );
+    }
+}
+
+#[test]
+fn a_unit_property_hash_does_not_dispatch_through_any() {
+    for target in WasmTarget::ALL {
+        for ty in [Ty::Unit, Ty::obj_name(crate::types::wk::unit())] {
+            let mut ir = IrFile::default();
+            // A neighbor that still inherits `Any.hashCode` is what used to make every reference
+            // property hash look like it might reach that unimplemented slot.
+            ir.classes
+                .push(IrClass::synthetic(crate::types::type_name("demo/Neighbor")));
+            let unit = ir.add_expr(IrExpr::UnitInstance);
+            ir.set_logical_type(unit, ty);
+            let hashed = ir.add_expr(IrExpr::Call {
+                callee: Box::new(Callee::Intrinsic {
+                    operation: IrIntrinsic::GeneratedPropertyHash { ty },
+                    ret: Ty::Int,
+                }),
+                dispatch_receiver: None,
+                args: vec![unit],
+            });
+            ir.set_logical_type(hashed, Ty::Int);
+            value_function(&mut ir, "hash", Ty::Int, hashed);
+            let properties = crate::backend::local_properties::realize(&mut ir).unwrap();
+            let mut started = super::super::super::Started::new(target);
+            assert_eq!(
+                super::super::lower_alone(&ir, &properties, &mut started).map(|_| ()),
+                Ok(())
+            );
+        }
     }
 }
