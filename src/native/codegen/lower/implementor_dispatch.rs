@@ -145,9 +145,30 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         )
     }
 
+    /// Whether `internal`'s member stays with the runtime, rather than a direct implementor call.
+    ///
+    /// A collection or a closed range is also worn by objects the runtime builds. No static type
+    /// tells one of those from a class of this file, which is why a member asked of such a type
+    /// declines once the handlers that can tell them apart have passed. A special bridge may skip
+    /// the override entirely when the argument cannot be what the declaration accepts, and this
+    /// dispatch has no bridge to put in front of an implementor's arm.
+    fn runtime_owns_member(&self, internal: crate::types::TypeName, name: &str) -> bool {
+        if super::classifier_shapes::is_closed_range(internal)
+            || super::classifier_shapes::is_closed_floating_range(internal)
+        {
+            return true;
+        }
+        let ty = Ty::obj_name(internal);
+        self.file.implements_collection_of(ty)
+            || self.file.mapped_collection(ty).is_some_and(|collection| {
+                super::super::super::intrinsics::has_special_bridge(collection, name)
+            })
+    }
+
     /// Dispatch one dependency interface member by the exact override edge each implementor
     /// published. An implementor without that edge leaves the call to the paths that already
-    /// know the member; this does not recover an implementation by its name.
+    /// know the member; this does not recover an implementation by its name. A member the runtime
+    /// also answers is left there too.
     pub(super) fn dependency_interface_member(
         &mut self,
         internal: crate::types::TypeName,
@@ -157,6 +178,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
+        if self.runtime_owns_member(internal, signature.name) {
+            return None;
+        }
         let declared = self.file.implementors_of(internal);
         let implementors: Vec<ImplementorArm> = declared
             .iter()
