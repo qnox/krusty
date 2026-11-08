@@ -87,7 +87,7 @@ jobs:
       # `java -version`.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '17'
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
@@ -109,7 +109,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '17'
       # The host tests start real compiler-plugin hosts from their pinned toolchains on the
       # runner's JDK. The toolchains and compiled adapters stay in krusty's cache.
@@ -277,7 +277,7 @@ jobs:
       - *plugin-host-runtime-cache
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '17'
       - name: compiler plugin integration tests
         env:
@@ -310,7 +310,7 @@ jobs:
       # `java -version`.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '17'
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
@@ -344,7 +344,7 @@ jobs:
       # `java -version`.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '17'
       - name: build focused KLIB test binaries
         run: |
@@ -381,7 +381,7 @@ jobs:
       # `java -version`.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '17'
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
@@ -1114,6 +1114,7 @@ jobs:
   # Every covered master commit builds its own immutable release artifacts, even after master
   # advances. All six platforms can build concurrently on their hosted runners.
   build-release:
+    needs: [ci-and-conformance]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     strategy:
       fail-fast: false
