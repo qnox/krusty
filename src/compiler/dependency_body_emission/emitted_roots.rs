@@ -148,7 +148,10 @@ pub(super) fn declarations(
             .map_err(|reason| format!("an invalid target member declaration: {reason:?}"))?;
         // A member of a class no support unit materializes is a leaf: support bodies call it
         // through its declaration, as source calls do, and the target realizes it.
-        let external_member = is_realized_outside_units(platform, bodies, &facts, selected)?;
+        // A target which realizes no declaration outside its emitted bodies has none: body
+        // lowering declines a call of such a member, as it declines any unmodelled form.
+        let external_member = capabilities.target_realizes_bodyless
+            && is_outside_units(platform, bodies, &facts, selected)?;
         // A call of a member realized outside the unit carries the facts the member hierarchy
         // decorates a source call of it with.
         if member || external_member {
@@ -452,8 +455,8 @@ fn member_edge(
     })
 }
 
-/// Whether `identity` is a member of a class no support unit materializes, which support bodies
-/// call through its declaration and the target realizes, so its body is never walked.
+/// Whether `identity` is a member of a class no support unit materializes. Support bodies call it
+/// through its declaration, or decline the call, so its body is never walked.
 pub(super) fn is_external_member(
     platform: &dyn SemanticPlatform,
     bodies: &KlibDeclarationBodies,
@@ -466,21 +469,18 @@ pub(super) fn is_external_member(
     let Some(selected) = realization.klib_body_callable() else {
         return Ok(false);
     };
-    is_realized_outside_units(platform, bodies, callees, selected)
+    is_outside_units(platform, bodies, callees, selected)
 }
 
-/// Whether `callable` is a member of a class no support unit materializes, which the target
-/// realizes. A member of a builtin type of the common type model is not one: its body is an
-/// ordinary function over the builtin value, which a support unit emits.
-fn is_realized_outside_units(
+/// Whether `callable` is a member of a class no support unit materializes, a builtin type of the
+/// common type model included: a target which realizes declarations outside its emitted bodies
+/// realizes it, and body lowering declines a call of it for any other target.
+fn is_outside_units(
     platform: &dyn SemanticPlatform,
     bodies: &KlibDeclarationBodies,
     callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
     callable: KlibBodyCallable<'_>,
 ) -> Result<bool, String> {
     Ok(callable.kind() == ExternalCallableKind::Member
-        && !callable
-            .class_contract()
-            .is_some_and(|class| class.is_builtin_type())
         && !is_materialized_class_member(platform, bodies, callees, callable)?)
 }

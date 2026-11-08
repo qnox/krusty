@@ -1295,15 +1295,11 @@ impl CallLinker for Linker<'_, '_> {
                     .map_err(callee_declined)?;
             }
             if !materialized {
-                // Without a frozen declaration the call itself is the unsupported form. A member of
-                // a builtin type is neither materialized nor realized outside the unit: the unit's
-                // closure emits its body, and lowering does not model a call of it yet.
-                let builtin = candidates.iter().any(|candidate| {
-                    candidate
-                        .class_contract()
-                        .is_some_and(|class| class.is_builtin_type())
-                });
-                if builtin || self.sources.callees.reference_target(&identity).is_none() {
+                // Without a frozen declaration and call edge, which a target realizing the member
+                // outside the unit has, the call itself is the unsupported form.
+                if self.sources.callees.reference_target(&identity).is_none()
+                    || self.sources.callees.member_edge(&identity).is_none()
+                {
                     return Err(KlibBodyDeclineReason::UnsupportedOperation(
                         "a call of a member function",
                     ));
