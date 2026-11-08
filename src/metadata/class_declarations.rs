@@ -113,6 +113,7 @@ pub struct ClassDeclarationRecord {
     pub(crate) primary_ctor_annotations: MetadataAnnotations,
     local_classifiers: crate::fx_hash::HashSet<TypeName>,
     enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
+    anonymous_classifiers: crate::fx_hash::HashSet<TypeName>,
     is_enum: bool,
     is_script: bool,
 }
@@ -206,6 +207,11 @@ impl ClassDeclarationRecord {
         annotations(&mut self.primary_ctor_annotations);
         self.local_classifiers = self
             .local_classifiers
+            .iter()
+            .map(|&classifier| renaming.name(classifier))
+            .collect();
+        self.anonymous_classifiers = self
+            .anonymous_classifiers
             .iter()
             .map(|&classifier| renaming.name(classifier))
             .collect();
@@ -402,6 +408,7 @@ impl ClassDeclarationRecord {
                 .unwrap_or(&self.primary_ctor_annotations),
             local_classifiers: &self.local_classifiers,
             enum_entry_bodies: &self.enum_entry_bodies,
+            anonymous_classifiers: &self.anonymous_classifiers,
             is_enum: self.is_enum,
             is_script: self.is_script,
             annotations_in_metadata: options.annotations_in_metadata,
@@ -613,6 +620,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .properties
         .iter()
         .enumerate()
+        .filter(|(_, property)| property.origin != crate::ir::IrPropertyOrigin::CaptureStorage)
         .map(|(property_index, property)| {
             crate::trace_compiler!(
                 "metadata",
@@ -1128,6 +1136,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         primary_ctor_annotations: MetadataAnnotations::of(&c.primary_ctor_annotations),
         local_classifiers: local_classifiers::names(ir),
         enum_entry_bodies: local_classifiers::enum_entry_bodies(ir),
+        anonymous_classifiers: local_classifiers::anonymous_names(ir),
         is_enum: c.is_enum,
         is_script: c.is_script,
     })
@@ -1801,6 +1810,40 @@ mod tests {
             .iter()
             .map(|(record, _)| record.params.clone())
             .collect()
+    }
+
+    #[test]
+    fn anonymous_reference_provenance_follows_recorded_classifier_renaming() {
+        let original = type_name("sample/Owner").nested_child("object");
+        let renamed = type_name("sample/Physical").nested_child("object");
+        let mut ir = IrFile::default();
+        let mut class = crate::ir::IrClass::synthetic(original);
+        class.is_anonymous_object = true;
+        ir.add_class(class);
+        super::record_all(&mut ir);
+        ir.remap_classifier_identities(&[(original, renamed)].into_iter().collect());
+        assert!(!ir.class_declarations.contains_key(&original));
+        let record = ir.class_declarations[&renamed].as_ref().unwrap();
+        assert_eq!(
+            record.anonymous_classifiers,
+            [renamed].into_iter().collect()
+        );
+        assert_eq!(record.local_classifiers, [renamed].into_iter().collect());
+        let mut strings = crate::metadata::type_encoder::StringTable::with_local_classifiers(
+            &record.local_classifiers,
+            &record.enum_entry_bodies,
+            &record.anonymous_classifiers,
+            None,
+            crate::metadata::MetadataTypeLookups::default().inner_classifiers,
+        );
+        assert_eq!(strings.class_id(renamed), 0);
+        assert_eq!(
+            strings.declaration_class_id(&crate::metadata::class_id::ResolvedClassId::anonymous(
+                renamed
+            )),
+            Ok(0)
+        );
+        assert_eq!(strings.into_strings(), ["sample/Physical$object"]);
     }
 
     #[test]

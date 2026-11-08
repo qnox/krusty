@@ -1,4 +1,4 @@
-//! Base Throwable realization and structured catch-only Kotlin exception transport.
+//! Base Throwable realization and structured Kotlin exception transport.
 
 use krusty::backend::BackendCompilerIntrinsic as CompilerIntrinsic;
 use krusty::fir::ExternalCallableId;
@@ -38,6 +38,44 @@ fn constructor_frame(
         );
     }
     Ok(())
+}
+
+// No cleanup stack is installed for nonlocal control transfers. Check the complete evaluated
+// subtree before emitting anything, conservatively including nested loops and inline bodies.
+fn finally_has_transfer(exprs: &[IrExpr], roots: impl IntoIterator<Item = u32>) -> bool {
+    let mut pending: Vec<_> = roots.into_iter().collect();
+    let mut seen = HashSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if matches!(
+            exprs[id as usize],
+            IrExpr::Return(_) | IrExpr::Break { .. } | IrExpr::Continue { .. }
+        ) {
+            return true;
+        }
+        krusty::ir::for_each_child(exprs, id, &mut |child| pending.push(child));
+    }
+    false
+}
+
+// Validate the actual use, not the logical Nothing type: discarded bottom values may complete.
+fn finally_input(
+    ir: &IrFile,
+    declared: &HashMap<u32, Ty>,
+    input: u32,
+    discarded: bool,
+) -> Result<bool, Unsupported> {
+    let diverges = if discarded {
+        ir.expr_discarding_diverges_by(input, &|_, _| false)
+    } else {
+        ir.expr_diverges_by(input, &|_, _| false)
+    };
+    if expression_type(ir, declared, input)?.is_none() && !diverges {
+        return Err("a `finally` region without a proven completion carrier".into());
+    }
+    Ok(diverges)
 }
 
 impl Body<'_> {
@@ -179,8 +217,8 @@ impl Body<'_> {
         finally: Option<u32>,
         result: Ty,
     ) -> Result<(), Unsupported> {
-        if finally.is_some() {
-            return Err("a `try` with `finally`".into());
+        if let Some(cleanup) = finally {
+            return self.try_finally(body, catches, cleanup, result);
         }
         let [catch] = catches else {
             return Err("a `try` without exactly one Throwable catch".into());
@@ -226,6 +264,78 @@ impl Body<'_> {
             }
         }
         self.close();
+        Ok(())
+    }
+
+    fn try_finally(
+        &mut self,
+        body: u32,
+        catches: &[IrCatch],
+        cleanup: u32,
+        result: Ty,
+    ) -> Result<(), Unsupported> {
+        if finally_has_transfer(
+            &self.ir.exprs,
+            [body, cleanup]
+                .into_iter()
+                .chain(catches.iter().map(|catch| catch.body)),
+        ) {
+            return Err("a `finally` region with return, break, or continue".into());
+        }
+        let carried = carrier(result)?;
+        let cleanup_diverges = finally_input(self.ir, &self.declared, cleanup, true)?;
+        let mut protected_diverges =
+            finally_input(self.ir, &self.declared, body, carried.is_none())?;
+        for catch in catches {
+            protected_diverges &=
+                finally_input(self.ir, &self.declared, catch.body, carried.is_none())?;
+        }
+        let saved = carried.map(|ty| self.local(ty));
+        self.code.block(BlockType::Empty);
+        let done = self.open();
+        self.code.block(BlockType::Value(REFERENCE));
+        let handler = self.open();
+        self.code.try_table(
+            BlockType::Empty,
+            self.runtime.exceptions.tag,
+            self.relative(handler),
+        );
+        self.open();
+        if catches.is_empty() {
+            self.value(body, result)?;
+        } else {
+            self.try_catch(body, catches, None, result)?;
+        }
+        if protected_diverges {
+            self.code.unreachable();
+        }
+        if let Some(saved) = saved {
+            self.code.local_set(saved);
+        }
+        self.code.br(self.relative(done));
+        self.close();
+        self.code.unreachable();
+        self.close();
+        let caught = self.local(REFERENCE);
+        self.code.local_set(caught);
+        // Both copies are outside this try_table. A cleanup throw replaces the saved exception;
+        // only completed cleanup rethrows the identical original Kotlin payload. Host traps and
+        // foreign exceptions do not enter the Kotlin tag handler.
+        self.statement(cleanup)?;
+        self.code
+            .local_get(caught)
+            .ref_as_non_null()
+            .throw(self.runtime.exceptions.tag);
+        self.close();
+        self.statement(cleanup)?;
+        if let Some(saved) = saved {
+            self.code.local_get(saved);
+        }
+        // A structured join must not turn proven noncompletion into a reachable empty stack.
+        // Logical Nothing alone is insufficient after inline control-flow rewriting.
+        if cleanup_diverges || protected_diverges {
+            self.code.unreachable();
+        }
         Ok(())
     }
 }

@@ -241,11 +241,7 @@ pub enum FirIntrinsic {
     ArrayGet,
     ArraySet,
     StringGet,
-    StringLength,
     StringPlus,
-    /// `kotlin.Enum.name` on a receiver. Constant evaluation replaces a direct enum entry with
-    /// that entry's declaration name; every other receiver lowers to the property's call.
-    EnumName,
     NullableAnyToString,
     PrimitiveCompare {
         operand: ResolvedTy,

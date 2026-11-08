@@ -68,8 +68,9 @@ pub use type_name_list::TypeNameList;
 pub use type_parameter_identity::type_parameter_source_name;
 pub(crate) use type_parameter_identity::{
     call_site_type_variable, constructor_type_parameter, generated_function_type_parameter,
-    hidden_captured_type_parameter, metadata_type_parameter, postponed_call_type_variable,
-    postponed_variable_origin, ty_declared_at_call, CallSiteIdentity,
+    hidden_captured_type_parameter, is_nested_result_type_variable, metadata_type_parameter,
+    nested_result_type_variable, postponed_call_type_variable, postponed_variable_origin,
+    ty_declared_at_call, CallSiteIdentity,
 };
 // Backend unit tests build declaration type parameters directly; production code outside the
 // frontend never allocates one.

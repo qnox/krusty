@@ -57,6 +57,7 @@ pub(super) fn reflect_source(
         .collect::<Vec<_>>();
     let local_classifiers = krusty::metadata::local_classifiers::names(ir);
     let enum_entry_bodies = krusty::metadata::local_classifiers::enum_entry_bodies(ir);
+    let anonymous_classifiers = krusty::metadata::local_classifiers::anonymous_names(ir);
     // Realization has fixed the exact typed `invoke` declaration. Its result may be the boxed
     // generic override used by a numbered FunctionN or the scalar implementation reached through
     // FunctionN's packed-array bridge; metadata must describe that declaration, not rebuild a
@@ -92,6 +93,7 @@ pub(super) fn reflect_source(
             type_parameters: recorded,
             local_classifiers: &local_classifiers,
             enum_entry_bodies: &enum_entry_bodies,
+            anonymous_classifiers: &anonymous_classifiers,
             intersection_approximation: &approximate_intersection,
             inner_classifiers: &inner_classifier,
         },

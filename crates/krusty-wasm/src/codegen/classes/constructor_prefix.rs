@@ -96,20 +96,53 @@ fn enclosing_receiver(ir: &IrFile, argument: &IrCtorArg, receiver: &IrCapturedRe
     else {
         return false;
     };
-    if owner.kind != EnclosingInstanceKind::Classifier
-        || argument.capture_identity.is_none()
+    if argument.capture_identity.is_none()
         || !matches!(argument.ty.kind(), TyKind::Obj(name, _) if name == *classifier)
     {
         return false;
     }
-    let Some(&selected) = ir.checked_classifier_classes.get(&owner.declaration) else {
+    if ir
+        .checked_classifier_classes
+        .contains_key(&owner.declaration)
+        && ir
+            .checked_enum_entry_classes
+            .contains_key(&owner.declaration)
+    {
+        return false;
+    }
+    let registry = match owner.kind {
+        EnclosingInstanceKind::Classifier => &ir.checked_classifier_classes,
+        EnclosingInstanceKind::EnumEntry => &ir.checked_enum_entry_classes,
+    };
+    let Some(&selected) = registry.get(&owner.declaration) else {
         return false;
     };
-    ir.classes
-        .get(selected as usize)
-        .is_some_and(|class| class.fq_name_id() == *classifier)
-        && ir
-            .checked_classifier_classes
+    let Some(class) = ir.classes.get(selected as usize) else {
+        return false;
+    };
+    let declared_receiver = match owner.kind {
+        EnclosingInstanceKind::Classifier => class.fq_name_id() == *classifier,
+        EnclosingInstanceKind::EnumEntry => {
+            let Some(entry) = ir.checked_enum_entry_bodies.get(&owner.declaration) else {
+                return false;
+            };
+            let Some(enumeration) = ir.classes.get(entry.class as usize) else {
+                return false;
+            };
+            entry.declaration == owner.declaration
+                && enumeration.is_enum
+                && enumeration.fq_name_id() == *classifier
+                && class.is_enum_entry
+                && class.superclass == *classifier
+                && enumeration
+                    .enum_entries
+                    .get(entry.ordinal as usize)
+                    .and_then(|entry| entry.subclass)
+                    == Some(class.fq_name_id())
+        }
+    };
+    declared_receiver
+        && registry
             .values()
             .filter(|&&class| class == selected)
             .count()

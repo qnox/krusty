@@ -539,6 +539,7 @@ fn lambda_metadata(
         .collect();
     let local_classifiers = krusty::metadata::local_classifiers::names(ir);
     let enum_entry_bodies = krusty::metadata::local_classifiers::enum_entry_bodies(ir);
+    let anonymous_classifiers = krusty::metadata::local_classifiers::anonymous_names(ir);
     let approximate_intersection = |ty| formatter.declaration_approximation(ty);
     let inner_classifier = |classifier| formatter.inner_classifier(classifier);
     let (bytes, strings) = krusty::metadata::lambda_function::build(
@@ -552,6 +553,7 @@ fn lambda_metadata(
             type_parameters: &lambda.type_parameters,
             local_classifiers: &local_classifiers,
             enum_entry_bodies: &enum_entry_bodies,
+            anonymous_classifiers: &anonymous_classifiers,
             intersection_approximation: &approximate_intersection,
             inner_classifiers: &inner_classifier,
         },

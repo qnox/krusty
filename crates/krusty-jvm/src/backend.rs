@@ -1572,6 +1572,7 @@ pub fn facade_package_metadata_from_ir(
 ) -> Option<crate::ir_emit::KotlinMetadata> {
     let local_classifiers = krusty::metadata::local_classifiers::names(ir);
     let enum_entry_bodies = krusty::metadata::local_classifiers::enum_entry_bodies(ir);
+    let anonymous_classifiers = krusty::metadata::local_classifiers::anonymous_names(ir);
     let functions = ir
         .package_functions
         .iter()
@@ -1791,6 +1792,7 @@ pub fn facade_package_metadata_from_ir(
             inner_classifiers: &inner_classifier,
             local_classifiers,
             enum_entry_bodies,
+            anonymous_classifiers,
         },
         metadata_stamp,
         annotations_in_metadata,

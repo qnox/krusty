@@ -62,6 +62,7 @@ pub struct LambdaFunction<'a> {
     /// The file's classifiers whose class ids are local, and the enum entry bodies among them.
     pub local_classifiers: &'a HashSet<TypeName>,
     pub enum_entry_bodies: &'a HashSet<TypeName>,
+    pub anonymous_classifiers: &'a HashSet<TypeName>,
     /// Checked declaration approximation for a non-denotable intersection in this signature.
     pub intersection_approximation: &'a dyn Fn(Ty) -> Option<Ty>,
     /// Checked lookup of inner classifiers named by this signature.
@@ -79,6 +80,7 @@ pub fn build(lambda: &LambdaFunction<'_>) -> Result<(Vec<u8>, Vec<String>), Stri
     let mut strings = StringTable::with_local_classifiers(
         lambda.local_classifiers,
         lambda.enum_entry_bodies,
+        lambda.anonymous_classifiers,
         Some(lambda.intersection_approximation),
         lambda.inner_classifiers,
     );

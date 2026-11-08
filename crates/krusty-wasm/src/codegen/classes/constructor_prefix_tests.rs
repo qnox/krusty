@@ -5,6 +5,157 @@ use krusty::ir::{
 };
 use krusty::types::{type_name, Ty};
 
+fn enum_receiver_slots(ir: &IrFile) -> Vec<(ClassId, u32)> {
+    ir.classes
+        .iter()
+        .enumerate()
+        .flat_map(|(class, declaration)| {
+            declaration
+                .ctor_args
+                .iter()
+                .enumerate()
+                .filter_map(move |(parameter, argument)| {
+                    let IrCapturedReceiver::Enclosing {
+                        owner: Some(owner), ..
+                    } = argument.capture.as_ref()?.receiver.as_ref()?
+                    else {
+                        return None;
+                    };
+                    (owner.kind == krusty::fir::EnclosingInstanceKind::EnumEntry)
+                        .then_some((class as ClassId, parameter as u32))
+                })
+        })
+        .collect()
+}
+
+#[test]
+fn whole_entry_property_programs_keep_their_checked_enclosing_receiver_transport() {
+    for (stem, source) in [
+        (
+            "DeepInnerEntryReceiver",
+            include_str!("../../../../../tests/box_regressions/deepInnerClassInEnumEntryClass2.kt"),
+        ),
+        (
+            "EntryWriteReceiver",
+            include_str!("../../../../../tests/box_regressions/enumEntryPropertyReceiverWrites.kt"),
+        ),
+        (
+            "EntrySetterReceiver",
+            include_str!("../../../../../tests/box_regressions/enumEntryPropertyCustomSetter.kt"),
+        ),
+        (
+            "EntryFunctionReceiver",
+            include_str!(
+                "../../../../../tests/box_regressions/enumEntryReceiverFunctionProperty.kt"
+            ),
+        ),
+    ] {
+        let ir = krusty::fir_lower::single_source_lowering::lower_single_source_with_jvm_stdlib(
+            source, stem,
+        );
+        let slots = enum_receiver_slots(&ir);
+        assert!(
+            !slots.is_empty(),
+            "{stem}: a checked entry receiver is required"
+        );
+        for (class, _) in slots {
+            assert_eq!(check_supported(&ir, class), Ok(()), "{stem}");
+        }
+    }
+}
+
+#[test]
+fn entry_receiver_roles_require_the_exact_declaration_enum_and_subclass() {
+    type Mutation = fn(&mut IrFile, ClassId, u32, krusty::fir::DeclarationId);
+    let mutations: &[(&str, Mutation)] = &[
+        ("missing entry registry", |ir, _, _, owner| {
+            ir.checked_enum_entry_classes.remove(&owner);
+        }),
+        ("missing checked entry body", |ir, _, _, owner| {
+            ir.checked_enum_entry_bodies.remove(&owner);
+        }),
+        ("conflicting declaration role", |ir, _, _, owner| {
+            ir.checked_classifier_classes
+                .insert(owner, ir.checked_enum_entry_classes[&owner]);
+        }),
+        ("ambiguous entry class", |ir, _, _, owner| {
+            ir.checked_enum_entry_classes.insert(
+                krusty::fir::DeclarationId::from_raw(u32::MAX),
+                ir.checked_enum_entry_classes[&owner],
+            );
+        }),
+        ("wrong entry declaration", |ir, _, _, owner| {
+            ir.checked_enum_entry_bodies
+                .get_mut(&owner)
+                .unwrap()
+                .declaration = krusty::fir::DeclarationId::from_raw(u32::MAX);
+        }),
+        ("wrong enum role", |ir, _, _, owner| {
+            let enumeration = ir.checked_enum_entry_bodies[&owner].class;
+            ir.classes[enumeration as usize].is_enum = false;
+        }),
+        ("wrong entry role", |ir, _, _, owner| {
+            let entry = ir.checked_enum_entry_classes[&owner];
+            ir.classes[entry as usize].is_enum_entry = false;
+        }),
+        ("wrong entry ordinal", |ir, _, _, owner| {
+            ir.checked_enum_entry_bodies
+                .get_mut(&owner)
+                .unwrap()
+                .ordinal = u32::MAX;
+        }),
+        ("missing selected subclass", |ir, _, _, owner| {
+            let entry = &ir.checked_enum_entry_bodies[&owner];
+            ir.classes[entry.class as usize].enum_entries[entry.ordinal as usize].subclass = None;
+        }),
+        ("wrong superclass", |ir, _, _, owner| {
+            let entry = ir.checked_enum_entry_classes[&owner];
+            ir.classes[entry as usize].superclass = type_name("kotlin/Any");
+        }),
+        ("wrong semantic capture type", |ir, class, parameter, _| {
+            ir.classes[class as usize].ctor_args[parameter as usize].ty = Ty::Int;
+        }),
+        ("missing logical identity", |ir, class, parameter, _| {
+            ir.class_capture_identities.remove(&(class, parameter));
+        }),
+        ("missing pre-super store", |ir, class, _, _| {
+            ir.classes[class as usize].pre_super_param_fields.clear();
+        }),
+    ];
+    let original = krusty::fir_lower::single_source_lowering::lower_single_source_with_jvm_stdlib(
+        include_str!("../../../../../tests/box_regressions/enumEntryPropertyReceiverWrites.kt"),
+        "EntryReceiverOwnership",
+    );
+    let (class, parameter) = enum_receiver_slots(&original)
+        .into_iter()
+        .find(|&(class, parameter)| {
+            original.classes[class as usize].ctor_args[parameter as usize].is_field
+        })
+        .expect("the nested member retains its checked entry instance");
+    let IrCapturedReceiver::Enclosing {
+        owner: Some(owner), ..
+    } = original.classes[class as usize].ctor_args[parameter as usize]
+        .capture
+        .as_ref()
+        .unwrap()
+        .receiver
+        .as_ref()
+        .unwrap()
+    else {
+        panic!("a checked enclosing receiver")
+    };
+    assert_eq!(check_supported(&original, class), Ok(()));
+    let expected = Err(format!(
+        "a class capturing its surroundings (`{}`)",
+        original.classes[class as usize].fq_name()
+    ));
+    for (label, mutation) in mutations {
+        let mut ir = copy_transport(&original);
+        mutation(&mut ir, class, parameter, owner.declaration);
+        assert_eq!(check_supported(&ir, class), expected, "{label}");
+    }
+}
+
 fn check_class(class: &IrClass) -> Result<(), super::Unsupported> {
     let mut ir = IrFile::default();
     ir.classes.push(class.clone());
@@ -325,6 +476,16 @@ fn copy_transport(ir: &IrFile) -> IrFile {
         ir.checked_classifier_classes
             .iter()
             .map(|(declaration, class)| (*declaration, *class)),
+    );
+    copy.checked_enum_entry_classes.extend(
+        ir.checked_enum_entry_classes
+            .iter()
+            .map(|(declaration, class)| (*declaration, *class)),
+    );
+    copy.checked_enum_entry_bodies.extend(
+        ir.checked_enum_entry_bodies
+            .iter()
+            .map(|(declaration, body)| (*declaration, body.clone())),
     );
     copy.class_capture_identities.extend(
         ir.class_capture_identities
