@@ -387,13 +387,22 @@ pub(crate) fn nested_result_is_input_constrained(
         .filter(|formal| {
             crate::types::ty_mentions_param(generic_sig.ret, std::slice::from_ref(*formal))
         })
-        .any(|formal| {
-            generic_sig.receiver.is_some_and(|receiver| {
-                crate::types::ty_mentions_param(receiver, std::slice::from_ref(formal))
-            }) || generic_sig.params.iter().any(|parameter| {
-                crate::types::ty_mentions_param(*parameter, std::slice::from_ref(formal))
-            })
-        })
+        .any(|formal| formal_is_input_constrained(generic_sig, formal))
+}
+
+/// Whether a nested call's own receiver or value parameters mention `formal`, so the call's
+/// arguments can bind it. A result formal they do not mention reads as its declared bound in the
+/// provisional result: that is a placeholder, not evidence.
+fn formal_is_input_constrained(
+    generic_sig: &GenericSig,
+    formal: &crate::types::TyParamName,
+) -> bool {
+    generic_sig.receiver.is_some_and(|receiver| {
+        crate::types::ty_mentions_param(receiver, std::slice::from_ref(formal))
+    }) || generic_sig
+        .params
+        .iter()
+        .any(|parameter| crate::types::ty_mentions_param(*parameter, std::slice::from_ref(formal)))
 }
 
 /// Whether binding a nested call's result to an enclosing expectation keeps the nullability the
@@ -422,7 +431,8 @@ pub(crate) fn expected_result_keeps_call_evidence(
     let mut input_bindings = super::GSigBinds::default();
     super::unify_inferred_ty(generic_sig.ret, provisional, &mut input_bindings);
     input_bindings.iter().all(|(formal, input)| {
-        !input.admits_null()
+        !formal_is_input_constrained(generic_sig, formal)
+            || !input.admits_null()
             || expected_bindings
                 .get(formal)
                 .is_none_or(|expected| admits_null(*expected))
