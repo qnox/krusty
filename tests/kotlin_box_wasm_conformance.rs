@@ -1200,3 +1200,6 @@ fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
         "wasmFinallyValueAndKotlinThrow",
     );
 }
+
+#[path = "wasm_unsigned_decimal.rs"]
+mod unsigned_decimal;

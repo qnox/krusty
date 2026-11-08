@@ -14,6 +14,9 @@ impl Body<'_> {
             self.string_constant("kotlin.Unit");
             return Ok(());
         }
+        if ty.is_unsigned() {
+            return self.unsigned_string_of(id, ty);
+        }
         let nullable_scalar = match ty.kind() {
             TyKind::Nullable(inner) => self
                 .scalar_string_function(inner)
@@ -55,6 +58,25 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// Decimal conversion of an exact non-null unsigned scalar, retaining its semantic width.
+    pub(super) fn unsigned_string_of(&mut self, id: u32, source: Ty) -> Result<(), Unsupported> {
+        if !source.is_unsigned() || self.type_of(id)? != Some(source) {
+            return Err(
+                "an unsigned string conversion without its exact non-null scalar source".into(),
+            );
+        }
+        self.expression(id)?;
+        if let Some(mask) = source.unsigned_widen_mask() {
+            self.code.i32_const(mask).op(AND32);
+        }
+        self.code.call(if source == Ty::ULong {
+            self.runtime.string_of_u64
+        } else {
+            self.runtime.string_of_u32
+        });
+        Ok(())
+    }
+
     /// The runtime function printing a `ty` scalar carrier.
     fn scalar_string_function(&self, ty: Ty) -> Option<u32> {
         Some(match ty {
@@ -77,3 +99,6 @@ impl Body<'_> {
 fn is_unit(ty: Ty) -> bool {
     ty == Ty::Unit || matches!(ty.kind(), TyKind::Obj(name, _) if name == crate::types::wk::unit())
 }
+
+#[cfg(test)]
+mod tests;
