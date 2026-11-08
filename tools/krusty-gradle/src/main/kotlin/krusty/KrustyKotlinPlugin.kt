@@ -232,12 +232,13 @@ private fun replaceKotlinJvmCompiles(
             binary.set(project.layout.file(binaryPath.map(::File)))
             refusals.set(compilerChoice)
         }
-        // KGP can put generated classes on the classpath by path and wire their producers onto
-        // the Kotlin task. Every reader needs those predecessors, including the fingerprint that
-        // runs before the replacement. The Kotlin task depends on our replacement, so that is the
-        // one edge a reader must not take back.
+        // KGP infers producer dependencies from task inputs as well as explicit dependsOn.
+        // Every classpath reader needs that complete graph. The Kotlin task also depends on
+        // our replacement, so exclude only that owned task by identity.
+        val replacement = project.tasks.register(replacementName, KrustyCompileTask::class.java)
         val compilePrerequisites = project.provider {
-            kotlinTask.dependsOn.filterNot { it is TaskProvider<*> && it.name == replacementName }
+            val replacementTask = replacement.get()
+            kotlinTask.taskDependencies.getDependencies(kotlinTask).filterNot { it === replacementTask }
         }
         val classpathFingerprint = project.tasks.register(
             "${kotlinTask.name}KrustyClasspath",
@@ -285,7 +286,7 @@ private fun replaceKotlinJvmCompiles(
             compilerPluginOptions.set(compilerPluginArguments)
             binary.set(project.layout.file(binaryPath.map(::File)))
         }
-        val replacement = project.tasks.register(replacementName, KrustyCompileTask::class.java) {
+        replacement.configure {
             group = kotlinTask.group ?: "build"
             description = "${kotlinTask.description ?: kotlinTask.name}, using krusty"
             configureCompilation()
