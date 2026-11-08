@@ -16,6 +16,7 @@ mod constructor_exports;
 mod control_forms;
 mod demo_package;
 mod elvis_blocks;
+mod enum_entries;
 mod for_loop_bindings;
 mod inline_templates;
 mod parameter_defaults;

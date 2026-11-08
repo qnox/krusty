@@ -36,6 +36,7 @@ use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol};
 use crate::types::{Ty, TypeName};
 
 mod class_construction;
+mod enum_materialization;
 mod local_class;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
@@ -171,6 +172,9 @@ pub struct DependencyBodyUnit {
     ir: IrFile,
     functions: HashMap<KlibDependencyCallable, FunId>,
     classes: HashMap<KlibDependencyCallable, crate::ir::ClassId>,
+    /// Enum classes whose constants this unit's bodies read, keyed by their constructor. Their
+    /// constants are built by the shared enum realization, so none exports a constructor.
+    enum_classes: HashMap<KlibDependencyCallable, crate::ir::ClassId>,
     authenticated_singleton_dispatches: HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: HashMap<KlibDependencyCallable, TypeName>,
     /// Private members of value classes, which only this unit's members of their class call.
@@ -199,6 +203,7 @@ impl Default for DependencyBodyUnit {
             ir: IrFile::default(),
             functions: HashMap::default(),
             classes: HashMap::default(),
+            enum_classes: HashMap::default(),
             authenticated_singleton_dispatches: HashMap::default(),
             authenticated_singleton_classifiers: HashMap::default(),
             private_members: HashSet::default(),
@@ -593,11 +598,15 @@ impl DependencyBodyUnit {
         })
     }
 
-    /// Ordinary classes owned by this closed unit, keyed by their authenticated constructor.
+    /// Classes owned by this closed unit, keyed by their authenticated constructor.
     pub(crate) fn materialized_classes(
         &self,
     ) -> impl Iterator<Item = (TypeName, &KlibDependencyCallable)> {
-        let mut classes = self.classes.iter().collect::<Vec<_>>();
+        let mut classes = self
+            .classes
+            .iter()
+            .chain(&self.enum_classes)
+            .collect::<Vec<_>>();
         classes.sort_unstable_by_key(|(_, class)| **class);
         classes
             .into_iter()
@@ -613,6 +622,7 @@ impl DependencyBodyUnit {
         let mut linker = Linker {
             functions: &mut self.functions,
             classes: &mut self.classes,
+            enum_classes: &mut self.enum_classes,
             authenticated_singleton_dispatches: &mut self.authenticated_singleton_dispatches,
             authenticated_singleton_classifiers: &mut self.authenticated_singleton_classifiers,
             private_members: &mut self.private_members,
@@ -723,6 +733,7 @@ impl DependencyBodyUnit {
 struct Linker<'u, 's> {
     functions: &'u mut HashMap<KlibDependencyCallable, FunId>,
     classes: &'u mut HashMap<KlibDependencyCallable, crate::ir::ClassId>,
+    enum_classes: &'u mut HashMap<KlibDependencyCallable, crate::ir::ClassId>,
     authenticated_singleton_dispatches: &'u mut HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
     private_members: &'u mut HashSet<KlibDependencyCallable>,
@@ -970,6 +981,21 @@ impl CallLinker for Linker<'_, '_> {
         self.sources
             .callees
             .constructor_bound(parameters, argument, bound)
+    }
+
+    fn enum_entry(
+        &mut self,
+        ir: &mut IrFile,
+        entry: &KlibPublicIdSignature,
+    ) -> Result<(TypeName, String), KlibBodyDeclineReason> {
+        let (class, name) = super::enum_classes::authenticate_entry(
+            self.sources.bodies,
+            &self.active_module,
+            entry,
+        )?;
+        let classifier = class.classifier;
+        self.materialize_enum_class(ir, class)?;
+        Ok((classifier, name))
     }
 
     fn singleton(&self, classifier: TypeName) -> Result<(), KlibBodyDeclineReason> {
@@ -1826,6 +1852,8 @@ impl UnitCheckpoint {
         let first = self.0.restore(&mut unit.ir);
         unit.functions.retain(|_, function| *function < first);
         unit.classes
+            .retain(|_, class| (*class as usize) < unit.ir.classes.len());
+        unit.enum_classes
             .retain(|_, class| (*class as usize) < unit.ir.classes.len());
         let functions = &unit.functions;
         unit.authenticated_singleton_dispatches

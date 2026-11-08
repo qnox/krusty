@@ -1,9 +1,10 @@
-//! Calls of dependency constructors and reads of dependency singletons.
+//! Calls of dependency constructors and reads of dependency singletons and enum constants.
 //!
 //! A constructor call lowers as checked FIR lowers the source construction of a dependency class:
 //! one construction of the class by the provider's constructor identity, with its supplied operands
 //! in declaration order and the ordinals of the parameters it leaves to their defaults. An object
-//! value lowers as the source reference of the singleton: its classifier's singleton value.
+//! value lowers as the source reference of the singleton: its classifier's singleton value. An enum
+//! entry lowers as the source reference of the constant, of the enum class the linker realized.
 
 use super::{mismatch, unsupported, BodyLowering, Lowered};
 use crate::ir::{ExprId, IrExpr};
@@ -46,6 +47,25 @@ impl BodyLowering<'_> {
         // type rather than its class.
         let value = self.ir.add_expr(IrExpr::SingletonValue { classifier });
         self.ir.set_logical_type(value, object);
+        Ok(value)
+    }
+
+    pub(super) fn enum_entry_value(&mut self, symbol: &KlibIrSymbol, ty: Ty) -> Lowered<ExprId> {
+        if symbol.kind != KlibIrSymbolKind::EnumEntry {
+            return Err(mismatch("an enum entry read's symbol is not an enum entry"));
+        }
+        let KlibIrSignature::Public(entry) = &symbol.signature else {
+            return unsupported("a file-private enum entry");
+        };
+        let (classifier, name) = self.linker.enum_entry(self.ir, entry)?;
+        if ty != Ty::obj_name(classifier) {
+            return Err(mismatch("an enum entry read is typed apart from its enum"));
+        }
+        let value = self.ir.add_expr(IrExpr::EnumEntry {
+            classifier,
+            name: name.into(),
+        });
+        self.ir.set_logical_type(value, ty);
         Ok(value)
     }
 

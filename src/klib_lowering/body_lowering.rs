@@ -175,6 +175,16 @@ pub(super) trait CallLinker {
     /// Proves that `classifier` is a dependency object, whose value a body may read.
     fn singleton(&self, classifier: TypeName) -> Lowered<()>;
 
+    /// The dependency enum class whose constant `entry` a body reads, with that constant's name.
+    /// A linker that materializes no class declines the read.
+    fn enum_entry(
+        &mut self,
+        _ir: &mut IrFile,
+        _entry: &KlibPublicIdSignature,
+    ) -> Lowered<(TypeName, String)> {
+        unsupported("an enum entry")
+    }
+
     /// `sub` as the class `owner` it is a subtype of, with the type arguments its hierarchy applies
     /// to `owner`.
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty>;
@@ -551,7 +561,10 @@ impl<'a> BodyLowering<'a> {
                 let ty = self.ty(expression, "class literal")?;
                 return self.class_reference(class, *class_type, ty);
             }
-            KlibIrExprKind::GetEnumValue(_) => return unsupported("an enum entry"),
+            KlibIrExprKind::GetEnumValue(symbol) => {
+                let ty = self.ty(expression, "enum entry")?;
+                return self.enum_entry_value(symbol, ty);
+            }
             KlibIrExprKind::Break { loop_id, label: _ } => {
                 let ty = self.ty(expression, "`break`")?;
                 (self.jump(*loop_id, ty, false)?, ty)
