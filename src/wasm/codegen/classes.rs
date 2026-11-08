@@ -44,6 +44,7 @@ use super::super::encode::{
 };
 use super::super::interface_dispatch::ClassRef;
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
+use super::super::runtime::{AND32, EQ32, EQ64, OR32};
 use super::lower::{carrier, parameter_carrier, Unsupported, STRING};
 
 mod companion_construction;
@@ -565,22 +566,22 @@ fn value_class_equals(module: &mut Module, storage: ValueStorage, equals: u32) -
             // Locals follow the two reference parameters.
             code.local_set(3).local_set(2);
             let (ne, bits, bits_eq) = match storage.value {
-                ValType::F32 => (0x5c, 0xbc, crate::wasm::runtime::EQ32),
-                _ => (0x62, 0xbd, crate::wasm::runtime::EQ64),
+                ValType::F32 => (0x5c, 0xbc, EQ32),
+                _ => (0x62, 0xbd, EQ64),
             };
             code.local_get(2).local_get(2).op(ne);
             code.local_get(3).local_get(3).op(ne);
-            code.op(crate::wasm::runtime::AND32);
+            code.op(AND32);
             code.local_get(2).op(bits).local_get(3).op(bits).op(bits_eq);
-            code.op(crate::wasm::runtime::OR32);
+            code.op(OR32);
             vec![storage.value, storage.value]
         }
         ValType::I32 => {
-            code.op(crate::wasm::runtime::EQ32);
+            code.op(EQ32);
             Vec::new()
         }
         ValType::I64 => {
-            code.op(crate::wasm::runtime::EQ64);
+            code.op(EQ64);
             Vec::new()
         }
         ValType::Ref { .. } => {
