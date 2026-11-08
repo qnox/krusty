@@ -183,16 +183,27 @@ fn element_value(ir: &IrFile, expression: ExprId, declared: Ty) -> Option<AnnoVa
             let mut supplied = args.iter();
             let mut values = Vec::new();
             for (ordinal, (name, ty)) in construction.members.iter().enumerate() {
-                if defaults.contains(&u32::try_from(ordinal).ok()?) {
+                let ordinal = u32::try_from(ordinal).ok()?;
+                if defaults.contains(&ordinal) {
+                    if !construction.arguments.omits(ordinal) {
+                        return None;
+                    }
                     continue;
                 }
-                values.push((name.clone(), element_value(ir, *supplied.next()?, *ty)?));
+                // A compact default replay supplies every runtime operand, including values whose
+                // declaration defaults stay omitted from metadata. Consume before projecting it.
+                let argument = *supplied.next()?;
+                if !construction.arguments.omits(ordinal) {
+                    values.push((name.clone(), element_value(ir, argument, *ty)?));
+                }
             }
             if supplied.next().is_some() {
                 return None;
             }
             AnnoValue::Annotation(AppliedAnnotation {
-                written_order: None,
+                written_order: construction
+                    .arguments
+                    .applied_order(construction.members.len())?,
                 internal: construction.interface,
                 values,
             })
@@ -203,6 +214,8 @@ fn element_value(ir: &IrFile, expression: ExprId, declared: Ty) -> Option<AnnoVa
 
 #[cfg(test)]
 mod tests {
+    mod argument_provenance;
+
     use super::*;
     use crate::types::{type_name, Ty};
 
@@ -217,6 +230,7 @@ mod tests {
             internal: interface,
             args: Vec::new(),
             ctor_params: None,
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([0]),
@@ -225,6 +239,12 @@ mod tests {
         ir.annotation_constructions.insert(
             construction,
             crate::ir::IrAnnotationConstruction {
+                arguments: crate::libraries::AnnotationArgumentProvenance::from_selected(
+                    1,
+                    &[],
+                    &[0],
+                )
+                .unwrap(),
                 interface,
                 members: vec![("value".into(), Ty::Int)],
                 defaults: vec![Some(closed)],
@@ -248,6 +268,7 @@ mod tests {
             internal: interface,
             args: Vec::new(),
             ctor_params: Some(vec![Ty::Int]),
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([0]),
@@ -256,6 +277,12 @@ mod tests {
         ir.annotation_constructions.insert(
             construction,
             crate::ir::IrAnnotationConstruction {
+                arguments: crate::libraries::AnnotationArgumentProvenance::from_selected(
+                    1,
+                    &[],
+                    &[0],
+                )
+                .unwrap(),
                 interface,
                 members: vec![("value".into(), Ty::Int)],
                 defaults: vec![None],

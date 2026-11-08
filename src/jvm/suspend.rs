@@ -1655,7 +1655,7 @@ fn build_state_machine(
             ),
             enclosing_function: Some(fid),
         };
-        continuation_metadata.insert(cont_internal.clone(), metadata);
+        continuation_metadata.insert(crate::types::type_name(&cont_internal), metadata);
     }
     let states = std::mem::take(&mut flat.states);
     let state_handlers = std::mem::take(&mut flat.state_handlers);
@@ -2138,7 +2138,7 @@ impl Flat<'_> {
         // already selected the resume completion from the checked BottomValue wrapper in its exact
         // use context; clear the raw call's logical bottom fact independently of that selection.
         if completion.semantic_bottom {
-            self.ir.logical_types.remove(&point);
+            self.ir.take_logical_type(point);
         }
         let dead = self
             .scopes

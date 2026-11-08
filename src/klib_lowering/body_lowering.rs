@@ -15,6 +15,7 @@ use crate::fx_hash::{HashMap, HashSet};
 
 mod arrays;
 mod blocks;
+mod callable_references;
 mod calls;
 mod class_initializers;
 mod class_literals;
@@ -23,12 +24,15 @@ mod compiler_blocks;
 mod conditionals;
 mod constructions;
 mod elvis_blocks;
+mod instance_storage;
 mod loops;
 mod range_membership;
 mod safe_calls;
 mod string_templates;
 mod try_catch;
 mod type_operators;
+
+pub(super) use blocks::publish_parameter_defaults;
 
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::FunctionHeader;
@@ -61,11 +65,24 @@ pub(super) struct LinkedCallee {
     pub(super) singleton_dispatch: Option<TypeName>,
     /// The semantic identities of the callee's own type parameters, which the receiver,
     /// parameters and result name and a call's type arguments bind, in declaration order.
-    pub(super) type_parameters: Vec<String>,
+    pub(super) type_parameters: Vec<crate::types::TyParamName>,
+    /// The complete declared upper bounds of each of [`Self::type_parameters`], as the selected
+    /// declaration authenticates them (an empty slot is the implicit `Any?`). `None` when the
+    /// selection carries no generic signature to read them from.
+    pub(super) type_parameter_bounds: Option<Vec<Vec<Ty>>>,
     /// The semantic identities of the type parameters of a member's generic class, which the
     /// receiver (the class applied to them), parameters and result name and a call binds from its
     /// dispatch receiver's type, in declaration order.
     pub(super) class_type_parameters: Vec<String>,
+    /// Whether each of [`Self::params`] declares a default a call may leave it to, for a function
+    /// this unit lowers; empty for every other callee, which no call may omit an argument of.
+    pub(super) parameter_defaults: Vec<bool>,
+}
+
+pub(super) struct LinkedCallableReference {
+    pub(super) declaration: crate::fir::ExternalCallableId,
+    pub(super) kind: crate::libraries::ExternalCallableKind,
+    pub(super) call: LinkedCallee,
 }
 
 /// The declared shape of a member a range literal's membership calls.
@@ -106,6 +123,14 @@ pub(super) trait CallLinker {
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 
+    fn link_reference(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<LinkedCallableReference> {
+        unsupported("a callable reference without an exact provider declaration")
+    }
+
     /// The dependency constructor a constructor call of the public declaration `callee` invokes.
     fn link_constructor(
         &mut self,
@@ -114,7 +139,11 @@ pub(super) trait CallLinker {
     ) -> Lowered<LinkedConstructor>;
 
     /// The dependency property a call of its accessor `callee` reads or writes.
-    fn link_accessor(&mut self, callee: &KlibAccessorIdSignature) -> Lowered<LinkedAccessor>;
+    fn link_accessor(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibAccessorIdSignature,
+    ) -> Lowered<LinkedAccessor>;
 
     /// Proves that `classifier` is a dependency object, whose value a body may read.
     fn singleton(&self, classifier: TypeName) -> Lowered<()>;
@@ -148,7 +177,7 @@ pub(super) struct LinkedConstructor {
 /// and the accessor's dispatch receiver, parameters (context parameters, extension receiver, and a
 /// setter's value) and result.
 pub(super) struct LinkedAccessor {
-    pub(super) property: crate::fir::ExternalPropertyId,
+    pub(super) target: LinkedAccessorTarget,
     pub(super) write: bool,
     pub(super) receiver: Option<Ty>,
     pub(super) params: Vec<Ty>,
@@ -156,6 +185,16 @@ pub(super) struct LinkedAccessor {
     pub(super) context_count: usize,
     /// As [`LinkedCallee::class_type_parameters`].
     pub(super) class_type_parameters: Vec<String>,
+}
+
+/// What an accessor call reaches.
+#[derive(Clone, Copy)]
+pub(super) enum LinkedAccessorTarget {
+    /// The provider's property, read or written through its accessor.
+    External(crate::fir::ExternalPropertyId),
+    /// The getter this unit emits, for a member of a value class: a member function of its
+    /// class, called on the receiver in place of the property read.
+    Local(FunId),
 }
 
 /// The function a body is lowered into: its serialized symbol, the only target its `return`s may
@@ -192,7 +231,7 @@ pub(super) struct BodyLowering<'a> {
     /// The coercions of an erased body's values to their erasure, which a conversion back to the
     /// declared type cancels.
     erasure_coercions: HashSet<ExprId>,
-    initialization: Option<class_initializers::InitializationFrame<'a>>,
+    instance_storage: Option<instance_storage::InstanceStorageFrame<'a>>,
 }
 
 impl<'a> BodyLowering<'a> {
@@ -219,8 +258,23 @@ impl<'a> BodyLowering<'a> {
             loops: Vec::new(),
             breakable_loops: HashSet::default(),
             erasure_coercions: HashSet::default(),
-            initialization: None,
+            instance_storage: None,
         }
+    }
+
+    /// This body as a member of the value class `class`, which reads its value through `field`.
+    pub(super) fn reading_value_through(
+        mut self,
+        class: crate::ir::ClassId,
+        field: &'a crate::metadata::klib_ir::tree::KlibIrField,
+    ) -> Self {
+        self.instance_storage = Some(instance_storage::InstanceStorageFrame::value_member(
+            class,
+            field,
+            self.ir.classes[class as usize].fields[0].ty,
+            self.header.value_receiver(),
+        ));
+        self
     }
 
     fn statement(&mut self, statement: &KlibIrStatement) -> Lowered<ExprId> {
@@ -325,6 +379,13 @@ impl<'a> BodyLowering<'a> {
                 origin,
                 ..
             } => {
+                if let Some(reference) =
+                    super::callable_references::unbound_reference(self.arena, expression)
+                {
+                    let ty = self.ty(expression, "callable reference")?;
+                    let lowered = self.callable_reference(reference, ty)?;
+                    return Ok(self.typed(lowered, ty));
+                }
                 if !super::closure_forms::unbound_rich_reference(&expression.kind) {
                     return unsupported("a bound or reflective rich function reference");
                 }
@@ -524,9 +585,9 @@ impl<'a> BodyLowering<'a> {
     /// records the type of every expression it lowers, around the bottom-value completion it
     /// attaches to a `Nothing` producer.
     fn typed(&mut self, lowered: ExprId, ty: Ty) -> ExprId {
-        self.ir.logical_types.insert(lowered, ty);
+        self.ir.set_logical_type(lowered, ty);
         let completed = complete_bottom_value(self.ir, lowered, ty);
-        self.ir.logical_types.insert(completed, ty);
+        self.ir.set_logical_type(completed, ty);
         completed
     }
 
@@ -635,7 +696,7 @@ impl<'a> BodyLowering<'a> {
             Some(erased) => {
                 // The read itself is of the declared type; its use is of the erasure.
                 let declared = self.header.slot_type(index);
-                self.ir.logical_types.insert(read, declared);
+                self.ir.set_logical_type(read, declared);
                 let coercion = self.coercion(read, erased);
                 self.erasure_coercions.insert(coercion);
                 coercion
@@ -691,7 +752,7 @@ impl<'a> BodyLowering<'a> {
                     .map(|(condition, result)| (condition, self.declared_value(result, target)))
                     .collect();
                 self.ir.exprs[value as usize] = IrExpr::When { branches };
-                self.ir.logical_types.insert(value, target);
+                self.ir.set_logical_type(value, target);
                 if self.ir.whens.exhaustive.contains_key(&value) {
                     self.ir.whens.exhaustive.insert(value, target);
                 }

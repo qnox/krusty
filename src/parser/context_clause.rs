@@ -78,13 +78,13 @@ impl Parser<'_> {
             }
             self.pending_context_params = self.parse_context_receiver_list();
         }
-        self.skip_newlines();
+        self.skip_semicolons();
         // Modifiers/annotations may follow the context prefix (`context(a: A) private fun …`);
         // consume them so the declaration keyword is next, and RETURN them so the caller keeps the
         // visibility/modality (annotations buffer as pending, read by the declaration parser).
         if self.at(TokenKind::At) || self.at_modifier() {
             let m = self.extend_decl_prefix();
-            self.skip_newlines();
+            self.skip_semicolons();
             m
         } else {
             Vec::new()
@@ -97,7 +97,7 @@ impl Parser<'_> {
     fn parse_context_receiver_list(&mut self) -> Vec<Param> {
         let mut receivers = Vec::new();
         self.expect(TokenKind::LParen, "'('");
-        self.skip_newlines();
+        self.skip_semicolons();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             let ty = self.parse_type();
             receivers.push(Param {
@@ -113,11 +113,11 @@ impl Parser<'_> {
                 annotations: Vec::new(),
                 annotation_args: Vec::new(),
             });
-            self.skip_newlines();
+            self.skip_semicolons();
             if !self.eat(TokenKind::Comma) {
                 break;
             }
-            self.skip_newlines();
+            self.skip_semicolons();
         }
         self.expect(TokenKind::RParen, "')'");
         receivers

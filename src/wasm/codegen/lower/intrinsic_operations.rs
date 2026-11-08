@@ -19,6 +19,12 @@ impl Body<'_> {
                 };
                 self.reference_array_get(receiver, *index)
             }
+            IrIntrinsic::ArraySet => {
+                let (Some(receiver), [index, value]) = (receiver, args) else {
+                    return Err("an array store with malformed operands".into());
+                };
+                self.reference_array_set(receiver, *index, *value)
+            }
             IrIntrinsic::PrimitiveCompare { operand, .. } => {
                 let (lhs, rhs) = match (receiver, args) {
                     (None, [lhs, rhs]) => (*lhs, *rhs),
@@ -50,8 +56,40 @@ impl Body<'_> {
                 self.code.array_get_u(self.runtime.chars);
                 Ok(())
             }
+            // `Any?.toString()` is the string a template makes of its operand.
+            IrIntrinsic::NullableAnyToString => {
+                let value = match (receiver, args) {
+                    (None, [value]) => *value,
+                    (Some(value), []) => value,
+                    _ => return Err("a malformed `toString` call".to_string()),
+                };
+                self.string_of(value)
+            }
+            IrIntrinsic::GeneratedPropertyHash { ty } => {
+                let (None, [value]) = (receiver, args) else {
+                    return Err("a malformed generated property hash".to_string());
+                };
+                self.generated_property_hash(*value, ty)
+            }
+            IrIntrinsic::GeneratedPropertyEquals { ty } => {
+                let (None, [left, right]) = (receiver, args) else {
+                    return Err("a malformed generated property comparison".to_string());
+                };
+                self.generated_property_equals(*left, *right, ty)
+            }
             other => Err(format!("a call to the intrinsic {other:?}")),
         }
+    }
+
+    /// Whether `target` is a string's `length`, by its getter's provider realization.
+    pub(super) fn is_string_length_property(&self, target: crate::fir::ExternalPropertyId) -> bool {
+        self.callables
+            .property(target)
+            .and_then(|property| self.callables.callable(property.getter))
+            .is_some_and(|getter| {
+                getter.compiler_operation()
+                    == Some(crate::backend::BackendCompilerIntrinsic::StringLength)
+            })
     }
 
     /// Leave the selected String receiver's UTF-16 storage array on the stack.

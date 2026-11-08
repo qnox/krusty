@@ -853,8 +853,11 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 crate::ir::IrIntrinsic::StringLength | crate::ir::IrIntrinsic::ArraySize => {
                     format!("{}.length", emit_expr(ir, dispatch_receiver.unwrap(), inst))
                 }
-                crate::ir::IrIntrinsic::EnumName => {
-                    format!("{}.name", emit_expr(ir, dispatch_receiver.unwrap(), inst))
+                crate::ir::IrIntrinsic::EnumOrdinal => {
+                    format!(
+                        "{}.ordinal",
+                        emit_expr(ir, dispatch_receiver.unwrap(), inst)
+                    )
                 }
                 crate::ir::IrIntrinsic::StringGet | crate::ir::IrIntrinsic::ArrayGet => format!(
                     "{}[{}]",
@@ -1294,6 +1297,7 @@ mod tests {
 
     fn blank_class(name: &str) -> IrClass {
         IrClass {
+            declaration_context: None,
             fq_name: name.into(),
             declaration_name: None,
             is_source_declared: true,

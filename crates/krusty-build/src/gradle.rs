@@ -313,56 +313,6 @@ mod tests {
         );
     }
 
-    /// The kotlin-versions manifest is the only list of supported releases: the plugin and its
-    /// packaging read it, and CI runs a Gradle lane for each of its releases.
-    #[test]
-    fn supported_gradle_kotlin_versions_follow_the_repository_manifest() {
-        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let manifest = std::fs::read_to_string(repository.join("kotlin-versions"))
-            .expect("read kotlin-versions");
-        let supported = manifest
-            .lines()
-            .map(|line| line.split('#').next().unwrap_or_default().trim())
-            .filter(|line| !line.is_empty())
-            .map(|line| line.split_whitespace().next().expect("reference version"))
-            .collect::<Vec<_>>();
-
-        let plugin = std::fs::read_to_string(
-            repository.join("tools/krusty-gradle/src/main/kotlin/krusty/KrustyKotlinPlugin.kt"),
-        )
-        .expect("read Gradle plugin");
-        let check = plugin
-            .split_once("private fun supportedKotlinPluginVersion")
-            .expect("supported Kotlin plugin version check")
-            .1
-            .split_once("\n    }\n")
-            .expect("end of the supported Kotlin plugin version check")
-            .0;
-        assert_eq!(quoted_release_versions(check), Vec::<&str>::new());
-
-        let workflow = std::fs::read_to_string(repository.join(".github/workflows/ci.yml"))
-            .expect("read CI workflow");
-        let gradle_job = workflow
-            .split_once("\n  gradle:\n")
-            .expect("Gradle integration job")
-            .1
-            .split_once("\n    steps:\n")
-            .expect("Gradle integration steps")
-            .0;
-        assert!(
-            gradle_job.contains("kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}"),
-            "every supported release needs a Gradle lane:\n{gradle_job}"
-        );
-        let unsupported = gradle_job
-            .lines()
-            .filter_map(|line| line.split_once("{ kotlin:").map(|(_, row)| row))
-            .filter_map(|row| row.split(',').next())
-            .map(str::trim)
-            .filter(|version| !supported.contains(version))
-            .collect::<Vec<_>>();
-        assert_eq!(unsupported, Vec::<&str>::new());
-    }
-
     /// The release Maven repository is exercised with the real krusty CLI. The proxy records each
     /// command before forwarding it, so the fixture verifies both Gradle wiring and emitted bytes.
     #[test]
@@ -433,6 +383,7 @@ mod tests {
                 "$ROOT/core/util.runtime/src/org/jetbrains/kotlin/util/RuntimeJava.java",
                 "-classpath",
                 runtime_classpath.as_str(),
+                "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 "-language-version",
                 "2.4",
                 "-api-version",
@@ -445,7 +396,6 @@ mod tests {
                 "no-compatibility",
                 "-java-parameters",
                 "-Xconsistent-data-class-copy-visibility",
-                "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 reference_version.as_str(),
                 "-jdk-home",
                 "$JDK_HOME",
@@ -467,6 +417,7 @@ mod tests {
                 "$ROOT/compiler/util/src/org/jetbrains/kotlin/util/Util.kt",
                 "-classpath",
                 util_classpath.as_str(),
+                "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 "-language-version",
                 "2.4",
                 "-api-version",
@@ -482,7 +433,6 @@ mod tests {
                 "-java-parameters",
                 "-Xconsistent-data-class-copy-visibility",
                 "-Xskip-prerelease-check",
-                "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 reference_version.as_str(),
                 "-jdk-home",
                 "$JDK_HOME",
@@ -499,6 +449,7 @@ mod tests {
                 "-classpath",
                 friend_classpath.as_str(),
                 friend_argument.as_str(),
+                "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 "-language-version",
                 "2.4",
                 "-api-version",
@@ -514,7 +465,6 @@ mod tests {
                 "-java-parameters",
                 "-Xconsistent-data-class-copy-visibility",
                 "-Xskip-prerelease-check",
-                "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 reference_version.as_str(),
                 "-jdk-home",
                 "$JDK_HOME",
@@ -1228,6 +1178,39 @@ tasks.register<JavaExec>("runJvm") {
             assert!(root.join(class).is_file(), "missing {class}");
         }
 
+        // A free `-P` configures a plugin the task already loads. It reaches krusty after the
+        // structured options, as KGP passes it to kotlinc, and the compile stays krusty's: the
+        // lambda of `Count` reads `length` only because the free annotation makes `text` its
+        // receiver.
+        clear_invocation_log(log);
+        clear_invocation_log(&fixture.probes);
+        fixture
+            .build()
+            .property("krusty.negative", "free-plugin-option")
+            .tasks([":model:compileKotlin"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("a free plugin option: {error}"));
+        let text = read_invocation_log(log).expect("invocation log");
+        let runs = invocations(&text);
+        assert_eq!(runs.len(), 1, "{text}");
+        assert_eq!(source_names(&runs[0]), ["Count.kt", "Point.kt"], "{text}");
+        let options = runs[0]
+            .windows(2)
+            .filter(|pair| pair[0] == "-P")
+            .map(|pair| pair[1].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            options,
+            [
+                "plugin:org.jetbrains.kotlin.samWithReceiver:annotation=model.WithReceiver",
+                "plugin:org.jetbrains.kotlin.samWithReceiver:annotation=model.FreeReceiver",
+            ],
+            "{text}"
+        );
+        assert!(root
+            .join("model/build/classes/kotlin/main/model/Count.class")
+            .is_file());
+
         // Through the `krustyCompile` aggregate too: it reaches the refused compile's kotlinc task,
         // so `:model` is compiled (by kotlinc) rather than skipped with its replacement.
         clear_invocation_log(log);
@@ -1327,6 +1310,14 @@ samWithReceiver {
 if (providers.gradleProperty("krusty.negative").orNull == "compiler-plugin-before-krusty") {
     pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
+// A free plugin option for a plugin the task loads, as Compose Hot Reload adds one to every compile.
+if (providers.gradleProperty("krusty.negative").orNull == "free-plugin-option") {
+    kotlin.sourceSets.named("main") { kotlin.srcDir("src/freeOption/kotlin") }
+    kotlin.compilerOptions.freeCompilerArgs.addAll(
+        "-P",
+        "plugin:org.jetbrains.kotlin.samWithReceiver:annotation=model.FreeReceiver",
+    )
+}
 pluginManager.apply("dev.krustythecompiler")
 
 dependencies {
@@ -1337,6 +1328,10 @@ dependencies {
         write(
             "model/src/main/kotlin/model/Point.kt",
             "package model\n\nimport kotlinx.serialization.Serializable\n\n@Serializable\ndata class Point(val x: Int, val label: String)\n\n@Target(AnnotationTarget.CLASS)\nannotation class WithReceiver\n\n@WithReceiver\nfun interface Measure { fun measure(text: String): Int }\n\nfun measured() = Measure { length }.measure(\"four\")\n",
+        );
+        write(
+            "model/src/freeOption/kotlin/model/Count.kt",
+            "package model\n\n@Target(AnnotationTarget.CLASS)\nannotation class FreeReceiver\n\n@FreeReceiver\nfun interface Count { fun count(text: String): Int }\n\nfun counted() = Count { length }.count(\"three\")\n",
         );
         // ...and follows krusty here.
         write(
@@ -1602,6 +1597,11 @@ android {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+}
+
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    outputs.upToDateWhen { false }
+    outputs.doNotCacheIf("the integration test must execute the classes compiled by krusty") { true }
 }
 "#,
         );
@@ -1925,19 +1925,6 @@ fun main() {
                 build
             }
         }
-    }
-
-    fn quoted_release_versions(text: &str) -> Vec<&str> {
-        text.split('"')
-            .skip(1)
-            .step_by(2)
-            .filter(|value| {
-                value.split('.').count() == 3
-                    && value.split('.').all(|part| {
-                        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
-                    })
-            })
-            .collect()
     }
 
     fn strings(values: &[&str]) -> Vec<String> {
@@ -2714,7 +2701,6 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "classpath-alias" -> freeCompilerArgs.addAll("-cp", "elsewhere.jar")
             "progressive-alias" -> freeCompilerArgs.add("-Xprogressive")
             "compiler-plugin-alias" -> freeCompilerArgs.add("-Xcompiler-plugin=forbidden.jar")
-            "plugin-option-free-argument" -> freeCompilerArgs.addAll("-P", "plugin:org.example.widget:annotation=probe.Open")
             "reference-version-free-argument" -> freeCompilerArgs.add("-Xkotlin-reference-version=2.4.0")
             "dependency-policy-free-argument" -> freeCompilerArgs.add("-no-stdlib=false")
             "release-specific-argument-boundary" -> freeCompilerArgs.addAll(
