@@ -619,3 +619,35 @@ fn a_companion_block_member_actualizes_its_expect() {
     .expect("krusty compiles and runs the split source set");
     assert_eq!(got, "OK");
 }
+
+/// An `expect` interface that an `actual typealias` actualizes to a Java interface is that Java
+/// interface in the platform compilation. A common class implementing it, and an `expect`
+/// interface extending it, inherit the Java interface's members, not the `expect` declaration's.
+#[test]
+fn expect_interface_actualized_by_java_typealias_is_inherited() {
+    run_source_set_same_as_kotlinc(
+        r#"// LANGUAGE: +MultiPlatformProjects
+package p
+expect interface Closer { fun close() }
+expect interface Queue2<E> : MutableCollection<E> { fun poll(): E? }
+expect interface Deque2<E> : Queue2<E> { fun addFirst(element: E) }
+interface Named { fun name(): String = "OK" }
+abstract class Resource : Closer, Named
+"#,
+        r#"// LANGUAGE: +MultiPlatformProjects
+package p
+actual typealias Closer = java.io.Closeable
+actual typealias Queue2<E> = java.util.Queue<E>
+actual typealias Deque2<E> = java.util.Deque<E>
+class FileResource : Resource() {
+    var closed = false
+    override fun close() { closed = true }
+}
+fun box(): String {
+    val resource = FileResource()
+    (resource as java.io.Closeable).close()
+    return if (resource.closed) resource.name() else "not closed"
+}
+"#,
+    );
+}

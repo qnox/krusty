@@ -474,6 +474,9 @@ fn interface_surface(
     interface: TypeName,
     receiver: Ty,
 ) -> Vec<SurfaceMember> {
+    // An `expect` interface an `actual typealias` actualizes stands for the alias's target here, as
+    // `shape` already does: its own declaration is not the platform's interface.
+    let interface = source.actualized_expect(interface).unwrap_or(interface);
     match index.classifier_declaration(interface) {
         Some(declaration) => module_surface(index, source, declaration, receiver),
         None => dependency_surface(source, shape, receiver),
