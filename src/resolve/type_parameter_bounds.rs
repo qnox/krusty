@@ -22,7 +22,9 @@ impl LexicalBoundsIndex {
     pub(super) fn record(&mut self, names: &[String], parameters: &TParams) {
         for source_name in names {
             let parameter = parameters.bound(source_name);
-            let TyKind::TyParam(identity, first_bound) = parameter.non_null().kind() else {
+            let (TyKind::TyParam(identity, first_bound) | TyKind::Var(identity, first_bound)) =
+                parameter.non_null().kind()
+            else {
                 continue;
             };
             let extra = parameters.extra_bounds_of(source_name);
@@ -85,7 +87,9 @@ impl DeclaredBoundsIndex {
         for generic in signatures.filter_map(|signature| signature.generic_sig.as_ref()) {
             for (formal, bounds) in generic.formals.iter().zip(&generic.formal_bounds) {
                 if bounds.len() > 1 {
-                    index.by_parameter.insert(formal.clone(), bounds.clone());
+                    index
+                        .by_parameter
+                        .insert(formal.to_string(), bounds.clone());
                 }
             }
         }

@@ -5,7 +5,8 @@
 //! naming it while generating the class. The instructions its inliner copies from a compiled inline
 //! function (`Continuation.resume`'s `Result.Companion` read, a `checkcast` to a nested class) never
 //! pass through that mapper, and neither do the ones its coroutine transformer adds with raw ASM (a
-//! spilled local's `checkcast` on restore), so a nested class only such code names gets no row. A
+//! spilled local's `checkcast` on restore), and neither does the operand of a written `is` or
+//! `as`, so a nested class only such code names gets no row. A
 //! reference interned while copying is recorded as copied; one the class's own code interns is
 //! recorded as mapped.
 
@@ -23,6 +24,9 @@ pub(super) struct MappedMembers {
     /// supertypes) was not created by the copy.
     copied_classes: HashSet<u16>,
     mapped_classes: HashSet<u16>,
+    /// Descriptors of the locals the class's own code declares. kotlinc maps a local's type when
+    /// it declares the variable; a local the inliner copies keeps the callee's descriptor.
+    local_types: crate::fx_hash::HashSet<String>,
 }
 
 impl MappedMembers {
@@ -35,10 +39,15 @@ impl MappedMembers {
         index
     }
 
-    /// How many references the class's own code names; the mention cache is rebuilt when it
-    /// grows.
+    /// How many references and local types the class's own code names; the mention cache is
+    /// rebuilt when it grows.
     pub(super) fn mapped_count(&self) -> usize {
-        self.mapped.len()
+        self.mapped.len() + self.local_types.len()
+    }
+
+    /// The local variable descriptors the class's own code declares.
+    pub(super) fn local_types(&self) -> impl Iterator<Item = &str> {
+        self.local_types.iter().map(String::as_str)
     }
 
     /// Whether only copied code names the member reference at `index`.
@@ -56,6 +65,22 @@ impl ClassWriter {
     /// Constant-pool index of a `Class` entry, for `new`, `checkcast` and the like.
     pub fn class_ref(&mut self, internal: &str) -> u16 {
         self.with_class_origin(internal, |pool| pool.class(internal))
+    }
+
+    /// The class constant a written type operator checks against: the `instanceof` of `x is T`
+    /// or the `checkcast` of `x as T`. kotlinc boxes that operand's type without its type mapper,
+    /// so a nested class only such an operator names gets no `InnerClasses` row; any other use,
+    /// a compiler-inserted cast included, still maps it.
+    pub fn type_operand_class_ref(&mut self, internal: &str) -> u16 {
+        self.copying(|writer| writer.class_ref(internal))
+    }
+
+    /// Declare a local of `descriptor`: kotlinc's type mapper maps it unless the declaration is
+    /// copied from an inline function's compiled body.
+    pub fn declare_local_type(&mut self, descriptor: &str) {
+        if !self.members.copying {
+            self.members.local_types.insert(descriptor.to_string());
+        }
     }
 
     /// Whether the class's own code, or a declaration, names `internal` as a class constant.

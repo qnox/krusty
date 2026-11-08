@@ -63,12 +63,14 @@ fn diagnostic_blocks(output: &str, echoes_source: bool) -> Vec<Vec<String>> {
 fn assert_diagnostics_match_kotlinc(file: &str, source: &str, expected: &[&[&str]]) {
     let stdlib = common::stdlib_jar();
     let result = common::compiler_diagnostics(&[(file, source)], std::slice::from_ref(&stdlib));
-    assert_ne!(result.krusty_code, 0, "krusty accepted {file}");
-    assert_ne!(result.reference_code, 0, "kotlinc accepted {file}");
-    let mut krusty_output = result.krusty_stderr.clone();
-    krusty_output.push_str(&result.krusty_stdout);
-    assert_eq!(errors(&krusty_output), errors(&result.reference_stderr));
-    let krusty = diagnostic_blocks(&krusty_output, false);
+    assert_eq!(result.krusty_code, 1, "krusty's exit status for {file}");
+    assert_eq!(result.reference_code, 1, "kotlinc's exit status for {file}");
+    assert_eq!(result.krusty_stdout, "", "krusty's stdout for {file}");
+    assert_eq!(
+        errors(&result.krusty_stderr),
+        errors(&result.reference_stderr)
+    );
+    let krusty = diagnostic_blocks(&result.krusty_stderr, false);
     assert_eq!(krusty, diagnostic_blocks(&result.reference_stderr, true));
     assert_eq!(
         krusty,
@@ -241,6 +243,46 @@ fun worst() = 3.gen {{ it.toString() }}\n"
             &["7:30: error: return type mismatch: expected 'String', actual 'Int'."],
             &["8:31: error: return type mismatch: expected 'String', actual 'Int'."],
             &["9:23: error: return type mismatch: expected 'Int', actual 'String'."],
+        ],
+    );
+}
+
+#[test]
+fn a_result_tie_across_different_argument_mappings_is_ambiguous_like_kotlinc() {
+    // The trailing lambda maps to the second parameter of the defaulted or vararg overload and to
+    // the only parameter of the other, so the two are compared through each one's own mapping.
+    // Their function types are incomparable, and the lambda's result does not refine an
+    // unannotated tie: every call is ambiguous, with no other diagnostic in signature position.
+    let source = "fun Int.pick(suffix: String = \"!\", f: (Int) -> String): String = \"d\" + f(this) + suffix\n\
+fun Int.pick(f: (Int) -> Int): String = \"p\" + f(this)\n\
+fun Int.tag(vararg extra: Int, f: (Int) -> String): String = \"v\" + f(this) + extra.size\n\
+fun Int.tag(f: (Int) -> Int): String = \"t\" + f(this)\n\
+fun bad() = 1.pick { it.toString() }\n\
+fun worse() = 2.tag { \"x$it\" }\n";
+    const PICK: [&str; 2] = [
+        "fun Int.pick(suffix: String = ..., f: (Int) -> String): String",
+        "fun Int.pick(f: (Int) -> Int): String",
+    ];
+    const TAG: [&str; 2] = [
+        "fun Int.tag(vararg extra: Int, f: (Int) -> String): String",
+        "fun Int.tag(f: (Int) -> Int): String",
+    ];
+    assert_diagnostics_match_kotlinc(
+        "MappedPick.kt",
+        source,
+        &[
+            &[
+                "5:15: error: overload resolution ambiguity between candidates:",
+                PICK[0],
+                PICK[1],
+            ],
+            &["5:22: error: unresolved reference 'it'."],
+            &[
+                "6:17: error: overload resolution ambiguity between candidates:",
+                TAG[0],
+                TAG[1],
+            ],
+            &["6:26: error: unresolved reference 'it'."],
         ],
     );
 }

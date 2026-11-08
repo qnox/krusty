@@ -147,6 +147,20 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
 - Metadata annotation arguments serialize written values first and any materialized unwritten
   values afterward, recursively through nested annotations and arrays. Applications without source
   provenance keep their stored order. JVM annotation attributes instead retain declaration order.
+
+  Closed nested annotation constructions used as another annotation element's default retain
+  validated declaration ordinals, checked written member order and omitted declaration defaults
+  through closed values, checked FIR and common IR, including folding and replay. Capture written
+  membership before implicit argument synthesis; provider normalization preserves sparse
+  membership before filling complete runtime defaults.
+
+  Runtime replay consumes the complete construction operands independently of metadata membership.
+  Only publication projects the retained declaration ordinals to compact `Annotation` argument
+  indices. Metadata omits declared defaults even when replay supplies their runtime values;
+  synthesized empty varargs remain supplied but unwritten and present in the metadata payload.
+  `annotation_constructions::tests::argument_provenance` compares both retained and replayed
+  constructions with the complete official Native nested-annotation message.
+  No wire schema or protocol version changes.
 - The PRIMARY constructor's flags word is written whenever it differs from the proto default 6
   (visibility PUBLIC). krusty carries the real word (6 for a public primary ctor) and omits it only
   at 6, so the bit takes a public ctor to an explicit 7, and an `internal constructor`, whose
@@ -311,8 +325,11 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
 - Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter
   of an enclosing declaration by id alone (`Type.type_parameter`). Ids come from kotlinc's
   per-declaration interner: the class's own parameters first, then each captured one on first use,
-  and a member's first use is numbered in that member's own scope. Test:
-  `tests/metadata_captured_type_parameters_e2e.rs`.
+  and a member's first use is numbered in that member's own scope. A use-site application of that
+  classifier records only its own arguments. Lexical captures are not type arguments and are not
+  `Type.outer_type`; an `inner` class still writes its enclosing instance there. Tests:
+  `tests/metadata_captured_type_parameters_e2e.rs`,
+  `tests/facade_local_classifier_metadata_e2e.rs`.
 - Nested and inner classes (kotlinc 2.4.0, 2.4.10, 2.4.20): a nested class, inner or not, is
   serialized under its outer classes, so every enclosing class's parameters hold the ids before its
   own, outermost first. The class header (type-parameter bounds, supertypes, the inline-class
@@ -624,3 +641,9 @@ The type-annotation adapter accepts exactly `IS_UNSIGNED` on BYTE, SHORT, INT an
 valid signed carriers; other flags and incompatible kinds are rejected. KSP protocol 16 transports
 `UByte`, `UShort`, `UInt` and `ULong` value tags, whose JVM adapter boxes the matching Kotlin unsigned
 wrappers. Class-reader constants and build ABI fingerprints retain their physical JVM carriers.
+
+Retained capture signatures carry `CAPTURE_STORAGE` into `IrPropertyOrigin::CaptureStorage`.
+The class metadata projection excludes only that role, after retaining each property's original IR
+index; ordinary and plugin-generated declarations remain properties. Physical fields and capture
+storage demand remain separate facts, owned by the current declaration-keyed capture plan.
+Tests: `tests/capture_storage_metadata_e2e.rs` and the FIR local-class owner tests.

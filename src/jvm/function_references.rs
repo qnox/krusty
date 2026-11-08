@@ -327,7 +327,7 @@ fn realize_adapter_reference(
             module_reflection = Some(module_declaration_reflection(declaration)?);
             (owner, declaration.name.to_string(), top_level, None)
         }
-        crate::ir::IrCallableReferenceTarget::Constructor { classifier } => {
+        crate::ir::IrCallableReferenceTarget::Constructor { classifier, .. } => {
             (Some(classifier), "<init>".to_string(), false, None)
         }
         crate::ir::IrCallableReferenceTarget::Classifier {
@@ -487,17 +487,16 @@ fn realize_adapter_reference(
     let mut constructor_arguments = reference.captures;
     constructor_arguments.extend(reference.bound_receiver);
     // The constructor's declared parameters say that a value-class receiver is bound as its box.
-    let mut declared_parameters = None;
     let carrier = match constructor_arguments.as_slice() {
         arguments if !arguments.is_empty() => {
             let mut constructor_parameters = capture_types;
             if bound {
                 constructor_parameters.push(Ty::obj("kotlin/Any"));
             }
-            declared_parameters = Some(constructor_parameters.clone().into_boxed_slice());
             IrExpr::New {
                 internal,
                 args: arguments.to_vec(),
+                declared_params: Some(constructor_parameters.clone().into_boxed_slice()),
                 ctor_params: Some(constructor_parameters),
                 ctor_desc: None,
                 external_target: None,
@@ -512,10 +511,7 @@ fn realize_adapter_reference(
         },
         _ => unreachable!("empty and non-empty capture shapes are exhaustive"),
     };
-    let carrier = install_carrier(ir, expression, carrier, internal);
-    if let Some(parameters) = declared_parameters {
-        ir.construction_declared_params.insert(carrier, parameters);
-    }
+    install_carrier(ir, expression, carrier, internal);
     Ok(())
 }
 
@@ -531,7 +527,7 @@ fn install_carrier(
 ) -> ExprId {
     ir.exprs[expression] = carrier;
     let carrier = ExprId::try_from(expression).expect("an expression id fits its index");
-    ir.logical_types.insert(carrier, Ty::obj_name(class));
+    ir.set_logical_type(carrier, Ty::obj_name(class));
     carrier
 }
 

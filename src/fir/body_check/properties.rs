@@ -11,6 +11,8 @@ pub(super) struct ExternalPropertyTarget {
     pub(super) extension_receiver_parameter: Option<u32>,
     /// Whether this selected read is a constant-value expression for Kotlin metadata.
     pub(super) metadata_constant_read: bool,
+    /// The language role its provider attached to the selected getter.
+    pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
 }
 
 type SelectedPropertyRead = (
@@ -198,6 +200,7 @@ impl BodyFirChecker<'_> {
                 },
 
                 metadata_constant_read: false,
+                semantic_role: None,
             },
             dispatch_receiver: Some(dispatch_receiver),
             extension_receiver: None,
@@ -250,6 +253,7 @@ impl BodyFirChecker<'_> {
                 },
 
                 metadata_constant_read: false,
+                semantic_role: None,
             },
             dispatch_receiver: Some(dispatch_receiver),
             extension_receiver: None,
@@ -291,6 +295,7 @@ impl BodyFirChecker<'_> {
             result: property.ty,
             extension_receiver_parameter,
             metadata_constant_read: property.metadata_constant_read,
+            semantic_role: property.getter.semantic_role,
         })
     }
 
@@ -304,6 +309,7 @@ impl BodyFirChecker<'_> {
             result: getter.ret,
             extension_receiver_parameter: None,
             metadata_constant_read: false,
+            semantic_role: getter.member.semantic_role,
         })
     }
 
@@ -318,6 +324,7 @@ impl BodyFirChecker<'_> {
             result: setter.ret,
             extension_receiver_parameter: None,
             metadata_constant_read: false,
+            semantic_role: None,
         })
     }
 
@@ -352,6 +359,7 @@ impl BodyFirChecker<'_> {
             result: setter.ret,
             extension_receiver_parameter,
             metadata_constant_read: false,
+            semantic_role: None,
         })
     }
 
@@ -503,9 +511,7 @@ impl BodyFirChecker<'_> {
                     depth: source.depth,
                     path: Box::new([]),
                     ty,
-                    receiver: FirCapturedReceiver::Enclosing {
-                        classifier: classifier.classifier,
-                    },
+                    receiver: self.enclosing_instance(owner),
                 });
             let value = self.body.add_expr(FirExpr {
                 origin,
@@ -548,21 +554,19 @@ impl BodyFirChecker<'_> {
         })
     }
 
-    /// The checker has already selected an enum-entry property by its owner-local structural
-    /// ordinal. Convert that transient coordinate to the stable module property identity before
-    /// publishing FIR; neither common lowering nor the backend sees the ordinal or source name.
-    pub(super) fn enum_entry_property(&self, sibling: u32) -> Option<PropertyId> {
-        let mut owner = crate::fir::DeclarationId::from_raw(self.body.owner().raw());
-        loop {
-            let anchor = self.index.declaration_anchor(owner)?;
-            if anchor.kind == crate::fir::DeclarationKind::EnumEntry {
-                break;
-            }
-            owner = anchor.owner?;
+    pub(super) fn selected_enum_entry_property(
+        &self,
+        selected: crate::resolve::EnumEntryProperty,
+    ) -> Option<PropertyId> {
+        let owner = selected.owner?;
+        if self.index.declaration_anchor(owner)?.kind != crate::fir::DeclarationKind::EnumEntry {
+            return None;
         }
-        let declaration =
-            self.index
-                .owned_declaration(owner, crate::fir::DeclarationKind::Property, sibling)?;
+        let declaration = self.index.owned_declaration(
+            owner,
+            crate::fir::DeclarationKind::Property,
+            selected.sibling,
+        )?;
         self.index.property_for_declaration(declaration)
     }
 
@@ -1022,13 +1026,15 @@ impl BodyFirChecker<'_> {
                 property,
             }));
         }
-        if let Some(ExprLowering::EnumEntryPropertyRead { sibling }) = selected.as_ref() {
-            let target = self.enum_entry_property(*sibling).ok_or_else(|| {
-                self.failure(
-                    self.file.expr_span(expression),
-                    BodyCheckFailureKind::MissingStablePropertyTarget,
-                )
-            })?;
+        if let Some(ExprLowering::EnumEntryPropertyRead { property }) = selected.as_ref() {
+            let target = self
+                .selected_enum_entry_property(*property)
+                .ok_or_else(|| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::MissingStablePropertyTarget,
+                    )
+                })?;
             let dispatch_receiver = self.implicit_receiver(expression)?.ok_or_else(|| {
                 self.failure(
                     self.file.expr_span(expression),
@@ -1087,6 +1093,7 @@ impl BodyFirChecker<'_> {
                         result: access.property.ty,
                         extension_receiver_parameter: None,
                         metadata_constant_read: access.property.metadata_constant_read,
+                        semantic_role: access.property.getter.semantic_role,
                     });
                 let dispatch_receiver = singleton_dispatch
                     .map(|singleton| self.singleton_call_receiver(expression, singleton))
@@ -1106,7 +1113,7 @@ impl BodyFirChecker<'_> {
                 accessor,
                 declaration_ty,
                 context_access,
-                compiler_intrinsic,
+                compiler_intrinsic: _,
                 owner_storage,
                 metadata_constant_read,
                 ..
@@ -1129,59 +1136,6 @@ impl BodyFirChecker<'_> {
                 let Some(dispatch_receiver) = dispatch_receiver else {
                     return Ok(None);
                 };
-                let intrinsic = match compiler_intrinsic {
-                    Some(crate::libraries::CompilerIntrinsic::ArraySize) => {
-                        Some(FirIntrinsic::ArraySize)
-                    }
-                    Some(crate::libraries::CompilerIntrinsic::StringLength) => {
-                        Some(FirIntrinsic::StringLength)
-                    }
-                    Some(crate::libraries::CompilerIntrinsic::EnumName) => {
-                        Some(FirIntrinsic::EnumName)
-                    }
-                    Some(_) | None => None,
-                };
-                if let Some(operation) = intrinsic {
-                    let receiver_ty = resolved_member
-                        .as_ref()
-                        .map(|selected| selected.receiver)
-                        .or_else(|| {
-                            self.info
-                                .implicit_receiver_selections
-                                .get(&expression)
-                                .map(|receiver| receiver.ty)
-                        })
-                        .or_else(|| receiver.map(|receiver| self.info.semantic_ty(receiver)))
-                        .ok_or_else(|| {
-                            self.failure(
-                                self.file.expr_span(expression),
-                                BodyCheckFailureKind::MissingStablePropertyTarget,
-                            )
-                        })?;
-                    return Ok(Some(FirExprKind::Call(FirCall {
-                        target: FirCallTarget::Intrinsic {
-                            operation,
-                            receiver: Some(ResolvedTy::new(receiver_ty).map_err(|error| {
-                                self.failure(
-                                    self.file.expr_span(expression),
-                                    BodyCheckFailureKind::UnpublishableType(error),
-                                )
-                            })?),
-                            parameters: Box::new([]),
-                            result: ResolvedTy::new(declaration_ty).map_err(|error| {
-                                self.failure(
-                                    self.file.expr_span(expression),
-                                    BodyCheckFailureKind::UnpublishableType(error),
-                                )
-                            })?,
-                        },
-                        dispatch_receiver: Some(dispatch_receiver),
-                        extension_receiver: None,
-                        parameter_types: Box::new([]),
-                        arguments: Box::new([]),
-                        substitutions: Box::new([]),
-                    })));
-                }
                 if stable_declaration.is_none() {
                     stable_declaration = source_member.and_then(|source| {
                         self.session
@@ -1190,6 +1144,8 @@ impl BodyFirChecker<'_> {
                             .source_member_declaration(self.file, self.index, source)
                     });
                 }
+                // The role is the selected property declaration's. The resolved member is the
+                // call-facing view of the same getter and need not repeat the declaration's facts.
                 let external = resolved_member
                     .as_ref()
                     .and_then(|selected| {
@@ -1201,6 +1157,11 @@ impl BodyFirChecker<'_> {
                                 result: selected.ret,
                                 extension_receiver_parameter: None,
                                 metadata_constant_read,
+                                semantic_role: accessor
+                                    .as_ref()
+                                    .map_or(selected.member.semantic_role, |accessor| {
+                                        accessor.semantic_role
+                                    }),
                             }
                         })
                     })
@@ -1220,6 +1181,7 @@ impl BodyFirChecker<'_> {
                             result: declaration_ty,
                             extension_receiver_parameter: None,
                             metadata_constant_read,
+                            semantic_role: accessor.semantic_role,
                         })
                     });
                 if owner_storage {
@@ -1336,6 +1298,7 @@ impl BodyFirChecker<'_> {
                         extension_receiver_parameter,
 
                         metadata_constant_read: false,
+                        semantic_role: access.property.getter.semantic_role,
                     });
                 // An extension imported from an object is still a MEMBER extension: the
                 // selected getter carries its exact singleton dispatch declaration. Preserve
@@ -1413,6 +1376,7 @@ impl BodyFirChecker<'_> {
                             ),
 
                             metadata_constant_read: false,
+                            semantic_role: getter.semantic_role,
                         })
                 });
                 (
@@ -1454,6 +1418,7 @@ impl BodyFirChecker<'_> {
                         result: ty,
                         extension_receiver_parameter: None,
                         metadata_constant_read,
+                        semantic_role: None,
                     }),
                     dispatch_receiver,
                     None,
@@ -1470,11 +1435,13 @@ impl BodyFirChecker<'_> {
                 return Ok(None);
             }
             Some(
-                ExprLowering::BuiltinUnaryCall { .. }
+                ExprLowering::ConstructorCaptures(_)
+                | ExprLowering::BuiltinUnaryCall { .. }
                 | ExprLowering::RuntimeTypeTest { .. }
                 | ExprLowering::ExtensionFunctionBinding { .. }
                 | ExprLowering::PluginExpression(_)
-                | ExprLowering::ClassStorageRead { .. }
+                | ExprLowering::ClassStorageRead(_)
+                | ExprLowering::EnumEntryStorageRead { .. }
                 | ExprLowering::EnumEntryPropertyRead { .. }
                 | ExprLowering::BackingFieldRead
                 | ExprLowering::ImplicitPropertyIncDec(_)
@@ -1591,7 +1558,10 @@ impl BodyFirChecker<'_> {
             .iter()
             .enumerate()
             .filter_map(|(ordinal, formal)| {
-                bindings.get(formal).copied().map(|value| (ordinal, value))
+                bindings
+                    .get(formal.as_str())
+                    .copied()
+                    .map(|value| (ordinal, value))
             })
             .map(|(ordinal, value)| {
                 let ordinal = u32::try_from(ordinal).map_err(|_| {
@@ -1730,6 +1700,7 @@ impl BodyFirChecker<'_> {
             result,
             extension_receiver_parameter,
             metadata_constant_read,
+            semantic_role,
         } = external
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
         let resolved = |ty| {
@@ -1747,6 +1718,7 @@ impl BodyFirChecker<'_> {
             result: resolved(result)?,
             extension_receiver_parameter,
             metadata_constant_read,
+            semantic_role,
             dispatch: crate::fir::FirPropertyDispatch::Ordinary,
         })
     }
@@ -2492,6 +2464,7 @@ impl BodyFirChecker<'_> {
                                     extension_receiver_parameter: None,
 
                                     metadata_constant_read: false,
+                                    semantic_role: None,
                                 }
                             })
                         });
@@ -2585,6 +2558,7 @@ impl BodyFirChecker<'_> {
                                     extension_receiver_parameter: None,
 
                                     metadata_constant_read: false,
+                                    semantic_role: None,
                                 }
                             })
                         });
@@ -2670,6 +2644,7 @@ impl BodyFirChecker<'_> {
                                 ),
 
                                 metadata_constant_read: false,
+                                semantic_role: None,
                             })
                     });
                     (
@@ -2698,6 +2673,7 @@ impl BodyFirChecker<'_> {
                         extension_receiver_parameter: None,
 
                         metadata_constant_read: false,
+                        semantic_role: None,
                     }),
                     None,
                     None,

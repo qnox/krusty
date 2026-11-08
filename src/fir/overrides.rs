@@ -10,7 +10,6 @@ use super::{
     ResolvedModuleIndex, ResolvedTy,
 };
 use crate::fx_hash::HashMap;
-use crate::libraries::CompilerCoreDeclaration;
 use crate::types::TypeName;
 
 /// Source identity or semantic compiler-generated role of a callable parameter. Target backends
@@ -155,23 +154,11 @@ pub enum ResolvedFunctionOverrideTarget {
 /// not reconstruct the relation from the source declaration's spelling or signature.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResolvedOperatorEqualsOverride {
-    pub overridden: ResolvedOperatorEqualsTarget,
+    pub overridden: ResolvedFunctionOverrideTarget,
     pub overridden_owner: TypeName,
     pub overridden_semantic_role: Option<crate::types::SemanticCallRole>,
     pub overridden_result: ResolvedTy,
     pub overridden_suspend: bool,
-}
-
-/// Stable identity of the `Any.equals` declaration selected by the convention relation.
-///
-/// A target dependency assigns the ordinary opaque callable identity. The compiler-owned core
-/// declaration exists even when no stdlib artifact supplies a physical `kotlin.Any` declaration;
-/// its provider-normalized semantic role is therefore its exact declaration identity, not a
-/// spelling-derived substitute for one.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ResolvedOperatorEqualsTarget {
-    Callable(ResolvedFunctionOverrideTarget),
-    CompilerCore(CompilerCoreDeclaration),
 }
 
 /// Frontend relations selected while declaration providers and finalized signatures coexist.
@@ -234,7 +221,7 @@ pub struct ResolvedFunctionOverride {
     /// this from the selected edge instead of recognizing an ABI slot from its source spelling.
     pub overridden_semantic_role: Option<crate::types::SemanticCallRole>,
     /// Provider-normalized JVM collection ABI role of the exact overridden declaration.
-    pub collection_barrier: Option<crate::libraries::CollectionBarrierOutcome>,
+    pub collection_barrier: Option<crate::libraries::CollectionBarrier>,
     /// The overridden owner is an interface. This is a semantic classifier fact, retained so a
     /// representation backend does not re-query the declaration provider merely to distinguish
     /// superclass and interface dispatch obligations.
