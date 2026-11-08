@@ -192,7 +192,10 @@ pub(super) fn lower_file(
             ir,
             module,
             &mut runtime.objects,
-            &runtime.hashing,
+            super::classes::MemberRuntime {
+                hashing: &runtime.hashing,
+                object_equals: runtime.object_equals,
+            },
             &indices,
             properties,
             plan,

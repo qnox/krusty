@@ -1331,6 +1331,9 @@ fn wasm_runs_an_enum_class() {
 #[path = "wasm_value_hash.rs"]
 mod value_hash;
 
+#[path = "wasm_value_class_equality.rs"]
+mod value_class_equality;
+
 #[path = "wasm_dependency_constructor_exports.rs"]
 mod dependency_constructor_exports;
 
