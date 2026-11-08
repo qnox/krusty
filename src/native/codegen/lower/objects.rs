@@ -1554,13 +1554,10 @@ impl<'a> FileLowering<'a> {
             None => None,
         };
 
-        // Constructing a class is the moment the JVM would have run its `<clinit>`, and what a
-        // `<clinit>` does for a class with a companion is create the companion instance — running
-        // its initializers. The singleton getter is idempotent and lazy, so calling it here gives
-        // Kotlin's order (companion initializers, then the superclass constructor, then this
-        // class's) and leaves a class nobody constructs untouched. Construction is the ONLY such
-        // trigger the generator can see today; a class-static call, the JVM's other one, is
-        // declined by name.
+        // Construction already initialized this class and its superclasses, superclass first,
+        // before the arguments. Asking again is idempotent, and a constructor reached from its
+        // own companion still finds the instance the getter published. A class-static call, the
+        // JVM's other initialization trigger, is declined by name.
         // An ENUM's companion is not created here: Kotlin builds every constant first and the
         // companion after, and the enum's own initializer keeps that order. Triggering it from the
         // constructor would run the companion's `init` in the middle of the first constant.
@@ -2110,8 +2107,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let descriptor = self.file.classes[class as usize].descriptor;
         let size = self.file.model.layout(class).instance_size;
 
-        // Arguments first, then the allocation: an argument that allocates cannot then leave a
-        // half-built object for the collector to find with a stale field.
+        // Class initialization precedes the arguments, and it does not allocate this instance.
+        // Arguments still run before the allocation: an argument that allocates cannot then
+        // leave a half-built object for the collector to find with a stale field.
+        self.activate_class(class)?;
+        if self.terminated {
+            return Ok(None);
+        }
         let mut arguments = self.arguments(args, &params)?;
         if self.terminated {
             return Ok(None);
@@ -2135,6 +2137,52 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let func_ref = self.func_ref(constructor);
         self.emit_call(func_ref, &arguments)?;
         self.constructed(object, class)
+    }
+
+    /// Initialize `class` the way `new` does, before any constructor argument runs.
+    ///
+    /// A superclass's companion runs before the subclass's. The singleton getter is the
+    /// typed initializer and publishes the instance before the companion constructor, so a
+    /// companion that constructs its holder does not re-enter. An enum's companion stays
+    /// with the enum initializer.
+    fn activate_class(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let mut chain = vec![class];
+        loop {
+            let parent = self
+                .file
+                .model
+                .layout(*chain.last().expect("non-empty"))
+                .superclass;
+            let Some(parent) = parent else {
+                break;
+            };
+            chain.push(parent);
+        }
+        for &owner in chain.iter().rev() {
+            let getter = {
+                let ir = self.file.ir;
+                let classes = &self.file.classes;
+                let declaration = &ir.classes[owner as usize];
+                if model::is_enum(declaration) {
+                    None
+                } else {
+                    declaration
+                        .companion_class
+                        .and_then(|companion| ir.class_id_by_name(companion))
+                        .and_then(|companion| classes[companion as usize].singleton)
+                        .map(|(_, getter)| getter)
+                }
+            };
+            let Some(getter) = getter else {
+                continue;
+            };
+            let func_ref = self.func_ref(getter);
+            self.emit_call(func_ref, &[])?;
+            if self.terminated {
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn method_call(

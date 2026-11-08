@@ -92,8 +92,9 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// `C(args)`: a new instance of `C`, then the constructor the construction at `site` selects
-    /// run on it.
+    /// `C(args)`: initialize `C`, then a new instance, then the constructor the construction
+    /// at `site` selects. Initialization is the `new` that precedes argument generation:
+    /// each superclass, then `C`.
     pub(super) fn construction(
         &mut self,
         site: u32,
@@ -138,6 +139,9 @@ impl Body<'_> {
                 "a constructor call with omitted arguments (`{name}`)"
             ));
         }
+        // The operand stack is empty here. Allocation leaves the instance on it, and the
+        // companion getter cannot run on top of that value.
+        self.activate_class(class)?;
         let object = self.local(REFERENCE);
         self.allocate(class)?;
         self.code.local_tee(object);
@@ -1570,10 +1574,10 @@ impl Body<'_> {
                 "a superclass constructor call with omitted arguments (`{name}`)"
             ));
         }
-        // Construction is this class's initialization. A companion's initializers belong to it,
-        // and the singleton getter is the typed hook: it publishes the instance before the
-        // companion constructor, so a constructor reached from that companion does not re-enter
-        // it. An enum's companion is created after its constants, not from a constructor.
+        // Construction already initialized this class and its superclasses. Asking again is
+        // idempotent, and a constructor reached from its own companion still finds the instance
+        // the getter published before that companion's constructor. An enum's companion is
+        // created after its constants, not from a constructor.
         self.initialize_companion(class)?;
         for &statement in &declaration.super_arg_prelude {
             self.statement(statement)?;
@@ -1656,8 +1660,8 @@ impl Body<'_> {
                 "a constructor delegating with omitted arguments (`{name}`)"
             ));
         }
-        // A delegation argument may use the companion before the primary constructor runs, so
-        // this constructor asks for it too. The getter is idempotent.
+        // A delegation argument may use the companion before the primary constructor runs.
+        // The getter is idempotent, including when construction already initialized it.
         self.initialize_companion(class)?;
         for &statement in &secondary.delegate_prelude {
             self.statement(statement)?;
@@ -1687,6 +1691,30 @@ impl Body<'_> {
         }
         if let Some(body) = secondary.body {
             self.statement(body)?;
+        }
+        Ok(())
+    }
+
+    /// Initialize `class` the way `new` does, before any constructor argument runs.
+    ///
+    /// JVMS 5.5 initializes a superclass before the subclass. Each class's companion goes
+    /// through the singleton getter, which publishes the instance before the companion
+    /// constructor, so a companion that constructs its holder does not re-enter.
+    fn activate_class(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let mut chain = vec![class];
+        loop {
+            let parent = self
+                .file_classes()?
+                .tables
+                .table(*chain.last().expect("non-empty"))
+                .superclass;
+            let Some(parent) = parent else {
+                break;
+            };
+            chain.push(parent);
+        }
+        for &owner in chain.iter().rev() {
+            self.initialize_companion(owner)?;
         }
         Ok(())
     }
