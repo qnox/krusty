@@ -165,7 +165,7 @@ impl IrFile {
         self.generated_classes.get(&(owner, role)).copied()
     }
 
-    pub(crate) fn record_generated_function(
+    pub fn record_generated_function(
         &mut self,
         owner: TypeName,
         role: IrGeneratedFunctionRole,
@@ -200,6 +200,14 @@ impl IrFile {
                         IrGeneratedFunctionRole::SerializationTypeSerializerGetter(_)
                     )
             })
+    }
+
+    /// Whether `function` is a member kotlinc's IR plugin adds to `owner` once the frontend has
+    /// declared the class, its structural members and its `interface by` delegation members (a
+    /// serializable class's `write$Self`).
+    pub fn follows_delegated_members(&self, owner: TypeName, function: FunId) -> bool {
+        self.generated_function(owner, IrGeneratedFunctionRole::SerializationWriteSelf)
+            == Some(function)
     }
 
     pub(crate) fn publish_generated_members(
