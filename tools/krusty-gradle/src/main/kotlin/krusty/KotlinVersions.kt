@@ -14,7 +14,7 @@ internal val supportedKotlinVersions: List<String> by lazy {
         .map { it.substringBefore('#').trim() }
         .filter { it.isNotEmpty() }
         .map { it.split(Regex("\\s+")).first() }
-        .sortedWith(compareBy(String::versionKey))
+        .sortedWith(compareBy { it.versionKey() })
         .toList()
 }
 
@@ -28,7 +28,15 @@ private data class VersionKey(
     val patch: Int,
     val channel: Int,
     val pre: Int,
-)
+) : Comparable<VersionKey> {
+    override fun compareTo(other: VersionKey): Int {
+        major.compareTo(other.major).takeIf { it != 0 }?.let { return it }
+        minor.compareTo(other.minor).takeIf { it != 0 }?.let { return it }
+        patch.compareTo(other.patch).takeIf { it != 0 }?.let { return it }
+        channel.compareTo(other.channel).takeIf { it != 0 }?.let { return it }
+        return pre.compareTo(other.pre)
+    }
+}
 
 private fun String.versionKey(): VersionKey {
     val dash = indexOf('-')
