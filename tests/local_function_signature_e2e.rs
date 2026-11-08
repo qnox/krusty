@@ -180,3 +180,11 @@ fn methods(bytes: &[u8]) -> Vec<(String, String, Option<String>)> {
         })
         .collect()
 }
+
+#[test]
+fn local_functions_keep_the_enclosing_type_parameter_in_their_declared_bounds() {
+    common::expect_box_same_as_kotlinc(
+        include_str!("box_regressions/boundTypeParameterInSupertype.kt"),
+        "boundTypeParameterInSupertype",
+    );
+}

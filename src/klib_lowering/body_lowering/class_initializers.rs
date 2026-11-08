@@ -41,4 +41,45 @@ impl<'a> BodyLowering<'a> {
         self.ir.callable_scopes.insert(body);
         Ok(body)
     }
+
+    /// Field stores and anonymous initializers of a same-library file-local class, in member order.
+    pub(in super::super) fn initialize_local(
+        mut self,
+        plan: &super::super::same_library_class::LocalInitialize<'a>,
+    ) -> Lowered<ExprId> {
+        self.instance_storage = Some(
+            super::instance_storage::InstanceStorageFrame::local_initializer(
+                plan.class,
+                plan.receiver_ty,
+                &plan.fields,
+            ),
+        );
+        let mut stmts = Vec::new();
+        for step in &plan.steps {
+            let statement = match step {
+                InitializationStep::Field { index, value } => {
+                    let receiver = self.read(plan.receiver_symbol)?;
+                    self.initializer_store(plan.fields[*index as usize].symbol, receiver, *value)?
+                }
+                InitializationStep::Block(statements) => self.block(statements)?,
+            };
+            stmts.push(statement);
+        }
+        let body = self.ir.add_expr(IrExpr::Block { stmts, value: None });
+        self.ir.callable_scopes.insert(body);
+        Ok(body)
+    }
+
+    /// A member of a same-library file-local class, reading and writing that class's fields.
+    pub(in super::super) fn reading_local_fields(
+        mut self,
+        member: &super::super::same_library_class::LocalMemberFields<'a>,
+    ) -> Self {
+        self.instance_storage = Some(super::instance_storage::InstanceStorageFrame::local_member(
+            member.class,
+            member.receiver,
+            &member.fields,
+        ));
+        self
+    }
 }

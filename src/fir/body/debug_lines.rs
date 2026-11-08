@@ -60,7 +60,7 @@ pub(super) struct FirBodyDebugLines {
     source_line_count: u32,
     expressions: Vec<FirExpressionDebugLines>,
     statements: Vec<FirStatementDebugLines>,
-    /// 1-based line of a local callable's closing `}` (0 = unknown).
+    /// 1-based line of a block body's closing `}` (0 = unknown).
     close_line: u32,
 }
 
@@ -110,8 +110,8 @@ impl FirBody {
         self.debug_lines.source_line_count
     }
 
-    /// The closing `}` line of this local callable's block body or lambda, where kotlinc marks
-    /// the return a body falling off its end gets; 0 when there is none.
+    /// The closing `}` line of this body's block or lambda, where kotlinc marks the return a body
+    /// falling off its end gets; 0 when there is none.
     pub const fn close_line(&self) -> u32 {
         self.debug_lines.close_line
     }
