@@ -40,6 +40,12 @@ impl Body<'_> {
                 result: reference.declaration_result,
                 suspend: reference.declaration_suspend,
             },
+            // A property read as a function value is identified by its own site, as the lambda
+            // it used to be lowered to was.
+            Target::Property(_) => Declaration::Local {
+                file: self.reference_file,
+                function: reference.adapter,
+            },
             Target::FunctionInvoke => Declaration::Invoke {
                 arity: reference.declaration_parameters.len(),
                 suspend: reference.declaration_suspend,

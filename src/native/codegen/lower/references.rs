@@ -158,6 +158,8 @@ impl<'a> FileLowering<'a> {
                 Some(format!("suspendConversion{ordinal}"))
             }
             crate::ir::IrCallableReferenceTarget::FunctionInvoke => Some("invoke".to_string()),
+            // A function value has no `name`; only the property reference itself does.
+            crate::ir::IrCallableReferenceTarget::Property(_) => None,
             crate::ir::IrCallableReferenceTarget::Classifier { operation, .. } => Some(
                 match operation {
                     crate::ir::IrClassifierCallable::EnumValueOf => "valueOf",

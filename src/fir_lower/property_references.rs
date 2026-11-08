@@ -4,30 +4,48 @@ use crate::fir::{
     FirCallableReferenceBinding, FirPropertyReferenceTarget, FirPropertyTarget,
     FirReferenceAdaptation, FirTypeSubstitution,
 };
-use crate::ir::{ExprId, IrCheckedOperation, IrExpr, IrFunction, IrTypeOp};
+use crate::ir::{
+    ExprId, IrCallableReference, IrCallableReferenceTarget, IrCheckedOperation, IrExpr, IrFunction,
+    IrPropertyFunctionReference, IrTypeOp,
+};
 use crate::types::{Ty, TyKind};
 
 use super::{BodyLowering, FirLoweringFailure};
 
+/// The checked facts of a source property reference that lowering carries together: the selected
+/// target, how it binds its receiver, and the type the reference is used as.
+pub(super) struct CheckedPropertyReference<'a> {
+    pub(super) target: &'a FirPropertyReferenceTarget,
+    pub(super) binding: FirCallableReferenceBinding,
+    pub(super) mutable: bool,
+    pub(super) substitutions: &'a [FirTypeSubstitution],
+    pub(super) adaptation: Option<&'a FirReferenceAdaptation>,
+    pub(super) reference_ty: Ty,
+}
+
 impl BodyLowering<'_> {
+    /// A property reference used as a function value is a callable reference whose adapter reads
+    /// the property, so an inline call splices that read as it splices a function reference.
     pub(super) fn materialize_property_function_reference(
         &mut self,
-        target: &FirPropertyReferenceTarget,
-        binding: FirCallableReferenceBinding,
+        checked: &CheckedPropertyReference<'_>,
         dispatch_capture: Option<ExprId>,
         extension_capture: Option<ExprId>,
-        substitutions: &[FirTypeSubstitution],
-        adaptation: Option<&FirReferenceAdaptation>,
-        reference_ty: Ty,
     ) -> Result<Option<ExprId>, FirLoweringFailure> {
+        let CheckedPropertyReference {
+            target,
+            binding,
+            mutable,
+            substitutions,
+            adaptation,
+            reference_ty,
+        } = *checked;
         let TyKind::Fun(reference) = reference_ty.non_null().kind() else {
             return Ok(None);
         };
         if adaptation.is_some_and(|adaptation| !adaptation.arguments.is_empty()) {
             return Err(FirLoweringFailure::UnsupportedPropertyReferenceTarget);
         }
-        let arity = u8::try_from(reference.params.len())
-            .map_err(|_| FirLoweringFailure::UnsupportedPropertyReferenceTarget)?;
         if dispatch_capture.is_some() && extension_capture.is_some() {
             return Err(FirLoweringFailure::UnsupportedPropertyReferenceTarget);
         }
@@ -87,18 +105,16 @@ impl BodyLowering<'_> {
         };
 
         let captured = dispatch_capture.or(extension_capture);
-        let mut captures = Vec::new();
         let mut capture_types = Vec::new();
-        let captured_receiver = if let Some(value) = captured {
+        let captured_receiver = if captured.is_some() {
             let receiver =
                 receiver_type.ok_or(FirLoweringFailure::UnsupportedPropertyReferenceTarget)?;
-            captures.push(value);
             capture_types.push(receiver.get());
             Some(self.ir.add_expr(IrExpr::GetValue(0)))
         } else {
             None
         };
-        let own_start = captures.len() as u32;
+        let own_start = capture_types.len() as u32;
         let unbound_receiver = if binding == FirCallableReferenceBinding::Unbound {
             let expected =
                 receiver_type.ok_or(FirLoweringFailure::UnsupportedPropertyReferenceTarget)?;
@@ -229,18 +245,35 @@ impl BodyLowering<'_> {
         });
         self.ir
             .set_method_visibility(function, crate::types::Visibility::Private);
-        self.ir
-            .lambda_own_params_from
-            .insert(function, captures.len() as u32);
+        self.ir.lambda_own_params_from.insert(function, own_start);
         self.attach_generated_static_to_lexical_class(function);
-        let lambda = self.ir.add_expr(IrExpr::Lambda {
-            impl_fn: function,
-            arity,
-            captures,
-            sam: None,
-            inline_body: None,
-        });
-        self.ir.note_synthesized_lambda(lambda);
-        Ok(Some(lambda))
+        let declaration_parameters = target_is_extension
+            .then_some(receiver_type)
+            .flatten()
+            .map(|receiver| receiver.get())
+            .into_iter()
+            .collect();
+        Ok(Some(self.ir.add_expr(IrExpr::CallableReference(Box::new(
+            IrCallableReference {
+                target: IrCallableReferenceTarget::Property(Box::new(
+                    IrPropertyFunctionReference {
+                        target: target.clone(),
+                        binding,
+                        bound_extension_receiver: extension_capture.is_some(),
+                        mutable,
+                        substitutions: super::checked::lower_substitutions(substitutions),
+                    },
+                )),
+                adapter: function,
+                captures: Vec::new(),
+                bound_receiver: captured,
+                function_type: reference_ty,
+                declaration_parameters,
+                declaration_result: property_type.get(),
+                declaration_suspend: false,
+                adaptation: adaptation.cloned().map(Box::new),
+                reflection_owner: None,
+            },
+        )))))
     }
 }

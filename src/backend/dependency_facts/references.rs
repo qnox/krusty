@@ -106,6 +106,9 @@ impl ReferencedDependencies {
                 IrCallableReferenceTarget::External { declaration, .. } => {
                     self.callables.insert(*declaration);
                 }
+                IrCallableReferenceTarget::Property(property) => {
+                    self.property_reference(&property.target);
+                }
                 IrCallableReferenceTarget::Module(_)
                 | IrCallableReferenceTarget::Constructor { .. }
                 | IrCallableReferenceTarget::Local { .. }

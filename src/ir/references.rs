@@ -50,6 +50,60 @@ pub enum IrCallableReferenceTarget {
         classifier: TypeName,
         operation: IrClassifierCallable,
     },
+    /// A property read as a function value (`P::n` passed as `(P) -> Int`). The adapter reads the
+    /// property; a use that is not spliced into an inline call is the property reference itself,
+    /// whose carrier a backend realizes from this checked identity.
+    Property(Box<IrPropertyFunctionReference>),
+}
+
+/// The checked property reference a function-typed property reference value denotes. Its receiver
+/// operand, when it is bound, is the reference's `bound_receiver`; `bound_extension_receiver` says
+/// which receiver of the property that operand is.
+#[derive(Clone, Debug)]
+pub struct IrPropertyFunctionReference {
+    pub target: crate::fir::FirPropertyReferenceTarget,
+    pub binding: crate::fir::FirCallableReferenceBinding,
+    pub bound_extension_receiver: bool,
+    pub mutable: bool,
+    pub substitutions: Vec<IrCheckedSubstitution>,
+}
+
+impl IrPropertyFunctionReference {
+    /// The getter is an inline accessor whose body each read splices, so no accessor method
+    /// performs the read.
+    pub(crate) fn getter_is_spliced(&self) -> bool {
+        matches!(
+            &self.target,
+            crate::fir::FirPropertyReferenceTarget::SpecializedModule {
+                getter_inline_splice: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// The checked property reference this value is, with its bound receiver operand and the
+    /// reference's adaptation in place.
+    pub(crate) fn checked_operation(
+        &self,
+        bound_receiver: Option<ExprId>,
+        adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
+    ) -> IrCheckedOperation {
+        let (dispatch_receiver, extension_receiver) = if self.bound_extension_receiver {
+            (None, bound_receiver)
+        } else {
+            (bound_receiver, None)
+        };
+        IrCheckedOperation::PropertyReference {
+            target: self.target.clone(),
+            delegated: false,
+            binding: self.binding,
+            dispatch_receiver,
+            extension_receiver,
+            mutable: self.mutable,
+            substitutions: self.substitutions.clone(),
+            adaptation,
+        }
+    }
 }
 
 /// The selected constructor declaration, retained independently of its invocation adapter.

@@ -276,6 +276,10 @@ fn realize_adapter_reference(
         | crate::ir::IrCallableReferenceTarget::FunctionInvoke => {
             crate::ir::ReflectedCallable::Physical
         }
+        // A property reference value is the property reference's carrier, never this one.
+        crate::ir::IrCallableReferenceTarget::Property(_) => {
+            return Err(FunctionReferenceRealizationTarget::Invalid);
+        }
     };
     // A local function is reflected by the physical signature it was lifted to, in which a
     // shared mutable capture is its JVM holder.
@@ -381,6 +385,9 @@ fn realize_adapter_reference(
                 false,
                 Some(format!("invoke({erased})Ljava/lang/Object;")),
             )
+        }
+        crate::ir::IrCallableReferenceTarget::Property(_) => {
+            return Err(FunctionReferenceRealizationTarget::Invalid);
         }
     };
     let adapted = reference.adaptation.is_some() || suspend_conversion;
@@ -871,6 +878,17 @@ pub(super) fn realize(
     let mut carrier_adapters = crate::fx_hash::HashSet::default();
     for raw in 0..expression_count {
         let adapter = match &ir.exprs[raw] {
+            // A property reference value is realized as the property reference, which calls the
+            // getter rather than the adapter, unless the getter is spliced at each read.
+            IrExpr::CallableReference(reference)
+                if matches!(
+                    &reference.target,
+                    crate::ir::IrCallableReferenceTarget::Property(property)
+                        if !property.getter_is_spliced()
+                ) =>
+            {
+                continue;
+            }
             IrExpr::CallableReference(reference) => reference.adapter,
             _ => continue,
         };
@@ -902,6 +920,37 @@ pub(super) fn realize(
                 }
                 ir.inline_only_fns.insert(reference.adapter);
             }
+            continue;
+        }
+        // A property reference that is not spliced is the property reference value itself, which
+        // the property-reference realization gives kotlinc's carrier. Its adapter is only ever
+        // spliced.
+        if let crate::ir::IrCallableReferenceTarget::Property(property) = &reference.target {
+            if property.getter_is_spliced() {
+                // An inline getter has no accessor method the carrier could call: kotlinc splices
+                // it into the carrier's `get`. Until the property-reference carrier takes such a
+                // body, the value is a function object over the adapter, which performs the splice.
+                let TyKind::Fun(function_type) = reference.function_type.non_null().kind() else {
+                    return Err(FunctionReferenceRealizationTarget::Adapter(
+                        reference.adapter,
+                    ));
+                };
+                let arity = u8::try_from(function_type.params.len())
+                    .map_err(|_| FunctionReferenceRealizationTarget::Adapter(reference.adapter))?;
+                ir.exprs[raw] = IrExpr::Lambda {
+                    impl_fn: reference.adapter,
+                    arity,
+                    captures: reference.bound_receiver.into_iter().collect(),
+                    sam: None,
+                    inline_body: None,
+                };
+                ir.note_synthesized_lambda(raw as u32);
+                continue;
+            }
+            let operation =
+                property.checked_operation(reference.bound_receiver, reference.adaptation.clone());
+            ir.exprs[raw] = IrExpr::Checked(Box::new(operation));
+            ir.inline_only_fns.insert(reference.adapter);
             continue;
         }
         let adapter_owner = adapter_owners.get(&reference.adapter).copied();

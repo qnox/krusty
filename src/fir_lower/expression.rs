@@ -512,14 +512,16 @@ impl BodyLowering<'_> {
                 substitutions,
                 adaptation,
             } => self.checked_property_reference(
-                target,
-                *binding,
+                super::property_references::CheckedPropertyReference {
+                    target,
+                    binding: *binding,
+                    mutable: *mutable,
+                    substitutions,
+                    adaptation: adaptation.as_deref(),
+                    reference_ty: function_type.get(),
+                },
                 *dispatch_receiver,
                 *extension_receiver,
-                *mutable,
-                substitutions,
-                adaptation.as_deref(),
-                function_type.get(),
                 *reflective,
             )?,
             FirExprKind::TypeOperation {
