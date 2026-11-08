@@ -372,6 +372,27 @@ impl Checker<'_> {
         }
     }
 
+    /// The evidence the other branches give the branch at `index`: the common supertype of every
+    /// sibling that offers a type (see [`Self::branch_sibling_type`]).
+    pub(super) fn conditional_sibling_evidence(
+        &self,
+        branches: &[(ExprId, Ty)],
+        index: usize,
+    ) -> Option<Ty> {
+        branches
+            .iter()
+            .enumerate()
+            .filter(|(sibling, _)| *sibling != index)
+            .map(|(_, (branch, ty))| self.branch_sibling_type(*branch, *ty))
+            .filter(|ty| *ty != Ty::Error && !ty.mentions_pending())
+            .fold(None, |joined, ty| {
+                Some(match joined {
+                    Some(joined) => self.semantic_common_supertype(joined, ty).unwrap_or(joined),
+                    None => ty,
+                })
+            })
+    }
+
     /// Check one branch of an `if` with an `else` or a `when` with an `else` arm. kotlinc completes
     /// such a conditional as one synthetic call even in statement position, so a sibling branch can
     /// fix a type parameter this branch leaves open (`when (s) { "a" -> build { set(T()) }; else ->
@@ -388,8 +409,11 @@ impl Checker<'_> {
             return self.expr_result(scope, branch, wanted.expected, wanted.value_required);
         }
         self.discarded_exprs.insert(branch);
-        let ty = self.expr_with_context(scope, branch, false);
+        // A block branch's trailing value is checked as the block's statement; the conditional,
+        // not that statement, owns completion of its open result.
         let result = branch_value_expression(self.file, branch);
+        self.joined_branch_values.insert(result);
+        let ty = self.expr_with_context(scope, branch, false);
         if !self.branch_result_is_open(branch)
             && self.report_unbound_call_result_type_parameter(scope, result)
         {
