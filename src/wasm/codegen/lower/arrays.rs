@@ -1,8 +1,13 @@
-//! Reference-element array storage and checked reads, owned by the Wasm representation boundary.
+//! Kotlin array storage and checked element access, owned by the Wasm representation boundary.
+//!
+//! A reference array and a primitive array differ only in their [`ArrayForm`]: the storage type,
+//! the element type that storage holds, and how a packed element is read back. Allocation,
+//! spreads, reads, stores and bounds checks are shared.
 
 use crate::backend::BackendCompilerIntrinsic;
 use crate::ir::{IrCheckedOperation, IrPropertyDispatch};
 use crate::libraries::RuntimeExceptionKind;
+use crate::wasm::array_objects::{ArrayForm, ElementRead, STORAGE_FIELD};
 
 #[cfg(test)]
 mod tests;
@@ -11,21 +16,6 @@ use super::*;
 
 const I32_ADD: u8 = 0x6a;
 const I32_GE_U: u8 = 0x4f;
-
-fn reference_element(array: Ty) -> Result<Ty, Unsupported> {
-    if !array.non_null().is_reference_array() {
-        return Err(format!(
-            "reference-element array storage for `{}`",
-            describe(array)
-        ));
-    }
-    // A scalar element is stored as its box and read back through it, as `Array<Int>` holds
-    // `Integer`s on the JVM: the ordinary coercions to and from `Any?` box and unbox it.
-    array
-        .non_null()
-        .array_read_elem()
-        .ok_or_else(|| "a reference array with no readable element type".to_string())
-}
 
 /// The complete selected getter frame, before any receiver is evaluated.
 fn array_size_receiver(operation: &IrCheckedOperation) -> Result<u32, Unsupported> {
@@ -41,7 +31,7 @@ fn array_size_receiver(operation: &IrCheckedOperation) -> Result<u32, Unsupporte
     else {
         return Err("an authenticated array size read with a mismatched getter frame".into());
     };
-    if !arguments.is_empty() || !parameters.is_empty() || !source.non_null().is_reference_array() {
+    if !arguments.is_empty() || !parameters.is_empty() || !source.non_null().is_array() {
         return Err("an authenticated array size read with a mismatched getter frame".into());
     }
     Ok(*receiver)
@@ -62,29 +52,45 @@ impl Body<'_> {
         &mut self,
         operation: &IrCheckedOperation,
     ) -> Result<(), Unsupported> {
-        self.reference_array_size(array_size_receiver(operation)?)
+        self.array_size(array_size_receiver(operation)?)
     }
 
-    pub(super) fn reference_array_literal(
+    /// The form of `array`'s values and the element type its storage holds.
+    fn array_form(&mut self, array: Ty) -> Result<(ArrayForm, Ty), Unsupported> {
+        self.runtime
+            .array_form(self.module, array)
+            .ok_or_else(|| format!("array storage for `{}`", describe(array)))
+    }
+
+    /// The checked array type of `operand`, its form and its storage's element type.
+    fn array_operand(&mut self, operand: u32) -> Result<(Ty, ArrayForm, Ty), Unsupported> {
+        let array = self
+            .type_of(operand)?
+            .ok_or_else(|| "an array operand without a checked type".to_string())?;
+        let (form, element) = self.array_form(array)?;
+        Ok((array, form, element))
+    }
+
+    pub(super) fn array_literal(
         &mut self,
         array: Ty,
         spreads: &[bool],
         elements: &[u32],
     ) -> Result<(), Unsupported> {
-        reference_element(array)?;
+        let (form, element_ty) = self.array_form(array)?;
         if spreads.len() != elements.len() {
             return Err("a malformed array literal's spread inventory".into());
         }
         if spreads.contains(&true) {
-            return self.spread_reference_array_literal(spreads, elements);
+            return self.spread_array_literal(form, element_ty, spreads, elements);
         }
         for &element in elements {
-            self.value(element, Ty::nullable(Ty::obj_name(crate::types::wk::any())))?;
+            self.value(element, element_ty)?;
         }
         let length = u32::try_from(elements.len())
             .map_err(|_| "an array literal exceeding Wasm's length space".to_string())?;
-        self.code.array_new_fixed(self.runtime.references, length);
-        self.wrap_reference_array();
+        self.code.array_new_fixed(form.storage, length);
+        self.wrap_array(form);
         Ok(())
     }
 
@@ -92,38 +98,42 @@ impl Body<'_> {
     /// order, and a spread array's elements are taken when it is reached, as the JVM's spread builder
     /// takes them: a later operand that writes to an earlier spread array does not change the result.
     /// The result is then allocated at the summed length and filled from those parts.
-    fn spread_reference_array_literal(
+    fn spread_array_literal(
         &mut self,
+        form: ArrayForm,
+        element_ty: Ty,
         spreads: &[bool],
         elements: &[u32],
     ) -> Result<(), Unsupported> {
-        let references = self.runtime.references;
-        let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+        let storage = form.storage;
         let element_carrier =
-            carrier(any)?.ok_or_else(|| "a reference element without a carrier".to_string())?;
+            carrier(element_ty)?.ok_or_else(|| "an array element without a carrier".to_string())?;
         let mut parts = Vec::with_capacity(elements.len());
         for (&element, &spread) in elements.iter().zip(spreads) {
             if !spread {
                 let value = self.local(element_carrier);
-                self.value(element, any)?;
+                self.value(element, element_ty)?;
                 self.code.local_set(value);
                 parts.push((value, false));
                 continue;
             }
-            let array = self
-                .type_of(element)?
-                .ok_or_else(|| "a spread operand without a checked type".to_string())?;
-            reference_element(array)?;
-            let source = self.local(ValType::nullable(references));
-            let taken = self.local(ValType::nullable(references));
+            let (array, spread_form, _) = self.array_operand(element)?;
+            if spread_form.storage != storage {
+                return Err(format!(
+                    "a spread of `{}` into another array storage",
+                    describe(array)
+                ));
+            }
+            let source = self.local(ValType::nullable(storage));
+            let taken = self.local(ValType::nullable(storage));
             self.value(element, array)?;
-            self.reference_array_storage();
+            self.array_storage(spread_form);
             self.code
                 .local_set(source)
                 .local_get(source)
                 .ref_as_non_null()
                 .array_len()
-                .array_new_default(references)
+                .array_new_default(storage)
                 .local_set(taken)
                 .local_get(taken)
                 .ref_as_non_null()
@@ -134,7 +144,7 @@ impl Body<'_> {
                 .local_get(source)
                 .ref_as_non_null()
                 .array_len()
-                .array_copy(references, references);
+                .array_copy(storage, storage);
             parts.push((taken, true));
         }
         let fixed = parts.iter().filter(|(_, spread)| !spread).count();
@@ -148,10 +158,10 @@ impl Body<'_> {
                 .array_len()
                 .op(I32_ADD);
         }
-        let result = self.local(ValType::nullable(references));
+        let result = self.local(ValType::nullable(storage));
         let offset = self.local(ValType::I32);
         self.code
-            .array_new_default(references)
+            .array_new_default(storage)
             .local_set(result)
             .i32_const(0)
             .local_set(offset);
@@ -167,7 +177,7 @@ impl Body<'_> {
                     .local_get(part)
                     .ref_as_non_null()
                     .array_len()
-                    .array_copy(references, references)
+                    .array_copy(storage, storage)
                     .local_get(offset)
                     .local_get(part)
                     .ref_as_non_null()
@@ -180,7 +190,7 @@ impl Body<'_> {
                     .ref_as_non_null()
                     .local_get(offset)
                     .local_get(part)
-                    .array_set(references)
+                    .array_set(storage)
                     .local_get(offset)
                     .i32_const(1)
                     .op(I32_ADD)
@@ -188,124 +198,120 @@ impl Body<'_> {
             }
         }
         self.code.local_get(result).ref_as_non_null();
-        self.wrap_reference_array();
+        self.wrap_array(form);
         Ok(())
     }
 
     /// Wrap the freshly allocated backing array on the stack in its Kotlin identity object.
-    fn wrap_reference_array(&mut self) {
-        let storage = self.local(ValType::reference(self.runtime.references));
+    fn wrap_array(&mut self, form: ArrayForm) {
+        let storage = self.local(ValType::reference(form.storage));
         self.code
             .local_set(storage)
-            .global_get(self.runtime.arrays.table)
+            .global_get(form.table)
             .call(self.runtime.identity.allocate)
             .local_get(storage)
-            .struct_new(self.runtime.arrays.object);
+            .struct_new(form.object);
     }
 
     /// Read the backing array of the checked Kotlin array value on the stack.
-    fn reference_array_storage(&mut self) {
-        let object = self.runtime.arrays.object;
+    fn array_storage(&mut self, form: ArrayForm) {
         self.code
-            .ref_cast(false, HeapType::Concrete(object))
-            .struct_get(object, crate::wasm::reference_arrays::STORAGE_FIELD);
+            .ref_cast(false, HeapType::Concrete(form.object))
+            .struct_get(form.object, STORAGE_FIELD);
     }
 
-    /// The length of the backing storage selected by a checked reference-array receiver.
-    pub(super) fn reference_array_size(&mut self, receiver: u32) -> Result<(), Unsupported> {
-        let array = self
-            .type_of(receiver)?
-            .ok_or_else(|| "an array receiver without a checked type".to_string())?;
-        // Length belongs to the wrapper's backing storage, independent of its element carrier.
-        // Reading it neither loads nor boxes an element of Array<T>.
-        if !array.non_null().is_reference_array() {
-            return Err("an array size read without reference-array storage".into());
-        }
+    /// `array.size`: the length of the receiver's backing storage.
+    pub(super) fn array_size(&mut self, receiver: u32) -> Result<(), Unsupported> {
+        let (array, form, _) = self.array_operand(receiver)?;
         self.value(receiver, array)?;
-        self.reference_array_storage();
+        self.array_storage(form);
         self.code.array_len();
         Ok(())
     }
 
-    pub(super) fn reference_array_get(
-        &mut self,
-        receiver: u32,
-        index: u32,
-    ) -> Result<(), Unsupported> {
-        let (storage, offset, element) = self.reference_slot_operands(receiver, index)?;
-        let storage = self.reference_array_backing(storage);
-        self.check_reference_slot(storage, offset)?;
+    pub(super) fn array_get(&mut self, receiver: u32, index: u32) -> Result<(), Unsupported> {
+        let (array, form, stored) = self.array_operand(receiver)?;
+        let element = array
+            .non_null()
+            .array_read_elem()
+            .ok_or_else(|| "an array with no readable element type".to_string())?;
+        let (object, offset) = self.slot_operands(receiver, array, form, index)?;
+        let storage = self.array_backing(form, object);
+        self.check_slot(storage, offset)?;
         self.code
             .local_get(storage)
             .ref_as_non_null()
-            .local_get(offset)
-            .array_get(self.runtime.references);
-        // The physical element is eqref, even when the checked read's type is String. Preserve
-        // that distinction so the ordinary coercion emits the required concrete GC cast.
-        self.coerce_emitted_value(Ty::nullable(Ty::obj_name(crate::types::wk::any())), element)
+            .local_get(offset);
+        match form.read {
+            ElementRead::Plain => self.code.array_get(form.storage),
+            ElementRead::Signed => self.code.array_get_s(form.storage),
+            ElementRead::Unsigned => self.code.array_get_u(form.storage),
+        };
+        // A reference array's physical element is eqref, even when the checked read's type is
+        // String or a scalar. Preserve that distinction so the ordinary coercion emits the
+        // required concrete GC cast or unboxing.
+        self.coerce_emitted_value(stored, element)
     }
 
-    /// `array[index] = value` on a reference array. The receiver, the index and the value are all
-    /// evaluated, in that order, before the bounds check, as `Array.set` receives them as
-    /// arguments: an out-of-range index still runs the value's side effects, and a value that
-    /// throws wins over `IndexOutOfBoundsException`.
-    pub(super) fn reference_array_set(
+    /// `array[index] = value`. The receiver, the index and the value are all evaluated, in that
+    /// order, before the bounds check, as `Array.set` receives them as arguments: an
+    /// out-of-range index still runs the value's side effects, and a value that throws wins over
+    /// `IndexOutOfBoundsException`.
+    pub(super) fn array_set(
         &mut self,
         receiver: u32,
         index: u32,
         value: u32,
     ) -> Result<(), Unsupported> {
-        let (storage, offset, _) = self.reference_slot_operands(receiver, index)?;
-        let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
-        let stored = self.local(
-            carrier(any)?.ok_or_else(|| "a reference element without a carrier".to_string())?,
+        let (array, form, stored) = self.array_operand(receiver)?;
+        let (object, offset) = self.slot_operands(receiver, array, form, index)?;
+        let element = self.local(
+            carrier(stored)?.ok_or_else(|| "an array element without a carrier".to_string())?,
         );
-        self.value(value, any)?;
-        self.code.local_set(stored);
-        let storage = self.reference_array_backing(storage);
-        self.check_reference_slot(storage, offset)?;
+        self.value(value, stored)?;
+        self.code.local_set(element);
+        let storage = self.array_backing(form, object);
+        self.check_slot(storage, offset)?;
         self.code
             .local_get(storage)
             .ref_as_non_null()
             .local_get(offset)
-            .local_get(stored)
-            .array_set(self.runtime.references);
+            .local_get(element)
+            .array_set(form.storage);
         Ok(())
     }
 
-    /// Evaluate a reference array receiver and an index, in that order, into locals. Returns the
-    /// array-object and offset locals and the array's element type. Dereferencing its backing
-    /// storage waits until every call operand, including a store's value, has been evaluated.
-    fn reference_slot_operands(
+    /// Evaluate an array receiver and an index, in that order, into locals: the array object and
+    /// the offset. Dereferencing its backing storage waits until every call operand, including a
+    /// store's value, has been evaluated.
+    fn slot_operands(
         &mut self,
         receiver: u32,
+        array: Ty,
+        form: ArrayForm,
         index: u32,
-    ) -> Result<(u32, u32, Ty), Unsupported> {
-        let array = self
-            .type_of(receiver)?
-            .ok_or_else(|| "an array receiver without a checked type".to_string())?;
-        let element = reference_element(array)?;
-        let storage = self.local(ValType::nullable(self.runtime.arrays.object));
+    ) -> Result<(u32, u32), Unsupported> {
+        let object = self.local(ValType::nullable(form.object));
         let offset = self.local(ValType::I32);
         self.value(receiver, array)?;
         self.code
-            .ref_cast(true, HeapType::Concrete(self.runtime.arrays.object))
-            .local_set(storage);
+            .ref_cast(true, HeapType::Concrete(form.object))
+            .local_set(object);
         self.value(index, Ty::Int)?;
         self.code.local_set(offset);
-        Ok((storage, offset, element))
+        Ok((object, offset))
     }
 
-    fn reference_array_backing(&mut self, array: u32) -> u32 {
-        let storage = self.local(ValType::reference(self.runtime.references));
-        self.code.local_get(array);
-        self.reference_array_storage();
+    fn array_backing(&mut self, form: ArrayForm, object: u32) -> u32 {
+        let storage = self.local(ValType::reference(form.storage));
+        self.code.local_get(object);
+        self.array_storage(form);
         self.code.local_set(storage);
         storage
     }
 
     /// Throw `IndexOutOfBoundsException` when the captured index is outside the captured array.
-    fn check_reference_slot(&mut self, storage: u32, offset: u32) -> Result<(), Unsupported> {
+    fn check_slot(&mut self, storage: u32, offset: u32) -> Result<(), Unsupported> {
         if !self.array_range_checks {
             return Ok(());
         }
