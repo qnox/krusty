@@ -16,6 +16,7 @@ mod asm_text;
 #[path = "box_byte_score.rs"]
 mod box_byte_score;
 mod box_inventory;
+mod box_klib_bytes;
 #[path = "box_lane.rs"]
 mod box_lane;
 #[path = "box_lane_profile.rs"]
