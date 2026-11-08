@@ -219,6 +219,25 @@ pub(super) enum ConstructorArgumentUses<'a> {
 }
 
 impl ConstructorArgumentUses<'_> {
+    /// Candidate discovery cannot decide whether an omitted lambda parameter list binds `it`.
+    /// Only the selected lambda expression and its checked function shape can hide that outer name.
+    pub(super) fn binds_implicit_lambda_parameter(self, file: &File, expression: ExprId) -> bool {
+        let Self::Checked {
+            expressions, types, ..
+        } = self
+        else {
+            return false;
+        };
+        if !matches!(expressions.get(&expression), Some(ExprLowering::Lambda(_))) {
+            return false;
+        }
+        let signature = match types.get(expression.0 as usize).map(|ty| ty.kind()) {
+            Some(TyKind::Fun(signature)) => Some(signature),
+            _ => None,
+        };
+        super::context_capture::lambda_binds_implicit_it(file, expression, signature)
+    }
+
     fn retains_closure(self, file: &File, declaration: DeclId, expression: ExprId) -> bool {
         match self {
             Self::Candidates => matches!(file.expr(expression), Expr::Lambda { .. }),
@@ -343,47 +362,6 @@ pub(super) fn anonymous_descendants(
     ))
 }
 
-fn expression_has_member_call_named(file: &File, expression: ExprId, name: &str) -> bool {
-    // A nested lambda is another runtime closure, but a value from outside the anonymous class
-    // still has to cross the class boundary before that closure can capture it.
-    let matches = match file.expr(expression) {
-        Expr::SafeCall { name: member, .. } => member == name,
-        Expr::Call { callee, .. } => {
-            matches!(file.expr(*callee), Expr::Member { name: member, .. } if member == name)
-        }
-        _ => false,
-    };
-    if matches {
-        return true;
-    }
-    let mut expressions = Vec::new();
-    let mut statements = Vec::new();
-    file.any_child_expr(
-        expression,
-        &mut |child| {
-            expressions.push(child);
-            false
-        },
-        &mut |statement| {
-            statements.push(statement);
-            false
-        },
-    );
-    expressions
-        .into_iter()
-        .any(|child| expression_has_member_call_named(file, child, name))
-        || statements.into_iter().any(|statement| {
-            let mut children = Vec::new();
-            file.any_child_stmt(statement, &mut |child| {
-                children.push(child);
-                false
-            });
-            children
-                .into_iter()
-                .any(|child| expression_has_member_call_named(file, child, name))
-        })
-}
-
 fn anonymous_body_uses_name(
     file: &File,
     declaration: DeclId,
@@ -391,26 +369,36 @@ fn anonymous_body_uses_name(
     ty: Ty,
     constructor_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
-    let expressions = anonymous_body_expressions(file, declaration, constructor_uses);
-    expressions
+    let Decl::Class(class) = file.decl(declaration) else {
+        return false;
+    };
+    let base_arguments = class
+        .base_args
         .iter()
-        .any(|expression| file.expr_uses_name_deep(*expression, name))
-        || matches!(ty.kind(), TyKind::Fun(signature) if signature.has_receiver)
-            && expressions
-                .into_iter()
-                .any(|expression| expression_has_member_call_named(file, expression, name))
+        .filter_map(|argument| {
+            anonymous_super_argument_constructor_use(file, declaration, *argument, constructor_uses)
+        })
+        .collect::<Vec<_>>();
+    capture_analysis::anonymous_class_uses_name(
+        file,
+        class,
+        &base_arguments,
+        name,
+        matches!(ty.kind(), TyKind::Fun(signature) if signature.has_receiver),
+        constructor_uses,
+    )
 }
 
 pub(super) fn anonymous_descendant_uses_name(
     file: &File,
     declaration: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
+    mut descendants: impl Iterator<Item = DeclId>,
     name: &str,
     ty: Ty,
     function_local: bool,
     constructor_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
-    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
+    descendants.any(|candidate| {
         enclosing_value_visible_beside_member(file, candidate, name, function_local)
             && (anonymous_body_uses_name(file, candidate, name, ty, constructor_uses)
                 || candidate != declaration
@@ -441,12 +429,12 @@ pub(super) fn enclosing_value_visible_beside_member(
 pub(super) fn anonymous_descendant_writes_name(
     file: &File,
     declaration: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
+    mut descendants: impl Iterator<Item = DeclId>,
     name: &str,
     function_local: bool,
     constructor_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
-    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
+    descendants.any(|candidate| {
         enclosing_value_visible_beside_member(file, candidate, name, function_local)
             && (anonymous_body_writes_name(file, candidate, name, constructor_uses)
                 || candidate != declaration
@@ -474,6 +462,7 @@ impl Checker<'_> {
             return;
         };
         captures.values.push(AnonymousObjectCapture {
+            enum_entry_storage: local.enum_entry_storage(),
             ty: local.ty,
             shared_cell: CapturedBinding {
                 delegated: local.delegate_storage_ty.is_some(),
@@ -492,6 +481,7 @@ impl Checker<'_> {
             lexical_shadow_depth: 0,
             lexical_binding: local.lexical_capture_identity,
             capture_dependency: None,
+            constructor_projections: Vec::new(),
             receiver_capture: None,
             receiver_role: None,
         });
@@ -591,9 +581,19 @@ impl Checker<'_> {
                 )
             });
         let innermost_label = self.this_labels.last();
-        let enclosing_instance = scope
-            .this_ty()
-            .filter(|_| innermost_label.is_some_and(|label| label.2));
+        // Class labels carry source labels, not closure identities. Keep the selected current
+        // dispatch rung's declared type and normalized enclosing-class role together here;
+        // a flow-narrowed `this` is a body lookup fact, not the constructor capture's ABI.
+        let enclosing_receiver = innermost_label.filter(|label| label.2).and_then(|_| {
+            self.declared_implicit_receivers(scope)
+                .into_iter()
+                .find(|receiver| receiver.current && receiver.class_receiver)
+        });
+        let enclosing_instance = enclosing_receiver
+            .as_ref()
+            .map(|receiver| receiver.declared_ty);
+        let enclosing_instance_role =
+            enclosing_receiver.and_then(|receiver| receiver.receiver_role);
         if implicit_receiver_capture.is_some() {
             // Receiver properties are reached through the captured receiver coordinate below; they
             // are not independent lexical values. Keeping both creates an impossible constructor
@@ -882,8 +882,9 @@ impl Checker<'_> {
         // The enclosing instance goes FIRST: lowering identifies it by POSITION (field 0), which is
         // what both an outer member read and a `this@Outer` go through.
         if needs_outer {
-            match enclosing_instance {
-                Some(outer) => result.values.push(AnonymousObjectCapture {
+            match (enclosing_instance, enclosing_instance_role) {
+                (Some(outer), Some(role)) => result.values.push(AnonymousObjectCapture {
+                    enum_entry_storage: None,
                     name: "this$0".to_string(),
                     ty: outer,
                     shared_cell: false,
@@ -901,10 +902,11 @@ impl Checker<'_> {
                     lexical_shadow_depth: 0,
                     lexical_binding: None,
                     capture_dependency: None,
+                    constructor_projections: Vec::new(),
                     receiver_capture: None,
-                    receiver_role: None,
+                    receiver_role: Some(role),
                 }),
-                None => {
+                _ => {
                     result.unsupported.get_or_insert("this".to_string());
                 }
             }
@@ -918,6 +920,7 @@ impl Checker<'_> {
             implicit_receiver_capture
         {
             result.values.push(AnonymousObjectCapture {
+                enum_entry_storage: None,
                 name: "this$receiver".to_string(),
                 ty: receiver,
                 shared_cell: false,
@@ -937,6 +940,7 @@ impl Checker<'_> {
                 lexical_shadow_depth: 0,
                 lexical_binding: None,
                 capture_dependency: None,
+                constructor_projections: Vec::new(),
                 receiver_capture,
                 receiver_role,
             });
@@ -950,17 +954,16 @@ impl Checker<'_> {
                 continue;
             };
             let source = match local.origin {
-                ReceiverFnValueOrigin::ClassStorage(field)
-                | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
-                    AnonymousObjectCaptureSource::ClassStorage { field }
+                ReceiverFnValueOrigin::ClassStorage(storage) => {
+                    AnonymousObjectCaptureSource::ClassStorage(storage)
                 }
-                ReceiverFnValueOrigin::Local
-                | ReceiverFnValueOrigin::DispatchProperty { .. }
-                | ReceiverFnValueOrigin::TopLevelProperty => {
-                    AnonymousObjectCaptureSource::LexicalValue
+                ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field, .. } => {
+                    AnonymousObjectCaptureSource::EnumEntryPropertyStorage { owner, field }
                 }
+                _ => AnonymousObjectCaptureSource::LexicalValue,
             };
             result.values.push(AnonymousObjectCapture {
+                enum_entry_storage: local.enum_entry_storage(),
                 // Smart-cast state is a fact about this control-flow point, not the type of a
                 // mutable cell captured by a separately checked classifier body.
                 ty: if local.is_var {
@@ -986,6 +989,7 @@ impl Checker<'_> {
                 lexical_shadow_depth: 0,
                 lexical_binding: local.lexical_capture_identity,
                 capture_dependency: None,
+                constructor_projections: Vec::new(),
                 receiver_capture: None,
                 receiver_role: None,
             });

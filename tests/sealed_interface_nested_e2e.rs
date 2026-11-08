@@ -51,9 +51,8 @@ fn data_object_has_no_copy() {
     // appeared: kotlinc's `Origin$Owned` declares only equals/hashCode/toString.
     assert!(!has("copy"), "a data object must not synthesize copy");
     assert!(has("INSTANCE"), "a data object has an INSTANCE field");
-    let meta = krusty::jvm::classreader::parse_class(&bytes)
-        .expect("Origin$Owned parses")
-        .meta;
+    let class = krusty::jvm::classreader::parse_class(&bytes).expect("Origin$Owned parses");
+    let meta = class.kotlin_members().expect("member metadata decodes");
     let functions: Vec<&str> = meta
         .class_functions
         .iter()

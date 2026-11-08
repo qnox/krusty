@@ -60,6 +60,8 @@ mod generic_hof_method_check;
 mod metadata_kept_params;
 #[path = "metadata_return_types.rs"]
 mod metadata_return_types;
+#[path = "plugin_host_compiler_e2e/mod.rs"]
+mod plugin_host_compiler_e2e;
 
 #[path = "common/serialization_runtime.rs"]
 mod serialization_runtime_support;

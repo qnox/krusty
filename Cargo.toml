@@ -66,6 +66,8 @@ focused-klib-tests = []
 dhat-heap = ["dep:dhat"]
 
 [dev-dependencies]
+# Compiler-dependent integration with the real plugin and KSP hosts lives in the e2e target.
+krusty-plugin-host = { path = "crates/krusty-plugin-host" }
 # Declares the e2e target's modules from the `tests/*_e2e.rs` files present.
 krusty-test-modules = { path = "crates/krusty-test-modules" }
 # The kotlinc command-line conformance test compares the CLI's argument parser with kotlinc's own.

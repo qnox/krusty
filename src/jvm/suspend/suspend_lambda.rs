@@ -27,12 +27,16 @@ use crate::ir::{
 use crate::jvm::lambda_classes::{site, Site};
 use crate::types::{Ty, TyKind, TypeName};
 
+#[cfg(test)]
+mod constructor_prefix_tests;
+
 const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 
 /// The value a captured field holds.
 struct Capture {
     name: String,
     ty: Ty,
+    crossinline: bool,
 }
 
 /// One of the lambda's own parameters.
@@ -165,7 +169,7 @@ pub(super) fn route(
     let units = ensure_tail_return(ir, body, unit_return);
     if let Some(&close) = ir.fn_close_lines.get(&fid) {
         for unit in units {
-            ir.expr_source_lines.insert(unit, close);
+            ir.set_source_line(unit, close);
         }
     }
     let Some((form, explicit_suspend)) = ir
@@ -195,12 +199,13 @@ pub(super) fn route(
             internal,
             args: arguments,
             ctor_params: None,
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),
             default_prefix_count: 0,
         };
-        ir.logical_types.insert(node, Ty::obj_name(internal));
+        ir.set_logical_type(node, Ty::obj_name(internal));
     }
 
     let mut declared_spill_fields: Vec<(String, usize)> = Vec::new();
@@ -228,6 +233,7 @@ pub(super) fn route(
                 .map(|(index, capture)| SuspendLambdaCapture {
                     field: index as u32,
                     ty: capture.ty,
+                    crossinline: capture.crossinline,
                 })
                 .collect(),
             member_parameters,
@@ -356,15 +362,18 @@ fn layout(
         return None;
     }
     let captured_receivers = &parameter_info.captured_receivers;
-    let recorded = identities[..own_from]
-        .iter()
-        .all(|identity| match identity.role {
+    let recorded = identities[..own_from].iter().all(|identity| {
+        if let Some((owner, parameter)) = identity.constructor_receiver() {
+            return crate::jvm::capture_names::constructor_receiver(ir, owner, parameter).is_some();
+        }
+        match identity.role {
             IrParameterRole::CapturedValue { .. } => identity.source_name.is_some(),
             IrParameterRole::CapturedReceiver { ordinal } => {
                 (ordinal as usize) < captured_receivers.len()
             }
             _ => false,
-        });
+        }
+    });
     if !recorded {
         return None;
     }
@@ -383,7 +392,15 @@ fn layout(
             Some(element) => crate::jvm::shared_captures::holder_ty(element),
             None => function.params[parameter],
         };
-        captures.push(Capture { name, ty });
+        let crossinline = matches!(
+            identity.role,
+            IrParameterRole::CapturedValue { capture, .. } if capture.crossinline_parameter.is_some()
+        );
+        captures.push(Capture {
+            name,
+            ty,
+            crossinline,
+        });
     }
     let expressions = crate::ir::value_namespace_expressions(ir, body);
     let read = |value: usize| {

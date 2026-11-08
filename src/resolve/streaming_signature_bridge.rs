@@ -13,6 +13,7 @@ use crate::types::{Ty, TyKind, TypeName};
 use super::{ClassSig, Signature, SymbolTable};
 
 mod bound_local_alias_templates;
+mod call_argument_kinds;
 mod callable_references;
 mod classifier_associated;
 mod classifier_identities;
@@ -22,11 +23,13 @@ mod convention_results;
 mod declaration_aliases;
 mod declaration_conflicts;
 mod declaration_spellings;
+mod declaration_type_parameters;
 mod declaration_type_sites;
 mod deferred_local_headers;
 mod delegates;
 mod demanded_source_call;
 mod diagnostics;
+use diagnostics::ProductionSignatureDiagnostic;
 mod file_import_scopes;
 mod generated_member_header;
 mod header_projection;
@@ -81,7 +84,7 @@ pub(crate) use local_signatures::{
 pub(crate) use local_signatures::{
     publish_checked_local_signatures, publish_discovered_local_capture_declarations,
 };
-use postponed_argument_mapping::MappedTopLevelSelection;
+use postponed_argument_mapping::{typed_argument_evidence, MappedTopLevelSelection};
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
 use type_resolution::SelectedTypeSite;
 
@@ -95,13 +98,7 @@ struct ProductionSignatureSemantics<'a> {
     source_orders: HashMap<crate::fir::DeclarationId, u32>,
     signature_origins: HashMap<crate::fir::DeclarationId, crate::fir::OriginId>,
     scoped_receivers: RefCell<HashMap<crate::fir::DeclarationId, Vec<SignatureImplicitReceiver>>>,
-    scoped_constraint_inputs: RefCell<HashMap<crate::fir::DeclarationId, Vec<Vec<Ty>>>>,
-    scoped_constraints:
-        RefCell<HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>>,
-    completed_scoped_constraints:
-        RefCell<HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>>,
-    scoped_constraint_checkpoints:
-        RefCell<Vec<semantics::scoped_constraint_frames::ScopedConstraintCheckpoint>>,
+    scoped_frames: semantics::scoped_constraint_frames::ScopedConstraintFrames,
     stable_functions: stable_function_index::StableFunctionIndex,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
     /// What each selected top-level call recorded, by call origin: its contract and the typealias
@@ -130,18 +127,8 @@ struct ProductionSignatureSemantics<'a> {
 
 #[derive(Clone)]
 struct DeclarationTypeParameters {
-    formals: Vec<String>,
+    formals: Vec<crate::types::TyParamName>,
     bounds: Vec<Vec<Ty>>,
-}
-
-#[derive(Clone)]
-struct ProductionSignatureDiagnostic {
-    declaration: crate::fir::DeclarationId,
-    file: u32,
-    span: Span,
-    message: String,
-    identity: Option<crate::diag::DiagnosticIdentity>,
-    unconditional: bool,
 }
 
 struct ExplicitContextCall {
@@ -468,7 +455,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: &super::CheckerScope<'_>,
         declaration: crate::fir::DeclarationId,
-        semantic_names: &[String],
+        semantic_names: &[crate::types::TyParamName],
         semantic_bounds: &[Vec<Ty>],
     ) {
         let packed = self.header_type_parameters(declaration);
@@ -480,7 +467,7 @@ impl ProductionSignatureSemantics<'_> {
             };
             let semantic_name = semantic_names
                 .get(ordinal)
-                .map(String::as_str)
+                .map(|name| name.as_str())
                 .unwrap_or(source_name);
             let bounds = semantic_bounds
                 .get(ordinal)
@@ -534,14 +521,12 @@ impl ProductionSignatureSemantics<'_> {
                 None => None,
             })
             .unwrap_or(stub.range);
-        diagnostics.push(ProductionSignatureDiagnostic {
+        diagnostics.push(ProductionSignatureDiagnostic::conditional(
             declaration,
-            file: stub.source.raw(),
+            stub.source.raw(),
             span,
-            message: RECURSIVE_INFERENCE_MESSAGE.to_string(),
-            identity: None,
-            unconditional: false,
-        });
+            RECURSIVE_INFERENCE_MESSAGE.to_string(),
+        ));
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
@@ -604,55 +589,9 @@ impl ProductionSignatureSemantics<'_> {
         }) {
             return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
         }
-        diagnostics.push(ProductionSignatureDiagnostic {
-            declaration: owner,
-            file,
-            span,
-            message,
-            identity: None,
-            unconditional: false,
-        });
-        crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
-    }
-
-    fn record_source_diagnostic(
-        &self,
-        declaration: crate::fir::DeclarationId,
-        origin: crate::fir::OriginId,
-        message: String,
-    ) -> crate::fir::DiagnosticId {
-        let fallback = self
-            .headers
-            .stub(declaration)
-            .map(|stub| (stub.source.raw(), stub.range));
-        let location = match self.headers.signature_origins.get(origin) {
-            Some(crate::fir::Origin::Source { file, span }) => Some((file.raw(), span)),
-            Some(crate::fir::Origin::Synthetic { cause, .. }) => {
-                match self.headers.signature_origins.get(cause) {
-                    Some(crate::fir::Origin::Source { file, span }) => Some((file.raw(), span)),
-                    Some(crate::fir::Origin::Synthetic { .. }) | None => None,
-                }
-            }
-            None => None,
-        }
-        .or(fallback);
-        let Some((file, span)) = location else {
-            return Self::failure();
-        };
-        let mut diagnostics = self.diagnostics.borrow_mut();
-        if let Some(index) = diagnostics.iter().position(|diagnostic| {
-            diagnostic.file == file && diagnostic.span == span && diagnostic.message == message
-        }) {
-            return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
-        }
-        diagnostics.push(ProductionSignatureDiagnostic {
-            declaration,
-            file,
-            span,
-            message,
-            identity: None,
-            unconditional: false,
-        });
+        diagnostics.push(ProductionSignatureDiagnostic::conditional(
+            owner, file, span, message,
+        ));
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
@@ -872,14 +811,12 @@ impl ProductionSignatureSemantics<'_> {
         }) {
             return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
         }
-        diagnostics.push(ProductionSignatureDiagnostic {
+        diagnostics.push(ProductionSignatureDiagnostic::conditional(
             declaration,
             file,
             span,
             message,
-            identity: None,
-            unconditional: false,
-        });
+        ));
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
@@ -903,14 +840,13 @@ impl ProductionSignatureSemantics<'_> {
         {
             return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
         }
-        diagnostics.push(ProductionSignatureDiagnostic {
+        diagnostics.push(ProductionSignatureDiagnostic::unconditional(
             declaration,
             file,
             span,
             message,
-            identity: Some(identity),
-            unconditional: true,
-        });
+            identity,
+        ));
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
@@ -1099,25 +1035,6 @@ impl ProductionSignatureSemantics<'_> {
             }
         })
         .ok()
-    }
-
-    /// The resolver-facing kind for one evaluated signature argument. An integer LITERAL keeps its
-    /// folded value so overload resolution can let it adopt a narrower integer parameter type.
-    fn call_argument_kind(
-        argument: &crate::fir::ResolvedSigCallArgument<'_>,
-    ) -> crate::symbol_resolver::CallArgKind {
-        if argument.spread {
-            return crate::symbol_resolver::CallArgKind::Spread(argument.ty.get());
-        }
-        if argument.lambda {
-            return crate::symbol_resolver::CallArgKind::LambdaLiteral(argument.ty.get());
-        }
-        match argument.integer_literal {
-            Some(constant) => {
-                crate::symbol_resolver::CallArgKind::integer_constant(argument.ty.get(), constant)
-            }
-            None => crate::symbol_resolver::CallArgKind::Typed(argument.ty.get()),
-        }
     }
 
     fn mapped_call_arguments(
@@ -1840,7 +1757,7 @@ impl ProductionSignatureSemantics<'_> {
         let mut bindings = class.type_parameter_bindings(applied);
         if let Some(signature) = generic_signature {
             for formal in &signature.formals {
-                bindings.remove(formal);
+                bindings.remove(formal.as_str());
             }
         }
         let specialized = crate::symbol_resolver::ty_subst_keep_unbound(result, &bindings);
@@ -1901,7 +1818,7 @@ impl ProductionSignatureSemantics<'_> {
                 generic
                     .formals
                     .iter()
-                    .cloned()
+                    .map(crate::types::TyParamName::from)
                     .zip(explicit_type_arguments.iter().copied()),
             );
         }
@@ -2194,7 +2111,7 @@ impl ProductionSignatureSemantics<'_> {
                 )) = resolver.select_receiver_function_with_params_tracking(
                     receiver,
                     member_spelling,
-                    &selected_arguments,
+                    crate::symbol_resolver::FamilyArguments::Shared(&selected_arguments),
                     type_arguments,
                     &callables,
                     None,
@@ -2823,6 +2740,7 @@ pub(crate) fn install_streamed_anonymous_capture_declarations(
                 flags: DeclarationFlags::default()
                     .with(DeclarationFlags::LOCAL_CLASS, true)
                     .with(DeclarationFlags::COMPILER_GENERATED, true)
+                    .with(DeclarationFlags::CAPTURE_STORAGE, true)
                     .with(DeclarationFlags::FINAL, true),
             });
             if let Some(property) = table
@@ -3433,10 +3351,7 @@ pub(crate) fn finalized_streamed_signature_index(
         source_orders: HashMap::default(),
         signature_origins: HashMap::default(),
         scoped_receivers: RefCell::new(HashMap::default()),
-        scoped_constraint_inputs: RefCell::new(HashMap::default()),
-        scoped_constraints: RefCell::new(HashMap::default()),
-        completed_scoped_constraints: RefCell::new(HashMap::default()),
-        scoped_constraint_checkpoints: RefCell::new(Vec::new()),
+        scoped_frames: Default::default(),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
@@ -4160,7 +4075,11 @@ pub(crate) fn finalized_streamed_signature_index(
     let explicit_diagnostics = explicit_type_semantics.diagnostics.borrow();
     // Parent findings retain their original classifier-publication position. Their cached facts
     // are needed by inference now, but the later header publication replays those findings once.
-    diagnostics::emit_unconditional(diags, &explicit_diagnostics[..parent_diagnostic_start]);
+    diagnostics::emit_unconditional(
+        diags,
+        &explicit_diagnostics[..parent_diagnostic_start],
+        &diagnostics::nothing_published,
+    );
     if !failed.is_empty() {
         crate::trace_compiler!(
             "fir",
@@ -4172,6 +4091,7 @@ pub(crate) fn finalized_streamed_signature_index(
             &explicit_diagnostics[..parent_diagnostic_start],
             &failed_declarations,
             false,
+            &diagnostics::nothing_published,
         );
     }
     let explicit_publication_diagnostics = explicit_diagnostics.len();
@@ -4204,10 +4124,7 @@ pub(crate) fn finalized_streamed_signature_index(
         source_orders,
         signature_origins,
         scoped_receivers: RefCell::new(HashMap::default()),
-        scoped_constraint_inputs: RefCell::new(HashMap::default()),
-        scoped_constraints: RefCell::new(HashMap::default()),
-        completed_scoped_constraints: RefCell::new(HashMap::default()),
-        scoped_constraint_checkpoints: RefCell::new(Vec::new()),
+        scoped_frames: Default::default(),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
@@ -4250,7 +4167,11 @@ pub(crate) fn finalized_streamed_signature_index(
     finalization_failures.extend(auxiliary_failures);
     finalization_failures.sort_by_key(|(declaration, _)| declaration.raw());
     finalization_failures.dedup_by_key(|(declaration, _)| *declaration);
-    diagnostics::emit_unconditional(diags, &semantics.diagnostics.borrow());
+    diagnostics::emit_unconditional(
+        diags,
+        &semantics.diagnostics.borrow(),
+        &diagnostics::published_in(&index),
+    );
     let solver_diagnostics = semantics.diagnostics.borrow().len();
     if !failed.is_empty() || !finalization_failures.is_empty() {
         crate::trace_compiler!(
@@ -4265,15 +4186,16 @@ pub(crate) fn finalized_streamed_signature_index(
             .iter()
             .filter_map(|(_, diagnostic)| *diagnostic)
             .collect::<crate::fx_hash::HashSet<_>>();
-        for (index, diagnostic) in semantics.diagnostics.borrow().iter().enumerate() {
-            let identity = crate::fir::DiagnosticId::from_raw(index as u32 + 1);
+        let published = diagnostics::published_in(&index);
+        for (ordinal, diagnostic) in semantics.diagnostics.borrow().iter().enumerate() {
+            let identity = crate::fir::DiagnosticId::from_raw(ordinal as u32 + 1);
             if diagnostic.unconditional
                 || (!failed_declarations.contains(&diagnostic.declaration)
                     && !selected_diagnostics.contains(&identity))
             {
                 continue;
             }
-            diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
+            diagnostics::emit_production_signature_diagnostic(diags, diagnostic, &published);
         }
         failed.extend(
             finalization_failures
@@ -4292,7 +4214,11 @@ pub(crate) fn finalized_streamed_signature_index(
     macro_rules! emit_publication_diagnostics {
         () => {{
             let recorded = semantics.diagnostics.borrow();
-            diagnostics::emit_unconditional(diags, &recorded[publication_diagnostics..]);
+            diagnostics::emit_unconditional(
+                diags,
+                &recorded[publication_diagnostics..],
+                &diagnostics::published_in(&index),
+            );
         }};
         ($declaration:expr) => {{
             let recorded = semantics.diagnostics.borrow();
@@ -4300,6 +4226,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 diags,
                 &recorded[publication_diagnostics..],
                 $declaration,
+                &diagnostics::published_in(&index),
             );
             publication_diagnostics = recorded.len();
         }};
@@ -4312,6 +4239,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 diags,
                 &recorded[publication_diagnostics..],
                 declaration,
+                &diagnostics::published_in(&index),
             );
             drop(recorded);
             failed.push(declaration);
@@ -4447,7 +4375,11 @@ pub(crate) fn finalized_streamed_signature_index(
                 .flags
                 .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
     }) {
+        // A capture a builder lambda recorded before its call was solved takes that solution.
         let Some((parameters, result, receiver)) = stable_members.property(stub.id) else {
+            stop_with_failure!(stub.id);
+        };
+        let Some(result) = semantics.complete_postponed_variables(result) else {
             stop_with_failure!(stub.id);
         };
         if receiver.is_some()
@@ -4750,6 +4682,7 @@ pub(crate) fn finalized_streamed_signature_index(
         &recorded[explicit_publication_diagnostics..],
         &failed_aliases,
         true,
+        &diagnostics::published_in(&index),
     );
     drop(recorded);
     failed.extend(alias_failures);

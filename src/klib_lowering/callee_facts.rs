@@ -17,6 +17,9 @@ pub struct KlibCalleeFacts<'a> {
     callables: HashMap<&'a KlibDependencyCallable, IndexedKlibCallee<'a>>,
     /// Header evidence is not a checked source call which requires an executable export.
     selected: HashSet<&'a KlibDependencyCallable>,
+    /// Same-compilation declaration identities for reference equality. These do not grant an
+    /// executable external export or turn header evidence into a checked source selection.
+    reference_targets: HashMap<&'a KlibDependencyCallable, crate::fir::ExternalCallableId>,
     /// Explicit same-compilation hierarchy evidence for authenticated dependency types.
     class_type_oracle: Option<&'a dyn crate::assignable::TypeOracle>,
     /// The classifiers whose representation the target owns, and so their singleton values too.
@@ -40,6 +43,51 @@ pub(super) enum KlibCalleeFact<'facts, 'callable> {
 }
 
 impl<'a> KlibCalleeFacts<'a> {
+    pub(crate) fn with_reference_declarations(
+        selected: impl IntoIterator<Item = KlibBodyCallable<'a>>,
+        declarations: impl IntoIterator<Item = (crate::fir::ExternalCallableId, KlibBodyCallable<'a>)>,
+    ) -> Self {
+        let mut facts = Self::new(selected);
+        for (target, declaration) in declarations {
+            facts.record(declaration, false);
+            if facts
+                .reference_targets
+                .insert(declaration.identity(), target)
+                .is_some_and(|previous| previous != target)
+            {
+                facts
+                    .callables
+                    .insert(declaration.identity(), IndexedKlibCallee::Ambiguous);
+            }
+        }
+        facts
+    }
+
+    pub(super) fn reference_declaration(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<
+        (
+            crate::fir::ExternalCallableId,
+            crate::libraries::ExternalCallableKind,
+        ),
+        super::decline::KlibBodyDeclineReason,
+    > {
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => self
+                .reference_targets
+                .get(identity)
+                .copied()
+                .map(|target| (target, callables[0].kind()))
+                .ok_or(super::decline::KlibBodyDeclineReason::UnsupportedOperation(
+                    "a callable reference without an exact provider declaration",
+                )),
+            _ => Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                "a callable reference has no unique provider declaration".to_owned(),
+            )),
+        }
+    }
+
     pub(crate) fn with_type_oracle(
         mut self,
         oracle: &'a dyn crate::assignable::TypeOracle,
@@ -128,12 +176,66 @@ impl<'a> KlibCalleeFacts<'a> {
                 super::class_initialization::constructor_initialization_callees(
                     callables[0],
                     bodies,
+                    self,
                 )
             }
             _ => Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
                 "an initializer has no unique selected constructor declaration".to_owned(),
             )),
         }
+    }
+
+    /// Check graph-owned declarations even when the root operation emits no callee body/export.
+    pub(super) fn validate_root_constructor(
+        &self,
+        module: &str,
+        signature: &crate::metadata::id_signature::KlibPublicIdSignature,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<(), super::decline::KlibBodyDeclineReason> {
+        use super::decline::KlibBodyDeclineReason;
+        use crate::klib_libraries::KlibCalleeOrigin;
+        use crate::libraries::KlibDeclarationSignature;
+        let mismatch = |detail: &str| KlibBodyDeclineReason::SignatureMismatch(detail.to_owned());
+        let declaration = KlibDeclarationSignature::Public(signature.clone());
+        let exact = match bodies.callee_origin(module, &declaration) {
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(mismatch("ambiguous root constructor producer"))
+            }
+            KlibCalleeOrigin::Exact(identity) => Some(identity),
+            KlibCalleeOrigin::Missing => None,
+        };
+        let reachable = bodies.body_provider_modules(module);
+        let mut known = self
+            .callables
+            .keys()
+            .copied()
+            .filter(|identity| {
+                identity.declaration == declaration
+                    && reachable.contains(&identity.module)
+                    && exact.as_ref().is_none_or(|exact| *identity == exact)
+            })
+            .collect::<Vec<_>>();
+        if exact.is_none() && known.iter().any(|identity| identity.module == module) {
+            known.retain(|identity| identity.module == module);
+        }
+        if known.len() > 1 {
+            return Err(mismatch("ambiguous frozen root constructor producer"));
+        }
+        for identity in known {
+            let Some(KlibCalleeFact::Selected(callables)) = self.get(identity) else {
+                return Err(mismatch(
+                    "conflicting provider contracts for the root constructor",
+                ));
+            };
+            super::constructor_calls::authenticate_root_declaration(callables[0])?;
+            if exact.is_some() {
+                super::constructor_calls::authenticate(callables[0], bodies)?;
+            }
+        }
+        if let Some(identity) = exact {
+            super::constructor_calls::authenticate_root_header(&identity, bodies)?;
+        }
+        Ok(())
     }
 
     /// Authenticate a declaration the target implements without lowering its serialized body.
@@ -251,6 +353,7 @@ impl<'a> KlibCalleeFacts<'a> {
     }
 
     /// Add exact provider header contracts without inventing source-call/export obligations.
+    #[cfg(test)]
     pub(crate) fn with_declarations(
         selected: impl IntoIterator<Item = KlibBodyCallable<'a>>,
         declarations: impl IntoIterator<Item = KlibBodyCallable<'a>>,

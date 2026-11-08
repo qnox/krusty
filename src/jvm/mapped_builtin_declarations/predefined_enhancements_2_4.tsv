@@ -1,0 +1,27 @@
+# Kotlin's org.jetbrains.kotlin.load.java.typeEnhancement.PREDEFINED_FUNCTION_ENHANCEMENT_INFO_BY_SIGNATURE
+# (predefinedEnhancementInfo.kt, Kotlin 2.4.21): the nullability kotlinc's Java signature enhancement
+# gives each position of a JDK method that carries no nullability annotations of its own. Only the
+# entries of the JDK methods a read-only collection face realizes as stubs (mutable_jdk_methods_2_4.tsv)
+# are ported; `List.sort` and `Map.remove(Object, Object)` have no entry, so every position of theirs
+# stays flexible. The `addFirst`/`removeFirst` family reports errors since language version 2.1, so
+# its enhancement applies to Kotlin 2.4 unconditionally.
+# This is checked-in policy data; it is not generated during the build.
+#
+# physical JVM owner<TAB>physical method name<TAB>descriptor<TAB>result<TAB>parameter...
+# Each position lists one qualifier per component of its declared type, in kotlinc's pre-order
+# (the type itself, then each type argument): `nullable` (T?), `not-platform` (T), `not-null`
+# (T & Any), or `-` (flexible). A position without qualifiers is a single `-`.
+java/util/Collection	removeIf	(Ljava/util/function/Predicate;)Z	-	not-platform,not-platform
+java/util/List	replaceAll	(Ljava/util/function/UnaryOperator;)V	-	not-platform,not-platform
+java/util/List	addFirst	(Ljava/lang/Object;)V	-	not-platform
+java/util/List	addLast	(Ljava/lang/Object;)V	-	not-platform
+java/util/List	removeFirst	()Ljava/lang/Object;	not-platform
+java/util/List	removeLast	()Ljava/lang/Object;	not-platform
+java/util/Map	putIfAbsent	(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;	nullable	not-platform	not-platform
+java/util/Map	replace	(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;	nullable	not-platform	not-platform
+java/util/Map	replace	(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z	-	not-platform	not-platform	not-platform
+java/util/Map	replaceAll	(Ljava/util/function/BiFunction;)V	-	not-platform,not-platform,not-platform,not-platform
+java/util/Map	compute	(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;	nullable	not-platform	not-platform,not-platform,nullable,nullable
+java/util/Map	computeIfAbsent	(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;	not-platform	not-platform	not-platform,not-platform,not-platform
+java/util/Map	computeIfPresent	(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;	nullable	not-platform	not-platform,not-platform,not-null,nullable
+java/util/Map	merge	(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;	nullable	not-platform	not-null	not-platform,not-null,not-null,nullable

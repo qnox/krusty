@@ -528,7 +528,10 @@ impl<'a> StreamedModuleSymbols<'a> {
             if !parameter_names.is_empty() {
                 let type_arguments = parameters_for_classifier(&parameter_names, &parameter_bounds);
                 constructor.generic_sig = Some(GenericSig {
-                    formals: parameter_names.clone(),
+                    formals: parameter_names
+                        .iter()
+                        .map(crate::types::TyParamName::from)
+                        .collect(),
                     formal_bounds: parameter_bounds.clone(),
                     receiver: None,
                     params: parameters.clone(),
@@ -692,7 +695,6 @@ impl<'a> StreamedModuleSymbols<'a> {
             annotations: Vec::new(),
             external_default_provider: None,
             external_property_identity: None,
-            compiler_core_declaration: None,
             declaration_owner: None,
             owner: TypeName::ROOT,
             name: name.to_owned(),
@@ -889,7 +891,10 @@ impl<'a> StreamedModuleSymbols<'a> {
         Some(function)
     }
 
-    fn declaration_formals(&self, declaration: DeclarationId) -> (Vec<String>, Vec<Vec<Ty>>) {
+    fn declaration_formals(
+        &self,
+        declaration: DeclarationId,
+    ) -> (Vec<crate::types::TyParamName>, Vec<Vec<Ty>>) {
         let mut formals = Vec::new();
         let mut bounds = Vec::new();
         for ordinal in 0.. {
@@ -899,12 +904,11 @@ impl<'a> StreamedModuleSymbols<'a> {
             let Some(header) = self.index.type_parameter_header(parameter) else {
                 break;
             };
-            formals.push(
+            formals.push(crate::types::TyParamName::new(
                 self.index
                     .type_parameter_semantic_name(parameter)
-                    .unwrap_or("")
-                    .to_owned(),
-            );
+                    .unwrap_or(""),
+            ));
             bounds.push(header.bounds.iter().map(|bound| bound.ty.get()).collect());
         }
         (formals, bounds)
