@@ -103,6 +103,9 @@ impl Body<'_> {
             Opcode::Plain(opcode) => self.code.op(opcode),
             Opcode::Saturating(opcode) => self.code.trunc_sat(opcode),
         };
+        // A `UByte` or `UShort` instruction result is still an `i32`. Keep its own bits, as
+        // `Char` arithmetic does.
+        self.mask_narrow_bits(ret);
         Ok(())
     }
 }

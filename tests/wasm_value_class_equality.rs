@@ -46,3 +46,35 @@ fn a_value_class_compares_a_reference_payload_with_its_equals() {
         "ValueClassPayloadEquality",
     );
 }
+
+#[test]
+fn nullable_unsigned_values_use_their_own_box_in_a_reference_array() {
+    run(
+        include_str!("box_regressions/NullableUnsignedReferenceArrays.kt"),
+        "NullableUnsignedReferenceArrays",
+    );
+}
+
+#[test]
+fn a_value_class_is_its_box_in_a_reference_array() {
+    run(
+        include_str!("box_regressions/ValueClassReferenceArray.kt"),
+        "ValueClassReferenceArray",
+    );
+}
+
+#[test]
+fn not_null_assertion_unboxes_every_primitive_box() {
+    run(
+        include_str!("box_regressions/NullableScalarNotNullAssert.kt"),
+        "NullableScalarNotNullAssert",
+    );
+}
+
+#[test]
+fn unsigned_narrow_increment_wraps() {
+    run(
+        include_str!("box_regressions/UnsignedNarrowWraparound.kt"),
+        "UnsignedNarrowWraparound",
+    );
+}

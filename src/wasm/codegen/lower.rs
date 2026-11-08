@@ -884,18 +884,26 @@ impl<'a> Body<'a> {
         if source == target {
             // An `Int` stored where a `Byte`, `Short` or `Char` is declared (`b++` on a `Byte`)
             // wraps to that width: the 32-bit carrier must hold the narrow value's own bits.
-            let narrowing = match (source_ty, target_ty) {
-                (from, to) if from == to => None,
-                (_, Ty::Byte) => Some(0xc0),
-                (_, Ty::Short) => Some(0xc1),
-                (_, Ty::Char) => Some(0),
+            // `UByte` and `UShort` are the same width on that carrier, so a store keeps their
+            // low bits (`255u + 1` stored in a `UByte` is `0`).
+            enum Narrow {
+                Mask(i32),
+                Extend(u8),
+            }
+            let narrowing = match target_ty {
+                Ty::UByte => Some(Narrow::Mask(0xff)),
+                Ty::UShort => Some(Narrow::Mask(0xffff)),
+                _ if source_ty == target_ty => None,
+                Ty::Byte => Some(Narrow::Extend(0xc0)),
+                Ty::Short => Some(Narrow::Extend(0xc1)),
+                Ty::Char => Some(Narrow::Mask(0xffff)),
                 _ => None,
             };
             match narrowing {
-                Some(0) => {
-                    self.code.i32_const(0xffff).op(AND32);
+                Some(Narrow::Mask(mask)) => {
+                    self.code.i32_const(mask).op(AND32);
                 }
-                Some(extend) => {
+                Some(Narrow::Extend(extend)) => {
                     self.code.op(extend);
                 }
                 None => {}
@@ -1254,22 +1262,27 @@ impl<'a> Body<'a> {
             IrExpr::NotNullAssert { operand, .. } => {
                 let operand_carrier = self.carrier_of(operand)?;
                 let result_ty = self.type_of(id)?;
-                // A nullable signed scalar stays declined: its box is the primitive box, and this
-                // backend does not yet unbox one through `!!`. An unsigned number is a value
-                // class, so `!!` reads that value class's own box back to its carrier.
+                // `!!` on a nullable scalar reads the box back to its carrier. Every primitive
+                // the runtime boxes — signed and unsigned — has that box form, so the same
+                // `unbox` serves all of them. A scalar result with no box form still declines:
+                // there is no representation to read.
                 if matches!(operand_carrier, Some(ValType::Ref { .. }))
                     && matches!(
                         self.carrier_of(id)?,
                         Some(ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64)
                     )
                 {
-                    let Some(result_ty) = result_ty.filter(|ty| ty.is_unsigned()) else {
+                    let Some(result_ty) = result_ty else {
+                        return Err("a not-null assertion without a result type".into());
+                    };
+                    let result_ty = result_ty.non_null();
+                    if self.runtime.box_form(self.module, result_ty).is_none() {
                         return Err(
                             "a not-null assertion requiring a scalar reference conversion".into(),
                         );
-                    };
+                    }
                     let Some(reference) = operand_carrier else {
-                        return Err("an unsigned assertion without a reference carrier".into());
+                        return Err("a not-null assertion without a reference carrier".into());
                     };
                     self.assert_nonnull_reference(operand, reference)?;
                     self.unbox(result_ty)?;
@@ -1761,11 +1774,21 @@ impl<'a> Body<'a> {
                 self.code.call(self.runtime.i64_div);
             }
         }
-        // `Char` arithmetic stays a 16-bit code unit.
-        if result == Ty::Char {
-            self.code.i32_const(0xffff).op(AND32);
-        }
+        // `Char`, `UByte` and `UShort` arithmetic stays inside the value's own width.
+        self.mask_narrow_bits(result);
         Ok(())
+    }
+
+    /// Keep a narrow `i32` result in its own bits. `UInt` and `ULong` already fill their carrier.
+    fn mask_narrow_bits(&mut self, result: Ty) {
+        let mask = match result {
+            Ty::Char | Ty::UShort => Some(0xffff),
+            Ty::UByte => Some(0xff),
+            _ => None,
+        };
+        if let Some(mask) = mask {
+            self.code.i32_const(mask).op(AND32);
+        }
     }
 
     fn equality(
