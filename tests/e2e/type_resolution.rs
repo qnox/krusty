@@ -11,3 +11,5 @@ mod object_qualifier_type_arguments_e2e;
 mod package_qualifier_forms_e2e;
 #[path = "../package_qualifier_type_arguments_e2e.rs"]
 mod package_qualifier_type_arguments_e2e;
+#[path = "../recursive_bound_inference_e2e.rs"]
+mod recursive_bound_inference_e2e;
