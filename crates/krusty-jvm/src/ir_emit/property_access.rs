@@ -140,8 +140,9 @@ impl Emitter<'_> {
         &self,
         owner: TypeName,
         name: &str,
+        receiver: Option<TypeName>,
     ) -> Option<krusty::jvm::inline::PropertyAccess> {
-        self.declared_property_read_access(owner, name, None, None, false)
+        self.declared_property_read_access(owner, name, None, None, false, receiver)
     }
 
     /// Is this exact physical field a `lateinit` backing field of a declaration THIS compilation is
@@ -175,9 +176,15 @@ impl Emitter<'_> {
     /// Whether this property read emits the uninitialized guard inline. A direct field load does.
     /// So does a synthetic `access$get<X>$p` bridge: that bridge is a raw field load, not a getter
     /// body, so the guard is not hiding inside an accessor. A real getter still owns its own guard.
-    pub(super) fn lateinit_read_guards_inline(&self, owner: TypeName, name: &str) -> bool {
+    pub(super) fn lateinit_read_guards_inline(
+        &self,
+        operation: krusty::ir::ExprId,
+        owner: TypeName,
+        name: &str,
+    ) -> bool {
         use krusty::jvm::inline::PropertyAccess;
-        let Some(access) = self.selected_local_property_read_access(owner, name) else {
+        let receiver = self.ir.dispatch_classes.get(&operation).copied();
+        let Some(access) = self.selected_local_property_read_access(owner, name, receiver) else {
             return false;
         };
         match access {
@@ -458,7 +465,10 @@ impl Emitter<'_> {
     }
 
     /// An instance accessor call names the class its dispatch receiver statically has, as any
-    /// virtual call does (`Leaf.getBase`, not `Base.getBase`).
+    /// virtual call does (`Leaf.getBase`, not `Base.getBase`). An instance field access does too:
+    /// kotlinc reaches an inherited field (`@JvmField`, a Java field) through its fake override in
+    /// the receiver's class (`Leaf.count`). A backing field read directly is only ever selected
+    /// through its declaring class's own receiver, so that rule leaves it on the declaring class.
     pub(super) fn dispatched_accessor(
         &self,
         operation: krusty::ir::ExprId,
@@ -488,6 +498,25 @@ impl Emitter<'_> {
                     is_static: false,
                     is_interface,
                     static_receiver,
+                })
+            }
+            PropertyAccess::Field {
+                owner,
+                name,
+                descriptor,
+                is_static: false,
+            } => {
+                let (owner, _) = crate::member_dispatch::call_owner(
+                    self.dispatch_classifiers.as_ref(),
+                    owner,
+                    false,
+                    self.ir.dispatch_classes.get(&operation).copied(),
+                )?;
+                Ok(PropertyAccess::Field {
+                    owner,
+                    name,
+                    descriptor,
+                    is_static: false,
                 })
             }
             access => Ok(access),
