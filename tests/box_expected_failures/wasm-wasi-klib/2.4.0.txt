@@ -43,7 +43,6 @@ annotations/recursiveAnnotationWithVarargAndDefaultValue.kt
 annotations/recursiveAnnotationWithVarargAndWithoutDefaultValue.kt
 annotations/selfReferentialAnnotation.kt
 annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
-argumentOrder/kt17691WithEnabledFeature.kt
 arithmetic/basic_charConversions.kt
 arithmetic/basic_charCornerCases.kt
 arithmetic/basic_compareIntToFloat.kt
@@ -321,7 +320,6 @@ bridges/typeParameterInExtensionReceiver.kt
 bridges/varargBridge1.kt
 builtinStubMethods/customReadOnlyIterator.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
-callableReference/adaptedReferences/adaptedArrayOf.kt
 callableReference/adaptedReferences/adaptedSecondArgArray.kt
 callableReference/adaptedReferences/adaptedSecondArgTypeVariable.kt
 callableReference/adaptedReferences/bothWithCoercionToUnit.kt
@@ -391,7 +389,6 @@ callableReference/arrayConstructorArgument.kt
 callableReference/arrayOfNulls.kt
 callableReference/bound/array.kt
 callableReference/bound/arrayConstructorArgument.kt
-callableReference/bound/arrayGetIntrinsic.kt
 callableReference/bound/boundReferenceToOverloadedFunction.kt
 callableReference/bound/coercionToUnit.kt
 callableReference/bound/companionObjectReceiverInheritsFromOuter.kt
@@ -538,7 +535,6 @@ casts/kt73931.kt
 casts/kt81257.kt
 casts/kt82732.kt
 casts/lambdaToUnitCast.kt
-casts/literalExpressionAsGenericArgument/vararg.kt
 casts/mutableCollections/asWithMutable.kt
 casts/mutableCollections/isWithMutable.kt
 casts/mutableCollections/reifiedAsWithMutable.kt
@@ -2133,7 +2129,6 @@ initializers/throw2.kt
 inline/LocalEntitiesInAnonymousObjectInInlineCallables.kt
 inline/anonymousFunction.kt
 inline/anonymousObjectInlineMethod.kt
-inline/astCopy.kt
 inline/blocksMaterialization.kt
 inline/callInlineFunctionOnTopLevel.kt
 inline/callInlineFunctionOnTopLevelSimple.kt
@@ -2253,7 +2248,6 @@ inline/typeSubstitutionInFakeOverride.kt
 inline/vararg.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
 inlineArgsInPlace/kt49370.kt
-inlineArgsInPlace/kt49407.kt
 inlineArgsInPlace/suspensionPointInsideArgument.kt
 inlineClass/customEquals.kt
 inlineClass/defaultEquals.kt
@@ -3481,7 +3475,6 @@ objects/useImportedMemberFromCompanion.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt
 operatorConventions/assignToDotQualifiedWithSideEffect.kt
 operatorConventions/assignmentOperations.kt
-operatorConventions/augmentedAssignmentWithArrayLHS.kt
 operatorConventions/compareTo/comparable.kt
 operatorConventions/compareTo/doubleInt.kt
 operatorConventions/compareTo/doubleLong.kt
@@ -4541,7 +4534,6 @@ regressions/kt35914.kt
 regressions/kt3903.kt
 regressions/kt5056.kt
 regressions/kt5395.kt
-regressions/kt57487.kt
 regressions/kt5953.kt
 regressions/kt6153.kt
 regressions/kt6434.kt
@@ -4563,7 +4555,6 @@ regressions/multimodule/inlineTodoDefaultMessage.kt
 regressions/multimodule/inlineUnsignedConstructionAndData.kt
 regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt
 regressions/multimodule/multimoduleDirectCollectionIterator.kt
-regressions/noCapturingForTypesWithTypeVariables.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
 regressions/recursiveDnnTypeInLambda.kt
@@ -4875,7 +4866,6 @@ underscoredTypeArguments/simple.kt
 unit/kt3634.kt
 unit/kt4212.kt
 unit/kt51036.kt
-unit/sillyThings.kt
 unsignedTypes/boxConstValOfUnsignedType.kt
 unsignedTypes/boxedUnsignedEqualsZero.kt
 unsignedTypes/checkBasicUnsignedLiterals.kt
