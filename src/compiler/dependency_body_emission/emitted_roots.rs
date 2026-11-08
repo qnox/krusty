@@ -147,18 +147,28 @@ pub(super) fn declarations(
             .target_member(&identity, capabilities.target_represents_classifier)
             .map_err(|reason| format!("an invalid target member declaration: {reason:?}"))?;
         // A member of a class no support unit materializes is a leaf: support bodies call it
-        // through its declaration, as source calls do, and the target realizes it.
-        // A target which realizes no declaration outside its emitted bodies has none: body
-        // lowering declines a call of such a member, as it declines any unmodelled form.
-        let external_member = capabilities.target_realizes_bodyless
-            && is_outside_units(platform, bodies, &facts, selected)?;
+        // through its declaration, as source calls do, and the target realizes it. Every target
+        // realizes one of `kotlin.Any`'s members, or a declaration overriding one, from the
+        // receiver's own representation, as it does for a source call. A target which realizes
+        // no other declaration outside its emitted bodies has no other such leaf: body lowering
+        // declines a call of one, as it declines any unmodelled form.
+        let outside_edge = if !member && is_outside_units(platform, bodies, &facts, selected)? {
+            Some(member_edge(platform, declaration_target, selected)?)
+        } else {
+            None
+        };
+        let external_member = outside_edge
+            .as_ref()
+            .is_some_and(|edge| capabilities.target_realizes_bodyless || realizes_any_member(edge));
         // A call of a member realized outside the unit carries the facts the member hierarchy
         // decorates a source call of it with.
-        if member || external_member {
+        if member {
             member_edges.insert(
                 identity.clone(),
                 member_edge(platform, declaration_target, selected)?,
             );
+        } else if let Some(edge) = outside_edge.filter(|_| external_member) {
+            member_edges.insert(identity.clone(), edge);
         }
         let emits_body = !externals.contains_key(&identity)
             && !member
@@ -453,6 +463,19 @@ fn member_edge(
         semantic_role: function.callable.semantic_role,
         overridden: function.callable.overridden_declarations.clone(),
     })
+}
+
+/// Whether a call with `edge` invokes one of `kotlin.Any`'s members, which every target realizes
+/// from the receiver's own representation.
+fn realizes_any_member(edge: &crate::klib_lowering::CallEdge) -> bool {
+    matches!(
+        edge.semantic_role,
+        Some(
+            crate::types::SemanticCallRole::KotlinAnyEquals
+                | crate::types::SemanticCallRole::KotlinAnyHashCode
+                | crate::types::SemanticCallRole::KotlinAnyToString
+        )
+    )
 }
 
 /// Whether `identity` is a member of a class no support unit materializes. Support bodies call it
