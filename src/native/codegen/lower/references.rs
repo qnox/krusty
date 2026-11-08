@@ -925,21 +925,7 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        use crate::types::SemanticCallRole;
-        let slot = match role {
-            Some(SemanticCallRole::KotlinCallableReferenceName) if args.is_empty() => NAME,
-            Some(SemanticCallRole::KotlinPropertyReferenceGet(arity))
-                if args.len() == usize::from(arity) =>
-            {
-                GET
-            }
-            Some(SemanticCallRole::KotlinPropertyReferenceSet(arity))
-                if args.len() == usize::from(arity) + 1 =>
-            {
-                SET
-            }
-            _ => return None,
-        };
+        let slot = reference_slot(role, args.len())?;
         Some(self.reference_call(slot, receiver, args, ret))
     }
 
@@ -975,12 +961,15 @@ impl BodyLowering<'_, '_, '_> {
         Ok(self.builder.inst_results(call).first().copied())
     }
 
-    pub(super) fn reference_property_role(
-        &self,
-        target: crate::fir::ExternalPropertyId,
-    ) -> Option<crate::types::SemanticCallRole> {
-        let property = self.file.callables.property(target)?;
-        self.file.callables.callable(property.getter)?.semantic_role
+    /// Whether a checked read of `target` is answered by a reference object's slot: its selected
+    /// getter carries a reference role that takes no operands. Other getter roles are not this
+    /// lowering's, and the read goes on to the path that owns them.
+    pub(super) fn reads_reference_slot(&self, target: crate::fir::ExternalPropertyId) -> bool {
+        self.file
+            .callables
+            .property(target)
+            .and_then(|property| self.file.callables.callable(property.getter))
+            .is_some_and(|getter| reference_slot(getter.semantic_role, 0).is_some())
     }
 
     /// A checked read of a dependency property whose selected getter carries a reference role.
@@ -1111,5 +1100,23 @@ impl BodyLowering<'_, '_, '_> {
         // The declared result is what the program reads: an `Int` property answers a boxed `Int`
         // here and is unboxed back at the call site.
         self.convert(answer, Some(any()), ret)
+    }
+}
+
+/// The reference-object slot a member with `role` reaches when it is handed `operands` operands
+/// after the reference itself, or `None` when the role is not a reference member's.
+fn reference_slot(role: Option<crate::types::SemanticCallRole>, operands: usize) -> Option<u32> {
+    use crate::types::SemanticCallRole;
+    match role? {
+        SemanticCallRole::KotlinCallableReferenceName if operands == 0 => Some(NAME),
+        SemanticCallRole::KotlinPropertyReferenceGet(arity) if operands == usize::from(arity) => {
+            Some(GET)
+        }
+        SemanticCallRole::KotlinPropertyReferenceSet(arity)
+            if operands == usize::from(arity) + 1 =>
+        {
+            Some(SET)
+        }
+        _ => None,
     }
 }

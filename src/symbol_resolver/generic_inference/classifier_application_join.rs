@@ -98,7 +98,7 @@ pub(crate) fn join_classifier_applications(
         let formal = &classifier.type_params()[index];
         for (bindings, argument) in formals.iter_mut().zip(&arguments) {
             bindings.insert(
-                formal.clone(),
+                crate::types::TyParamName::new(formal),
                 argument.projection_inner().unwrap_or(*argument),
             );
         }

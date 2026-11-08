@@ -208,3 +208,36 @@ fn a_classpath_inline_nothing_lambda_is_regenerated_at_both_language_levels() {
         );
     }
 }
+
+/// Under the current language a `Nothing` slot of the selected function type itself still has no
+/// adaptee: `computeParameterTypeAdaptationConstraint` conflicts on a `Nothing` parameter and on a
+/// declared `Nothing` result alike, so kotlinc writes both lambdas as classes.
+const CURRENT_NOTHING_SLOTS_SRC: &str = "fun keep(f: () -> Nothing) = f\n\
+    fun keepParameter(f: (Nothing) -> Unit) = f\n\
+    fun box(): String { keep { throw Exception() }; keepParameter { }; return \"OK\" }\n";
+
+#[test]
+fn current_language_nothing_slots_of_the_function_type_are_classes() {
+    let settings = krusty::language_settings::LanguageSettings::default();
+    for class in [
+        "CurrentNothingSlotsKt$box$1",
+        "CurrentNothingSlotsKt$box$2",
+        "CurrentNothingSlotsKt",
+    ] {
+        let built = common::compare_with_kotlinc_plugin_language_settings(
+            "CurrentNothingSlots",
+            CURRENT_NOTHING_SLOTS_SRC,
+            class,
+            &[common::stdlib_jar()],
+            "1.8",
+            &settings,
+        )
+        .expect("reference kotlinc is provisioned");
+        assert!(!built.reference_bytes.is_empty(), "kotlinc writes {class}");
+        assert_eq!(
+            built.krusty_bytes, built.reference_bytes,
+            "{class} differs:\n{}\n---\n{}",
+            built.krusty, built.reference
+        );
+    }
+}

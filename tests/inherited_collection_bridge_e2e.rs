@@ -1,4 +1,4 @@
-//! Special bridges a Kotlin class inherits from a Java collection superclass.
+//! Special bridges a Kotlin class inherits from a Java or Kotlin collection superclass.
 //!
 //! kotlinc emits them on the first Kotlin class even when that class overrides nothing, and not
 //! again on a subclass. Every named class is compared byte-for-byte with kotlinc.
@@ -83,5 +83,56 @@ fn an_existing_override_bridge_is_not_replaced_by_an_inherited_pair() {
         "InheritedCollectionExistingBridge",
         EXISTING_OVERRIDE_BRIDGES,
         &["ConcreteCount", "GenericCountImpl"],
+    );
+}
+
+const SIGNED_ELEMENTS: &str = "\
+class Box<T>(val t: T)\n\
+class Outs : AbstractSet<Box<out String>>() {\n\
+    override val size get() = 1\n\
+    override fun iterator(): Iterator<Box<out String>> = listOf(Box(\"a\")).iterator()\n\
+}\n\
+abstract class Ins : AbstractList<Box<in String>>()\n\
+abstract class Stars : AbstractSet<Box<*>>()\n\
+abstract class Nested : AbstractSet<List<Box<out CharSequence>>>()\n\
+abstract class Bounded<T : CharSequence> : AbstractSet<List<T>>()\n\
+abstract class Consumed<T : CharSequence> : AbstractList<Box<in T>>()\n\
+abstract class Recursive<T : Comparable<T>> : AbstractSet<Box<T>>()\n\
+abstract class Applied<T : Map<String, Int>?> : AbstractSet<Box<T>>()\n\
+abstract class Chained<U : CharSequence, T : U> : AbstractSet<Box<T>>()\n\
+class Values<T : CharSequence> : java.util.HashMap<String, List<T>>()\n\
+class Projected : java.util.HashMap<String, Box<out CharSequence>>()\n\
+fun box(): String {\n\
+    val outs = Outs()\n\
+    if (outs.size != 1 || (outs as java.util.Collection<Any>).contains(1)) return \"outs\"\n\
+    val projected = Projected()\n\
+    projected[\"a\"] = Box(\"b\")\n\
+    if (projected.getOrDefault(\"a\", Box(\"c\")).t != \"b\" || projected.remove(\"a\")?.t != \"b\") return \"map\"\n\
+    return \"OK\"\n\
+}\n";
+
+/// A bridge's generic signature spells each element argument as the class spells it: use-site
+/// projections keep `+`, `-` and `*`, a parameter position adds its declaration-site wildcard, and
+/// the overridable entry erases the class's own type parameters to their star-projected bounds
+/// while the final entry keeps them.
+#[test]
+fn an_inherited_special_bridge_signs_projected_and_generic_elements_like_kotlinc() {
+    assert_eq!(run(SIGNED_ELEMENTS), "OK");
+    common::assert_classes_identical_to_kotlinc_jdk(
+        "InheritedCollectionSignedElements",
+        SIGNED_ELEMENTS,
+        &[
+            "Outs",
+            "Ins",
+            "Stars",
+            "Nested",
+            "Bounded",
+            "Consumed",
+            "Recursive",
+            "Applied",
+            "Chained",
+            "Values",
+            "Projected",
+        ],
     );
 }

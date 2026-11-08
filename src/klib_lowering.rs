@@ -18,6 +18,7 @@ mod callable_references;
 mod callee_facts;
 mod class_headers;
 mod class_initialization;
+mod class_storage;
 mod closure_forms;
 mod constructor_calls;
 mod decline;
@@ -29,13 +30,14 @@ mod local_values;
 mod lowering_checkpoint;
 mod primitive_calls;
 mod range_membership;
+mod same_library_class;
 #[cfg(test)]
 mod tests;
 mod type_evidence;
 
 pub use crate::libraries::KlibBodyCallable as KlibCallable;
 pub use body_unit::DependencyBodyUnit;
-pub(crate) use body_unit::EmittedDependencyCallable;
+pub(crate) use body_unit::{is_private_value_member, EmittedDependencyCallable};
 pub use callee_facts::KlibCalleeFacts;
 pub(crate) use closure_forms::emitted_closure_function;
 

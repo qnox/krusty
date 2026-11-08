@@ -8,12 +8,14 @@ use crate::fir::ResolvedParameterIdentity;
 use crate::fx_hash::{HashMap, HashSet};
 use crate::klib_libraries::KlibDeclarationBodies;
 use crate::libraries::{
-    ExternalCallableKind, KlibBodyCallable, KlibBodyClassParameters, ParamFlags,
+    ExternalCallableKind, KlibBodyCallable, KlibBodyClassParameters, KlibDependencyCallable,
+    ParamFlags,
 };
 use crate::metadata::klib_ir::tree::{KlibIrFunction, KlibIrNullability, KlibIrType};
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
 use crate::types::{Ty, TyKind, TypeName};
 
+#[derive(Clone)]
 pub(super) struct ConstructorDeclaration {
     pub(super) classifier: TypeName,
     params: Vec<Ty>,
@@ -141,7 +143,127 @@ pub(super) fn authenticate(
     })
 }
 
+/// The frozen invocation contract of the compiler root, independently of an executable body.
+pub(super) fn authenticate_root_declaration(
+    selected: KlibBodyCallable<'_>,
+) -> Result<(), KlibBodyDeclineReason> {
+    let owner = crate::types::wk::any();
+    let class = selected
+        .class_contract()
+        .ok_or_else(|| mismatch("a root constructor has no declared class"))?;
+    if selected.kind() != ExternalCallableKind::Constructor
+        || selected.ret() != Ty::Unit
+        || selected.name() != "<init>"
+        || !selected.params().is_empty()
+        || !selected.parameter_identities().is_empty()
+        || selected.context_count() != 0
+        || selected.generic_signature().is_some()
+        || !selected.type_parameters().is_empty()
+        || selected.semantic_role().is_some()
+        || selected.compiler_intrinsic().is_some()
+        || selected.range_construction().is_some()
+        || selected.singleton_dispatch().is_some()
+        || selected.singleton_classifier().is_some()
+        || selected.companion_receiver().is_some()
+        || selected.accessor().is_some()
+        || selected.visibility() != crate::types::Visibility::Public
+        || selected.declaration_modifiers().is_some_and(|modifiers| {
+            modifiers.is_inline || modifiers.is_suspend || modifiers.property_is_external
+        })
+        || !selected.reified_type_parameter_ordinals().is_empty()
+        || selected.vararg_index().is_some()
+        || selected
+            .parameter_defaults()
+            .is_none_or(|defaults| !defaults.is_empty())
+        || selected.declaration_owner()
+            != Some(crate::types::SemanticCallableOwner::Classifier(owner))
+        || class.module != selected.identity().module
+        || class.classifier != owner
+        || class.signature
+            != crate::metadata::id_signature::KlibPublicIdSignature::classifier(owner)
+        || class.primary_constructor.as_ref().is_some_and(|primary| {
+            selected.signature()
+                != &crate::libraries::KlibDeclarationSignature::Public(primary.clone())
+        })
+        || class.kind != crate::libraries::TypeKind::Class
+        || class.is_value
+        || class.is_inner
+        || class.is_expect
+        || !class.parameters.formals.is_empty()
+        || !class.parameters.bounds.is_empty()
+        || !class.parameters.variances.is_empty()
+        || class.parameters.own_count != 0
+    {
+        return Err(mismatch(
+            "a frozen root constructor has an incompatible declaration contract",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a known serialized root header; absence of its body does not erase contradictions.
+pub(super) fn authenticate_root_header(
+    identity: &KlibDependencyCallable,
+    bodies: &KlibDeclarationBodies,
+) -> Result<(), KlibBodyDeclineReason> {
+    let member = bodies
+        .class_member_header(
+            identity,
+            &crate::metadata::id_signature::KlibPublicIdSignature::classifier(
+                crate::types::wk::any(),
+            ),
+        )
+        .map_err(mismatch)?
+        .ok_or_else(|| mismatch("a known root constructor is not its class's member"))?;
+    let function = member.function;
+    require_constructor_kind(function)?;
+    if member.class.base.symbol.kind != KlibIrSymbolKind::Class
+        || crate::metadata::semantic::class_kind(member.class.base.flags)
+            != crate::libraries::TypeKind::Class
+        || crate::metadata::semantic::class_is_value(member.class.base.flags)
+        || member.class.value_class_representation.is_some()
+        || crate::metadata::semantic::declaration_visibility(function.base.flags)
+            != crate::types::Visibility::Public
+        || !member.class.type_parameters.is_empty()
+        || !member.class.supertypes.is_empty()
+        || function.name != "<init>"
+        || !function.regular_parameters.is_empty()
+        || !function.context_parameters.is_empty()
+        || function.dispatch_receiver.is_some()
+        || function.extension_receiver.is_some()
+        || !function.type_parameters.is_empty()
+        || !function.overridden.is_empty()
+        || function.companion_extension_class.is_some()
+        || !matches!(member.arena.ty(function.return_type), KlibIrType::Simple {
+            classifier, nullability: KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull,
+            arguments, ..
+        } if classifier.kind == KlibIrSymbolKind::Class && arguments.is_empty()
+            && classifier.signature == KlibIrSignature::Public(crate::metadata::id_signature::KlibPublicIdSignature::classifier(crate::types::wk::any())))
+    {
+        return Err(mismatch(
+            "a known root constructor has an incompatible serialized header",
+        ));
+    }
+    Ok(())
+}
+
 impl ConstructorDeclaration {
+    /// A constructor this library materializes for a file-local class, with no provider record.
+    pub(super) fn local(
+        classifier: TypeName,
+        params: Vec<Ty>,
+        class_parameters: KlibBodyClassParameters,
+        defaults: ParamFlags,
+    ) -> Self {
+        Self {
+            classifier,
+            params,
+            class_parameters,
+            defaults,
+            semantic_role: None,
+        }
+    }
+
     pub(super) fn default_allowed(&self, ordinal: usize) -> bool {
         self.defaults.get(ordinal).copied().unwrap_or(false)
     }

@@ -634,6 +634,7 @@ impl BodyFirChecker<'_> {
                     classifier: None,
                     context_binding: None,
                     singleton: None,
+                    context_parameter: false,
                     construction_sites: Vec::new(),
                 }
             }
@@ -652,6 +653,7 @@ impl BodyFirChecker<'_> {
                     flow_identity: None,
                 }),
                 singleton: None,
+                context_parameter: true,
                 construction_sites: Vec::new(),
             },
             FirDelegateDispatchReceiver::Singleton { ty, classifier } => {
@@ -665,6 +667,7 @@ impl BodyFirChecker<'_> {
                         classifier: *classifier,
                         companion_owner: None,
                     }),
+                    context_parameter: false,
                     construction_sites: Vec::new(),
                 }
             }
@@ -868,6 +871,7 @@ fn selected_delegate_call(
                     default_provider: *external_default_provider,
                     receiver: Some(receiver),
                     declared_receiver: None,
+                    declaring_receiver: None,
                     parameters: parameters.clone(),
                     result: resolved(*ret)?,
                     declared_result: None,
@@ -973,6 +977,7 @@ fn selected_delegate_call(
                     default_provider: callable.external_default_provider,
                     receiver: Some(receiver),
                     declared_receiver: callable.source_receiver.map(resolved).transpose()?,
+                    declaring_receiver: None,
                     parameters: parameters.clone(),
                     result: resolved(callable.ret)?,
                     declared_result: callable.declared_ret.map(resolved).transpose()?,
@@ -1082,6 +1087,7 @@ fn selected_delegate_call(
                         default_provider: *external_default_provider,
                         receiver: Some(resolved(dispatch_receiver.ty)?),
                         declared_receiver: None,
+                        declaring_receiver: None,
                         parameters: parameters
                             .into_iter()
                             .map(resolved)

@@ -54,6 +54,11 @@ pub(crate) fn referenced_classifier_names(ir: &IrFile) -> Vec<TypeName> {
         }
         for argument in &class.ctor_args {
             collect_classifier_names(argument.ty, &mut out);
+            if let super::IrCtorParameterProvenance::InterfaceDelegate { interface, .. } =
+                argument.provenance
+            {
+                collect_classifier_names(interface, &mut out);
+            }
         }
         for constructor in &class.secondary_ctors {
             constructor
@@ -85,6 +90,15 @@ pub(crate) fn referenced_classifier_names(ir: &IrFile) -> Vec<TypeName> {
                 collect_classifier_names(result, &mut out);
             }
         }
+    }
+    // A class realizes each inherited default with a forwarder that declares the member's types.
+    for default in ir.inherited_defaults.values().flatten() {
+        default
+            .parameters
+            .iter()
+            .chain(&default.applied_parameters)
+            .chain([&default.result, &default.applied_result])
+            .for_each(|ty| collect_classifier_names(*ty, &mut out));
     }
     for (_, ty) in ir.logical_types() {
         collect_classifier_names(ty, &mut out);

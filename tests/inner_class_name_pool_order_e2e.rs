@@ -134,3 +134,43 @@ fn a_local_class_interns_its_enclosing_method_before_its_own_row() {
     .expect("reference kotlinc is provisioned")
     .unwrap_or_else(|e| panic!("the local class is byte-identical to kotlinc: {e}"));
 }
+
+// PLATFORM: JVM InnerClasses rows and class headers describe declaring-class ancestry.
+const ANONYMOUS_PROPERTY_ANCESTORS: &str =
+    include_str!("fixtures/inner_class_declaration_ancestors/AnonymousPropertyAncestors.kt");
+
+#[test]
+fn anonymous_property_ancestors_preserve_every_class_header_and_member() {
+    let classes = common::classes_against_kotlinc_module(&[(
+        "AnonymousPropertyAncestors.kt",
+        ANONYMOUS_PROPERTY_ANCESTORS,
+    )]);
+    assert!(!classes.reference.is_empty(), "reference class inventory");
+    let inventory = |classes: &std::collections::BTreeMap<String, Vec<u8>>| {
+        classes
+            .iter()
+            .map(|(name, bytes)| {
+                let class = krusty::jvm::classreader::parse_class(bytes).expect("readable class");
+                let header = format!(
+                    "{:?}",
+                    (
+                        class.major,
+                        class.access,
+                        class.this_class,
+                        class.super_class,
+                        class.interfaces(),
+                        class.signature,
+                        class.inner_classes,
+                    )
+                );
+                (name.clone(), (header, common::member_table(bytes)))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(inventory(&classes.krusty), inventory(&classes.reference));
+}
+
+#[test]
+fn anonymous_property_ancestors_keep_their_runtime_result() {
+    common::expect_box_same_as_kotlinc(ANONYMOUS_PROPERTY_ANCESTORS, "AnonymousPropertyAncestors");
+}

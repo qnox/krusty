@@ -304,6 +304,7 @@ fn annotation_implementation(
     enclosure: IrEnclosure,
 ) -> IrClass {
     IrClass {
+        declaration_context: None,
         declaration_name: None,
         fq_name,
         is_source_declared: false,
@@ -405,6 +406,7 @@ mod tests {
             internal: interface,
             args: vec![value],
             ctor_params: Some(vec![Ty::String]),
+            declared_params: None,
             ctor_desc: None,
             external_target: Some(ExternalCallableId::from_raw(7)),
             defaults: Box::new([]),
@@ -413,6 +415,12 @@ mod tests {
         ir.annotation_constructions.insert(
             construction,
             crate::ir::IrAnnotationConstruction {
+                arguments: crate::libraries::AnnotationArgumentProvenance::from_selected(
+                    1,
+                    &[0],
+                    &[],
+                )
+                .unwrap(),
                 interface,
                 members: vec![("value".into(), Ty::String)],
                 defaults: vec![None],

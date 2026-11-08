@@ -27,6 +27,7 @@ pub(super) fn derive_bridges(
     override_results: &crate::jvm::override_results::OverrideResults,
     argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
+    abstract_overrides: &crate::jvm::abstract_builtin_overrides::AbstractBuiltinOverrides,
 ) -> Result<(), SkipReason> {
     for cid in 0..ir.classes.len() {
         // Source-declared classes, declaration-owned enum-entry subclasses, and anonymous classes
@@ -61,7 +62,7 @@ pub(super) fn derive_bridges(
         ir.classes[cid].bridges.extend(inherited);
         declaration_order(&mut ir.classes[cid].bridges[first..], order);
     }
-    finalize_special_collection_bridges(ir, classpath);
+    finalize_special_collection_bridges(ir, classpath, abstract_overrides);
     Ok(())
 }
 
@@ -71,6 +72,7 @@ pub(super) fn derive_bridges(
 fn finalize_special_collection_bridges(
     ir: &mut IrFile,
     classpath: &crate::jvm::classpath::Classpath,
+    abstract_overrides: &crate::jvm::abstract_builtin_overrides::AbstractBuiltinOverrides,
 ) {
     for class in &mut ir.classes {
         for bridge in &mut class.bridges {
@@ -99,6 +101,7 @@ fn finalize_special_collection_bridges(
                         method_descriptor(&bridge.erased_params, bridge.erased_ret),
                     )
                 })
+                .chain(abstract_overrides.final_bridges(class.fq_name_id()))
                 .collect::<Vec<_>>();
             (class.fq_name, methods)
         })
@@ -946,8 +949,13 @@ fn push_property_bridge(
             (internal_getter_bridge || getter_name != getter_target).then_some(getter_target);
         // As for a function, the name an internal slot publishes (`getV$lib`) is not a builtin's
         // mapped JVM name, so its bridge is an ordinary overridable one, not a final special bridge.
+        // So is a value class's: kotlinc's `JvmInlineClassLowering` replaces the accessor with a
+        // member that no longer belongs to the property, so `BridgeLowering` finds no special
+        // property under it and bridges the builtin's mapped name (`size()`) like any other
+        // override, synthetic and without a generic signature.
         let special = !internal_getter_bridge
             && !overridden_internal
+            && !ir.classes[cid].is_value
             && getter_name != property_getter_name(&edge.name);
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertyGetter,

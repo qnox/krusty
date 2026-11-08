@@ -71,10 +71,9 @@ impl Parser<'_> {
         if !self.eat(TokenKind::Lt) {
             return args;
         }
-        self.skip_newlines();
+        self.skip_semicolons();
         while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
             let (in_projection, out_projection, projection_span) = self.skip_variance();
-            self.skip_plain_newlines();
             if self.at(TokenKind::Star) {
                 let span = self.tok().span;
                 self.bump();
@@ -101,11 +100,11 @@ impl Parser<'_> {
                 }
                 args.push(argument);
             }
-            self.skip_newlines();
+            self.skip_semicolons();
             if !self.eat(TokenKind::Comma) {
                 break;
             }
-            self.skip_newlines();
+            self.skip_semicolons();
         }
         self.expect(TokenKind::Gt, "'>'");
         args

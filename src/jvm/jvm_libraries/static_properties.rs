@@ -26,7 +26,10 @@ impl JvmLibraries {
                 .is_some_and(|field| field.name == field_name && field.desc == field_descriptor)
         };
         let ci = self.cp.find_name(internal)?;
-        if let Some(property) = super::metadata::class_properties(&ci)
+        if let Some(property) = self
+            .cp
+            .class_members(&ci)
+            .class_properties
             .iter()
             .find(|property| realizes_field(property))
             .cloned()
@@ -47,7 +50,9 @@ impl JvmLibraries {
         let companion_name = super::metadata::class_companion_name(&ci)?;
         let companion = crate::types::existing_type_name_nested_child(internal, &companion_name)?;
         let companion = self.cp.find_name(companion)?;
-        super::metadata::class_properties(&companion)
+        self.cp
+            .class_members(&companion)
+            .class_properties
             .iter()
             .find(|property| realizes_field(property))
             .cloned()
@@ -106,7 +111,10 @@ impl JvmLibraries {
     /// `JvmPropertySignature` names, whose `ConstantValue` is the declaration's constant.
     fn companion_block_property(&self, internal: TypeName, name: &str) -> Option<PropertyInfo> {
         let class = self.cp.find_name(internal)?;
-        let declaration = super::metadata::class_properties(&class)
+        let declaration = self
+            .cp
+            .class_members(&class)
+            .class_properties
             .iter()
             .find(|property| property.is_companion_block_member && property.name == name)?;
         let accessor = |jvm_name: &str, descriptor: &str| {
@@ -290,7 +298,9 @@ impl JvmLibraries {
             }
             let companion = self.cp.find_name(internal)?;
             let field = self.static_field_name(outer, name)?;
-            super::metadata::class_properties(&companion)
+            self.cp
+                .class_members(&companion)
+                .class_properties
                 .iter()
                 .any(|property| {
                     property.field.as_ref().is_some_and(|signature| {

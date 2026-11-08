@@ -16,16 +16,22 @@
 //! `String` is on every target. A string constant is copied out of the module's passive data
 //! segment with `array.new_data`.
 
+mod object_equality;
+
 use crate::fx_hash::HashMap;
 
 use super::boxes::Boxes;
+use super::callable_references::CallableReferences;
 use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
 };
 use super::exception_transport::ExceptionTransport;
 use super::function_values::FunctionShapes;
+use super::hashing::Hashing;
 use super::host::Host;
+use super::identity::IdentityObjects;
 use super::objects::ObjectRoot;
+use super::reference_arrays::ReferenceArrays;
 
 /// Where a host write's bytes are staged in linear memory. The first 16 bytes are left for the
 /// host's own use (a WASI iovec).
@@ -41,7 +47,9 @@ pub(super) struct Runtime {
     pub(super) string: u32,
     /// Reference-element array storage shared by every applied Kotlin `Array<T>`.
     pub(super) references: u32,
+    pub(super) arrays: ReferenceArrays,
     pub(super) string_equals: u32,
+    pub(super) object_equals: u32,
     pub(super) string_concat: u32,
     pub(super) string_of_i32: u32,
     pub(super) string_of_i64: u32,
@@ -53,11 +61,15 @@ pub(super) struct Runtime {
     pub(super) i64_div: u32,
     /// The object model's root types and `kotlin.Any`'s members.
     pub(super) objects: ObjectRoot,
+    pub(super) identity: IdentityObjects,
+    /// Kotlin's `hashCode()` rules.
+    pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
     /// The box types of the primitives this module carries as references.
     pub(super) boxes: Boxes,
     /// The table types of the function values this module creates.
     pub(super) functions: FunctionShapes,
+    pub(super) callable_references: CallableReferences,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
 }
@@ -101,11 +113,17 @@ impl Runtime {
             storage: StorageType::Val(super::objects::REFERENCE),
             mutable: true,
         }));
+        let identity = IdentityObjects::declare(module, &objects);
+        let arrays = ReferenceArrays::declare(module, &mut objects, &identity, references);
+        let object_equals = module.declare();
+        let callable_references = CallableReferences::declare(module, &objects, object_equals);
         let mut runtime = Self {
             chars,
             string,
             references,
+            arrays,
             string_equals: module.declare(),
+            object_equals,
             string_concat: module.declare(),
             string_of_i32: module.declare(),
             string_of_i64: module.declare(),
@@ -116,12 +134,16 @@ impl Runtime {
             i32_div: module.declare(),
             i64_div: module.declare(),
             objects,
+            identity,
+            hashing: Hashing::declare(module),
             exceptions,
             boxes: Boxes::default(),
             functions: FunctionShapes::default(),
+            callable_references,
             constants: HashMap::default(),
         };
         runtime.define_string_equals(module);
+        runtime.define_object_equals(module);
         runtime.define_string_concat(module);
         runtime.define_string_of_i64(module);
         runtime.define_string_of_i32(module);
@@ -130,6 +152,9 @@ impl Runtime {
         runtime.define_string_or_null(module);
         runtime.define_write_string(module, host);
         runtime.define_division(module);
+        runtime
+            .hashing
+            .define(module, &runtime.objects, runtime.string, runtime.chars);
         runtime
     }
 

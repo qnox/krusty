@@ -3,6 +3,16 @@
 Use `./run-tests.sh` as the canonical test entrypoint. It is self-provisioning and normally needs no
 parameters.
 
+## Adding an e2e test
+
+The `e2e` target declares one module for every `tests/*_e2e.rs` file, through
+`krusty_test_modules::declare_test_modules!` in `tests/e2e.rs`, so a new test file needs no list
+edit anywhere. A module's own child modules live in `tests/<parent>_e2e/` without the suffix, so
+they are not also declared at the root; the macro rejects a suffixed child at compile time. Cargo does not notice a file appearing or disappearing, so
+the generated `declared_test_modules_match_the_tests_directory` test fails until the target is
+rebuilt; touch `tests/e2e.rs` to rebuild it. `cargo fmt` does not follow macro-declared modules,
+which is why `just fmt` and `just fmt-check` also pass `tests/*_e2e.rs` to rustfmt.
+
 ## Compiler/plugin model reuse across worktrees
 
 `krusty-plugin-ir` records the workspace's existing `KRUSTY_BUILD_CHECKOUT` input in Rust dep-info.
@@ -175,9 +185,13 @@ target test consumes JVM artifacts and no target waits for another target's corp
 `KRUSTY_KOTLIN_BOX_DIR` select the runtime reference toolchain, so the matrix does not rebuild Rust
 code per Kotlin version or target. Toolchain and box/serialization corpora are isolated by version.
 JVM rows require pinned serialization-runtime provisioning, so missing prerequisites fail rather
-than turning those tests into passing skips. Real KSP integrations belong to the plugin host and
-run unconditionally in the lint job through `cargo test -p krusty-plugin-host -- --include-ignored`;
-they use that host's pinned toolchain and the runner's JDK, not JVM matrix opt-in flags. Each row
+than turning those tests into passing skips. Compiler-dependent plugin and KSP integrations belong
+to the root e2e target. After coverage, CI reuses that exact coverage-profile executable for an explicit
+`plugin_host_compiler_e2e:: --include-ignored --test-threads=1` pass under the configurable e2e deadline.
+That pass runs after the coverage report; its counters do not change the measured workload.
+Compiler-independent host tests run in their own `plugin-host` job through
+`cargo test --profile gate -p krusty-plugin-host -- --include-ignored`. Both use the host's pinned
+toolchain and JDK 17 in CI, not JVM matrix opt-in flags. Each row
 uses its target's configurable process-group deadline. The complete JVM non-box CI pass retains
 its 600-second cold serialization/reference-CLI toolchain budget. The local 120-second default
 and test inventory are unchanged; an exhausted deadline still fails. JVM rows upload `pct-<version>` and

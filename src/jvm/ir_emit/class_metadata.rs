@@ -159,7 +159,11 @@ pub(super) fn build_class_metadata_with_facts(
     );
     let classifier = record.classifier();
     let class_id = if tail.local_classifiers.contains(&classifier) {
-        crate::metadata::class_id::ResolvedClassId::local(classifier)
+        if crate::metadata::local_classifiers::is_anonymous(c) {
+            crate::metadata::class_id::ResolvedClassId::anonymous(classifier)
+        } else {
+            crate::metadata::class_id::ResolvedClassId::local(classifier)
+        }
     } else {
         match crate::metadata::class_id::ResolvedClassId::resolve(
             crate::libraries::ClassifierDeclarationKey::Ordinary(classifier),
@@ -232,10 +236,11 @@ fn mentions_undescribed_value_class(
             .chain(function.params.iter().map(|(_, ty)| ty))
             .chain(std::iter::once(&function.ret))
             .any(undescribed)
-    }) || c
-        .properties
-        .iter()
-        .any(|p| p.getter_jvm_name.is_some() && undescribed(&p.ty))
+    }) || (0u32..).zip(&c.properties).any(|(index, p)| {
+        ir.jvm_property_accessor_name(c.fq_name, index, crate::ir::JvmAccessorSide::Getter)
+            .is_some()
+            && undescribed(&p.ty)
+    })
 }
 
 /// The classifiers whose class id a reader cannot map back to their JVM name, so that a signature
@@ -438,7 +443,7 @@ impl<'a> JvmClassRealization<'a> {
         let hoisted = static_fields::hoisted_static_declaration_for(ir, c, property_index);
         // A delegated companion property's `x$delegate`, hoisted onto the outer class.
         let hoisted_delegate = static_fields::hoisted_delegate_static_for(ir, c, property_index);
-        let (default_getter, default_setter) = accessor_jvm_names(c, &property.name);
+        let (default_getter, default_setter) = accessor_jvm_names(ir, c, &property.name);
         // A getter's descriptor is its physical one: a scalar getter result over a reference-returning
         // overridden property returns the wrapper (see `jvm::override_results`).
         let physical_getter = |fid: u32| {
@@ -466,7 +471,7 @@ impl<'a> JvmClassRealization<'a> {
                     let result = if boxed {
                         Ty::nullable(property.ty)
                     } else {
-                        declared_property_accessor_jvm(ir, property, field)
+                        declared_property_accessor_jvm(ir, c, property_index as u32, field)
                     };
                     (!visibility.is_private() && !is_jvm_field(c, &property.name))
                         .then(|| (default_getter, format!("(){}", desc(result))))
