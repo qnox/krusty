@@ -2,6 +2,7 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::types::{Ty, TypeName};
 
+use super::expression_copy::InheritedFacts;
 use super::{ExprId, IrFile};
 
 /// Target-neutral semantic facts captured before a backend erases value-class identities.
@@ -95,5 +96,17 @@ impl IrFile {
             .values()
             .flatten()
             .copied()
+    }
+}
+
+impl InheritedFacts for ValueClassConstructorFacts {
+    fn inherit(&mut self, source: ExprId, target: ExprId) {
+        // The primary-constructor facts belong to classes, not to expressions.
+        let Self {
+            primary_owners: _,
+            primary_declared_params: _,
+            parameter_constructions,
+        } = self;
+        parameter_constructions.inherit(source, target);
     }
 }

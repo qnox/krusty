@@ -734,6 +734,12 @@ impl NameTree {
                 .is_some_and(|suffix| suffix.starts_with('$'))
     }
 
+    /// The exact nesting edge published by nested-child construction, without decoding spelling.
+    pub(crate) fn exact_nested_owner(&self, nested: NameId) -> Option<NameId> {
+        let exact = self.node(nested).exact_nested_owner.load(Ordering::Acquire);
+        exact.checked_sub(1).map(NameId)
+    }
+
     /// The immediate classifier owner encoded in the final segment (`Outer$Inner` or
     /// `Outer.Inner` -> `Outer`). Returns an already-interned identity and never creates a spelling.
     #[inline]

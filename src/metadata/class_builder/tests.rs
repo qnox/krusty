@@ -912,15 +912,16 @@ fn class_metadata_has_expected_strings() {
     assert!(d2.contains(&"setY".to_string()));
     assert!(d2.contains(&"(ILjava/lang/String;)V".to_string()));
     let d1 = String::from_iter(d1.into_iter().map(char::from));
-    let metadata =
-        crate::jvm::metadata::decode_metadata(&[d1], &d2, Some(1), "demo/Point", None, &[])
-            .expect("generated class metadata decodes");
-    assert_eq!(metadata.class_properties.len(), 2);
-    assert_eq!(metadata.class_properties[0].setter_parameter_name, None);
+    let metadata = crate::jvm::metadata::decode_metadata(&[d1], &d2, Some(1), "demo/Point", None)
+        .expect("generated class metadata decodes");
+    let members = metadata
+        .members
+        .decode(&[], &metadata.type_parameter_scope)
+        .expect("decode generated members");
+    assert_eq!(members.class_properties.len(), 2);
+    assert_eq!(members.class_properties[0].setter_parameter_name, None);
     assert_eq!(
-        metadata.class_properties[1]
-            .setter_parameter_name
-            .as_deref(),
+        members.class_properties[1].setter_parameter_name.as_deref(),
         Some("replacement")
     );
 }

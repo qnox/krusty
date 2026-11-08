@@ -507,7 +507,8 @@ fn collect_type_reified_parameters(
         | TyKind::Null
         | TyKind::Nothing
         | TyKind::Error
-        | TyKind::Pending => {}
+        | TyKind::Pending
+        | TyKind::Var(..) => {}
     }
 }
 
@@ -722,6 +723,7 @@ mod tests {
                 bounds: vec![(Ty::obj("kotlin/Any"), false)],
                 variance: Default::default(),
                 reified: true,
+                captured_from_enclosing: false,
             }],
             params: vec![],
             ret: None,
@@ -1222,6 +1224,7 @@ mod tests {
                     bounds: vec![(Ty::obj("kotlin/Throwable"), false)],
                     variance: Default::default(),
                     reified: true,
+                    captured_from_enclosing: false,
                 }],
                 params: vec![],
                 ret: None,
@@ -1282,6 +1285,7 @@ mod tests {
                     bounds: vec![(Ty::obj("kotlin/Throwable"), false)],
                     variance: Default::default(),
                     reified: true,
+                    captured_from_enclosing: false,
                 }],
                 params: vec![],
                 ret: None,
@@ -1349,6 +1353,7 @@ mod tests {
                     bounds: vec![(Ty::obj("kotlin/Throwable"), false)],
                     variance: Default::default(),
                     reified: true,
+                    captured_from_enclosing: false,
                 }],
                 params: vec![],
                 ret: None,

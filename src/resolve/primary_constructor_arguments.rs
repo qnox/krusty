@@ -25,6 +25,7 @@ impl Checker<'_> {
             owner: current_owner,
             anonymous: is_anonymous_object,
         } = site;
+        let capture_scope = scope;
         // An anonymous constructor header sees lexical values without its instance-property
         // overlay. Retain its authentic dispatch rung solely as the unavailable constructor
         // prefix: removing that rung would renumber enclosing receivers in the capture ledger.
@@ -143,7 +144,15 @@ impl Checker<'_> {
                         resolved: selected, ..
                     } = c.select_source_constructor(header_scope, &arguments, &candidates)
                     {
-                        let selected = *selected;
+                        let mut selected = *selected;
+                        if let (true, ResolvedCtorDelegationTarget::Super { owner, .. }) =
+                            (is_anonymous_object, &selected.target)
+                        {
+                            // Written arguments use the construction-site lexical tower;
+                            // hidden captures are read from this constructor's prefix.
+                            selected.capture_plan =
+                                c.selected_constructor_capture_plan(capture_scope, *owner);
+                        }
                         if let Some(receiver) = &selected.outer_receiver {
                             c.mark_selected_implicit_receiver_used(header_scope, receiver, d);
                         }
