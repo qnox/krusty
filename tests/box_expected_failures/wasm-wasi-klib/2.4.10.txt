@@ -1809,7 +1809,6 @@ enum/toString.kt
 enum/vCallNoEntryClass.kt
 enum/vCallWithEntryClass.kt
 enum/valueOf2.kt
-enum/valueof.kt
 enum/values.kt
 enum/varargParam.kt
 enum/whenInObject.kt
