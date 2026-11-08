@@ -61,8 +61,8 @@ impl IrFile {
 
     /// The checked type of the value `id` yields, if lowering recorded one.
     pub fn checked_type(&self, id: ExprId) -> Option<Ty> {
-        match self.logical_types.get(&id) {
-            Some(ty) => Some(*ty),
+        match self.logical_type(id) {
+            Some(ty) => Some(ty),
             None => self.named_type(id),
         }
     }
@@ -104,13 +104,15 @@ impl IrFile {
             IrExpr::New { internal, .. } => Ty::obj_name(*internal),
             IrExpr::SingletonValue { classifier }
             | IrExpr::EnumEntry { classifier, .. }
-            | IrExpr::EnumValueOf { classifier, .. } => Ty::obj_name(*classifier),
+            | IrExpr::EnumValueOf { classifier, .. }
+            | IrExpr::EnumConstant { classifier, .. } => Ty::obj_name(*classifier),
+            IrExpr::EnumAllocation { instance, .. } => Ty::obj_name(*instance),
             // An enclosing-instance edge names the outer classifier it reaches.
             IrExpr::EnclosingInstance { outer, .. } => Ty::obj_name(*outer),
             IrExpr::EnumValues { classifier } => {
                 Ty::obj_args("kotlin/Array", &[Ty::obj_name(*classifier)])
             }
-            IrExpr::EnumEntries { classifier } => {
+            IrExpr::EnumEntries { classifier } | IrExpr::EnumEntriesList { classifier, .. } => {
                 Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::obj_name(*classifier)])
             }
             IrExpr::EnumSwitchOrdinal { .. } | IrExpr::EnumSwitchKey { .. } => Ty::Int,
@@ -135,7 +137,7 @@ impl IrFile {
             "{op:?} answers a Boolean; it has no selected result type to record"
         );
         let id = self.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs });
-        self.logical_types.insert(id, result);
+        self.set_logical_type(id, result);
         id
     }
 
@@ -145,7 +147,7 @@ impl IrFile {
             let id = ExprId::try_from(id).expect("too many expressions");
             matches!(expression, IrExpr::PrimitiveBinOp { op, .. } if !op.yields_boolean())
                 .then_some(id)
-                .filter(|id| !self.logical_types.contains_key(id))
+                .filter(|id| !self.logical_type(*id).is_some())
         })
     }
 }

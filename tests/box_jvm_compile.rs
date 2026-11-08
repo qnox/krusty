@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
+use krusty::jvm::classreader::parse_class;
 
 use krusty::conformance::split_modules;
 
@@ -270,7 +271,7 @@ pub(super) fn compile_multifile(
     // sees the emitted classes as an overlay on the shared jar classpath, and they ride along to
     // BoxRunner's loader. When javac-first fails — the Java references Kotlin declarations, so it
     // cannot be ordered first — fall back to the KOTLIN-FIRST pipeline: signature stubs → krusty →
-    // real javac (docs/JAVA_INTEROP.md slice 2).
+    // real javac.
     let mut java_classes: Vec<(String, Vec<u8>)> = Vec::new();
     if !java_blocks.is_empty() {
         match common::javac_compile(&java_blocks, cp_jars) {
@@ -492,6 +493,13 @@ impl CompiledClasses {
         }
     }
 
+    /// Only the final canonical `ModuleUnit` owns the executable box entry, even if its
+    /// range is empty. Dependencies remain in `flat` and their complete scoring ranges.
+    pub(super) fn box_class(&self) -> Option<String> {
+        let (_, range) = self.module_ranges.last()?;
+        find_box_class(self.flat.get(range.clone())?)
+    }
+
     /// The module-qualified inventory for byte scoring, keyed by `(module, internal name)`.
     pub(super) fn qualified(&self) -> box_byte_score::QualifiedClasses {
         let mut out = box_byte_score::QualifiedClasses::new();
@@ -502,6 +510,21 @@ impl CompiledClasses {
         }
         out
     }
+}
+
+/// Find the class that declares `static box()Ljava/lang/String;`.
+pub(super) fn find_box_class(classes: &[(String, Vec<u8>)]) -> Option<String> {
+    for (name, bytes) in classes {
+        if let Ok(ci) = parse_class(bytes) {
+            if ci
+                .method("box", "()Ljava/lang/String;")
+                .is_some_and(|m| m.is_static())
+            {
+                return Some(name.replace('/', "."));
+            }
+        }
+    }
+    None
 }
 
 /// Compile a `// MODULE:` test the way a Gradle multi-module build (or kotlinc's separate-compilation

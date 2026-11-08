@@ -37,9 +37,7 @@ fn branch_entry_line(ir: &IrFile, expression: ExprId) -> Option<u32> {
 }
 
 fn direct_expression_source_line(ir: &IrFile, expression: ExprId) -> Option<u32> {
-    ir.expr_source_lines
-        .get(&expression)
-        .copied()
+    ir.source_line(expression)
         .or_else(|| ir.expr_lines.get(&expression).copied())
 }
 
@@ -67,10 +65,9 @@ fn nearest_expression_source_line(ir: &IrFile, root: ExprId) -> Option<u32> {
         if !seen.insert(expression) {
             continue;
         }
-        if let Some(&line) = ir
-            .expr_source_lines
-            .get(&expression)
-            .or_else(|| ir.expr_lines.get(&expression))
+        if let Some(line) = ir
+            .source_line(expression)
+            .or_else(|| ir.expr_lines.get(&expression).copied())
         {
             best = Some(best.map_or(line, |current: u32| current.min(line)));
         }
@@ -231,7 +228,7 @@ fn collect_suspension_lines(
             let region_fall_through = finally
                 .and_then(|finally| expression_source_line(ir, finally))
                 .or(fall_through);
-            let body_fall_through = ir.expr_end_lines.get(body).copied().or(region_fall_through);
+            let body_fall_through = ir.end_line(*body).or(region_fall_through);
             collect_suspension_lines(ir, *body, suspend_functions, body_fall_through, out);
             for catch in catches {
                 collect_suspension_lines(

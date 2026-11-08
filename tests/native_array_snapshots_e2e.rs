@@ -65,7 +65,7 @@ fn each_element_is_boxed_as_the_type_its_array_declares() {
 /// the second. Native only, and deliberately: krusty's JVM backend rejects this program with
 /// `VerifyError: Type '[I' is not assignable to 'java/lang/Iterable'` — a `UIntArray` IS a
 /// `Collection<UInt>` in Kotlin, and that backend hands the erased `int[]` to `Iterable.toList()`
-/// without the wrapper. That is a defect of its own, recorded in `docs/SPEC.md`; the expectation
+/// without the wrapper. That is a defect of its own; the expectation
 /// here is kotlinc's, taken by running the same program under it.
 #[test]
 fn an_unsigned_array_reads_its_elements_unsigned() {

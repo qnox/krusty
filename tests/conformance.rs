@@ -40,6 +40,8 @@ mod kotlin_native_multimodule_support;
 mod kotlinc_argument_conformance_e2e;
 #[path = "krusty_case_workers.rs"]
 mod krusty_case_workers;
+#[path = "common/reference_targets/invocation.rs"]
+mod reference_invocation_support;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;
 #[path = "serialization_conformance.rs"]

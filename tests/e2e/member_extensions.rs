@@ -8,6 +8,8 @@ mod classpath_object_member_extension_import_e2e;
 mod generic_member_extension_lambda_result_e2e;
 #[path = "../member_extension_default_args_e2e.rs"]
 mod member_extension_default_args_e2e;
+#[path = "../member_extension_default_forwarder_e2e.rs"]
+mod member_extension_default_forwarder_e2e;
 #[path = "../member_extension_function_e2e.rs"]
 mod member_extension_function_e2e;
 #[path = "../member_extension_in_lambda_e2e.rs"]

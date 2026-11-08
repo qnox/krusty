@@ -16,6 +16,12 @@ pub enum SemanticCallRole {
     KotlinFunctionInvoke,
     /// The `name` property declared by Kotlin's callable-reflection contract.
     KotlinCallableReferenceName,
+    /// The `length` property `kotlin.String` declares, its count of UTF-16 code units. The
+    /// declaration is `@IntrinsicConstEvaluation`: a read of a constant string is constant.
+    KotlinStringLength,
+    /// The `name` property `kotlin.Enum` declares. A read on a direct entry is that entry's
+    /// declaration name, a constant kotlinc evaluates without initializing the enum.
+    KotlinEnumName,
     /// A property-reference read with this many unbound receivers.
     KotlinPropertyReferenceGet(u8),
     /// A mutable property-reference write with this many unbound receivers.
@@ -31,4 +37,28 @@ pub enum SemanticCallRole {
     /// equivalent stable declaration flag; dependency providers derive this role from Kotlin
     /// metadata's synthesized-member kind while that metadata is still authoritative.
     DataClassCopy,
+    /// A stdlib numeric declaration marked `@IntrinsicConstEvaluation` whose operation no other
+    /// role or compiler intrinsic names: an unsigned operation or conversion, or `floorDiv`/`mod`.
+    /// kotlinc evaluates a call to it whose operands are constants.
+    IntrinsicConstNumeric(ConstNumericOperation),
+}
+
+/// The numeric operation of an [`SemanticCallRole::IntrinsicConstNumeric`] declaration. Operands
+/// and result are read at the call's checked types: an operation on mixed widths computes at the
+/// wider operand type, then converts to the declared result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstNumericOperation {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+    /// Division rounding toward negative infinity.
+    FloorDivide,
+    /// The remainder of [`Self::FloorDivide`], with the divisor's sign.
+    Modulo,
+    /// `compareTo` between two unsigned values of different widths.
+    CompareTo,
+    /// A conversion to the declared result type (`toUInt()`, `UInt.toLong()`).
+    Conversion,
 }

@@ -34,8 +34,7 @@ impl Emitter<'_> {
 
     fn is_unsigned_bitwise_result(&self, expression: u32) -> bool {
         self.ir
-            .logical_types
-            .get(&expression)
+            .logical_type(expression)
             .is_some_and(|ty| matches!(ty.canonical_semantic().non_null(), Ty::UInt | Ty::ULong))
     }
 
@@ -149,9 +148,7 @@ impl Emitter<'_> {
                 };
                 let semantic_result = self
                     .ir
-                    .logical_types
-                    .get(&expression)
-                    .copied()
+                    .logical_type(expression)
                     .unwrap_or(arithmetic_result);
                 emit_num_conv(
                     arithmetic_result,
@@ -249,9 +246,7 @@ impl Emitter<'_> {
     fn rebuild_unsigned_bitwise_result(&mut self, expression: u32, code: &mut CodeBuilder) {
         let semantic = self
             .ir
-            .logical_types
-            .get(&expression)
-            .copied()
+            .logical_type(expression)
             .map(|ty| ty.canonical_semantic().non_null());
         let Some(semantic @ (Ty::UInt | Ty::ULong)) = semantic else {
             return;
@@ -283,7 +278,7 @@ impl Emitter<'_> {
         // declaration still lets the literal own the line, and a nested unsigned operation that
         // is not under that flag forgets ahead of its own literal so that literal is kept.
         // An enclosing `&&`/`||` that kept its own mark of this line there owns the receiver too.
-        let line = self.ir.expr_source_lines.get(&expression).copied();
+        let line = self.ir.source_line(expression);
         let kept_line = line.is_some_and(|line| code.line_kept_here(line));
         let keep_receiver_line =
             self.inside_condition || self.unsigned_assignment_line || kept_line;
@@ -357,9 +352,7 @@ impl Emitter<'_> {
         loop {
             match self.ir.expr(expression) {
                 crate::ir::IrExpr::TypeOp { arg, .. } => expression = *arg,
-                crate::ir::IrExpr::Const(_) => {
-                    return self.ir.expr_source_lines.contains_key(&expression)
-                }
+                crate::ir::IrExpr::Const(_) => return self.ir.source_line(expression).is_some(),
                 _ => return false,
             }
         }

@@ -1,35 +1,14 @@
 //! Overload selection over one top-level callable family.
 //!
 //! A family is selected under one argument list when every declaration maps the source arguments
-//! to the same parameters. When the declarations name or omit different parameters there is no
-//! shared list, and each declaration carries its own mapping ([`CandidateCall`]). Both forms run
-//! the same algorithm: applicability, `@LowPriorityInOverloadResolution`, integer-literal
-//! adaptation and specificity. Only the coordinates the declarations are compared in differ: a
-//! shared mapping compares parameters slot by slot, separate mappings compare the parameter each
-//! source argument maps to.
+//! to the same parameters; otherwise each declaration carries its own mapping and the family is
+//! compared in source-argument order ([`super::separately_mapped_selection`]). Both forms run
+//! applicability, `@LowPriorityInOverloadResolution`, integer-literal adaptation and specificity.
 
+use super::declaration_specificity::discriminate_generics;
+use super::overload_selection::low_priority_in_overload_resolution;
+use super::separately_mapped_selection::{select_separately_mapped, SeparatelyMapped};
 use super::*;
-
-/// One declaration's own mapping of a call's source arguments.
-pub(crate) struct CandidateCall {
-    /// The arguments in value-parameter order; a parameter left to its default holds
-    /// [`CallArgKind::OmittedDefault`].
-    pub(crate) args: Vec<CallArgKind>,
-    /// The declaration parameter each source argument maps to.
-    pub(crate) parameter_by_argument: Box<[Option<u32>]>,
-}
-
-/// The argument list a top-level family is selected under.
-pub(crate) enum TopLevelArguments<'a> {
-    /// One mapping shared by every declaration, in parameter order.
-    Shared(&'a [CallArgKind]),
-    /// Each declaration's own mapping, parallel to the family, and the source arguments in
-    /// source order.
-    PerCandidate {
-        calls: &'a [CandidateCall],
-        source: &'a [CallArgKind],
-    },
-}
 
 /// One declaration instantiated for the call under its own arguments.
 struct Instantiated<'a> {
@@ -49,8 +28,6 @@ pub(crate) enum TopLevelSelection<T> {
     Ambiguous(Vec<FunctionInfo>),
 }
 
-const LOW_PRIORITY: &str = "kotlin/internal/LowPriorityInOverloadResolution";
-
 impl SymbolResolver<'_> {
     /// Select from one top-level family under `arguments`. Distinguishes a call no declaration
     /// accepts from an ambiguous one.
@@ -58,7 +35,7 @@ impl SymbolResolver<'_> {
         &self,
         name: &str,
         candidates: Vec<FunctionInfo>,
-        arguments: TopLevelArguments<'_>,
+        arguments: FamilyArguments<'_>,
         type_args: &[Ty],
         expected: Option<Ty>,
         include_invisible: bool,
@@ -111,17 +88,15 @@ impl SymbolResolver<'_> {
         &self,
         name: &str,
         fs: &FunctionSet,
-        arguments: TopLevelArguments<'_>,
+        arguments: FamilyArguments<'_>,
         type_args: &[Ty],
         expected: Option<Ty>,
         include_invisible: bool,
     ) -> TopLevelSelection<(Option<FunctionInfo>, LibraryCallable)> {
         let candidates: Vec<(&FunctionInfo, &[CallArgKind], Option<&CandidateCall>)> =
             match &arguments {
-                TopLevelArguments::Shared(args) => {
-                    fs.top_level().map(|o| (o, *args, None)).collect()
-                }
-                TopLevelArguments::PerCandidate { calls, .. } => fs
+                FamilyArguments::Shared(args) => fs.top_level().map(|o| (o, *args, None)).collect(),
+                FamilyArguments::PerCandidate { calls, .. } => fs
                     .overloads
                     .iter()
                     .zip(calls.iter())
@@ -165,13 +140,8 @@ impl SymbolResolver<'_> {
                 })
                 .is_some()
         };
-        let low_priority = |candidate: &Instantiated<'_>| {
-            candidate
-                .function
-                .callable
-                .annotations
-                .contains(&crate::types::type_name(LOW_PRIORITY))
-        };
+        let low_priority =
+            |candidate: &Instantiated<'_>| low_priority_in_overload_resolution(candidate.function);
         if parsed
             .iter()
             .any(|candidate| !low_priority(candidate) && applicable(candidate))
@@ -180,7 +150,7 @@ impl SymbolResolver<'_> {
         }
 
         let pick = match arguments {
-            TopLevelArguments::Shared(args) => {
+            FamilyArguments::Shared(args) => {
                 match self.pick_shared(&parsed, args, &fits, &adapts) {
                     CandidateSelectionWithTies::Selected(pick) => Some(pick),
                     CandidateSelectionWithTies::Ambiguous(tied) => return tied_declarations(tied),
@@ -203,10 +173,32 @@ impl SymbolResolver<'_> {
                     }
                 }
             }
-            TopLevelArguments::PerCandidate { source, .. } => {
-                match self.pick_per_candidate(&parsed, source, &fits, &adapts) {
-                    CandidateSelectionWithTies::Selected(pick) => Some(pick),
-                    CandidateSelectionWithTies::Ambiguous(tied) => return tied_declarations(tied),
+            FamilyArguments::PerCandidate { source, .. } => {
+                let entries = parsed
+                    .iter()
+                    .map(|entry| SeparatelyMapped {
+                        function: entry.function,
+                        params: &entry.params,
+                        args: entry.args,
+                        call: entry
+                            .call
+                            .expect("a separately mapped family carries every declaration's call"),
+                    })
+                    .collect::<Vec<_>>();
+                match select_separately_mapped(
+                    &self.src,
+                    &entries,
+                    source,
+                    self.eager_lambda_results,
+                    &fits,
+                    &adapts,
+                ) {
+                    CandidateSelectionWithTies::Selected(pick) => Some(&parsed[pick]),
+                    CandidateSelectionWithTies::Ambiguous(tied) => {
+                        return tied_declarations(
+                            tied.into_iter().map(|pick| &parsed[pick]).collect(),
+                        )
+                    }
                     CandidateSelectionWithTies::None => None,
                 }
             }
@@ -385,129 +377,82 @@ impl SymbolResolver<'_> {
         fits: &dyn Fn(&Ty, &CallArgKind) -> bool,
         adapts: &dyn Fn(&Ty, &CallArgKind, usize) -> bool,
     ) -> CandidateSelectionWithTies<&'p Instantiated<'a>> {
-        if let Some(exact) = parsed.iter().find(|candidate| {
-            candidate.params.len() == args.len()
-                && candidate
-                    .params
-                    .iter()
-                    .zip(args)
-                    .all(|(parameter, argument)| *parameter == argument.type_for(*parameter))
-        }) {
+        let exact = |adapted: bool| {
+            move |candidate: &&Instantiated<'_>| {
+                candidate.params.len() == args.len()
+                    && candidate
+                        .params
+                        .iter()
+                        .zip(args)
+                        .all(|(parameter, argument)| {
+                            *parameter == argument.type_for(*parameter)
+                                && (adapted
+                                    || !argument.adapts_integer_literal_to(parameter.non_null()))
+                        })
+            }
+        };
+        // A generic declaration the call instantiates to a non-generic one's parameters is the
+        // less specific of the two (`discriminate_generics`). Only an argument's own type decides
+        // that here: integer-literal adaptation (`maxOf(1, 2)` against `maxOf(Long, Long)`) is the
+        // next step's choice.
+        if let Some(exact) = parsed
+            .iter()
+            .filter(exact(false))
+            .find(|candidate| !is_generic(candidate.function))
+            .or_else(|| parsed.iter().find(exact(true)))
+        {
             return CandidateSelectionWithTies::Selected(exact);
         }
-        match integer_literal_overload_with_ties(
-            parsed.iter().map(|entry| (entry.params.clone(), entry)),
-            args,
-            |_, param, arg| fits(param, arg),
-            |_position, left, right, arg| {
-                parameter_at_least_as_specific(&self.src, left, right, arg)
-                    || resolution_subtype(&self.src, left, right)
-            },
-            |_, _| false,
+        let generic = |candidate: &Instantiated<'_>| is_generic(candidate.function);
+        match discriminate_generics(
+            integer_literal_overload_with_ties(
+                parsed.iter().map(|entry| (entry.params.clone(), entry)),
+                args,
+                |_, param, arg| fits(param, arg),
+                |_position, left, right, arg| {
+                    parameter_at_least_as_specific(&self.src, left, right, arg)
+                        || resolution_subtype(&self.src, left, right)
+                },
+                |_, _| false,
+            ),
+            generic,
         ) {
             CandidateSelectionWithTies::None => {}
             selection => return selection,
         }
-        match unique_most_specific_with_conflicts_and_ties(
-            parsed.iter().filter_map(|entry| {
-                fixed_parameter_shape(&entry.params, args, |_, param, arg| fits(param, arg))
-                    .map(|shape| (shape, entry))
-            }),
-            |_, left, right| resolution_subtype(&self.src, left, right),
-            |_, _| false,
+        match discriminate_generics(
+            unique_most_specific_with_conflicts_and_ties(
+                parsed.iter().filter_map(|entry| {
+                    fixed_parameter_shape(&entry.params, args, |_, param, arg| fits(param, arg))
+                        .map(|shape| (shape, entry))
+                }),
+                |_, left, right| resolution_subtype(&self.src, left, right),
+                |_, _| false,
+            ),
+            generic,
         ) {
             CandidateSelectionWithTies::None => {}
             selection => return selection,
         }
-        unique_most_specific_with_conflicts_and_ties(
-            parsed.iter().filter_map(|entry| {
-                candidate_vararg_shape(entry.function, &entry.params, args, |i, param, arg| {
-                    fits(param, arg) || adapts(param, arg, i)
-                })
-                .map(|shape| (shape, entry))
-            }),
-            |_, left, right| resolution_subtype(&self.src, left, right),
-            |_, _| false,
-        )
-    }
-
-    /// A family whose declarations map the source arguments differently. Each declaration's
-    /// applicable shape is read in source-argument order (a parameter left to its default takes
-    /// no part), and the declarations are compared there exactly as a shared family is: integer
-    /// literal adaptation first, then specificity. Declarations whose compared parameters are
-    /// identical are separated first by a vararg (the one without wins), then by the defaults
-    /// they leave out (the fewest win); distinct declarations still equal after that are ambiguous.
-    fn pick_per_candidate<'p, 'a>(
-        &self,
-        parsed: &'p [Instantiated<'a>],
-        source: &[CallArgKind],
-        fits: &dyn Fn(&Ty, &CallArgKind) -> bool,
-        adapts: &dyn Fn(&Ty, &CallArgKind, usize) -> bool,
-    ) -> CandidateSelectionWithTies<&'p Instantiated<'a>> {
-        let mut shaped = Vec::new();
-        for entry in parsed {
-            let args = entry.args;
-            let shape =
-                fixed_parameter_shape(&entry.params, args, |_, param, arg| fits(param, arg))
-                    .or_else(|| {
-                        candidate_vararg_shape(
-                            entry.function,
-                            &entry.params,
-                            args,
-                            |i, param, arg| fits(param, arg) || adapts(param, arg, i),
-                        )
+        discriminate_generics(
+            unique_most_specific_with_conflicts_and_ties(
+                parsed.iter().filter_map(|entry| {
+                    candidate_vararg_shape(entry.function, &entry.params, args, |i, param, arg| {
+                        fits(param, arg) || adapts(param, arg, i)
                     })
-                    .or_else(|| {
-                        fixed_parameter_shape(&entry.params, args, |i, param, arg| {
-                            fits(param, arg) || adapts(param, arg, i)
-                        })
-                    });
-            let Some(shape) = shape else {
-                continue;
-            };
-            // Every applicable declaration must be comparable; one whose shape cannot be read in
-            // source order leaves the call without a defensible selection.
-            let Some(projected) = source_order_shape(entry, &shape) else {
-                return CandidateSelectionWithTies::Ambiguous(parsed.iter().collect());
-            };
-            let omitted = entry.params.len().saturating_sub(args.len())
-                + args.iter().filter(|arg| arg.is_omitted_default()).count();
-            shaped.push((projected, entry, omitted));
-        }
-        let preferred = shaped
-            .iter()
-            .filter(|(shape, entry, omitted)| {
-                !shaped.iter().any(|(other_shape, other, other_omitted)| {
-                    other_shape == shape
-                        && (entry.function.call_sig.vararg, *omitted)
-                            > (other.function.call_sig.vararg, *other_omitted)
-                })
-            })
-            .map(|(shape, entry, _)| (shape.clone(), *entry))
-            .collect::<Vec<_>>();
-        match integer_literal_overload_with_ties(
-            preferred.iter().cloned(),
-            source,
-            |_, param, arg| fits(param, arg),
-            |_position, left, right, arg| {
-                parameter_at_least_as_specific(&self.src, left, right, arg)
-                    || resolution_subtype(&self.src, left, right)
-            },
-            distinct_declarations,
-        ) {
-            CandidateSelectionWithTies::None => {}
-            selection => return selection,
-        }
-        unique_most_specific_with_conflicts_and_ties(
-            preferred,
-            |position, left, right| {
-                source.get(position).is_some_and(|argument| {
-                    parameter_at_least_as_specific(&self.src, left, right, argument.clone())
-                })
-            },
-            distinct_declarations,
+                    .map(|shape| (shape, entry))
+                }),
+                |_, left, right| resolution_subtype(&self.src, left, right),
+                |_, _| false,
+            ),
+            generic,
         )
     }
+}
+
+/// Whether a declaration declares type parameters of its own.
+fn is_generic(function: &FunctionInfo) -> bool {
+    !function.semantic_signature().formals.is_empty()
 }
 
 /// The declarations an ambiguous selection left tied.
@@ -517,28 +462,4 @@ fn tied_declarations<T>(tied: Vec<&Instantiated<'_>>) -> TopLevelSelection<T> {
             .map(|entry| entry.function.clone())
             .collect(),
     )
-}
-
-/// Two declarations left with equally specific shapes in source order conflict: separate mappings
-/// can project different declarations onto one shape, and kotlinc then reports the ambiguity
-/// between them rather than selecting either.
-fn distinct_declarations(left: &&Instantiated<'_>, right: &&Instantiated<'_>) -> bool {
-    !std::ptr::eq(left.function, right.function)
-}
-
-/// `shape`, a declaration's parameters parallel to its value-parameter-ordered arguments, read in
-/// source-argument order through the declaration's own mapping.
-fn source_order_shape(entry: &Instantiated<'_>, shape: &[Ty]) -> Option<Vec<Ty>> {
-    let call = entry.call?;
-    if shape.len() != entry.args.len() {
-        return None;
-    }
-    let context = entry.function.context_count;
-    call.parameter_by_argument
-        .iter()
-        .map(|parameter| {
-            let parameter = usize::try_from((*parameter)?).ok()?;
-            shape.get(parameter.checked_sub(context)?).copied()
-        })
-        .collect()
 }

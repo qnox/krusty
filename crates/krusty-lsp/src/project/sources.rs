@@ -781,29 +781,19 @@ pub fn workspace_sources(
     let mut found = Vec::new();
     // Keep the discovered prefix on a read error. Dropping it would make the walk contribute no
     // files at all, even though the caller explicitly asked for best-effort coverage.
-    let scan_truncated = find_sources_into(&walk_roots, &excluded, &mut found, progress).is_err();
-    finish_workspace_sources(found, scan_truncated, crate::MAX_WORKSPACE_INDEX_FILES)
+    let scan_incomplete = find_sources_into(&walk_roots, &excluded, &mut found, progress).is_err();
+    (finish_workspace_sources(found), scan_incomplete)
 }
 
-/// Apply workspace-inventory policy after the generic walk has finished.
+/// Order the walk's findings into the workspace inventory: every supported source, once.
 ///
-/// Parallel walkers deliberately return paths in completion order. Sorting and deduplicating before
-/// applying the workspace budget is therefore a correctness boundary, not presentation cleanup: if
-/// the limit were applied first, an oversized workspace would retain a different set of files as OS
-/// scheduling changed. Java files are removed before the limit because they are useful to strict
-/// project discovery but are not entries in the Kotlin workspace-symbol index.
-fn finish_workspace_sources(
-    mut found: Vec<PathBuf>,
-    scan_truncated: bool,
-    max_files: usize,
-) -> (Vec<PathBuf>, bool) {
+/// Parallel walkers return paths in completion order, so sorting is what makes the inventory, and
+/// every index built from it, independent of OS scheduling.
+fn finish_workspace_sources(mut found: Vec<PathBuf>) -> Vec<PathBuf> {
     found.retain(|path| krusty::source::is_supported_path(path));
     found.sort();
     found.dedup();
-
-    let over_budget = found.len() > max_files;
-    found.truncate(max_files);
-    (found, scan_truncated || over_budget)
+    found
 }
 
 fn find_sources(
@@ -1751,28 +1741,25 @@ mod tests {
         );
     }
 
+    /// The inventory keeps every supported source of a workspace of any size, once each, in an
+    /// order independent of which walker finished first.
     #[test]
-    fn workspace_budget_is_stable_across_parallel_completion_order() {
-        let directory = temp_path("stable-workspace-budget");
+    fn workspace_inventory_keeps_every_source_in_a_stable_order() {
+        let directory = temp_path("stable-workspace-inventory");
         let first = directory.join("A.kt");
+        let java = directory.join("B.java");
         let later = directory.join("Z.kt");
 
-        // Put the lexically later source first to model workers finishing in the opposite order.
-        // The Java path and duplicate also prove the budget is applied to the final index domain,
-        // rather than to raw traversal events that cannot become workspace-symbol entries.
-        let (sources, truncated) = finish_workspace_sources(
-            vec![
-                later.clone(),
-                directory.join("Ignored.java"),
-                first.clone(),
-                later,
-            ],
-            false,
-            1,
-        );
+        // The lexically later source comes first, as when workers finish in the opposite order.
+        let sources = finish_workspace_sources(vec![
+            later.clone(),
+            directory.join("notes.txt"),
+            java.clone(),
+            first.clone(),
+            later.clone(),
+        ]);
 
-        assert_eq!(sources, vec![first]);
-        assert!(truncated);
+        assert_eq!(sources, vec![first, java, later]);
     }
 
     #[test]

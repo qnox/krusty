@@ -4,9 +4,9 @@
 //! started it (`kt_thread_start`: the kernel's `clone` on a stack the runtime maps, Go's way, with
 //! no C library) or because foreign code did and called into Kotlin. Every such thread holds the
 //! lock while it runs Kotlin and releases it while it is in foreign code, so at most one thread
-//! runs Kotlin at a time and every hand-off of the lock orders memory. `docs/SPEC.md` records that
-//! decision and what it leaves for later (safepoints, so that a thread looping in Kotlin cannot
-//! keep the others waiting). `tests/native_runtime_e2e.rs` drives the lock with real threads.
+//! runs Kotlin at a time and every hand-off of the lock orders memory. What that leaves for later
+//! is safepoints, so that a thread looping in Kotlin cannot keep the others waiting.
+//! `tests/native_runtime_e2e.rs` drives the lock with real threads.
 //!
 //! So these tests pin the contract as it stands: a construct whose meaning is exhausted by
 //! one-thread-at-a-time execution compiles and runs, and a construct that needs real concurrency is

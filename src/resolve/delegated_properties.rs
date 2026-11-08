@@ -464,7 +464,7 @@ fn select_delegate_operator_in_kind(
     match resolver.select_receiver_function_with_applied_receiver_tracking(
         receiver,
         name,
-        &args,
+        crate::symbol_resolver::FamilyArguments::Shared(&args),
         &[],
         &callables,
         expected_result,
@@ -1415,7 +1415,7 @@ impl Checker<'_> {
             match resolver.select_receiver_function_with_applied_receiver_tracking(
                 delegate_ty,
                 name,
-                &call_args,
+                crate::symbol_resolver::FamilyArguments::Shared(&call_args),
                 &[],
                 &callables,
                 expected_result,
@@ -1486,6 +1486,7 @@ impl Checker<'_> {
                             Some(CallCandidateScore {
                                 rank: (score, std::cmp::Reverse(0), !call_sig.vararg),
                                 sam_signatures: vec![None; slots.args.len()],
+                                lambda_result_fits: true,
                             })
                         },
                     },
