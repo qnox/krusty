@@ -724,9 +724,44 @@ Main.kt:2:1: warning: noted\n";
     );
 }
 
+/// A none-applicable overload family has no resolved callee. `take(Absent)` beside `take(String)`
+/// does not add a missing class to the rejection: kotlinc lists both candidates and their argument
+/// mismatches, and nothing else.
+#[test]
+fn a_rejected_overload_naming_a_missing_class_is_not_a_resolved_callee() {
+    let sources = [
+        (
+            "p/Partial.java",
+            "package p;\nimport missing.dependency.Absent;\npublic class Partial {\n    \
+             public static void take(Absent v) {}\n    \
+             public static void take(String v) {}\n}\n",
+        ),
+        ("Use.kt", "package p\nfun use() = Partial.take(Any())\n"),
+    ];
+    let result = common::compiler_diagnostics(&sources, &[common::stdlib_jar()]);
+    // Captured from kotlinc 2.4.21. The family has no resolved callee, so neither ledger names a
+    // missing class. Krusty still rejects the static as unresolved rather than listing each
+    // candidate's argument mismatch.
+    assert_exact_compiler_ledgers(
+        &result,
+        &source_texts(&sources),
+        1,
+        1,
+        &["\
+Use.kt:2:21: error: none of the following candidates is applicable:
+
+static fun take(v: Absent!): Unit:
+  Argument type mismatch: actual type is 'Any', but 'Absent!' was expected.
+
+static fun take(v: String!): Unit:
+  Argument type mismatch: actual type is 'Any', but 'String!' was expected."],
+        &["Use.kt:2:13: error: unresolved Java static 'Partial.take' for given argument types"],
+    );
+}
+
 /// A root-package class spelled the same as an unresolved import, or as an ambiguous inherited
-/// member type, does not satisfy that reference. kotlinc binds the root class; the reference here
-/// stays unresolved evidence.
+/// member type, does not satisfy that reference. kotlinc binds the root class and reports nothing;
+/// the reference here stays unresolved evidence, so each program's ledger is its own.
 #[test]
 fn a_root_package_class_does_not_satisfy_unresolved_or_ambiguous_java_types() {
     let unresolved = [
@@ -745,17 +780,17 @@ fn a_root_package_class_does_not_satisfy_unresolved_or_ambiguous_java_types() {
         ),
     ];
     let unresolved_result = common::compiler_diagnostics(&unresolved, &[common::stdlib_jar()]);
-    assert_eq!(unresolved_result.reference_code, 0);
-    assert_eq!(unresolved_result.krusty_code, 1);
-    let unresolved_ledger =
-        diagnostic_ledger(&unresolved_result.krusty_stderr, &source_texts(&unresolved));
-    assert!(
-        unresolved_ledger
-            .iter()
-            .any(|entry| { entry.contains("cannot access class 'Absent'") }),
-        "{unresolved_ledger:#?}"
+    assert_exact_compiler_ledgers(
+        &unresolved_result,
+        &source_texts(&unresolved),
+        0,
+        1,
+        &[],
+        &[
+            "Use.kt:2:23: error: cannot access class 'Absent'. Check your module classpath for missing or conflicting dependencies.",
+            "Use.kt:2:32: error: unresolved reference 'token' on receiver of type 'Absent'.",
+        ],
     );
-    assert_stdout_has_no_errors(&unresolved_result.krusty_stdout, &source_texts(&unresolved));
 
     let ambiguous = [
         (
@@ -778,17 +813,58 @@ fn a_root_package_class_does_not_satisfy_unresolved_or_ambiguous_java_types() {
         ("ItemUse.kt", "fun use(b: p.Both) = b.item().root()\n"),
     ];
     let ambiguous_result = common::compiler_diagnostics(&ambiguous, &[common::stdlib_jar()]);
-    assert_eq!(ambiguous_result.reference_code, 0);
-    assert_eq!(ambiguous_result.krusty_code, 1);
-    let ambiguous_ledger =
-        diagnostic_ledger(&ambiguous_result.krusty_stderr, &source_texts(&ambiguous));
-    assert!(
-        ambiguous_ledger
-            .iter()
-            .any(|entry| entry.contains("cannot access class 'Item'")),
-        "{ambiguous_ledger:#?}"
+    assert_exact_compiler_ledgers(
+        &ambiguous_result,
+        &source_texts(&ambiguous),
+        0,
+        1,
+        &[],
+        &[
+            "ItemUse.kt:1:24: error: cannot access class 'Item'. Check your module classpath for missing or conflicting dependencies.",
+            "ItemUse.kt:1:31: error: unresolved reference 'root' on receiver of type 'Item'.",
+        ],
     );
-    assert_stdout_has_no_errors(&ambiguous_result.krusty_stdout, &source_texts(&ambiguous));
+}
+
+/// Each compiler's complete ordered ledger and exit status. The lists are independent, so a case
+/// the compilers answer differently still pins both, including an empty ledger.
+fn assert_exact_compiler_ledgers(
+    result: &common::CompilerDiagnosticResult,
+    sources: &[&str],
+    reference_code: i32,
+    krusty_code: i32,
+    reference: &[&str],
+    krusty: &[&str],
+) {
+    let owned = |entries: &[&str]| {
+        entries
+            .iter()
+            .map(|entry| (*entry).to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        result.reference_code, reference_code,
+        "kotlinc exit\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        result.krusty_code, krusty_code,
+        "krusty exit\n{}",
+        result.krusty_stderr
+    );
+    assert_eq!(
+        diagnostic_ledger(&result.reference_stderr, sources),
+        owned(reference),
+        "kotlinc ledger:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        diagnostic_ledger(&result.krusty_stderr, sources),
+        owned(krusty),
+        "krusty ledger:\n{}",
+        result.krusty_stderr
+    );
+    assert_stdout_has_no_errors(&result.krusty_stdout, sources);
 }
 
 #[test]

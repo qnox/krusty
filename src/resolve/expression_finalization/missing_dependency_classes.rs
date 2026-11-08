@@ -4,7 +4,8 @@
 //! The declaration's return type is examined first, type arguments included, then its value
 //! parameter types; a callable reference examines its return type only. Each missing class is
 //! reported once per access, at the selected name: the class name of a constructor call. A type
-//! parameter bound is not examined, and an overload that names no missing class reports nothing.
+//! parameter bound is not examined. A none-applicable overload family has no resolved callee, so
+//! it reports nothing, including when one of the rejected candidates names a missing class.
 //!
 //! Such a class reaches a signature from a classpath class compiled against a dependency that is
 //! absent, or from a Java source of the module whose type does not resolve: the source header

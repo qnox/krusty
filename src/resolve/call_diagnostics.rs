@@ -171,30 +171,26 @@ impl Checker<'_> {
         Some(msg)
     }
 
-    /// Remember a rejected dependency candidate's declared signature so a missing class in it is
-    /// still reported. Bounds stay out: `bounded(Any())` is an inference failure, not a missing
-    /// class, even when the bound names a class that is absent.
-    fn note_rejected_dependency_signatures(
+    /// Remember the dependency candidate these diagnostics select, so a missing class in its
+    /// declared signature is still reported. A none-applicable family selects nobody: the missing
+    /// class check inspects only a resolved callee. Bounds stay out: `bounded(Any())` is an
+    /// inference failure, not a missing class, even when the bound names a class that is absent.
+    fn note_selected_dependency_signature(
         &mut self,
         call: ExprId,
-        candidates: &[crate::libraries::FunctionInfo],
+        candidate: &crate::libraries::FunctionInfo,
     ) {
-        let mut types = Vec::new();
-        for candidate in candidates {
-            if candidate.callable.external_identity.is_none() {
-                continue;
-            }
-            let (ret, params) = if let Some(signature) = candidate.generic_sig.as_ref() {
-                (signature.ret, signature.params.as_slice())
-            } else {
-                (candidate.callable.ret, candidate.callable.params.as_slice())
-            };
-            types.push(ret);
-            types.extend(params.iter().copied());
+        if candidate.callable.external_identity.is_none() {
+            return;
         }
-        if !types.is_empty() {
-            self.rejected_dependency_signatures.insert(call, types);
-        }
+        let (ret, params) = if let Some(signature) = candidate.generic_sig.as_ref() {
+            (signature.ret, signature.params.as_slice())
+        } else {
+            (candidate.callable.ret, candidate.callable.params.as_slice())
+        };
+        let mut types = vec![ret];
+        types.extend(params.iter().copied());
+        self.rejected_dependency_signatures.insert(call, types);
     }
 
     /// A single static candidate that has more source arguments than value parameters. The extra
@@ -276,7 +272,6 @@ impl Checker<'_> {
         candidates: &[crate::libraries::FunctionInfo],
     ) -> Option<Ty> {
         let type_args = constraints.type_args;
-        self.note_rejected_dependency_signatures(call, candidates);
         let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let checkpoint = self.diags.diags.len();
@@ -314,6 +309,7 @@ impl Checker<'_> {
         let [mapped_candidate] = mapped.as_slice() else {
             return reported_type_arity.then_some(Ty::Error);
         };
+        self.note_selected_dependency_signature(call, mapped_candidate.candidate);
         let MappedRejectionCandidate {
             candidate,
             shape,
@@ -525,6 +521,7 @@ impl Checker<'_> {
             self.diags.sort_source_order_from(checkpoint);
             return Some(Ty::Error);
         }
+        self.rejected_dependency_signatures.remove(&call);
         None
     }
 
