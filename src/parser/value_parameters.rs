@@ -11,7 +11,7 @@ impl Parser<'_> {
     pub(super) fn parse_param_list(&mut self) -> Vec<Param> {
         let mut params = Vec::new();
         self.expect(TokenKind::LParen, "'('");
-        self.skip_newlines();
+        self.skip_semicolons();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             let prefix_start = self.i;
             let mut pmods = Vec::new();
@@ -54,7 +54,7 @@ impl Parser<'_> {
             let ty = self.parse_vararg_aware_type(is_vararg);
             let default_operator = self.eat_span(TokenKind::Eq);
             let default = if default_operator.is_some() {
-                self.skip_newlines();
+                self.skip_semicolons();
                 Some(self.parse_expr())
             } else {
                 None
@@ -79,11 +79,11 @@ impl Parser<'_> {
                 annotations: pannos,
                 annotation_args: pannos_args,
             });
-            self.skip_newlines();
+            self.skip_semicolons();
             if !self.eat(TokenKind::Comma) {
                 break;
             }
-            self.skip_newlines();
+            self.skip_semicolons();
         }
         self.expect(TokenKind::RParen, "')'");
         params
