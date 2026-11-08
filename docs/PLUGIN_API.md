@@ -406,11 +406,9 @@ private and internal functions, every constant kind, member and extension calls 
 generic dependency call, and non-ASCII names in krusty and in kotlinc, and requires identical dumps.
 
 The adapter builds against every supported compiler. Where kotlinc's IR API changed between
-releases (`IrFileImpl` takes its module as a constructor argument from 2.4.20, and from
-2.5.0-Beta2 an `IrConstImpl` is built by the factory that passes the constructor indicator), the
-version-specific source lives under
-`adapter/compat/<first release>/`, and `adapter.rs` lists the exact releases each set builds for; a
-Kotlin version no set lists has no adapter.
+releases (`IrFileImpl` takes its module as a constructor argument from 2.4.20), the version-specific
+source lives under `adapter/compat/<first release>/`, and `adapter.rs` lists the exact releases each
+set builds for; a Kotlin version no set lists has no adapter.
 
 ## Drop-in extension management — two layers, like kotlinc
 

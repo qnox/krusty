@@ -11,10 +11,10 @@ import org.jetbrains.kotlin.ir.declarations.IrFile
 import org.jetbrains.kotlin.ir.declarations.IrSimpleFunction
 import org.jetbrains.kotlin.ir.declarations.IrValueDeclaration
 import org.jetbrains.kotlin.ir.expressions.IrBody
-import org.jetbrains.kotlin.ir.expressions.IrConstKind
 import org.jetbrains.kotlin.ir.expressions.IrExpression
 import org.jetbrains.kotlin.ir.expressions.IrStatementOrigin
 import org.jetbrains.kotlin.ir.expressions.impl.IrCallImpl
+import org.jetbrains.kotlin.ir.expressions.impl.IrConstImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrGetValueImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrReturnImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrSetValueImpl
@@ -195,23 +195,23 @@ internal class ModuleBuilder(private val ir: Fir2IrActualizedResult) {
     private fun DataInputStream.readConstant(start: Int, end: Int): Node = when (val tag = readByte().toInt()) {
         0 -> {
             val value = readBoolean()
-            Node { _, _ -> irConst(start, end, builtIns.booleanType, IrConstKind.Boolean, value) }
+            Node { _, _ -> IrConstImpl.boolean(start, end, builtIns.booleanType, value) }
         }
         1 -> {
             val value = readInt()
-            Node { _, _ -> irConst(start, end, builtIns.intType, IrConstKind.Int, value) }
+            Node { _, _ -> IrConstImpl.int(start, end, builtIns.intType, value) }
         }
         2 -> {
             val value = readLong()
-            Node { _, _ -> irConst(start, end, builtIns.longType, IrConstKind.Long, value) }
+            Node { _, _ -> IrConstImpl.long(start, end, builtIns.longType, value) }
         }
         3 -> {
             val value = readString()
-            Node { _, _ -> irConst(start, end, builtIns.stringType, IrConstKind.String, value) }
+            Node { _, _ -> IrConstImpl.string(start, end, builtIns.stringType, value) }
         }
         4 -> {
             val type = readTypeNode()
-            Node { function, _ -> irConst(start, end, type(function), IrConstKind.Null, null) }
+            Node { function, _ -> IrConstImpl.constNull(start, end, type(function)) }
         }
         else -> throw Refused("unknown constant kind $tag")
     }
