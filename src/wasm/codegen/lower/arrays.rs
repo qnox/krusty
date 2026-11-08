@@ -155,6 +155,30 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// Whether `target` is an array's `size`, by its getter's provider operation.
+    pub(super) fn is_array_size(&self, target: crate::fir::ExternalPropertyId) -> bool {
+        self.callables
+            .property(target)
+            .and_then(|property| self.callables.callable(property.getter))
+            .is_some_and(|getter| {
+                getter.compiler_operation()
+                    == Some(crate::backend::BackendCompilerIntrinsic::ArraySize)
+            })
+    }
+
+    /// `array.size`: the length of the reference array's backing storage.
+    pub(super) fn reference_array_size(
+        &mut self,
+        receiver: u32,
+        array: Ty,
+    ) -> Result<(), Unsupported> {
+        reference_element(array)?;
+        self.value(receiver, array)?;
+        self.reference_array_storage();
+        self.code.ref_as_non_null().array_len();
+        Ok(())
+    }
+
     /// Wrap the freshly allocated backing array on the stack in its Kotlin identity object.
     fn wrap_reference_array(&mut self) {
         let storage = self.local(ValType::reference(self.runtime.references));

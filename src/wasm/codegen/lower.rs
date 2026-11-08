@@ -1381,6 +1381,23 @@ impl<'a> Body<'a> {
             {
                 self.intrinsic(IrIntrinsic::StringLength, Some(*receiver), &[])?;
             }
+            // `array.size` is the length of the reference array's backing storage. The read stays
+            // a dependency property; its getter's provider operation is the array-size intrinsic.
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    source_receiver: Some(array),
+                    ..
+                } = &**checked_op
+                    && arguments.is_empty()
+                    && parameters.is_empty()
+                    && self.is_array_size(*target) =>
+            {
+                self.reference_array_size(*receiver, *array)?
+            }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::PropertyWrite {
                     target,
