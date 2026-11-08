@@ -2946,3 +2946,6 @@ mod facade_local_classifier_metadata_e2e;
 
 #[path = "plugin_host_compiler_e2e/mod.rs"]
 mod plugin_host_compiler_e2e;
+
+#[path = "published_inline_capture_bindings_e2e.rs"]
+mod published_inline_capture_bindings_e2e;

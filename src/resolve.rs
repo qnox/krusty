@@ -9351,6 +9351,8 @@ struct Local {
     /// Ephemeral identity of the runtime lexical value during one resolver check. Narrowing
     /// shadows copy it; fresh declarations allocate another. It never enters TypeInfo or FIR.
     lexical_capture_identity: Option<u32>,
+    /// Written declaration role retained across bounded checker reconstruction.
+    lexical_declaration: Option<lexical_bindings::LexicalValueDeclaration>,
     /// Identity smart-cast facts about this value are keyed by. Every declaration allocates one,
     /// whatever its origin; a narrowing shadow keeps the identity of the value it narrows.
     flow_identity: u32,
@@ -13731,6 +13733,7 @@ impl<'a> Checker<'a> {
                         receiver: None,
                         semantic_receiver: None,
                         lexical_binding: local.lexical_capture_identity,
+                        lexical_declaration: local.lexical_declaration,
                         receiver_identity: None,
                         receiver_capture: None,
                         receiver_role: None,
@@ -13850,6 +13853,7 @@ impl<'a> Checker<'a> {
                                     .anonymous_capture_receiver_label(scope, receiver),
                                 semantic_receiver: Some(semantic_receiver),
                                 lexical_binding: None,
+                                lexical_declaration: None,
                                 receiver_identity: Some(identity),
                             },
                             identity,
@@ -13999,7 +14003,7 @@ impl<'a> Checker<'a> {
                     return self.anonymous_object_type(scope, declaration);
                 }
             }
-            let Some(captures) = self
+            let Some(mut captures) = self
                 .discovered_anonymous_captures
                 .get(&declaration)
                 .cloned()
@@ -14009,6 +14013,13 @@ impl<'a> Checker<'a> {
                 return Ty::Error;
             };
             {
+                if self.fragment == SourceFragmentMode::InlinePreparation {
+                    if !self.refresh_published_lexical_captures(scope, &mut captures, span) {
+                        return Ty::Error;
+                    }
+                    self.discovered_anonymous_captures
+                        .insert(declaration, captures.clone());
+                }
                 for capture in &captures {
                     let actual = match capture.source {
                         AnonymousObjectCaptureSource::EnclosingInstance { depth, .. } => {
@@ -19641,6 +19652,14 @@ impl<'a> Checker<'a> {
                 }
                 self.local_decl_types.insert(s, prop_ty);
                 let flow_identity = self.declare(scope, &name, prop_ty, true);
+                self.record_lexical_declaration(
+                    scope,
+                    &name,
+                    lexical_bindings::LexicalValueRole::Statement {
+                        declaration: self.file.stmt_spans[s.0 as usize],
+                        slot: 0,
+                    },
+                );
                 self.local_properties.record(flow_identity, true);
             }
             Stmt::Destructure { entries, init } => self.stmt_destructure(scope, s, entries, init),
@@ -20017,6 +20036,14 @@ impl<'a> Checker<'a> {
         } else {
             self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance)
         };
+        self.record_lexical_declaration(
+            scope,
+            &name,
+            lexical_bindings::LexicalValueRole::Statement {
+                declaration: self.file.stmt_spans[s.0 as usize],
+                slot: 0,
+            },
+        );
         self.local_properties.record(flow_identity, is_var);
         if deferred {
             self.local_initialization.declare_deferred(s, flow_identity);
@@ -20085,6 +20112,14 @@ impl<'a> Checker<'a> {
         }
         self.local_decl_types.insert(s, prop_ty);
         let flow_identity = self.declare(scope, &name, prop_ty, site.is_var);
+        self.record_lexical_declaration(
+            scope,
+            &name,
+            lexical_bindings::LexicalValueRole::Statement {
+                declaration: self.file.stmt_spans[s.0 as usize],
+                slot: 0,
+            },
+        );
         self.local_properties.record(flow_identity, site.is_var);
         let storage_ty = self
             .delegate_provide_targets
@@ -21137,7 +21172,7 @@ impl<'a> Checker<'a> {
                 defaults_scope,
                 f.params
                     .iter()
-                    .map(|parameter| (parameter.name.as_str(), parameter.default)),
+                    .map(|parameter| (parameter.name.as_str(), parameter.default, parameter.span)),
                 &semantic_params,
                 ParameterDefaultFlow::Function,
             );
@@ -39091,75 +39126,6 @@ impl<'a> Checker<'a> {
         true
     }
 
-    fn declare(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty, is_var: bool) -> u32 {
-        self.declare_with_origin(
-            scope,
-            name,
-            ty,
-            is_var,
-            ValueBindingDeclaration::ordinary(ReceiverFnValueOrigin::Local, ErrorProvenance::None),
-        )
-    }
-
-    fn declare_context_parameter(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty) {
-        self.declare_with_origin(
-            scope,
-            name,
-            ty,
-            false,
-            ValueBindingDeclaration::context_parameter(),
-        );
-    }
-
-    fn declare_inferred(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        ty: Ty,
-        is_var: bool,
-        error_provenance: ErrorProvenance,
-    ) -> u32 {
-        self.declare_with_origin(
-            scope,
-            name,
-            ty,
-            is_var,
-            ValueBindingDeclaration::ordinary(ReceiverFnValueOrigin::Local, error_provenance),
-        )
-    }
-
-    fn declare_callable_reference(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        ty: Ty,
-        is_var: bool,
-        function_type: Ty,
-    ) -> u32 {
-        let lexical_capture_identity = Some(self.allocate_lexical_capture_identity());
-        let flow_identity = self.allocate_flow_identity();
-        scope.rebind(
-            name,
-            Ns::Value,
-            ScopeBinding::Value(Local {
-                ty,
-                declared_ty: ty,
-                write_ty: is_var.then_some(ty),
-                is_var,
-                error_provenance: ErrorProvenance::None,
-                origin: ReceiverFnValueOrigin::Local,
-                is_context_parameter: false,
-                callable_reference_type: Some(function_type),
-                delegate_storage_ty: None,
-                shared_storage_cell: false,
-                lexical_capture_identity,
-                flow_identity,
-                safe_call_origin: None,
-            }),
-        );
-        flow_identity
-    }
-
     fn declare_dispatch_property(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -39434,104 +39400,6 @@ impl<'a> Checker<'a> {
             signature.source_member = Some(source_member);
             self.register_lexical_member(scope, &method.name, receiver, entry_owner, signature);
         }
-    }
-
-    fn declare_with_origin(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        ty: Ty,
-        is_var: bool,
-        declaration: ValueBindingDeclaration,
-    ) -> u32 {
-        let ValueBindingDeclaration {
-            origin,
-            error_provenance,
-            is_context_parameter,
-            shared_storage_cell,
-        } = declaration;
-        // A NEW binding gets a new flow identity, so the property-path narrowings of a same-named
-        // older value (`if (a.p == null) return; val a = …`) cannot apply to it.
-        let write_ty = is_var.then_some(match origin {
-            ReceiverFnValueOrigin::DispatchProperty { declared_ty, .. } => declared_ty,
-            _ => ty,
-        });
-        let declared_ty = match origin {
-            ReceiverFnValueOrigin::DispatchProperty { declared_ty, .. } => declared_ty,
-            _ => ty,
-        };
-        let lexical_capture_identity = self.capture_lexical_identity(origin);
-        let flow_identity = self.allocate_flow_identity();
-        scope.rebind(
-            name,
-            Ns::Value,
-            ScopeBinding::Value(Local {
-                ty,
-                declared_ty,
-                write_ty,
-                is_var,
-                error_provenance,
-                origin,
-                is_context_parameter,
-                callable_reference_type: ty.is_fun().then_some(ty),
-                delegate_storage_ty: None,
-                shared_storage_cell,
-                lexical_capture_identity,
-                flow_identity,
-                safe_call_origin: None,
-            }),
-        );
-        flow_identity
-    }
-
-    /// Shadow a binding with its flow-narrowed type (`if (x != null) …`). Unlike a fresh
-    /// declaration this re-binds the SAME runtime value, so property-path narrowings rooted at it
-    /// stay valid. A narrowed `var` stays writable (kotlinc allows `if (x != null) { x = null }`);
-    /// `stmt_assign` then replaces or kills the shadow's proven type.
-    fn declare_narrowing_shadow(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty) {
-        // Narrowing changes only the type of the existing value, never where that value comes from.
-        // In particular, a bare member property is represented in the lexical namespace with a
-        // `DispatchProperty` origin. Reclassifying its narrowed shadow as a local makes the checker
-        // stop recording the receiver/property handoff and leaves lowering no legal operation to
-        // consume.
-        let previous = self.lookup(scope, name);
-        let origin = previous
-            .map(|local| local.origin)
-            .unwrap_or(ReceiverFnValueOrigin::Local);
-        let callable_reference_type = previous.and_then(|local| local.callable_reference_type);
-        let delegate_storage_ty = previous.and_then(|local| local.delegate_storage_ty);
-        let lexical_capture_identity = previous.and_then(|local| local.lexical_capture_identity);
-        let flow_identity = match previous {
-            Some(local) => local.flow_identity,
-            None => self.allocate_flow_identity(),
-        };
-        let safe_call_origin = previous.and_then(|local| local.safe_call_origin);
-        let declared_ty = previous.map(|local| local.declared_ty).unwrap_or(ty);
-        let write_ty = previous.and_then(|local| local.write_ty);
-        let is_var = previous.map(|local| local.is_var).unwrap_or(false);
-        let error_provenance = previous
-            .map(|local| local.error_provenance)
-            .unwrap_or(ErrorProvenance::None);
-        let is_context_parameter = previous.is_some_and(|local| local.is_context_parameter);
-        scope.rebind(
-            name,
-            Ns::Value,
-            ScopeBinding::Value(Local {
-                ty,
-                declared_ty,
-                write_ty,
-                is_var,
-                error_provenance,
-                origin,
-                is_context_parameter,
-                callable_reference_type,
-                delegate_storage_ty,
-                shared_storage_cell: previous.is_some_and(|local| local.shared_storage_cell),
-                lexical_capture_identity,
-                flow_identity,
-                safe_call_origin,
-            }),
-        );
     }
 
     fn scoped_properties(&self, scope: &CheckerScope<'_>, owner: TypeName) -> Vec<ScopedProperty> {
@@ -42774,32 +42642,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn declare_function_parameter(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        parameter: &Param,
-        ty: Ty,
-        inherited_equality_bound: Option<Ty>,
-        is_context_parameter: bool,
-    ) {
-        if is_context_parameter {
-            self.declare_context_parameter(scope, &parameter.name, ty);
-        } else {
-            self.declare(scope, &parameter.name, ty, false);
-        }
-        if let Some(bound) = self
-            .equality_bound_parameter_ty(scope, parameter)
-            .or(inherited_equality_bound)
-            .filter(|bound| self.receiver_is_assignable(*bound, ty))
-        {
-            // This is a declaration contract, not a branch-local proof. Rebind the same lexical
-            // value so the refined read type survives child blocks and short-circuit RHS scopes;
-            // `declare_narrowing_shadow` retains the original declared/storage type for writes and
-            // checked-FIR smart-cast materialization.
-            self.declare_narrowing_shadow(scope, &parameter.name, bound);
-        }
-    }
-
     /// Retry unresolved inferred local-property signatures after direct nested classifiers publish
     /// their checked members. It owns receiver-less properties such as `val value = Inner().x`,
     /// which cannot be inferred on the first sweep when `Inner.x` is body-local. This fixpoint keeps
@@ -44038,6 +43880,7 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 self.declare_context_parameter(scope, name, receiver.ty);
+                self.record_context_declaration(scope, name, receiver);
             }
             if body_local_class {
                 // A nested typealias declared by a body-local class is itself body-local and is
@@ -44973,6 +44816,7 @@ impl<'a> Checker<'a> {
                         for receiver in &context_receivers {
                             if let Some(name) = receiver.name() {
                                 self.declare(&accessor_scope, name, receiver.ty, false);
+                                self.record_context_declaration(&accessor_scope, name, receiver);
                             }
                         }
                         let field_ty =
@@ -45417,9 +45261,9 @@ impl<'a> Checker<'a> {
                     let context_count = semantic_params.len().saturating_sub(sc.params.len());
                     checker.check_parameter_defaults(
                         scope,
-                        sc.params
-                            .iter()
-                            .map(|parameter| (parameter.name.as_str(), parameter.default)),
+                        sc.params.iter().map(|parameter| {
+                            (parameter.name.as_str(), parameter.default, parameter.span)
+                        }),
                         &semantic_params[context_count..],
                         ParameterDefaultFlow::Constructor,
                     );
@@ -45583,9 +45427,13 @@ impl<'a> Checker<'a> {
                 self.with_this_unavailable(|checker| {
                     checker.check_parameter_defaults(
                         scope,
-                        cl.props
-                            .iter()
-                            .map(|parameter| (parameter.name.as_str(), parameter.default)),
+                        cl.props.iter().map(|parameter| {
+                            (
+                                parameter.name.as_str(),
+                                parameter.default,
+                                parameter.declaration_span,
+                            )
+                        }),
                         &source_primary_params,
                         ParameterDefaultFlow::Constructor,
                     );
@@ -45612,6 +45460,11 @@ impl<'a> Checker<'a> {
                 let header_scope = scope.child(ScopeKind::Block);
                 for (parameter, &ty) in cl.props.iter().zip(&source_primary_params) {
                     self.declare(&header_scope, &parameter.name, ty, parameter.is_var);
+                    self.record_lexical_declaration(
+                        &header_scope,
+                        &parameter.name,
+                        lexical_bindings::LexicalValueRole::Parameter(parameter.declaration_span),
+                    );
                 }
                 self.with_this_unavailable(|checker| {
                     for &argument in &cl.base_args {
@@ -45663,6 +45516,11 @@ impl<'a> Checker<'a> {
                 let scope = &body_scope;
                 for (p, &parameter_ty) in cl.props.iter().zip(&source_primary_params) {
                     self.declare(scope, &p.name, parameter_ty, p.is_var);
+                    self.record_lexical_declaration(
+                        scope,
+                        &p.name,
+                        lexical_bindings::LexicalValueRole::Parameter(p.declaration_span),
+                    );
                 }
                 if body_local_class {
                     // Constructor parameters are locals on this rung. Rebinding captures after them
@@ -46372,6 +46230,7 @@ impl<'a> Checker<'a> {
                         for receiver in &checked_property_context_receivers {
                             if let Some(name) = receiver.name() {
                                 self.declare(scope, name, receiver.ty, false);
+                                self.record_context_declaration(scope, name, receiver);
                             }
                         }
                         let field_ty = (bp.receiver.is_none() && bp.context_params.is_empty())
@@ -51208,6 +51067,14 @@ impl<'a> Checker<'a> {
                         .map(|r| self.type_ref_ty(scope, r))
                         .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                     self.declare(scope, name, pty, false);
+                    self.record_lexical_declaration(
+                        scope,
+                        name,
+                        lexical_bindings::LexicalValueRole::LambdaParameter {
+                            expression: self.span(e),
+                            slot: i as u32,
+                        },
+                    );
                 }
                 self.with_lambda_return_scope(
                     scope,
@@ -51572,6 +51439,11 @@ impl<'a> Checker<'a> {
                     let catch_scope = scope.child(ScopeKind::Block);
                     let scope = &catch_scope;
                     checker.declare(scope, &c.name, cty, false);
+                    checker.record_lexical_declaration(
+                        scope,
+                        &c.name,
+                        lexical_bindings::LexicalValueRole::Catch(c.param_span),
+                    );
                     checker.joined_branch_result(scope, c.body, wanted, joined)
                 });
                 all_exit_writes.extend(catch_writes);
@@ -58496,6 +58368,14 @@ impl<'a> Checker<'a> {
                     } else {
                         self.declare(scope, name, pty, false);
                     }
+                    self.record_lexical_declaration(
+                        scope,
+                        name,
+                        lexical_bindings::LexicalValueRole::LambdaParameter {
+                            expression: self.span(e),
+                            slot: i as u32,
+                        },
+                    );
                 }
                 let coerce = mode.coerce_return_to_unit;
                 let result_constraint = mode.result_constraint;
