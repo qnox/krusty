@@ -145,6 +145,7 @@ fn type_parameter(index: &ResolvedModuleIndex, parameter: TypeParameterId) -> Ir
             .collect(),
         variance: header.flags.variance(),
         reified: header.flags.is_reified(),
+        captured_from_enclosing: false,
     }
 }
 

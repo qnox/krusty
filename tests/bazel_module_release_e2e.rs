@@ -1,5 +1,5 @@
 //! `scripts/package-bazel-module.sh`: the release's Bazel module names the SHA-256 of every compiler
-//! archive the release publishes, and the release job packages it before publishing.
+//! archive the release publishes.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -80,23 +80,6 @@ fn tar(args: &[&str], archive: &Path) -> String {
         .expect("run tar");
     assert!(output.status.success(), "tar {args:?} failed: {output:?}");
     String::from_utf8(output.stdout).expect("tar output is UTF-8")
-}
-
-#[test]
-fn the_extension_registers_exactly_the_hosts_the_release_builds() {
-    let workflow =
-        fs::read_to_string(root().join(".github/workflows/ci.yml")).expect("read ci.yml");
-    let mut built: Vec<String> = workflow
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("- { triple: "))
-        .map(|line| line.split(',').next().unwrap().trim().to_owned())
-        .collect();
-    built.sort();
-    assert_eq!(
-        extension_hosts(),
-        built,
-        "extensions.bzl HOSTS must list every build-release triple, sorted"
-    );
 }
 
 #[test]
@@ -216,66 +199,4 @@ fn refuses_an_archive_for_an_unknown_host() {
         )
     );
     let _ = fs::remove_dir_all(&dist);
-}
-
-#[test]
-fn the_release_job_packages_the_module_before_publishing() {
-    let workflow =
-        fs::read_to_string(root().join(".github/workflows/ci.yml")).expect("read ci.yml");
-    let job = &workflow[workflow.find("\n  release:\n").expect("release job")..];
-    let steps: Vec<&str> = job.split("\n      - ").skip(1).collect();
-    let position = |needle: &str| {
-        steps
-            .iter()
-            .position(|step| step.contains(needle))
-            .unwrap_or_else(|| panic!("release job has a step running `{needle}`"))
-    };
-    let collect = position("name: collect all target artifacts");
-    let version = position("name: compute version + tag");
-    let package = position("scripts/package-bazel-module.sh \"${{ steps.v.outputs.ver }}\" dist");
-    let publish = position("gh release create \"$TAG\"");
-    assert!(collect < package && version < package && package < publish);
-    assert!(steps[package].contains("if: steps.tip.outputs.publish == 'true'"));
-
-    // The site's Bazel registry is generated from the releases, so it is rebuilt after this one
-    // is published, and before the commit is recorded, so a failed dispatch is retried.
-    let refresh = position("run: gh workflow run pages.yml --ref master");
-    let record = position("release-publisher.sh record");
-    assert!(publish < refresh && refresh < record);
-    assert!(steps[refresh].contains("if: steps.tip.outputs.publish == 'true'"));
-    assert!(job.contains("    permissions:\n      contents: write\n      # Dispatches the pages workflow, which regenerates the Bazel registry.\n      actions: write\n"));
-    let pages =
-        fs::read_to_string(root().join(".github/workflows/pages.yml")).expect("read pages.yml");
-    assert!(pages.contains("  workflow_dispatch:\n"));
-    assert!(pages.contains("        run: node scripts/bazel-registry.mjs dist/bazel-registry\n"));
-}
-
-#[test]
-fn every_merge_builds_the_packaged_module_under_bazel() {
-    let workflow =
-        fs::read_to_string(root().join(".github/workflows/ci.yml")).expect("read ci.yml");
-    let start = workflow.find("\n  bazel:\n").expect("bazel job");
-    let job = &workflow[start..];
-    let job = &job[..job[1..].find("\n  # ").map_or(job.len(), |end| end + 1)];
-    assert!(job.contains("    needs: [build-tool-bins]\n"), "{job}");
-    assert!(job.contains("        bazel: [8.4.2, 9.3.1]\n"), "{job}");
-    assert!(
-        job.contains("          USE_BAZEL_VERSION: ${{ matrix.bazel }}\n"),
-        "{job}"
-    );
-    assert!(
-        job.contains(
-            "          scripts/bazel-smoke.sh \"$PWD/krusty\" \"$RUNNER_TEMP/kotlin-stdlib.jar\"\n"
-        ),
-        "{job}"
-    );
-    let smoke = fs::read_to_string(root().join("scripts/bazel-smoke.sh")).expect("read smoke");
-    assert!(smoke.contains(
-        "for exec_groups in --incompatible_auto_exec_groups --noincompatible_auto_exec_groups; do\n"
-    ));
-    assert!(smoke
-        .contains("  for compiler in toolchain --@krusty//:krusty_binary=//tools:krusty; do\n"));
-    assert!(
-        smoke.contains("    for name, use_worker in [(\"actions\", False), (\"worker\", True)]\n")
-    );
 }

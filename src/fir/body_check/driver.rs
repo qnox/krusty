@@ -613,6 +613,10 @@ fn check_and_dispatch_enum_entry(
         kind: FirStatementKind::Expression(expression),
     });
     checker.body.push_root(statement);
+    // The constant's arguments carry their source lines, as a constructor call's do.
+    checker
+        .body
+        .attach_debug_lines(source, file, checker.origins);
     ordinary_sink.accept(work.owner, checker.body);
     Ok(())
 }

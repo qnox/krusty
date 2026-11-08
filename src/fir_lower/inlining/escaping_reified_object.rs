@@ -419,3 +419,24 @@ fn method_calls(ir: &crate::ir::IrFile, function: u32) -> Vec<u32> {
     }
     calls
 }
+
+#[test]
+fn a_reified_parameter_used_only_by_a_supertype_specializes_the_class() {
+    let source = include_str!("../../../tests/reified_anonymous_object_e2e/capturedSuperclass.kt");
+    let ir = lower(source, "CapturedAnonymousSuperclass");
+    let call = constructed_class(&ir, function_named(&ir, "box"));
+    let spec = ir
+        .specialized_anonymous_classes
+        .get(&call)
+        .expect("a reified superclass needs a call-site class");
+    assert_ne!(call, spec.source);
+    let original = &ir.classes[spec.source as usize];
+    let copy = &ir.classes[call as usize];
+    assert_ne!(copy.supertypes, original.supertypes);
+    assert_eq!(
+        ir.class_signature_name(copy.fq_name).unwrap().supers,
+        ir.class_signature_name(original.fq_name).unwrap().supers,
+    );
+    assert!(ir.reified_anonymous_declarations.contains(&spec.source));
+    assert!(!ir.reified_anonymous_declarations.contains(&call));
+}

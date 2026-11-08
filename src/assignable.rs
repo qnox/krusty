@@ -198,8 +198,11 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     }
     // A type parameter's semantic identity is its key. The carried bound is constraint metadata and
     // may be normalized differently while a generic call is instantiated (`Any` versus `Any?`).
-    if matches!((sub.kind(), sup.kind()), (TyKind::TyParam(a, _), TyKind::TyParam(b, _)) if a == b)
-    {
+    if matches!(
+        (sub.kind(), sup.kind()),
+        (TyKind::TyParam(a, _), TyKind::TyParam(b, _)) | (TyKind::Var(a, _), TyKind::Var(b, _))
+            if a == b
+    ) {
         return true;
     }
     // `T & Any` is a subtype of the original parameter and of the non-null intersection of that
@@ -210,7 +213,7 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
         if assignable_inner(cx, oracle, original, sup) {
             return true;
         }
-        if let TyKind::TyParam(name, bound) = original.kind() {
+        if let TyKind::TyParam(name, bound) | TyKind::Var(name, bound) = original.kind() {
             let tightened = declared_upper_bound(oracle, name.as_str(), bound, Ty::non_null);
             if tightened != original && assignable_inner(cx, oracle, tightened, sup) {
                 return true;
@@ -300,11 +303,15 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
         // stripping the target's `?`: `<T : Any?>` is a subtype of `Any?` (and therefore fits a
         // star projection), but is not a subtype of non-null `Any`. Preserve the direct `T <: T?`
         // relation without expanding T to an unrelated upper bound first.
-        if matches!(sub.kind(), TyKind::TyParam(source, _) if matches!(inner.kind(), TyKind::TyParam(target, _) if source == target))
-        {
+        if matches!(
+            (sub.kind(), inner.kind()),
+            (TyKind::TyParam(source, _), TyKind::TyParam(target, _))
+                | (TyKind::Var(source, _), TyKind::Var(target, _))
+                if source == target
+        ) {
             return true;
         }
-        if let TyKind::TyParam(name, bound) = sub.kind() {
+        if let TyKind::TyParam(name, bound) | TyKind::Var(name, bound) = sub.kind() {
             return variable_bound_assignable(cx, oracle, sub, name.as_str(), bound, sup);
         }
         return is_assignable(cx, oracle, sub.non_null(), inner);
@@ -317,8 +324,10 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     // A source type variable is a subtype of its declared upper bound, including another variable
     // (`<R, T : R>` means `T <: R`). Check this before rejecting an unbound target variable; otherwise
     // the target arm hides the only declared proof of that relation.
-    if let (TyKind::TyParam(source_name, source_bound), TyKind::TyParam(target_name, _)) =
-        (sub.kind(), sup.kind())
+    if let (
+        TyKind::TyParam(source_name, source_bound) | TyKind::Var(source_name, source_bound),
+        TyKind::TyParam(target_name, _) | TyKind::Var(target_name, _),
+    ) = (sub.kind(), sup.kind())
     {
         if source_name != target_name {
             return variable_bound_assignable(
@@ -336,12 +345,12 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     // `String <: T`. Generic inference must bind T before ordinary assignability is asked. This comes
     // AFTER nullability so the same symbolic type still obeys Kotlin's ordinary `T <: T?` relation;
     // expanding the source `T` to its bound first loses that identity.
-    if let TyKind::TyParam(name, _) = sup.kind() {
+    if let TyKind::TyParam(name, _) | TyKind::Var(name, _) = sup.kind() {
         return cx
             .lookup(name.as_str())
             .is_some_and(|target| target != sup && assignable_inner(cx, oracle, sub, target));
     }
-    if let TyKind::TyParam(name, bound) = sub.kind() {
+    if let TyKind::TyParam(name, bound) | TyKind::Var(name, bound) = sub.kind() {
         return variable_bound_assignable(cx, oracle, sub, name.as_str(), bound, sup);
     }
 
@@ -497,7 +506,7 @@ fn capture_projection_parameters(
     actual: Ty,
 ) {
     match template.kind() {
-        TyKind::TyParam(name, _) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
             if cx.lookup(name.as_str()).is_none() && actual != template {
                 cx.bind(name.as_str(), actual.projection_inner().unwrap_or(actual));
             }
@@ -543,7 +552,9 @@ fn capture_projection_parameters(
 
 fn same_type_argument_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool {
     match (left.kind(), right.kind()) {
-        (TyKind::TyParam(a, _), TyKind::TyParam(b, _)) => a == b,
+        (TyKind::TyParam(a, _), TyKind::TyParam(b, _)) | (TyKind::Var(a, _), TyKind::Var(b, _)) => {
+            a == b
+        }
         // `T & Any` has two spellings: the provenance wrapper a nullable binding leaves and the
         // compact parameter whose occurrence bound excludes null. They are one argument.
         (TyKind::DefinitelyNotNull(a), TyKind::DefinitelyNotNull(b)) => {
@@ -553,6 +564,11 @@ fn same_type_argument_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool
         | (TyKind::TyParam(name, bound), TyKind::DefinitelyNotNull(wrapped)) => {
             !bound.upper_bound_admits_null()
                 && matches!(wrapped.kind(), TyKind::TyParam(inner, _) if inner == name)
+        }
+        (TyKind::DefinitelyNotNull(wrapped), TyKind::Var(name, bound))
+        | (TyKind::Var(name, bound), TyKind::DefinitelyNotNull(wrapped)) => {
+            !bound.upper_bound_admits_null()
+                && matches!(wrapped.kind(), TyKind::Var(inner, _) if inner == name)
         }
         (TyKind::Obj(a, aa), TyKind::Obj(b, ba)) => {
             a == b
@@ -655,7 +671,7 @@ fn mutability_bound_matches(oracle: &dyn TypeOracle, inner: Ty, other: Ty) -> bo
 /// `Box<T : Any>` is therefore not assignable to `Box<String>` until inference binds `T` to `String`.
 fn normalized_type_argument(cx: &TyCtx, ty: Ty) -> Ty {
     fn resolve(cx: &TyCtx, current: Ty, origin: Ty) -> Ty {
-        let TyKind::TyParam(name, _) = current.kind() else {
+        let (TyKind::TyParam(name, _) | TyKind::Var(name, _)) = current.kind() else {
             return current;
         };
         let Some(next) = cx.lookup(name.as_str()) else {

@@ -78,6 +78,7 @@ mod tests {
 
     fn property(field: u32) -> IrProperty {
         IrProperty {
+            origin: crate::ir::IrPropertyOrigin::Declaration,
             name: "result".to_string(),
             diagnostic_span: None,
             getter_diagnostic_span: None,
