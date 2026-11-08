@@ -297,10 +297,7 @@ impl Recorder<'_, '_> {
 
     fn reject_published(&mut self, id: crate::ir::PropertyId) -> bool {
         let property = &self.ir.checked_properties[&id];
-        if property
-            .flags
-            .has(crate::fir::DeclarationFlags::SCRIPT_RESULT)
-        {
+        if property.is_script_result() {
             return false;
         }
         let published = wk::published_api();
@@ -346,7 +343,7 @@ impl Recorder<'_, '_> {
             message: publication_error(declaration, self.release),
         });
         // The official checker reports mutability independently, after publication.
-        if property.flags.has(crate::fir::DeclarationFlags::MUTABLE) {
+        if property.is_mutable() {
             let consider = if self
                 .release
                 .is_some_and(|release| release < PluginRelease::V2_4_20)

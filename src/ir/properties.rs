@@ -216,6 +216,18 @@ pub struct IrCheckedProperty {
     pub setter_inline: bool,
 }
 
+impl IrCheckedProperty {
+    /// Whether this is the checked result property synthesized for a script.
+    pub(crate) fn is_script_result(&self) -> bool {
+        self.flags.has(crate::fir::DeclarationFlags::SCRIPT_RESULT)
+    }
+
+    /// Whether the checked declaration is a mutable property.
+    pub(crate) fn is_mutable(&self) -> bool {
+        self.flags.has(crate::fir::DeclarationFlags::MUTABLE)
+    }
+}
+
 /// A property a class DECLARES. A property is a declaration, not a pair of methods: `val a: Int` is one
 /// thing, and the `getA()` a target may emit for it is a realization of it. The front end lowers only
 /// what is genuinely Kotlin — a source-written accessor's BODY — and leaves naming, descriptors and
