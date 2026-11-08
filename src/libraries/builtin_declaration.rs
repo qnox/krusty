@@ -74,6 +74,22 @@ pub(crate) fn semantic_call_role(
         {
             return Some(SemanticCallRole::KotlinCallableReferenceName);
         }
+        let plain =
+            declaration.params.is_empty() && !declaration.is_operator && !declaration.is_infix;
+        if plain
+            && declaration.owner == crate::types::wk::string()
+            && declaration.name == "length"
+            && declaration.ret == Ty::Int
+        {
+            return Some(SemanticCallRole::KotlinStringLength);
+        }
+        if plain
+            && declaration.owner == crate::types::wk::kotlin_enum()
+            && declaration.name == "name"
+            && declaration.ret == Ty::String
+        {
+            return Some(SemanticCallRole::KotlinEnumName);
+        }
         return None;
     }
     if let Some(operation) =
