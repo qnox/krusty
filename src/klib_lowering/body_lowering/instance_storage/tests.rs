@@ -338,7 +338,7 @@ impl Fixture {
             &mut linker,
         );
         if matches!(access, Access::ValueReadOnly) {
-            lowering = lowering.reading_value_through(class, &self.fields[0]);
+            lowering = lowering.reading_through(class, &[&self.fields[0]], true);
             if no_declared_receiver {
                 lowering.instance_storage.as_mut().unwrap().receiver = None;
             }
@@ -355,6 +355,7 @@ impl Fixture {
                         symbol: &field.base.symbol,
                         index: index as u32,
                         ty: self.field_ty,
+                        final_: false,
                     })
                     .collect(),
             });

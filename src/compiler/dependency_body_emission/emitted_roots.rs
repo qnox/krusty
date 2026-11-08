@@ -10,6 +10,13 @@ use crate::libraries::{
 };
 use std::collections::VecDeque;
 
+/// The declarations a unit's closure freezes, and the call edge facts of its members realized
+/// outside the unit.
+pub(super) struct FrozenClosure {
+    pub(super) declarations: Vec<(crate::fir::ExternalCallableId, ExternalCallableRealization)>,
+    pub(super) member_edges: HashMap<KlibDependencyCallable, crate::klib_lowering::CallEdge>,
+}
+
 /// Freeze declaration contracts along the exact producer graph before ordinary body lowering.
 /// A body-bearing callee cannot regain the legacy header-only path merely because source FIR did
 /// not also select it. Intrinsic/bodyless leaves retain their separately authenticated boundary.
@@ -21,7 +28,7 @@ pub(super) fn declarations(
     externals: &HashMap<KlibDependencyCallable, super::EmittedDependencyCallable>,
     capabilities: &super::DependencyLeafCapabilities<'_>,
     requires_ordinary: bool,
-) -> Result<Vec<(crate::fir::ExternalCallableId, ExternalCallableRealization)>, String> {
+) -> Result<FrozenClosure, String> {
     // Each callee, with the value class whose member's body calls it.
     let mut pending = roots
         .iter()
@@ -29,6 +36,9 @@ pub(super) fn declarations(
         .collect::<VecDeque<_>>();
     let mut visited = HashSet::default();
     let mut declarations = Vec::new();
+    let mut member_edges = HashMap::default();
+    // Declaration-only evidence already pushed, which the closure never walks.
+    let mut declared = HashSet::default();
     while let Some((identity, value_class)) = pending.pop_front() {
         if !visited.insert(identity.clone()) {
             continue;
@@ -102,6 +112,23 @@ pub(super) fn declarations(
             {
                 pending.extend(callees.into_iter().map(|callee| (callee, None)));
             }
+            // The declarations the class's overrides override, which their edges name.
+            for overridden in facts
+                .constructor_overridden_declarations(&identity, bodies)
+                .map_err(|reason| format!("an invalid class override: {reason:?}"))?
+            {
+                if declared.insert(overridden.clone()) {
+                    declarations.push(
+                        platform
+                            .external_callable_by_dependency(&overridden)
+                            .ok_or_else(|| {
+                                format!(
+                                    "an overridden KLIB declaration has no provider: {overridden:?}"
+                                )
+                            })?,
+                    );
+                }
+            }
         }
         let primitive = facts
             .common_primitive(&identity, bodies)
@@ -119,8 +146,21 @@ pub(super) fn declarations(
         let member = facts
             .target_member(&identity, capabilities.target_represents_classifier)
             .map_err(|reason| format!("an invalid target member declaration: {reason:?}"))?;
+        // A member of a class no support unit materializes is a leaf: support bodies call it
+        // through its declaration, as source calls do, and the target realizes it.
+        let external_member = realization.kind == ExternalCallableKind::Member
+            && !is_materialized_class_member(platform, bodies, &facts, selected)?;
+        // A call of a member realized outside the unit carries the facts the member hierarchy
+        // decorates a source call of it with.
+        if member || external_member {
+            member_edges.insert(
+                identity.clone(),
+                member_edge(platform, declaration_target, selected)?,
+            );
+        }
         let emits_body = !externals.contains_key(&identity)
             && !member
+            && !external_member
             && !constructor
             && primitive.is_none()
             && target.is_none()
@@ -129,20 +169,33 @@ pub(super) fn declarations(
             && bodies.function_has_body(&identity) == Some(true);
         if requires_ordinary
             && emits_body
-            && (!(matches!(
+            && (!matches!(
                 realization.kind,
-                ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
-            ) || is_value_class_member(selected))
-                || !realization
-                    .klib_body_declaration_modifiers
-                    .is_some_and(|modifiers| modifiers.permits_ordinary_body()))
+                ExternalCallableKind::TopLevel
+                    | ExternalCallableKind::Extension
+                    | ExternalCallableKind::Member
+            ) || !realization
+                .klib_body_declaration_modifiers
+                .is_some_and(|modifiers| modifiers.permits_ordinary_body()))
         {
             return Err(format!("a transitive KLIB body has no supported ordinary declaration contract: {identity:?}"));
         }
         if emits_body {
-            let value_class = is_value_class_member(selected)
-                .then(|| selected.class_contract().cloned())
-                .flatten();
+            // A member of an ordinary class is called on an instance its primary constructor
+            // created, which materializes the class.
+            if let Some(primary) = selected
+                .class_contract()
+                .filter(|class| !class.is_value && selected.kind() == ExternalCallableKind::Member)
+                .map(|class| ordinary_class_constructor(platform, bodies, &facts, class))
+                .transpose()?
+                .flatten()
+            {
+                pending.push_back((primary, None));
+            }
+            let value_class = selected
+                .class_contract()
+                .filter(|class| class.is_value && class.emits_members())
+                .cloned();
             pending.extend(
                 bodies
                     .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
@@ -152,10 +205,14 @@ pub(super) fn declarations(
         }
         declarations.push((declaration_target, realization));
     }
-    Ok(declarations)
+    Ok(FrozenClosure {
+        declarations,
+        member_edges,
+    })
 }
 
 pub(super) fn ordinary_roots<'a>(
+    platform: &dyn SemanticPlatform,
     source: &'a CheckedIrFile<'_>,
     bodies: &KlibDeclarationBodies,
     intrinsics: &KlibIntrinsicFacts,
@@ -227,10 +284,12 @@ pub(super) fn ordinary_roots<'a>(
             }
             continue;
         }
-        // Instance dispatch/storage is a different emission capability. This category accepts
-        // declaration-owned top-level and extension frames, and the members of a value class,
-        // which are final and read their receiver only through its one value.
-        if !callable.is_top_level() && !is_value_class_member(selected) {
+        // Virtual instance dispatch is a different emission capability. This category accepts
+        // declaration-owned top-level and extension frames, and the members of a class the unit
+        // materializes, which dispatch statically.
+        if !callable.is_top_level()
+            && !is_materialized_class_member(platform, bodies, callees, selected)?
+        {
             continue;
         }
         // A member of a classifier the target represents itself is the target's to realize.
@@ -265,11 +324,136 @@ pub(super) fn ordinary_roots<'a>(
     Ok(roots)
 }
 
-/// Whether `callable` is a member of a value class which a support unit emits as a member of the
-/// class it materializes. A builtin type of the common type model is not such a class.
-fn is_value_class_member(callable: KlibBodyCallable<'_>) -> bool {
-    callable.kind() == ExternalCallableKind::Member
-        && callable
-            .class_contract()
-            .is_some_and(|class| class.is_value && !class.is_builtin_type())
+/// Whether `callable` is a member of a class which a support unit materializes and emits the
+/// member as a member of. A value class is materialized by its members; an ordinary class only by
+/// the admitted initialization of its primary constructor, the same plan lowering executes. A
+/// builtin type of the common type model is neither.
+fn is_materialized_class_member(
+    platform: &dyn SemanticPlatform,
+    bodies: &KlibDeclarationBodies,
+    callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
+    callable: KlibBodyCallable<'_>,
+) -> Result<bool, String> {
+    if callable.kind() != ExternalCallableKind::Member {
+        return Ok(false);
+    }
+    let Some(class) = callable
+        .class_contract()
+        .filter(|class| class.emits_members())
+    else {
+        return Ok(false);
+    };
+    if class.is_value {
+        return Ok(true);
+    }
+    Ok(ordinary_class_constructor(platform, bodies, callees, class)?.is_some())
+}
+
+/// The primary constructor of the ordinary class `class`, when its admitted initialization
+/// materializes the class.
+fn ordinary_class_constructor(
+    platform: &dyn SemanticPlatform,
+    bodies: &KlibDeclarationBodies,
+    callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
+    class: &crate::libraries::KlibBodyClassContract,
+) -> Result<Option<KlibDependencyCallable>, String> {
+    let Some(primary) = class.primary_constructor.clone() else {
+        return Ok(None);
+    };
+    let identity = KlibDependencyCallable {
+        module: class.module.clone(),
+        declaration: crate::libraries::KlibDeclarationSignature::Public(primary),
+    };
+    let Some((_, realization)) = platform.external_callable_by_dependency(&identity) else {
+        return Ok(None);
+    };
+    let Some(constructor) = realization.klib_body_callable() else {
+        return Ok(None);
+    };
+    let admitted = callees
+        .with_declaration(constructor)
+        .constructor_initialization_callees(&identity, bodies)
+        .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
+        .is_some();
+    Ok(admitted.then_some(identity))
+}
+
+/// The primary constructor which materializes the ordinary class declaring the member
+/// `identity`, which every instance the member is called on was created by.
+pub(super) fn member_class_constructor(
+    platform: &dyn SemanticPlatform,
+    bodies: &KlibDeclarationBodies,
+    callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
+    identity: &KlibDependencyCallable,
+) -> Result<Option<KlibDependencyCallable>, String> {
+    let Some((_, realization)) = platform.external_callable_by_dependency(identity) else {
+        return Ok(None);
+    };
+    let Some(selected) = realization.klib_body_callable() else {
+        return Ok(None);
+    };
+    match selected.class_contract() {
+        Some(class)
+            if !class.is_value
+                && class.emits_members()
+                && selected.kind() == ExternalCallableKind::Member =>
+        {
+            ordinary_class_constructor(platform, bodies, callees, class)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The facts the member hierarchy of `selected`'s declaring class decorates a source call of
+/// `selected` (frozen as `target`) with: the declarations it overrides and the semantic role it
+/// inherits from them. A target recognizes a member it implements specially through them.
+fn member_edge(
+    platform: &dyn SemanticPlatform,
+    target: crate::fir::ExternalCallableId,
+    selected: KlibBodyCallable<'_>,
+) -> Result<crate::klib_lowering::CallEdge, String> {
+    let Some(crate::types::SemanticCallableOwner::Classifier(owner)) = selected.declaration_owner()
+    else {
+        return Err(format!(
+            "a KLIB member has no declaring class: {:?}",
+            selected.identity()
+        ));
+    };
+    let callables = crate::symbol_resolver::member_declarations_in_hierarchy(
+        platform,
+        crate::types::Ty::obj_name(owner),
+        selected.name(),
+    );
+    let mut found = callables
+        .functions()
+        .iter()
+        .filter(|function| function.callable.external_identity == Some(target));
+    let (Some(function), None) = (found.next(), found.next()) else {
+        return Err(format!(
+            "a KLIB member is not one declaration of its class's hierarchy: {:?}",
+            selected.identity()
+        ));
+    };
+    Ok(crate::klib_lowering::CallEdge {
+        semantic_role: function.callable.semantic_role,
+        overridden: function.callable.overridden_declarations.clone(),
+    })
+}
+
+/// Whether `identity` is a member of a class no support unit materializes, which support bodies
+/// call through its declaration and the target realizes, so its body is never walked.
+pub(super) fn is_external_member(
+    platform: &dyn SemanticPlatform,
+    bodies: &KlibDeclarationBodies,
+    callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
+    identity: &KlibDependencyCallable,
+) -> Result<bool, String> {
+    let Some((_, realization)) = platform.external_callable_by_dependency(identity) else {
+        return Ok(false);
+    };
+    let Some(selected) = realization.klib_body_callable() else {
+        return Ok(false);
+    };
+    Ok(realization.kind == ExternalCallableKind::Member
+        && !is_materialized_class_member(platform, bodies, callees, selected)?)
 }

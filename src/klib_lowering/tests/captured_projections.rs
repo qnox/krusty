@@ -101,6 +101,7 @@ fn stdlib_array_walk_reads_its_captured_iterator() {
     .collect();
     let oracle = crate::symbol_resolver::SourceOracle(&libraries);
     let facts = KlibCalleeFacts::with_declarations([root], [iterator, has_next, next, add])
+        .with_member_edges(super::non_overriding_edges([iterator]))
         .with_type_oracle(&oracle);
     let mut unit = DependencyBodyUnit::default();
     let lowered = unit
@@ -242,6 +243,7 @@ fn stdlib_array_copy_binds_its_captured_type_argument() {
         .collect();
     let oracle = crate::symbol_resolver::SourceOracle(&libraries);
     let facts = KlibCalleeFacts::with_declarations([root], leaves.into_iter().chain([size, get]))
+        .with_member_edges(super::non_overriding_edges([size, get]))
         .with_type_oracle(&oracle);
     let mut unit = DependencyBodyUnit::default();
     let lowered = unit

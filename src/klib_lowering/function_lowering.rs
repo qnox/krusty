@@ -645,14 +645,15 @@ fn header(
             (Some(receiver), Some(selected))
                 if selected
                     .class_contract()
-                    .is_some_and(|class| class.is_value) =>
+                    .is_some_and(crate::libraries::KlibBodyClassContract::emits_members) =>
             {
-                // A value class's member is final and is emitted as a member of its class, whose
-                // `this` is the value it is called on. Semantic conversion interns the class path,
-                // so the raw receiver proves the exact class identity first.
+                // A member of a class the unit materializes dispatches statically and is emitted
+                // as a member of its class, whose `this` is the instance it is called on. Semantic
+                // conversion interns the class path, so the raw receiver proves the exact class
+                // identity first.
                 let class = selected
                     .class_contract()
-                    .expect("the guard selected a value class member");
+                    .expect("the guard selected a materialized class member");
                 super::class_headers::authenticate_receiver(class, arena, function)?;
                 let serialized = semantic_type(arena, types, receiver.ty)?;
                 if selected.declaration_owner()
@@ -661,7 +662,7 @@ fn header(
                         .map(crate::types::SemanticCallableOwner::Classifier)
                 {
                     return Err(mismatch(
-                        "a value class member's receiver is not its declaring class".to_owned(),
+                        "a class member's receiver is not its declaring class".to_owned(),
                     ));
                 }
                 value_receiver = Some((&receiver.base.symbol, serialized));

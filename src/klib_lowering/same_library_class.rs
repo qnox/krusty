@@ -69,6 +69,7 @@ pub(super) struct MaterializedLocalClass {
 pub(super) struct LocalStoredField<'a> {
     pub(super) symbol: &'a KlibIrSymbol,
     pub(super) ty: Ty,
+    pub(super) final_: bool,
 }
 
 /// The initializer frame queued for a file-local class.
@@ -288,6 +289,7 @@ pub(super) fn linked_member(
         type_parameter_bounds: Some(Vec::new()),
         class_type_parameters: class.class_type_parameters.clone(),
         parameter_defaults: defaults,
+        edge: super::CallEdge::default(),
     }
 }
 
@@ -584,6 +586,7 @@ fn members_and_storage<'a>(
             stored.push(LocalStoredField {
                 symbol: &field.base.symbol,
                 ty: authenticated.ty,
+                final_: authenticated.final_,
             });
             Some((index, field))
         } else {

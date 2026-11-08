@@ -113,6 +113,7 @@ pub(super) fn emit_dependencies<B: Backend>(
     let target_represents_classifier =
         |classifier| backend.represents_dependency_classifier(classifier);
     let mut ordinary = match emitted_roots::ordinary_roots(
+        platform,
         source,
         bodies,
         intrinsics,
@@ -159,7 +160,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             target_realizes_getter: &target_realizes_getter,
             target_represents_classifier: &target_represents_classifier,
         };
-        let declarations = match emitted_roots::declarations(
+        let closure = match emitted_roots::declarations(
             platform,
             bodies,
             intrinsics,
@@ -168,7 +169,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             &capabilities,
             !requires_intrinsic_link,
         ) {
-            Ok(declarations) => declarations,
+            Ok(closure) => closure,
             Err(error) => {
                 diags.error(
                     Span::new(0, 0),
@@ -177,6 +178,10 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
+        let emitted_roots::FrozenClosure {
+            declarations,
+            member_edges,
+        } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
             declarations.iter().filter_map(|(target, declaration)| {
@@ -185,6 +190,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                     .map(|callable| (*target, callable))
             }),
         )
+        .with_member_edges(member_edges)
         .with_type_oracle(&type_oracle)
         .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {
@@ -549,6 +555,20 @@ fn prepare_bodyless_externals(
         } else {
             bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
         };
+        // A member of a materialized class is lowered with the class its constructor creates.
+        match emitted_roots::member_class_constructor(
+            platform,
+            bodies,
+            capabilities.callees,
+            &identity,
+        ) {
+            Ok(Some(primary)) => pending.push_back(primary),
+            Ok(None) => {}
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return false;
+            }
+        }
         for callee in edges {
             if externals.contains_key(&callee) {
                 continue;
@@ -670,6 +690,15 @@ fn prepare_bodyless_externals(
                     return false;
                 }
             }
+            match emitted_roots::is_external_member(platform, bodies, capabilities.callees, &callee)
+            {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                    return false;
+                }
+            }
             let Some(has_body) = bodies.function_has_body(&callee) else {
                 continue;
             };
@@ -680,7 +709,9 @@ fn prepare_bodyless_externals(
             if !capabilities.target_realizes_bodyless {
                 diags.error(
                     Span::new(0, 0),
-                    "internal error: the target cannot realize a bodyless KLIB support dependency",
+                    format!(
+                        "internal error: the target cannot realize a bodyless KLIB support dependency: {callee:?}"
+                    ),
                 );
                 return false;
             }

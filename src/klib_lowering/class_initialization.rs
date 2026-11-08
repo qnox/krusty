@@ -12,8 +12,8 @@ use crate::libraries::{
     KlibBodyCallable, KlibClassStorage, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
 };
 use crate::metadata::klib_ir::tree::{
-    KlibIrArguments, KlibIrBody, KlibIrExprId, KlibIrExprKind, KlibIrField, KlibIrMember,
-    KlibIrStatement,
+    KlibIrArguments, KlibIrBody, KlibIrExprId, KlibIrExprKind, KlibIrField, KlibIrFunction,
+    KlibIrMember, KlibIrStatement,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
 use crate::metadata::semantic::KotlinModality;
@@ -53,6 +53,9 @@ pub(super) struct ClassInitialization<'a, 'b> {
     pub(super) field_declarations: Vec<&'b KlibIrField>,
     pub(super) storage: KlibClassStorage,
     pub(super) steps: Vec<InitializationStep<'b>>,
+    /// The class's own overrides of `kotlin.Any`'s members. A materialized class always carries
+    /// them, so dispatch on one of its instances never reaches `Any`'s implementation instead.
+    pub(super) overrides: Vec<&'b KlibIrFunction>,
 }
 
 fn mismatch(detail: &str) -> KlibBodyDeclineReason {
@@ -83,14 +86,18 @@ pub(super) fn plan<'a, 'b>(
         return Ok(None);
     }
     let mut constructors = Vec::new();
+    let mut overrides = Vec::new();
     for member in &header.class.members {
         match member {
             KlibIrMember::Function(function) => {
                 let function = header.arena.function(*function);
-                if !function.constructor {
-                    return Ok(None);
+                if function.constructor {
+                    constructors.push(&function.base.symbol);
+                } else if !function.overridden.is_empty() {
+                    // The only supertype is `Any` (checked below), so an override is one of its
+                    // members. A final member of this final class dispatches statically.
+                    overrides.push(function);
                 }
-                constructors.push(&function.base.symbol);
             }
             KlibIrMember::Property(_)
             | KlibIrMember::Field(_)
@@ -176,6 +183,7 @@ pub(super) fn plan<'a, 'b>(
         field_declarations: storage.field_declarations,
         storage: storage.storage,
         steps,
+        overrides,
     }))
 }
 
@@ -202,6 +210,8 @@ pub(super) fn constructor_initialization_callees(
             .arena
             .emitted_callable_symbols_from(roots, super::EMITTED_CALL_FORMS)
             .into_iter()
+            // The class's overrides are always emitted with it, as dispatch reaches them.
+            .chain(plan.overrides.iter().map(|function| &function.base.symbol))
             .filter_map(|symbol| match &symbol.signature {
                 KlibIrSignature::Public(signature) => {
                     Some(KlibDeclarationSignature::Public(signature.clone()))
@@ -219,4 +229,36 @@ pub(super) fn constructor_initialization_callees(
             })
             .collect(),
     ))
+}
+
+/// The declarations the overrides of an admitted class override, which their override edges
+/// name. They are declaration evidence only: an override edge executes none of their bodies.
+pub(super) fn constructor_overridden_declarations(
+    selected: KlibBodyCallable<'_>,
+    bodies: &KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
+) -> Result<Vec<KlibDependencyCallable>, KlibBodyDeclineReason> {
+    let Some(plan) = plan(selected, bodies, callees)? else {
+        return Ok(Vec::new());
+    };
+    plan.overrides
+        .iter()
+        .flat_map(|function| &function.overridden)
+        .map(|symbol| {
+            let KlibIrSignature::Public(signature) = &symbol.signature else {
+                return Err(mismatch(
+                    "an override names a declaration without a public signature",
+                ));
+            };
+            match bodies.callee_origin(
+                &plan.header.contract.module,
+                &KlibDeclarationSignature::Public(signature.clone()),
+            ) {
+                KlibCalleeOrigin::Exact(identity) => Ok(identity),
+                KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => Err(mismatch(
+                    "an override names a declaration without one exact producer",
+                )),
+            }
+        })
+        .collect()
 }

@@ -36,6 +36,21 @@ impl KlibBodyClassContract {
     pub(crate) fn is_builtin_type(&self) -> bool {
         crate::types::builtin_semantic(self.classifier).is_some()
     }
+
+    /// Whether a support unit materializes this class and emits its members as functions of the
+    /// class it materializes: a value class, or a final class without type parameters, whose
+    /// members all dispatch statically. A builtin type of the common type model is neither.
+    pub(crate) fn emits_members(&self) -> bool {
+        if self.is_builtin_type() {
+            return false;
+        }
+        self.is_value
+            || (self.kind == super::TypeKind::Class
+                && self.modality == KotlinModality::Final
+                && !self.is_inner
+                && !self.is_expect
+                && self.parameters.formals.is_empty())
+    }
 }
 
 /// A complete declared instance layout. Its field ordinals belong to this exact producer class;

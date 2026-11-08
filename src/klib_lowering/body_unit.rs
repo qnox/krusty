@@ -244,22 +244,23 @@ struct PendingBody<'a> {
         crate::ir::ClassId,
         super::class_initialization::ClassInitialization<'a, 'a>,
     )>,
-    value_member: Option<ValueMember<'a>>,
+    value_member: Option<MemberClass<'a>>,
     local_body: Option<super::same_library_class::LocalBody<'a>>,
 }
 
 /// The declaration of a body this unit emits, and for a value class member, its class.
 struct BodyHeader<'a> {
     header: FunctionHeader,
-    value_member: Option<ValueMember<'a>>,
+    value_member: Option<MemberClass<'a>>,
 }
 
-/// The class of a value class member this unit emits: the class it materializes, the field the
-/// member's body reads the value through, and the provider's authenticated class contract.
-#[derive(Clone, Copy)]
-struct ValueMember<'a> {
+/// The class of a member this unit emits: the class it materializes, the fields the member's
+/// body reads through its receiver, in declaration order, and the provider's authenticated class
+/// contract. A value class has exactly one field, its value.
+#[derive(Clone)]
+struct MemberClass<'a> {
     class: crate::ir::ClassId,
-    field: &'a KlibIrField,
+    fields: Vec<&'a KlibIrField>,
     contract: &'a crate::libraries::KlibBodyClassContract,
 }
 
@@ -653,7 +654,7 @@ impl DependencyBodyUnit {
         while let Some(body) = linker.pending.pop_front() {
             linker.active_module.clone_from(&body.identity.module);
             linker.active_identity.clone_from(&body.identity);
-            linker.active_value_class = body.value_member;
+            linker.active_value_class.clone_from(&body.value_member);
             let function = LoweredFunction {
                 symbol: body.symbol,
                 function: body.function,
@@ -687,11 +688,11 @@ impl DependencyBodyUnit {
                     .map(|()| lowered)
                 })
             } else {
-                match (&body.initialization, body.value_member) {
+                match (&body.initialization, &body.value_member) {
                     (Some((class, plan)), _) => lowering.initialize_class(*class, plan),
                     (None, value_member) => match value_member {
                         Some(member) => lowering
-                            .reading_value_through(member.class, member.field)
+                            .reading_through(member.class, &member.fields, member.contract.is_value)
                             .body(body.statements),
                         None => lowering.body(body.statements),
                     }
@@ -743,7 +744,7 @@ struct Linker<'u, 's> {
     active_identity: KlibDependencyCallable,
     /// The class and value field of the value class member being lowered, the class of every
     /// private member it calls.
-    active_value_class: Option<ValueMember<'s>>,
+    active_value_class: Option<MemberClass<'s>>,
     sources: Sources<'s>,
 }
 
@@ -1157,6 +1158,7 @@ impl CallLinker for Linker<'_, '_> {
                 type_parameter_bounds: Some(Vec::new()),
                 class_type_parameters: self.class_type_parameters(selected)?,
                 parameter_defaults: Vec::new(),
+                edge: super::CallEdge::default(),
             });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
@@ -1261,6 +1263,12 @@ impl CallLinker for Linker<'_, '_> {
                     .map(|signature| signature.formal_bounds.clone()),
                 class_type_parameters,
                 parameter_defaults: Vec::new(),
+                edge: if emitted.is_target_member() {
+                    self.external_member_edge(&identity)
+                        .map_err(callee_declined)?
+                } else {
+                    super::CallEdge::default()
+                },
             });
         }
         if declaration.dispatch_receiver.is_some() && selected.is_none() {
@@ -1272,26 +1280,30 @@ impl CallLinker for Linker<'_, '_> {
             }
         }
         if declaration.dispatch_receiver.is_some() {
-            // A value class's member is final and is emitted as a member of its materialized class.
-            // Any other member call dispatches virtually unless the member is final; lowering
-            // models neither yet.
-            let value_class_member = match selected {
-                Some(SelectedKlibCallables::One(candidate)) => candidate
-                    .class_contract()
-                    .is_some_and(|class| class.is_value),
-                Some(SelectedKlibCallables::Variants(candidates)) => {
-                    candidates.iter().all(|candidate| {
-                        candidate
-                            .class_contract()
-                            .is_some_and(|class| class.is_value)
-                    })
-                }
-                None => false,
+            // A member of a class this unit materializes dispatches statically and is emitted as a
+            // member of that class. A member of a class realized outside the unit is called
+            // through its frozen declaration, as a source call of it is.
+            let candidates = match &selected {
+                Some(SelectedKlibCallables::One(candidate)) => std::slice::from_ref(candidate),
+                Some(SelectedKlibCallables::Variants(candidates)) => *candidates,
+                None => &[],
             };
-            if !value_class_member {
-                return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                    "a call of a member function",
-                ));
+            let mut materialized = !candidates.is_empty();
+            for candidate in candidates {
+                materialized &= self
+                    .materializes_class_of(*candidate)
+                    .map_err(callee_declined)?;
+            }
+            if !materialized {
+                // Without a frozen declaration the call itself is the unsupported form.
+                if self.sources.callees.reference_target(&identity).is_none() {
+                    return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                        "a call of a member function",
+                    ));
+                }
+                return self
+                    .external_member(&identity, selected, arena, declaration)
+                    .map_err(callee_declined);
             }
             let selected = selected_callable_for_header_purpose(
                 selected,
@@ -1338,6 +1350,7 @@ impl CallLinker for Linker<'_, '_> {
                 .map(|signature| signature.formal_bounds.clone()),
             class_type_parameters: Vec::new(),
             parameter_defaults,
+            edge: super::CallEdge::default(),
         })
     }
 }
@@ -1364,7 +1377,7 @@ impl<'s> Linker<'_, 's> {
         if accessor.role != crate::libraries::KlibAccessorRole::Getter
             || !selected
                 .class_contract()
-                .is_some_and(|class| class.is_value)
+                .is_some_and(crate::libraries::KlibBodyClassContract::emits_members)
         {
             return Ok(None);
         }
@@ -1405,7 +1418,12 @@ impl<'s> Linker<'_, 's> {
         ir: &mut IrFile,
         identity: &KlibDependencyCallable,
     ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
-        let Some(active) = self.active_value_class else {
+        // Only a value class's private members are emitted with its members yet.
+        let Some(active) = self
+            .active_value_class
+            .clone()
+            .filter(|active| active.contract.is_value)
+        else {
             return Ok(None);
         };
         if self.sources.callees.get(identity).is_some()
@@ -1459,7 +1477,122 @@ impl<'s> Linker<'_, 's> {
             type_parameter_bounds: Some(Vec::new()),
             class_type_parameters: Vec::new(),
             parameter_defaults: parameter_defaults(declaration),
+            edge: super::CallEdge::default(),
         }))
+    }
+
+    /// Whether this unit materializes the class declaring the member `candidate`: a value class,
+    /// or an ordinary class whose primary constructor's initialization the class plan admits.
+    fn materializes_class_of(
+        &self,
+        candidate: KlibBodyCallable<'s>,
+    ) -> Result<bool, KlibBodyDeclineReason> {
+        let Some(class) = candidate
+            .class_contract()
+            .filter(|class| class.emits_members())
+        else {
+            return Ok(false);
+        };
+        if class.is_value {
+            return Ok(true);
+        }
+        let Some(primary) = &class.primary_constructor else {
+            return Ok(false);
+        };
+        let identity = KlibDependencyCallable {
+            module: class.module.clone(),
+            declaration: KlibDeclarationSignature::Public(primary.clone()),
+        };
+        let Some(KlibCalleeFact::Selected(constructors)) = self.sources.callees.get(&identity)
+        else {
+            return Ok(false);
+        };
+        Ok(super::class_initialization::plan(
+            constructors[0],
+            self.sources.bodies,
+            self.sources.callees,
+        )?
+        .is_some())
+    }
+
+    /// A call of a member of a class this unit does not materialize, through the member's
+    /// declaration frozen with the unit's closure. The target realizes and dispatches it as it does
+    /// a source call of the same declaration.
+    fn external_member(
+        &self,
+        identity: &KlibDependencyCallable,
+        selected: Option<SelectedKlibCallables<'s, '_>>,
+        arena: &'s KlibIrArena,
+        declaration: &'s KlibIrFunction,
+    ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+        let target = self
+            .sources
+            .callees
+            .reference_target(identity)
+            .expect("the caller proved a frozen declaration");
+        let selected = selected_callable_for_header_purpose(
+            selected,
+            HeaderPurpose::External,
+            arena,
+            declaration,
+            Some(self.sources.bodies),
+        )?
+        .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+            "a call of a member function without a provider declaration",
+        ))?;
+        if !selected
+            .class_contract()
+            .is_some_and(|class| class.parameters.formals.is_empty())
+        {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call of a member of a generic class",
+            ));
+        }
+        let header =
+            raw_function_header(Some(selected), HeaderPurpose::External, arena, declaration)?;
+        let (params, ret, context_count, extension_receiver, receiver) = header.linked_signature();
+        Ok(LinkedCallee {
+            callee: Callee::External {
+                target,
+                default_provider: None,
+                params: params.to_vec(),
+                ret,
+                substitutions: Vec::new(),
+                defaults: Vec::new(),
+                extension_receiver_parameter: extension_receiver.then_some(context_count as u32),
+            },
+            receiver,
+            params: params.to_vec(),
+            ret,
+            context_count,
+            singleton_dispatch: None,
+            type_parameters: selected
+                .generic_signature()
+                .map_or_else(Vec::new, |signature| signature.formals.clone()),
+            type_parameter_bounds: selected
+                .generic_signature()
+                .map(|signature| signature.formal_bounds.clone()),
+            class_type_parameters: Vec::new(),
+            parameter_defaults: Vec::new(),
+            edge: self.external_member_edge(identity)?,
+        })
+    }
+
+    /// The facts a call of the member `identity`, which a target realizes, carries, as the
+    /// unit's closure froze them from the member hierarchy.
+    fn external_member_edge(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<super::CallEdge, KlibBodyDeclineReason> {
+        self.sources
+            .callees
+            .member_edge(identity)
+            .cloned()
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "a member realized outside the unit has no frozen call edge".to_owned(),
+                )
+            })
     }
 
     /// A call of the value class member `selected`, which this unit emits as a member of its
@@ -1503,6 +1636,7 @@ impl<'s> Linker<'_, 's> {
                 .map(|signature| signature.formal_bounds.clone()),
             class_type_parameters: self.class_type_parameters(Some(selected))?,
             parameter_defaults: parameter_defaults(declaration),
+            edge: super::CallEdge::default(),
         })
     }
 
@@ -1590,10 +1724,10 @@ impl<'s> Linker<'_, 's> {
         block_statements(function)?;
         let header = body_header(selected, arena, function, self.sources.bodies)?;
         let value_member = match (header.value_receiver(), selected) {
-            (Some(_), Some(selected)) => Some(self.materialize_value_class(ir, selected)?),
+            (Some(_), Some(selected)) => Some(self.materialize_member_class(ir, selected)?),
             (Some(_), None) => {
                 return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "a value class member body has no selected declaration".to_owned(),
+                    "a class member body has no selected declaration".to_owned(),
                 ))
             }
             (None, _) => None,

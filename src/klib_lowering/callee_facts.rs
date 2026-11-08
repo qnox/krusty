@@ -24,6 +24,8 @@ pub struct KlibCalleeFacts<'a> {
     class_type_oracle: Option<&'a dyn crate::assignable::TypeOracle>,
     /// The classifiers whose representation the target owns, and so their singleton values too.
     target_classifiers: Option<&'a dyn Fn(crate::types::TypeName) -> bool>,
+    /// The call edge facts of members realized outside the unit, by declaration.
+    member_edges: HashMap<KlibDependencyCallable, CallEdge>,
 }
 
 #[derive(Clone)]
@@ -42,7 +44,30 @@ pub(super) enum KlibCalleeFact<'facts, 'callable> {
     Ambiguous,
 }
 
+/// The facts a call of a member realized outside a support unit carries beyond its callee, as the
+/// member hierarchy decorates a source call of the same declaration: its semantic role, inherited
+/// from a declaration it overrides when it has none of its own, and the declarations it
+/// overrides, through which a target recognizes a member it implements specially.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct CallEdge {
+    pub(crate) semantic_role: Option<crate::types::SemanticCallRole>,
+    pub(crate) overridden: Box<[crate::types::OverriddenDeclaration]>,
+}
+
 impl<'a> KlibCalleeFacts<'a> {
+    /// The call edge facts of the members realized outside the unit, frozen with its closure.
+    pub(crate) fn with_member_edges(
+        mut self,
+        edges: crate::fx_hash::HashMap<KlibDependencyCallable, CallEdge>,
+    ) -> Self {
+        self.member_edges = edges;
+        self
+    }
+
+    pub(super) fn member_edge(&self, identity: &KlibDependencyCallable) -> Option<&CallEdge> {
+        self.member_edges.get(identity)
+    }
+
     pub(crate) fn with_reference_declarations(
         selected: impl IntoIterator<Item = KlibBodyCallable<'a>>,
         declarations: impl IntoIterator<Item = (crate::fir::ExternalCallableId, KlibBodyCallable<'a>)>,
@@ -61,6 +86,14 @@ impl<'a> KlibCalleeFacts<'a> {
             }
         }
         facts
+    }
+
+    /// The same-compilation declaration `identity` names, when the unit's closure froze one.
+    pub(super) fn reference_target(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<crate::fir::ExternalCallableId> {
+        self.reference_targets.get(identity).copied()
     }
 
     pub(super) fn reference_declaration(
@@ -174,6 +207,26 @@ impl<'a> KlibCalleeFacts<'a> {
         match self.get(identity) {
             Some(KlibCalleeFact::Selected(callables)) => {
                 super::class_initialization::constructor_initialization_callees(
+                    callables[0],
+                    bodies,
+                    self,
+                )
+            }
+            _ => Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                "an initializer has no unique selected constructor declaration".to_owned(),
+            )),
+        }
+    }
+
+    /// The declarations the overrides of the class `identity` constructs override.
+    pub(crate) fn constructor_overridden_declarations(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Vec<KlibDependencyCallable>, super::decline::KlibBodyDeclineReason> {
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => {
+                super::class_initialization::constructor_overridden_declarations(
                     callables[0],
                     bodies,
                     self,

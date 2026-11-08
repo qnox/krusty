@@ -502,11 +502,22 @@ impl BodyLowering<'_> {
         }
         let (dispatch_receiver, args) = (operands.receiver, operands.args);
         let singleton_dispatch = linked.singleton_dispatch;
+        let external = match &callee {
+            Callee::External { target, .. } => Some(*target),
+            _ => None,
+        };
         let call = self.ir.add_expr(IrExpr::Call {
             callee: Box::new(callee),
             dispatch_receiver,
             args,
         });
+        if let Some(role) = linked.edge.semantic_role {
+            self.ir.semantic_call_roles.insert(call, role);
+        }
+        if let Some(target) = external {
+            self.ir
+                .record_external_overridden_declarations(target, &linked.edge.overridden);
+        }
         if let Some(classifier) = singleton_dispatch {
             self.ir
                 .external_singleton_dispatches

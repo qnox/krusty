@@ -4507,6 +4507,7 @@ regressions/kt789.kt
 regressions/kt998.kt
 regressions/lambdaWithTypeParameters.kt
 regressions/lambdaWrongReturnType.kt
+regressions/libraryFinalDataClassMembers.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
 regressions/multimodule/inlineBuiltString.kt

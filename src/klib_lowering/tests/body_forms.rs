@@ -685,7 +685,7 @@ fn local_variables_lower_as_the_source_declarations_do() {
 
 #[test]
 fn unmodelled_local_variables_decline_by_form() {
-    let cases: [(u64, &str, bool, &str); 4] = [
+    let cases: [(u64, &str, bool, &str); 5] = [
         (
             0b1000 | 0b10,
             "DEFINED",
@@ -695,9 +695,15 @@ fn unmodelled_local_variables_decline_by_form() {
         (0b100, "DEFINED", true, "it uses a `const` variable"),
         (
             0,
-            "IR_TEMPORARY_VARIABLE",
+            "IR_TEMPORARY_VARIABLE_FOR_INLINED_PARAMETER",
             true,
             "it uses a compiler-introduced variable",
+        ),
+        (
+            0b10,
+            "IR_TEMPORARY_VARIABLE",
+            true,
+            "it uses a mutable or annotated compiler temporary",
         ),
         (
             0,
@@ -719,6 +725,27 @@ fn unmodelled_local_variables_decline_by_form() {
             format!("the KLIB body of `demo.f` ({reason})")
         );
     }
+}
+
+/// A compiler temporary, such as the cast `other` of a data class's `equals`, is an unnamed `val`
+/// the source never names.
+#[test]
+fn a_compiler_temporary_lowers_as_an_unnamed_local() {
+    let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
+        let a = body.param(0);
+        let (declaration, x) = body.variable_with(T::Int, Some(a), 0, "IR_TEMPORARY_VARIABLE");
+        let read = body.get(&x, T::Int);
+        Some(vec![declaration, body.ret(read)])
+    });
+    let mut unit = DependencyBodyUnit::default();
+    let function = demo
+        .lower(&mut unit, "f", &[])
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    assert_eq!(
+        lowered_body(&unit, function),
+        "scope {scope {temp v1: Int = v0!: Int; return@Some(0) v1!: Int: Nothing}: Nothing}"
+    );
 }
 
 #[test]
