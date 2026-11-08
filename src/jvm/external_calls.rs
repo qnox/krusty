@@ -1039,6 +1039,9 @@ fn realize_expressions(
             Some(crate::libraries::CompilerIntrinsic::ScalarInstruction(_)) => {
                 unreachable!("a target KLIB scalar instruction cannot reach JVM call realization")
             }
+            Some(crate::libraries::CompilerIntrinsic::AtomicField(_)) => {
+                unreachable!("a target KLIB field intrinsic cannot reach JVM call realization")
+            }
             Some(
                 crate::libraries::CompilerIntrinsic::UnsignedDivide { .. }
                 | crate::libraries::CompilerIntrinsic::UnsignedRemainder { .. }

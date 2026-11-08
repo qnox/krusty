@@ -108,7 +108,8 @@ pub use crate::types::Visibility;
 use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
 pub use compiler_intrinsic::{
-    CompilerIntrinsic, IndicesReceiver, ListStorageConstruction, ResultFailureIntrinsic,
+    AtomicFieldOperation, CompilerIntrinsic, IndicesReceiver, ListStorageConstruction,
+    ResultFailureIntrinsic,
 };
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};

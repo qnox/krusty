@@ -21,6 +21,19 @@ pub enum ListStorageConstruction {
     MutablePacked,
 }
 
+/// One atomic operation on the field behind a bound `KMutableProperty0` (Native's
+/// `kotlin.concurrent` field intrinsics). The receiver must be a bound reference to a property with
+/// a backing field; the target realizes the operation on that field's storage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtomicFieldOperation {
+    Load,
+    Store,
+    CompareAndSet,
+    CompareAndExchange,
+    GetAndSet,
+    GetAndAdd,
+}
+
 /// A source-declared callable whose implementation is supplied by the compiler after ordinary symbol
 /// and overload selection. Providers attach this to the exact declaration identity; lowering never
 /// grants intrinsic behavior from a coincidental source name.
@@ -41,6 +54,10 @@ pub enum CompilerIntrinsic {
     /// authenticated declaration fixes its operand and result types. Checked FIR and common IR
     /// keep its call an ordinary call; only the target emitter replaces it with the instruction.
     ScalarInstruction(super::ScalarInstruction),
+    /// Native's `kotlin.concurrent` field intrinsic: an atomic operation on the field a bound
+    /// property reference receiver names. Checked FIR and common IR keep the call ordinary; only
+    /// the target emitter realizes it on the field's storage.
+    AtomicField(AtomicFieldOperation),
     /// Native's exact `GCUnsafeCall` floating-point predicate declaration. The provider
     /// authenticates the runtime entry and complete extension-receiver shape while it still owns
     /// the platform KLIB; target lowering consumes only this operation and scalar type.

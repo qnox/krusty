@@ -498,6 +498,11 @@ pub(super) fn authenticate(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
 ) -> Option<KlibIntrinsicShape> {
+    if platform == Some(TargetIntrinsicPlatform::Native) {
+        if let Some(shape) = atomic_field(placement, declaration) {
+            return Some(shape);
+        }
+    }
     if declaration.context_count != 0
         || !declaration.context_kinds.is_empty()
         || !declaration.formals.is_empty()
@@ -538,6 +543,124 @@ fn radix_to_string(
         receiver: None,
         params: vec![operand, Ty::Int],
         ret: Ty::obj("kotlin/String"),
+    })
+}
+
+/// Native's `kotlin.concurrent` field intrinsics (`AtomicIntrinsics.kt`): `external` extensions
+/// on a `KMutableProperty0<T>` annotated `@TypedIntrinsic(kind = "…_FIELD")`. `getAndAddField` has
+/// one overload per integral type; the others are generic in the field's type `T`. The whole
+/// declaration shape is the contract, so a same-named user declaration never matches.
+fn atomic_field(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    use crate::libraries::AtomicFieldOperation as Op;
+    if placement != crate::libraries::CallablePlacement::Package(type_name("kotlin/concurrent"))
+        || !declaration.is_external
+        || declaration.context_count != 0
+        || !declaration.context_kinds.is_empty()
+        || declaration.is_suspend
+        || declaration.is_inline
+        || declaration.is_expect
+        || declaration.vararg.is_some()
+        || declaration
+            .param_defaults
+            .iter()
+            .any(|defaulted| *defaulted)
+    {
+        return None;
+    }
+    let operation = match string_annotation(
+        &declaration.annotation_applications,
+        type_name("kotlin/native/internal/TypedIntrinsic"),
+        "kind",
+    )? {
+        "ATOMIC_GET_FIELD" => Op::Load,
+        "ATOMIC_SET_FIELD" => Op::Store,
+        "COMPARE_AND_SET_FIELD" => Op::CompareAndSet,
+        "COMPARE_AND_EXCHANGE_FIELD" => Op::CompareAndExchange,
+        "GET_AND_SET_FIELD" => Op::GetAndSet,
+        "GET_AND_ADD_FIELD" => Op::GetAndAdd,
+        _ => return None,
+    };
+    let Some(KotlinType::Class {
+        internal,
+        args,
+        nullable: false,
+        shape,
+    }) = &declaration.receiver
+    else {
+        return None;
+    };
+    let [field] = args.as_slice() else {
+        return None;
+    };
+    if internal != "kotlin/reflect/KMutableProperty0"
+        || *shape != KotlinFunctionTypeShape::default()
+    {
+        return None;
+    }
+    // The field's value type: the declaration's only type parameter (bounded by `Any?`), or for
+    // `getAndAddField` the exact integral type of that overload.
+    let generic = match (field, declaration.formals.as_slice()) {
+        (
+            KotlinType::Param {
+                id,
+                nullable: false,
+                ..
+            },
+            [formal],
+        ) if formal.id == *id && !formal.reified => true,
+        (KotlinType::Class { .. }, []) => false,
+        _ => return None,
+    };
+    let value = if generic {
+        if operation == Op::GetAndAdd {
+            return None;
+        }
+        Ty::nullable(Ty::obj("kotlin/Any"))
+    } else {
+        let integral = [
+            ("kotlin/Byte", Ty::Byte),
+            ("kotlin/Short", Ty::Short),
+            ("kotlin/Int", Ty::Int),
+            ("kotlin/Long", Ty::Long),
+        ]
+        .into_iter()
+        .find_map(|(classifier, ty)| exact_type(field, classifier).then_some(ty));
+        match (operation, integral) {
+            (Op::GetAndAdd, Some(ty)) => ty,
+            _ => return None,
+        }
+    };
+    let is_value = |ty: &KotlinType| ty == field;
+    let (params, ret) = match operation {
+        Op::Load => (vec![], value),
+        Op::Store => (vec![value], Ty::Unit),
+        Op::CompareAndSet => (vec![value, value], Ty::Boolean),
+        Op::CompareAndExchange => (vec![value, value], value),
+        Op::GetAndSet | Op::GetAndAdd => (vec![value], value),
+    };
+    let declared_ret = match ret {
+        Ty::Unit => exact_type(&declaration.ret, "kotlin/Unit"),
+        Ty::Boolean if operation == Op::CompareAndSet => {
+            exact_type(&declaration.ret, "kotlin/Boolean")
+        }
+        _ => is_value(&declaration.ret),
+    };
+    if !declared_ret
+        || declaration.params.len() != params.len()
+        || !declaration.params.iter().all(is_value)
+    {
+        return None;
+    }
+    let receiver = Ty::obj("kotlin/reflect/KMutableProperty0");
+    Some(KlibIntrinsicShape {
+        operation: CompilerIntrinsic::AtomicField(operation),
+        kind: ExternalCallableKind::Extension,
+        receiver: Some(receiver),
+        params: std::iter::once(receiver).chain(params).collect(),
+        ret,
     })
 }
 
@@ -842,6 +965,187 @@ mod tests {
                 AnnotationArgument::String(kind.to_owned()),
             )],
         }
+    }
+
+    fn property_of(field: KotlinType) -> KotlinType {
+        KotlinType::Class {
+            internal: "kotlin/reflect/KMutableProperty0".to_owned(),
+            args: vec![field],
+            nullable: false,
+            shape: KotlinFunctionTypeShape::default(),
+        }
+    }
+
+    fn generic_field_intrinsic(
+        name: &str,
+        kind: &str,
+        arity: usize,
+        ret: Option<&str>,
+    ) -> KotlinFunction {
+        let id = crate::metadata::semantic::KotlinTypeParameterId(7);
+        let value = KotlinType::Param {
+            name: "T".to_owned(),
+            id,
+            nullable: false,
+        };
+        let mut function = declaration(name, &[], "kotlin/Unit", native_annotation(kind));
+        function.formals = vec![crate::metadata::semantic::KotlinTypeParameter {
+            id,
+            name: "T".to_owned(),
+            bounds: vec![],
+            variance: crate::types::TypeVariance::Invariant,
+            only_input: false,
+            reified: false,
+        }];
+        function.receiver = Some(property_of(value.clone()));
+        function.params = vec![value.clone(); arity];
+        function.param_names = (0..arity).map(|index| format!("p{index}")).collect();
+        function.param_defaults = vec![false; arity];
+        function.inline_modifiers = vec![crate::types::InlineParameterModifier::None; arity];
+        function.ret = ret.map_or(value, KotlinType::class);
+        function
+    }
+
+    #[test]
+    fn native_field_intrinsics_are_the_exact_kotlin_concurrent_declarations() {
+        use crate::libraries::AtomicFieldOperation as Op;
+        let concurrent =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/concurrent"));
+        let property = Ty::obj("kotlin/reflect/KMutableProperty0");
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let cases = [
+            ("atomicGetField", "ATOMIC_GET_FIELD", 0, None, Op::Load, any),
+            (
+                "atomicSetField",
+                "ATOMIC_SET_FIELD",
+                1,
+                Some("kotlin/Unit"),
+                Op::Store,
+                Ty::Unit,
+            ),
+            (
+                "compareAndSetField",
+                "COMPARE_AND_SET_FIELD",
+                2,
+                Some("kotlin/Boolean"),
+                Op::CompareAndSet,
+                Ty::Boolean,
+            ),
+            (
+                "compareAndExchangeField",
+                "COMPARE_AND_EXCHANGE_FIELD",
+                2,
+                None,
+                Op::CompareAndExchange,
+                any,
+            ),
+            (
+                "getAndSetField",
+                "GET_AND_SET_FIELD",
+                1,
+                None,
+                Op::GetAndSet,
+                any,
+            ),
+        ];
+        for (name, kind, arity, ret, operation, result) in cases {
+            let exact = generic_field_intrinsic(name, kind, arity, ret);
+            assert_eq!(
+                authenticate(Some(TargetIntrinsicPlatform::Native), concurrent, &exact),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::AtomicField(operation),
+                    kind: ExternalCallableKind::Extension,
+                    receiver: Some(property),
+                    params: std::iter::once(property)
+                        .chain(std::iter::repeat_n(any, arity))
+                        .collect(),
+                    ret: result,
+                }),
+                "{name}"
+            );
+            assert_eq!(
+                authenticate(Some(TargetIntrinsicPlatform::Wasm), concurrent, &exact),
+                None
+            );
+            let elsewhere = crate::libraries::CallablePlacement::Package(type_name("spoof"));
+            assert_eq!(
+                authenticate(Some(TargetIntrinsicPlatform::Native), elsewhere, &exact),
+                None
+            );
+            let mut bodyful = generic_field_intrinsic(name, kind, arity, ret);
+            bodyful.is_external = false;
+            assert_eq!(
+                authenticate(Some(TargetIntrinsicPlatform::Native), concurrent, &bodyful),
+                None
+            );
+            let mut wrong_arity = generic_field_intrinsic(name, kind, arity, ret);
+            wrong_arity.params.push(
+                wrong_arity
+                    .params
+                    .first()
+                    .cloned()
+                    .unwrap_or(KotlinType::class("kotlin/Int")),
+            );
+            assert_eq!(
+                authenticate(
+                    Some(TargetIntrinsicPlatform::Native),
+                    concurrent,
+                    &wrong_arity
+                ),
+                None
+            );
+        }
+
+        let make_add = || {
+            let mut add = declaration(
+                "getAndAddField",
+                &["kotlin/Long"],
+                "kotlin/Long",
+                native_annotation("GET_AND_ADD_FIELD"),
+            );
+            add.receiver = Some(property_of(KotlinType::class("kotlin/Long")));
+            add
+        };
+        let add = make_add();
+        assert_eq!(
+            authenticate(Some(TargetIntrinsicPlatform::Native), concurrent, &add),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::AtomicField(Op::GetAndAdd),
+                kind: ExternalCallableKind::Extension,
+                receiver: Some(property),
+                params: vec![property, Ty::Long],
+                ret: Ty::Long,
+            })
+        );
+        let mut mismatched = make_add();
+        mismatched.params = vec![KotlinType::class("kotlin/Int")];
+        assert_eq!(
+            authenticate(
+                Some(TargetIntrinsicPlatform::Native),
+                concurrent,
+                &mismatched
+            ),
+            None
+        );
+        let mut floating = make_add();
+        floating.receiver = Some(property_of(KotlinType::class("kotlin/Double")));
+        floating.params = vec![KotlinType::class("kotlin/Double")];
+        floating.ret = KotlinType::class("kotlin/Double");
+        assert_eq!(
+            authenticate(Some(TargetIntrinsicPlatform::Native), concurrent, &floating),
+            None
+        );
+        let mut generic_add =
+            generic_field_intrinsic("getAndAddField", "GET_AND_ADD_FIELD", 1, None);
+        generic_add.name = "getAndAddField".to_owned();
+        assert_eq!(
+            authenticate(
+                Some(TargetIntrinsicPlatform::Native),
+                concurrent,
+                &generic_add
+            ),
+            None
+        );
     }
 
     #[test]
