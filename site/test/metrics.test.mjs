@@ -172,6 +172,23 @@ test("the newest corpus run is shown, every kept run is history", () => {
   }
 });
 
+test("a run whose summary artifact has no summary.json is left out", () => {
+  const older = { ...CORPUS_RUN, databaseId: 5, createdAt: "2026-10-30T01:30:00Z", url: "https://example.test/run/5" };
+  const dir = inputs({
+    // An artifact from before summary.json: only the Markdown report.
+    "corpus/runs/5/run.json": older,
+    "corpus/runs/5/summary.md": "# corpus\n",
+    ...corpusRun(CORPUS_RUN, [project("p")]),
+  });
+  try {
+    const { corpus } = collectMetrics(dir);
+    assert.deepEqual(corpus.measured, MEASURED);
+    assert.deepEqual(corpus.history.map((r) => r.run), [CORPUS_RUN.url]);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
 test("a corpus run must carry its identity and a valid project list", () => {
   const { conclusion, ...noConclusion } = CORPUS_RUN;
   for (const [files, error] of [
