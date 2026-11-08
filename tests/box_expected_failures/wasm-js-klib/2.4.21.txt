@@ -565,7 +565,6 @@ classLiteral/bound/simple.kt
 classLiteral/bound/smartCast.kt
 classLiteral/classEquality.kt
 classLiteral/primitiveClassEquality.kt
-classes/classObjectAsStaticInitializer.kt
 classes/comanionObjectFieldVsClassField.kt
 classes/delegationGenericArg.kt
 classes/delegationGenericArgUpperBound.kt
