@@ -2,7 +2,7 @@
 
 pub(super) use super::common;
 
-#[path = "operator_equals_declarations_e2e.rs"]
+#[path = "operator_declarations_e2e/equals.rs"]
 mod equals;
-#[path = "operator_inc_dec_e2e.rs"]
+#[path = "operator_declarations_e2e/inc_dec.rs"]
 mod inc_dec;

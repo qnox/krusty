@@ -92,7 +92,6 @@ impl Parser<'_> {
         // A parenthesized or control-flow range bound may end on its own line before the range
         // operator. Physical newlines are allowed here; an explicit semicolon still terminates the
         // iterable expression and is deliberately left visible.
-        self.skip_plain_newlines();
         let operator_span = self.tok().span;
         let kind = if self.eat(TokenKind::DotDot) {
             RangeKind::Through
@@ -123,7 +122,7 @@ impl Parser<'_> {
             {
                 self.bump(); // '?'
                 self.bump(); // ':'
-                self.skip_newlines();
+                self.skip_semicolons();
                 let rhs = self.parse_bp(8);
                 let lspan = self.file.expr_spans[rstart.0 as usize];
                 let rspan = self.file.expr_spans[rhs.0 as usize];
@@ -148,7 +147,6 @@ impl Parser<'_> {
             );
         };
         // `rangeExpression`/`infixFunctionCall` allow `NL*` after the operator.
-        self.skip_plain_newlines();
         let rend = self.parse_bp(9);
         // A `..`/`until`/`downTo` range may be followed by ordinary infix calls (`step`, or any user
         // infix), possibly chained (`a..b step 2 step 3`). These are NOT special syntax — recognizing

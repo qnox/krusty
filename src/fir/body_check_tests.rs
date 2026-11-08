@@ -1073,7 +1073,7 @@ fn selected_range_to_operator_is_a_stable_fir_call() {
 }
 
 #[test]
-fn indexed_reads_distinguish_builtin_storage_from_selected_get_calls() {
+fn indexed_reads_select_the_get_operator_of_arrays_and_classes_alike() {
     let analysis = checked_analysis(
         "fun arrayAt(values: IntArray, index: Int) = values[index]\n\
          class Box { operator fun get(index: Int): String = \"OK\" }\n\
@@ -1133,14 +1133,51 @@ fn indexed_reads_distinguish_builtin_storage_from_selected_get_calls() {
     else {
         panic!("arrayAt root must be expression FIR")
     };
+    // An array subscript selects the array's `operator fun get` like any other class's.
+    let FirExprKind::Call(array_call) = &array_body.expr(array_root).unwrap().kind else {
+        panic!("an array subscript must be its selected `get` call")
+    };
+    assert!(array_call.dispatch_receiver.is_some());
     assert!(matches!(
-        array_body.expr(array_root).map(|expression| &expression.kind),
-        Some(FirExprKind::IndexedRead {
-            kind: FirIndexedAccessKind::Array,
-            indices,
-            ..
-        }) if indices.len() == 1
+        array_call.arguments.as_ref(),
+        [FirCallArgument::Expression { parameter: 0, .. }]
     ));
+    let FirCallTarget::External {
+        declaration,
+        receiver,
+        parameters,
+        result,
+        ..
+    } = &array_call.target
+    else {
+        panic!("an array subscript must select the provider's `get`")
+    };
+    assert_eq!(
+        (
+            receiver.map(ResolvedTy::get),
+            parameters
+                .iter()
+                .map(|parameter| parameter.get())
+                .collect::<Vec<_>>(),
+            result.get(),
+        ),
+        (Some(Ty::obj("kotlin/IntArray")), vec![Ty::Int], Ty::Int)
+    );
+    let selected =
+        crate::symbol_source::SymbolSource::external_callable(&EmptySymbolSource, *declaration)
+            .expect("the selected `get` is a core declaration");
+    assert_eq!(
+        (
+            selected.callable.owner,
+            selected.callable.name.as_str(),
+            selected.callable.compiler_intrinsic,
+        ),
+        (
+            crate::types::type_name("kotlin/IntArray"),
+            "get",
+            Some(crate::libraries::CompilerIntrinsic::ArrayGet),
+        )
+    );
 
     let box_body = check(function("boxAt"), 53, &mut origins);
     let FirStatementKind::Expression(box_root) =
