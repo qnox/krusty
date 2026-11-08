@@ -3474,7 +3474,6 @@ localClass/signatureConflictHiddenByTypeParameter.kt
 localClass/tryCatch.kt
 localClass/virtualCallFromConstructor.kt
 localClasses/anonymousObjectInExtension.kt
-localClasses/closureOfLambdaInLocalClass.kt
 localClasses/closureWithSelfInstantiation.kt
 localClasses/defaultParameterInConstructor.kt
 localClasses/inExtensionFunction.kt
@@ -3529,8 +3528,6 @@ multiDecl/forIterator/longIterator/MultiDeclForComponentMemberExtensionsInExtens
 multiDecl/forRange/UnderscoreNamesDontCallComponent.kt
 multiDecl/forRange/explicitRangeToWithDot/long/MultiDeclForComponentExtensions.kt
 multiDecl/kt9828_hashMap.kt
-multiDecl/positionalDestructuringFullForm.kt
-multiDecl/positionalDestructuringShortForm.kt
 multiplatform/k2/aliasSuperTypeInLazy.kt
 multiplatform/k2/annotations/expectAnnotationCallInLibrary.kt
 multiplatform/k2/annotations/optionalExpectationAnnotation.kt
@@ -4103,7 +4100,6 @@ ranges/forInIndices/forInPrimitiveArrayIndices.kt
 ranges/forInIndices/forNullableIntInArrayIndices.kt
 ranges/forInIndices/forNullableIntInCollectionIndices.kt
 ranges/forInIndices/indexOfLast.kt
-ranges/forInIndices/kt12983_forInGenericArrayIndices.kt
 ranges/forInIndices/kt12983_forInGenericCollectionIndices.kt
 ranges/forInIndices/kt12983_forInSpecificArrayIndices.kt
 ranges/forInIndices/kt12983_forInSpecificCollectionIndices.kt
