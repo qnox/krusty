@@ -57,7 +57,6 @@ fn is_intrinsic_call(ir: &IrFile, expression: ExprId, call: &IrBuiltinCall) -> b
                     && from != call.result);
             !inlined && primitive_change && signed
         }
-        IrBuiltinCallKind::IndexedRead => true,
         IrBuiltinCallKind::Intrinsic => matches!(
             ir.expr(expression),
             IrExpr::Call { callee, .. } if matches!(
@@ -90,14 +89,14 @@ pub(in crate::jvm::ir_emit) fn inversion_mask_line(ir: &IrFile, expression: Expr
     let call = ir.builtin_calls.get(&expression)?;
     (call.kind == IrBuiltinCallKind::Unary(FirUnaryOperation::BitwiseNot)
         && is_intrinsic_call(ir, expression, call))
-    .then(|| ir.expr_source_lines.get(&expression).copied())
+    .then(|| ir.source_line(expression))
     .flatten()
     .filter(|&line| line != 0)
 }
 
 /// The line a read of a safe call's receiver temporary carries: the null test at the safe call's
 /// line, the selector's receiver at the line the receiver starts on.
-pub(in crate::jvm::ir_emit) fn safe_call_read_line(ir: &IrFile, read: ExprId) -> Option<u32> {
+pub(super) fn safe_call_read_line(ir: &IrFile, read: ExprId) -> Option<u32> {
     match ir.safe_call_reads.get(&read)? {
         IrSafeCallRead::NullCheck { line } => Some(*line),
         IrSafeCallRead::Receiver { start_line } => Some(*start_line),

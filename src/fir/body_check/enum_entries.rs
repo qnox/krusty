@@ -41,9 +41,11 @@ impl BodyFirChecker<'_> {
                     depth: 0,
                     path: path.clone().into_boxed_slice(),
                     ty,
-                    receiver: FirCapturedReceiver::Enclosing {
-                        classifier: entry.classifier,
-                    },
+                    receiver: self.enclosing_instance(
+                        entry
+                            .declaration
+                            .expect("an enclosing entry path retains its declaration"),
+                    ),
                 });
             self.body.add_expr(FirExpr {
                 origin,

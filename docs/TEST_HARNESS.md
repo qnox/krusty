@@ -48,7 +48,7 @@ existing contracts.
   ```
 
   `KRUSTY_KOTLINC` is what the harness reads, so exporting it is the whole of the setup. This matters
-  more than it looks: kotlinc is the correctness oracle (`docs/SPEC.md` §6), so a change validated
+  more than it looks: kotlinc is the correctness oracle, so a change validated
   without it has been checked against an expectation rather than against the reference — which is
   exactly the mistake the differential harness exists to prevent.
 - Use focused harness runs, not raw `cargo test`, while iterating. Standalone suites still use `./run-tests.sh --test <name> -- --nocapture`; grouped e2e tests use a test-name filter, e.g. `./run-tests.sh --test e2e lambda_e2e::lambdas_run -- --nocapture`.
@@ -175,9 +175,13 @@ target test consumes JVM artifacts and no target waits for another target's corp
 `KRUSTY_KOTLIN_BOX_DIR` select the runtime reference toolchain, so the matrix does not rebuild Rust
 code per Kotlin version or target. Toolchain and box/serialization corpora are isolated by version.
 JVM rows require pinned serialization-runtime provisioning, so missing prerequisites fail rather
-than turning those tests into passing skips. Real KSP integrations belong to the plugin host and
-run unconditionally in the lint job through `cargo test -p krusty-plugin-host -- --include-ignored`;
-they use that host's pinned toolchain and the runner's JDK, not JVM matrix opt-in flags. Each row
+than turning those tests into passing skips. Compiler-dependent plugin and KSP integrations belong
+to the root e2e target. After coverage, CI reuses that exact coverage-profile executable for an explicit
+`plugin_host_compiler_e2e:: --include-ignored --test-threads=1` pass under the configurable e2e deadline.
+That pass runs after the coverage report; its counters do not change the measured workload.
+Compiler-independent host tests run in their own `plugin-host` job through
+`cargo test --profile gate -p krusty-plugin-host -- --include-ignored`. Both use the host's pinned
+toolchain and JDK 17 in CI, not JVM matrix opt-in flags. Each row
 uses its target's configurable process-group deadline. The complete JVM non-box CI pass retains
 its 600-second cold serialization/reference-CLI toolchain budget. The local 120-second default
 and test inventory are unchanged; an exhausted deadline still fails. JVM rows upload `pct-<version>` and
@@ -206,6 +210,12 @@ and both Wasm target-KLIB lanes' known non-passing backlogs are explicit under `
 `wasm-js-klib`, and `wasm-wasi-klib`. Every pass/fail/not-applicable transition, duplicate, and
 corpus-absent entry fails. Sharded and filtered runs judge only their scheduled files while still
 validating committed paths against the complete corpus.
+
+The one approved outcome reset, for the #2459 KLIB inline-body migration, is spent and cannot be
+renewed. Its rows in `scripts/outcome-list-migrations.tsv` are append-only history:
+`scripts/check-outcome-lists.sh` accepts a row only when the comparison introduces it, so a
+historical row never authorizes a later reset. Follow-ups recovering that debt use the ordinary
+shrink-only rule.
 
 After a change that moves any outcome, rewrite both manifests from a full run and commit the diffs
 with the change, so review sees exactly which files moved:
@@ -289,7 +299,7 @@ not-applicable lists are not under this gate: they record what the reference kot
 this environment, and the required reference run proves every entry against that compiler.
 
 The rest of the suite is version-sensitive too, because the supported kotlinc releases do not word
-every diagnostic alike (see `docs/SPEC.md` §6). `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the
+every diagnostic alike. `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the
 whole suite with krusty reproducing release `<v>` against that release's kotlinc; `just test-all`
 does it for every manifest version at once.
 
@@ -506,15 +516,13 @@ The `master` ruleset (id `19534763`) requires this aggregate from the GitHub Act
    It must print `[{"context":"ci-and-conformance","integration_id":15368}]`. An open pull request
    must also list `ci-and-conformance` as required.
 
-The JVM conformance, JVM byte-equality, and Native conformance badges change only when the `pages`
-workflow runs on master: nightly, after each release, and on site changes. It publishes the reports of
-the latest successful master `ci` push run for the newest Kotlin version that run covered. To verify a
-publication, find that `ci` run, render its reports locally, and compare the results with the three
-Gist files:
+The JVM conformance, JVM byte-equality, and Native conformance badges change only when a master
+`release` job publishes. To verify a publication, confirm that run's `release` job succeeded,
+render its max-version reports locally, and compare the results with the three Gist files:
 
 ```sh
-gh run list --repo qnox/krusty --workflow ci.yml --branch master --event push --status success \
-  --limit 1 --json databaseId,headSha
+gh run view <run-id> --repo qnox/krusty --json jobs \
+  --jq '.jobs[] | select(.name == "release") | {conclusion, steps: [.steps[] | {name, conclusion}]}'
 v="$(just max-version)"
 gh run download <run-id> --repo qnox/krusty -n "pct-$v" -n "jvm-byte-equality-$v" -n "native-pct-$v" -D target/reports
 just conformance-badge target/reports/pct-$v/pct.txt target/reports/jvm-byte-equality-$v/jvm-byte-equality.txt target/reports/native-pct-$v/native-pct.txt
@@ -525,7 +533,7 @@ curl -fsSL https://gist.githubusercontent.com/qnox/dec8149bc4f43b203d6cc9adc14f2
 
 The `label`, `message`, and `color` in `docs/badges/conformance.json` and
 `docs/badges/jvm-byte-equality.json` and `docs/badges/native-conformance.json` must match the Gist's
-respective files. A `pages` run without the `CONFORMANCE_GIST_ID` variable left all three unchanged.
+respective files. A `release` job that skipped its publish steps left all three unchanged.
 
 ## Focused Runs
 
@@ -801,8 +809,8 @@ just conformance-badge target/reports/pct-$v/pct.txt target/reports/jvm-byte-equ
 
 In CI, every target row prints and uploads its own report: JVM owns `pct-<version>` and
 `jvm-byte-equality-<version>`, while Native owns `native-pct-<version>`. Only the
-`pages` workflow on master publishes the newest version's three payloads to the badge Gist, from
-the latest successful master run; pull requests and merge groups never publish.
+`release` job on master publishes the max version's three payloads to the badge Gist; pull requests
+and merge groups never publish.
 
 To inspect where bytes are lost, focus a case with `KRUSTY_BOX_ONLY=<substring>` (which turns the
 score on for that selection, failed boxes included) and add `KRUSTY_BYTE_DIFF=1` for the first
@@ -810,9 +818,6 @@ difference per class set in `target/byte_diff_report.txt` (see "Byte-Identity Di
 
 Read the badges, or the `conformance` job of the latest master CI run, when you need today's
 figures; use the target-specific recipes locally when you need this checkout's.
-
-A count in a phase-log entry (`docs/IMPLEMENTATION_PLAN.md`) is a snapshot of what that phase
-measured at the time it landed, not a claim about the present, and must not be quoted as current.
 
 Two rules hold whatever the number is. Only compare `box()=OK` counts when `FAIL: 0` — a count taken
 beside a failure is not a coverage measurement. And `KRUSTY_NO_RUN=1` is for compile/emit profiling

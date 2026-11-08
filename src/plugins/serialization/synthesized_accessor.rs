@@ -78,6 +78,7 @@ mod tests {
 
     fn property(field: u32) -> IrProperty {
         IrProperty {
+            origin: crate::ir::IrPropertyOrigin::Declaration,
             name: "result".to_string(),
             diagnostic_span: None,
             getter_diagnostic_span: None,
@@ -103,8 +104,6 @@ mod tests {
             setter_visibility: Visibility::Public,
             getter: None,
             setter: None,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
             needs_access_bridge: false,
             accessor_annotations: Default::default(),
         }

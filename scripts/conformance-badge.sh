@@ -2,7 +2,7 @@
 # Turn one target report into its shields.io badge. `conformance` and `native-conformance` are case
 # reports "<pct> <passed> <applicable>"; `jvm-byte-equality` is "<pct> <matched> <total>" class-file
 # bytes (see conformance-report.sh). `just conformance-badge` writes local endpoint JSON; the
-# `pages` workflow publishes the newest version's reports of the latest successful master CI run.
+# master-only release job publishes the maximum version's reports.
 #
 #   scripts/conformance-badge.sh fields <kind> <report> <kotlin-version>   key=value lines ($GITHUB_OUTPUT)
 #   scripts/conformance-badge.sh json <kind> <report> <kotlin-version>     shields.io endpoint JSON

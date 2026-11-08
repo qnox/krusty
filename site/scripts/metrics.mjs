@@ -7,8 +7,11 @@
 //   box/jvm-byte-equality-<kotlin>/jvm-byte-equality.txt
 //                                                 JVM byte report      "<pct> <matched> <total>"
 //   box/native-pct-<kotlin>/native-pct.txt        Native case report   "<pct> <passed> <applicable>"
-//   corpus/results.json                           the `corpus-results` branch's scoreboard
-//   corpus/history.tsv                            the `corpus-results` branch's run history
+//   corpus/runs/<run id>/run.json                 one nightly `oss corpus` run on master:
+//                                                 {"databaseId", "headSha", "createdAt", "url", "conclusion"}
+//   corpus/runs/<run id>/summary.json             that run's `summary` artifact (summarize.py --json)
+//   corpus/runs/<run id>/projects.tsv             scripts/oss-corpus/projects.tsv at the run's commit
+//   corpus/runs/<run id>/patches.txt              the names in scripts/oss-corpus/patches/ at that commit
 //   coverage-baseline.json                        the coverage gate's recorded floor
 //
 // Every input is optional: one that is absent is reported as not measured, never guessed. One that
@@ -105,7 +108,31 @@ function notBuilt(p) {
   return out;
 }
 
-function corpusProject(p) {
+const PROJECTS_TSV = "scripts/oss-corpus/projects.tsv";
+const PATCHES = "scripts/oss-corpus/patches";
+
+/**
+ * What the corpus builds, from projects.tsv at the measured commit: per project, the upstream
+ * repository and pinned commit, the Kotlin version pin, and the krusty-side patch applied after
+ * checkout (a path in this repository at the measured commit), or null without one.
+ */
+export function corpusSources(tsv, patches, path) {
+  const out = new Map();
+  for (const line of tsv.split("\n")) {
+    if (line.trim() === "" || line.startsWith("#")) continue;
+    const [name, url, commit, , , pin] = line.split("\t");
+    if (!name || !url || !/^[0-9a-f]{40}$/.test(commit ?? "") || !pin) throw new Error(`${path}: not a project line: ${JSON.stringify(line)}`);
+    out.set(name, {
+      url: url.replace(/\.git$/, ""),
+      commit,
+      kotlinPin: pin === "-" ? null : pin,
+      patch: patches.has(`${name}.patch`) ? `${PATCHES}/${name}.patch` : null,
+    });
+  }
+  return out;
+}
+
+function corpusProject(p, path, measured, source) {
   const cost = (side) => {
     const c = p.cost?.[side];
     if (!c) return null;
@@ -121,23 +148,24 @@ function corpusProject(p) {
       buildPeakRssMb: c.peak_rss_mb.total,
     };
   };
-  for (const key of ["compilations", "built", "classes", "identical"]) {
-    if (!Number.isInteger(p[key])) throw new Error(`corpus/results.json: ${p.name}: missing ${key}`);
+  for (const key of ["reference_exit", "compilations", "built", "classes", "identical"]) {
+    if (!Number.isInteger(p[key])) throw new Error(`${path}: ${p.name}: missing ${key}`);
   }
   const project = {
     name: p.name,
     stars: p.stars ?? null,
     kotlinLoc: p.loc?.kotlin ?? null,
+    // The reference build's own exit status. A failed one is reported as failed, not as a
+    // project krusty matched or missed: the classes it left are all the comparison has.
+    referenceExit: p.reference_exit,
     referenceBuild: p.reference_exit === 0 ? "ok" : `failed (exit ${p.reference_exit})`,
     compilations: p.compilations,
     built: p.built,
     classes: p.classes,
     identical: p.identical,
-    measured: p.measured ?? null,
-    // What the run built: upstream repository and commit, the krusty-side patch (repository path at
-    // the measured commit) and the Kotlin version pin. Absent for results published before the
-    // corpus recorded it.
-    source: p.source ?? null,
+    measured,
+    // What the run built; null when the run's project list does not name it.
+    source,
     notBuilt: notBuilt(p),
     cost: { kotlinc: cost("kotlinc"), krusty: cost("krusty") },
   };
@@ -160,46 +188,67 @@ export function wholeBuildsComparable(project, referenceExit) {
   return kotlinc.exit === 0 && krusty.exit === 0;
 }
 
-/** One line per corpus run: the sums over the projects the run measured, oldest first. */
-export function corpusHistory(tsv) {
-  const [header, ...lines] = tsv.split("\n").filter((line) => line.trim() !== "");
-  const columns = header.split("\t");
-  const at = (name) => {
-    const index = columns.indexOf(name);
-    if (index === -1) throw new Error(`corpus/history.tsv: no "${name}" column`);
-    return index;
-  };
-  const [date, commit, run, built, compilations, identical, classes] = [
-    "date", "krusty commit", "run", "built", "compilations", "identical", "classes",
-  ].map(at);
-  const runs = new Map();
-  for (const line of lines) {
-    const cells = line.split("\t");
-    const key = cells[run];
-    if (!runs.has(key)) {
-      runs.set(key, { date: cells[date], commit: cells[commit], run: key, projects: 0, built: 0, compilations: 0, identical: 0, classes: 0 });
-    }
-    const entry = runs.get(key);
-    entry.projects += 1;
-    for (const [name, index] of [["built", built], ["compilations", compilations], ["identical", identical], ["classes", classes]]) {
-      const value = Number(cells[index]);
-      if (!Number.isInteger(value)) throw new Error(`corpus/history.tsv: bad ${name} in: ${line}`);
-      entry[name] += value;
-    }
+const sum = (projects, key) => projects.reduce((total, p) => total + p[key], 0);
+
+/** One corpus run: its identity, and every project record its summary artifact holds. */
+function corpusRun(dir, id) {
+  const at = (file) => join(dir, id, file);
+  const run = readJson(at("run.json"));
+  for (const key of ["headSha", "createdAt", "url", "conclusion"]) {
+    if (typeof run[key] !== "string") throw new Error(`${at("run.json")}: missing ${key}`);
   }
-  return [...runs.values()];
+  if (String(run.databaseId) !== id) throw new Error(`${at("run.json")}: not run ${id}`);
+  const measured = { run: run.url, commit: run.headSha, date: run.createdAt, conclusion: run.conclusion };
+  const summary = readJson(at("summary.json"));
+  if (!Array.isArray(summary.projects)) throw new Error(`${at("summary.json")}: no projects`);
+  const listed = existsSync(at("projects.tsv"))
+    ? corpusSources(
+        readFileSync(at("projects.tsv"), "utf8"),
+        new Set(existsSync(at("patches.txt")) ? readFileSync(at("patches.txt"), "utf8").split("\n").filter(Boolean) : []),
+        at("projects.tsv"),
+      )
+    : null;
+  const projects = summary.projects.map((p) => corpusProject(p, at("summary.json"), measured, listed?.get(p.name) ?? null));
+  return {
+    measured,
+    projects,
+    // Listed projects the run has no result for: their job failed before it compared anything.
+    // Null when the run's project list was not read.
+    noResult: listed ? [...listed.keys()].filter((name) => !projects.some((p) => p.name === name)) : null,
+    listed: listed ? listed.size : null,
+  };
+}
+
+/** One line per corpus run, in the order given: the sums over the projects the run measured. */
+export function corpusHistory(runs) {
+  return runs
+    .map(({ measured, projects }) => ({
+      date: measured.date.slice(0, 10),
+      commit: measured.commit,
+      run: measured.run,
+      projects: projects.length,
+      built: sum(projects, "built"),
+      compilations: sum(projects, "compilations"),
+      identical: sum(projects, "identical"),
+      classes: sum(projects, "classes"),
+    }));
 }
 
 function corpus(dir) {
-  const results = join(dir, "corpus", "results.json");
-  if (!existsSync(results)) return null;
-  const projects = readJson(results).projects.map(corpusProject);
-  const sum = (key) => projects.reduce((total, p) => total + p[key], 0);
-  const history = join(dir, "corpus", "history.tsv");
+  const runsDir = join(dir, "corpus", "runs");
+  if (!existsSync(runsDir)) return null;
+  const runs = readdirSync(runsDir).map((id) => corpusRun(runsDir, id));
+  if (runs.length === 0) return null;
+  runs.sort((a, b) => (a.measured.date < b.measured.date ? -1 : a.measured.date > b.measured.date ? 1 : 0));
+  const latest = runs[runs.length - 1];
+  const { projects } = latest;
   return {
+    measured: latest.measured,
     projects,
-    total: { compilations: sum("compilations"), built: sum("built"), classes: sum("classes"), identical: sum("identical") },
-    history: existsSync(history) ? corpusHistory(readFileSync(history, "utf8")) : [],
+    noResult: latest.noResult,
+    listed: latest.listed,
+    total: { compilations: sum(projects, "compilations"), built: sum(projects, "built"), classes: sum(projects, "classes"), identical: sum(projects, "identical") },
+    history: corpusHistory(runs),
   };
 }
 

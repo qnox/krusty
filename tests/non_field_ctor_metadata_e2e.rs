@@ -1,6 +1,5 @@
 use super::common;
 use krusty::jvm::classreader::parse_class;
-use krusty::jvm::metadata::class_constructors;
 
 #[test]
 fn non_field_constructor_parameter_is_recorded() {
@@ -14,7 +13,10 @@ fn non_field_constructor_parameter_is_recorded() {
             (name == "Child").then(|| parse_class(bytes).expect("parse Child"))
         })
         .expect("Child class");
-    let constructors = class_constructors(&child);
+    let constructors = &child
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .constructors;
 
     assert_eq!(constructors.len(), 1);
     assert_eq!(constructors[0].params.names, ["value"]);

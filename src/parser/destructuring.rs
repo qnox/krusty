@@ -67,7 +67,7 @@ impl Parser<'_> {
             },
         );
         self.expect(TokenKind::Eq, "'='");
-        self.skip_newlines();
+        self.skip_semicolons();
         let init = self.parse_expr();
         let statement = self.finish_stmt(Stmt::Destructure { entries, init }, start);
         self.record_destructure_syntax(statement, source_properties, entry_types);
@@ -122,9 +122,8 @@ impl Parser<'_> {
                     "']'"
                 },
             );
-            self.skip_plain_newlines_before(TokenKind::Eq);
             self.expect(TokenKind::Eq, "'='");
-            self.skip_newlines();
+            self.skip_semicolons();
             let init = self.parse_expr();
             let statement = self.finish_stmt(Stmt::Destructure { entries, init }, start);
             self.record_destructure_syntax(statement, source_properties, entry_types);
@@ -133,7 +132,6 @@ impl Parser<'_> {
 
         let name = self.ident_or_error("variable name");
         let ty = if self.eat(TokenKind::Colon) {
-            self.skip_plain_newlines();
             Some(self.parse_type())
         } else {
             None
@@ -141,7 +139,7 @@ impl Parser<'_> {
         if self.at(TokenKind::Ident) && self.keyword_text("by") {
             let by_span = self.tok().span;
             self.bump();
-            self.skip_newlines();
+            self.skip_semicolons();
             let delegate = self.parse_unlabelled_expr();
             return self.finish_stmt(
                 Stmt::LocalDelegate {
@@ -165,10 +163,10 @@ impl Parser<'_> {
             })
         });
         let init = if deferred {
-            let span = self.tok().span;
+            let span = self.implied_span();
             self.default_init_expr(ty.as_ref().unwrap(), span)
         } else {
-            self.skip_newlines();
+            self.skip_semicolons();
             self.parse_unlabelled_expr()
         };
         if let Some(operator) = init_operator {

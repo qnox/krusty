@@ -279,11 +279,6 @@ impl<'a> Checker<'a> {
                     && (candidate.kind != crate::libraries::FnKind::Member
                         || candidate.context_count == 0)
             });
-            self.drop_members_hidden_by_applicable_extensions(
-                receiver,
-                &mut functions.overloads,
-                super::access_control::OperatorCallShape::IndexedSet { args: &arg_kinds },
-            );
             let callables = crate::libraries::Callables::from_parts(functions, properties);
             let indexed = resolver.select_receiver_indexed_set_function_with_params(
                 receiver,
@@ -376,6 +371,7 @@ impl<'a> Checker<'a> {
                 member.params = params;
                 ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
                     receiver,
+                    declaring_receiver: None,
                     physical_params: selected.callable.physical_params.clone(),
                     context_args: context_args.into_iter().map(Some).collect(),
                     ret,
@@ -435,18 +431,13 @@ impl<'a> Checker<'a> {
                 && (candidate.kind != crate::libraries::FnKind::Member
                     || candidate.context_count == 0)
         });
-        self.drop_members_hidden_by_applicable_extensions(
-            receiver,
-            &mut functions.overloads,
-            super::access_control::OperatorCallShape::Call {
-                name,
-                args: &arg_kinds,
-            },
-        );
+        // The member rung resolves only with a member this site can see. One it cannot see stays
+        // in the final selection below, ranked under every accessible candidate.
         let mut members = functions.clone();
-        members
-            .overloads
-            .retain(|candidate| candidate.kind == crate::libraries::FnKind::Member);
+        members.overloads.retain(|candidate| {
+            candidate.kind == crate::libraries::FnKind::Member
+                && self.member_candidate_accessible(candidate, Some(receiver))
+        });
         let members = crate::libraries::Callables::Functions(members);
         let callables = crate::libraries::Callables::from_parts(functions, properties);
         let member_applicable = {
@@ -455,7 +446,7 @@ impl<'a> Checker<'a> {
                     .select_receiver_function_with_params_tracking(
                         receiver,
                         name,
-                        &arg_kinds,
+                        crate::symbol_resolver::FamilyArguments::Shared(&arg_kinds),
                         &[],
                         &members,
                         None,
@@ -551,7 +542,7 @@ impl<'a> Checker<'a> {
         } = match resolver.select_receiver_function_with_applied_receiver_tracking(
             receiver,
             name,
-            &arg_kinds,
+            crate::symbol_resolver::FamilyArguments::Shared(&arg_kinds),
             &[],
             &callables,
             expected_result,
@@ -643,7 +634,7 @@ impl<'a> Checker<'a> {
                     arguments: signature
                         .formals
                         .iter()
-                        .map(|formal| bindings.get(formal).copied())
+                        .map(|formal| bindings.get(formal.as_str()).copied())
                         .collect(),
                     signature: signature.clone(),
                     call_sig: selected.call_sig.clone(),
@@ -676,20 +667,6 @@ impl<'a> Checker<'a> {
                 && (candidate.kind != crate::libraries::FnKind::Member
                     || candidate.context_count == 0)
         });
-        self.drop_members_hidden_by_applicable_extensions(
-            receiver,
-            &mut functions.overloads,
-            if name == "set" {
-                super::access_control::OperatorCallShape::IndexedSet {
-                    args: &argument_kinds,
-                }
-            } else {
-                super::access_control::OperatorCallShape::Call {
-                    name,
-                    args: &argument_kinds,
-                }
-            },
-        );
         let callables = crate::libraries::Callables::Functions(functions);
         if name == "set" {
             match resolver.select_receiver_indexed_set_function_with_params(
@@ -969,7 +946,9 @@ impl<'a> Checker<'a> {
                 .select_receiver_function_with_params_tracking(
                     comparable,
                     "compareTo",
-                    &[crate::symbol_resolver::CallArgKind::Typed(element)],
+                    crate::symbol_resolver::FamilyArguments::Shared(&[
+                        crate::symbol_resolver::CallArgKind::Typed(element),
+                    ]),
                     &[],
                     &callables,
                     None,
@@ -1072,6 +1051,7 @@ fn selected_member_call(
     member.params = params;
     ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
         receiver,
+        declaring_receiver: None,
         physical_params: selected.callable.physical_params.clone(),
         context_args: Vec::new(),
         ret,

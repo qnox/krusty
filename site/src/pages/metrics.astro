@@ -32,9 +32,8 @@ const change = (kotlinc: number, krusty: number) => {
 const newest = box?.versions[0];
 
 
-// The corpus run that measured the projects: one caption when they share it, per row otherwise.
-const measuredRuns = new Set((corpus?.projects ?? []).map((p) => p.measured?.run ?? ""));
-const commonMeasured = measuredRuns.size === 1 ? corpus?.projects[0]?.measured ?? null : null;
+// The nightly corpus run that measured every project shown.
+const measured = corpus?.measured ?? null;
 
 const tileRows = [
   {
@@ -71,7 +70,7 @@ const tileRows = [
 // that measured as many projects as the corpus lists now (a manual run of a few projects is not
 // comparable and stays in the table of every run).
 const history = corpus?.history ?? [];
-const fullSize = corpus?.projects.length ?? 0;
+const fullSize = corpus?.listed ?? corpus?.projects.length ?? 0;
 const runs = history.filter((r) => r.projects === fullSize).slice(-60);
 const frame = { width: 480, height: 190, left: 44, right: 16, top: 12, bottom: 28 };
 const plotW = frame.width - frame.left - frame.right;
@@ -137,7 +136,7 @@ const slot = plotW / Math.max(1, runs.length - 1);
         </div>
       ))}
       <dl class="sources">
-        <div><dt>Real projects</dt><dd>{commonMeasured ? <><a href={commonMeasured.run}>corpus run of {commonMeasured.date}</a>, krusty <a href={commitUrl(commonMeasured.commit)}>{short(commonMeasured.commit)}</a></> : corpus ? "several corpus runs, per project below" : "not measured"}</dd></div>
+        <div><dt>Real projects</dt><dd>{measured ? <><a href={measured.run}>nightly corpus run of {day(measured.date)}</a>{measured.conclusion !== "success" && <> ({measured.conclusion})</>}, krusty <a href={commitUrl(measured.commit)}>{short(measured.commit)}</a></> : "not measured"}</dd></div>
         <div><dt>codegen/box</dt><dd>{box ? <><a href={box.run.url}>master CI run of {day(box.run.date)}</a>, krusty <a href={commitUrl(box.run.commit)}>{short(box.run.commit)}</a></> : "not measured"}</dd></div>
         <div><dt>Page</dt><dd>generated {generated} UTC · <a href="/metrics.json">raw data</a></dd></div>
       </dl>
@@ -150,13 +149,13 @@ const slot = plotW / Math.max(1, runs.length - 1);
         <p class="eyebrow">Headline metric</p>
         <h2>Byte-identical classes on real projects</h2>
         <p>krusty aims to emit <code>.class</code> files byte for byte identical to <code>kotlinc</code>'s. An identical class needs no tests to trust: it is exactly what <code>kotlinc</code> would have shipped, which matters most for code with few or no tests. A class counts only when the whole file matches.</p>
-        <p>Each project is built from a pinned commit with its own Gradle build, once with <code>kotlinc</code> and once with the krusty Gradle plugin. A <em>compilation</em> is one Kotlin/JVM compile task of the reference build, main and test source sets alike. krusty <em>built</em> it when it compiled it itself. When it did not, every class of that compilation counts as different, and the reason is one of: <strong>left to kotlinc</strong> (the build uses a compiler plugin or argument krusty does not implement yet, so the plugin hands the task to kotlinc), <strong>failed</strong> (krusty reported an error), or <strong>not run</strong> (a task it depends on failed first). The <a href={`${repo}/tree/corpus-results`}><code>corpus-results</code></a> report lists every reason.</p>
+        <p>Each project is built from a pinned commit with its own Gradle build, once with <code>kotlinc</code> and once with the krusty Gradle plugin. A <em>compilation</em> is one Kotlin/JVM compile task of the reference build, main and test source sets alike. krusty <em>built</em> it when it compiled it itself. When it did not, every class of that compilation counts as different, and the reason is one of: <strong>left to kotlinc</strong> (the build uses a compiler plugin or argument krusty does not implement yet, so the plugin hands the task to kotlinc), <strong>failed</strong> (krusty reported an error), or <strong>not run</strong> (a task it depends on failed first). The run's <code>summary</code> artifact lists every reason{measured && <> (<a href={measured.run}>run of {day(measured.date)}</a>)</>}.</p>
       </div>
       {corpus ? (
         <div class="table-scroll">
           <table class="table-sticky table-compact">
             <thead>
-              <tr><th>Project</th><th class="num">Identical classes</th><th class="num">Built</th><th>Not built</th><th>Patch</th>{!commonMeasured && <th>Measured</th>}</tr>
+              <tr><th>Project</th><th class="num">Identical classes</th><th class="num">Built</th><th>Not built</th><th>Patch</th></tr>
             </thead>
             <tbody>
               {corpus.projects.map((p) => (
@@ -164,7 +163,7 @@ const slot = plotW / Math.max(1, runs.length - 1);
                   <td>
                     {p.source ? <a href={`${p.source.url}/tree/${p.source.commit}`}>{p.name}</a> : p.name}
                     {p.kotlinLoc !== null && <div class="sub nowrap">{n(p.kotlinLoc)} Kotlin lines</div>}
-                    {p.referenceBuild !== "ok" && <div class="sub bad">kotlinc build {p.referenceBuild}{p.measured && <> · <a href={p.measured.run}>logs</a></>}</div>}
+                    {p.referenceBuild !== "ok" && <div class="sub bad">kotlinc build {p.referenceBuild} · <a href={p.measured.run}>logs</a></div>}
                   </td>
                   <td class="num">{pct(p.identical, p.classes)}<div class="sub">{share(p.identical, p.classes)}</div></td>
                   <td class="num">{share(p.built, p.compilations)}</td>
@@ -176,22 +175,27 @@ const slot = plotW / Math.max(1, runs.length - 1);
                     ) : <span class="na">—</span>}
                   </td>
                   <td>
-                    {p.source?.patch && p.measured ? <a href={`${repo}/blob/${p.measured.commit}/${p.source.patch}`}>{p.source.patch.split("/").pop()}</a> : !p.source ? <span class="na">not recorded</span> : null}
+                    {p.source?.patch ? <a href={`${repo}/blob/${p.measured.commit}/${p.source.patch}`}>{p.source.patch.split("/").pop()}</a> : !p.source ? <span class="na">not recorded</span> : null}
                   </td>
-                  {!commonMeasured && <td class="nowrap">{p.measured ? <a href={p.measured.run}>{p.measured.date}</a> : "—"}</td>}
+                </tr>
+              ))}
+              {(corpus.noResult ?? []).map((name) => (
+                <tr>
+                  <td>{name}</td>
+                  <td colspan="4" class="bad">no result: the project's job failed before it compared anything · <a href={measured.run}>logs</a></td>
                 </tr>
               ))}
               <tr class="total">
                 <td>Total</td>
                 <td class="num">{pct(corpus.total.identical, corpus.total.classes)}<div class="sub">{share(corpus.total.identical, corpus.total.classes)}</div></td>
                 <td class="num">{share(corpus.total.built, corpus.total.compilations)}</td>
-                <td></td><td></td>{!commonMeasured && <td></td>}
+                <td></td><td></td>
               </tr>
             </tbody>
           </table>
         </div>
       ) : <p class="na">Not measured: no nightly corpus result was available when this page was built.</p>}
-      {corpus && <p class="fine">Totals include every listed project, also one whose own kotlinc build failed: its compilations count as far as the kotlinc build produced classes. Every project is built with the newest Kotlin release krusty supports; a linked patch is what the corpus changes to make that build work, applied to both builds.</p>}
+      {corpus && <p class="fine">Totals include every project with a result, also one whose own kotlinc build failed: its compilations count as far as the kotlinc build produced classes. Every project is built with the newest Kotlin release krusty supports; a linked patch is what the corpus changes to make that build work, applied to both builds.</p>}
     </div>
   </section>
 
@@ -366,7 +370,7 @@ const slot = plotW / Math.max(1, runs.length - 1);
         <li><strong>Project test suites:</strong> each project's own tests run against the classes krusty built, as tests passed out of tests run.</li>
         <li><strong>Compiler benchmark:</strong> krusty's own compile time and peak RSS on a fixed workload, independent of Gradle.</li>
       </ul>
-      <p class="fine">The <a href={`${repo}/blob/master/.github/workflows/pages.yml`}><code>pages</code> workflow</a> rebuilds this page every night, after each nightly corpus run and after every release, from the latest successful master <a href={`${repo}/actions/workflows/ci.yml`}>CI run</a>, the <a href={`${repo}/tree/corpus-results`}><code>corpus-results</code></a> branch and the coverage baseline. A malformed report stops the deploy rather than publish a wrong number.</p>
+      <p class="fine">The <a href={`${repo}/blob/master/.github/workflows/pages.yml`}><code>pages</code> workflow</a> rebuilds this page every night, after each nightly corpus run and after every release, from the latest successful master <a href={`${repo}/actions/workflows/ci.yml`}>CI run</a>, the <code>summary</code> artifacts of the nightly <a href={`${repo}/actions/workflows/oss-corpus.yml`}>corpus runs</a> and the coverage baseline. A malformed report stops the deploy rather than publish a wrong number.</p>
     </div>
   </section>
 </Base>

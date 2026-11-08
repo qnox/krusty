@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { collectMetrics, compareKotlinVersions, corpusHistory, parseBoxReport } from "../scripts/metrics.mjs";
+import { collectMetrics, compareKotlinVersions, corpusSources, parseBoxReport } from "../scripts/metrics.mjs";
 
 function inputs(files) {
   const dir = mkdtempSync(join(tmpdir(), "metrics-"));
@@ -16,6 +16,18 @@ function inputs(files) {
     writeFileSync(join(dir, path), typeof contents === "string" ? contents : JSON.stringify(contents));
   }
   return dir;
+}
+
+const CORPUS_RUN = { databaseId: 8, headSha: "b".repeat(40), createdAt: "2026-11-01T01:30:00Z", url: "https://example.test/run/8", conclusion: "success" };
+const MEASURED = { run: CORPUS_RUN.url, commit: CORPUS_RUN.headSha, date: CORPUS_RUN.createdAt, conclusion: "success" };
+const PROJECTS_TSV = "# comment\np\thttps://example.test/p.git\t" + "c".repeat(40) + "\t.\t21\tgradle.properties:kotlin\nq\thttps://example.test/q\t" + "d".repeat(40) + "\t.\t17\t-\nr\thttps://example.test/r\t" + "e".repeat(40) + "\t.\t21\t-\n";
+
+/** The files of one corpus run: its identity, summary artifact, and optionally what it built. */
+function corpusRun(run, projects, extra = {}) {
+  const dir = `corpus/runs/${run.databaseId}`;
+  const files = { [`${dir}/run.json`]: run, [`${dir}/summary.json`]: { projects } };
+  for (const [name, contents] of Object.entries(extra)) files[`${dir}/${name}`] = contents;
+  return files;
 }
 
 const RUN = { databaseId: 7, headSha: "a".repeat(40), createdAt: "2026-11-01T09:00:00Z", url: "https://example.test/run/7" };
@@ -33,7 +45,6 @@ function project(name, extra = {}) {
       kotlinc: { wall_seconds: 10, cpu_seconds: 20, compile_seconds: 8, built_compile_seconds: 4, peak_rss_mb: { total: 900, kotlin_daemon: 500, krusty: 0 } },
       krusty: { wall_seconds: 7, cpu_seconds: 9, compile_seconds: 3, built_compile_seconds: 1, peak_rss_mb: { total: 600, kotlin_daemon: 0, krusty: 80 } },
     },
-    measured: { date: "2026-11-01", commit: "b".repeat(40), run: "https://example.test/run/8" },
     rows: [
       { built: true, fallback: null, error: null },
       { built: false, fallback: "krusty does not implement everything it requests (plugin)", error: null },
@@ -92,27 +103,34 @@ test("an unknown box artifact stops the build", () => {
   }
 });
 
-test("corpus projects carry their totals, cost and what was built", () => {
-  const source = { url: "https://example.test/p", commit: "c".repeat(40), patch: "scripts/oss-corpus/patches/p.patch", kotlin_pin: "gradle.properties:kotlin" };
-  const dir = inputs({
-    "corpus/results.json": { projects: [project("p", { source }), project("q", { reference_exit: 1, cost: {}, rows: undefined })] },
-  });
+test("corpus projects carry their totals, cost, run identity and what was built", () => {
+  const dir = inputs(corpusRun(CORPUS_RUN, [project("p"), project("q", { reference_exit: 1, cost: {}, rows: undefined })], {
+    "projects.tsv": PROJECTS_TSV,
+    "patches.txt": "p.patch\nunrelated.patch\n",
+  }));
   try {
     const { corpus } = collectMetrics(dir);
+    assert.deepEqual(corpus.measured, MEASURED);
     assert.deepEqual(corpus.total, { compilations: 8, built: 4, classes: 20, identical: 6 });
-    assert.deepEqual(corpus.history, []);
+    assert.equal(corpus.listed, 3);
+    // r is listed but the run has no result for it.
+    assert.deepEqual(corpus.noResult, ["r"]);
+    assert.deepEqual(corpus.history, [
+      { date: "2026-11-01", commit: CORPUS_RUN.headSha, run: CORPUS_RUN.url, projects: 2, built: 4, compilations: 8, identical: 6, classes: 20 },
+    ]);
     const [p, q] = corpus.projects;
     assert.deepEqual(p, {
       name: "p",
       stars: null,
       kotlinLoc: 100,
+      referenceExit: 0,
       referenceBuild: "ok",
       compilations: 4,
       built: 2,
       classes: 10,
       identical: 3,
-      measured: project("p").measured,
-      source,
+      measured: MEASURED,
+      source: { url: "https://example.test/p", commit: "c".repeat(40), kotlinPin: "gradle.properties:kotlin", patch: "scripts/oss-corpus/patches/p.patch" },
       notBuilt: { leftToKotlinc: 1, failed: 1, notRun: 1 },
       cost: {
         kotlinc: { exit: null, builtCompileSeconds: 4, compileSeconds: 8, wallSeconds: 10, cpuSeconds: 20, compilerPeakRssMb: 500, buildPeakRssMb: 900 },
@@ -121,8 +139,10 @@ test("corpus projects carry their totals, cost and what was built", () => {
       // One compilation failed and one was not run: the whole builds did different work.
       wholeBuildsComparable: false,
     });
+    // A failed reference build stays distinct from a project krusty missed.
+    assert.equal(q.referenceExit, 1);
     assert.equal(q.referenceBuild, "failed (exit 1)");
-    assert.equal(q.source, null);
+    assert.deepEqual(q.source, { url: "https://example.test/q", commit: "d".repeat(40), kotlinPin: null, patch: null });
     assert.equal(q.notBuilt, null);
     assert.deepEqual(q.cost, { kotlinc: null, krusty: null });
   } finally {
@@ -130,18 +150,43 @@ test("corpus projects carry their totals, cost and what was built", () => {
   }
 });
 
-test("corpus history sums each run's projects, across header versions", () => {
-  const header = "date\tkrusty commit\tproject\treference exit\tbuilt\tcompilations\tidentical\tclasses\trun\tkotlinc wall s\n";
-  const tsv =
-    header +
-    "2026-10-30\tc1\tp\t0\t1\t4\t2\t10\thttps://r/1\n" +
-    "2026-10-30\tc1\tq\t0\t0\t3\t0\t5\thttps://r/1\n" +
-    "2026-10-31\tc2\tp\t0\t2\t4\t3\t10\thttps://r/2\t12.5\n";
-  assert.deepEqual(corpusHistory(tsv), [
-    { date: "2026-10-30", commit: "c1", run: "https://r/1", projects: 2, built: 1, compilations: 7, identical: 2, classes: 15 },
-    { date: "2026-10-31", commit: "c2", run: "https://r/2", projects: 1, built: 2, compilations: 4, identical: 3, classes: 10 },
-  ]);
-  assert.throws(() => corpusHistory("date\tproject\n"), /corpus\/history.tsv: no "krusty commit" column/);
+test("the newest corpus run is shown, every kept run is history", () => {
+  const older = { ...CORPUS_RUN, databaseId: 5, headSha: "f".repeat(40), createdAt: "2026-10-30T01:30:00Z", url: "https://example.test/run/5", conclusion: "failure" };
+  const dir = inputs({
+    ...corpusRun(older, [project("p", { identical: 1 })]),
+    ...corpusRun(CORPUS_RUN, [project("p"), project("q")]),
+  });
+  try {
+    const { corpus } = collectMetrics(dir);
+    assert.deepEqual(corpus.measured, MEASURED);
+    // Without the run's project list nothing is known about what it built or left out.
+    assert.equal(corpus.listed, null);
+    assert.equal(corpus.noResult, null);
+    assert.equal(corpus.projects[0].source, null);
+    assert.deepEqual(corpus.history.map((r) => [r.date, r.run, r.projects, r.identical]), [
+      ["2026-10-30", older.url, 1, 1],
+      ["2026-11-01", CORPUS_RUN.url, 2, 6],
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("a corpus run must carry its identity and a valid project list", () => {
+  const { conclusion, ...noConclusion } = CORPUS_RUN;
+  for (const [files, error] of [
+    [corpusRun(noConclusion, []), /run.json: missing conclusion/],
+    [{ ...corpusRun(CORPUS_RUN, []), "corpus/runs/9/run.json": CORPUS_RUN, "corpus/runs/9/summary.json": { projects: [] } }, /runs\/9\/run.json: not run 9/],
+    [corpusRun(CORPUS_RUN, [project("p", { identical: undefined })]), /summary.json: p: missing identical/],
+  ]) {
+    const dir = inputs(files);
+    try {
+      assert.throws(() => collectMetrics(dir), error);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  }
+  assert.throws(() => corpusSources("p\thttps://x\tnot-a-sha\t.\t21\t-\n", new Set(), "projects.tsv"), /projects.tsv: not a project line/);
 });
 
 test("the coverage baseline must name every measure", () => {
@@ -175,7 +220,7 @@ test("the landing page links the metrics page", { skip: !existsSync(new URL("../
   assert.ok(readFileSync(new URL("../dist/index.html", import.meta.url), "utf8").includes('href="/metrics/"'));
 });
 
-// From the corpus producer to the page's data: compare.py and summarize.py write results.json the
+// From the corpus producer to the page's data: compare.py and summarize.py write summary.json the
 // way the nightly run does, and the page credits a whole-build change only where both Gradle builds
 // succeeded and krusty did the same work.
 test("whole builds are comparable only when both succeeded and did the same work", () => {
@@ -212,8 +257,10 @@ test("whole builds are comparable only when both succeeded and did the same work
       execFileSync("python3", [join(corpus, "compare.py"), work, name, "0"], { stdio: "ignore" });
       return join(work, "out", name, "compare.json");
     });
-    mkdirSync(join(work, "input", "corpus"), { recursive: true });
-    execFileSync("python3", [join(corpus, "summarize.py"), "--json", join(work, "input", "corpus", "results.json"), ...compares], { stdio: "ignore" });
+    const run = join(work, "input", "corpus", "runs", String(CORPUS_RUN.databaseId));
+    mkdirSync(run, { recursive: true });
+    writeFileSync(join(run, "run.json"), JSON.stringify(CORPUS_RUN));
+    execFileSync("python3", [join(corpus, "summarize.py"), "--json", join(run, "summary.json"), ...compares], { stdio: "ignore" });
     const byName = Object.fromEntries(collectMetrics(join(work, "input")).corpus.projects.map((p) => [p.name, p]));
     assert.deepEqual(
       Object.fromEntries(Object.entries(byName).map(([name, p]) => [name, [p.built, p.notBuilt, p.cost.kotlinc.exit, p.cost.krusty.exit, p.wholeBuildsComparable]])),
@@ -231,7 +278,7 @@ test("whole builds are comparable only when both succeeded and did the same work
 });
 
 test("a result without build outcomes leaves whole-build comparability unknown", () => {
-  const dir = inputs({ "corpus/results.json": { projects: [project("old", { rows: [{ built: true, fallback: null, error: null }] })] } });
+  const dir = inputs(corpusRun(CORPUS_RUN, [project("old", { rows: [{ built: true, fallback: null, error: null }] })]));
   try {
     assert.equal(collectMetrics(dir).corpus.projects[0].wholeBuildsComparable, null);
   } finally {

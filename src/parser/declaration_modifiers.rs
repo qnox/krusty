@@ -44,6 +44,18 @@ pub(super) struct PrefixInProgress {
     first_modifier: Option<Span>,
     visibility: Option<Visibility>,
     modifiers: WrittenModifiers,
+    /// Each keyword written, with its span. A rewound lookahead consumes the same keyword again,
+    /// so a span is kept once.
+    keywords: Vec<(ModifierKeyword, Span)>,
+}
+
+impl PrefixInProgress {
+    fn write(&mut self, modifier: ModifierKeyword, span: Span) {
+        self.modifiers.insert(modifier);
+        if !self.keywords.iter().any(|(_, seen)| *seen == span) {
+            self.keywords.push((modifier, span));
+        }
+    }
 }
 
 impl Parser<'_> {
@@ -102,7 +114,7 @@ impl Parser<'_> {
         if target == "file" && self.at(TokenKind::LBracket) {
             self.bump(); // '['
             loop {
-                self.skip_newlines();
+                self.skip_semicolons();
                 if self.at(TokenKind::RBracket) || self.at(TokenKind::Eof) {
                     break;
                 }
@@ -179,7 +191,7 @@ impl Parser<'_> {
         self.pending_annotations.clear();
         self.pending_annotation_args.clear();
         loop {
-            self.skip_newlines();
+            self.skip_semicolons();
             if self.at(TokenKind::At) {
                 let (name, args) = self.parse_annotation();
                 if let Some(name) = name {
@@ -208,10 +220,11 @@ impl Parser<'_> {
                         self.file.multiplatform_modifiers.push((text.clone(), span));
                     }
                 }
-                self.note_declaration_prefix_token(self.t[self.i].span);
+                let span = self.t[self.i].span;
+                self.note_declaration_prefix_token(span);
                 let prefix = &mut self.declaration_prefix;
                 if let Some(modifier) = ModifierKeyword::from_keyword(&text) {
-                    prefix.modifiers.insert(modifier);
+                    prefix.write(modifier, span);
                 }
                 if matches!(
                     text.as_str(),
@@ -304,7 +317,7 @@ impl Parser<'_> {
             } else {
                 break;
             }
-            self.skip_newlines();
+            self.skip_semicolons();
         }
         self.file
             .external_modifier_uses
@@ -329,7 +342,7 @@ impl Parser<'_> {
         if !(self.at(TokenKind::Ident) && self.keyword_text("external")) {
             return false;
         }
-        let next = self.after_plain_newlines(self.i + 1);
+        let next = self.i + 1;
         let Some(next_token) = self.t.get(next).copied() else {
             return false;
         };
@@ -338,17 +351,20 @@ impl Parser<'_> {
         }
         match next_token.kind {
             TokenKind::At => true,
-            TokenKind::Ident => matches!(
-                self.t.get(next + 1).map(|token| token.kind),
-                None | Some(
-                    TokenKind::LParen
-                        | TokenKind::LBrace
-                        | TokenKind::Comma
-                        | TokenKind::Newline
-                        | TokenKind::RBrace
-                        | TokenKind::Eof
-                )
-            ),
+            TokenKind::Ident => {
+                self.newline_before_at(next + 1)
+                    || matches!(
+                        self.t.get(next + 1).map(|token| token.kind),
+                        None | Some(
+                            TokenKind::LParen
+                                | TokenKind::LBrace
+                                | TokenKind::Comma
+                                | TokenKind::Semicolon
+                                | TokenKind::RBrace
+                                | TokenKind::Eof
+                        )
+                    )
+            }
             _ => false,
         }
     }
@@ -396,7 +412,7 @@ impl Parser<'_> {
             let Some(kind_word) = kind_word else {
                 break;
             };
-            prefix.modifiers.insert(kind_word);
+            prefix.write(kind_word, token.span);
             index += 1;
         }
         if let Some(keyword) = self.t.get(index).filter(|token| {
@@ -418,7 +434,9 @@ impl Parser<'_> {
                 declaration_start: start,
                 classifier_keyword,
                 modifiers: prefix.modifiers,
+                keywords: (0, 0),
             },
+            &prefix.keywords,
         );
     }
 }

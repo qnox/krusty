@@ -195,7 +195,7 @@ pub(super) fn emit_inherited_default_surface(
                 semantic_ret,
                 // The promoted generic signature of an inherited member is not reconstructed here
                 // (the declaring classifier's formals are not this interface's); a generic
-                // inherited surface keeps descriptor-only shape. Recorded in docs/SPEC.md.
+                // inherited surface keeps descriptor-only shape.
                 signature: None,
                 // kotlinc gives an inherited member's holder forwarder no line: it has no source in
                 // this interface.
@@ -303,7 +303,7 @@ pub(super) fn emit_own_member_forward(
                         c.properties
                             .iter()
                             .find(|property| {
-                                let (getter, setter) = accessor_jvm_names(c, &property.name);
+                                let (getter, setter) = accessor_jvm_names(ir, c, &property.name);
                                 getter == f.name || setter == f.name
                             })
                             .map(|property| property.decl_line)
