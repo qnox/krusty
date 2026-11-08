@@ -339,7 +339,7 @@ mod tests {
         let lookup = |classifier| {
             if classifier == inner {
                 Ok(Some(crate::metadata::InnerClassifier {
-                    outer,
+                    outer: Some(outer),
                     own_arguments: 1,
                 }))
             } else {
