@@ -121,3 +121,54 @@ fn a_different_owner_or_incomplete_constructor_frame_declines() {
         );
     }
 }
+
+#[test]
+fn finally_preflight_finds_every_control_transfer_before_emission() {
+    for transfer in [
+        IrExpr::Return(None),
+        IrExpr::Break { label: None },
+        IrExpr::Continue {
+            label: Some("outer".into()),
+        },
+    ] {
+        let exprs = vec![
+            IrExpr::UnitInstance,
+            transfer,
+            IrExpr::Block {
+                stmts: vec![1],
+                value: Some(0),
+            },
+        ];
+        for roots in [[2, 0, 0], [0, 2, 0], [0, 0, 2]] {
+            assert!(finally_has_transfer(&exprs, roots));
+        }
+        assert!(!finally_has_transfer(&exprs, [0]));
+    }
+}
+
+#[test]
+fn finally_input_requires_the_completion_proof_for_its_actual_use() {
+    use crate::ir::IrBottomValueCompletion;
+    let mut ir = IrFile::default();
+    let producer = ir.add_expr(IrExpr::Const(IrConst::Int(7)));
+    ir.set_logical_type(producer, Ty::Int);
+    let fallthrough = ir.add_expr(IrExpr::BottomValue {
+        producer,
+        completion: IrBottomValueCompletion::FallThroughWhenDiscarded,
+    });
+    ir.set_logical_type(fallthrough, Ty::Nothing);
+    let diverging = ir.add_expr(IrExpr::BottomValue {
+        producer,
+        completion: IrBottomValueCompletion::Diverge,
+    });
+    ir.set_logical_type(diverging, Ty::Nothing);
+    let declared = HashMap::default();
+    assert_eq!(finally_input(&ir, &declared, fallthrough, false), Ok(true));
+    assert_eq!(
+        finally_input(&ir, &declared, fallthrough, true),
+        Err("a `finally` region without a proven completion carrier".into())
+    );
+    assert_eq!(finally_input(&ir, &declared, diverging, true), Ok(true));
+    assert_eq!(finally_input(&ir, &declared, producer, false), Ok(false));
+    assert_eq!(finally_input(&ir, &declared, producer, true), Ok(false));
+}

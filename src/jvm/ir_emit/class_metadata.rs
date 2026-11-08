@@ -159,7 +159,7 @@ pub(super) fn build_class_metadata_with_facts(
     );
     let classifier = record.classifier();
     let class_id = if tail.local_classifiers.contains(&classifier) {
-        if c.is_anonymous_object && !c.is_enum_entry {
+        if crate::metadata::local_classifiers::is_anonymous(c) {
             crate::metadata::class_id::ResolvedClassId::anonymous(classifier)
         } else {
             crate::metadata::class_id::ResolvedClassId::local(classifier)

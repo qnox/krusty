@@ -1365,6 +1365,21 @@ impl<'a> Body<'a> {
                 self.throwable_message(*receiver, arguments, *result)?;
             }
             IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && self.is_string_length_property(*target) =>
+            {
+                self.intrinsic(IrIntrinsic::StringLength, Some(*receiver), &[])?;
+            }
+            IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::PropertyWrite {
                     target,
                     dispatch_receiver,
