@@ -20,7 +20,7 @@ pub(super) fn primary_constructor_method_parameters(
 ) -> Vec<crate::jvm::method_parameters::MethodParameter> {
     if !java_parameters {
         Vec::new()
-    } else if super::metadata_policy::is_continuation_class(class) {
+    } else if crate::jvm::coroutine_classes::is_continuation_class(class) {
         crate::jvm::method_parameters::continuation_constructor(class)
     } else {
         crate::jvm::method_parameters::primary_constructor(
