@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 
 use super::common_core::{byte_dump, kotlinc_compile, scratch_dir};
 
-pub use super::common_core::reference_diagnostics::{compiler_errors, CompilerError};
-pub(crate) use super::common_core::reference_diagnostics::{error_blocks, render_errors};
+use super::common_core::reference_diagnostics::{
+    error_blocks, rendered_diagnostics, CompilerError,
+};
 
 /// Write named sources under `work`, creating their directories, and return their paths.
 pub fn write_fixture_sources(work: &Path, sources: &[(&str, &str)]) -> Vec<PathBuf> {
@@ -52,9 +53,9 @@ pub fn reference_compiler_run(sources: &[(&str, &str)], extra_args: &[String]) -
     result
 }
 
-/// Every rendered compiler warning in emission order, located like [`compiler_errors`].
+/// Every rendered compiler warning in emission order, located like [`super::common_core::compiler_errors`].
 pub fn compiler_warnings(output: &str) -> Vec<CompilerError> {
-    super::common_core::reference_diagnostics::rendered_diagnostics(output, "warning:")
+    rendered_diagnostics(output, "warning:")
 }
 
 /// Every warning about the compilation itself rather than a source position (`warning: …` with no
