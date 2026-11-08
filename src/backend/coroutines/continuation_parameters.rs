@@ -297,7 +297,8 @@ fn add_continuation_parameter(ir: &mut IrFile, function: u32) {
 }
 
 /// Make every completion of a body that does not suspend return its result as `Any?`: an explicit
-/// `return`, the body's value, and falling off its end. Returns the body to install, which is
+/// `return`, the body's value, and a `Unit` body falling off its end. A non-`Unit` block with no
+/// result expression keeps the returns it already has. Returns the body to install, which is
 /// `body` itself when it is a block.
 ///
 /// An expression body keeps its node: the new block returns it rather than taking its arena slot,
@@ -318,7 +319,10 @@ fn complete_in_place(ir: &mut IrFile, body: ExprId, unit: bool) -> ExprId {
             let completed = completed_value(ir, Some(value), unit);
             stmts.push(ir.add_expr(IrExpr::Return(Some(completed))));
         }
-        None if stmts.last().is_some_and(|&last| stmt_diverges(ir, last)) => {}
+        // A non-Unit block with no result expression completes through the returns already in it.
+        // A `tailrec` body is that shape: `do { …; break } while (true)`, and the value leaves by
+        // `return` inside the loop. There is no value to invent after the loop.
+        None if !unit || stmts.last().is_some_and(|&last| stmt_diverges(ir, last)) => {}
         None => {
             let completed = completed_value(ir, None, unit);
             stmts.push(ir.add_expr(IrExpr::Return(Some(completed))));

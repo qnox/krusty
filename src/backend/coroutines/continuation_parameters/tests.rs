@@ -238,6 +238,58 @@ fn an_expression_body_is_returned_by_a_new_block_that_keeps_it() {
     ));
 }
 
+/// A non-`Unit` `tailrec` body is a loop whose value leaves by `return`, then `break`. There is no
+/// result after the loop, and the return's value stays its own node.
+#[test]
+fn a_non_unit_loop_completes_through_the_return_it_already_has() {
+    let mut ir = IrFile::default();
+    let seven = ir.add_expr(IrExpr::Const(IrConst::Int(7)));
+    let returned = ir.add_expr(IrExpr::Return(Some(seven)));
+    let exit = ir.add_expr(IrExpr::Break { label: None });
+    let loop_body = ir.add_expr(IrExpr::Block {
+        stmts: vec![returned, exit],
+        value: None,
+    });
+    let condition = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+    let loop_expression = ir.add_expr(IrExpr::While {
+        cond: condition,
+        body: loop_body,
+        update: None,
+        post_test: true,
+        label: None,
+    });
+    let body = ir.add_expr(IrExpr::Block {
+        stmts: vec![loop_expression],
+        value: None,
+    });
+    let f = ir.add_fun(function(Vec::new(), Ty::Int, Some(body)));
+    ir.suspend_funs.push(f);
+
+    assert_eq!(add_continuation_parameters(&mut ir), Ok(()));
+
+    assert_eq!(ir.functions[f as usize].body, Some(body));
+    assert!(acyclic(&ir, body));
+    let IrExpr::Block { stmts, value: None } = &ir.exprs[body as usize] else {
+        panic!("the loop stays the body");
+    };
+    assert_eq!(stmts.as_slice(), [loop_expression]);
+    let IrExpr::Return(Some(completed)) = ir.exprs[returned as usize] else {
+        panic!("the return completes with a value");
+    };
+    assert!(matches!(
+        ir.exprs[completed as usize],
+        IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } if arg == seven && type_operand == any()
+    ));
+    assert!(matches!(
+        ir.exprs[seven as usize],
+        IrExpr::Const(IrConst::Int(7))
+    ));
+}
+
 /// `suspend fun f(): Unit = g()`: the expression runs for effect, then the body completes with
 /// `Unit`.
 #[test]
