@@ -286,9 +286,13 @@ fun box(): String {{
 // PLATFORM-SPECIFIC: complete JVM bridge descriptors, access flags, and class ABI.
 #[test]
 fn an_adapted_renamed_override_inherits_the_realized_final_bridge_like_kotlinc() {
+    let source = krusty::conformance::prepare_test_source(
+        include_str!("box_regressions/adaptedInheritedCollectionRename.kt"),
+        krusty::conformance::TestTarget::Jvm,
+    );
     common::assert_classes_identical_to_kotlinc(
         "AdaptedInheritedRename",
-        include_str!("box_regressions/adaptedInheritedCollectionRename.kt"),
+        &source,
         &[
             "BridgeToken",
             "TokenParent",

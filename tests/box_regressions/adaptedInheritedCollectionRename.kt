@@ -1,6 +1,6 @@
 // WITH_STDLIB
 // FILE: AdaptedInheritedRename.kt
-@JvmInline value class BridgeToken(val value: Int)
+OPTIONAL_JVM_INLINE_ANNOTATION value class BridgeToken(val value: Int)
 abstract class TokenLeaf : TokenChild() {
     override fun removeAt(index: Int): BridgeToken = BridgeToken(index + 2)
 }
