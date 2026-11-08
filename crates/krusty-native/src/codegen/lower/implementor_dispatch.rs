@@ -118,6 +118,108 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         })
     }
 
+    /// A call of a dependency interface member this file does not implement. The link joins the
+    /// stub to the implementation a dependency object recorded under the same identity.
+    pub(super) fn dependency_interface_stub(
+        &mut self,
+        identity: &krusty::libraries::KlibDependencyCallable,
+        receiver: u32,
+        args: &[u32],
+        params: &[Ty],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let number = self.file.dependency_interface_number(identity);
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        let arguments = self.arguments(args, params)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.dispatch_through(
+            object,
+            model::Dispatch::Interface(number),
+            params,
+            ret,
+            &arguments,
+        )
+    }
+
+    /// Whether `internal`'s member stays with the runtime, rather than a direct implementor call.
+    ///
+    /// A collection or a closed range is also worn by objects the runtime builds. No static type
+    /// tells one of those from a class of this file, which is why a member asked of such a type
+    /// declines once the handlers that can tell them apart have passed. A special bridge may skip
+    /// the override entirely when the argument cannot be what the declaration accepts, and this
+    /// dispatch has no bridge to put in front of an implementor's arm.
+    fn runtime_owns_member(&self, internal: krusty::types::TypeName, name: &str) -> bool {
+        if super::classifier_shapes::is_closed_range(internal)
+            || super::classifier_shapes::is_closed_floating_range(internal)
+        {
+            return true;
+        }
+        let ty = Ty::obj_name(internal);
+        self.file.implements_collection_of(ty)
+            || self.file.mapped_collection(ty).is_some_and(|collection| {
+                super::super::super::intrinsics::has_special_bridge(collection, name)
+            })
+    }
+
+    /// Dispatch one dependency interface member by the exact override edge each implementor
+    /// published. An implementor without that edge leaves the call to the paths that already
+    /// know the member; this does not recover an implementation by its name. A member the runtime
+    /// also answers is left there too.
+    pub(super) fn dependency_interface_member(
+        &mut self,
+        internal: krusty::types::TypeName,
+        target: krusty::fir::ExternalCallableId,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        if self.runtime_owns_member(internal, signature.name) {
+            return None;
+        }
+        let declared = self.file.implementors_of(internal);
+        let implementors: Vec<ImplementorArm> = declared
+            .iter()
+            .filter_map(|&class| self.external_override_slot(class, target, signature.params))
+            .collect();
+        if implementors.is_empty() || implementors.len() != declared.len() {
+            return None;
+        }
+        Some(self.dependency_interface_dispatch(&implementors, receiver, args, ret))
+    }
+
+    fn dependency_interface_dispatch(
+        &mut self,
+        implementors: &[ImplementorArm],
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let mut operands = Vec::with_capacity(args.len());
+        for argument in args {
+            let Some(value) = self.expression(*argument)? else {
+                return Ok(None);
+            };
+            if self.terminated {
+                return Ok(None);
+            }
+            operands.push((value, self.physical_type(*argument)));
+        }
+        self.dispatch_by_implementor_with(implementors, object, &operands, ret, |body, _| {
+            // Unreachable when every implementor was tested. The merge fills the carrier.
+            body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
+            Ok(None)
+        })
+    }
+
     pub(super) fn dispatch_by_implementor_with(
         &mut self,
         implementors: &[ImplementorArm],

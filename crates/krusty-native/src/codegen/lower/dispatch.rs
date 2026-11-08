@@ -14,6 +14,43 @@ pub(super) struct SuperTarget<'c> {
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
+    /// A call of one exact method of a class this file declares. The method is the callee's
+    /// function, and the slot is that function's own slot.
+    pub(super) fn own_class_member(
+        &mut self,
+        function: krusty::ir::FunId,
+        owner: TypeName,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let class = self.file.ir.class_id_by_name(owner).ok_or_else(|| {
+            declined!(
+                "a member of `{}` this file does not declare",
+                owner.render().replace('/', ".")
+            )
+        })?;
+        let key = super::super::super::classes::function_key(self.file.ir, class, function);
+        let Some(slot) = self.file.model.slot(class, &key) else {
+            return Err(declined!(
+                "a member of `{}` with no slot",
+                owner.render().replace('/', ".")
+            ));
+        };
+        let (params, ret) = {
+            let declaration = &self.file.ir.functions[function as usize];
+            (declaration.params.clone(), declaration.ret)
+        };
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let arguments = self.arguments(args, &params)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.dispatch(object, slot, &params, ret, &arguments)
+    }
+
     /// A call through the receiver's vtable: `receiver.type.vtable[slot](receiver, args…)`.
     pub(super) fn dispatch(
         &mut self,

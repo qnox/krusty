@@ -34,8 +34,8 @@ use crate::types::TypeName;
 
 pub use archives::OpenedKlibLibraries;
 pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics};
-pub(crate) use declaration_bodies::KlibCalleeOrigin;
 pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
+pub(crate) use declaration_bodies::{KlibCalleeOrigin, LocatedClass, LocatedMember};
 pub use declaration_signatures::KlibLibraryError;
 pub use serialized_references::{
     KlibReferenceBinding, KlibReferenceBindings, KlibReferenceDispatch, KlibReferenceOrigin,

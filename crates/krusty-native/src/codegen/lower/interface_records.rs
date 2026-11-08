@@ -68,6 +68,27 @@ impl FileLowering<'_> {
 }
 
 impl FileLowering<'_> {
+    /// The stub number of one dependency interface member this file calls. The same member keeps
+    /// one number, after the numbers of this module's own interfaces.
+    pub(super) fn dependency_interface_number(
+        &mut self,
+        identity: &krusty::libraries::KlibDependencyCallable,
+    ) -> u32 {
+        let bytes = krusty::backend::interface_identity::member_identity(identity);
+        if let Some((number, _)) = self
+            .dependency_interface_calls
+            .iter()
+            .find(|(_, known)| *known == bytes)
+        {
+            return *number;
+        }
+        let number = self.slot_plan.interfaces().count()
+            + u32::try_from(self.dependency_interface_calls.len())
+                .expect("a dependency interface number fits u32");
+        self.dependency_interface_calls.push((number, bytes));
+        number
+    }
+
     /// Name, for the link, the KLIB identity of every function an interface of this file
     /// declares, beside its member number: what a dependent module's class implementing the member
     /// records its implementation under (see `native::interface_calls`); likewise every getter
@@ -108,6 +129,11 @@ impl FileLowering<'_> {
                     }),
             )
             .collect::<Vec<_>>();
+        entries.extend(
+            self.dependency_interface_calls
+                .iter()
+                .map(|(number, identity)| (*number, identity.clone())),
+        );
         if entries.is_empty() {
             return Ok(());
         }
@@ -166,7 +192,11 @@ impl FileLowering<'_> {
                     .callables
                     .callable(target)
                     .and_then(|fact| fact.dependency_callable.as_ref())
-                    .filter(|member| source_modules.contains(member.module.as_str()))
+                    .filter(|member| {
+                        source_modules.contains(member.module.as_str())
+                            || self.unit_kind
+                                == krusty::backend::CheckedIrUnitKind::DependencySupport
+                    })
                 else {
                     continue;
                 };

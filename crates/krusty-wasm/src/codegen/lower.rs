@@ -626,6 +626,8 @@ struct Body<'a> {
     /// How many structured instructions enclose the current position.
     depth: u32,
     loops: Vec<Loop>,
+    /// The `finally` regions whose protected code encloses the current position, innermost last.
+    cleanups: Vec<exceptions::CleanupFrame>,
     /// The executable scope whose code this body emits: the function, the class's constructor or
     /// singleton, or the file's static initializer. Only the template ownership of a reified
     /// type operation reads it.
@@ -684,6 +686,7 @@ impl<'a> Body<'a> {
             result,
             depth: 0,
             loops: Vec::new(),
+            cleanups: Vec::new(),
             scope: krusty::ir::IrEnclosure::File,
             enum_base: None,
         }
@@ -1002,7 +1005,7 @@ impl<'a> Body<'a> {
                     }
                     (None, None) => {}
                 }
-                self.code.return_();
+                self.control_transfer(exceptions::Transfer::Return, None)?;
             }
             IrExpr::When { branches } => self.when(id, &branches)?,
             IrExpr::While {
@@ -1014,13 +1017,11 @@ impl<'a> Body<'a> {
             } => self.while_(cond, body, update, post_test, label)?,
             IrExpr::Break { label } => {
                 let target = self.find_loop(label.as_deref())?.exit;
-                let depth = self.relative(target);
-                self.code.br(depth);
+                self.control_transfer(exceptions::Transfer::Branch(target), None)?;
             }
             IrExpr::Continue { label } => {
                 let target = self.find_loop(label.as_deref())?.next;
-                let depth = self.relative(target);
-                self.code.br(depth);
+                self.control_transfer(exceptions::Transfer::Branch(target), None)?;
             }
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(id, op, lhs, rhs)?,
             IrExpr::Equality { op, mode, lhs, rhs } => self.equality(op, mode, lhs, rhs)?,
