@@ -36,6 +36,16 @@ impl WasmLane {
         ["WASM", self.target.backend_token()]
     }
 
+    fn backend(&self, source: &str) -> Result<WasmBackend, Outcome> {
+        let options = krusty::conformance::WasmCompilerOptions::from_source(source)
+            .map_err(Outcome::Harness)?;
+        let mut backend = WasmBackend::new(self.target).with_entry(Entry::Box);
+        if let Some(enabled) = options.array_range_checks() {
+            backend = backend.with_array_range_checks(enabled);
+        }
+        Ok(backend)
+    }
+
     fn run_artifacts(
         &self,
         scratch: &Path,
@@ -159,7 +169,10 @@ impl Lane for WasmLane {
         sources: &[(String, String)],
         directive_source: &str,
     ) -> Outcome {
-        let backend = WasmBackend::new(self.target).with_entry(Entry::Box);
+        let backend = match self.backend(directive_source) {
+            Ok(backend) => backend,
+            Err(outcome) => return outcome,
+        };
         let program = match box_lane::compile(
             sources,
             directive_source,
@@ -185,9 +198,10 @@ impl Lane for WasmLane {
         let Some(entry_module) = modules.last() else {
             return Outcome::Harness("a module graph has no final source module".to_string());
         };
-        let backend = WasmBackend::new(self.target)
-            .with_entry(Entry::Box)
-            .with_entry_module(entry_module.name.clone());
+        let backend = match self.backend(directive_source) {
+            Ok(backend) => backend.with_entry_module(entry_module.name.clone()),
+            Err(outcome) => return outcome,
+        };
         let features = krusty::features::LangFeatures::from_source(directive_source);
         let platform = match self.target {
             WasmTarget::Js => krusty::klib::write::KlibPlatform::WasmJs,
@@ -768,6 +782,56 @@ fun box(): String {
 }
 "#;
 
+// PLATFORM-SPECIFIC: the shared program selects checked Wasm access on every release. The
+// reference invocation below proves compile acceptance of the same option, not reference runtime.
+#[test]
+fn explicit_array_checks_share_metadata_with_the_reference_compiler() {
+    use krusty::backend::Backend;
+    let source = include_str!("box_regressions/arrayStoreIndexAfterValue.kt");
+    let options = krusty::conformance::WasmCompilerOptions::from_source(source)
+        .expect("the original case's compilation metadata");
+    assert_eq!(options.array_range_checks(), Some(true));
+    let (sources, java) = krusty::conformance::split_files(source);
+    assert!(java.is_empty());
+    let [(stem, written_source)] = sources.as_slice() else {
+        panic!("one complete array-store source")
+    };
+    assert_eq!(
+        krusty::conformance::WasmCompilerOptions::from_source(written_source),
+        Ok(krusty::conformance::WasmCompilerOptions::default()),
+        "the pre-FILE option belongs to compilation context, not the split program"
+    );
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, "explicitArrayChecks"));
+        let work = super::common::scratch_dir().expect("array check compilation directory");
+        let path = work.join(format!("{stem}.kt"));
+        std::fs::write(&path, written_source).expect("write the complete split program");
+        let compilation_target = WasmBackend::new(target).compilation_target();
+        let reference_arguments = options
+            .reference_arguments(compilation_target)
+            .iter()
+            .map(|argument| (*argument).to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(reference_arguments, ["-Xwasm-enable-array-range-checks"]);
+        let (reference, _) = crate::reference_invocation_support::run_reference(
+            compilation_target,
+            &work,
+            &[path],
+            &reference_arguments,
+            false,
+        )
+        .expect("the exact Wasm reference compiler");
+        assert_eq!(reference.status, 0, "{}", reference.stderr);
+        assert_eq!(
+            lane.compile_and_run(&work, "explicitArrayChecks", &sources, source),
+            Outcome::Pass,
+            "the product must execute the entire checked store-order program"
+        );
+        std::fs::remove_dir_all(work).expect("remove array check compilation directory");
+    }
+}
+
 // PLATFORM-SPECIFIC: both the Kotlin exception and the unchecked host trap are observable here.
 #[test]
 fn wasm_reference_array_bounds_preserve_reference_defaults_and_explicit_options() {
@@ -1083,6 +1147,21 @@ fn wasm_declines_a_generated_hash_that_can_reach_the_identity_hash() {
         "class Plain\ndata class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
          fun box(): String = if (Holder(Plain()).hashCode() == 0) \"zero\" else \"OK\"",
         "wasmGeneratedHashOfAnErasedProperty",
+        reason,
+    );
+    // Runtime exception objects come from the exception runtime rather than this file's classes,
+    // and an erased property can hold one that the file constructs or catches.
+    expect_wasm_decline(
+        "data class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
+         fun box(): String = if (Holder(IllegalStateException()).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfAConstructedRuntimeException",
+        reason,
+    );
+    expect_wasm_decline(
+        "data class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
+         fun caught(text: String?): Any = try { text!! } catch (e: NullPointerException) { e }\n\
+         fun box(): String = if (Holder(caught(null)).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfACaughtRuntimeException",
         reason,
     );
 }
