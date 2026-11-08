@@ -72,7 +72,7 @@ impl BodyLowering<'_> {
                 "an Elvis block does not declare a compiler temporary",
             ));
         }
-        let input = super::semantic_type(self.arena, self.header.type_parameters(), variable.ty)?;
+        let input = self.semantic(variable.ty)?;
         let expression = self.arena.expr(conditional);
         let KlibIrExprKind::When {
             branches,
