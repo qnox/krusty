@@ -1133,7 +1133,6 @@ inference/pcla/substitutelambdaExtensionReceiverType.kt
 inference/pcla/topDownCompletionBreakedByNonBuilderInferenceSession.kt
 inference/pcla/withoutAnnotation.kt
 inference/plusAssignInsideLambda.kt
-inference/suspendExtensionRecevierFromConstraint.kt
 initializers/correctOrder1.kt
 initializers/correctOrder2.kt
 initializers/correctOrder3.kt
