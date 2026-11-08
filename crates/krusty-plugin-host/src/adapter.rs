@@ -34,20 +34,50 @@ struct Compat {
 }
 
 /// Every supported Kotlin version is listed in exactly one.
-const COMPAT: [Compat; 2] = [
+///
+/// `IrFileImpl` takes its module as a constructor argument from 2.4.20. From 2.5.0-Beta2 the
+/// `IrConstImpl` builder is gone and the constructor that takes the indicator is internal, so that
+/// release calls the factory for each kind. The file constructor is unchanged there, so it reuses
+/// the 2.4.20 source.
+const COMPAT: [Compat; 3] = [
     Compat {
         versions: &["2.4.0", "2.4.10"],
-        sources: &[(
-            "IrFiles.kt",
-            include_str!("../adapter/compat/2.4.0/IrFiles.kt"),
-        )],
+        sources: &[
+            (
+                "IrFiles.kt",
+                include_str!("../adapter/compat/2.4.0/IrFiles.kt"),
+            ),
+            (
+                "IrConst.kt",
+                include_str!("../adapter/compat/2.4.0/IrConst.kt"),
+            ),
+        ],
     },
     Compat {
-        versions: &["2.4.20", "2.4.21", "2.5.0-Beta2"],
-        sources: &[(
-            "IrFiles.kt",
-            include_str!("../adapter/compat/2.4.20/IrFiles.kt"),
-        )],
+        versions: &["2.4.20", "2.4.21"],
+        sources: &[
+            (
+                "IrFiles.kt",
+                include_str!("../adapter/compat/2.4.20/IrFiles.kt"),
+            ),
+            (
+                "IrConst.kt",
+                include_str!("../adapter/compat/2.4.0/IrConst.kt"),
+            ),
+        ],
+    },
+    Compat {
+        versions: &["2.5.0-Beta2"],
+        sources: &[
+            (
+                "IrFiles.kt",
+                include_str!("../adapter/compat/2.4.20/IrFiles.kt"),
+            ),
+            (
+                "IrConst.kt",
+                include_str!("../adapter/compat/2.5.0-Beta2/IrConst.kt"),
+            ),
+        ],
     },
 ];
 
@@ -236,7 +266,8 @@ mod tests {
                     "ScriptDefinitions.kt",
                     "Session.kt",
                     "Wire.kt",
-                    "IrFiles.kt"
+                    "IrFiles.kt",
+                    "IrConst.kt"
                 ],
                 "{version}"
             );
@@ -246,5 +277,39 @@ mod tests {
     #[test]
     fn a_kotlin_version_no_compat_set_lists_has_no_adapter() {
         assert_eq!(sources("2.4.20-RC"), None);
+        assert_eq!(sources("2.5.0"), None);
+    }
+
+    #[test]
+    fn a_2_5_const_uses_the_factory_that_passes_the_indicator_and_2_4_keeps_the_builder() {
+        let beta = const_source("2.5.0-Beta2");
+        for factory in [
+            "IrConstImpl.boolean",
+            "IrConstImpl.int",
+            "IrConstImpl.long",
+            "IrConstImpl.string",
+            "IrConstImpl.constNull",
+        ] {
+            assert!(beta.contains(factory), "{factory}");
+        }
+        assert!(!beta.contains("IrConstImpl(start, end, type, kind, value)"));
+        assert!(!beta.contains("constructorIndicator"));
+        for version in ["2.4.0", "2.4.10", "2.4.20", "2.4.21"] {
+            let source = const_source(version);
+            assert!(
+                source.contains("IrConstImpl(start, end, type, kind, value)"),
+                "{version}"
+            );
+            assert!(!source.contains("constructorIndicator"), "{version}");
+        }
+    }
+
+    fn const_source(version: &str) -> &'static str {
+        sources(version)
+            .unwrap()
+            .iter()
+            .find(|(name, _)| *name == "IrConst.kt")
+            .map(|(_, text)| *text)
+            .unwrap()
     }
 }

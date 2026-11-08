@@ -15,7 +15,6 @@ import org.jetbrains.kotlin.ir.expressions.IrConstKind
 import org.jetbrains.kotlin.ir.expressions.IrExpression
 import org.jetbrains.kotlin.ir.expressions.IrStatementOrigin
 import org.jetbrains.kotlin.ir.expressions.impl.IrCallImpl
-import org.jetbrains.kotlin.ir.expressions.impl.IrConstImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrGetValueImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrReturnImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrSetValueImpl
@@ -196,23 +195,23 @@ internal class ModuleBuilder(private val ir: Fir2IrActualizedResult) {
     private fun DataInputStream.readConstant(start: Int, end: Int): Node = when (val tag = readByte().toInt()) {
         0 -> {
             val value = readBoolean()
-            Node { _, _ -> IrConstImpl(start, end, builtIns.booleanType, IrConstKind.Boolean, value) }
+            Node { _, _ -> irConst(start, end, builtIns.booleanType, IrConstKind.Boolean, value) }
         }
         1 -> {
             val value = readInt()
-            Node { _, _ -> IrConstImpl(start, end, builtIns.intType, IrConstKind.Int, value) }
+            Node { _, _ -> irConst(start, end, builtIns.intType, IrConstKind.Int, value) }
         }
         2 -> {
             val value = readLong()
-            Node { _, _ -> IrConstImpl(start, end, builtIns.longType, IrConstKind.Long, value) }
+            Node { _, _ -> irConst(start, end, builtIns.longType, IrConstKind.Long, value) }
         }
         3 -> {
             val value = readString()
-            Node { _, _ -> IrConstImpl(start, end, builtIns.stringType, IrConstKind.String, value) }
+            Node { _, _ -> irConst(start, end, builtIns.stringType, IrConstKind.String, value) }
         }
         4 -> {
             val type = readTypeNode()
-            Node { function, _ -> IrConstImpl(start, end, type(function), IrConstKind.Null, null) }
+            Node { function, _ -> irConst(start, end, type(function), IrConstKind.Null, null) }
         }
         else -> throw Refused("unknown constant kind $tag")
     }
