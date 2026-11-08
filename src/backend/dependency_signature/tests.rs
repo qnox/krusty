@@ -44,7 +44,7 @@ fn the_emitted_signature_authenticates_retained_member_dispatch() {
 fn generic() -> GenericSig {
     let formal = Ty::ty_param("dependency-owned-T", Ty::nullable(Ty::obj("kotlin/Any")));
     GenericSig {
-        formals: vec!["dependency-owned-T".to_owned()],
+        formals: vec![crate::types::TyParamName::new("dependency-owned-T")],
         formal_bounds: vec![Vec::new()],
         receiver: Some(formal),
         params: vec![Ty::Long, formal],
@@ -125,6 +125,7 @@ fn frozen(signature: GenericSig) -> BackendCallableFact {
         klib_body_accessor: None,
         klib_body_vararg_index: None,
         klib_body_parameter_defaults: None,
+        declares_parameter_defaults: false,
         annotations: Box::new([]),
     }
 }

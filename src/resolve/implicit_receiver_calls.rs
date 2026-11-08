@@ -74,7 +74,7 @@ impl Checker<'_> {
             == Ty::String
             || matches!(
                 member_receiver.kind(),
-                TyKind::Obj(..) | TyKind::TyParam(..)
+                TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Var(..)
             ) {
             match self.record_member_call_with_slots(
                 scope,

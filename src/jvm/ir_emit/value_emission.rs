@@ -217,6 +217,7 @@ impl super::Emitter<'_> {
                 internal,
                 args,
                 ctor_params,
+                declared_params: _,
                 ctor_desc,
                 external_target: _,
                 defaults: default_parameters,
@@ -258,7 +259,7 @@ impl super::Emitter<'_> {
                         // Every parameter of a verbatim descriptor is a supplied operand; the
                         // descriptor, not the argument count, says how many there are.
                         let parameters = self.constructor_physical_params(e, d).len();
-                        (d.clone(), false, parameters, parameters)
+                        (d.to_string(), false, parameters, parameters)
                     } else {
                         let mut field_tys: Vec<Ty> = match ctor_params {
                             Some(ps) => jvm_tys(&capture_order::physical_for(
@@ -819,7 +820,7 @@ impl super::Emitter<'_> {
                     op @ (crate::ir::IrIntrinsic::ArraySize
                     | crate::ir::IrIntrinsic::StringGet
                     | crate::ir::IrIntrinsic::StringLength
-                    | crate::ir::IrIntrinsic::EnumName
+                    | crate::ir::IrIntrinsic::EnumOrdinal
                     | crate::ir::IrIntrinsic::NullableAnyToString) => {
                         self.emit_builtin_member(e, op, dispatch_receiver.unwrap(), args, code)
                     }
@@ -1940,7 +1941,7 @@ impl super::Emitter<'_> {
                 // An inlined operand leaves the caller's line forgotten. kotlinc marks the checked
                 // expression's line again at the implicit check, so the check owns an entry even
                 // though the restored caller line is already in effect.
-                if matches!(check, NullCheck::Named(_)) && code.line_forgotten() {
+                if matches!(check, NullCheck::Named { .. }) && code.line_forgotten() {
                     if let Some(line) = code.current_line() {
                         code.mark_line(line.into());
                     }
@@ -1950,7 +1951,7 @@ impl super::Emitter<'_> {
                 // in its failure (`getenv(...) must not be null`); `x!!` has no such name and uses the
                 // one-argument form. Both consume the duplicate and leave the value in place.
                 let m = match check {
-                    NullCheck::Named(message) => {
+                    NullCheck::Named { message, .. } => {
                         code.push_string(message, self.cw);
                         self.cw.methodref(
                             "kotlin/jvm/internal/Intrinsics",
@@ -1958,13 +1959,13 @@ impl super::Emitter<'_> {
                             "(Ljava/lang/Object;Ljava/lang/String;)V",
                         )
                     }
-                    NullCheck::Source | NullCheck::Unnamed => self.cw.methodref(
+                    NullCheck::Source | NullCheck::Unnamed { .. } => self.cw.methodref(
                         "kotlin/jvm/internal/Intrinsics",
                         "checkNotNull",
                         "(Ljava/lang/Object;)V",
                     ),
                 };
-                let arguments = if matches!(check, NullCheck::Named(_)) {
+                let arguments = if matches!(check, NullCheck::Named { .. }) {
                     2
                 } else {
                     1

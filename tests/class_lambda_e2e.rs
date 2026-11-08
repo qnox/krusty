@@ -677,6 +677,10 @@ class Outer<T : CharSequence> {
 /// class kotlinc writes to be byte-identical: the lambda classes extend `Lambda`, hold the body in
 /// their typed `invoke`, and the callers construct them.
 fn assert_class_mode_identical_to_kotlinc(source: &str) {
+    assert_lambda_mode_identical_to_kotlinc(source, "class");
+}
+
+fn assert_lambda_mode_identical_to_kotlinc(source: &str, mode: &str) {
     let work = common::scratch_dir().expect("allocate class-lambda byte fixture");
     let source_path = work.join("B.kt");
     std::fs::write(&source_path, source).expect("write fixture");
@@ -690,7 +694,7 @@ fn assert_class_mode_identical_to_kotlinc(source: &str) {
         // This isolated byte fixture supplies its complete stdlib classpath and uses no
         // reflection. Do not make its local run depend on a kotlin-reflect distribution jar.
         .arg("-no-reflect")
-        .args(["-Xlambdas=class"])
+        .arg(format!("-Xlambdas={mode}"))
         .args(["-classpath", stdlib.to_str().expect("UTF-8 stdlib")])
         .arg(&source_path)
         .output()
@@ -703,7 +707,7 @@ fn assert_class_mode_identical_to_kotlinc(source: &str) {
     let (code, stderr) = common::kotlinc_compile(&[
         "-d".to_string(),
         reference_output.to_string_lossy().into_owned(),
-        "-Xlambdas=class".to_string(),
+        format!("-Xlambdas={mode}"),
         source_path.to_string_lossy().into_owned(),
     ])
     .expect("kotlinc");
@@ -822,4 +826,16 @@ fun use(seed: Int, f: () -> Int = { seed + 1 }): Int = f()
 fun box(): String = if (use(4) == 5) "OK" else "fail"
 "#,
     );
+}
+
+// The existing whole portable input already owns its runtime-corpus entry. These classfile
+// comparisons additionally pin the constructor receiver's complete ABI in both lambda strategies.
+#[test]
+fn constructor_prefix_receiver_matches_complete_reference_bytes_in_both_lambda_modes() {
+    let source = include_str!(
+        "../src/fir/body_check/local_class_tests/fixtures/localSuperclassOuterCapture.kt"
+    );
+    for mode in ["indy", "class"] {
+        assert_lambda_mode_identical_to_kotlinc(source, mode);
+    }
 }

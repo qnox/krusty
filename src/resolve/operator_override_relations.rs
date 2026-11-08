@@ -17,7 +17,7 @@ use crate::symbol_source::{CompositeSource, SymbolSource};
 use crate::types::Ty;
 
 struct DeclaredFunction {
-    formals: Vec<String>,
+    formals: Vec<crate::types::TyParamName>,
     formal_bounds: Vec<Vec<Ty>>,
     parameters: Vec<Ty>,
     receiver: Option<Ty>,
@@ -61,7 +61,7 @@ fn declared_function(
         .map_while(|ordinal| index.type_parameter(declaration, ordinal))
         .filter_map(|parameter| {
             Some((
-                index.type_parameter_semantic_name(parameter)?.to_owned(),
+                crate::types::TyParamName::new(index.type_parameter_semantic_name(parameter)?),
                 index
                     .type_parameter_header(parameter)?
                     .bounds
@@ -70,7 +70,7 @@ fn declared_function(
                     .collect(),
             ))
         })
-        .collect::<Vec<(String, Vec<Ty>)>>();
+        .collect::<Vec<(crate::types::TyParamName, Vec<Ty>)>>();
     let (formals, formal_bounds) = type_parameters.into_iter().unzip();
     Some(DeclaredFunction {
         formals,

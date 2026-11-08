@@ -858,6 +858,32 @@ impl ActiveSourceDeclarations {
         ))
     }
 
+    pub(crate) fn enum_entry_declaration(
+        &self,
+        class: DeclId,
+        entry: u32,
+    ) -> Option<DeclarationId> {
+        self.first_bound(ActiveDeclarationRef::EnumEntry {
+            class,
+            index: entry,
+        })
+    }
+
+    pub(crate) fn enum_entry_property_declaration(
+        &self,
+        class: DeclId,
+        entry: u32,
+        property: u32,
+    ) -> Option<DeclarationId> {
+        self.first_bound(ActiveDeclarationRef::Property(
+            ActivePropertyRef::EnumEntry {
+                class,
+                entry,
+                index: property,
+            },
+        ))
+    }
+
     pub(crate) fn enum_entry_method_declaration(
         &self,
         class: DeclId,

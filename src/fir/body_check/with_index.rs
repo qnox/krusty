@@ -304,6 +304,7 @@ impl BodyFirChecker<'_> {
                 extension_receiver_parameter: None,
 
                 metadata_constant_read: false,
+                semantic_role: None,
             }),
             false,
             &[],
