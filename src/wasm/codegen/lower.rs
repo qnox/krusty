@@ -397,18 +397,17 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         TyKind::Nullable(Ty::String) => STRING,
         // Nullable scalars keep their semantic type until this representation boundary. They
         // use the same boxes as erased values; nullable Unit can hold its singleton or null.
-        TyKind::Nullable(
-            Ty::Boolean
-            | Ty::Byte
-            | Ty::Short
-            | Ty::Char
-            | Ty::Int
-            | Ty::Long
-            | Ty::Float
-            | Ty::Double
-            | Ty::Unit
-            | Ty::Nothing,
-        ) => REFERENCE,
+        TyKind::Nullable(Ty::Unit | Ty::Nothing) => REFERENCE,
+        TyKind::Nullable(inner)
+            if matches!(
+                carrier(inner),
+                Ok(Some(
+                    ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64
+                ))
+            ) =>
+        {
+            REFERENCE
+        }
         // Every object, interface and `Any` value, and a type parameter's: a reference the
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,

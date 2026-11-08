@@ -1745,7 +1745,6 @@ evaluate/thisPlusStringWithObject.kt
 evaluate/ubyteOperations.kt
 evaluate/uintOperations.kt
 evaluate/ulongOperations.kt
-evaluate/unsignedConst.kt
 evaluate/ushortOperations.kt
 exceptions/catch1.kt
 exceptions/catch2.kt
@@ -2601,7 +2600,6 @@ inlineClasses/equalityChecksPrimitiveGeneric.kt
 inlineClasses/equalityChecksPrimitiveUnboxed.kt
 inlineClasses/equalityForBoxesOfNullableValuesOfInlineClass.kt
 inlineClasses/equalityForBoxesOfNullableValuesOfInlineClassGeneric.kt
-inlineClasses/equalityForIndyLambdaParameter.kt
 inlineClasses/equalsCallsLeftArgument.kt
 inlineClasses/equalsCallsLeftArgumentGeneric.kt
 inlineClasses/equalsEvaluationOrderInlineClass.kt
