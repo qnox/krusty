@@ -147,6 +147,14 @@ fn name_table() -> &'static NameTable {
 }
 
 impl TyParamName {
+    /// The identities of a formal list still held as text (a classifier's type parameters).
+    pub fn all<S: AsRef<str>>(names: &[S]) -> Vec<TyParamName> {
+        names
+            .iter()
+            .map(|name| TyParamName::new(name.as_ref()))
+            .collect()
+    }
+
     pub fn new(name: &str) -> TyParamName {
         let table = name_table();
         if let Some(&id) = table.ids.read().unwrap().get(name) {
@@ -202,6 +210,24 @@ impl Ord for TyParamName {
 impl From<&str> for TyParamName {
     fn from(name: &str) -> Self {
         TyParamName::new(name)
+    }
+}
+
+impl From<&TyParamName> for TyParamName {
+    fn from(name: &TyParamName) -> Self {
+        *name
+    }
+}
+
+impl From<&String> for TyParamName {
+    fn from(name: &String) -> Self {
+        TyParamName::new(name)
+    }
+}
+
+impl From<String> for TyParamName {
+    fn from(name: String) -> Self {
+        TyParamName::new(&name)
     }
 }
 
@@ -270,6 +296,18 @@ impl PartialEq<&String> for TyParamName {
 impl PartialEq<TyParamName> for &String {
     fn eq(&self, other: &TyParamName) -> bool {
         self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<TyParamName> for &TyParamName {
+    fn eq(&self, other: &TyParamName) -> bool {
+        **self == *other
+    }
+}
+
+impl PartialEq<&TyParamName> for TyParamName {
+    fn eq(&self, other: &&TyParamName) -> bool {
+        *self == **other
     }
 }
 

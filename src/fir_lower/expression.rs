@@ -100,10 +100,10 @@ impl BodyLowering<'_> {
                                 self.ir.mark_positionless(lowered);
                             }
                             if debug.source != 0 {
-                                self.ir.expr_source_lines.insert(lowered, debug.source);
+                                self.ir.set_source_line(lowered, debug.source);
                             }
                             if debug.end != 0 {
-                                self.ir.expr_end_lines.insert(lowered, debug.end);
+                                self.ir.set_end_line(lowered, debug.end);
                             }
                             Ok(lowered)
                         }
@@ -114,7 +114,7 @@ impl BodyLowering<'_> {
                             // hoisting snapshots every effectful part before a later suspension and
                             // consumes this producer-owned type rather than rediscovering it.
                             let ty = self.converted_type(part.value, part.conversion)?;
-                            self.ir.logical_types.insert(lowered, ty);
+                            self.ir.set_logical_type(lowered, ty);
                             Ok(lowered)
                         }
                     })
@@ -273,7 +273,8 @@ impl BodyLowering<'_> {
                 target,
                 dispatch_receiver,
             } => {
-                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
+                let (dispatch_receiver, _) =
+                    self.module_property_receiver(*target, *dispatch_receiver)?;
                 self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::LateinitFieldRead {
                         target: *target,
@@ -285,7 +286,8 @@ impl BodyLowering<'_> {
                 target,
                 dispatch_receiver,
             } => {
-                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
+                let (dispatch_receiver, _) =
+                    self.module_property_receiver(*target, *dispatch_receiver)?;
                 self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::BackingFieldRead {
                         target: *target,
@@ -299,7 +301,8 @@ impl BodyLowering<'_> {
                 value,
                 conversion,
             } => {
-                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
+                let (dispatch_receiver, _) =
+                    self.module_property_receiver(*target, *dispatch_receiver)?;
                 let value = self.expression_with_conversion(*value, *conversion)?;
                 self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::BackingFieldWrite {
@@ -361,7 +364,7 @@ impl BodyLowering<'_> {
                 // result is the `Int` that the relational operator compares with zero; the outer
                 // FIR expression records only the final Boolean, so keep the nested operand's
                 // checked type explicitly too.
-                self.ir.logical_types.insert(call, Ty::Int);
+                self.ir.set_logical_type(call, Ty::Int);
                 if let IrExpr::Call {
                     callee: call_callee,
                     ..
@@ -392,7 +395,7 @@ impl BodyLowering<'_> {
                 // The selected `contains` convention call is the Boolean operand of a synthesized
                 // negation for `!in`. The outer FIR expression records the negation's type, not
                 // this nested call's, so preserve the checker-owned result before building it.
-                self.ir.logical_types.insert(call, Ty::Boolean);
+                self.ir.set_logical_type(call, Ty::Boolean);
                 if *negated {
                     self.ir.add_negation(call)
                 } else {
@@ -418,7 +421,7 @@ impl BodyLowering<'_> {
                 ) {
                     return Err(FirLoweringFailure::InvalidComparableRangeOrdering { origin });
                 }
-                self.ir.logical_types.insert(lower, Ty::Int);
+                self.ir.set_logical_type(lower, Ty::Int);
                 let end = self.expression(*upper_bound)?;
                 self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::ComparableRangeContains {
@@ -546,9 +549,7 @@ impl BodyLowering<'_> {
                             check: crate::ir::NullCheck::Source,
                         });
                         let asserted = if operand_ty != target.get() {
-                            self.ir
-                                .logical_types
-                                .insert(asserted, operand_ty.non_null());
+                            self.ir.set_logical_type(asserted, operand_ty.non_null());
                             self.ir.add_expr(IrExpr::TypeOp {
                                 op: IrTypeOp::ImplicitCoercion,
                                 arg: asserted,
@@ -873,9 +874,7 @@ impl BodyLowering<'_> {
                         (None, present_comparison),
                     ],
                 });
-                self.ir
-                    .logical_types
-                    .insert(lhs_present_result, Ty::Boolean);
+                self.ir.set_logical_type(lhs_present_result, Ty::Boolean);
                 let lhs_is_null = null_test(self, lhs_temporary);
                 let rhs_null_comparison = null_test(self, rhs_temporary);
                 let lhs_null_result = if *operation == FirBinaryOperation::Equal {
@@ -889,7 +888,7 @@ impl BodyLowering<'_> {
                         (None, lhs_present_result),
                     ],
                 });
-                self.ir.logical_types.insert(result, Ty::Boolean);
+                self.ir.set_logical_type(result, Ty::Boolean);
                 self.ir.add_expr(IrExpr::Block {
                     stmts: vec![lhs_variable, rhs_variable],
                     value: Some(result),
@@ -1122,7 +1121,7 @@ impl BodyLowering<'_> {
                 let result = self.ir.add_expr(IrExpr::When {
                     branches: vec![(Some(condition), rhs), (None, lhs)],
                 });
-                self.ir.logical_types.insert(result, expression.ty.get());
+                self.ir.set_logical_type(result, expression.ty.get());
                 // The fold's right-side condition marks the elvis's line. Where the right side is
                 // the chain's next link, kotlinc's chain marks that link's operand line there
                 // instead, and the last link marks the line the chain started on.
@@ -1500,9 +1499,9 @@ impl BodyLowering<'_> {
                 lambda
             }
         };
-        self.ir.logical_types.insert(lowered, expression.ty.get());
+        self.ir.set_logical_type(lowered, expression.ty.get());
         let lowered = crate::ir::complete_bottom_value(self.ir, lowered, expression.ty.get());
-        self.ir.logical_types.insert(lowered, expression.ty.get());
+        self.ir.set_logical_type(lowered, expression.ty.get());
         // A lambda's own provenance went to its node above; the references in its body carry
         // theirs.
         if !matches!(expression.kind, FirExprKind::Lambda { .. }) {
@@ -1524,7 +1523,7 @@ impl BodyLowering<'_> {
             self.ir.mark_positionless(lowered);
         }
         if debug.source != 0 {
-            self.ir.expr_source_lines.insert(lowered, debug.source);
+            self.ir.set_source_line(lowered, debug.source);
             // The builtin call this node realizes, when lowering made a node of its own for it.
             if let Some(call) = builtin_call.filter(|_| lowered as usize >= first_generated) {
                 self.ir.builtin_calls.insert(lowered, call);
@@ -1532,27 +1531,24 @@ impl BodyLowering<'_> {
             // A call whose operands were stored first keeps the call's line on the call itself, which
             // kotlinc marks once those operands are evaluated.
             if let Some(&call) = self.operand_bound_calls.get(&lowered) {
-                self.ir
-                    .expr_source_lines
-                    .entry(call)
-                    .or_insert(debug.source);
+                self.ir.set_source_line_if_absent(call, debug.source);
             }
             for raw in first_generated..self.ir.exprs.len() {
                 let raw = raw as u32;
                 if !self.ir.suspend_calls.contains_key(&raw) {
                     continue;
                 }
-                self.ir.expr_source_lines.entry(raw).or_insert(debug.source);
+                self.ir.set_source_line_if_absent(raw, debug.source);
             }
         }
         if debug.end != 0 {
-            self.ir.expr_end_lines.insert(lowered, debug.end);
+            self.ir.set_end_line(lowered, debug.end);
             for raw in first_generated..self.ir.exprs.len() {
                 let raw = raw as u32;
                 if !self.ir.suspend_calls.contains_key(&raw) {
                     continue;
                 }
-                self.ir.expr_end_lines.entry(raw).or_insert(debug.end);
+                self.ir.set_end_line_if_absent(raw, debug.end);
             }
         }
         self.record_expression_origins(first_generated, lowered, origin);
@@ -1668,12 +1664,9 @@ impl BodyLowering<'_> {
         // The conversion remains the same checked source operation. Keep its position on the
         // original producer and on the selected call inside an operand-evaluation block.
         if source_line != 0 {
-            self.ir.expr_source_lines.entry(call).or_insert(source_line);
+            self.ir.set_source_line_if_absent(call, source_line);
             if let Some(&selected) = self.operand_bound_calls.get(&call) {
-                self.ir
-                    .expr_source_lines
-                    .entry(selected)
-                    .or_insert(source_line);
+                self.ir.set_source_line_if_absent(selected, source_line);
             }
         }
         let coercion = self.ir.add_expr(IrExpr::TypeOp {
@@ -1724,16 +1717,16 @@ impl BodyLowering<'_> {
             let first_generated = self.ir.exprs.len();
             let constant = lower_constant(&folded.value, folded.ty, origin)?;
             let lowered = self.ir.add_expr(IrExpr::Const(constant));
-            self.ir.logical_types.insert(lowered, folded.ty);
+            self.ir.set_logical_type(lowered, folded.ty);
             let debug = self.body.expression_debug_lines(value);
             if debug.positionless {
                 self.ir.mark_positionless(lowered);
             }
             if debug.source != 0 {
-                self.ir.expr_source_lines.insert(lowered, debug.source);
+                self.ir.set_source_line(lowered, debug.source);
             }
             if debug.end != 0 {
-                self.ir.expr_end_lines.insert(lowered, debug.end);
+                self.ir.set_end_line(lowered, debug.end);
             }
             self.record_expression_origins(first_generated, lowered, origin);
             return Ok(lowered);
@@ -1744,8 +1737,8 @@ impl BodyLowering<'_> {
             matches!(conversion.kind, FirConversionKind::FunctionValue { .. })
         }) {
             // The checker named the class a function-value conversion compiles to on its value.
-            if let Some(&line) = self.ir.expr_source_lines.get(&expression) {
-                self.ir.expr_source_lines.insert(converted, line);
+            if let Some(line) = self.ir.source_line(expression) {
+                self.ir.set_source_line(converted, line);
             }
             self.record_generated_class_provenance(value, converted as usize);
         }
@@ -1797,8 +1790,8 @@ impl BodyLowering<'_> {
                         origin: conversion_origin,
                     })
                     .map(platform_null_check)?;
-                if check == crate::ir::NullCheck::Unnamed {
-                    return Ok(self.unnamed_null_check(expression, source_type, to.get()));
+                if let crate::ir::NullCheck::Unnamed { site } = check {
+                    return Ok(self.unnamed_null_check(expression, source_type, to.get(), site));
                 }
                 // A generic external call can already carry its checked result cast. Kotlin checks
                 // the value produced by the call and then casts that checked value; keep the
@@ -1823,9 +1816,7 @@ impl BodyLowering<'_> {
                         check,
                     });
                     if source_type != to.get() {
-                        self.ir
-                            .logical_types
-                            .insert(asserted, source_type.non_null());
+                        self.ir.set_logical_type(asserted, source_type.non_null());
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg: asserted,
@@ -1890,6 +1881,11 @@ impl BodyLowering<'_> {
                         nullable: false,
                         kotlin_interface: conversion.kotlin_interface,
                         parameter_identities: conversion.parameter_identities.to_vec(),
+                        type_parameters: conversion
+                            .type_parameters
+                            .iter()
+                            .map(crate::ir::IrSamTypeParameter::lowered)
+                            .collect(),
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,
@@ -1928,7 +1924,13 @@ impl BodyLowering<'_> {
     /// kotlinc's implicit not-null cast over a value it cannot name keeps the value in a temporary,
     /// checks the temporary, and yields it (`astore; aload; checkNotNull; aload`). A read of a
     /// stable binding is its own snapshot: `irLetS` checks and yields the binding itself.
-    fn unnamed_null_check(&mut self, value: ExprId, source_type: Ty, target: Ty) -> ExprId {
+    fn unnamed_null_check(
+        &mut self,
+        value: ExprId,
+        source_type: Ty,
+        target: Ty,
+        site: crate::ir::NullCheckSite,
+    ) -> ExprId {
         let reused = self.stable_value_read(value);
         let (stored, temporary) = match reused {
             Some(slot) => (None, slot),
@@ -1950,7 +1952,7 @@ impl BodyLowering<'_> {
         };
         let check = self.ir.add_expr(IrExpr::NotNullAssert {
             operand: checked,
-            check: crate::ir::NullCheck::Unnamed,
+            check: crate::ir::NullCheck::Unnamed { site },
         });
         let mut result = self.checked_value_read(temporary, reused.is_some());
         if source_type != target {
@@ -1986,7 +1988,7 @@ impl BodyLowering<'_> {
         self.ir
             .short_circuits
             .insert(when, crate::ir::IrShortCircuitKind::And);
-        self.ir.logical_types.insert(when, Ty::Boolean);
+        self.ir.set_logical_type(when, Ty::Boolean);
         when
     }
 
@@ -1998,7 +2000,7 @@ impl BodyLowering<'_> {
         self.ir
             .short_circuits
             .insert(when, crate::ir::IrShortCircuitKind::Or);
-        self.ir.logical_types.insert(when, Ty::Boolean);
+        self.ir.set_logical_type(when, Ty::Boolean);
         when
     }
 
@@ -2011,7 +2013,7 @@ impl BodyLowering<'_> {
             stmts: vec![effect],
             value: Some(unit),
         });
-        self.ir.logical_types.insert(block, Ty::Unit);
+        self.ir.set_logical_type(block, Ty::Unit);
         block
     }
 
@@ -2096,13 +2098,13 @@ impl BodyLowering<'_> {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });
         self.ir.whens.exhaustive.insert(guarded, result_type);
-        self.ir.logical_types.insert(guarded, result_type);
+        self.ir.set_logical_type(guarded, result_type);
         self.ir.null_guards.insert(guarded);
         let block = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],
             value: Some(guarded),
         });
-        self.ir.logical_types.insert(block, result_type);
+        self.ir.set_logical_type(block, result_type);
         Ok(block)
     }
 
@@ -2178,7 +2180,7 @@ impl BodyLowering<'_> {
             let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
             let line = self.body.expression_debug_lines(safe_call).source;
             if line != 0 {
-                self.ir.expr_source_lines.insert(null, line);
+                self.ir.set_source_line(null, line);
             }
             null
         };
@@ -2189,7 +2191,7 @@ impl BodyLowering<'_> {
         // common-IR `when`; a backend may choose its physical representation but must not
         // reconstruct `Nothing`, nullability, or another result from the branch instructions.
         self.ir.whens.exhaustive.insert(guarded, result_type);
-        self.ir.logical_types.insert(guarded, result_type);
+        self.ir.set_logical_type(guarded, result_type);
         self.ir.null_guards.insert(guarded);
         let block = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],
@@ -2395,18 +2397,8 @@ impl BodyLowering<'_> {
             });
         }
         let class = self.storage_class(owner)?;
-        // Kotlin exposes an enum entry receiver as the parent enum type, while a property declared
-        // in an entry body is owned by that entry's stable anonymous-subclass declaration. The FIR
-        // owner proves the receiver's exact runtime subtype; make that checked narrowing explicit
-        // in common IR before addressing the owner field. Backends receive no inference task.
         if self.ir.checked_enum_entry_classes.contains_key(&owner) {
-            receiver = self.ir.add_expr(IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::Cast,
-                arg: receiver,
-                type_operand: crate::types::Ty::obj_name(
-                    self.ir.classes[class as usize].fq_name_id(),
-                ),
-            });
+            receiver = self.apply_enum_entry_receiver(owner, receiver)?.0;
         }
         self.capture_field_read(receiver, class, field)
     }
@@ -2647,8 +2639,17 @@ fn lower_type_operation(operation: FirTypeOperation, target: crate::types::Ty) -
 pub(super) fn platform_null_check(
     narrowing: &crate::fir::FirPlatformNarrowing,
 ) -> crate::ir::NullCheck {
+    let site = match narrowing.site {
+        crate::fir::FirPlatformNarrowingSite::Value => crate::ir::NullCheckSite::Value,
+        crate::fir::FirPlatformNarrowingSite::ExtensionReceiver => {
+            crate::ir::NullCheckSite::ExtensionReceiver
+        }
+    };
     match &narrowing.message {
-        Some(message) => crate::ir::NullCheck::Named(message.to_string()),
-        None => crate::ir::NullCheck::Unnamed,
+        Some(message) => crate::ir::NullCheck::Named {
+            message: message.to_string(),
+            site,
+        },
+        None => crate::ir::NullCheck::Unnamed { site },
     }
 }

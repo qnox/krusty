@@ -447,3 +447,34 @@ fn a_trimmed_string_literal_is_not_a_constant() {
     assert_identical("TrimmedConstants", SRC, "app/T$Companion");
     assert_identical("TrimmedConstants", SRC, "app/TrimmedConstantsKt");
 }
+
+/// kotlinc's constant checker reads the form source wrote. A number conversion or `unaryMinus`
+/// written as a call over a constant is a constant, and so is a `+` of string literals or `+1`.
+/// An explicit `plus` or `unaryPlus` call, a conversion written as a property (`'a'.code`), and
+/// any other call over constants are not.
+#[test]
+fn only_conversion_and_negation_calls_of_constants_are_constants() {
+    const SRC: &str = "package app\n\
+        \n\
+        const val C = 5\n\
+        val nc = 5\n\
+        val wide = 1.toLong()\n\
+        val narrow = 1.0.toInt()\n\
+        val byte = C.toByte()\n\
+        val chained = 1.toLong().toInt()\n\
+        val max = Long.MAX_VALUE.toInt()\n\
+        val negated = 1.unaryMinus()\n\
+        val negatedDouble = 1.0.unaryMinus()\n\
+        val positive = 1.unaryPlus()\n\
+        val literalPositive = +1\n\
+        val notConstantReceiver = nc.toLong()\n\
+        val code = 'a'.code\n\
+        val length = \"ab\".length\n\
+        val plus = 1.plus(2)\n\
+        val compared = 1.compareTo(2)\n\
+        val text = \"a\".plus(\"b\")\n\
+        val concatenated = \"a\" + \"b\"\n\
+        val largest = maxOf(1, 2)\n\
+        val template = \"${1.toLong()}\"\n";
+    assert_identical("ConstantCalls", SRC, "app/ConstantCallsKt");
+}

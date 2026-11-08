@@ -30,6 +30,22 @@ pub(crate) fn rename(
     let mut renamed_continuations = Vec::new();
     for class in pending {
         let from = ir.classes[class as usize].fq_name;
+        // kotlinc keeps the declaration's captured parameters in @Metadata while the JVM
+        // Signature names the applied superclass/interfaces of this call-site class.
+        if let Some(mut signature) = ir.class_signature_name(from).cloned() {
+            let copy = &ir.classes[class as usize];
+            signature.supers = copy.supertypes.clone();
+            if !signature
+                .supers
+                .iter()
+                .any(|parent| parent.obj_internal() == Some(copy.superclass))
+            {
+                signature
+                    .supers
+                    .insert(0, crate::types::Ty::obj_name(copy.superclass));
+            }
+            ir.insert_lowered_class_signature(from, signature);
+        }
         let name =
             crate::jvm::ir_emit::lambda_class_names::anonymous_class_name(ir, class, facade, modes)
                 .expect("a specialized anonymous object retains complete caller provenance");
@@ -49,11 +65,12 @@ pub(crate) fn rename(
     ir.remap_classifier_identities(&names);
     for (function, from, to, host) in renamed_continuations {
         continuations.machines.rename_continuation(function, to);
-        if let Some(mut metadata) = continuations.metadata.remove(&from.render()) {
+        if let Some(mut metadata) = continuations.metadata.remove(&from) {
+            // The classfile and `@DebugMetadata` spell the host; the map keeps its identity.
             let host = host.render();
             metadata.c = host.replace('/', ".");
             metadata.enclosing_class = host;
-            continuations.metadata.insert(to.render(), metadata);
+            continuations.metadata.insert(to, metadata);
         }
     }
 }

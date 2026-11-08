@@ -68,6 +68,11 @@ pub(crate) struct Parameters {
     /// caller has in no local, so its slot follows the temporaries of the arguments before that
     /// lambda. Without an owner, a captured temporary follows every argument.
     pub capture_owners: Vec<usize>,
+    /// The parameters, by index into `parameters`, that take a function value for an inline
+    /// suspend parameter: kotlinc's `NonInlineArgumentForInlineSuspendParameter.OTHER`. An object
+    /// the body constructs keeps such a value in a field, and its regenerated suspend methods mark
+    /// each invoke of it as a suspension point.
+    pub non_inline_suspend: Vec<usize>,
 }
 
 /// Where one of the body's slots lives in the caller.
@@ -133,6 +138,20 @@ impl Parameters {
             declaration += words;
         }
         None
+    }
+
+    /// Whether a parameter's declaration slot holds a function value of an inline suspend parameter
+    /// the call does not inline.
+    pub(super) fn non_inline_suspend_at(&self, slot: usize) -> bool {
+        let mut declaration = 0usize;
+        for (index, parameter) in self.parameters.iter().enumerate() {
+            let words = parameter.category.words() as usize;
+            if slot < declaration + words {
+                return self.non_inline_suspend.contains(&index);
+            }
+            declaration += words;
+        }
+        false
     }
 
     /// The temporary each parameter is stored to, relative to the inline frame's base, indexed like
@@ -333,6 +352,7 @@ mod tests {
             ],
             captured: vec![parameter(Category::Reference, Binding::Temporary)],
             capture_owners: vec![0],
+            non_inline_suspend: Vec::new(),
         };
         assert_eq!(
             parameters.temporaries(),
@@ -356,6 +376,7 @@ mod tests {
                 },
             )],
             capture_owners: vec![0],
+            non_inline_suspend: Vec::new(),
         };
         assert_eq!(parameters.temporaries(), vec![None, Some(0), None]);
     }
@@ -372,6 +393,7 @@ mod tests {
             ],
             captured: vec![parameter(Category::Reference, Binding::Temporary)],
             capture_owners: vec![0],
+            non_inline_suspend: Vec::new(),
         };
         assert_eq!(
             parameters.temporaries(),

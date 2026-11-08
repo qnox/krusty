@@ -45,6 +45,7 @@ pub(crate) fn realize_calls(
         &classifiers,
         &callables,
         &mut property_realizations,
+        &mut super::module_calls::SuperAccessors::default(),
         crate::jvm::ir_emit::JvmDefaultMode::default(),
     )
     .expect("every module call is realized");

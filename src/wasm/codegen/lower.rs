@@ -21,23 +21,31 @@ use crate::fx_hash::{HashMap, HashSet};
 mod absent_arguments;
 mod arrays;
 mod boxing;
+mod callable_reference_identity;
 mod dependency_exports;
+mod enums;
 mod exceptions;
 mod function_values;
+mod generated_members;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
 mod shared_cells;
+mod string_conversion;
+pub(super) mod value_hash;
 
 #[cfg(test)]
 use tests::lower_alone;
 
 pub(super) use scalar_instructions::is_scalar_operation;
+pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
+        || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
+        || operation == crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
 }
 
 use crate::backend::class_tables::module_interfaces::ModuleInterfaces;
@@ -141,12 +149,20 @@ pub(super) fn lower_file(
         let params = function
             .params
             .iter()
-            .map(|param| carrier(*param)?.ok_or_else(|| "a `Unit` parameter".to_string()))
+            .enumerate()
+            .map(|(parameter, _)| {
+                parameter_carrier(module, ir, id as FunId, parameter as u32)?
+                    .ok_or_else(|| "a `Unit` parameter".to_string())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
     }
     let indices = callable_registry.declare_file(ir, module)?;
+    let reference_file =
+        runtime
+            .callable_references
+            .begin_file(module_name, ir, dependency_exports)?;
     let call_targets = callable_registry.file_calls(ir, callables, module)?;
     let inert_singleton_bindings = crate::backend::inert_staged_singleton_bindings(
         ir,
@@ -196,6 +212,7 @@ pub(super) fn lower_file(
         array_range_checks,
         classifiers,
         module_name,
+        reference_file,
         numbers: plan.interfaces(),
         ir,
         functions: &indices,
@@ -242,6 +259,8 @@ pub(super) fn lower_file(
             ir.declared_value_slot_types(root),
             function.ret,
         );
+        body.scope = crate::ir::IrEnclosure::Function(id as FunId);
+        body.shared_cell_parameters(id as FunId)?;
         match body.function_body(root, function.ret) {
             Ok(()) => {
                 let Body { code, locals, .. } = body;
@@ -257,8 +276,7 @@ pub(super) fn lower_file(
             Err(_reason)
                 if ir.signatures.get(&(id as FunId)).is_some_and(|signature| {
                     signature
-                        .type_params
-                        .iter()
+                        .declared_type_parameters()
                         .any(|parameter| parameter.reified)
                 }) =>
             {
@@ -340,6 +358,8 @@ struct FileContext<'a> {
     array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
+    /// Backend namespace of this file's local callable declarations.
+    reference_file: u32,
     /// The module-wide numbers of the module's interface members.
     numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
@@ -375,9 +395,24 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         TyKind::DOUBLE => ValType::F64,
         TyKind::STRING | TyKind::Null => STRING,
         TyKind::Nullable(Ty::String) => STRING,
+        // Nullable scalars keep their semantic type until this representation boundary. They
+        // use the same boxes as erased values; nullable Unit can hold its singleton or null.
+        TyKind::Nullable(
+            Ty::Boolean
+            | Ty::Byte
+            | Ty::Short
+            | Ty::Char
+            | Ty::Int
+            | Ty::Long
+            | Ty::Float
+            | Ty::Double
+            | Ty::Unit
+            | Ty::Nothing,
+        ) => REFERENCE,
         // Every object, interface and `Any` value, and a type parameter's: a reference the
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
+        TyKind::Intersection(..) if is_reference_intersection(ty) => REFERENCE,
         TyKind::DefinitelyNotNull(inner) if inner.is_ty_param() => REFERENCE,
         // A function value is an object (see `super::super::function_values`).
         TyKind::Fun(signature) if !signature.suspend => REFERENCE,
@@ -386,12 +421,24 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
             REFERENCE
         }
         TyKind::Nullable(inner)
-            if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..)) =>
+            if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..))
+                || is_reference_intersection(inner) =>
         {
             REFERENCE
         }
         _ => return Err(format!("the type `{}`", describe(ty))),
     }))
+}
+
+/// Whether `ty` is an intersection whose every component is carried as a reference: its value is
+/// each of those types at once, so it is carried as one too.
+fn is_reference_intersection(ty: Ty) -> bool {
+    match ty.kind() {
+        TyKind::Intersection(parts) => parts
+            .iter()
+            .all(|&part| matches!(carrier(part), Ok(Some(REFERENCE)))),
+        _ => false,
+    }
 }
 
 /// Carrier admitted to the ordinary signed numeric instruction table. Unsigned values are carried
@@ -455,8 +502,8 @@ fn expression_type(
         IrExpr::Block {
             value: Some(value), ..
         } if ir.checked_type(id).is_none() => return expression_type(ir, declared, *value),
-        IrExpr::GetValue(slot) => match ir.logical_types.get(&id) {
-            Some(ty) => *ty,
+        IrExpr::GetValue(slot) => match ir.logical_type(id) {
+            Some(ty) => ty,
             None => *declared
                 .get(slot)
                 .ok_or_else(|| format!("a read of value {slot} before its declaration"))?,
@@ -471,6 +518,8 @@ fn expression_type(
             ir.functions[function as usize].ret
         }
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        // A top-level property read has its storage's declared type.
+        IrExpr::GetStatic(index) if ir.checked_type(id).is_none() => ir.statics[*index as usize].ty,
         // A shared cell's element is read, and a write evaluates to what it stored, at the
         // element's declared type.
         IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. }
@@ -544,6 +593,7 @@ struct Body<'a> {
     array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
+    reference_file: u32,
     numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
     module: &'a mut Module,
@@ -576,6 +626,13 @@ struct Body<'a> {
     /// How many structured instructions enclose the current position.
     depth: u32,
     loops: Vec<Loop>,
+    /// The executable scope whose code this body emits: the function, the class's constructor or
+    /// singleton, or the file's static initializer. Only the template ownership of a reified
+    /// type operation reads it.
+    scope: crate::ir::IrEnclosure,
+    /// `kotlin.Enum`'s `name` and `ordinal` for the enum constant whose construction is being
+    /// lowered, taken by that construction's allocation.
+    enum_base: Option<(Box<str>, u32)>,
 }
 
 impl<'a> Body<'a> {
@@ -599,6 +656,7 @@ impl<'a> Body<'a> {
         );
         Self {
             module_name: context.module_name,
+            reference_file: context.reference_file,
             array_range_checks: context.array_range_checks,
             classifiers: context.classifiers,
             numbers: context.numbers,
@@ -626,6 +684,8 @@ impl<'a> Body<'a> {
             result,
             depth: 0,
             loops: Vec::new(),
+            scope: crate::ir::IrEnclosure::File,
+            enum_base: None,
         }
     }
 
@@ -1007,8 +1067,8 @@ impl<'a> Body<'a> {
                 if params.len() != args.len() {
                     return Err("a call whose arguments do not match its parameters".into());
                 }
-                for (arg, param) in args.iter().zip(params) {
-                    self.value(*arg, param)?;
+                for (parameter, &arg) in args.iter().enumerate() {
+                    self.function_argument(*function, parameter as u32, arg)?;
                 }
                 let function = self.emitted_function(*function)?;
                 self.code.call(function);
@@ -1087,6 +1147,9 @@ impl<'a> Body<'a> {
             {
                 self.throwable_message(dispatch_receiver, &args, *ret)?;
             }
+            IrExpr::Call { .. } if value_hash::call_kind(self.ir, self.callables, id).is_some() => {
+                self.value_hash_call(id)?;
+            }
             IrExpr::Call {
                 callee: ref call_callee,
                 dispatch_receiver,
@@ -1102,7 +1165,7 @@ impl<'a> Body<'a> {
                 && defaults.is_empty()
                 && self.scalar_operation_of(*target).is_some() =>
             {
-                self.scalar_operation_call(*target, dispatch_receiver, params, *ret, &args)?;
+                self.scalar_operation_call(id, *target, dispatch_receiver, params, *ret, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1124,7 +1187,7 @@ impl<'a> Body<'a> {
                 op: op @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast),
                 arg,
                 type_operand,
-            } => self.type_test(op, arg, type_operand)?,
+            } => self.type_test(id, op, arg, type_operand)?,
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::ImplicitCoercion | IrTypeOp::Cast),
                 arg,
@@ -1191,12 +1254,23 @@ impl<'a> Body<'a> {
                 ..
             } => {
                 self.new_object(
+                    id,
                     internal,
                     &args,
                     ctor_params.as_deref(),
                     external_target,
                     &defaults,
                 )?;
+            }
+            IrExpr::EnumConstant {
+                name,
+                ordinal,
+                construction,
+                published: None,
+                ..
+            } => self.enum_constant(&name, ordinal, construction)?,
+            IrExpr::NoSuchEnumConstant { classifier, name } => {
+                self.no_such_enum_constant(classifier, name)?
             }
             IrExpr::Throw { operand } => self.throw_value(operand)?,
             IrExpr::Vararg {
@@ -1231,11 +1305,22 @@ impl<'a> Body<'a> {
                 receiver,
                 args,
             } => self.method_call(class, index, receiver, &args)?,
+            // `Unit` has no carrier: its one value is the absence of one.
+            IrExpr::SingletonValue { .. } if self.carrier_of(id)?.is_none() => {}
             IrExpr::SingletonValue { classifier } => self.singleton(classifier)?,
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
+                ty,
                 ..
-            } => self.realized_property_read(id, receiver)?,
+            } => {
+                self.realized_property_read(id, receiver)?;
+                // A property stored as `kotlin.Unit`'s instance and read where the checked use is
+                // `Unit` has no carrier there: the stored reference is discarded, as any value
+                // converted to a type without a carrier is.
+                if carrier(ty)?.is_some() && self.carrier_of(id)?.is_none() {
+                    self.code.drop_();
+                }
+            }
             IrExpr::PropertyWrite {
                 receiver: Some(receiver),
                 value,
@@ -1253,6 +1338,19 @@ impl<'a> Body<'a> {
             {
                 self.property_read(*target, *dispatch_receiver)?
             }
+            // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from
+            // the `$Enum` fields its struct leads with.
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && let Some(member) =
+                        crate::backend::enums::base_member(self.callables, *target) =>
+            {
+                self.enum_member(member, *receiver)?
+            }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
                     target,
@@ -1267,6 +1365,21 @@ impl<'a> Body<'a> {
                     && self.is_throwable_message_property(*target) =>
             {
                 self.throwable_message(*receiver, arguments, *result)?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && self.is_string_length_property(*target) =>
+            {
+                self.intrinsic(IrIntrinsic::StringLength, Some(*receiver), &[])?;
             }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::PropertyWrite {
@@ -1385,32 +1498,6 @@ impl<'a> Body<'a> {
             IrConst::UInt(value) => self.code.i32_const(*value as i32),
             IrConst::ULong(value) => self.code.i64_const(*value as i64),
         };
-        Ok(())
-    }
-
-    /// Push `id` converted to a non-null `String`, as a string template does.
-    fn string_of(&mut self, id: u32) -> Result<(), Unsupported> {
-        let ty = self.type_of(id)?;
-        self.expression(id)?;
-        let function = match ty {
-            Some(Ty::String | Ty::Null) => self.runtime.string_or_null,
-            Some(ty) if ty == Ty::nullable(Ty::String) => self.runtime.string_or_null,
-            Some(Ty::Int | Ty::Short | Ty::Byte) => self.runtime.string_of_i32,
-            Some(Ty::Long) => self.runtime.string_of_i64,
-            Some(Ty::Char) => self.runtime.string_of_char,
-            Some(Ty::Boolean) => self.runtime.string_of_boolean,
-            Some(ty) if self.class_of_type(ty).is_some() => {
-                return self.object_to_string(ty);
-            }
-            Some(other) => {
-                return Err(format!(
-                    "a string template part of type `{}`",
-                    describe(other)
-                ));
-            }
-            None => return Ok(()),
-        };
-        self.code.call(function);
         Ok(())
     }
 
@@ -1545,10 +1632,20 @@ impl<'a> Body<'a> {
         } else {
             left.is_unsigned() || right.is_unsigned()
         };
+        // Equality, shifts and the bitwise connectives are sign-agnostic on the carrier (a shift
+        // takes its right-shift kind from `unsigned` below); every other operator needs an
+        // unsigned instruction this lowering does not select yet.
         if unsigned
             && !matches!(
                 op,
-                IrBinOp::Eq | IrBinOp::Ne | IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr
+                IrBinOp::Eq
+                    | IrBinOp::Ne
+                    | IrBinOp::Shl
+                    | IrBinOp::Shr
+                    | IrBinOp::Ushr
+                    | IrBinOp::BitAnd
+                    | IrBinOp::BitOr
+                    | IrBinOp::BitXor
             )
         {
             return Err(format!("an ordinary operator on `{}`", describe(left)));
@@ -1649,6 +1746,34 @@ impl<'a> Body<'a> {
                 self.code.ref_eq();
             }
             (Some(ValType::Ref { .. }), Some(ValType::Ref { .. })) => {
+                self.object_equality(lhs, rhs)?
+            }
+            // `Unit` has one value, so two `Unit` operands are equal, by identity as well.
+            (None, None) => {
+                self.statement(lhs)?;
+                self.statement(rhs)?;
+                self.code.i32_const(1);
+            }
+            // `Unit` against a reference: its instance, compared as any object is.
+            (None, Some(ValType::Ref { .. })) | (Some(ValType::Ref { .. }), None)
+                if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) =>
+            {
+                self.value(lhs, objects::any())?;
+                self.value(rhs, objects::any())?;
+                self.code.ref_eq();
+            }
+            (None, Some(ValType::Ref { .. })) | (Some(ValType::Ref { .. }), None) => {
+                self.object_equality(lhs, rhs)?
+            }
+            // `any == 3`: the primitive side is boxed and the left value's `equals` decides, as
+            // kotlinc's `Intrinsics.areEqual` does. IEEE-754 equality of a nullable floating
+            // value is a different relation and stays unsupported.
+            (Some(ValType::Ref { .. }), Some(scalar))
+            | (Some(scalar), Some(ValType::Ref { .. }))
+                if rank(scalar).is_some()
+                    && matches!(op, IrBinOp::Eq | IrBinOp::Ne)
+                    && mode != EqualityMode::Ieee754 =>
+            {
                 self.object_equality(lhs, rhs)?
             }
             _ => {
@@ -1815,19 +1940,18 @@ mod tests {
     ) -> Result<(), Unsupported> {
         let mut ir = IrFile::default();
         let seven = ir.add_expr(IrExpr::Const(IrConst::Int(7)));
-        ir.logical_types.insert(seven, Ty::Int);
+        ir.set_logical_type(seven, Ty::Int);
         let statement = if diverges {
             ir.add_expr(IrExpr::Return(Some(seven)))
         } else {
             ir.add_expr(IrExpr::UnitInstance)
         };
-        ir.logical_types
-            .insert(statement, if diverges { Ty::Nothing } else { Ty::Unit });
+        ir.set_logical_type(statement, if diverges { Ty::Nothing } else { Ty::Unit });
         let operand = ir.add_expr(IrExpr::Block {
             stmts: vec![statement],
             value: None,
         });
-        ir.logical_types.insert(operand, Ty::Unit);
+        ir.set_logical_type(operand, Ty::Unit);
         let returned = ir.add_expr(IrExpr::Return(Some(operand)));
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![returned],
@@ -1882,7 +2006,7 @@ mod tests {
             type_operand: Ty::String,
         });
         ir.call_declared_ret.insert(call, formal);
-        ir.logical_types.insert(coercion, Ty::String);
+        ir.set_logical_type(coercion, Ty::String);
         assert_eq!(ir.checked_type(call), None);
         assert_eq!(
             expression_type(&ir, &HashMap::default(), call),
@@ -1919,7 +2043,7 @@ mod tests {
             args: Vec::new(),
         });
         ir.call_declared_ret.insert(call, declared);
-        ir.logical_types.insert(call, Ty::String);
+        ir.set_logical_type(call, Ty::String);
         assert_eq!(
             expression_type(&ir, &HashMap::default(), call),
             Ok(Some(Ty::String))
@@ -1951,7 +2075,7 @@ mod tests {
             stmts: Vec::new(),
             value: Some(value),
         });
-        ir.logical_types.insert(block, Ty::Byte);
+        ir.set_logical_type(block, Ty::Byte);
         let declared = HashMap::from_iter([(7, Ty::Int)]);
 
         assert_eq!(expression_type(&ir, &declared, block), Ok(Some(Ty::Byte)));

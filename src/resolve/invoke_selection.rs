@@ -60,6 +60,54 @@ impl SelectedInvokePlan {
 }
 
 impl Checker<'_> {
+    pub(super) fn record_implicit_callable_property_read(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        name: &str,
+        receiver: ImplicitReceiver,
+    ) -> Result<Option<Ty>, ()> {
+        if let Some(binding) = self.lookup(scope, name) {
+            if let ReceiverFnValueOrigin::DispatchProperty {
+                owner,
+                receiver_identity,
+                enum_entry_property: Some(property),
+                ..
+            } = binding.origin
+            {
+                if receiver_identity == receiver.identity {
+                    if !self.value_type_claims_call(scope, binding.ty) {
+                        return Ok(None);
+                    }
+                    if !self.publish_enum_entry_property_read(
+                        scope,
+                        expression,
+                        owner,
+                        property,
+                        receiver_identity,
+                    ) {
+                        self.diags.error(
+                            self.span(expression),
+                            "selected enum-entry property has no declaring receiver",
+                        );
+                        return Err(());
+                    }
+                    return Ok(Some(self.set(expression, binding.ty)));
+                }
+            }
+        }
+        let Ok(Some(selection)) = self.select_property_read(scope, receiver.ty, name) else {
+            return Ok(None);
+        };
+        if !self.value_type_claims_call(scope, selection.ty()) {
+            return Ok(None);
+        }
+        let ty = self.record_property_read(scope, Some(expression), selection);
+        self.set(expression, ty);
+        self.mark_implicit_receiver_selection(expression, receiver);
+        Ok(Some(ty))
+    }
+
     pub(super) fn invoke_operator_candidates(
         &self,
         receiver_ty: Ty,
@@ -124,7 +172,7 @@ impl Checker<'_> {
             let bound = bound.non_null();
             let callable_bounds = match bound.kind() {
                 TyKind::Fun(_) => vec![bound],
-                TyKind::TyParam(..) => {
+                TyKind::TyParam(..) | TyKind::Var(..) => {
                     self.collect_bound_function_types(scope, bound, visited, functions);
                     Vec::new()
                 }
@@ -179,7 +227,7 @@ impl Checker<'_> {
     fn invoke_projects_type_parameter(&self, receiver: Ty, function: Ty) -> bool {
         let mut first_bound = receiver.non_null();
         let mut visited = crate::fx_hash::HashSet::default();
-        while let TyKind::TyParam(name, bound) = first_bound.kind() {
+        while let TyKind::TyParam(name, bound) | TyKind::Var(name, bound) = first_bound.kind() {
             if !visited.insert(name) {
                 return false;
             }
@@ -230,7 +278,7 @@ impl Checker<'_> {
     ) -> bool {
         match ty.kind() {
             TyKind::Nullable(_) | TyKind::Null => true,
-            TyKind::TyParam(name, bound) => {
+            TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => {
                 visited.insert(name.as_str())
                     && std::iter::once(bound)
                         .chain(self.semantic_tparam_extra_bounds(scope, ty))
@@ -715,6 +763,7 @@ impl Checker<'_> {
             let member = selected.member_with_return(ret);
             let access_probe = crate::symbol_resolver::ResolvedMember {
                 receiver: receiver_ty,
+                declaring_receiver: None,
                 physical_params: selected.callable.physical_params.clone(),
                 context_args: shape.context_sources.clone(),
                 ret,
@@ -1182,6 +1231,7 @@ impl Checker<'_> {
                     let member = selected.member_with_return(ret);
                     let access_probe = crate::symbol_resolver::ResolvedMember {
                         receiver: receiver_ty,
+                        declaring_receiver: None,
                         member: member.clone(),
                         physical_params: physical_params.clone(),
                         context_args: shape.context_sources.clone(),

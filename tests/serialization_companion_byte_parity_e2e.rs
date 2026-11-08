@@ -2332,11 +2332,8 @@ fn member_signature(disassembly: &str, member: &str) -> String {
 /// Decode one generated member's Kotlin-metadata return type. The JVM Signature and metadata are
 /// separate attributes built by separate emitters, so bytecode parity alone does not cover this.
 fn metadata_member_return(bytes: &[u8], owner: &str, member: &str) -> Ty {
-    let (d1, d2) = common_core::raw_kotlin_metadata(bytes).expect("read Kotlin metadata");
-    let d1 = vec![d1.into_iter().map(char::from).collect::<String>()];
-    let metadata = krusty::jvm::metadata::decode_metadata(&d1, &d2, Some(1), owner, None, &[])
-        .expect("generated class metadata decodes");
-    let matches = metadata
+    let members = generated_members(bytes, owner);
+    let matches = members
         .class_functions
         .iter()
         .filter(|function| function.kotlin_name == member)
@@ -2446,11 +2443,14 @@ struct ConstructorMetadataShape {
     jvm_descriptor: Option<&'static str>,
 }
 
+fn generated_members(bytes: &[u8], owner: &str) -> krusty::jvm::metadata::KotlinMembers {
+    let class = krusty::jvm::classreader::parse_class(bytes).expect("generated class parses");
+    assert_eq!(class.this_class(), owner);
+    class.kotlin_members().expect("members decode").clone()
+}
+
 fn metadata_constructors(bytes: &[u8], owner: &str) -> Vec<ConstructorMetadataShape> {
-    let (d1, d2) = common_core::raw_kotlin_metadata(bytes).expect("read Kotlin metadata");
-    let d1 = vec![d1.into_iter().map(char::from).collect::<String>()];
-    krusty::jvm::metadata::decode_metadata(&d1, &d2, Some(1), owner, None, &[])
-        .expect("generated class metadata decodes")
+    generated_members(bytes, owner)
         .constructors
         .iter()
         .map(|constructor| ConstructorMetadataShape {

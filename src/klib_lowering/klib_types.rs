@@ -256,13 +256,23 @@ fn annotation_classifier(annotation: &KlibIrAnnotation) -> Option<TypeName> {
 /// declaration's role, not the name, decides. Suspend and reflective classifiers are not invoked
 /// here.
 pub(super) fn function_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
+    invocation_arity(member, false)
+}
+
+/// A reflective function's inherited invocation, authenticated against the same builtins
+/// declaration as its ordinary function supertype. This grants no reflection-operation support.
+pub(super) fn reference_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
+    invocation_arity(member, true)
+}
+
+fn invocation_arity(member: &KlibPublicIdSignature, reflective: bool) -> Option<usize> {
     let (name, class) = member.declaration().segments().split_last()?;
     let owner = declaration_name(member.package().segments(), class).ok()?;
     let function = function_classifiers::classifier(owner)?;
-    if function.is_suspend() || function.is_reflective() {
+    if function.is_suspend() || function.is_reflective() != reflective {
         return None;
     }
-    let declaration = function_classifiers::synthetic(function);
+    let declaration = function_classifiers::synthetic(function.invocation_classifier());
     let (functions, _) = declaration
         .declared_callables
         .get(name)?
@@ -285,6 +295,34 @@ pub(super) fn classifier_name(
         signature.package().segments(),
         signature.declaration().segments(),
     )
+}
+
+/// The declaring container and own segment of the classifier `signature` names.
+pub(super) fn classifier_declaration(
+    signature: &KlibPublicIdSignature,
+) -> Result<crate::types::ClassifierDeclarationName, KlibBodyDeclineReason> {
+    let segments = signature.declaration().segments();
+    let (name, owner) = segments
+        .split_last()
+        .ok_or(KlibBodyDeclineReason::UnsupportedType(
+            "a type whose classifier is not a class",
+        ))?;
+    let name = name.as_str().into();
+    Ok(if owner.is_empty() {
+        let package = signature
+            .package()
+            .segments()
+            .iter()
+            .fold(TypeName::ROOT, |parent, segment| {
+                type_name_child(parent, segment)
+            });
+        crate::types::ClassifierDeclarationName::TopLevel { package, name }
+    } else {
+        crate::types::ClassifierDeclarationName::Nested {
+            owner: declaration_name(signature.package().segments(), owner)?,
+            name,
+        }
+    })
 }
 
 /// The classifier that declares the member `member`: its signature's declaration path without the
