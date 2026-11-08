@@ -407,7 +407,6 @@ coroutines/bridges/lambdaWithLongReceiver.kt
 coroutines/bridges/lambdaWithMultipleParameters.kt
 coroutines/bridges/mapSuspendAbstractClear.kt
 coroutines/bridges/mapSuspendClear.kt
-coroutines/builderInferenceAndGenericArrayAcessCall.kt
 coroutines/captureInfixFun.kt
 coroutines/captureMutableLocalVariableInsideCoroutineBlock.kt
 coroutines/captureUnaryOperator.kt
@@ -1658,7 +1657,6 @@ properties/accessorForProtectedPropertyWithPrivateSetterInObjectLiteral.kt
 properties/accessorForProtectedPropertyWithPrivateSetterViaSuper.kt
 properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
 properties/backingField/backingFieldWithSmartTypeParameters.kt
-properties/backingField/equalsHashCodeWithValueClassExplicitBackingFieldAndSupertype.kt
 properties/complexPropertyInitializer.kt
 properties/eagerInitializationGlobal1.kt
 properties/eagerInitializationGlobal2.kt
@@ -2428,7 +2426,6 @@ regressions/multimodule/inlineTextTrim.kt
 regressions/multimodule/inlineUnsignedConstructionAndData.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
-regressions/resolvedCallForGetOperator.kt
 reified/callChain.kt
 reified/callableReferenceInlinedFun.kt
 reified/callableReferenceInlinedFunFromOtherModule.kt
