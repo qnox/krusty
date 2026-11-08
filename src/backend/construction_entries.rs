@@ -34,6 +34,24 @@ pub fn realize(ir: &mut IrFile, exports: &mut DependencyExportSignatures) {
     }
 }
 
+/// Exercise the production export realization with an exact primary-constructor identity.
+#[cfg(any(test, feature = "test-support"))]
+pub fn realize_primary_constructor_for_test(
+    ir: &mut IrFile,
+    class: crate::ir::ClassId,
+    identity: super::KlibDependencyCallable,
+) {
+    let mut exports = DependencyExportSignatures::default();
+    exports.record_constructor(
+        super::ExportedConstructor {
+            class,
+            secondary: None,
+        },
+        identity,
+    );
+    realize(ir, &mut exports);
+}
+
 /// The entry answering the instance of the object `classifier`.
 fn instance(ir: &mut IrFile, classifier: crate::types::TypeName) -> Option<FunId> {
     let result = ir.declared_class_self_type(classifier)?;

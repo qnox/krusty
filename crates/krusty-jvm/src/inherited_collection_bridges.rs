@@ -48,6 +48,11 @@ pub(super) struct InheritedCollectionBridge {
 
 #[derive(Clone, Debug)]
 pub(super) enum InheritedCollectionBridgeBody {
+    /// `ACC_PUBLIC|ACC_ABSTRACT`: the superclass leaves the member abstract (`AbstractList.size()`),
+    /// so its specialization stays abstract (`abstract int getSize()`) for a subclass to implement.
+    Abstract {
+        signature: Option<InheritedBridgeSignature>,
+    },
     /// `ACC_PUBLIC|ACC_BRIDGE`: call the immediate superclass implementation.
     SuperDelegate {
         owner: TypeName,
@@ -600,22 +605,30 @@ fn member_bridges(
                 .collect()
         }),
         result: specialized_result,
-        body: InheritedCollectionBridgeBody::SuperDelegate {
-            owner: class.superclass,
-            name: specification.physical_name.clone(),
-            descriptor: member.method.descriptor.clone(),
-            delegate_result: super_result,
-            // The entry is the fake override itself, signed at its specialized types with each
-            // class type parameter erased (`contains(Ljava/util/Map$Entry<LZ;LZ;>;)Z`;
-            // `getValues()Ljava/util/Collection<Ljava/lang/Object;>;` on `C<T> : HashMap<T, T>`).
-            signature: Some(InheritedBridgeSignature {
+        // The entry is the fake override itself, signed at its specialized types with each
+        // class type parameter erased (`contains(Ljava/util/Map$Entry<LZ;LZ;>;)Z`;
+        // `getValues()Ljava/util/Collection<Ljava/lang/Object;>;` on `C<T> : HashMap<T, T>`).
+        // An abstract superclass method keeps that specialization abstract.
+        body: {
+            let signature = Some(InheritedBridgeSignature {
                 parameters: specification
                     .parameters
                     .iter()
                     .map(|parameter| erase_type_parameters(*parameter))
                     .collect(),
                 result: erase_type_parameters(specialized_result),
-            }),
+            });
+            if member.method.is_abstract() {
+                InheritedCollectionBridgeBody::Abstract { signature }
+            } else {
+                InheritedCollectionBridgeBody::SuperDelegate {
+                    owner: class.superclass,
+                    name: specification.physical_name.clone(),
+                    descriptor: member.method.descriptor.clone(),
+                    delegate_result: super_result,
+                    signature,
+                }
+            }
         },
     }];
 

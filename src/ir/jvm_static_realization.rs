@@ -93,15 +93,20 @@ impl IrFile {
         &self,
         index: u32,
     ) -> Option<(&super::IrClass, &super::IrProperty)> {
-        let (&(companion, property), _) = self
-            .jvm_companion_property_statics
-            .iter()
-            .find(|(_, static_index)| **static_index == index)?;
+        let (companion, property) = self.jvm_companion_static_property(index)?;
         let class = self
             .classes
             .iter()
             .find(|class| class.fq_name == companion)?;
         Some((class, class.properties.get(property as usize)?))
+    }
+
+    /// The exact `(companion, property index)` declaration whose storage `index` realizes.
+    pub fn jvm_companion_static_property(&self, index: u32) -> Option<(TypeName, u32)> {
+        self.jvm_companion_property_statics
+            .iter()
+            .find(|(_, static_index)| **static_index == index)
+            .map(|(&declaration, _)| declaration)
     }
 
     pub fn set_jvm_static_field_name(&mut self, index: u32, name: String) {

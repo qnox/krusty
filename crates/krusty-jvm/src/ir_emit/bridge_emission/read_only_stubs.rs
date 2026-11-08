@@ -300,11 +300,11 @@ fn emit_type_safe_special_bridges(
 
 /// The member a bridge forwards to, by its JVM name and physical descriptor, and the value class
 /// whose carrier it returns where an erased reference result expects the box.
-struct Target<'a> {
-    name: &'a str,
-    parameters: &'a [Ty],
-    result: Ty,
-    result_box: Option<ValueClassAdapter>,
+pub(super) struct Target<'a> {
+    pub(super) name: &'a str,
+    pub(super) parameters: &'a [Ty],
+    pub(super) result: Ty,
+    pub(super) result_box: Option<ValueClassAdapter>,
 }
 
 /// The bridge of an implemented member: each erased argument is cast or unboxed to the
@@ -312,7 +312,7 @@ struct Target<'a> {
 /// result is discarded for a `void` bridge (a `Nothing` member's `Void`) or boxed back to the
 /// erased result when that is a reference. A type-safe declaration's bridge first tests each
 /// checked argument against its declared type.
-fn emit_forwarding<const ACCESS: u16>(
+pub(super) fn emit_forwarding<const ACCESS: u16>(
     class: &IrClass,
     cw: &mut ClassWriter,
     target: &Target<'_>,
@@ -464,12 +464,14 @@ fn method_locals(class: &IrClass, method: &ThrowingMethod) -> Vec<(String, Strin
 }
 
 #[derive(Clone, Copy)]
-struct ThrowingMethod<'a> {
-    name: &'a str,
-    parameters: &'a [Ty],
-    parameter_names: &'a [String],
-    descriptor: &'a str,
-    signature: Option<&'a str>,
+/// A method a stub or bridge writes: its JVM name, parameters with their names, descriptor, and
+/// generic signature.
+pub(super) struct ThrowingMethod<'a> {
+    pub(super) name: &'a str,
+    pub(super) parameters: &'a [Ty],
+    pub(super) parameter_names: &'a [String],
+    pub(super) descriptor: &'a str,
+    pub(super) signature: Option<&'a str>,
 }
 
 fn emit_throwing<const ACCESS: u16>(

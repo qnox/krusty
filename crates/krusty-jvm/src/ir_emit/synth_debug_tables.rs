@@ -156,8 +156,8 @@ pub(super) fn attach_synth_debug_tables(
             .position(|property| property.backing_field == Some(field_index as u32));
         let declared_property = declared_index.map(|index| &c.properties[index]);
         // The accessors' own type: an explicit backing field stores a narrower one.
-        let accessor_ty = declared_property.map_or(f.ty, |property| {
-            declared_property_accessor_jvm(ir, property, f)
+        let accessor_ty = declared_index.map_or(f.ty, |index| {
+            declared_property_accessor_jvm(ir, c, index as u32, f)
         });
         // A scalar getter result over a reference-returning overridden getter is the wrapper.
         let getter_result = if declared_index
@@ -182,7 +182,7 @@ pub(super) fn attach_synth_debug_tables(
         let setter_line = declared_property
             .map(|property| accessor_line(property.accessor_lines.setter))
             .unwrap_or(pline);
-        let (g, s) = accessor_jvm_names(c, &f.name);
+        let (g, s) = accessor_jvm_names(ir, c, &f.name);
         if declared_property.is_none_or(|property| property.getter.is_none()) {
             cw.set_method_debug(
                 &g,
@@ -234,7 +234,7 @@ pub(super) fn attach_synth_debug_tables(
             line
         };
         let pd = krusty::jvm::names::type_descriptor(jvm_declared_ty(&hoisted.ty));
-        let (_, s) = accessor_jvm_names(c, &property.name);
+        let (_, s) = accessor_jvm_names(ir, c, &property.name);
         let getter_line = if property.accessor_lines.getter != 0 {
             property.accessor_lines.getter
         } else {

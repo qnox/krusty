@@ -141,13 +141,15 @@ fn package_marker_parameters(
 /// The getter JVM name module realization gave the property declared at `source_order`: a
 /// declared getter's function name, or a default getter's written `@JvmName`.
 fn realized_getter_name(ir: &IrFile, class_index: usize, source_order: u32) -> Option<String> {
-    let property = ir.classes[class_index]
-        .properties
-        .iter()
-        .find(|property| property.source_order == source_order)?;
+    let class = &ir.classes[class_index];
+    let (index, property) = (0u32..)
+        .zip(&class.properties)
+        .find(|(_, property)| property.source_order == source_order)?;
     match property.getter {
         Some(getter) => Some(ir.functions[getter as usize].name.clone()),
-        None => property.getter_jvm_name.clone(),
+        None => ir
+            .jvm_property_accessor_name(class.fq_name, index, krusty::ir::JvmAccessorSide::Getter)
+            .map(str::to_owned),
     }
 }
 
@@ -162,7 +164,9 @@ pub(super) fn realized_package_getter_name(
             storage,
             getter: None,
             ..
-        } => ir.statics[*storage as usize].getter_jvm_name.clone(),
+        } => ir
+            .jvm_static_accessor_name(*storage, krusty::ir::JvmAccessorSide::Getter)
+            .map(str::to_owned),
         krusty::ir::IrLocalPropertyLayout::TopLevelStorage {
             getter: Some(getter),
             ..

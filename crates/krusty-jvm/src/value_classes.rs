@@ -3567,22 +3567,7 @@ pub(crate) fn lower_value_classes(
         if erased {
             property.ty = erase(&declared, &under);
         }
-        // The SETTER's name is decided by its parameter, not by the storage: a value-class
-        // parameter always contributes to the hash, whether the field behind it holds the carrier
-        // or the box. `var nullableScalar: Crate?` keeps a boxed field AND takes
-        // `setNullableScalar-<hash>(Crate)`, which tying the two decisions together left unmangled.
-        // (The getter keeps its plain name: a value-class RESULT alone contributes no hash inside a
-        // file class.)
-        if property.is_var && property.is_facade_owned() && !property.accessors.any_declared() {
-            property.setter_jvm_name = Some(vc_mangle(
-                &krusty::names::property_setter_name(&property.name),
-                std::slice::from_ref(&declared),
-                &Ty::Unit,
-                &under,
-                false,
-                false,
-            ));
-        }
+        accessor_names::stamp_facade_setter(ir, si as u32, declared, &under);
     }
 
     let lambda_implementation_ids: HashSet<u32> = ir

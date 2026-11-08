@@ -1,6 +1,7 @@
 //! The JVM backend: lowers checked common IR to class files through krusty's class-file layer
 //! (`krusty::jvm`).
 
+mod abstract_builtin_overrides;
 mod annotation_constructions;
 mod annotation_kclass;
 mod anonymous_context_labels;

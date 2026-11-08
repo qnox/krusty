@@ -45,6 +45,7 @@ use super::super::interface_dispatch::ClassRef;
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
 use super::lower::{carrier, parameter_carrier, Unsupported, STRING};
 
+mod companion_construction;
 mod constructor_prefix;
 
 #[cfg(test)]
@@ -230,7 +231,9 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     // Stored by-value captures use the same checked pre-super field transport.
     } else if !constructor_prefix::supported(ir, id) {
         "a class capturing its surroundings"
-    } else if class.companion_class.is_some() {
+    } else if class.companion_class.is_some()
+        && companion_construction::requires_initialization(ir, id)
+    {
         "a class with a companion object"
     } else if class
         .supertypes

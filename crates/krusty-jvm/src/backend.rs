@@ -38,6 +38,8 @@ pub enum SkipReason {
     ReadOnlyCollectionStubs(String),
     /// A collection class's supertype lacks the declaration facts its `toArray` members need.
     CollectionToArray(String),
+    /// An abstract builtin member lacks the source-superclass facts its materialization needs.
+    AbstractBuiltinOverrides(String),
     /// A `suspend inline` callee's compiled body does not say where it places a suspend lambda
     /// passed to it: in the caller's frame, or in an object it constructs.
     SuspendLambdaPlacement(String),
@@ -341,6 +343,9 @@ fn run_backend_passes_after_plugins(
     )?;
     facts.override_results.collection_signatures =
         crate::collection_override_signatures::select(ir, classpath);
+    // An abstract class's materialized builtin members precede bridge derivation: their final
+    // bridges are ones a subclass inherits rather than declares.
+    let abstract_overrides = crate::abstract_builtin_overrides::select(ir, classpath, classifiers)?;
     crate::bridges::derive_bridges(
         ir,
         classpath,
@@ -348,6 +353,7 @@ fn run_backend_passes_after_plugins(
         &facts.override_results,
         &mut facts.function_argument_arrays,
         facts.jvm_default,
+        &abstract_overrides,
     )?;
     crate::collection_barriers::select(
         ir,
@@ -361,6 +367,7 @@ fn run_backend_passes_after_plugins(
             &facts.override_results,
         ),
         read_only_stubs: crate::read_only_collection_stubs::select(ir, classpath, classifiers)?,
+        abstract_overrides,
         to_array: crate::collection_to_array::select(ir, classpath, classifiers)?,
     };
     // The value-class pass reads same-module SOURCE value classes (internal name → sole-field
@@ -1301,6 +1308,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::AbstractBuiltinOverrides(detail) => {
+            diags.error(
+                krusty::diag::Span::new(0, 0),
+                format!("krusty: cannot realize abstract builtin overrides: {detail}"),
+            );
+            return;
+        }
         SkipReason::SuspendLambdaPlacement(detail) => {
             diags.error(
                 krusty::diag::Span::new(0, 0),
@@ -1331,6 +1345,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         | SkipReason::InlineParameters
         | SkipReason::ReadOnlyCollectionStubs(_)
         | SkipReason::CollectionToArray(_)
+        | SkipReason::AbstractBuiltinOverrides(_)
         | SkipReason::SuspendLambdaPlacement(_)
         | SkipReason::MemberDispatch(_) => {
             unreachable!()
@@ -1648,7 +1663,7 @@ pub fn facade_package_metadata_from_ir(
                         setter.is_some() || ir.has_jvm_default_static_setter(*storage),
                         *getter,
                         *setter,
-                        Some(&ir.statics[*storage as usize]),
+                        Some(*storage),
                     ),
                     Some(krusty::ir::IrLocalPropertyLayout::TopLevelAccessor {
                         getter,
@@ -1697,7 +1712,7 @@ pub fn facade_package_metadata_from_ir(
             let getter = has_getter.then(|| {
                 (
                     accessor_jvm_name(getter_function).unwrap_or_else(|| match storage {
-                        Some(storage) => storage.default_getter_jvm_name(),
+                        Some(storage) => ir.jvm_static_getter_name(storage),
                         None => krusty::jvm::names::property_getter_name(&declaration.name),
                     }),
                     value_class_accessor_descriptor(ir, getter_function)
@@ -1709,7 +1724,7 @@ pub fn facade_package_metadata_from_ir(
                 parameters.push_str(&value_descriptor);
                 (
                     accessor_jvm_name(setter_function).unwrap_or_else(|| match storage {
-                        Some(storage) => storage.default_setter_jvm_name(),
+                        Some(storage) => ir.jvm_static_setter_name(storage),
                         None => krusty::jvm::names::property_setter_name(&declaration.name),
                     }),
                     value_class_accessor_descriptor(ir, setter_function)
@@ -2117,8 +2132,6 @@ mod tests {
             is_lateinit: false,
             owner: None,
             visibility: krusty::types::Visibility::Public,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
             erased_declared_ty: None,
             accessors: krusty::ir::IrStaticAccessors::ABSENT,
             line: 0,

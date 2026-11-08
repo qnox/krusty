@@ -324,6 +324,8 @@ const COUNTED_LOOPS: krusty::backend::counted_loops::CountedLoopPolicy =
 
 #[cfg(test)]
 mod tests {
+    mod companion_declarations;
+
     use super::{WasmBackend, WasmTarget};
     use krusty::backend::{Artifact, Entry};
     use krusty::diag::DiagSink;

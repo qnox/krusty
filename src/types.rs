@@ -40,8 +40,9 @@ pub use equality_mode::EqualityMode;
 
 pub(crate) use substitute::{
     declares_formal, ty_canonicalize_params, ty_map_symbols, ty_rename_params,
-    ty_subst_alias_expansion, ty_subst_formals, ty_subst_keep_unbound, ty_subst_supertype_template,
-    ty_with_param_bounds, ty_with_transitive_param_bounds, TyParamBindings,
+    ty_subst_alias_expansion, ty_subst_formals, ty_subst_keep_unbound,
+    ty_subst_keep_unbound_closed, ty_subst_supertype_template, ty_with_param_bounds,
+    ty_with_transitive_param_bounds, TyParamBindings,
 };
 pub use substitute::{ty_subst, ty_subst_all, ty_subst_applied_arguments, TyParamKey};
 

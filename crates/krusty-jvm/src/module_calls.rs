@@ -2,7 +2,7 @@ use crate::property_realizations::PropertyRealizations;
 use krusty::fir::{CallableId, PropertyId};
 use krusty::ir::{
     Callee, ExprId, IrCheckedOperation, IrClassifierKind, IrExpr, IrFile, IrFunction,
-    IrModuleProperty, IrModuleSource, IrStaticPlacement,
+    IrModuleProperty, IrModuleSource, IrStaticPlacement, JvmAccessorSide,
 };
 use krusty::jvm::inline::PropertyAccess;
 use krusty::types::TypeName;
@@ -186,19 +186,33 @@ pub(super) fn applied_jvm_name(
 /// source-written accessor is an ordinary function, which [`realize_declared_function_names`]
 /// renames.
 fn realize_default_accessor_names(ir: &mut IrFile) -> Result<(), ModuleRealizationTarget> {
-    for class in &mut ir.classes {
+    let mut property_names = Vec::new();
+    for class in &ir.classes {
         let failure = ModuleRealizationTarget::Classifier(class.fq_name);
-        for property in &mut class.properties {
+        for (index, property) in (0u32..).zip(&class.properties) {
             let annotations = &property.accessor_annotations;
             let getter = applied_jvm_name(Some(&annotations.getter)).map_err(|()| failure)?;
             let setter = applied_jvm_name(Some(&annotations.setter)).map_err(|()| failure)?;
             if let Some(getter) = getter.filter(|_| property.getter.is_none()) {
-                property.getter_jvm_name = Some(getter.to_owned());
+                property_names.push((
+                    class.fq_name,
+                    index,
+                    JvmAccessorSide::Getter,
+                    getter.to_owned(),
+                ));
             }
             if let Some(setter) = setter.filter(|_| property.setter.is_none()) {
-                property.setter_jvm_name = Some(setter.to_owned());
+                property_names.push((
+                    class.fq_name,
+                    index,
+                    JvmAccessorSide::Setter,
+                    setter.to_owned(),
+                ));
             }
         }
+    }
+    for (class, index, side, name) in property_names {
+        ir.set_jvm_property_accessor_name(class, index, side, name);
     }
     let mut names = Vec::new();
     for (index, storage) in ir.statics.iter().enumerate() {
@@ -217,12 +231,11 @@ fn realize_default_accessor_names(ir: &mut IrFile) -> Result<(), ModuleRealizati
         }
     }
     for (index, getter, setter) in names {
-        let storage = &mut ir.statics[index];
-        if getter.is_some() {
-            storage.getter_jvm_name = getter;
+        if let Some(getter) = getter {
+            ir.set_jvm_static_accessor_name(index as u32, JvmAccessorSide::Getter, getter);
         }
-        if setter.is_some() {
-            storage.setter_jvm_name = setter;
+        if let Some(setter) = setter {
+            ir.set_jvm_static_accessor_name(index as u32, JvmAccessorSide::Setter, setter);
         }
     }
     Ok(())

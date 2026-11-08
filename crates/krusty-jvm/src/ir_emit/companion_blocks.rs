@@ -47,23 +47,24 @@ pub(super) fn property_signature(
             )
         })
     };
+    let storage_index = property.storage;
     let storage = property
         .storage
         .map(|storage| &ir.statics[storage as usize]);
     let default_getter = || {
         (
-            storage.map_or_else(
+            storage_index.map_or_else(
                 || property_getter_name(&property.name),
-                |storage| storage.default_getter_jvm_name(),
+                |storage| ir.jvm_static_getter_name(storage),
             ),
             format!("(){}", type_descriptor(property.ty)),
         )
     };
     let default_setter = || {
         (
-            storage.map_or_else(
+            storage_index.map_or_else(
                 || property_setter_name(&property.name),
-                |storage| storage.default_setter_jvm_name(),
+                |storage| ir.jvm_static_setter_name(storage),
             ),
             format!("({})V", type_descriptor(property.ty)),
         )

@@ -39,33 +39,31 @@ pub(crate) fn declared_signature(
         return None;
     }
     let field = class.fields.get(property.backing_field? as usize)?;
-    let accessor_jt = declared_property_accessor_jvm(ir, property, field);
+    let property_index = class
+        .properties
+        .iter()
+        .position(|declared| std::ptr::eq(declared, property))?;
+    let property_index = u32::try_from(property_index).expect("too many class properties");
+    let accessor_jt = declared_property_accessor_jvm(ir, class, property_index, field);
+    let realized = ir.jvm_property_accessor_names(class.fq_name, property_index);
     let (name, descriptor) = match side {
         PropertyAccessorSide::Getter => {
-            let property_index = class
-                .properties
-                .iter()
-                .position(|declared| std::ptr::eq(declared, property))?;
-            let getter_jt = if override_results.boxes_member_property(
-                class.fq_name,
-                u32::try_from(property_index).expect("too many class properties"),
-            ) {
+            let getter_jt = if override_results.boxes_member_property(class.fq_name, property_index)
+            {
                 jvm_declared_ty(&Ty::nullable(property.ty))
             } else {
                 accessor_jt
             };
             (
-                property
-                    .getter_jvm_name
-                    .clone()
+                realized
+                    .getter
                     .unwrap_or_else(|| krusty::names::property_getter_name(&property.name)),
                 format!("(){}", type_descriptor(getter_jt)),
             )
         }
         PropertyAccessorSide::Setter if property.is_var => (
-            property
-                .setter_jvm_name
-                .clone()
+            realized
+                .setter
                 .unwrap_or_else(|| krusty::names::property_setter_name(&property.name)),
             format!("({})V", type_descriptor(accessor_jt)),
         ),
@@ -136,14 +134,18 @@ pub(super) fn emit(
     let lateinit_end = lateinit_end_line(property, field);
     let field_jt = jvm_value_ty(&field.ty);
     let field_desc = type_descriptor(field_jt);
-    let accessor_jt = declared_property_accessor_jvm(ir, property, field);
-    // A scalar getter result over a reference-returning overridden getter is the wrapper; the
-    // setter keeps taking the scalar (see `jvm::override_results`).
-    let boxed_getter = c
+    let Some(property_index) = c
         .properties
         .iter()
         .position(|declared| std::ptr::eq(declared, property))
-        .is_some_and(|index| override_results.boxes_member_property(c.fq_name, index as u32));
+    else {
+        return;
+    };
+    let property_index = u32::try_from(property_index).expect("too many class properties");
+    let accessor_jt = declared_property_accessor_jvm(ir, c, property_index, field);
+    // A scalar getter result over a reference-returning overridden getter is the wrapper; the
+    // setter keeps taking the scalar (see `jvm::override_results`).
+    let boxed_getter = override_results.boxes_member_property(c.fq_name, property_index);
     let getter_jt = if boxed_getter {
         jvm_declared_ty(&Ty::nullable(property.ty))
     } else {
@@ -353,11 +355,15 @@ fn own_accessor_line(written: u32, property: u32) -> u32 {
 /// decision directly; emission must not repeat classifier/value-class lookup. An explicit backing
 /// field with a narrower type does not otherwise change the property's public descriptor.
 pub(super) fn declared_property_accessor_jvm(
-    _ir: &IrFile,
-    property: &krusty::ir::IrProperty,
+    ir: &IrFile,
+    class: &krusty::ir::IrClass,
+    property: u32,
     field: &krusty::ir::IrField,
 ) -> Ty {
-    let semantic = if property.getter_jvm_name.is_some() {
+    let realized =
+        ir.jvm_property_accessor_name(class.fq_name, property, krusty::ir::JvmAccessorSide::Getter);
+    let property = &class.properties[property as usize];
+    let semantic = if realized.is_some() {
         field.ty
     } else {
         stored_value_ty(property.ty)
@@ -437,4 +443,33 @@ pub(super) fn emit_backing_field_write_adaptation(
             code.checkcast(class);
         }
     }
+}
+
+/// The JVM accessor spellings a class's synthesized property accessors are emitted under: the value-class
+/// pass's stamp when the plain convention is not the physical ABI (`val k: K` → `getK-XLNMDGE`), else the
+/// convention itself. The constant-pool seeder, the debug tables (`LineNumberTable`/`LocalVariableTable`)
+/// and the `@Metadata` record all key on the accessor by NAME, so they must ask the same question the
+/// emission does — a seeded/annotated `getK` beside an emitted `getK-XLNMDGE` interns a constant nothing
+/// uses, drops the accessor's debug info, and (in the record) advertises a method that does not exist.
+/// The convention itself is [`krusty::names::property_getter_name`] — the same helper the accessor
+/// EMISSION uses, so a Kotlin `is`-prefixed property (`val isOpen`, whose accessor keeps the source
+/// name rather than becoming `getIsOpen`) is spelled one way everywhere.
+pub(super) fn accessor_jvm_names(
+    ir: &IrFile,
+    c: &krusty::ir::IrClass,
+    field_name: &str,
+) -> (String, String) {
+    let realized = (0u32..)
+        .zip(&c.properties)
+        .find(|(_, p)| p.name == field_name)
+        .map(|(index, _)| ir.jvm_property_accessor_names(c.fq_name, index))
+        .unwrap_or_default();
+    (
+        realized
+            .getter
+            .unwrap_or_else(|| krusty::names::property_getter_name(field_name)),
+        realized
+            .setter
+            .unwrap_or_else(|| krusty::names::property_setter_name(field_name)),
+    )
 }

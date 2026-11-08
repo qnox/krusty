@@ -133,7 +133,10 @@ mod control_flow_join;
 pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
 mod provider_constructor_selection;
-use constructor_arguments::ConstructionExpectations;
+use constructor_arguments::{
+    ConstructionExpectations, ConstructorCandidateRejection, SourceConstructorSelection,
+};
+use provider_constructor_selection::{LibraryConstructorSelection, RejectedProviderConstructors};
 mod script_receivers;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod call_argument_position;
@@ -198,6 +201,8 @@ mod interface_delegation;
 mod intersection_inference;
 mod intersection_receiver_selection;
 mod invoke_selection;
+mod lexical_value_invoke;
+use lexical_value_invoke::{DeferredInvokePeers, DeferredLexicalInvoke, LexicalInvokeSite};
 mod lambda_call_shapes;
 mod property_read_selection;
 use lambda_call_shapes::UntypedLambdaCall;
@@ -208,6 +213,7 @@ mod lambda_returns;
 mod lexical_bindings;
 mod lexical_policies;
 mod library_constructor_failure;
+mod local_call_applicability;
 mod local_callable_reference_selection;
 mod local_capture_dependencies;
 mod local_class_scope;
@@ -2124,66 +2130,6 @@ fn erased_arg_defeats_selection<'a>(
         }
     }
     false
-}
-
-fn local_function_candidate_score(
-    signature: &Signature,
-    args: &[ExprId],
-    arg_tys: &[Ty],
-    arg_names: Option<&[Option<String>]>,
-    trailing_lambda: bool,
-    argument_fits: impl Fn(Ty, Ty) -> bool,
-) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
-    let context_count = signature.context_count.min(signature.params.len());
-    let params = &signature.params[context_count..];
-    let names = signature
-        .param_names
-        .get(context_count..)
-        .unwrap_or_default();
-    let defaults = signature
-        .param_defaults
-        .get(context_count..)
-        .unwrap_or_default();
-    if arg_names.is_some() || trailing_lambda {
-        let Ok(slots) = map_call_args(
-            args,
-            arg_names,
-            names,
-            params.len(),
-            signature.required.saturating_sub(context_count),
-            defaults,
-            signature
-                .vararg_index
-                .and_then(|index| index.checked_sub(context_count)),
-            trailing_lambda,
-        ) else {
-            return None;
-        };
-        let mut type_score = 0;
-        let mut omitted = 0;
-        for (index, argument) in slots.iter().enumerate() {
-            let Some(argument) = argument else {
-                omitted += 1;
-                continue;
-            };
-            let source_index = args.iter().position(|candidate| candidate == argument)?;
-            let parameter = *params.get(index)?;
-            let actual = *arg_tys.get(source_index)?;
-            if !argument_fits(parameter, actual) {
-                return None;
-            }
-            type_score += if parameter == actual { 2 } else { 1 };
-        }
-        return Some((type_score, std::cmp::Reverse(omitted), !signature.vararg()));
-    }
-    positional_candidate_score_by(
-        params,
-        signature.vararg(),
-        signature.required.saturating_sub(context_count),
-        defaults,
-        arg_tys,
-        argument_fits,
-    )
 }
 
 /// Simple type name → JVM internal name, split into a SHARED read-only base (the library/classpath
@@ -7880,30 +7826,6 @@ struct CtorDelegationCandidate {
     lambda_receivers: Vec<bool>,
 }
 
-enum SourceConstructorSelection {
-    Selected {
-        candidate_index: usize,
-        resolved: Box<ResolvedCtorDelegation>,
-    },
-    NoMatch {
-        mismatch: Option<ConstructorArgumentMismatch>,
-    },
-    Ambiguous,
-}
-
-#[derive(Clone, Copy)]
-struct ConstructorArgumentMismatch {
-    source_argument: usize,
-    expected: Ty,
-    actual: Ty,
-}
-
-enum LibraryConstructorSelection {
-    Selected,
-    Rejected,
-    NoMatch,
-}
-
 #[derive(Clone, Copy)]
 enum ConstructorPriorityTier {
     All,
@@ -10029,16 +9951,8 @@ fn unify_member_extension_slot(
     }
 }
 
-fn apply_inference_bindings(mut ty: Ty, bindings: &crate::symbol_resolver::GSigBinds) -> Ty {
-    let mut seen = crate::fx_hash::HashSet::default();
-    while seen.insert(ty) {
-        let next = crate::symbol_resolver::ty_subst_keep_unbound(ty, bindings);
-        if next == ty {
-            break;
-        }
-        ty = next;
-    }
-    ty
+fn apply_inference_bindings(ty: Ty, bindings: &crate::symbol_resolver::GSigBinds) -> Ty {
+    crate::types::ty_subst_keep_unbound_closed(ty, bindings)
 }
 
 impl<'a> Checker<'a> {
@@ -14380,7 +14294,7 @@ impl<'a> Checker<'a> {
                                 );
                             }
                             Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
-                            Ok(LibraryConstructorSelection::NoMatch) => {}
+                            Ok(LibraryConstructorSelection::NoMatch(_)) => {}
                             Err(error) => {
                                 constructor_mapping_error = Some(error);
                             }
@@ -15794,6 +15708,7 @@ impl<'a> Checker<'a> {
                 // later callable accepts the name; arguments are not contextually checked against
                 // the losing value before that later selection.
                 let mut deferred_function_value_failure = None;
+                let mut deferred_lexical_invoke = None;
                 let local_value = self
                     .lookup(scope, &fname)
                     .map(|local| {
@@ -15850,6 +15765,19 @@ impl<'a> Checker<'a> {
                             Some((*signature, *missing_receiver, missing_context.clone()));
                         // The lexical value is inapplicable, so the next call-tower rung gets the
                         // untouched argument expressions and can supply their actual expectations.
+                    } else if self.lexical_invoke_rejects_arguments(
+                        scope,
+                        call,
+                        receiver_function.map_or(receiver_ty, |(signature, _)| {
+                            Ty::from(TyKind::Fun(signature))
+                        }),
+                        args,
+                        implicit_receiver_function.as_ref(),
+                    ) {
+                        deferred_lexical_invoke = Some(DeferredLexicalInvoke {
+                            receiver_ty,
+                            origin,
+                        });
                     } else {
                         if matches!(
                             origin,
@@ -16498,8 +16426,11 @@ impl<'a> Checker<'a> {
                     );
                     return ret;
                 }
-                let unshadowed_name =
-                    !self.lexical_value_claims_call_with_arguments(scope, &fname, args);
+                // An inapplicable function value remains a candidate, but it does not hide a
+                // same-named classifier. An applicable constructor still wins, and a constructor
+                // whose arguments map but whose types do not is reported beside the value.
+                let unshadowed_name = deferred_lexical_invoke.is_some()
+                    || !self.lexical_value_claims_call_with_arguments(scope, &fname, args);
                 // The alias, if any, is the one `select_classifier_binding` attached to the winning
                 // rung. A later spelling lookup would rediscover a star-imported alias even after a
                 // same-package class won (`class Pick<A, B>` above `typealias Pick<T> = Pick<T, T>`).
@@ -18455,6 +18386,7 @@ impl<'a> Checker<'a> {
                 // Keep its diagnostic pending while the remaining callable-tower levels participate;
                 // report it only if no constructor, same-named function, or companion `invoke` wins.
                 let mut constructor_mapping_failure = None;
+                let mut provider_constructor_rejections = Vec::new();
                 let mut source_constructor_failure = None;
                 let mut low_priority_source_constructor = None;
                 let mut low_priority_provider_constructor = None;
@@ -18526,11 +18458,16 @@ impl<'a> Checker<'a> {
                                     );
                                 }
                                 Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
-                                Ok(LibraryConstructorSelection::NoMatch) => {
+                                Ok(LibraryConstructorSelection::NoMatch(rejections)) => {
+                                    provider_constructor_rejections.extend(rejections);
                                     had_inapplicable_constructor |=
                                         !classifier.constructors.is_empty();
                                 }
-                                Err(error) => constructor_mapping_failure = Some(error),
+                                Err(error) => {
+                                    provider_constructor_rejections
+                                        .extend(error.retained_provider_constructors());
+                                    constructor_mapping_failure = Some(error);
+                                }
                             }
                         }
                     }
@@ -18568,6 +18505,7 @@ impl<'a> Checker<'a> {
                             // A real applicable constructor wins even when a same-named factory is
                             // available. Interfaces deliberately contribute no constructible candidate;
                             // their synthetic source shape exists for diagnostics, not as a callable.
+                            let mut constructor_rejections = Vec::new();
                             let selected = (!cls.is_interface() && !cls.is_object())
                                 .then(|| {
                                     match self.select_source_constructor(
@@ -18579,8 +18517,13 @@ impl<'a> Checker<'a> {
                                             resolved: selected,
                                             ..
                                         } => Some(*selected),
-                                        SourceConstructorSelection::NoMatch { .. }
-                                        | SourceConstructorSelection::Ambiguous => None,
+                                        SourceConstructorSelection::NoMatch {
+                                            rejected, ..
+                                        } => {
+                                            constructor_rejections = rejected;
+                                            None
+                                        }
+                                        SourceConstructorSelection::Ambiguous => None,
                                     }
                                 })
                                 .flatten();
@@ -18617,6 +18560,8 @@ impl<'a> Checker<'a> {
                                         |declaration| declaration.name,
                                     ),
                                     cls.internal_name(),
+                                    constructor_rejections,
+                                    !cls.type_parameters.type_params.is_empty(),
                                 ));
                             }
                         }
@@ -18671,11 +18616,14 @@ impl<'a> Checker<'a> {
                                     );
                                 }
                                 Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
-                                Ok(LibraryConstructorSelection::NoMatch) => {
+                                Ok(LibraryConstructorSelection::NoMatch(rejections)) => {
+                                    provider_constructor_rejections.extend(rejections);
                                     had_inapplicable_constructor |=
                                         !classifier.constructors.is_empty();
                                 }
                                 Err(error) => {
+                                    provider_constructor_rejections
+                                        .extend(error.retained_provider_constructors());
                                     constructor_mapping_failure = Some(error);
                                 }
                             }
@@ -19323,10 +19271,15 @@ impl<'a> Checker<'a> {
                             );
                         }
                         Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
-                        Ok(LibraryConstructorSelection::NoMatch) => {
+                        Ok(LibraryConstructorSelection::NoMatch(rejections)) => {
+                            provider_constructor_rejections.extend(rejections);
                             had_inapplicable_constructor |= !classifier.constructors.is_empty();
                         }
-                        Err(error) => constructor_mapping_failure = Some(error),
+                        Err(error) => {
+                            provider_constructor_rejections
+                                .extend(error.retained_provider_constructors());
+                            constructor_mapping_failure = Some(error);
+                        }
                     }
                 }
                 if let Some((class, selected)) = low_priority_source_constructor {
@@ -19347,6 +19300,41 @@ impl<'a> Checker<'a> {
                 let mut candidates = inapplicable_associated;
                 candidates.extend(self.resolver().top_level_candidates(&fname));
                 candidates.extend(inapplicable_classifier_invoke.iter().cloned());
+                if let Some(result) = self.finish_deferred_lexical_invoke_failure(
+                    scope,
+                    CallArgs {
+                        call,
+                        args,
+                        arg_tys: &arg_tys,
+                    },
+                    &LexicalInvokeSite {
+                        callee,
+                        name: &fname,
+                        span,
+                        expected,
+                    },
+                    deferred_lexical_invoke,
+                    DeferredInvokePeers {
+                        receiver: retained_receiver_call_rejections
+                            .as_ref()
+                            .map(|rejections| rejections.type_rejected_candidates())
+                            .unwrap_or_default(),
+                        later: &candidates,
+                        source_constructors: source_constructor_failure.as_ref().map(
+                            |(_, candidates, name, _, rejected, generic)| {
+                                lexical_value_invoke::SourceConstructorRejections {
+                                    candidates,
+                                    rejected,
+                                    name,
+                                    generic: *generic,
+                                }
+                            },
+                        ),
+                        provider_constructors: &provider_constructor_rejections,
+                    },
+                ) {
+                    return result;
+                }
                 let had_rejected_callable = had_inapplicable_constructor
                     || !candidates.is_empty()
                     || !local_overloads.is_empty();
@@ -19386,7 +19374,7 @@ impl<'a> Checker<'a> {
                     );
                     return Ty::Error;
                 }
-                if let Some((arguments, candidates, class_name, internal)) =
+                if let Some((arguments, candidates, class_name, internal, _, _)) =
                     source_constructor_failure
                 {
                     if !self.report_source_constructor_mapping_error(
@@ -24940,12 +24928,15 @@ fun box(): String {
                         Ty::Char,
                         "(I)C",
                     );
+                    // `kotlin.String.get` is declared `operator`, which is what admits `s[0]`.
+                    let mut info = crate::libraries::FunctionInfo::plain(
+                        crate::libraries::FnKind::Member,
+                        Some(Ty::String),
+                        callable,
+                    );
+                    info.flags.operator = true;
                     return crate::libraries::FunctionSet {
-                        overloads: vec![crate::libraries::FunctionInfo::plain(
-                            crate::libraries::FnKind::Member,
-                            Some(Ty::String),
-                            callable,
-                        )],
+                        overloads: vec![info],
                     };
                 }
                 if recv != Ty::String
@@ -39844,76 +39835,6 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// A lambda/callable-reference literal can claim a function-value call rung only when that
-    /// already-declared function shape supplies a callable expectation for the corresponding slot.
-    /// Unlike a generic function declaration, invoking a value `(T) -> R` cannot infer or replace
-    /// its enclosing `T`; when `T` is not itself callable, `value { ... }` is inapplicable and the
-    /// next call-tower rung (for example an implicit-receiver extension) must be considered.
-    fn local_function_value_accepts_literal_arguments(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        arguments: &[ExprId],
-    ) -> bool {
-        let Some(TyKind::Fun(signature)) = self
-            .local_callable_type(scope, name)
-            .map(|(ty, _)| ty.kind())
-        else {
-            // Callable objects perform their own overload applicability selection.
-            return true;
-        };
-        if arguments.iter().all(|&argument| {
-            !matches!(
-                self.file.expr(argument),
-                Expr::Lambda { .. } | Expr::CallableRef { .. }
-            )
-        }) {
-            // Arity and ordinary value-argument mismatches do not make a selected lexical value
-            // disappear from the call tower. Its fixed `invoke` declaration owns the diagnostic.
-            // Only postponed callable literals need this pre-applicability shape check: they can be
-            // typed solely after a competing callable supplies an expectation, so a lexical value
-            // whose corresponding parameter is not callable must let the next rung participate.
-            return true;
-        }
-        let context_count = signature.context_count.min(signature.params.len());
-        let explicit_context = context_count > 0 && arguments.len() == signature.params.len();
-        let mut parameters = if explicit_context {
-            signature.params.as_slice()
-        } else {
-            &signature.params[context_count..]
-        };
-        if signature.has_receiver && parameters.len() != arguments.len() {
-            let Some((&receiver, values)) = parameters.split_first() else {
-                return false;
-            };
-            if values.len() != arguments.len()
-                || self
-                    .receiver_function_implicit_receiver(
-                        scope,
-                        receiver,
-                        values.len(),
-                        arguments.len(),
-                    )
-                    .is_none()
-            {
-                return false;
-            }
-            parameters = values;
-        }
-        if parameters.len() != arguments.len() {
-            return false;
-        }
-        arguments
-            .iter()
-            .zip(parameters)
-            .all(|(&argument, &expected)| match self.file.expr(argument) {
-                Expr::Lambda { .. } | Expr::CallableRef { .. } => {
-                    expected.non_null().is_fun() || self.semantic_sam_signature(expected).is_some()
-                }
-                _ => true,
-            })
-    }
-
     /// The call-shaping view of a lexical level must agree with final selection. In particular, a
     /// function value whose fixed parameter is not callable cannot claim `value { ... }`; otherwise
     /// it would hide the next implicit-receiver rung while the lambda is being typed even though
@@ -40218,14 +40139,14 @@ impl<'a> Checker<'a> {
             .iter()
             .enumerate()
             .filter_map(|(candidate_index, candidate)| {
-                let mut mismatch = None;
+                let mut rejection = ConstructorCandidateRejection::new(candidate_index);
                 let Some(selected) = self.match_ctor_delegation_candidate(
                     scope,
                     arguments,
                     candidate,
-                    &mut mismatch,
+                    &mut rejection,
                 ) else {
-                    rejected.push((candidate_index, mismatch));
+                    rejected.push(rejection);
                     return None;
                 };
                 let params = candidate.target.params();
@@ -40323,9 +40244,14 @@ impl<'a> Checker<'a> {
         }
         let Some(best) = scored.iter().map(|candidate| candidate.1).max() else {
             let mismatch = (candidates.len() == 1)
-                .then(|| rejected.into_iter().find(|(index, _)| *index == 0)?.1)
+                .then(|| {
+                    rejected
+                        .iter()
+                        .find(|rejection| rejection.candidate_index == 0)?
+                        .first
+                })
                 .flatten();
-            return SourceConstructorSelection::NoMatch { mismatch };
+            return SourceConstructorSelection::NoMatch { mismatch, rejected };
         };
         scored.retain(|candidate| candidate.1 == best);
         let selected = if let [(_, _, candidate_index, selected)] = scored.as_slice() {
@@ -40548,295 +40474,6 @@ impl<'a> Checker<'a> {
             return false;
         }
         self.erased_function_param_fits(expected.non_null(), actual.non_null())
-    }
-
-    fn match_ctor_delegation_candidate(
-        &self,
-        scope: &CheckerScope<'_>,
-        arguments: &CtorDelegationCall,
-        candidate: &CtorDelegationCandidate,
-        mismatch: &mut Option<ConstructorArgumentMismatch>,
-    ) -> Option<ResolvedCtorDelegation> {
-        let outer_receiver = match &candidate.target {
-            ResolvedCtorDelegationTarget::Super {
-                implicit_outer: Some(outer),
-                ..
-            } => {
-                let expected = Ty::obj_name(*outer);
-                let receiver = self
-                    .implicit_receivers(scope)
-                    .into_iter()
-                    .find(|receiver| self.receiver_is_assignable(receiver.ty, expected))?;
-                Some(self.implicit_receiver_selection(receiver))
-            }
-            ResolvedCtorDelegationTarget::ThisPrimary { .. }
-            | ResolvedCtorDelegationTarget::ThisSecondary { .. }
-            | ResolvedCtorDelegationTarget::Super {
-                implicit_outer: None,
-                ..
-            } => None,
-        };
-        let params = candidate.target.params();
-        let full_call_sig = CallSig::source(
-            candidate.param_names.clone(),
-            candidate.defaults.clone(),
-            params
-                .iter()
-                .map(|parameter| match parameter.non_null().kind() {
-                    TyKind::Fun(function) => function.params.clone(),
-                    _ => Vec::new(),
-                })
-                .collect(),
-            candidate.lambda_receivers.clone(),
-            params
-                .iter()
-                .map(|parameter| match parameter.non_null().kind() {
-                    TyKind::Fun(function) => function.context_count,
-                    _ => 0,
-                })
-                .collect(),
-            required_arity(params.len(), &candidate.defaults),
-            candidate.vararg,
-        );
-        let contextual = self.contextual_call_shape(
-            scope,
-            params,
-            &full_call_sig,
-            candidate.context_count,
-            arguments
-                .names
-                .iter()
-                .any(Option::is_some)
-                .then_some(arguments.names.as_slice()),
-        )?;
-        let visible_vararg = contextual.call_sig.vararg_index;
-        let slots = map_call_args(
-            &arguments.args,
-            Some(&arguments.names),
-            &contextual.call_sig.param_names,
-            contextual.params.len(),
-            contextual.call_sig.required,
-            &contextual.call_sig.param_defaults,
-            visible_vararg,
-            arguments.trailing_lambda,
-        )
-        .ok()?;
-        let argument_slots = arguments
-            .args
-            .iter()
-            .map(|argument| {
-                slots
-                    .iter()
-                    .position(|slot| slot.as_ref() == Some(argument))
-                    .or(visible_vararg)
-                    .and_then(|visible| contextual.parameter_indices.get(visible).copied())
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let mut argument_types = Vec::with_capacity(arguments.args.len());
-        let mut argument_declared_types = Vec::with_capacity(arguments.args.len());
-        let mut argument_implicit_integer_coercion = Vec::with_capacity(arguments.args.len());
-        let mut argument_lambda_receivers = Vec::with_capacity(arguments.args.len());
-        for (source, (&argument, &slot)) in arguments.args.iter().zip(&argument_slots).enumerate() {
-            let parameter = *params.get(slot)?;
-            let expected = if candidate.vararg == Some(slot) {
-                if self.file.is_spread_arg(argument)
-                    || arguments.names.get(source).is_some_and(Option::is_some)
-                {
-                    parameter
-                } else {
-                    parameter.array_read_elem()?
-                }
-            } else {
-                if self.file.is_spread_arg(argument) {
-                    return None;
-                }
-                parameter
-            };
-            let declared_parameter = *candidate.target.declaration_params().get(slot)?;
-            let declared = if candidate.vararg == Some(slot)
-                && !self.file.is_spread_arg(argument)
-                && arguments
-                    .names
-                    .get(source)
-                    .is_none_or(|name| name.is_none())
-            {
-                declared_parameter.array_read_elem()?
-            } else {
-                declared_parameter
-            };
-            let nominal = self.expr_types[argument.0 as usize];
-            let actual = self.argument_type_for_expected(scope, argument, nominal, expected);
-            // Preserve the non-generic shell of a parameter while leaving only its type-variable
-            // components to inference. A direct `T` cannot be judged against its erased non-null `Any`,
-            // but `(Int) -> T` still requires a function of the right shape; otherwise that primary
-            // constructor can enter competition for a String argument and make a valid String secondary
-            // ambiguous.
-            let constraint = candidate
-                .parameter_constraints
-                .get(slot)
-                .copied()
-                .unwrap_or_else(|| {
-                    if !expected.mentions_ty_param() {
-                        ConstructorParameterConstraint::Concrete
-                    } else if expected.non_null().is_fun() {
-                        ConstructorParameterConstraint::GenericFunction
-                    } else {
-                        ConstructorParameterConstraint::Inferred
-                    }
-                });
-            let lambda_literal = matches!(self.file.expr(argument), Expr::Lambda { .. });
-            let fits = self.sam_argument_fits(scope, expected, actual, argument)
-                || match constraint {
-                    // A lambda literal must first land in a FUNCTION slot; its actual type is contextual
-                    // and is checked only after overload selection. Applying this rule here, in the shared
-                    // constructor matcher, makes primary/secondary and file/module/classpath delegation
-                    // agree instead of teaching the class-header path a private lambda exception.
-                    ConstructorParameterConstraint::Concrete if lambda_literal => {
-                        expected.non_null().is_fun()
-                            || self.semantic_sam_signature(expected).is_some()
-                    }
-                    // A numeric argument reaches another primitive slot the same way it does at a function
-                    // call (`L(b: Long)` accepts `L(1)`): the emit site inserts the conversion. Subtyping
-                    // alone rejected it, so every constructor with a `Long`/`Double`/… parameter was
-                    // unreachable from an integer literal — the one call origin that did not admit the
-                    // conversion `expect_assignable` applies everywhere else.
-                    //
-                    // `accepts_numeric` is the shared predicate and is deliberately the SAME one those
-                    // origins use, so this inherits their leniency rather than inventing a constructor
-                    // rule: it also admits `Int` into `Byte`/`Short`, where kotlinc requires an explicit
-                    // conversion. Narrowing that predicate is a project-wide decision (the plain-call and
-                    // classpath-constructor origins already take it), not one to fork here.
-                    ConstructorParameterConstraint::Concrete => {
-                        self.receiver_is_assignable(actual, expected)
-                            || expected.accepts_numeric(actual)
-                            || self.argument_result_may_bind_expected(scope, argument, expected)
-                    }
-                    ConstructorParameterConstraint::Inferred => true,
-                    ConstructorParameterConstraint::GenericConstructed => {
-                        if actual == Ty::Null {
-                            expected.is_nullable()
-                        } else if actual.is_nullable() && !expected.is_nullable() {
-                            false
-                        } else {
-                            actual
-                                .non_null()
-                                .obj_internal()
-                                .zip(expected.non_null().obj_internal())
-                                .is_some_and(|(actual_owner, expected_owner)| {
-                                    self.generic_constructed_argument_reaches(
-                                        expected,
-                                        actual_owner,
-                                        expected_owner,
-                                    )
-                                })
-                        }
-                    }
-                    ConstructorParameterConstraint::GenericFunction => {
-                        // A lambda's arity is contextual (an omitted parameter list can mean zero
-                        // parameters or implicit `it`), so its provisional type cannot reject a function
-                        // candidate. Non-lambda values already have a stable function shape and must match.
-                        lambda_literal
-                            || self.generic_function_constructor_arg_fits(expected, actual)
-                    }
-                };
-            // `Error` normally suppresses cascades, but a DEFERRED lambda deliberately uses it as a
-            // placeholder. Its structural function-slot test is therefore authoritative and must
-            // still reject a non-function constructor overload.
-            if (lambda_literal || actual != Ty::Error) && !fits {
-                crate::trace_compiler!(
-                    "expected_call",
-                    "constructor argument rejected expression={argument:?} slot={slot} expected={expected:?} actual={actual:?} constraint={constraint:?} variances={:?}",
-                    expected
-                        .obj_internal()
-                        .map(|owner| {
-                            (0..expected.type_args().len())
-                                .map(|index| {
-                                    crate::assignable::TypeOracle::type_param_variance(
-                                        self, owner, index,
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                );
-                let implicit_integer_coercion = self.implicit_integer_coercion_applies(
-                    argument,
-                    expected,
-                    candidate
-                        .implicit_integer_coercion
-                        .get(slot)
-                        .copied()
-                        .unwrap_or(false),
-                );
-                if !implicit_integer_coercion {
-                    *mismatch = Some(ConstructorArgumentMismatch {
-                        source_argument: source,
-                        expected,
-                        actual,
-                    });
-                    return None;
-                }
-            }
-            argument_types.push(expected);
-            argument_declared_types.push(declared);
-            argument_implicit_integer_coercion.push(
-                candidate
-                    .implicit_integer_coercion
-                    .get(slot)
-                    .copied()
-                    .unwrap_or(false),
-            );
-            argument_lambda_receivers.push(
-                candidate
-                    .lambda_receivers
-                    .get(slot)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        matches!(expected.non_null().kind(), TyKind::Fun(signature) if signature.has_receiver)
-                    }),
-            );
-        }
-        let omitted = slots
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                // An omitted vararg with no declared default is an empty array, not a mask bit.
-                // A declared default is a real omission: the constructor `$default` stub evaluates it.
-                let implicit_empty_vararg =
-                    visible_vararg == Some(index) && !contextual.call_sig.param_has_default(index);
-                (slot.is_none() && !implicit_empty_vararg)
-                    .then(|| contextual.parameter_indices.get(index).copied())
-                    .flatten()
-            })
-            .collect::<Vec<_>>();
-        let mut default_masks = Vec::new();
-        if !omitted.is_empty() && candidate.supports_default_abi {
-            default_masks.resize(params.len().div_ceil(32).max(1), 0);
-            for &index in &omitted {
-                default_masks[index / 32] |= (1u32 << (index % 32)) as i32;
-            }
-        }
-        let capture_plan = match &candidate.target {
-            ResolvedCtorDelegationTarget::Super { owner, .. } => {
-                self.selected_constructor_capture_plan(scope, *owner)
-            }
-            _ => None,
-        };
-        Some(ResolvedCtorDelegation {
-            target: candidate.target.clone(),
-            capture_plan,
-            outer_receiver,
-            context_args: contextual.context_sources.into_iter().flatten().collect(),
-            argument_slots,
-            argument_types,
-            argument_declared_types,
-            argument_implicit_integer_coercion,
-            argument_lambda_receivers,
-            omitted,
-            vararg: candidate.vararg,
-            default_masks,
-            parameter_constraints: candidate.parameter_constraints.clone(),
-            low_priority: candidate.low_priority,
-        })
     }
 
     fn select_ctor_delegation(
@@ -48929,10 +48566,6 @@ impl<'a> Checker<'a> {
     }
 
     fn report_assignability_error(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
-        // Neither side is a TYPE when it still carries the not-determined marker: the declaration it
-        // came from has not been resolved yet, and the message would name `<not determined>` — a
-        // placeholder the source never wrote — for a program that may well be correct. Whatever
-        // could not be determined is reported at its own declaration.
         if expected.mentions_pending() || actual.mentions_pending() {
             return;
         }
@@ -48944,43 +48577,9 @@ impl<'a> Checker<'a> {
             "resolve",
             "assignability failure context={ctx} expected={expected:?} actual={actual:?} span={span:?}"
         );
-        let context = [expected, actual];
-        let expected = self.diagnostic_type_name(expected, &context);
-        let actual = self.diagnostic_type_name(actual, &context);
-        if actual == "Null" {
-            self.diags.error(
-                span,
-                format!("null cannot be a value of a non-null type '{expected}'."),
-            );
-            return;
+        if let Some(message) = self.assignability_error_message(expected, actual, ctx) {
+            self.diags.error(span, message);
         }
-        let msg = match ctx {
-            "function body" | "getter body" | "local function body" | "return" => {
-                format!("return type mismatch: expected '{expected}', actual '{actual}'.")
-            }
-            "initializer" | "property initializer" | "default argument" => {
-                format!("initializer type mismatch: expected '{expected}', actual '{actual}'.")
-            }
-            "assignment" => {
-                format!(
-                    "assignment type mismatch: actual type is '{actual}', but '{expected}' was expected."
-                )
-            }
-            argument if argument.ends_with("argument") => {
-                format!(
-                    "argument type mismatch: actual type is '{actual}', but '{expected}' was expected."
-                )
-            }
-            condition if condition.ends_with("condition") => {
-                format!(
-                    "condition type mismatch: inferred type is '{actual}' but '{expected}' was expected."
-                )
-            }
-            _ => {
-                format!("type mismatch: inferred type is {actual} but {expected} was expected")
-            }
-        };
-        self.diags.error(span, msg);
     }
 
     fn expr(&mut self, scope: &CheckerScope<'_>, e: ExprId) -> Ty {
@@ -51272,24 +50871,6 @@ impl<'a> Checker<'a> {
                 None => self.expr(scope, array),
             };
             let its: Vec<Ty> = indices.iter().map(|&i| self.expr(scope, i)).collect();
-            if let [index] = indices.as_slice() {
-                // A read consumes the projection rather than exposing it as an expression type.
-                if let Some(elem) = self
-                    .builtin_array_read_element(at)
-                    .filter(|_| self.receiver_is_assignable(its[0], Ty::Int))
-                {
-                    self.expect_assignable(Ty::Int, its[0], self.span(*index), "array index");
-                    return self.set(e, elem);
-                }
-                // `str[i]` is the `String.get(Int): Char` operator.
-                if at == Ty::String {
-                    if let Some(m) = self.select_instance_member(at, "get", &its) {
-                        let ret = m.ret;
-                        self.resolved_calls.insert(e, ResolvedCall::Member(m));
-                        return self.set(e, ret);
-                    }
-                }
-            }
             if at == Ty::Error {
                 return Ty::Error;
             }
@@ -57096,27 +56677,25 @@ impl<'a> Checker<'a> {
             else {
                 continue;
             };
+            let Some(scored) = local_call_applicability::score(
+                self,
+                scope,
+                &signature,
+                args,
+                arg_tys,
+                argument_names,
+                trailing_lambda,
+            ) else {
+                continue;
+            };
+            let signature = scored.signature;
             let context_count = signature.context_count.min(signature.params.len());
             let Some(context_args) =
                 self.select_context_arguments(scope, &signature.params[..context_count])
             else {
                 continue;
             };
-            let Some(score) = local_function_candidate_score(
-                &signature,
-                args,
-                arg_tys,
-                argument_names,
-                trailing_lambda,
-                |parameter, actual| {
-                    arg_assignable_simple(parameter, actual)
-                        || self.postponed_call_mentions(parameter)
-                        || self.postponed_call_mentions(actual)
-                },
-            ) else {
-                continue;
-            };
-            applicable.push((score, statement, signature, context_args));
+            applicable.push((scored.rank, statement, signature, context_args));
         }
         let Some(best) = applicable.iter().map(|(score, ..)| *score).max() else {
             return LocalExtensionSelection::None;
@@ -57153,21 +56732,18 @@ impl<'a> Checker<'a> {
                 })
                 .filter_map(|candidate| {
                     let signature = &candidate.signature;
-                    let score = local_function_candidate_score(
+                    let scored = local_call_applicability::score(
+                        self,
+                        scope,
                         signature,
                         args,
                         arg_tys,
                         argument_names,
                         trailing_lambda,
-                        |parameter, actual| {
-                            arg_assignable_simple(parameter, actual)
-                                || self.postponed_call_mentions(parameter)
-                                || self.postponed_call_mentions(actual)
-                        },
                     )?;
-                    let context_count = signature.context_count.min(signature.params.len());
-                    self.select_context_arguments(scope, &signature.params[..context_count])
-                        .map(|_| (score, candidate.clone()))
+                    let context_count = scored.signature.context_count.min(scored.signature.params.len());
+                    self.select_context_arguments(scope, &scored.signature.params[..context_count])
+                        .map(|_| (scored.rank, candidate.clone()))
                 })
                 .collect::<Vec<_>>();
             if let Some(best) = applicable.iter().map(|(score, _)| *score).max() {
@@ -58998,7 +58574,7 @@ impl<'a> Checker<'a> {
         options: LibraryConstructorOptions<'_>,
     ) -> Result<LibraryConstructorSelection, LibraryConstructorFailure> {
         let Some(classifier) = self.resolved_type_name(internal) else {
-            return Ok(LibraryConstructorSelection::NoMatch);
+            return Ok(LibraryConstructorSelection::NoMatch(None));
         };
         self.record_library_constructor(scope, call, internal, &classifier, args, options)
     }
