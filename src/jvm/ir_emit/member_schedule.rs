@@ -227,8 +227,10 @@ pub(super) fn source_ordered_members<'a>(
                         (function_order(function), 3)
                     } else if ir.interface_delegation_forwarders.contains(&function) {
                         DELEGATED_MEMBER_KEY
+                    } else if ir.follows_delegated_members(class.fq_name_id(), function) {
+                        IR_PLUGIN_MEMBER_KEY
                     } else if lowered_after_generated_members(ir, function) {
-                        (u32::MAX, 4)
+                        LIFTED_FUNCTION_KEY
                     } else if ir.follows_declared_constructors(class.fq_name_id(), function) {
                         (function_order(function), 1)
                     } else {
@@ -255,7 +257,7 @@ pub(super) fn source_ordered_members<'a>(
                     // order for it; the functions kotlinc lifts out of bodies afterwards follow it.
                     if defer_serialization_constructor(ordinal, deferred_serialization_constructor)
                     {
-                        (u32::MAX, 3)
+                        DEFERRED_SERIALIZATION_CONSTRUCTOR_KEY
                     } else {
                         (constructor.source_order, 0)
                     },
@@ -288,6 +290,18 @@ pub(super) fn source_ordered_members<'a>(
 /// value class's `toString`, `hashCode` and `equals`), so they follow every member without a source
 /// position except the bodies lowered out of members later.
 const DELEGATED_MEMBER_KEY: (u32, u8) = (u32::MAX, 2);
+
+/// The schedule key of a member kotlinc's IR plugin adds to the class, such as a serializable
+/// class's `write$Self`. The plugin runs after the frontend has declared the delegation members, so
+/// its members follow them.
+const IR_PLUGIN_MEMBER_KEY: (u32, u8) = (u32::MAX, 3);
+
+/// The schedule key of the serialization plugin's deserialization constructor, which kotlinc emits
+/// after every member, `write$Self` included.
+const DEFERRED_SERIALIZATION_CONSTRUCTOR_KEY: (u32, u8) = (u32::MAX, 4);
+
+/// The schedule key of a function [`lowered_after_generated_members`].
+const LIFTED_FUNCTION_KEY: (u32, u8) = (u32::MAX, 5);
 
 /// Whether `function` is a lambda's or local function's implementation that has no declaration
 /// order of its own. kotlinc lifts those in `LocalDeclarationsLowering`, after a compiler plugin

@@ -39,3 +39,31 @@ fn delegation_forwarders_follow_members_generated_later() {
         .collect();
     assert_eq!(order, [declared, generated, forwarder]);
 }
+
+/// kotlinc's serialization plugin adds `write$Self` in its IR phase, after the frontend declared
+/// the class's `interface by` forwarders, and emits the deserialization constructor after both.
+#[test]
+fn ir_plugin_members_follow_delegation_forwarders() {
+    let mut ir = IrFile::default();
+    let class = ir.add_class(crate::plugins::synthetic_class("demo/Named"));
+    let owner = ir.classes[class as usize].fq_name_id();
+    let write_self = method(&mut ir, class, "write$Self$main");
+    ir.record_generated_function(
+        owner,
+        crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
+        write_self,
+    );
+    let forwarder = method(&mut ir, class, "greet");
+    ir.interface_delegation_forwarders.insert(forwarder);
+    let declared = method(&mut ir, class, "own");
+    ir.fn_source_order.insert(declared, 0);
+
+    let order: Vec<u32> = source_ordered_members(&ir, &ir.classes[class as usize], None)
+        .into_iter()
+        .map(|member| match member {
+            SourceOrderedMember::Function(function) => function,
+            _ => panic!("only functions are scheduled"),
+        })
+        .collect();
+    assert_eq!(order, [declared, forwarder, write_self]);
+}
