@@ -290,7 +290,7 @@ impl Libraries {
 
 /// Wasm publishes kotlin-test separately from its stdlib. Retain it as an ordinary dependency:
 /// these coordinates select the exact target/version but confer no compiler intrinsic authority.
-fn wasm_test_library(
+pub(super) fn wasm_test_library(
     target: krusty::compilation_target::CompilationTarget,
 ) -> Option<krusty::klib_libraries::KlibLibraryInput> {
     use krusty::compilation_target::CompilationTarget;
@@ -417,8 +417,24 @@ pub fn compile<B: Backend>(
     if let Some(first) = first_error(&diags, 0) {
         return Err(Outcome::Frontend(first.msg.clone()));
     }
-    let artifacts =
-        krusty::compiler::emit_analyzed(analysis, &stems, backend, module_name, &mut diags);
+    let artifacts = if super::box_klib_bytes::capturing() {
+        let metadata = super::box_klib_bytes::metadata_backend(target, directive_source)
+            .map_err(Outcome::Harness)?;
+        let observer = super::box_klib_bytes::MetadataObserver(metadata);
+        let mut session = krusty::compiler::EmissionSession::new(backend);
+        if session
+            .emit_module(analysis, &stems, &observer, module_name, &mut diags)
+            .is_none()
+            && !diags.has_errors()
+        {
+            return Err(Outcome::Harness(
+                "source emission failed without a diagnostic".into(),
+            ));
+        }
+        session.finish(module_name, &mut diags)
+    } else {
+        krusty::compiler::emit_analyzed(analysis, &stems, backend, module_name, &mut diags)
+    };
     if let Some(decline) = diags
         .diags
         .iter()
@@ -644,6 +660,7 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
             });
             return Err(outcome);
         };
+        super::box_klib_bytes::capture_artifacts(&unit.name, dependency.artifacts());
         let archive = write_dependency_archive(&generated_root.0, ordinal, dependency.artifacts())?;
         generated.insert(
             unit.name.clone(),
@@ -1002,11 +1019,8 @@ fn owned_fatal_outcomes_cannot_be_blessed_as_box_failures() {
     );
 }
 
-fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
-    let source = match std::fs::read_to_string(file) {
-        Ok(source) => source,
-        Err(error) => return Outcome::Harness(format!("reading case: {error}")),
-    };
+fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path, source: &str) -> Outcome {
+    let source = source.to_owned();
     let stem = file
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -1183,6 +1197,7 @@ pub fn run(lane: &dyn Lane) {
     }
     let pool = pool.build().expect("build the worker pool");
 
+    let bytes = super::box_klib_bytes::ByteRun::new(lane);
     let started = Instant::now();
     let outcomes: Vec<(&PathBuf, Outcome)> = pool.install(|| {
         files
@@ -1191,21 +1206,32 @@ pub fn run(lane: &dyn Lane) {
                 // A panic inside the compiler is a failure of THAT case, recorded like any other
                 // so one bug does not hide the picture for the rest of the corpus; the test still
                 // fails.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    outcome(lane, &scratch.0, file)
-                }))
-                .unwrap_or_else(|panic| {
-                    let message = panic
-                        .downcast_ref::<String>()
-                        .cloned()
-                        .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "panic".to_string());
-                    let origin = LAST_PANIC_FILE.with(|last| last.borrow_mut().take());
-                    Outcome::CompilerPanic(match origin {
-                        Some(origin) => format!("{message} ({origin})"),
-                        None => message,
-                    })
-                });
+                let capture = bytes.capture();
+                let source = std::fs::read_to_string(file);
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &source {
+                        Ok(source) => outcome(lane, &scratch.0, file, source),
+                        Err(error) => Outcome::Harness(format!("reading case: {error}")),
+                    }))
+                    .unwrap_or_else(|panic| {
+                        let message = panic
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "panic".to_string());
+                        let origin = LAST_PANIC_FILE.with(|last| last.borrow_mut().take());
+                        Outcome::CompilerPanic(match origin {
+                            Some(origin) => format!("{message} ({origin})"),
+                            None => message,
+                        })
+                    });
+                bytes.record(
+                    lane,
+                    file,
+                    source.as_ref().map(String::as_str),
+                    &result,
+                    capture,
+                );
                 (file, result)
             })
             .collect()
@@ -1214,6 +1240,7 @@ pub fn run(lane: &dyn Lane) {
     // an owned fatal outcome or a broken inventory must remain visible, not fail silently under
     // the compiler-only hook.
     let _ = std::panic::take_hook();
+    bytes.finish();
 
     let mut passed = 0usize;
     let mut frontend = 0usize;

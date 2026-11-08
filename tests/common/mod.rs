@@ -7,6 +7,8 @@ pub(crate) mod kotlin_metadata;
 pub(crate) mod kotlinc_lib;
 pub(crate) mod kotlinc_server;
 pub mod language_directives;
+pub(crate) mod reference_diagnostics;
+pub use reference_diagnostics::reference_error_blocks_from;
 mod metadata_diff;
 pub mod native_backend;
 pub(crate) mod producing_jdk;
