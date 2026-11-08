@@ -35,8 +35,6 @@ pub enum IrBuiltinCallKind {
     Binary(crate::fir::FirBinaryOperation),
     /// An implicit numeric conversion of the one operand to the result type.
     NumericConversion,
-    /// `receiver[index]` on an array or a string.
-    IndexedRead,
     /// A member call the frontend selected as a compiler intrinsic; the node's callee names it.
     Intrinsic,
 }

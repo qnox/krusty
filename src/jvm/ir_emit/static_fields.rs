@@ -310,11 +310,12 @@ pub(in crate::jvm) fn declared_default_static_accessor_signature(
     let storage = &ir.statics[static_index as usize];
     let descriptor = type_descriptor(jvm_declared_ty(&storage.ty));
     let (name, descriptor) = match side {
-        PropertyAccessorSide::Getter => {
-            (storage.default_getter_jvm_name(), format!("(){descriptor}"))
-        }
+        PropertyAccessorSide::Getter => (
+            ir.jvm_static_getter_name(static_index),
+            format!("(){descriptor}"),
+        ),
         PropertyAccessorSide::Setter => (
-            storage.default_setter_jvm_name(),
+            ir.jvm_static_setter_name(static_index),
             format!("({descriptor})V"),
         ),
     };
@@ -1217,7 +1218,7 @@ impl Emitter<'_> {
             if !emitted_by_owner && companion_blocks::getter_owned(self.ir, i) {
                 let m = self.cw.methodref(
                     &owner_name,
-                    &self.ir.statics[i as usize].default_getter_jvm_name(),
+                    &self.ir.jvm_static_getter_name(i),
                     &format!("(){}", type_descriptor(jt)),
                 );
                 code.invokestatic(m, 0, slot_words(jt) as i32);
@@ -1296,7 +1297,7 @@ impl Emitter<'_> {
         } else {
             let m = self.cw.methodref(
                 &facade,
-                &self.ir.statics[i as usize].default_getter_jvm_name(),
+                &self.ir.jvm_static_getter_name(i),
                 &format!("(){}", type_descriptor(jt)),
             );
             code.invokestatic(m, 0, slot_words(jt) as i32);
@@ -1339,10 +1340,19 @@ impl Emitter<'_> {
                 let (companion, property) = self.ir.jvm_companion_static_declaration(index)?;
                 let setter = property.setter?;
                 let companion_name = companion.fq_name();
-                let setter_name = property
-                    .setter_jvm_name
-                    .clone()
-                    .unwrap_or_else(|| self.ir.functions[setter as usize].name.clone());
+                let (companion_id, property_index) =
+                    self.ir.jvm_companion_static_property(index)?;
+                let setter_name = self
+                    .ir
+                    .jvm_property_accessor_name(
+                        companion_id,
+                        property_index,
+                        crate::ir::JvmAccessorSide::Setter,
+                    )
+                    .map_or_else(
+                        || self.ir.functions[setter as usize].name.clone(),
+                        str::to_owned,
+                    );
                 Some((
                     companion_name,
                     crate::jvm::companion_storage::field_name(
@@ -1423,7 +1433,7 @@ impl Emitter<'_> {
             let owner_name = owner.render();
             let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
             if !emitted_by_owner && companion_blocks::setter_owned(self.ir, index) {
-                let setter = self.ir.statics[index as usize].default_setter_jvm_name();
+                let setter = self.ir.jvm_static_setter_name(index);
                 let m =
                     self.cw
                         .methodref(&owner_name, &setter, &format!("({})V", type_descriptor(jt)));
@@ -1461,7 +1471,7 @@ impl Emitter<'_> {
         } else {
             let m = self.cw.methodref(
                 &facade,
-                &self.ir.statics[index as usize].default_setter_jvm_name(),
+                &self.ir.jvm_static_setter_name(index),
                 &format!("({})V", type_descriptor(jt)),
             );
             code.invokestatic(m, slot_words(jt) as i32, 0);

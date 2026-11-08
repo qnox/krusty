@@ -322,6 +322,9 @@ const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy =
 
 #[cfg(test)]
 mod tests {
+    mod companion_declarations;
+    mod reference_array_size;
+
     use super::{WasmBackend, WasmTarget};
     use crate::backend::{Artifact, Entry};
     use crate::diag::DiagSink;

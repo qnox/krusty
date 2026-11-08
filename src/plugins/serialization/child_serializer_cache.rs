@@ -259,8 +259,6 @@ pub(super) fn add_child_serializer_cache(
                 is_lateinit: false,
                 owner: Some(serialized),
                 visibility: crate::types::Visibility::Private,
-                getter_jvm_name: None,
-                setter_jvm_name: None,
                 erased_declared_ty: None,
                 accessors: crate::ir::IrStaticAccessors::ABSENT,
                 line: 0,
@@ -375,8 +373,6 @@ pub(super) fn add_child_serializer_cache(
             is_lateinit: false,
             owner: Some(serialized),
             visibility: crate::types::Visibility::Private,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
             erased_declared_ty: None,
             accessors: crate::ir::IrStaticAccessors::ABSENT,
             // kotlinc declares the cache on the companion, at the companion's offsets, so the

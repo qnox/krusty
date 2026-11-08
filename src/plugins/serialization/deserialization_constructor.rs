@@ -87,8 +87,6 @@ pub(super) fn add_cached_descriptor(
         is_lateinit: false,
         owner: Some(owner),
         visibility: Visibility::Private,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         erased_declared_ty: None,
         accessors: crate::ir::IrStaticAccessors::ABSENT,
         // kotlinc builds the descriptor in the companion's initializer: the store opens on the

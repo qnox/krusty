@@ -26,7 +26,7 @@ impl Parser<'_> {
         let mut delegation = CtorDelegation::None;
         let mut delegation_offset = 0;
         if self.eat(TokenKind::Colon) {
-            self.skip_newlines();
+            self.skip_semicolons();
             let target = if self.at(TokenKind::Ident) {
                 let target = self.text().to_string();
                 delegation_offset = self.tok().span.lo;
@@ -55,7 +55,7 @@ impl Parser<'_> {
         }
         // A bodyless constructor ends at its delegation, not at the newlines skipped after it.
         let mut end = self.t[self.i.saturating_sub(1)].span.hi;
-        self.skip_newlines();
+        self.skip_semicolons();
         let body = self
             .at(TokenKind::LBrace)
             .then(|| self.parse_block_expr(false));

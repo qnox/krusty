@@ -92,7 +92,7 @@ pub(super) fn applicable_local_extension_signature(
     if !generic_bindings_satisfy_bounds(generic, &bindings, &mut bounds_admit) {
         return None;
     }
-    let selected = specialize_local_extension_signature(source, signature, generic, &bindings);
+    let selected = specialize_local_signature(source, signature, generic, &bindings);
     let declared = selected.source_receiver?;
     receiver_admits(receiver, declared).then_some(selected)
 }
@@ -421,10 +421,10 @@ impl Checker<'_> {
     }
 }
 
-/// Apply a local extension's own generic receiver bindings to its call-site signature. The
+/// Apply a local callable's own generic bindings to its call-site signature. The
 /// declaration remains generic; only the selected call shape is specialized (`Base<T>` on
 /// `Derived<String>` yields `T := String` when `Derived<U> : Base<U>`).
-fn specialize_local_extension_signature(
+pub(super) fn specialize_local_signature(
     source: &dyn SymbolSource,
     signature: &Signature,
     generic: &GenericSig,

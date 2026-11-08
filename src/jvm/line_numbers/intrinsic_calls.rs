@@ -65,7 +65,6 @@ fn is_intrinsic_call(ir: &IrFile, expression: ExprId, call: &IrBuiltinCall) -> b
                     && from != call.result);
             !inlined && primitive_change && signed
         }
-        IrBuiltinCallKind::IndexedRead => true,
         IrBuiltinCallKind::Intrinsic => matches!(
             ir.expr(expression),
             IrExpr::Call { callee, .. } if matches!(

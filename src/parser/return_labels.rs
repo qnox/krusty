@@ -11,13 +11,12 @@ impl crate::parser::Parser<'_> {
     pub(super) fn parse_return_statement(&mut self, start: crate::diag::Span) -> StmtId {
         self.bump();
         let (label, label_span) = self.parse_return_label();
-        let value =
-            if self.at(TokenKind::Newline) || self.at(TokenKind::RBrace) || self.at(TokenKind::Eof)
-            {
-                None
-            } else {
-                Some(self.parse_expr())
-            };
+        // kotlinc's `parseReturn`: a value only when it starts on the same line.
+        let value = if self.at_eol_or_semicolon() || self.at(TokenKind::RBrace) {
+            None
+        } else {
+            Some(self.parse_expr())
+        };
         let statement = self.finish_stmt(crate::ast::Stmt::Return(value, label), start);
         self.file
             .return_label_spans
@@ -30,7 +29,7 @@ impl crate::parser::Parser<'_> {
     /// `return@` with no name following is accepted here and left unlabelled; the missing name is a
     /// parse-level concern reported elsewhere, and inventing a label would hide it.
     pub(super) fn parse_return_label(&mut self) -> (Option<String>, Option<Span>) {
-        if !self.at(TokenKind::At) {
+        if !self.at_label_reference() {
             return (None, None);
         }
         let span = self.tok().span;
@@ -50,15 +49,11 @@ impl crate::parser::Parser<'_> {
     pub(super) fn parse_return_expression(&mut self, start: Span) -> ExprId {
         self.bump();
         let (label, label_span) = self.parse_return_label();
-        let value = if matches!(
-            self.kind(),
-            TokenKind::Newline
-                | TokenKind::RBrace
-                | TokenKind::RParen
-                | TokenKind::RBracket
-                | TokenKind::Comma
-                | TokenKind::Eof
-        ) {
+        let value = if self.at_eol_or_semicolon()
+            || matches!(
+                self.kind(),
+                TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket | TokenKind::Comma
+            ) {
             None
         } else {
             Some(self.parse_expr())

@@ -419,13 +419,12 @@ pub(super) fn lower_companion_properties(
             },
         };
         // The companion keeps the property's accessors, so the names realized for them carry over.
-        let declaration = &ir.classes[candidate.companion as usize].properties[candidate.property];
-        let (getter_jvm_name, setter_jvm_name) = if candidate.delegate_storage {
-            (None, None)
+        let accessor_names = if candidate.delegate_storage {
+            crate::ir::JvmAccessorNames::default()
         } else {
-            (
-                declaration.getter_jvm_name.clone(),
-                declaration.setter_jvm_name.clone(),
+            ir.jvm_property_accessor_names(
+                ir.classes[candidate.companion as usize].fq_name,
+                candidate.property as u32,
             )
         };
         ir.statics.push(IrStatic {
@@ -437,8 +436,6 @@ pub(super) fn lower_companion_properties(
             is_lateinit: candidate.is_lateinit,
             owner: Some(ir.classes[candidate.outer as usize].fq_name),
             visibility: candidate.visibility,
-            getter_jvm_name,
-            setter_jvm_name,
             erased_declared_ty: None,
             accessors,
             line: candidate.decl_line,
@@ -453,6 +450,7 @@ pub(super) fn lower_companion_properties(
         // hoisted companion property (the declaration belongs to the companion's metadata alone).
         // Emission finds the physical field through `IrStatic.owner`.
         ir.mark_jvm_companion_hoisted_static(index);
+        ir.set_jvm_static_accessor_names(index, accessor_names);
         if candidate.is_jvm_field {
             ir.mark_jvm_field_static(index);
         }
@@ -601,9 +599,8 @@ pub(super) fn lower_companion_properties(
         // custom setter still gets the default getter over the hoisted field.
         // The synthesized accessors are the property's default accessors: they take the names
         // realized for them and the annotations written on them.
-        let realized = &ir.statics[static_index as usize];
-        let getter_name = realized.default_getter_jvm_name();
-        let setter_name = realized.default_setter_jvm_name();
+        let getter_name = ir.jvm_static_getter_name(static_index);
+        let setter_name = ir.jvm_static_setter_name(static_index);
         let accessor_annotations = if candidate.delegate_storage {
             Default::default()
         } else {

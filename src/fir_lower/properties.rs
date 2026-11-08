@@ -732,8 +732,6 @@ fn materialize_top_level_property(
                 && property.flags.has(DeclarationFlags::LATEINIT),
             owner: companion_block_owner.map(|class| ir.classes[class as usize].fq_name_id()),
             visibility: property.visibility,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
             erased_declared_ty: None,
             accessors: top_level_accessors(index, &property),
             line: 0,
@@ -1139,8 +1137,6 @@ fn materialize_member_property(
             is_lateinit: false,
             owner: Some(owner),
             visibility: property.visibility,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
             erased_declared_ty: None,
             accessors: crate::ir::IrStaticAccessors::DEFAULT,
             line: 0,
@@ -1481,8 +1477,6 @@ fn materialize_member_property(
         setter_visibility: setter_visibility(index, property.declaration, property.visibility),
         getter,
         setter,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         needs_access_bridge: needs_property_reference_bridge,
         accessor_annotations: ir
             .accessor_annotations

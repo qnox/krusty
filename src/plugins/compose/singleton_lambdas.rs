@@ -134,8 +134,6 @@ fn property(name: &str, field: u32, initializer: ExprId) -> IrProperty {
         setter_visibility: Visibility::Internal,
         getter: None,
         setter: None,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         needs_access_bridge: false,
         accessor_annotations: Default::default(),
     }

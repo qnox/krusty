@@ -447,8 +447,6 @@ pub(super) fn materialize_member_delegate(
         setter_visibility: setter_visibility(index, property.declaration, property.visibility),
         getter: Some(getter),
         setter,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         needs_access_bridge: false,
         accessor_annotations: ir
             .accessor_annotations
@@ -784,8 +782,6 @@ fn push_delegate_static(
         is_lateinit: false,
         owner,
         visibility: crate::types::Visibility::Private,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         erased_declared_ty: None,
         accessors: crate::ir::IrStaticAccessors::ABSENT,
         line: 0,
