@@ -49307,162 +49307,102 @@ impl<'a> Checker<'a> {
         {
             mapped.retain(|(candidate, _)| candidate.receiver_rank == nearest);
         }
-        // Until lambda bodies are typed, two mapped candidates can legitimately remain
-        // indistinguishable. The exact-one pattern declines an expectation in that case;
-        // choosing the first would leak provider iteration order into overload resolution.
-        if let [(candidate, argument_parameters)] = mapped.as_slice() {
-            crate::trace_compiler!(
-                    "provider_lambda",
-                    "call={call:?} name={name} candidate={} params={:?} map={argument_parameters:?} marks={:?}",
-                    candidate.callable.name,
-                    candidate.semantic_params(),
-                    candidate.call_sig.lambda_receiver_params,
-                );
-            let semantic = candidate.semantic_signature();
-            let binds = self.mapped_generic_call_bindings(
-                candidate,
-                None,
-                (args, partial),
-                argument_parameters,
-                &named_whole_array_varargs(argument_parameters, arg_names, &candidate.call_sig),
-                type_args,
-            );
-            let expectations = argument_parameters
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(source_index, parameter_index)| {
-                    if !matches!(
-                        self.file.expr(args[source_index]),
-                        Expr::Lambda { .. } | Expr::CallableRef { .. }
-                    ) {
-                        return None;
+        // Several candidates can still map the call while its lambdas are untyped. Choose among
+        // them with the selector the call finally commits through, its lambdas postponed, so a
+        // lambda is shaped by exactly the overload that resolution selects: kotlinc's postponed
+        // argument selection, including its preference for a candidate that needs no SAM
+        // conversion. A tie declines the expectation rather than leaking provider order.
+        let selected = match mapped.as_slice() {
+            [] => return None,
+            [_] => 0,
+            _ => {
+                let receiver_ty = match receiver {
+                    crate::symbol_resolver::SymRecv::Value(receiver)
+                    | crate::symbol_resolver::SymRecv::ImplicitValue(receiver) => receiver,
+                    crate::symbol_resolver::SymRecv::TypeName(classifier) => {
+                        Ty::obj_name(classifier)
                     }
-                    let param = semantic.params.get(parameter_index).copied().map(|param| {
-                        crate::symbol_resolver::ty_subst_keep_unbound(param, &binds)
-                    })?;
-                    functional_argument_expectation(
-                        self.libraries,
-                        &self.fed_source(),
-                        &candidate.call_sig,
-                        candidate.flags.inline.can_inline(),
-                        parameter_index,
-                        param,
-                        Some(&semantic),
-                    )
-                })
-                .collect();
-            crate::trace_compiler!(
-                "provider_lambda",
-                "call={call:?} name={name} expectations={expectations:?}",
-            );
-            return Some(expectations);
-        }
-        crate::trace_compiler!(
-            "provider_lambda",
-            "call={call:?} name={name} mapped_candidates={}",
-            mapped.len(),
-        );
-
-        let provisional: Vec<Ty> = args
-            .iter()
-            .enumerate()
-            .map(|(index, &arg)| {
-                self.lambda_probe_ty(scope, arg)
-                    .or_else(|| partial.get(index).copied().flatten())
-                    .unwrap_or(Ty::Error)
-            })
-            .collect();
-        let arg_kinds: Vec<CallArgKind> = args
-            .iter()
-            .zip(provisional)
-            .map(|(&arg, ty)| call_arg_kind(self.file, arg, ty))
-            .collect();
-        // The probe is MEMBER-only by construction: `selected_member` reads the instance-call,
-        // object-instance, or companion facet, never the extension facet — so the specialized
-        // params are value-param based and align with the argument positions below.
-        // A member level that joined an inner classifier's constructors to these functions is a
-        // family the symbol query cannot rebuild; select over exactly that family.
-        let joined_constructors = mapped
-            .iter()
-            .any(|(candidate, _)| candidate.constructor.is_some());
-        let candidate = match receiver {
-            crate::symbol_resolver::SymRecv::Value(receiver) if joined_constructors => {
-                let family =
-                    crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
-                        overloads: mapped.into_iter().map(|(candidate, _)| candidate).collect(),
-                    });
-                let (selected, _) = self.resolver().select_receiver_function_with_params(
-                    receiver, name, &arg_kinds, type_args, &family,
-                )?;
-                selected.member_with_return(selected.callable.ret)
+                    crate::symbol_resolver::SymRecv::Type(_)
+                    | crate::symbol_resolver::SymRecv::TopLevel => return None,
+                };
+                let arg_tys = partial
+                    .iter()
+                    .map(|ty| ty.unwrap_or(Ty::Error))
+                    .collect::<Vec<_>>();
+                let selection = self.select_callable_candidate(
+                    scope,
+                    CallArgs {
+                        call,
+                        args,
+                        arg_tys: &arg_tys,
+                    },
+                    type_args,
+                    Some(receiver_ty),
+                    CallResultConstraint::direct(None),
+                    mapped
+                        .iter()
+                        .map(|(candidate, _)| candidate.clone())
+                        .collect(),
+                );
+                let selected = selection
+                    .and_then(CallableCandidateSelection::available)
+                    .and_then(|selected| selected.candidate_index);
+                crate::trace_compiler!(
+                    "provider_lambda",
+                    "call={call:?} name={name} mapped_candidates={} selected={selected:?}",
+                    mapped.len(),
+                );
+                selected?
             }
-            _ => self
-                .resolver()
-                .select_symbol(receiver, name, &arg_kinds, type_args)
-                .and_then(crate::symbol_resolver::Symbol::selected_member)?,
         };
-
-        // Expectations are consumed in SOURCE-ARGUMENT order, but the selected callable's types
-        // and receiver marks live in SEMANTIC-PARAMETER order. Named/default/trailing-lambda calls
-        // can make those orders differ (`two(b = { this }, a = { ... })`), so route through the
-        // same CallSig slot mapper used by call recording instead of adding a provider-specific
-        // positional assumption. A metadata-less Java member has no names/defaults to reorder, so
-        // its only valid shape is the positional identity map.
-        let argument_parameters = if candidate.call_sig.has_param_names() {
-            call_argument_parameter_indices(
-                args.len(),
-                candidate.params.len(),
-                arg_names,
-                trailing_lambda,
-                &candidate.call_sig,
-            )?
-        } else if arg_names.is_none() && args.len() <= candidate.params.len() {
-            (0..args.len()).collect()
-        } else {
-            return None;
-        };
-
-        // Generic specialization expects arguments in parameter order. Use a lambda/error sentinel
-        // for omitted default slots: specialization deliberately skips lambda slots while inferring
-        // bindings from concrete non-lambda arguments, which is exactly the behavior an absent
-        // argument needs. Multiple source vararg elements may map to one slot; receiver-function
-        // varargs are not a meaningful Kotlin call shape, so the last mapped kind is sufficient.
-        let mut parameter_arg_kinds =
-            vec![CallArgKind::LambdaLiteral(Ty::Error); candidate.params.len()];
-        for (source_index, &parameter_index) in argument_parameters.iter().enumerate() {
-            let target = parameter_arg_kinds.get_mut(parameter_index)?;
-            *target = arg_kinds.get(source_index)?.clone();
-        }
-        let specialized_params = crate::symbol_resolver::specialized_member_params(
-            &candidate,
-            &parameter_arg_kinds,
+        let (candidate, argument_parameters) = mapped.get(selected)?;
+        crate::trace_compiler!(
+                "provider_lambda",
+                "call={call:?} name={name} candidate={} params={:?} map={argument_parameters:?} marks={:?}",
+                candidate.callable.name,
+                candidate.semantic_params(),
+                candidate.call_sig.lambda_receiver_params,
+            );
+        let semantic = candidate.semantic_signature();
+        let binds = self.mapped_generic_call_bindings(
+            candidate,
+            None,
+            (args, partial),
+            argument_parameters,
+            &named_whole_array_varargs(argument_parameters, arg_names, &candidate.call_sig),
             type_args,
         );
-        Some(
-            argument_parameters
-                .into_iter()
-                .enumerate()
-                .map(|(source_index, parameter_index)| {
-                    if !matches!(
-                        self.file.expr(args[source_index]),
-                        Expr::Lambda { .. } | Expr::CallableRef { .. }
-                    ) {
-                        return None;
-                    }
-                    let param = specialized_params.get(parameter_index).copied()?;
-                    functional_argument_expectation(
-                        self.libraries,
-                        &self.fed_source(),
-                        &candidate.call_sig,
-                        candidate.inline.can_inline(),
-                        parameter_index,
-                        param,
-                        candidate.generic_sig.as_ref(),
-                    )
-                })
-                .collect(),
-        )
+        let expectations = argument_parameters
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(source_index, parameter_index)| {
+                if !matches!(
+                    self.file.expr(args[source_index]),
+                    Expr::Lambda { .. } | Expr::CallableRef { .. }
+                ) {
+                    return None;
+                }
+                let param =
+                    semantic.params.get(parameter_index).copied().map(|param| {
+                        crate::symbol_resolver::ty_subst_keep_unbound(param, &binds)
+                    })?;
+                functional_argument_expectation(
+                    self.libraries,
+                    &self.fed_source(),
+                    &candidate.call_sig,
+                    candidate.flags.inline.can_inline(),
+                    parameter_index,
+                    param,
+                    Some(&semantic),
+                )
+            })
+            .collect();
+        crate::trace_compiler!(
+            "provider_lambda",
+            "call={call:?} name={name} expectations={expectations:?}",
+        );
+        return Some(expectations);
     }
 
     /// The [`CallArgKind`] for an already-checked argument — pure, no checking side effects.
