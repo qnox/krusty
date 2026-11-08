@@ -967,7 +967,6 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .collect::<Vec<_>>();
     member_order::sort_delegation_functions(&mut delegation);
     let delegation_functions = methods.len()..methods.len() + delegation.len();
-    let delegation_function_count = delegation.len();
     methods.extend(delegation);
     let (methods, method_origins): (Vec<FnMeta>, Vec<FunctionOrigin>) = methods.into_iter().unzip();
     let type_aliases = ir
@@ -996,7 +995,6 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         &mut prop_origins,
         &mut prop_source_orders,
     );
-    let delegation_members = delegation_function_count + delegation_properties.len();
     let (synthesized, delegation_functions) = member_order::generated_function_order(
         ir,
         &declared_fids,
@@ -1005,6 +1003,9 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         declared_method_count.min(inferred_method_count)..inferred_method_count,
         delegation_functions,
     );
+    // Structural functions consume delegation forwarders into their mixed sorted run. Only the
+    // remaining function range and delegation properties still form a trailing run.
+    let delegation_members = delegation_functions.len() + delegation_properties.len();
     let member_order = member_order::member_order(
         ir,
         c,
@@ -2021,5 +2022,87 @@ mod tests {
         assert_eq!(record.ret, Ty::Unit);
         assert_eq!(record.flags, 32);
         assert!(!record.annotations.declares_annotations());
+    }
+    fn late_publication_member_order(data: bool) -> Vec<String> {
+        let source = format!(
+            "interface Greeter {{ fun answer(): Int; val size: Int }}\n\
+             {}class Owner(val greeter: Greeter) : Greeter by greeter {{ fun own(): Int = 1 }}\n",
+            if data { "data " } else { "" }
+        );
+        let mut ir = crate::fir_lower::tests::lower_single_source(&source, "LatePublication");
+        let owner = type_name("Owner");
+        super::record_all(&mut ir);
+        let function = generated_function(&mut ir, true);
+        ir.functions[function as usize].name = "late".to_string();
+        ir.functions[function as usize].params[0] = Ty::obj_name(owner);
+        let class = ir.class_id_by_name(owner).unwrap();
+        ir.classes[class as usize].methods.push(function);
+        ir.publish_generated_members(
+            owner,
+            IrGeneratedMemberPublication {
+                metadata_scope: IrGeneratedFunctionMetadataScope::Additive,
+                functions: vec![IrGeneratedFunctionPublication {
+                    function,
+                    parameter_identities: ["self", "output", "serialDesc"]
+                        .map(crate::ir::IrParameterIdentity::producer_value)
+                        .to_vec(),
+                    metadata: Some(IrGeneratedFunctionMetadata {
+                        source_name: "late".to_string(),
+                        visibility: Visibility::Internal,
+                    }),
+                    debug: IrGeneratedDeclarationDebug::declaration_line(2),
+                }],
+            },
+        );
+        super::add_target_generated_functions(&mut ir);
+        // Refreshing an already published function must not insert it twice or shift indices again.
+        super::add_target_generated_functions(&mut ir);
+        let record = ir.class_declarations[&owner].as_ref().unwrap();
+        record
+            .member_order
+            .iter()
+            .map(|member| match member {
+                super::ClassMemberOrder::Function(index) => {
+                    format!("function:{}", record.methods[*index].name)
+                }
+                super::ClassMemberOrder::Property(index) => {
+                    format!("property:{}", record.props[*index].name)
+                }
+                _ => panic!("unexpected non-function/property member in the complete record"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn late_publication_follows_the_complete_mixed_structural_run() {
+        assert_eq!(
+            late_publication_member_order(true),
+            [
+                "property:greeter",
+                "function:own",
+                "function:component1",
+                "function:copy",
+                "function:answer",
+                "function:equals",
+                "function:hashCode",
+                "function:toString",
+                "function:late",
+                "property:size",
+            ]
+        );
+    }
+
+    #[test]
+    fn late_publication_precedes_the_remaining_ordinary_delegation_tail() {
+        assert_eq!(
+            late_publication_member_order(false),
+            [
+                "property:greeter",
+                "function:own",
+                "function:late",
+                "function:answer",
+                "property:size"
+            ]
+        );
     }
 }
