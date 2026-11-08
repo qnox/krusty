@@ -19,6 +19,8 @@ mod box_lane;
 mod box_ratchet;
 #[path = "box_reference_classes.rs"]
 mod box_reference_classes;
+#[path = "box_selection_reference.rs"]
+mod box_selection_reference;
 #[path = "box_vendored.rs"]
 mod box_vendored;
 mod dependency_template_rejections;
