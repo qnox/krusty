@@ -14,17 +14,12 @@ fn reference_element(array: Ty) -> Result<Ty, Unsupported> {
             describe(array)
         ));
     }
-    let element = array
+    // A scalar element is stored as its box and read back through it, as `Array<Int>` holds
+    // `Integer`s on the JVM: the ordinary coercions to and from `Any?` box and unbox it.
+    array
         .non_null()
         .array_read_elem()
-        .ok_or_else(|| "a reference array with no readable element type".to_string())?;
-    if !matches!(carrier(element)?, Some(ValType::Ref { .. })) {
-        return Err(format!(
-            "a reference array requiring scalar boxing for `{}`",
-            describe(element)
-        ));
-    }
-    Ok(element)
+        .ok_or_else(|| "a reference array with no readable element type".to_string())
 }
 
 impl Body<'_> {
