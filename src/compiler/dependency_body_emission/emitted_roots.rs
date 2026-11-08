@@ -148,8 +148,7 @@ pub(super) fn declarations(
             .map_err(|reason| format!("an invalid target member declaration: {reason:?}"))?;
         // A member of a class no support unit materializes is a leaf: support bodies call it
         // through its declaration, as source calls do, and the target realizes it.
-        let external_member = realization.kind == ExternalCallableKind::Member
-            && !is_materialized_class_member(platform, bodies, &facts, selected)?;
+        let external_member = is_realized_outside_units(platform, bodies, &facts, selected)?;
         // A call of a member realized outside the unit carries the facts the member hierarchy
         // decorates a source call of it with.
         if member || external_member {
@@ -370,6 +369,11 @@ fn ordinary_class_constructor(
     let Some(constructor) = realization.klib_body_callable() else {
         return Ok(None);
     };
+    // A class whose constructor has no serialized declaration, such as one of a module compiled
+    // from source alongside, is realized from its own declarations, never materialized from a KLIB.
+    if bodies.function_has_body(&identity).is_none() {
+        return Ok(None);
+    }
     let admitted = callees
         .with_declaration(constructor)
         .constructor_initialization_callees(&identity, bodies)
@@ -412,6 +416,14 @@ fn member_edge(
     target: crate::fir::ExternalCallableId,
     selected: KlibBodyCallable<'_>,
 ) -> Result<crate::klib_lowering::CallEdge, String> {
+    // The hierarchy decorates function calls. A property accessor is read as its property, which
+    // carries neither a call role nor function override edges.
+    if matches!(
+        selected.identity().declaration,
+        crate::libraries::KlibDeclarationSignature::Accessor(_)
+    ) {
+        return Ok(crate::klib_lowering::CallEdge::default());
+    }
     let Some(crate::types::SemanticCallableOwner::Classifier(owner)) = selected.declaration_owner()
     else {
         return Err(format!(
@@ -454,6 +466,21 @@ pub(super) fn is_external_member(
     let Some(selected) = realization.klib_body_callable() else {
         return Ok(false);
     };
-    Ok(realization.kind == ExternalCallableKind::Member
-        && !is_materialized_class_member(platform, bodies, callees, selected)?)
+    is_realized_outside_units(platform, bodies, callees, selected)
+}
+
+/// Whether `callable` is a member of a class no support unit materializes, which the target
+/// realizes. A member of a builtin type of the common type model is not one: its body is an
+/// ordinary function over the builtin value, which a support unit emits.
+fn is_realized_outside_units(
+    platform: &dyn SemanticPlatform,
+    bodies: &KlibDeclarationBodies,
+    callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
+    callable: KlibBodyCallable<'_>,
+) -> Result<bool, String> {
+    Ok(callable.kind() == ExternalCallableKind::Member
+        && !callable
+            .class_contract()
+            .is_some_and(|class| class.is_builtin_type())
+        && !is_materialized_class_member(platform, bodies, callees, callable)?)
 }
