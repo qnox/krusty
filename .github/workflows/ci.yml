@@ -262,9 +262,9 @@ jobs:
         with:
           path: target/cache/box-corpus
           # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
-          # corpus and the bytecode corpora. A key hit is never re-saved, so the salt changes
-          # whenever those inputs do.
-          key: box-and-cli-corpus-v2-${{ hashFiles('kotlin-versions') }}
+          # corpus, the bytecode corpora, and the test-generator sources that select each target's
+          # cases. A key hit is never re-saved, so the key changes whenever those inputs do.
+          key: box-cli-and-generator-corpus-v3-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit
         if: steps.box-corpus.outputs.cache-hit == 'true'
@@ -729,9 +729,9 @@ jobs:
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
           # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
-          # corpus and the bytecode corpora. A key hit is never re-saved, so the salt changes
-          # whenever those inputs do.
-          key: box-and-cli-corpus-v2-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          # corpus, the bytecode corpora, and the test-generator sources that select each target's
+          # cases. A key hit is never re-saved, so the key changes whenever those inputs do.
+          key: box-cli-and-generator-corpus-v3-${{ matrix.version }}-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit (${{ matrix.version }})
         if: steps.box-corpus.outputs.cache-hit == 'true'

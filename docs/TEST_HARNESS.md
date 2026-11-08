@@ -250,6 +250,16 @@ Blessing requires the exact value `1` and is refused under CI and on a partial r
 is replaced atomically. Review and commit the platform/version diff. The failure lists only shrink;
 the long-term goal is zero expected failures on every platform.
 
+### Upstream case selection
+
+Each lane runs the `codegen/box` cases that kotlinc's own pinned test generators select for its
+target, read from the generator sources of the same checkout by `scripts/box_selection.py`. For
+example, the Wasm generators exclude the JVM-only `compileKotlinAgainstKotlin` directory, so the Wasm
+lanes do not run it; the JVM generators select the whole directory. `just box-corpus` provisions the
+generator sources listed in `tests/box_selection_sources.txt` and the box roots they name, and
+`box_selection_reference` executes each generator's own `main` against the checkout to confirm the
+extraction selects exactly the same roots and files.
+
 ### Repository-owned box regressions
 
 `tests/box_regressions/` joins the upstream box corpus in the normal inventory on every backend.
@@ -411,7 +421,7 @@ class-dump: live kotlinc summary cache-miss test=<module>::<case> invocations=<n
 `kotlin_cli_jvm_conformance` (in the `conformance` binary) runs Kotlin's own command-line test
 corpus, `compiler/testData/cli/jvm` at the reference tag, through the krusty binary. `just box-corpus`
 provisions it in the same checkout as the box corpus. CI caches that checkout under a key versioned
-for every input it carries (`box-and-cli-corpus-v2-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
+for every input it carries (`box-cli-and-generator-corpus-v3-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
 and `just box-corpus` then fails rather than fetch into an incomplete restored checkout, so adding a
 corpus input means bumping the salt. Each case is an `.args` file and the `.out`
 file kotlinc's `AbstractCliTest` compares against: the normalized stderr followed by the exit code's
