@@ -4,11 +4,11 @@ use super::*;
 use crate::ir::{IrExpr, IrFile};
 use crate::metadata::klib_ir::KlibIrSignature;
 
-impl<'u, 's> Linker<'u, 's> {
+impl<'s> Linker<'_, 's> {
     pub(super) fn install_local_class(
         &mut self,
         ir: &mut IrFile,
-        prepared: super::super::same_library_class::PreparedLocalClass<'s>,
+        prepared: Box<super::super::same_library_class::PreparedLocalClass<'s>>,
     ) -> Result<super::super::same_library_class::LocalConstructor, KlibBodyDeclineReason> {
         if ir.class_id_by_name(prepared.classifier).is_some() {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
@@ -104,6 +104,7 @@ impl<'u, 's> Linker<'u, 's> {
                 function,
                 &member.overrides,
                 self.sources.externals,
+                self.sources.declarations,
             )?;
         }
         let constructor = super::super::same_library_class::LocalConstructor {
@@ -217,6 +218,7 @@ fn publish_overrides(
     function: crate::ir::FunId,
     overrides: &[super::super::same_library_class::MemberOverride],
     externals: &HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
+    declarations: &dyn crate::symbol_source::SymbolSource,
 ) -> Result<(), KlibBodyDeclineReason> {
     if overrides.is_empty() {
         return Ok(());
@@ -226,13 +228,10 @@ fn publish_overrides(
     let implementation_result = implementation.ret;
     let name = implementation.name.clone();
     for edge in overrides {
-        // The interface table consumes the provider's external identity. A body that calls the
-        // member carries that handle before this class is installed. Without it there is no
-        // checked callee to publish, and the authenticated hierarchy still stands.
-        let Some(external) = externals.get(&edge.identity) else {
-            continue;
-        };
-        if edge.declared_parameters.len() != implementation_parameters.len() {
+        let external = registered_override_handle(&edge.identity, externals, declarations)?;
+        if edge.declared_parameters.len() != implementation_parameters.len()
+            || edge.applied_parameters.len() != implementation_parameters.len()
+        {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "an override's parameters differ from its interface member".to_owned(),
             ));
@@ -254,8 +253,8 @@ fn publish_overrides(
                 name: name.clone(),
                 declared_parameters: edge.declared_parameters.clone(),
                 declared_result: edge.declared_result,
-                applied_parameters: implementation_parameters.clone(),
-                applied_result: implementation_result,
+                applied_parameters: edge.applied_parameters.clone(),
+                applied_result: edge.applied_result,
                 implementation_parameters: implementation_parameters.clone(),
                 implementation_parameter_identities: implementation_parameters
                     .iter()
@@ -283,6 +282,36 @@ fn publish_overrides(
             });
     }
     Ok(())
+}
+
+/// The provider handle of an authenticated override. The call closure may already carry the same
+/// handle when a body calls the member; a body that only constructs the class still publishes it.
+fn registered_override_handle(
+    identity: &KlibDependencyCallable,
+    externals: &HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
+    declarations: &dyn crate::symbol_source::SymbolSource,
+) -> Result<EmittedDependencyCallable, KlibBodyDeclineReason> {
+    if let Some((target, realization)) = declarations.external_callable_by_dependency(identity) {
+        if realization.dependency_callable.as_ref() != Some(identity) {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an override realization changed its exact identity".to_owned(),
+            ));
+        }
+        if let Some(emitted) = externals.get(identity) {
+            if emitted.target() != target {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an override declaration handle disagrees with its call".to_owned(),
+                ));
+            }
+        }
+        return Ok(EmittedDependencyCallable::provider_leaf(target));
+    }
+    externals
+        .get(identity)
+        .copied()
+        .ok_or(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "an override whose declaration handle was not registered",
+        ))
 }
 
 fn class_constructor(

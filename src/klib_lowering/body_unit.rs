@@ -218,6 +218,18 @@ struct Sources<'a> {
     callees: &'a KlibCalleeFacts<'a>,
     intrinsics: &'a KlibIntrinsicFacts,
     externals: &'a HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
+    /// Declaration handles for override edges. This is the provider's complete registry, not the
+    /// call closure in `externals`.
+    declarations: &'a dyn crate::symbol_source::SymbolSource,
+}
+
+struct UnregisteredDeclarations;
+
+impl crate::symbol_source::SymbolSource for UnregisteredDeclarations {}
+
+fn unregistered_declarations() -> &'static dyn crate::symbol_source::SymbolSource {
+    static SOURCE: UnregisteredDeclarations = UnregisteredDeclarations;
+    &SOURCE
 }
 
 /// A declared function whose body is still to be lowered.
@@ -360,6 +372,27 @@ impl DependencyBodyUnit {
         intrinsics: &'a KlibIntrinsicFacts,
         externals: &'a HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
     ) -> Result<FunId, KlibBodyDecline> {
+        self.lower_function_with_declarations(
+            callable,
+            bodies,
+            callees,
+            intrinsics,
+            externals,
+            unregistered_declarations(),
+        )
+    }
+
+    /// Lower one function, resolving override declaration handles from `declarations` even when
+    /// the body never calls those members.
+    pub(crate) fn lower_function_with_declarations<'a>(
+        &mut self,
+        callable: KlibBodyCallable<'a>,
+        bodies: &'a KlibDeclarationBodies,
+        callees: &'a KlibCalleeFacts<'a>,
+        intrinsics: &'a KlibIntrinsicFacts,
+        externals: &'a HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
+        declarations: &'a dyn crate::symbol_source::SymbolSource,
+    ) -> Result<FunId, KlibBodyDecline> {
         if let Some(function) = self.functions.get(callable.identity()).copied() {
             // Declared before, perhaps from its header alone as another body's callee: the
             // selection it is now asked for must describe it too.
@@ -382,6 +415,7 @@ impl DependencyBodyUnit {
                 callees,
                 intrinsics,
                 externals,
+                declarations,
             },
         );
         lowered.map_err(|decline| {
@@ -399,6 +433,9 @@ impl DependencyBodyUnit {
 
     /// Authenticate the complete checked callee-fact bucket for one root against its serialized
     /// header and lower the unique matching variant. Input order cannot decide target emission.
+    ///
+    /// Tests that do not install interface overrides use this. Production passes the provider.
+    #[cfg(test)]
     pub(crate) fn lower_root_with_intrinsics_and_externals<'a>(
         &mut self,
         root: KlibBodyCallable<'a>,
@@ -406,6 +443,26 @@ impl DependencyBodyUnit {
         callees: &'a KlibCalleeFacts<'a>,
         intrinsics: &'a KlibIntrinsicFacts,
         externals: &'a HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
+    ) -> Result<FunId, KlibBodyDecline> {
+        self.lower_root_with_declarations(
+            root,
+            bodies,
+            callees,
+            intrinsics,
+            externals,
+            unregistered_declarations(),
+        )
+    }
+
+    /// Lower one selected root, publishing override handles from `declarations`.
+    pub(crate) fn lower_root_with_declarations<'a>(
+        &mut self,
+        root: KlibBodyCallable<'a>,
+        bodies: &'a KlibDeclarationBodies,
+        callees: &'a KlibCalleeFacts<'a>,
+        intrinsics: &'a KlibIntrinsicFacts,
+        externals: &'a HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
+        declarations: &'a dyn crate::symbol_source::SymbolSource,
     ) -> Result<FunId, KlibBodyDecline> {
         let callables = match callees.get(root.identity()) {
             Some(KlibCalleeFact::Selected(callables)) => callables,
@@ -438,12 +495,13 @@ impl DependencyBodyUnit {
                         ),
                     )
                 })?;
-            return self.lower_function_with_intrinsics_and_externals(
+            return self.lower_function_with_declarations(
                 callables[0],
                 bodies,
                 callees,
                 intrinsics,
                 externals,
+                declarations,
             );
         }
         let (arena, declaration) = bodies.function(root.identity()).ok_or_else(|| {
@@ -458,8 +516,13 @@ impl DependencyBodyUnit {
         )
         .map_err(|reason| KlibBodyDecline::new(root.signature().clone(), reason))?
         .expect("a selected root bucket contains a callable");
-        self.lower_function_with_intrinsics_and_externals(
-            callable, bodies, callees, intrinsics, externals,
+        self.lower_function_with_declarations(
+            callable,
+            bodies,
+            callees,
+            intrinsics,
+            externals,
+            declarations,
         )
     }
 
@@ -813,7 +876,7 @@ impl CallLinker for Linker<'_, '_> {
         sup: Ty,
     ) -> bool {
         let callees = self.sources.callees;
-        super::same_library_class::is_subtype(&self.local_classes, sub, sup, &|sub, sup| {
+        super::same_library_class::is_subtype(self.local_classes, sub, sup, &|sub, sup| {
             callees.is_subtype(parameters, sub, sup)
                 || super::callable_references::function_supertype(sub, sup)
         })

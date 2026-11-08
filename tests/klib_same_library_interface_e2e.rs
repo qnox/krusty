@@ -1,16 +1,20 @@
-//! A same-library private class called through an interface-typed receiver.
-//!
-//! The JVM oracle runs the producer and the consumer as one program. The Native consumer then
-//! imports only the official producer and calls `through`, whose body dispatches `mark` on a
-//! `Marker` receiver.
+//! PLATFORM-SPECIFIC: the Native consumer imports an official KLIB. The producer constructs a
+//! private class and the consumer calls `mark` both through a local `Marker` and on the `Marker`
+//! returned by `make`. The portable program is `tests/box_regressions/sameLibraryInterfaceDispatch.kt`.
 
 use crate::common;
 use krusty::diag::DiagSink;
 use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
 
-const LIBRARY: &str = include_str!("fixtures/klib_same_library_class/InterfaceDispatch.kt");
+const LIBRARY: &str = include_str!("box_regressions/sameLibraryInterfaceDispatch.kt");
 
-const CONSUMER: &str = "fun box(): String = if (through(7) == 7) \"OK\" else \"wrong\"\n";
+const CONSUMER: &str = "\
+fun box(): String {
+    val direct = through(7)
+    val returned = make(4).mark()
+    return if (direct == 7 && returned == 4) \"OK\" else \"wrong\"
+}
+";
 
 #[test]
 fn interface_typed_receiver_dispatches_the_private_implementation() {
@@ -22,16 +26,19 @@ fn interface_typed_receiver_dispatches_the_private_implementation() {
         return;
     };
     let consumer = format!("package fixture\n{CONSUMER}");
-    common::expect_box_ok_with_stdlib(
-        &format!("{LIBRARY}\n{CONSUMER}"),
-        "SameLibraryInterfaceDispatchOracle",
-    );
+    common::expect_box_ok_with_stdlib(LIBRARY, "SameLibraryInterfaceDispatchOracle");
     let root = std::env::var_os("KRUSTY_KOTLIN_NATIVE")
         .map(std::path::PathBuf::from)
         .expect("the caller requires an official Native distribution");
     let work = common::scratch_dir().expect("allocate interface-dispatch producer directory");
     let source = work.join("InterfaceDispatch.kt");
-    std::fs::write(&source, LIBRARY).unwrap();
+    // The shared program's `box` is the single-module oracle. The producer library exports
+    // `through` and `make`; this consumer supplies the entry.
+    let producer = LIBRARY
+        .split_once("\nfun box():")
+        .expect("the shared program declares box")
+        .0;
+    std::fs::write(&source, producer).unwrap();
     let library = work.join("dispatch");
     let output = std::process::Command::new(root.join("bin/kotlinc-native"))
         .args(["-p", "library", "-nopack", "-o"])

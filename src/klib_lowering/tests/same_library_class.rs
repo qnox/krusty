@@ -350,7 +350,7 @@ fn classifier(module: &str) -> crate::types::TypeName {
     .expect("a file-local class has a classifier")
 }
 
-fn init_statements<'a>(ir: &'a crate::ir::IrFile, class: crate::ir::ClassId) -> Vec<&'a IrExpr> {
+fn init_statements(ir: &crate::ir::IrFile, class: crate::ir::ClassId) -> Vec<&IrExpr> {
     let init = ir.classes[class as usize].methods[0];
     let body = ir.functions[init as usize]
         .body
@@ -361,7 +361,7 @@ fn init_statements<'a>(ir: &'a crate::ir::IrFile, class: crate::ir::ClassId) -> 
     stmts.iter().map(|id| &ir.exprs[*id as usize]).collect()
 }
 
-fn expression<'a>(ir: &'a crate::ir::IrFile, id: u32) -> &'a IrExpr {
+fn expression(ir: &crate::ir::IrFile, id: u32) -> &IrExpr {
     &ir.exprs[id as usize]
 }
 
@@ -628,7 +628,17 @@ fn a_declined_library_does_not_keep_another_librarys_class() {
 
 const LIBRARY: &str = include_str!("../../../tests/fixtures/klib_same_library_class/Library.kt");
 const INTERFACE_DISPATCH: &str =
-    include_str!("../../../tests/fixtures/klib_same_library_class/InterfaceDispatch.kt");
+    include_str!("../../../tests/box_regressions/sameLibraryInterfaceDispatch.kt");
+const APPLIED_INTERFACE: &str = "\
+package fixture
+interface View<T> {
+    fun get(): T
+}
+private class Hidden(private val value: String) : View<CharSequence> {
+    override fun get(): String = value
+}
+fun make(value: String): View<CharSequence> = Hidden(value)
+";
 
 #[test]
 fn official_klib_initializes_a_private_class_and_calls_its_members() {
@@ -677,12 +687,13 @@ fn official_klib_initializes_a_private_class_and_calls_its_members() {
             .unwrap();
         let callable = selected.klib_body_callable().unwrap();
         let callees = super::super::KlibCalleeFacts::new([callable]);
-        unit.lower_function_with_intrinsics_and_externals(
+        unit.lower_function_with_declarations(
             callable,
             libraries.declaration_bodies(),
             &callees,
             libraries.intrinsic_facts(),
             &externals,
+            &libraries,
         )
         .unwrap_or_else(|decline| panic!("{name}: {decline}"));
     }
@@ -813,12 +824,13 @@ fn interface_typed_call_targets_the_authenticated_override() {
     )]
     .into_iter()
     .collect();
-    unit.lower_function_with_intrinsics_and_externals(
+    unit.lower_function_with_declarations(
         callable,
         libraries.declaration_bodies(),
         &callees,
         libraries.intrinsic_facts(),
         &externals,
+        &libraries,
     )
     .unwrap_or_else(|decline| panic!("through: {decline}"));
     validated(unit.ir());
@@ -848,34 +860,196 @@ fn interface_typed_call_targets_the_authenticated_override() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+#[test]
+fn returned_interface_publishes_the_override_without_calling_it() {
+    let Some((directory, libraries)) = produce_library("returned-interface", INTERFACE_DISPATCH)
+    else {
+        return;
+    };
+    let mark = declared_member(&libraries, "Marker", "mark");
+    let mut unit = DependencyBodyUnit::default();
+    lower_fixture(
+        &mut unit,
+        &libraries,
+        "make",
+        &Default::default(),
+        &libraries,
+    );
+    validated(unit.ir());
+    let edge = override_edge(unit.ir(), mark.id);
+    assert!(edge.overridden_is_interface);
+    assert!(edge.implementation_function.is_some());
+    assert!(
+        unit.ir().exprs.iter().all(|expression| match expression {
+            IrExpr::Call { callee, .. } => !matches!(
+                callee.as_ref(),
+                crate::ir::Callee::External { target, .. } if *target == mark.id
+            ),
+            _ => true,
+        }),
+        "make constructs Hidden without calling Marker.mark"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn applied_interface_signature_substitutes_the_supertype() {
+    let Some((directory, libraries)) = produce_library("applied-interface", APPLIED_INTERFACE)
+    else {
+        return;
+    };
+    let get = declared_member(&libraries, "View", "get");
+    let mut unit = DependencyBodyUnit::default();
+    lower_fixture(
+        &mut unit,
+        &libraries,
+        "make",
+        &Default::default(),
+        &libraries,
+    );
+    validated(unit.ir());
+    let edge = override_edge(unit.ir(), get.id);
+    assert!(
+        edge.declared_result.is_ty_param(),
+        "{:?}",
+        edge.declared_result
+    );
+    assert_eq!(type_name_of(edge.applied_result), "kotlin/CharSequence");
+    assert_eq!(type_name_of(edge.implementation_result), "kotlin/String");
+    assert_ne!(edge.applied_result, edge.implementation_result);
+    assert_ne!(edge.declared_result, edge.applied_result);
+    assert!(edge.applied_parameters.is_empty());
+    assert!(edge.declared_parameters.is_empty());
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 struct MarkIdentity {
     id: crate::fir::ExternalCallableId,
     identity: crate::libraries::KlibDependencyCallable,
 }
 
 fn marker_mark(libraries: &crate::klib_libraries::KlibLibraries) -> MarkIdentity {
+    declared_member(libraries, "Marker", "mark")
+}
+
+fn declared_member(
+    libraries: &crate::klib_libraries::KlibLibraries,
+    owner: &str,
+    name: &str,
+) -> MarkIdentity {
     let symbols = libraries.symbols(
         crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
-        "Marker",
+        owner,
     );
-    let classifier = symbols.classifier.as_ref().expect("fixture.Marker");
+    let classifier = symbols
+        .classifier
+        .as_ref()
+        .unwrap_or_else(|| panic!("fixture.{owner}"));
     let callables = classifier
         .declared_callables
-        .get("mark")
-        .expect("Marker.mark");
+        .get(name)
+        .unwrap_or_else(|| panic!("fixture.{owner}.{name}"));
     let [function] = callables.functions() else {
-        panic!("one Marker.mark, found {}", callables.functions().len())
+        panic!(
+            "one fixture.{owner}.{name}, found {}",
+            callables.functions().len()
+        )
     };
     let id = function
         .callable
         .external_identity
-        .expect("Marker.mark identity");
+        .unwrap_or_else(|| panic!("fixture.{owner}.{name} identity"));
     let selected = libraries.external_callable(id).unwrap();
     let identity = selected
         .dependency_callable
         .clone()
-        .expect("Marker.mark dependency identity");
+        .unwrap_or_else(|| panic!("fixture.{owner}.{name} dependency identity"));
     MarkIdentity { id, identity }
+}
+
+type ProducedExternals = crate::fx_hash::HashMap<
+    crate::libraries::KlibDependencyCallable,
+    super::super::EmittedDependencyCallable,
+>;
+
+fn produce_library(
+    name: &str,
+    source_text: &str,
+) -> Option<(std::path::PathBuf, crate::klib_libraries::KlibLibraries)> {
+    let root = super::distribution_root()?;
+    let directory = std::env::temp_dir().join(format!("krusty-klib-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("create producer directory");
+    let source = directory.join(format!("{name}.kt"));
+    std::fs::write(&source, source_text).unwrap();
+    let library = directory.join(name);
+    let output = std::process::Command::new(root.join("bin/kotlinc-native"))
+        .args(["-p", "library", "-nopack", "-o"])
+        .arg(&library)
+        .arg(&source)
+        .output()
+        .expect("run exact Native KLIB producer");
+    assert!(
+        output.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let libraries = crate::klib_libraries::KlibLibraries::open(&[
+        crate::klib_libraries::KlibLibraryInput::platform_stdlib(
+            root.join("klib/common/stdlib"),
+            crate::klib_libraries::KlibStdlibSemantics::Native,
+        ),
+        crate::klib_libraries::KlibLibraryInput::dependency(library),
+    ])
+    .expect("read the serialized library");
+    Some((directory, libraries))
+}
+
+fn lower_fixture(
+    unit: &mut DependencyBodyUnit,
+    libraries: &crate::klib_libraries::KlibLibraries,
+    name: &str,
+    externals: &ProducedExternals,
+    declarations: &dyn SymbolSource,
+) {
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+        name,
+    );
+    let [function] = symbols.callables.functions() else {
+        panic!("one producer declaration {name}")
+    };
+    let selected = libraries
+        .external_callable(function.callable.external_identity.unwrap())
+        .unwrap();
+    let callable = selected.klib_body_callable().unwrap();
+    let callees = super::super::KlibCalleeFacts::new([callable]);
+    unit.lower_function_with_declarations(
+        callable,
+        libraries.declaration_bodies(),
+        &callees,
+        libraries.intrinsic_facts(),
+        externals,
+        declarations,
+    )
+    .unwrap_or_else(|decline| panic!("{name}: {decline}"));
+}
+
+fn override_edge(
+    ir: &crate::ir::IrFile,
+    id: crate::fir::ExternalCallableId,
+) -> &crate::ir::IrFunctionOverride {
+    ir.function_overrides
+        .values()
+        .flatten()
+        .find(|edge| edge.overridden == crate::fir::ResolvedFunctionOverrideTarget::External(id))
+        .unwrap_or_else(|| panic!("missing override {id:?}"))
+}
+
+fn type_name_of(ty: Ty) -> String {
+    ty.kotlin_class_internal()
+        .map(|name| name.render())
+        .unwrap_or_else(|| format!("{ty:?}"))
 }
 
 fn marker_externals(

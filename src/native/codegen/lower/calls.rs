@@ -907,6 +907,13 @@ impl BodyLowering<'_, '_, '_> {
                         let Some(symbol) =
                             super::super::super::intrinsics::runtime_member(signature)
                         else {
+                            if realization.owner_is_interface {
+                                if let Some(identity) = realization.dependency_callable.as_ref() {
+                                    return self.dependency_interface_stub(
+                                        identity, receiver, args, params, *ret,
+                                    );
+                                }
+                            }
                             return Err(declined!(
                                 "the member `{}.{name}`",
                                 realization.physical_owner.render().replace('/', ".")

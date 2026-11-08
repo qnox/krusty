@@ -103,9 +103,10 @@ pub(super) struct LocalClassSource<'bodies, 'call> {
 }
 
 /// A class ready to install, or the constructor of one already installed for this library.
+/// The prepared class is boxed so the ready constructor does not carry its frame.
 pub(super) enum LocalLink<'a> {
     Ready(LocalConstructor),
-    Prepared(PreparedLocalClass<'a>),
+    Prepared(Box<PreparedLocalClass<'a>>),
 }
 
 /// One member function, declared before its body is lowered so an initializer can call it.
@@ -119,16 +120,28 @@ pub(super) struct PreparedMember<'a> {
 }
 
 /// An overridden interface member, joined by its checked dependency identity.
+///
+/// `declared_*` is the interface signature with its own type parameters. `applied_*` is that
+/// signature after substituting the implementing class's supertype arguments. Neither is the
+/// implementation member's signature.
 pub(super) struct MemberOverride {
     pub(super) identity: KlibDependencyCallable,
     pub(super) owner: TypeName,
     pub(super) declared_parameters: Vec<Ty>,
     pub(super) declared_result: Ty,
+    pub(super) applied_parameters: Vec<Ty>,
+    pub(super) applied_result: Ty,
 }
 
 struct AdmittedInterface {
     name: TypeName,
     signature: KlibIrSignature,
+    arguments: Vec<Ty>,
+}
+
+struct InterfaceSignature {
+    parameters: Vec<Ty>,
+    result: Ty,
 }
 
 /// A file-local class authenticated and not yet added to the unit.
@@ -330,9 +343,9 @@ pub(super) fn link<'bodies>(
     if !std::ptr::eq(arena, class_arena) {
         return Err(mismatch("a constructor is not a member of its class"));
     }
-    Ok(LocalLink::Prepared(prepare(
+    Ok(LocalLink::Prepared(Box::new(prepare(
         source, signature, arena, class, function, key,
-    )?))
+    )?)))
 }
 
 fn constructor_class(
@@ -396,7 +409,12 @@ fn prepare<'a>(
     }
     delegates_to_any(arena, &class.base.symbol, function, source.validate_root)?;
     let resolve = |signature: &KlibIrSignature| classifier(source.bodies, source.module, signature);
-    let (types, formals, variances, bounds) = class_formals(arena, class, &resolve)?;
+    let ClassFormals {
+        types,
+        formals,
+        variances,
+        bounds,
+    } = class_formals(arena, class, &resolve)?;
     let (supertypes, interfaces) =
         authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
     let self_type = Ty::obj_args_name(class_name, &formals);
@@ -428,7 +446,11 @@ fn prepare<'a>(
         steps,
         members,
     } = members_and_storage(arena, class, &scope)?;
-    let (params, defaults, ctor_args) = constructor_parameters(arena, function, &types, &resolve)?;
+    let ConstructorParameters {
+        params,
+        defaults,
+        arguments: ctor_args,
+    } = constructor_parameters(arena, function, &types, &resolve)?;
     let class_type_parameters = formals
         .iter()
         .map(|formal| match formal.kind() {
@@ -513,6 +535,7 @@ fn authenticate_supertypes(
                 interfaces.push(AdmittedInterface {
                     name,
                     signature: classifier.signature.clone(),
+                    arguments: ty.type_args().to_vec(),
                 });
                 supertypes.push(ty);
             }
@@ -683,52 +706,98 @@ fn member_overrides(
                 "an override of a generic or constructor declaration",
             ));
         }
-        let mut declared_types = KlibTypeParameters::default();
-        for parameter in &owner.type_parameters {
-            if parameter.base.symbol.kind != KlibIrSymbolKind::TypeParameter {
-                return Err(mismatch("an interface type parameter has no symbol"));
-            }
-            let formal = Ty::ty_param(
+        let declared_types = bind_interface_parameters(owner, |parameter| {
+            Ok(Ty::ty_param(
                 crate::types::metadata_type_parameter(&parameter.name),
                 Ty::nullable(Ty::obj("kotlin/Any")),
-            );
-            if !declared_types.bind(&parameter.base.symbol, formal) {
-                return Err(mismatch("an interface repeats a type parameter"));
-            }
-        }
-        let declared_parameters = declared
-            .regular_parameters
-            .iter()
-            .map(|parameter| {
-                semantic_type_in(owner_arena, &declared_types, parameter.ty, scope.resolve)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if declared_parameters.len() != function.regular_parameters.len() {
+            ))
+        })?;
+        let declared_signature =
+            interface_signature(owner_arena, declared, &declared_types, scope.resolve)?;
+        if declared_signature.parameters.len() != function.regular_parameters.len() {
             return Err(unsupported(
                 "an override whose parameters differ from the interface member",
             ));
         }
-        let declared_result = semantic_type_in(
-            owner_arena,
-            &declared_types,
-            declared.return_type,
-            scope.resolve,
-        )?;
+        let applied_types = applied_interface_parameters(owner, &interface.arguments)?;
+        let applied_signature =
+            interface_signature(owner_arena, declared, &applied_types, scope.resolve)?;
         overrides.push(MemberOverride {
             identity,
             owner: interface.name,
-            declared_parameters,
-            declared_result,
+            declared_parameters: declared_signature.parameters,
+            declared_result: declared_signature.result,
+            applied_parameters: applied_signature.parameters,
+            applied_result: applied_signature.result,
         });
     }
     Ok(overrides)
+}
+
+fn bind_interface_parameters(
+    owner: &KlibIrClass,
+    mut formal: impl FnMut(&KlibIrTypeParameter) -> Result<Ty, KlibBodyDeclineReason>,
+) -> Result<KlibTypeParameters, KlibBodyDeclineReason> {
+    let mut types = KlibTypeParameters::default();
+    for parameter in &owner.type_parameters {
+        if parameter.base.symbol.kind != KlibIrSymbolKind::TypeParameter {
+            return Err(mismatch("an interface type parameter has no symbol"));
+        }
+        if !types.bind(&parameter.base.symbol, formal(parameter)?) {
+            return Err(mismatch("an interface repeats a type parameter"));
+        }
+    }
+    Ok(types)
+}
+
+fn applied_interface_parameters(
+    owner: &KlibIrClass,
+    arguments: &[Ty],
+) -> Result<KlibTypeParameters, KlibBodyDeclineReason> {
+    if arguments.len() != owner.type_parameters.len() {
+        return Err(mismatch(
+            "an interface supertype applies a different number of type arguments",
+        ));
+    }
+    let mut types = KlibTypeParameters::default();
+    for (parameter, argument) in owner.type_parameters.iter().zip(arguments) {
+        if parameter.base.symbol.kind != KlibIrSymbolKind::TypeParameter {
+            return Err(mismatch("an interface type parameter has no symbol"));
+        }
+        if !types.bind(&parameter.base.symbol, *argument) {
+            return Err(mismatch("an interface repeats a type parameter"));
+        }
+    }
+    Ok(types)
+}
+
+fn interface_signature(
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+    types: &KlibTypeParameters,
+    resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
+) -> Result<InterfaceSignature, KlibBodyDeclineReason> {
+    let parameters = function
+        .regular_parameters
+        .iter()
+        .map(|parameter| semantic_type_in(arena, types, parameter.ty, resolve))
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = semantic_type_in(arena, types, function.return_type, resolve)?;
+    Ok(InterfaceSignature { parameters, result })
+}
+
+struct ClassFormals {
+    types: KlibTypeParameters,
+    formals: Vec<Ty>,
+    variances: Vec<TypeVariance>,
+    bounds: Vec<Vec<Ty>>,
 }
 
 fn class_formals(
     arena: &KlibIrArena,
     class: &KlibIrClass,
     resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
-) -> Result<(KlibTypeParameters, Vec<Ty>, Vec<TypeVariance>, Vec<Vec<Ty>>), KlibBodyDeclineReason> {
+) -> Result<ClassFormals, KlibBodyDeclineReason> {
     let mut types = KlibTypeParameters::default();
     let mut formals = Vec::with_capacity(class.type_parameters.len());
     let mut variances = Vec::with_capacity(class.type_parameters.len());
@@ -760,7 +829,12 @@ fn class_formals(
         }
         bounds.push(parameter_bounds);
     }
-    Ok((types, formals, variances, bounds))
+    Ok(ClassFormals {
+        types,
+        formals,
+        variances,
+        bounds,
+    })
 }
 
 fn variance(parameter: &KlibIrTypeParameter) -> Result<TypeVariance, KlibBodyDeclineReason> {
@@ -774,12 +848,18 @@ fn variance(parameter: &KlibIrTypeParameter) -> Result<TypeVariance, KlibBodyDec
     }
 }
 
+struct ConstructorParameters {
+    params: Vec<Ty>,
+    defaults: Vec<bool>,
+    arguments: Vec<IrCtorArg>,
+}
+
 fn constructor_parameters(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
     types: &KlibTypeParameters,
     resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
-) -> Result<(Vec<Ty>, Vec<bool>, Vec<IrCtorArg>), KlibBodyDeclineReason> {
+) -> Result<ConstructorParameters, KlibBodyDeclineReason> {
     let mut params = Vec::with_capacity(function.regular_parameters.len());
     let mut defaults = Vec::with_capacity(function.regular_parameters.len());
     let mut arguments = Vec::with_capacity(function.regular_parameters.len());
@@ -810,7 +890,11 @@ fn constructor_parameters(
             capture_identity: None,
         });
     }
-    Ok((params, defaults, arguments))
+    Ok(ConstructorParameters {
+        params,
+        defaults,
+        arguments,
+    })
 }
 
 fn delegates_to_any(

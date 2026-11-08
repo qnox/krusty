@@ -118,6 +118,33 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         })
     }
 
+    /// A call of a dependency interface member this file does not implement. The link joins the
+    /// stub to the implementation a dependency object recorded under the same identity.
+    pub(super) fn dependency_interface_stub(
+        &mut self,
+        identity: &crate::libraries::KlibDependencyCallable,
+        receiver: u32,
+        args: &[u32],
+        params: &[Ty],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let number = self.file.dependency_interface_number(identity);
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        let arguments = self.arguments(args, params)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.dispatch_through(
+            object,
+            model::Dispatch::Interface(number),
+            params,
+            ret,
+            &arguments,
+        )
+    }
+
     /// Dispatch one dependency interface member by the exact override edge each implementor
     /// published. An implementor without that edge leaves the call to the paths that already
     /// know the member; this does not recover an implementation by its name.
