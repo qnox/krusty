@@ -260,6 +260,7 @@ pub(super) fn source_ordered_members<'a>(
     ordered.sort_by_key(|(order, _)| *order);
     let mut ordered: Vec<SourceOrderedMember<'a>> =
         ordered.into_iter().map(|(_, member)| member).collect();
+    follow_generated_any_impls(ir, &mut ordered);
     let mut functions: Vec<u32> = ordered
         .iter()
         .filter_map(|member| match member {
@@ -275,6 +276,41 @@ pub(super) fn source_ordered_members<'a>(
         }
     }
     ordered
+}
+
+/// kotlinc emits each instance `toString`/`hashCode`/`equals` a value class generates directly
+/// after the static `-impl` it delegates to. The instance member is the class's generated
+/// declaration, which keeps its place among the class's functions, so move it behind its `-impl`.
+fn follow_generated_any_impls(ir: &IrFile, ordered: &mut Vec<SourceOrderedMember<'_>>) {
+    let function_at = |ordered: &[SourceOrderedMember<'_>], wanted: &dyn Fn(u32) -> bool| {
+        ordered.iter().position(
+            |member| matches!(member, SourceOrderedMember::Function(function) if wanted(*function)),
+        )
+    };
+    for member in [
+        crate::ir::IrValueClassAnyMember::ToString,
+        crate::ir::IrValueClassAnyMember::HashCode,
+        crate::ir::IrValueClassAnyMember::Equals,
+    ] {
+        let Some(delegator) = function_at(ordered, &|function| {
+            ir.jvm_value_class_any_delegators.get(&function) == Some(&member)
+        }) else {
+            continue;
+        };
+        if function_at(ordered, &|function| {
+            ir.jvm_value_class_generated_any.get(&function) == Some(&member)
+        })
+        .is_none()
+        {
+            continue;
+        }
+        let moved = ordered.remove(delegator);
+        let implementation = function_at(ordered, &|function| {
+            ir.jvm_value_class_generated_any.get(&function) == Some(&member)
+        })
+        .expect("the generated `-impl` is still scheduled");
+        ordered.insert(implementation + 1, moved);
+    }
 }
 
 /// Whether `function` is a lambda's or local function's implementation that has no declaration

@@ -2894,6 +2894,7 @@ mod platform_result_check_e2e;
 mod unboxing_coercion_e2e;
 
 mod data_class_enum_equality_e2e;
+mod generated_equals_narrowing_e2e;
 mod serializer_metadata_class_id_e2e;
 mod serializer_property_with_over_contextual_e2e;
 mod serializer_return_value_status_e2e;

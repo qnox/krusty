@@ -1418,7 +1418,7 @@ fn open_value_class_functions(ir: &IrFile, c: &IrClass) -> Vec<(FnMeta, Function
         .collect()
 }
 
-/// Each `Any` member, in kotlinc's order, that no function of `c` overrides.
+/// Each `Any` member, in kotlinc's order, that no source function of `c` overrides.
 fn any_members_not_overridden<'a>(
     ir: &IrFile,
     c: &'a IrClass,

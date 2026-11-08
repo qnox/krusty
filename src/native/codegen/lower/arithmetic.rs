@@ -748,18 +748,14 @@ impl BodyLowering<'_, '_, '_> {
 }
 
 impl BodyLowering<'_, '_, '_> {
-    /// Whether a value class of this file declares its own `equals`, which its box's first vtable
-    /// entry records: the synthesized answer by the value is there only where it does not.
+    /// Whether a value class of this file declares its own `equals`. The one it generates compares
+    /// the values themselves, which `==` does directly.
     fn declares_its_own_equals(&self, classifier: TypeName) -> bool {
         self.file
             .ir
-            .class_id_by_name(classifier)
-            .is_some_and(|class| {
-                !matches!(
-                    self.file.model.layout(class).vtable.first(),
-                    Some(model::Slot::ValueMember { .. })
-                )
-            })
+            .any_member_overrides(classifier)
+            .values()
+            .any(|member| *member == crate::ir::IrValueClassAnyMember::Equals)
     }
 }
 
