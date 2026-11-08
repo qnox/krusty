@@ -125,14 +125,16 @@ fn body_needs_state_machine(
         })
 }
 
-/// A continuation read, an intrinsic suspension, or a suspend call whose callee is not a function
-/// of this file. A lambda body belongs to the lambda's function, so only its captures count here.
+/// A continuation read, an intrinsic suspension, a suspend call whose callee is not a function of
+/// this file, or a suspend method call whose implementation is selected at run time. A lambda body
+/// belongs to the lambda's function, so only its captures count here.
 fn has_unrealized_suspension(ir: &IrFile, body: ExprId, suspend_set: &HashSet<u32>) -> bool {
     any_in_body(ir, body, |ir, expression| {
         matches!(ir.expr(expression), IrExpr::CurrentContinuation)
             || ir.intrinsic_suspension_points.contains_key(&expression)
             || (ir.suspend_calls.contains_key(&expression)
                 && direct_suspend_callee(ir, expression, suspend_set).is_none())
+            || suspend_method_slot(ir, expression, suspend_set).is_some_and(|(_, closed)| !closed)
     })
 }
 
@@ -179,10 +181,15 @@ fn any_in_body(ir: &IrFile, body: ExprId, mut hit: impl FnMut(&IrFile, ExprId) -
     walk(ir, body, &mut hit, &mut HashSet::default())
 }
 
-/// The same-file suspend function a direct call names, when `expression` is such a call.
+/// The same-file suspend function a direct call runs, when `expression` is such a call.
 ///
 /// A `$default` entry keeps the callee's identity but is its own function: its parameters were not
 /// given a continuation, and the call it makes to the declaration is the one that needs one.
+///
+/// A method call names a slot of its static class; the implementation that runs is selected at
+/// run time. The slot's function is the one that runs only when no override can replace it: the
+/// method is closed (`open_methods` does not hold it) or its class can have no subclass. Any other
+/// method call keeps its unknown implementation, which may suspend.
 fn direct_suspend_callee(
     ir: &IrFile,
     expression: ExprId,
@@ -197,12 +204,33 @@ fn direct_suspend_callee(
             }
             _ => None,
         },
-        IrExpr::MethodCall { class, index, .. } => {
-            let function = *ir.classes[*class as usize].methods.get(*index as usize)?;
-            suspend_set.contains(&function).then_some(function)
-        }
+        IrExpr::MethodCall { .. } => match suspend_method_slot(ir, expression, suspend_set)? {
+            (function, true) => Some(function),
+            (_, false) => None,
+        },
         _ => None,
     }
+}
+
+/// The same-file suspend function in the slot a method call names, and whether that function is
+/// the implementation that runs.
+fn suspend_method_slot(
+    ir: &IrFile,
+    expression: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> Option<(u32, bool)> {
+    let IrExpr::MethodCall { class, index, .. } = ir.expr(expression) else {
+        return None;
+    };
+    let class = &ir.classes[*class as usize];
+    let function = *class.methods.get(*index as usize)?;
+    if !suspend_set.contains(&function) {
+        return None;
+    }
+    let closed = !class.is_interface
+        && (!ir.open_methods.contains(&function)
+            || !(class.is_open || class.is_abstract || class.is_sealed));
+    Some((function, closed))
 }
 
 /// Pass a continuation into every direct call of a suspend function and read the call at the

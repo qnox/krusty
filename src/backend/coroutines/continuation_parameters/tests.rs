@@ -328,3 +328,95 @@ fn a_unit_expression_body_runs_and_completes_with_unit() {
     assert_eq!(effects.as_slice(), [call]);
     assert!(matches!(ir.exprs[*unit as usize], IrExpr::UnitInstance));
 }
+
+/// `open class Base { open suspend fun value(): Int = 7 }`, its `override` in `Derived`, and a
+/// caller `suspend fun read(base: Base) = base.value()`. The method call names `Base`'s slot,
+/// with the open method in it as its static function and the override as a second
+/// implementation. Answers the file and the call.
+fn method_call_through_base(open_method: bool, open_class: bool) -> (IrFile, ExprId) {
+    let mut ir = IrFile::default();
+    let base_value = {
+        let seven = ir.add_expr(IrExpr::Const(IrConst::Int(7)));
+        let mut method = function(Vec::new(), Ty::Int, Some(seven));
+        method.is_static = false;
+        method.dispatch_receiver = Some("Base".into());
+        ir.add_fun(method)
+    };
+    let derived_value = {
+        let eight = ir.add_expr(IrExpr::Const(IrConst::Int(8)));
+        let mut method = function(Vec::new(), Ty::Int, Some(eight));
+        method.is_static = false;
+        method.dispatch_receiver = Some("Derived".into());
+        ir.add_fun(method)
+    };
+    let mut base = crate::ir::test_support::blank_class("Base");
+    base.is_open = open_class;
+    base.methods.push(base_value);
+    let base = ir.add_class(base);
+    let mut derived = crate::ir::test_support::blank_class("Derived");
+    derived.superclass = "Base".into();
+    derived.methods.push(derived_value);
+    ir.add_class(derived);
+    if open_method {
+        ir.open_methods.insert(base_value);
+    }
+    let receiver = ir.add_expr(IrExpr::Const(IrConst::Null));
+    let call = ir.add_expr(IrExpr::MethodCall {
+        class: base,
+        index: 0,
+        receiver,
+        args: Vec::new(),
+    });
+    let caller = ir.add_fun(function(
+        vec![Ty::obj_name("Base".into())],
+        Ty::Int,
+        Some(call),
+    ));
+    ir.suspend_funs.extend([base_value, derived_value, caller]);
+    (ir, call)
+}
+
+/// An open suspend method of an open class may run as any override, including one in another
+/// module; its slot does not prove the call completes in place, and the file is declined.
+#[test]
+fn a_call_to_an_overridable_suspend_method_is_declined() {
+    let (mut ir, call) = method_call_through_base(true, true);
+    assert_eq!(
+        add_continuation_parameters(&mut ir),
+        Err(ContinuationDecline::Suspends)
+    );
+    let IrExpr::MethodCall { args, .. } = &ir.exprs[call as usize] else {
+        panic!("the call is left as it was");
+    };
+    assert!(args.is_empty());
+    assert!(ir.suspend_declared_sigs.is_empty());
+}
+
+/// The same slot when nothing can replace its function: a final method of an open class, and an
+/// open method of a class that can have no subclass. The call passes a continuation.
+#[test]
+fn a_call_to_a_closed_suspend_method_passes_a_continuation() {
+    for (open_method, open_class) in [(false, true), (true, false)] {
+        let (mut ir, call) = method_call_through_base(open_method, open_class);
+
+        assert_eq!(
+            add_continuation_parameters(&mut ir),
+            Ok(()),
+            "{open_method} {open_class}"
+        );
+
+        let IrExpr::TypeOp { arg: invoked, .. } = ir.exprs[call as usize] else {
+            panic!("the call is read at its declared result");
+        };
+        let IrExpr::MethodCall { args, .. } = &ir.exprs[invoked as usize] else {
+            panic!("the method call");
+        };
+        let [Some(continuation)] = args.as_slice() else {
+            panic!("the continuation is the only argument: {args:?}");
+        };
+        assert!(matches!(
+            ir.exprs[*continuation as usize],
+            IrExpr::Const(IrConst::Null)
+        ));
+    }
+}
