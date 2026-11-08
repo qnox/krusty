@@ -37,7 +37,6 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(intrinsic_suspension_points);
     move_fact!(reified_call_subst);
     move_fact!(inline_call_type_arguments);
-    move_fact!(construction_declared_params);
     move_fact!(construction_targets);
     move_fact!(synthesized_accessor_calls);
     move_fact!(private_property_accessor_calls);
@@ -55,6 +54,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(static_extension_receivers);
     move_fact!(call_inline_modifiers);
     move_fact!(value_class_unbox_type_operation_edges);
+    move_fact!(value_class_null_safe_unbox_type_operation_edges);
     // The static a value-class member or constructor call was realized as: a private one reached
     // from another class goes through its accessor, which only the call itself names.
     move_fact!(jvm_member_targets);

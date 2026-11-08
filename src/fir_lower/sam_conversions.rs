@@ -188,6 +188,11 @@ impl BodyLowering<'_> {
                     nullable: conversion.nullable,
                     kotlin_interface: conversion.kotlin_interface,
                     parameter_identities: conversion.parameter_identities.to_vec(),
+                    type_parameters: conversion
+                        .type_parameters
+                        .iter()
+                        .map(crate::ir::IrSamTypeParameter::lowered)
+                        .collect(),
                 })),
                 inline_body: None,
             }),

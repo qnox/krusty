@@ -4,7 +4,7 @@
 
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
-use krusty::jvm::metadata::{package_functions, parse_builtins};
+use krusty::jvm::metadata::parse_builtins;
 use krusty::symbol_resolver::{SymRecv, Symbol, SymbolResolver};
 use krusty::types::{type_name, Ty};
 use std::rc::Rc;
@@ -19,7 +19,10 @@ fn collection_factory_return_types_distinguish_mutable() {
     let ci = cp
         .find("kotlin/collections/CollectionsKt__CollectionsKt")
         .expect("CollectionsKt part on classpath");
-    let fns = package_functions(&ci);
+    let fns = &ci
+        .kotlin_members()
+        .expect("member metadata decodes")
+        .package_functions;
     let ret = |name: &str| {
         fns.iter()
             .find(|f| f.kotlin_name == name)

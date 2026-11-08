@@ -30,6 +30,29 @@ pub enum IrBinOp {
 }
 
 impl IrBinOp {
+    /// The binary operation an exact builtin operator member realizes (`Int.plus`, `Long.and`,
+    /// `Int.shl`): the operation its source operator form lowers to. Every backend realizes the
+    /// provider-authenticated member through this one mapping.
+    pub fn of_primitive_operator(intrinsic: crate::libraries::CompilerIntrinsic) -> Option<Self> {
+        use crate::libraries::{CompilerIntrinsic, PrimitiveBinaryIntrinsic};
+        Some(match intrinsic {
+            CompilerIntrinsic::PrimitiveBinary(operation) => match operation {
+                PrimitiveBinaryIntrinsic::Add => IrBinOp::Add,
+                PrimitiveBinaryIntrinsic::Subtract => IrBinOp::Sub,
+                PrimitiveBinaryIntrinsic::Multiply => IrBinOp::Mul,
+                PrimitiveBinaryIntrinsic::Divide => IrBinOp::Div,
+                PrimitiveBinaryIntrinsic::Remainder => IrBinOp::Rem,
+            },
+            CompilerIntrinsic::PrimitiveBitAnd => IrBinOp::BitAnd,
+            CompilerIntrinsic::PrimitiveBitOr => IrBinOp::BitOr,
+            CompilerIntrinsic::PrimitiveBitXor => IrBinOp::BitXor,
+            CompilerIntrinsic::PrimitiveShiftLeft => IrBinOp::Shl,
+            CompilerIntrinsic::PrimitiveShiftRight => IrBinOp::Shr,
+            CompilerIntrinsic::PrimitiveUnsignedShiftRight => IrBinOp::Ushr,
+            _ => return None,
+        })
+    }
+
     /// Whether the operator answers a `Boolean` whatever its operands: a comparison, an identity
     /// test, or a logical connective.
     pub fn yields_boolean(self) -> bool {

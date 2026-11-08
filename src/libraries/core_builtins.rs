@@ -7,6 +7,14 @@
 
 use super::*;
 
+/// How a core member function may be written at a call site besides `receiver.name(…)`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Notation {
+    Plain,
+    Infix,
+    Operator,
+}
+
 /// Publish the compiler-owned realization attached to each exact core declaration. These names
 /// define declarations in this provider; consumers receive the selected callable identity and its
 /// typed intrinsic and never classify a later source or JVM spelling.
@@ -18,9 +26,11 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         name: &str,
         parameter: Option<Ty>,
         result: Ty,
-        semantics: (CompilerIntrinsic, bool),
+        semantics: (CompilerIntrinsic, Notation),
     ) {
-        let (intrinsic, infix) = semantics;
+        let (intrinsic, notation) = semantics;
+        let infix = notation == Notation::Infix;
+        let operator = notation == Notation::Operator;
         let params = parameter.into_iter().collect::<Vec<_>>();
         let mut callable =
             LibraryCallable::library(owner, name, params.clone(), result, result, "");
@@ -28,16 +38,20 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         let mut declaration = FunctionInfo::plain(FnKind::Member, Some(receiver), callable);
         declaration.call_sig = CallSig::metadata_plain(params.len());
         declaration.flags.infix = infix;
+        declaration.flags.operator = operator;
 
+        // A class cannot declare two members with one name and one parameter list, so a decoded
+        // declaration with this name and these parameters is the core declaration itself, whatever
+        // its provider calls the owner's type parameter in the result (`Array<T>.get`).
         if let Some(callables) = classifier.declared_callables.get_mut(name) {
             let (mut functions, properties) = std::mem::take(callables).into_parts();
             if let Some(existing) = functions.overloads.iter_mut().find(|candidate| {
                 candidate.kind == FnKind::Member
                     && candidate.semantic_params().as_ref() == params.as_slice()
-                    && candidate.callable.ret.canonical_semantic() == result
             }) {
                 existing.callable.compiler_intrinsic = Some(intrinsic);
                 existing.flags.infix |= infix;
+                existing.flags.operator |= operator;
             } else {
                 functions.overloads.push(declaration);
             }
@@ -59,11 +73,24 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         ty: Ty,
         intrinsic: CompilerIntrinsic,
     ) {
+        let role = super::builtin_declaration::semantic_call_role(
+            super::builtin_declaration::BuiltinMemberDeclaration {
+                owner,
+                name,
+                params: &[],
+                ret: ty,
+                is_property: true,
+                is_operator: false,
+                is_infix: false,
+                annotations: &[],
+            },
+        );
         if let Some(callables) = classifier.declared_callables.get_mut(name) {
             let (functions, mut properties) = std::mem::take(callables).into_parts();
             if !properties.overloads.is_empty() {
                 for property in &mut properties.overloads {
                     property.getter.compiler_intrinsic = Some(intrinsic);
+                    property.getter.semantic_role = role;
                 }
                 *callables = Callables::from_parts(functions, properties);
                 return;
@@ -72,6 +99,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         }
         let mut getter = LibraryCallable::library(owner, name, Vec::new(), ty, ty, "");
         getter.compiler_intrinsic = Some(intrinsic);
+        getter.semantic_role = role;
         let property = PropertyInfo {
             return_value_status: None,
             name: name.to_string(),
@@ -155,6 +183,36 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             Ty::Int,
             CompilerIntrinsic::ArraySize,
         );
+        // `operator fun get(index: Int): E`, where `E` is `Array<T>`'s formal or the primitive
+        // array's element.
+        let (receiver, element) = match crate::types::prim_array_element(owner) {
+            Some(element) => (Ty::obj_name(owner), element),
+            None => {
+                let element =
+                    Ty::ty_param("T", Ty::nullable(Ty::obj_name(crate::types::wk::any())));
+                (Ty::obj_args_name(owner, &[element]), element)
+            }
+        };
+        member_function(
+            classifier,
+            owner,
+            receiver,
+            "get",
+            Some(Ty::Int),
+            element,
+            (CompilerIntrinsic::ArrayGet, Notation::Operator),
+        );
+    }
+    if owner == crate::types::wk::string() {
+        member_function(
+            classifier,
+            owner,
+            Ty::String,
+            "get",
+            Some(Ty::Int),
+            Ty::Char,
+            (CompilerIntrinsic::StringGet, Notation::Operator),
+        );
     }
     let bit_receiver = if owner.matches("kotlin/Int") {
         Some(Ty::Int)
@@ -178,7 +236,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
                 name,
                 Some(receiver),
                 receiver,
-                (intrinsic, true),
+                (intrinsic, Notation::Infix),
             );
         }
         member_function(
@@ -188,7 +246,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             "inv",
             None,
             receiver,
-            (CompilerIntrinsic::PrimitiveBitNot, false),
+            (CompilerIntrinsic::PrimitiveBitNot, Notation::Plain),
         );
         if matches!(receiver, Ty::Int | Ty::Long) {
             for (name, intrinsic) in [
@@ -203,7 +261,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
                     name,
                     Some(Ty::Int),
                     receiver,
-                    (intrinsic, true),
+                    (intrinsic, Notation::Infix),
                 );
             }
         }

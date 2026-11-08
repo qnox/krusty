@@ -1527,7 +1527,7 @@ fn source_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagnost
 fn ensure_determined_type(ty: crate::types::Ty) -> Result<(), UndeterminedDiagnosticType> {
     match ty.kind() {
         TyKind::Error => Err(UndeterminedDiagnosticType::Error),
-        TyKind::Pending => Err(UndeterminedDiagnosticType::Pending),
+        TyKind::Pending | TyKind::Var(..) => Err(UndeterminedDiagnosticType::Pending),
         TyKind::Obj(_, arguments) => {
             for &argument in arguments {
                 ensure_determined_type(argument)?;
@@ -1626,7 +1626,7 @@ fn qualified_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagn
         TyKind::StarProjection(_) => "*".to_string(),
         TyKind::RawProjection(inner) => qualified_type_name(inner)?,
         TyKind::Error => return Err(UndeterminedDiagnosticType::Error),
-        TyKind::Pending => return Err(UndeterminedDiagnosticType::Pending),
+        TyKind::Pending | TyKind::Var(..) => return Err(UndeterminedDiagnosticType::Pending),
     })
 }
 
@@ -1769,6 +1769,7 @@ mod tests {
                     bounds: vec![(bound, false), (comparable, true)],
                     variance: crate::types::TypeVariance::Invariant,
                     reified: false,
+                    captured_from_enclosing: false,
                 }],
                 params: vec![crate::types::Ty::Int],
                 ret: Some(parameter),

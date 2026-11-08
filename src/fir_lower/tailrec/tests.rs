@@ -175,7 +175,10 @@ fn a_self_call_under_a_not_null_assertion_replaces_its_return() {
     });
     let asserted = ir.add_expr(IrExpr::NotNullAssert {
         operand: call,
-        check: crate::ir::NullCheck::Named("step(n)".to_string()),
+        check: crate::ir::NullCheck::Named {
+            message: "step(n)".to_string(),
+            site: crate::ir::NullCheckSite::Value,
+        },
     });
     let returned = ir.add_expr(IrExpr::Return(Some(asserted)));
     ir.checked_return_depths.insert(returned, 0);

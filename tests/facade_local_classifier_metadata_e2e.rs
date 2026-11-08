@@ -35,6 +35,63 @@ fun box(): String = "OK"
 }
 
 #[test]
+fn private_generic_anonymous_factory_metadata_matches_kotlinc() {
+    assert_facade_metadata(
+        "GenericAnonymousMetadataBaseline",
+        include_str!("box_regressions/localGenericAnonymousMetadata.kt"),
+    );
+}
+
+fn assert_class_metadata(stem: &str, source: &str, class_internal: &str) {
+    let file = format!("{stem}.kt");
+    let classes = common::classes_against_kotlinc_module(&[(&file, source)]);
+    let metadata = |bytes: &Vec<u8>| {
+        let info = krusty::jvm::classreader::parse_class(bytes).expect("readable class");
+        (
+            format!("{:?}", info.meta),
+            common::kotlin_metadata::kotlin_metadata_ints(bytes),
+            common::kotlin_metadata::kotlin_metadata_d1_parts(bytes),
+            common::raw_kotlin_metadata(bytes),
+        )
+    };
+    assert_eq!(
+        metadata(&classes.krusty[class_internal]),
+        metadata(&classes.reference[class_internal])
+    );
+}
+
+#[test]
+fn named_local_class_metadata_keeps_own_arguments_and_omits_enclosing_captures() {
+    assert_class_metadata(
+        "NamedLocalArgumentMetadata",
+        include_str!("box_regressions/namedLocalArgumentMetadata.kt"),
+        "NamedLocalArgumentMetadataKt$enclose$Holder",
+    );
+}
+
+#[test]
+fn shadowed_enclosing_formal_stays_out_of_the_anonymous_application() {
+    let source = include_str!("box_regressions/shadowedLocalFormalMetadata.kt");
+    let classes = common::classes_against_kotlinc_module(&[("ShadowedFormalMetadata.kt", source)]);
+    let metadata = |bytes: &Vec<u8>| {
+        let info = krusty::jvm::classreader::parse_class(bytes).expect("readable class");
+        (
+            format!("{:?}", info.meta),
+            common::kotlin_metadata::kotlin_metadata_ints(bytes),
+            common::kotlin_metadata::kotlin_metadata_d1_parts(bytes),
+            common::raw_kotlin_metadata(bytes),
+        )
+    };
+    for class_internal in ["Outer", "Outer$copy$1"] {
+        assert_eq!(
+            metadata(&classes.krusty[class_internal]),
+            metadata(&classes.reference[class_internal]),
+            "{class_internal}"
+        );
+    }
+}
+
+#[test]
 fn explicitly_typed_getter_of_anonymous_factory_metadata_matches_kotlinc() {
     assert_facade_metadata(
         "ExplicitGetterMetadataBaseline",

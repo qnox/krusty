@@ -310,14 +310,11 @@ fn klib_primitive_planning_and_body_lowering_use_the_same_authenticated_shape() 
     };
     let libraries = stdlib(&root);
     let class = libraries.classifier(type_name("kotlin/Array")).unwrap();
-    let provider = libraries
-        .external_callable(
-            class.declared_callables["size"].properties()[0]
-                .getter
-                .external_identity
-                .unwrap(),
-        )
+    let target = class.declared_callables["size"].properties()[0]
+        .getter
+        .external_identity
         .unwrap();
+    let provider = libraries.external_callable(target).unwrap();
     let primitive = provider.klib_body_callable().unwrap();
     let (caller, tree) = array_caller(&provider);
     let root = caller.klib_body_callable().unwrap();
@@ -343,29 +340,76 @@ fn klib_primitive_planning_and_body_lowering_use_the_same_authenticated_shape() 
         1,
         "no primitive implementation is emitted"
     );
-    let calls = unit
+    // The read stays the selected property's ordinary read; no call of an operation stands in.
+    let accessor = primitive.accessor().unwrap().property;
+    let reads = unit
         .ir()
         .exprs
         .iter()
         .filter_map(|expression| match expression {
-            IrExpr::Call {
-                callee,
-                dispatch_receiver,
-                args,
-            } => Some((&**callee, dispatch_receiver.is_some(), args.len())),
+            IrExpr::Call { .. } => panic!("a call in the lowered size read: {expression:?}"),
+            IrExpr::Checked(operation) => match &**operation {
+                crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver,
+                    arguments,
+                    result,
+                    ..
+                } => Some((*target, receiver.is_some(), arguments.len(), *result)),
+                _ => None,
+            },
             _ => None,
         })
         .collect::<Vec<_>>();
+    assert_eq!(reads, [(accessor, true, 0, Ty::Int)]);
+    // Each lowering reads its own provider's `Array.size`: the property whose getter is the array
+    // size operation the provider attached to `kotlin.Array`.
+    use crate::symbol_source::SymbolSource;
+    let klib_property = libraries.external_property(accessor).unwrap();
     assert_eq!(
-        calls,
-        [(
-            &Callee::Intrinsic {
-                operation: crate::ir::IrIntrinsic::ArraySize,
-                ret: Ty::Int
+        (klib_property.name.as_str(), klib_property.getter),
+        ("size", target)
+    );
+    let source = crate::fir_lower::tests::lower_single_source_with_platform(
+        "fun sizeOf(a: Array<Int>): Int { return a.size }",
+        "KlibBodyEquivalent",
+        Box::new(crate::libraries::EmptySymbolSource),
+    );
+    let source_reads = source
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Checked(operation) => match &**operation {
+                crate::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } => Some(*target),
+                _ => None,
             },
-            true,
-            0
-        )]
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [source_property] = source_reads.as_slice() else {
+        panic!("one source size read: {source_reads:?}")
+    };
+    let core = crate::libraries::EmptySymbolSource;
+    let core_property = core.external_property(*source_property).unwrap();
+    let core_getter = core.external_callable(core_property.getter).unwrap();
+    assert_eq!(
+        (
+            core_property.name.as_str(),
+            core_getter.callable.owner,
+            core_getter.callable.compiler_intrinsic,
+        ),
+        (
+            "size",
+            type_name("kotlin/Array"),
+            Some(CompilerIntrinsic::ArraySize),
+        )
+    );
+    assert_eq!(
+        (provider.callable.owner, primitive.compiler_intrinsic()),
+        (
+            type_name("kotlin/Array"),
+            Some(CompilerIntrinsic::ArraySize)
+        )
     );
     let selected = KlibCalleeFacts::new([root, primitive]);
     assert!(selected

@@ -18,6 +18,7 @@ mod catch_clauses;
 mod checked_hierarchy;
 mod checked_operand_types;
 mod checked_substitutions;
+mod enum_realization;
 mod external_constructions;
 mod external_references;
 mod inline_only;
@@ -591,6 +592,7 @@ fn external_default_call_keeps_only_supplied_common_operands() {
                 default_provider: None,
                 receiver: None,
                 declared_receiver: None,
+                declaring_receiver: None,
                 parameters: Box::new([resolved(Ty::Int), resolved(Ty::String)]),
                 result: resolved(Ty::String),
                 declared_result: None,
@@ -656,6 +658,7 @@ fn external_property_function_reference_is_materialized_without_lookup() {
             dispatch: crate::fir::FirPropertyDispatch::Ordinary,
 
             metadata_constant_read: false,
+            semantic_role: None,
         }),
         setter: None,
         extension_receiver: false,
@@ -757,6 +760,7 @@ fn external_member_extension_property_uses_published_receiver_coordinate() {
                 dispatch: crate::fir::FirPropertyDispatch::Ordinary,
 
                 metadata_constant_read: false,
+                semantic_role: None,
             },
             dispatch_receiver: Some(FirReceiver {
                 value: dispatch,
@@ -833,6 +837,7 @@ fn external_super_property_dispatch_survives_common_lowering() {
                 },
 
                 metadata_constant_read: false,
+                semantic_role: None,
             },
             dispatch_receiver: Some(FirReceiver {
                 value: receiver,

@@ -19,9 +19,8 @@ pub(super) const SAM_CONVERSION: &str = "a lambda converted to a `fun interface`
 pub(super) enum FunctionEquality {
     /// A lambda is equal only to itself.
     Identity,
-    /// Kotlin makes two references to one declaration equal; this generator does not compare
-    /// declarations yet, so such an `==` traps rather than answer `false`.
-    Declaration,
+    /// The checked declaration/adaptation kind and the semantic receiver's capture slot.
+    Declaration { kind: i32, receiver: Option<usize> },
 }
 
 impl Body<'_> {
@@ -47,19 +46,47 @@ impl Body<'_> {
             .get(captures.len()..)
             .ok_or("a function value capturing more than its body takes")?
             .to_vec();
+        if self
+            .ir
+            .shared_capture_parameters
+            .keys()
+            .any(|&(owner, parameter)| owner == function && parameter as usize >= captures.len())
+        {
+            return Err("a function value with a shared parameter outside its captures".into());
+        }
         let body = self.emitted_function(function)?;
         let shape = self.runtime.function_shape(self.module, own.len());
 
-        let mut fields = vec![immutable(ValType::reference(
-            self.runtime.objects.any_table,
-        ))];
-        for &captured in &params[..captures.len()] {
-            let value = carrier(captured)?.ok_or("a function value capturing a `Unit` value")?;
+        let mut fields = vec![
+            immutable(ValType::reference(self.runtime.objects.any_table)),
+            immutable(ValType::I32),
+        ];
+        let (parent, first_capture) = match equality {
+            FunctionEquality::Identity => (
+                self.runtime.identity.object,
+                crate::wasm::identity::PREFIX_FIELDS,
+            ),
+            FunctionEquality::Declaration { receiver, .. } => {
+                if receiver.is_some_and(|slot| slot >= captures.len()) {
+                    return Err("a callable reference with an invalid bound receiver slot".into());
+                }
+                fields.push(immutable(REFERENCE));
+                (
+                    self.runtime.callable_references.object,
+                    crate::wasm::callable_references::PREFIX_FIELDS,
+                )
+            }
+        };
+        let mut captured_types = Vec::with_capacity(captures.len());
+        for parameter in 0..captures.len() {
+            let value = parameter_carrier(self.module, self.ir, function, parameter as u32)?
+                .ok_or("a function value capturing a `Unit` value")?;
+            captured_types.push(value);
             fields.push(immutable(value));
         }
         let structure = self.module.subtype(SubType {
             composite: CompositeType::Struct(fields),
-            supertype: Some(self.runtime.objects.object),
+            supertype: Some(parent),
             open: false,
         });
 
@@ -70,7 +97,7 @@ impl Body<'_> {
             entry
                 .local_get(0)
                 .ref_cast(false, HeapType::Concrete(structure))
-                .struct_get(structure, field + 1);
+                .struct_get(structure, field + first_capture);
         }
         for (index, &param) in own.iter().enumerate() {
             entry.local_get(index as u32 + 1);
@@ -89,12 +116,15 @@ impl Body<'_> {
             },
         );
 
-        let [equals_ty, hash_code_ty, to_string_ty] = self.runtime.objects.any_slot_types;
+        let [_, _, to_string_ty] = self.runtime.objects.any_slot_types;
         let equals = match equality {
             FunctionEquality::Identity => self.runtime.objects.identity_equals,
-            FunctionEquality::Declaration => self.runtime.objects.trap(self.module, equals_ty),
+            FunctionEquality::Declaration { .. } => self.runtime.callable_references.equals,
         };
-        let hash_code = self.runtime.objects.trap(self.module, hash_code_ty);
+        let hash_code = match equality {
+            FunctionEquality::Identity => self.runtime.identity.hash_code,
+            FunctionEquality::Declaration { .. } => self.runtime.callable_references.hash_code,
+        };
         let to_string = self.runtime.objects.trap(self.module, to_string_ty);
         let objects = &mut self.runtime.objects;
         let (_, itable) = objects
@@ -113,9 +143,32 @@ impl Body<'_> {
             .module
             .constant_global(ValType::reference(shape.table), init);
 
+        // Ordinary captures precede the bound receiver. Save each once so equality metadata
+        // and the adapter's physical receiver reuse the same evaluated value.
+        let mut saved = Vec::with_capacity(captures.len());
+        for (parameter, &capture) in captures.iter().enumerate() {
+            let local = self.local(captured_types[parameter]);
+            self.function_argument(function, parameter as u32, capture)?;
+            self.code.local_set(local);
+            saved.push(local);
+        }
         self.code.global_get(table);
-        for (&capture, &captured) in captures.iter().zip(&params) {
-            self.value(capture, captured)?;
+        match equality {
+            FunctionEquality::Identity => {
+                self.code.call(self.runtime.identity.allocate);
+            }
+            FunctionEquality::Declaration { kind, receiver } => {
+                self.code.i32_const(kind);
+                if let Some(slot) = receiver {
+                    self.code.local_get(saved[slot]);
+                    self.coerce_emitted_value(params[slot], Ty::obj_name(crate::types::wk::any()))?;
+                } else {
+                    self.code.ref_null(HeapType::None);
+                }
+            }
+        }
+        for local in saved {
+            self.code.local_get(local);
         }
         self.code.struct_new(structure);
         Ok(())
@@ -133,7 +186,15 @@ impl Body<'_> {
             .copied()
             .chain(reference.bound_receiver)
             .collect();
-        self.function_value(reference.adapter, &captures, FunctionEquality::Declaration)
+        let kind = self.callable_reference_kind(reference)?;
+        self.function_value(
+            reference.adapter,
+            &captures,
+            FunctionEquality::Declaration {
+                kind,
+                receiver: reference.bound_receiver.map(|_| reference.captures.len()),
+            },
+        )
     }
 
     /// `function(args)`, where `function` is a function value taking `params` and answering

@@ -33,6 +33,7 @@ use crate::{
     WorkspaceSymbolIndex,
 };
 
+mod deadline;
 mod java_stub_memo;
 
 use java_stub_memo::JavaStubMemo;
@@ -40,8 +41,6 @@ use java_stub_memo::JavaStubMemo;
 pub const DEFAULT_ANALYSES_PER_WORKER: usize = 64;
 const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SOURCE_SET_BYTES: usize = 32 * 1024 * 1024;
-const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const READINESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const WORKER_READY: &[u8] = b"ready";
 
 /// Classpath override and whether the worker should skip navigation indexes.
@@ -334,7 +333,7 @@ struct WireDiagnostic {
     hi: u32,
     severity: u8,
     #[serde(default)]
-    warning_name: Option<String>,
+    name: Option<String>,
     kind: u8,
     message: String,
 }
@@ -372,9 +371,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
                         Severity::Error => 1,
                         Severity::Warning => 2,
                     },
-                    warning_name: diagnostic
-                        .warning_name
-                        .map(|name| name.as_str().to_string()),
+                    name: diagnostic.name.map(|name| name.as_str().to_string()),
                     kind: match diagnostic.kind {
                         DiagnosticKind::Compiler => 0,
                         DiagnosticKind::IncompatibleEquality => 1,
@@ -411,10 +408,10 @@ impl AnalysisResponse {
                     span: Span::new(diagnostic.lo, diagnostic.hi),
                     editor_span: None,
                     identity: None,
-                    warning_name: diagnostic
-                        .warning_name
+                    name: diagnostic
+                        .name
                         .as_deref()
-                        .and_then(krusty::diag::CompilerWarningName::parse),
+                        .and_then(krusty::diag::DiagnosticName::parse),
                     severity: if diagnostic.severity == 2 {
                         Severity::Warning
                     } else {
@@ -681,7 +678,7 @@ impl WorkerProcess {
         let ready = self
             .read_frame(
                 WORKER_READY.len(),
-                READINESS_TIMEOUT,
+                deadline::READINESS,
                 "analysis worker readiness timed out",
             )?
             .ok_or_else(|| {
@@ -734,10 +731,10 @@ impl WorkerProcess {
         }
     }
 
-    fn read_response(&mut self) -> io::Result<Vec<u8>> {
+    fn read_response(&mut self, timeout: Duration) -> io::Result<Vec<u8>> {
         match self.read_frame(
             MAX_WORKER_MESSAGE_BYTES,
-            ANALYSIS_TIMEOUT,
+            timeout,
             "analysis worker timed out",
         )? {
             Some(response) => Ok(response),
@@ -815,7 +812,7 @@ impl WorkerProcess {
         )?;
         write_framed(&mut self.stdin, &request)?;
         drop(request);
-        let response = self.read_response()?;
+        let response = self.read_response(deadline::analysis(options.diagnostics_only))?;
         let analyses =
             serde_json::from_slice::<Vec<AnalysisResponse>>(&response).map_err(json_io)?;
         drop(response);
@@ -832,13 +829,13 @@ impl WorkerProcess {
     ) -> io::Result<Option<MaterializeResponse>> {
         let request = encode_materialize_request(reference, use_sources)?;
         write_framed(&mut self.stdin, &request)?;
-        let response = self.read_response()?;
+        let response = self.read_response(deadline::INTERACTIVE)?;
         serde_json::from_slice(&response).map_err(json_io)
     }
 
     fn dump(&mut self, request: &[u8]) -> io::Result<Option<DumpResponse>> {
         write_framed(&mut self.stdin, request)?;
-        let response = self.read_response()?;
+        let response = self.read_response(deadline::INTERACTIVE)?;
         serde_json::from_slice(&response).map_err(json_io)
     }
 }
@@ -1561,21 +1558,21 @@ mod tests {
     use crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES;
 
     #[test]
-    fn compiler_warning_name_survives_the_worker_wire_boundary() {
-        let diagnostic = |warning_name: krusty::diag::CompilerWarningName, msg: &str| Diagnostic {
+    fn kotlinc_diagnostic_name_survives_the_worker_wire_boundary() {
+        let diagnostic = |name: krusty::diag::DiagnosticName, msg: &str| Diagnostic {
             span: Span::new(1, 2),
             editor_span: None,
             severity: Severity::Warning,
-            warning_name: Some(warning_name),
+            name: Some(name),
             kind: DiagnosticKind::Compiler,
             msg: msg.to_string(),
             identity: None,
             file: 0,
         };
         let analysis = DocumentAnalysis::with_diagnostics(vec![
-            diagnostic(krusty::diag::CompilerWarningName::Deprecation, "deprecated"),
+            diagnostic(krusty::diag::names::DEPRECATION, "deprecated"),
             diagnostic(
-                krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
+                krusty::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING,
                 "recursive",
             ),
         ]);
@@ -1586,12 +1583,12 @@ mod tests {
             decoded
                 .diagnostics
                 .iter()
-                .map(|diagnostic| diagnostic.warning_name)
+                .map(|diagnostic| diagnostic.name)
                 .collect::<Vec<_>>(),
             [
-                Some(krusty::diag::CompilerWarningName::Deprecation),
+                Some(krusty::diag::names::DEPRECATION),
                 Some(
-                    krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
+                    krusty::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING,
                 ),
             ]
         );

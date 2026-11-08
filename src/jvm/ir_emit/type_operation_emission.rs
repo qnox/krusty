@@ -59,12 +59,12 @@ impl Emitter<'_> {
                 .record_deferred_result(expression, physical);
             return;
         }
-        let inline_stack_block = (op == IrTypeOp::ImplicitCoercion)
-            .then(|| self.inline_stack_coercion_block(arg, code.stack_height()))
+        let coercion_owner = (op == IrTypeOp::ImplicitCoercion)
+            .then(|| self.inline_result_coercion_owner(arg, code.stack_height()))
             .flatten();
-        let enclosing = self.inline_coercions.replace_pending(inline_stack_block);
+        let enclosing = self.inline_coercions.replace_pending(coercion_owner);
         self.emit_type_operation_now(expression, op, arg, type_operand, jvm_ty, &internal, code);
-        if inline_stack_block.is_some()
+        if coercion_owner.is_some()
             && !self.finish_pending_inline_stack_coercion(code)
             && !code.is_dead()
         {
@@ -582,7 +582,7 @@ impl Emitter<'_> {
             let checked_platform_value = matches!(
                 self.ir.expr(arg),
                 IrExpr::NotNullAssert {
-                    check: crate::ir::NullCheck::Named(_),
+                    check: crate::ir::NullCheck::Named { .. },
                     ..
                 }
             );
