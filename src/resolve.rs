@@ -20410,16 +20410,16 @@ impl<'a> Checker<'a> {
                                 // but the closure still invalidates a proof owned by the enclosing
                                 // scope once that closure exists, unless the value it stores is
                                 // already of the proven type.
-                                let context = crate::assignable::TyCtx::new();
-                                if self.capturing_closure_reassigned_before(&name, target_span)
-                                    && (vt == Ty::Error
-                                        || !crate::assignable::is_subtype(
-                                            &context, self, vt, cur.ty,
-                                        ))
-                                {
+                                if self.closure_assignment_breaks_proof(
+                                    &name,
+                                    target_span,
+                                    vt,
+                                    cur.ty,
+                                ) {
                                     scope.decline_cast_at_binding(&name, cur.ty);
                                 }
                                 let flow = narrowing.unwrap_or(declared);
+                                let context = crate::assignable::TyCtx::new();
                                 // The join of the old proof and the new fact: the wider of the two
                                 // when comparable, the declared type otherwise (kotlinc's LUB —
                                 // `if (t != null) { run { t = null } }` rejoins to `String?`).
@@ -41846,55 +41846,6 @@ impl<'a> Checker<'a> {
         StablePathRead::new(self).ty(scope, path, site)
     }
 
-    /// The one stability failure kotlinc reports as SMARTCAST_IMPOSSIBLE: the path's root is a
-    /// local `var` a capturing closure mutates. Returns the variable's name and its DECLARED type
-    /// (the proof's starting point) so the declined cast can be recorded next to the narrowings
-    /// and named at the use that needed it.
-    fn closure_mutated_decline(
-        &self,
-        scope: &CheckerScope<'_>,
-        path: &NarrowPath,
-        site: Span,
-    ) -> Option<(String, Ty)> {
-        let (scope::PathRoot::Value(identity), true) = (&path.root, path.segments.is_empty())
-        else {
-            return None;
-        };
-        let (name, local) = self.visible_flow_value(scope, *identity)?;
-        if local.is_var
-            && matches!(local.origin, ReceiverFnValueOrigin::Local)
-            && self.closure_reassigned_before(&name, site)
-        {
-            Some((name, local.write_ty.unwrap_or(local.ty)))
-        } else {
-            None
-        }
-    }
-
-    /// The stability gate for an `is T` proof, shared by the condition and contract shapes: a
-    /// stable path narrows; a path declined only because a capturing closure mutates its root
-    /// records the cast (with its target) so the use that needed it reports kotlinc's
-    /// SMARTCAST_IMPOSSIBLE.
-    fn is_proof_stable_or_decline(
-        &self,
-        scope: &CheckerScope<'_>,
-        path: &NarrowPath,
-        target: Ty,
-        declined: &mut Vec<(String, Ty)>,
-        site: Span,
-    ) -> bool {
-        if self.stable_path_ty(scope, path, site).is_some() {
-            return true;
-        }
-        if let Some((name, _)) = self.closure_mutated_decline(scope, path, site) {
-            if self.closure_writes_conform(&name, site, target) {
-                return true;
-            }
-            declined.push((name, target));
-        }
-        false
-    }
-
     /// The type a successful `value is tested` proves for a value declared `stable_ty`: shared by
     /// the `is` operator and a contract's `returns(…) implies (value is T)` conclusion, so the two
     /// cannot disagree about scalars, nullable tests, or type arguments the test leaves implicit.
@@ -41948,39 +41899,6 @@ impl<'a> Checker<'a> {
                 .filter(|declared| crate::assignable::is_subtype(&context, self, *declared, target))
                 .unwrap_or(target)
         })
-    }
-
-    /// The NULL branch of a null check: the operand is proven null, so a stable nullable path
-    /// narrows to `Nothing?` (kotlinc's exact receiver wording there). A root-only local made
-    /// unstable only by closure writes still narrows when every such write stores null — the
-    /// proven null joined with the writes kotlinc can interleave stays `Nothing?`. A SAFE-CALL
-    /// chain proves nothing here: a null result means SOME link failed, not which one.
-    fn null_branch_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        operand: ExprId,
-        out: &mut Vec<(NarrowPath, Ty)>,
-    ) {
-        if matches!(self.file.expr(operand), Expr::SafeCall { .. }) {
-            return;
-        }
-        let Some(path) = self.expr_access_path(operand) else {
-            return;
-        };
-        let site = self.span(operand);
-        if matches!(self.stable_path_ty(scope, &path, site), Some(ty) if ty.is_nullable()) {
-            out.push((path, Ty::nullable(Ty::Nothing)));
-            return;
-        }
-        if let Some((name, _)) = self
-            .closure_mutated_decline(scope, &path, site)
-            .filter(|(_, ty)| ty.is_nullable())
-        {
-            let proven = Ty::nullable(Ty::Nothing);
-            if self.closure_writes_conform(&name, site, proven) {
-                out.push((path, proven));
-            }
-        }
     }
 
     /// Compiler-known equality bound selected by the receiver's semantic `equals` declaration.
