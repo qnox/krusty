@@ -380,11 +380,14 @@ impl CallLinker for TemplateCalls<'_> {
     fn dependency_override(
         &self,
         symbol: &crate::metadata::klib_ir::KlibIrSymbol,
+        supertypes: &[crate::types::Ty],
     ) -> Result<
         Option<super::body_lowering::object_literals::DependencyOverride>,
         KlibBodyDeclineReason,
     > {
-        use super::body_lowering::object_literals::DependencyOverride;
+        use super::body_lowering::object_literals::{
+            authenticated_override, DependencyOverrideKind,
+        };
         use crate::metadata::id_signature::KlibDeclarationSignature;
         use crate::metadata::klib_ir::KlibIrSignature;
         let signature = match &symbol.signature {
@@ -406,7 +409,34 @@ impl CallLinker for TemplateCalls<'_> {
                     callee.clone(),
                 )));
             }
-            KlibReferenceOrigin::Missing => return Ok(None),
+            KlibReferenceOrigin::Missing => {
+                // An override symbol is the declaration itself, not a call. The prepared
+                // reference index only records calls, so a member that this body does not call
+                // is still the declaration the producer published under that signature.
+                match self
+                    .callees
+                    .declarations
+                    .callee_origin(self.module, &signature)
+                {
+                    crate::klib_libraries::KlibCalleeOrigin::Exact(declaration) => {
+                        KlibReferenceBinding {
+                            declaration,
+                            dispatch: None,
+                        }
+                    }
+                    crate::klib_libraries::KlibCalleeOrigin::Missing => return Ok(None),
+                    crate::klib_libraries::KlibCalleeOrigin::Ambiguous => {
+                        let KlibDeclarationSignature::Public(callee) = &signature else {
+                            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                                "an object literal overrides an ambiguous accessor".to_owned(),
+                            ));
+                        };
+                        return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                            callee.clone(),
+                        )));
+                    }
+                }
+            }
         };
         let Some((target, realization)) = self
             .callees
@@ -415,19 +445,42 @@ impl CallLinker for TemplateCalls<'_> {
         else {
             return Ok(None);
         };
-        if let Some(accessor) = &realization.klib_body_accessor {
-            return match accessor.role {
-                crate::libraries::KlibAccessorRole::Getter => {
-                    Ok(Some(DependencyOverride::Property(target)))
-                }
+        let kind = if let Some(accessor) = &realization.klib_body_accessor {
+            match accessor.role {
+                crate::libraries::KlibAccessorRole::Getter => DependencyOverrideKind::Property,
                 crate::libraries::KlibAccessorRole::Setter => {
-                    Err(KlibBodyDeclineReason::SignatureMismatch(
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
                         "an object literal overrides a property setter".to_owned(),
                     ))
                 }
-            };
-        }
-        Ok(Some(DependencyOverride::Function(target)))
+            }
+        } else {
+            DependencyOverrideKind::Function
+        };
+        let Some(crate::types::SemanticCallableOwner::Classifier(owner)) =
+            realization.declaration_owner
+        else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an override's declaration has no classifier owner".to_owned(),
+            ));
+        };
+        let interface = match self.callees.source.classifier(owner) {
+            Some(classifier) => classifier.is_interface(),
+            None => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an override's declaring classifier is not a selected class".to_owned(),
+                ))
+            }
+        };
+        authenticated_override(
+            &realization,
+            target,
+            kind,
+            interface,
+            supertypes,
+            |sub, owner| self.applied_supertype(sub, owner),
+        )
+        .map(Some)
     }
 
     fn is_interface(&self, name: crate::types::TypeName) -> Result<bool, KlibBodyDeclineReason> {

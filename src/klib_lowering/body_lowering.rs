@@ -193,12 +193,16 @@ pub(super) trait CallLinker {
     fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool;
 
     /// The dependency declaration a prepared object's member overrides, when `symbol` names one.
-    /// `None` leaves the member without an interface edge.
+    ///
+    /// The record carries that declaration's classifier and its declared and applied signatures.
+    /// `supertypes` are the object's, and the applied signature is the declaration viewed through
+    /// the one whose hierarchy reaches the classifier. `None` leaves the member without an edge.
     fn dependency_override(
         &self,
         symbol: &KlibIrSymbol,
+        supertypes: &[Ty],
     ) -> Lowered<Option<object_literals::DependencyOverride>> {
-        let _ = symbol;
+        let _ = (symbol, supertypes);
         Ok(None)
     }
 

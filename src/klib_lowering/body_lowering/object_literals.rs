@@ -28,10 +28,182 @@ pub(super) struct CaptureField {
 
 /// The dependency declaration an object member overrides.
 ///
-/// A property edge names the getter's callable, which is the identity a property slot records.
-pub(in crate::klib_lowering) enum DependencyOverride {
-    Function(crate::fir::ExternalCallableId),
-    Property(crate::fir::ExternalCallableId),
+/// `owner` is the classifier that declares the member. `declared_*` is that declaration's own
+/// signature, and `applied_*` is the same signature through the object's supertype. A property
+/// edge names the getter's callable, which is the identity a property slot records; its type is
+/// the signature's result.
+pub(in crate::klib_lowering) struct DependencyOverride {
+    pub(in crate::klib_lowering) target: crate::fir::ExternalCallableId,
+    pub(in crate::klib_lowering) kind: DependencyOverrideKind,
+    pub(in crate::klib_lowering) owner: TypeName,
+    pub(in crate::klib_lowering) interface: bool,
+    pub(in crate::klib_lowering) declared_parameters: Vec<Ty>,
+    pub(in crate::klib_lowering) declared_result: Ty,
+    pub(in crate::klib_lowering) applied_parameters: Vec<Ty>,
+    pub(in crate::klib_lowering) applied_result: Ty,
+}
+
+/// Whether an override edge publishes a function or the getter of a property.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::klib_lowering) enum DependencyOverrideKind {
+    Function,
+    Property,
+}
+
+/// The authenticated override `realization` names, viewed through one of `supertypes`.
+///
+/// The declaring classifier comes from the realization. `interface` is that classifier's kind.
+/// The applied signature substitutes the classifier's own type parameters with the arguments of
+/// the supertype whose hierarchy reaches it. A supertype is never selected by its position.
+pub(in crate::klib_lowering) fn authenticated_override(
+    realization: &crate::libraries::ExternalCallableRealization,
+    target: crate::fir::ExternalCallableId,
+    kind: DependencyOverrideKind,
+    interface: bool,
+    supertypes: &[Ty],
+    applied_supertype: impl Fn(Ty, TypeName) -> Option<Ty>,
+) -> Lowered<DependencyOverride> {
+    let Some(crate::types::SemanticCallableOwner::Classifier(owner)) =
+        realization.declaration_owner
+    else {
+        return Err(mismatch(
+            "an override's declaration has no classifier owner",
+        ));
+    };
+    if realization
+        .klib_body_class_contract
+        .as_ref()
+        .is_some_and(|contract| contract.classifier != owner)
+    {
+        return Err(mismatch("an override's class contract names another owner"));
+    }
+    let (declared_parameters, declared_result) = declared_signature(realization);
+    if kind == DependencyOverrideKind::Property && !declared_parameters.is_empty() {
+        return Err(mismatch(
+            "an object literal overrides a property with parameters",
+        ));
+    }
+    let applied = applied_owner(supertypes, owner, &applied_supertype)?;
+    let (applied_parameters, applied_result) =
+        applied_signature(realization, applied, &declared_parameters, declared_result)?;
+    Ok(DependencyOverride {
+        target,
+        kind,
+        owner,
+        interface,
+        declared_parameters,
+        declared_result,
+        applied_parameters,
+        applied_result,
+    })
+}
+
+/// The declaration's own parameters and result, before the object's type arguments: its
+/// value-class spelling, else its generic signature, else the shape the provider published.
+fn declared_signature(
+    realization: &crate::libraries::ExternalCallableRealization,
+) -> (Vec<Ty>, Ty) {
+    let callable = &realization.callable;
+    let parameters = callable
+        .declared_params
+        .clone()
+        .map(|parameters| parameters.to_vec())
+        .or_else(|| {
+            callable.generic_sig.as_ref().map(|signature| {
+                if realization.kind == crate::libraries::ExternalCallableKind::Extension {
+                    signature
+                        .parameters_with_receiver(callable.context_count)
+                        .to_vec()
+                } else {
+                    signature.params.clone()
+                }
+            })
+        })
+        .unwrap_or_else(|| callable.params.clone());
+    let result = callable
+        .declared_ret
+        .or_else(|| callable.generic_sig.as_ref().map(|signature| signature.ret))
+        .unwrap_or(callable.ret);
+    (parameters, result)
+}
+
+fn applied_owner(
+    supertypes: &[Ty],
+    owner: TypeName,
+    applied_supertype: &impl Fn(Ty, TypeName) -> Option<Ty>,
+) -> Lowered<Ty> {
+    let mut found = None;
+    for supertype in supertypes.iter().copied() {
+        let candidate = supertype.non_null();
+        let view = if candidate.kotlin_class_internal() == Some(owner) {
+            Some(candidate)
+        } else {
+            applied_supertype(candidate, owner)
+        };
+        let Some(view) = view else {
+            continue;
+        };
+        if view.non_null().kotlin_class_internal() != Some(owner) {
+            return Err(mismatch("an applied supertype names another classifier"));
+        }
+        if found.replace(view.non_null()).is_some() {
+            return Err(mismatch("an object repeats one overridden supertype"));
+        }
+    }
+    found.ok_or_else(|| mismatch("an override's declaring type is not a supertype of the object"))
+}
+
+fn applied_signature(
+    realization: &crate::libraries::ExternalCallableRealization,
+    applied: Ty,
+    parameters: &[Ty],
+    result: Ty,
+) -> Lowered<(Vec<Ty>, Ty)> {
+    let arguments = applied.type_args();
+    let Some(contract) = realization.klib_body_class_contract.as_ref() else {
+        if arguments.is_empty() {
+            return Ok((parameters.to_vec(), result));
+        }
+        return Err(mismatch(
+            "an override's declaring class has no type-parameter contract",
+        ));
+    };
+    let formals = &contract.parameters.formals;
+    let own = contract.parameters.own_count;
+    if own > formals.len() || arguments.len() != own {
+        return Err(mismatch(
+            "an override's declaring type has another number of type arguments",
+        ));
+    }
+    if own == 0 {
+        return Ok((parameters.to_vec(), result));
+    }
+    let mut bindings = crate::fx_hash::HashMap::default();
+    for (formal, argument) in formals[..own]
+        .iter()
+        .copied()
+        .zip(arguments.iter().copied())
+    {
+        let Some(name) = formal.ty_param_name() else {
+            return Err(mismatch(
+                "a declaring type parameter is not a type parameter",
+            ));
+        };
+        if bindings
+            .insert(crate::types::TyParamName::new(name), argument)
+            .is_some()
+        {
+            return Err(mismatch("a declaring type repeats a type parameter"));
+        }
+    }
+    Ok((
+        parameters
+            .iter()
+            .copied()
+            .map(|parameter| crate::types::ty_subst_keep_unbound(parameter, &bindings))
+            .collect(),
+        crate::types::ty_subst_keep_unbound(result, &bindings),
+    ))
 }
 
 struct Capture {
@@ -71,7 +243,6 @@ impl BodyLowering<'_> {
         self.prepared_constructor(&class)?;
         let captures = self.captures_of(&class)?;
         let (superclass, interfaces, supertypes) = self.supertypes(&class)?;
-        let override_owner = interfaces.first().copied().unwrap_or(superclass);
         let class_name = crate::types::type_name(&format!(
             "__krusty_object_{}_{}",
             self.function.function,
@@ -85,7 +256,7 @@ impl BodyLowering<'_> {
         declared.is_local_class = true;
         declared.superclass = superclass;
         declared.interfaces = interfaces.into();
-        declared.supertypes = supertypes;
+        declared.supertypes = supertypes.clone();
         let capture_count = u32::try_from(captures.len()).expect("a capture list fits u32");
         declared.constructor_prefix_count = capture_count;
         declared.ctor_param_count = capture_count;
@@ -131,7 +302,7 @@ impl BodyLowering<'_> {
                 },
             );
         }
-        self.lower_members(&class, class_id, owner, override_owner, &capture_fields)?;
+        self.lower_members(&class, class_id, owner, &supertypes, &capture_fields)?;
         let mut args = Vec::with_capacity(captures.len());
         let mut params = Vec::with_capacity(captures.len());
         for capture in &captures {
@@ -310,7 +481,7 @@ impl BodyLowering<'_> {
         class: &KlibIrClass,
         class_id: ClassId,
         owner: TypeName,
-        override_owner: TypeName,
+        supertypes: &[Ty],
         captures: &HashMap<KlibIrSymbol, CaptureField>,
     ) -> Lowered<()> {
         for member in &class.members {
@@ -319,14 +490,7 @@ impl BodyLowering<'_> {
                     let function = self.arena.function(*id).clone();
                     let (fun, ret, params) = self.lower_member(&function, owner, captures)?;
                     self.ir.classes[class_id as usize].methods.push(fun);
-                    self.record_function_override(
-                        &function,
-                        fun,
-                        owner,
-                        override_owner,
-                        &params,
-                        ret,
-                    )?;
+                    self.record_function_override(&function, fun, owner, supertypes, &params, ret)?;
                 }
                 KlibIrMember::Property(property) => {
                     let Some(getter_id) = property.getter else {
@@ -342,7 +506,7 @@ impl BodyLowering<'_> {
                     self.ir.classes[class_id as usize]
                         .properties
                         .push(property_declaration(&name, ret, fun));
-                    self.record_property_override(&name, &getter, fun, owner, override_owner, ret)?;
+                    self.record_property_override(&name, &getter, fun, owner, supertypes, ret)?;
                 }
                 _ => {}
             }
@@ -451,35 +615,37 @@ impl BodyLowering<'_> {
         function: &KlibIrFunction,
         fun: FunId,
         owner: TypeName,
-        override_owner: TypeName,
+        supertypes: &[Ty],
         params: &[Ty],
         ret: Ty,
     ) -> Lowered<()> {
         use crate::fir::ResolvedFunctionOverrideTarget;
         for symbol in &function.overridden {
-            let Some(DependencyOverride::Function(target)) =
-                self.linker.dependency_override(symbol)?
-            else {
+            let Some(record) = self.linker.dependency_override(symbol, supertypes)? else {
                 continue;
             };
+            if record.kind != DependencyOverrideKind::Function {
+                return Err(mismatch("a function overrides a property"));
+            }
+            let target = ResolvedFunctionOverrideTarget::External(record.target);
             self.ir
                 .function_overrides
                 .entry(owner)
                 .or_default()
                 .push(IrFunctionOverride {
-                    implementation: ResolvedFunctionOverrideTarget::External(target),
+                    implementation: target,
                     implementation_function: Some(fun),
                     implementation_owner: owner,
-                    overridden: ResolvedFunctionOverrideTarget::External(target),
-                    overridden_owner: override_owner,
+                    overridden: target,
+                    overridden_owner: record.owner,
                     overridden_semantic_role: None,
                     collection_barrier: None,
-                    overridden_is_interface: true,
+                    overridden_is_interface: record.interface,
                     name: function.name.clone(),
-                    declared_parameters: params.to_vec(),
-                    declared_result: ret,
-                    applied_parameters: params.to_vec(),
-                    applied_result: ret,
+                    declared_parameters: record.declared_parameters,
+                    declared_result: record.declared_result,
+                    applied_parameters: record.applied_parameters,
+                    applied_result: record.applied_result,
                     implementation_parameters: params.to_vec(),
                     implementation_parameter_identities: Vec::new(),
                     overridden_parameter_identities: Vec::new(),
@@ -498,31 +664,33 @@ impl BodyLowering<'_> {
         getter: &KlibIrFunction,
         fun: FunId,
         owner: TypeName,
-        override_owner: TypeName,
+        supertypes: &[Ty],
         ty: Ty,
     ) -> Lowered<()> {
         use crate::fir::ResolvedPropertyOverrideTarget;
         for symbol in &getter.overridden {
-            let Some(DependencyOverride::Property(target)) =
-                self.linker.dependency_override(symbol)?
-            else {
+            let Some(record) = self.linker.dependency_override(symbol, supertypes)? else {
                 continue;
             };
+            if record.kind != DependencyOverrideKind::Property {
+                return Err(mismatch("a property overrides a function"));
+            }
+            let target = ResolvedPropertyOverrideTarget::External(record.target);
             self.ir
                 .property_overrides
                 .entry(owner)
                 .or_default()
                 .push(IrPropertyOverride {
-                    implementation: ResolvedPropertyOverrideTarget::External(target),
+                    implementation: target,
                     implementation_getter: Some(fun),
                     implementation_setter: None,
                     implementation_owner: owner,
-                    overridden: ResolvedPropertyOverrideTarget::External(target),
-                    overridden_owner: override_owner,
-                    overridden_is_interface: true,
+                    overridden: target,
+                    overridden_owner: record.owner,
+                    overridden_is_interface: record.interface,
                     name: name.to_owned(),
-                    declared_type: ty,
-                    applied_type: ty,
+                    declared_type: record.declared_result,
+                    applied_type: record.applied_result,
                     implementation_type: ty,
                     declared_receiver: None,
                     implementation_receiver: None,
