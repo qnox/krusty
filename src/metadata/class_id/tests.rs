@@ -102,6 +102,7 @@ fn resolved_local_headers_preserve_raw_jvm_names_and_decline_klib_cleanly() {
     let mut strings = StringTable::with_local_classifiers(
         &std::iter::once(identity).collect(),
         &Default::default(),
+        &Default::default(),
         None,
         crate::metadata::MetadataTypeLookups::default().inner_classifiers,
     );
@@ -198,6 +199,7 @@ fn an_anonymous_declaration_keeps_its_raw_id_beside_a_dotted_nested_class() {
     let mut strings = StringTable::with_local_classifiers(
         &locals,
         &namespaces,
+        &[object].into_iter().collect(),
         None,
         crate::metadata::MetadataTypeLookups::default().inner_classifiers,
     );
