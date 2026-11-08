@@ -92,6 +92,10 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Pull requests restore master's entries but never save their own: per-branch copies
+          # overflowed the repository cache and evicted the master entries every branch restores.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
       # `java -version`.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
@@ -115,6 +119,10 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Pull requests restore master's entries but never save their own: per-branch copies
+          # overflowed the repository cache and evicted the master entries every branch restores.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
@@ -160,6 +168,10 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Pull requests restore master's entries but never save their own: per-branch copies
+          # overflowed the repository cache and evicted the master entries every branch restores.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - *just-on-path
       - *install-just
       # krusty-toolchain's oracle builds the Build Tools API implementation with its Gradle
@@ -317,6 +329,10 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Pull requests restore master's entries but never save their own: per-branch copies
+          # overflowed the repository cache and evicted the master entries every branch restores.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
       # `java -version`.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
@@ -350,6 +366,10 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Pull requests restore master's entries but never save their own: per-branch copies
+          # overflowed the repository cache and evicted the master entries every branch restores.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
       # `java -version`.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
@@ -387,6 +407,10 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Pull requests restore master's entries but never save their own: per-branch copies
+          # overflowed the repository cache and evicted the master entries every branch restores.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
       # `java -version`.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
