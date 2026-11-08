@@ -1190,13 +1190,14 @@ impl<'a> Body<'a> {
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
-            // `as Int` on a reference reads the value out of its box. The unboxing cast traps on
-            // null or on another type's box, as the class casts above trap on a failed cast.
+            // `as Int` on a reference reads the value out of its box once the cast has checked it.
             IrExpr::TypeOp {
                 op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
                 arg,
                 type_operand,
-            } if self.is_unboxing_cast(arg, type_operand) => self.value(arg, type_operand)?,
+            } if self.is_unboxing_cast(arg, type_operand) => {
+                self.checked_unbox_cast(arg, type_operand)?
+            }
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast),
                 arg,
