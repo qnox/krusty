@@ -1082,6 +1082,21 @@ fn wasm_declines_a_generated_hash_that_can_reach_the_identity_hash() {
         "wasmGeneratedHashOfAnErasedProperty",
         reason,
     );
+    // Runtime exception objects come from the exception runtime rather than this file's classes,
+    // and an erased property can hold one that the file constructs or catches.
+    expect_wasm_decline(
+        "data class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
+         fun box(): String = if (Holder(IllegalStateException()).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfAConstructedRuntimeException",
+        reason,
+    );
+    expect_wasm_decline(
+        "data class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
+         fun caught(text: String?): Any = try { text!! } catch (e: NullPointerException) { e }\n\
+         fun box(): String = if (Holder(caught(null)).hashCode() == 0) \"zero\" else \"OK\"",
+        "wasmGeneratedHashOfACaughtRuntimeException",
+        reason,
+    );
 }
 
 #[test]
@@ -1192,6 +1207,9 @@ mod value_hash;
 
 #[path = "wasm_dependency_constructor_exports.rs"]
 mod dependency_constructor_exports;
+
+#[path = "wasm_escaping_closures.rs"]
+mod escaping_closures;
 
 #[test]
 fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
