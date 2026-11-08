@@ -1,5 +1,5 @@
 //! Top-level and member suspend functions whose state machine kotlinc's coroutine transformer
-//! builds from the finished method (`docs/JVM_INLINE_BEFORE_CPS.md` §1a, steps 2 and 3). An
+//! builds from the finished method. An
 //! overridable member's machine is built in the static `$suspendImpl` its body moves to.
 //!
 //! The emitter marks each suspension point as kotlinc's codegen does and the transformer rewrites

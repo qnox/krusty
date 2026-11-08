@@ -55,8 +55,12 @@ versioning-tests:
 # Maven Central upload, against a stand-in Gradle build and Central Portal, and the Gradle wrapper
 # check it depends on, against stand-in published checksums.
 release-tests:
+    node --test scripts/test-release-build-progress.cjs
+    python3 scripts/test-format-release-notes.py
     bash scripts/test-signing-key-id.sh
     bash scripts/test-sign-release-checksums.sh
+    bash scripts/test-publish-release-signing-key.sh
+    python3 scripts/test-package-release-badges.py
     bash scripts/test-publish-maven-central.sh
     bash scripts/test-check-gradle-wrappers.sh
 
@@ -259,9 +263,9 @@ kotlinc VERSION=`just max-version`:
     chmod +x "$bin"
     echo "$bin"
 
-# Regenerate krusty's copy of one kotlinc release's argument table and language feature table from
-# that release's compiler jar (crates/krusty-cli/src/kotlinc_arguments/releases/<ver>.tsv and
-# src/features/releases/<ver>.{features,language-versions}.tsv). The conformance e2e test fails
+# Regenerate krusty's copy of one kotlinc release's argument table, language feature table and
+# diagnostic names from that release's distribution (crates/krusty-cli/src/kotlinc_arguments/releases/<ver>.tsv,
+# src/features/releases/<ver>.{features,language-versions}.tsv and src/diag/releases/<ver>.diagnostics.tsv). The conformance e2e test fails
 # until the table each release reads equals what the provisioned compiler declares. A release keeps a
 # file only where it differs from the newest recorded release below it, which it otherwise reads.
 kotlinc-arguments VERSION=`just max-version`:
@@ -285,6 +289,7 @@ kotlinc-arguments VERSION=`just max-version`:
     dump DumpKotlincArguments crates/krusty-cli/src/kotlinc_arguments/releases .tsv
     dump DumpLanguageFeatures src/features/releases .features.tsv
     dump DumpLanguageVersions src/features/releases .language-versions.tsv
+    dump DumpDiagnosticNames src/diag/releases .diagnostics.tsv
 
 # Provision the Kotlin/Native distribution whose stdlib KLIB supplies the real metadata format.
 # The extracted root is versioned and cached beside the JVM compiler distribution.
@@ -707,11 +712,9 @@ build-release TARGET="":
     export KRUSTY_VERSION="$(just version)"
     export KRUSTY_KOTLIN_SUPPORT="$(just supported-kotlin)"
     if [ -n "{{TARGET}}" ]; then
-        cargo build --locked --release --target {{TARGET}} -p krusty-cli --bin krusty
-        cargo build --locked --release --target {{TARGET}} -p krusty-lsp
+        cargo build --locked --release --timings --target {{TARGET}} -p krusty-cli -p krusty-lsp --bin krusty --bin krusty-lsp
     else
-        cargo build --locked --release -p krusty-cli --bin krusty
-        cargo build --locked --release -p krusty-lsp
+        cargo build --locked --release --timings -p krusty-cli -p krusty-lsp --bin krusty --bin krusty-lsp
     fi
     echo "built krusty and krusty-lsp $KRUSTY_VERSION (supported Kotlin: $KRUSTY_KOTLIN_SUPPORT) ${TARGET:+for {{TARGET}}}"
 
