@@ -7,9 +7,11 @@ import org.gradle.api.GradleException
 // (`-progressive`, `-module-name=okhttp`) wins exactly as it does for kotlinc. krusty parses them with
 // kotlinc's argument table, reports kotlinc's errors and warnings, and refuses an argument it does
 // not implement. What this plugin checks is only the boundary of the arguments it owns: the task's
-// sources, destination, libraries and compiler plugins. A free argument must not reach them under
-// any spelling (a short or deprecated alias), hide them in an argument file, or turn them into
-// sources after `--`.
+// sources, destination, libraries and compiler plugin classpath. A free argument must not reach them
+// under any spelling (a short or deprecated alias), hide them in an argument file, or turn them into
+// sources after `--`. A free plugin option (`-P plugin:<id>:<key>=<value>`) is not one of them: it
+// configures a plugin the task already loads, and krusty decides whether it implements that setting
+// exactly as it does for a structured option.
 
 /** A kotlinc argument's canonical name, and whether a bare occurrence consumes the next token. */
 private class KotlincArgument(val name: String, val takesValue: Boolean)
@@ -64,7 +66,6 @@ private val reservedArguments: Map<String, String> = mapOf(
     // krusty's own argument, not in kotlinc's table.
     "-Xkotlin-reference-version" to "the Kotlin Gradle plugin version",
     "-Xplugin" to "compiler plugin configuration",
-    "-P" to "compiler plugin configuration",
     "-Xcompiler-plugin" to "compiler plugin configuration",
     "-Xcompiler-plugin-order" to "compiler plugin configuration",
 )

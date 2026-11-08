@@ -30,7 +30,7 @@ impl Parser<'_> {
         self.bump(); // `companion`
         let mut tail = Vec::new();
         loop {
-            self.skip_newlines();
+            self.skip_semicolons();
             if self.at(TokenKind::At) || self.at_modifier() {
                 tail.extend(self.extend_decl_prefix());
                 continue;
@@ -97,7 +97,7 @@ impl Parser<'_> {
         self.bump(); // `companion`
         self.expect(TokenKind::LBrace, "'{'");
         loop {
-            self.skip_newlines();
+            self.skip_semicolons();
             if matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
                 break;
             }

@@ -707,12 +707,6 @@ pub enum FirBinaryOperation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirIndexedAccessKind {
-    Array,
-    String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirCallableReferenceBinding {
     Static,
     Bound,
@@ -1268,11 +1262,6 @@ pub enum FirExprKind {
         end: FirExprId,
         negated: bool,
     },
-    IndexedRead {
-        kind: FirIndexedAccessKind,
-        receiver: FirExprId,
-        indices: Box<[FirConvertedValue]>,
-    },
     IndexedWrite {
         receiver: FirExprId,
         indices: Box<[FirConvertedValue]>,
@@ -1395,8 +1384,7 @@ impl FirExprKind {
             FirExprKind::ClassLiteral { .. } => 0,
             FirExprKind::LocalPropertyReference { name, .. } => name.len(),
             FirExprKind::LocalDelegateAccess { .. } => 0,
-            FirExprKind::IndexedRead { indices, .. }
-            | FirExprKind::IndexedWrite { indices, .. } => {
+            FirExprKind::IndexedWrite { indices, .. } => {
                 indices.len() * std::mem::size_of::<FirConvertedValue>()
             }
             FirExprKind::AnnotationArray(expressions)

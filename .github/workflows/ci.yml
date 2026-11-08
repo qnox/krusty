@@ -35,7 +35,16 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      # Runners that ship just skip the download (install-action always fetches it from
+      # GitHub releases, even when it is installed); others install it as before.
+      - &just-on-path
+        id: just-on-path
+        name: look for an installed just
+        shell: bash
+        run: if command -v just > /dev/null; then echo "found=true" >> "$GITHUB_OUTPUT"; fi
+      - &install-just
+        if: steps.just-on-path.outputs.found != 'true'
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
       # The same value build-tool-bins publishes as its matrix output.
@@ -87,11 +96,10 @@ jobs:
       # `java -version`.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '17'
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: just
+      - *just-on-path
+      - *install-just
       - name: lint
         run: just lint
 
@@ -109,7 +117,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '17'
       # The host tests start real compiler-plugin hosts from their pinned toolchains on the
       # runner's JDK. The toolchains and compiled adapters stay in krusty's cache.
@@ -144,13 +152,16 @@ jobs:
         run: rustup toolchain install "$KRUSTY_COVERAGE_TOOLCHAIN" --profile minimal --component llvm-tools-preview
       # Prebuilt binary: `cargo install cargo-llvm-cov` compiled it from source on every run
       # (~75s of the ci job).
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      - id: llvm-cov-on-path
+        name: look for an installed cargo-llvm-cov
+        run: if command -v cargo-llvm-cov > /dev/null; then echo "found=true" >> "$GITHUB_OUTPUT"; fi
+      - if: steps.llvm-cov-on-path.outputs.found != 'true'
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: just
+      - *just-on-path
+      - *install-just
       # krusty-toolchain's oracle builds the Build Tools API implementation with its Gradle
       # wrapper, which does not run on JDK 25; the coverage gate points it at JDK 21. The last
       # version listed stays JAVA_HOME.
@@ -277,7 +288,7 @@ jobs:
       - *plugin-host-runtime-cache
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '17'
       - name: compiler plugin integration tests
         env:
@@ -310,11 +321,10 @@ jobs:
       # `java -version`.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '17'
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: just
+      - *just-on-path
+      - *install-just
       - name: build conformance binary
         run: |
           set -euo pipefail
@@ -344,7 +354,7 @@ jobs:
       # `java -version`.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '17'
       - name: build focused KLIB test binaries
         run: |
@@ -381,11 +391,10 @@ jobs:
       # `java -version`.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '17'
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: just
+      - *just-on-path
+      - *install-just
       - name: select supported Kotlin versions
         id: versions
         run: |
@@ -433,9 +442,8 @@ jobs:
       KRUSTY_BOX_CASE_TIMEOUT_MS: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '2000' || '8000' }}
     steps: &conformance-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: just
+      - *just-on-path
+      - *install-just
       # Kotlin's CLI corpus names JDK 8, 11, 17 and 21 homes; kotlin_cli_jvm_conformance finds them
       # through the JAVA_HOME_<release>_X64 variables this exports and fails a case it cannot run.
       # The last version listed stays JAVA_HOME.
@@ -821,9 +829,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: just
+      - *just-on-path
+      - *install-just
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
@@ -859,9 +866,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: just
+      - *just-on-path
+      - *install-just
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
@@ -906,9 +912,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: just
+      - *just-on-path
+      - *install-just
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
@@ -997,9 +1002,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
+      - *just-on-path
+      - *install-just
       - uses: actions/setup-java@v6.2.0
         with:
           distribution: zulu
@@ -1032,9 +1036,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
+      - *just-on-path
+      - *install-just
       - uses: actions/setup-java@v6.2.0
         with:
           distribution: zulu
@@ -1079,9 +1082,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: just
+      - *just-on-path
+      - *install-just
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
@@ -1114,6 +1116,7 @@ jobs:
   # Every covered master commit builds its own immutable release artifacts, even after master
   # advances. All six platforms can build concurrently on their hosted runners.
   build-release:
+    needs: [ci-and-conformance]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     strategy:
       fail-fast: false
@@ -1137,9 +1140,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target.triple }}
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: just
+      - *just-on-path
+      - *install-just
       - name: install aarch64-linux linker
         if: matrix.target.cross
         run: |
