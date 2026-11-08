@@ -16,6 +16,12 @@ pub enum SemanticCallRole {
     KotlinFunctionInvoke,
     /// The `name` property declared by Kotlin's callable-reflection contract.
     KotlinCallableReferenceName,
+    /// The `length` property `kotlin.String` declares, its count of UTF-16 code units. The
+    /// declaration is `@IntrinsicConstEvaluation`: a read of a constant string is constant.
+    KotlinStringLength,
+    /// The `name` property `kotlin.Enum` declares. A read on a direct entry is that entry's
+    /// declaration name, a constant kotlinc evaluates without initializing the enum.
+    KotlinEnumName,
     /// A property-reference read with this many unbound receivers.
     KotlinPropertyReferenceGet(u8),
     /// A mutable property-reference write with this many unbound receivers.

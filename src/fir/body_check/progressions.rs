@@ -436,6 +436,7 @@ impl BodyFirChecker<'_> {
                 result: plan.size.ty,
                 extension_receiver_parameter: None,
                 metadata_constant_read: false,
+                semantic_role: None,
             }),
             false,
             &[],
@@ -528,6 +529,7 @@ impl BodyFirChecker<'_> {
                     extension_receiver_parameter: None,
 
                     metadata_constant_read: false,
+                    semantic_role: None,
                 }),
                 false,
                 &[],
