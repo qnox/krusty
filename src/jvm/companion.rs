@@ -241,15 +241,15 @@ pub(super) fn lower_companion_properties(
             continue;
         }
         // Whether this property is a `@JvmField`-realizable declaration: annotated, ordinary
-        // storage (no custom accessor, not lateinit/open), and at least internal-visible — kotlinc
-        // rejects the other placements outright, so an annotated-but-ineligible property simply
-        // keeps the ordinary realization here.
+        // storage (no custom accessor, not lateinit/open), and not private. kotlinc hoists a
+        // public, internal, or protected one as a static field of that visibility; an
+        // annotated-but-ineligible property simply keeps the ordinary realization here.
         let jvm_field_eligible = |declaration: &crate::ir::IrProperty,
                                   backing: &crate::ir::IrField| {
             companion_class.property_has_jvm_field(&declaration.name)
                 && matches!(
                     declaration.visibility,
-                    Visibility::Public | Visibility::Internal
+                    Visibility::Public | Visibility::Internal | Visibility::Protected
                 )
                 && !declaration.is_private
                 && !declaration.is_open
