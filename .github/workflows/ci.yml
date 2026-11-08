@@ -120,13 +120,16 @@ jobs:
           distribution: zulu
           java-version: '17'
       # The host tests start real compiler-plugin hosts from their pinned toolchains on the
-      # runner's JDK. The toolchains and compiled adapters stay in krusty's cache.
+      # runner's JDK. The toolchains and compiled adapters stay in krusty's cache. Each job keeps
+      # its own entry: this job and ci provision different Kotlin versions, and an entry is never
+      # saved again once its key hits, so a shared one held only the first saver's jars and the
+      # other job downloaded the rest from Maven Central on every run (~190 MB).
       - &plugin-host-runtime-cache
         name: cache plugin host runtime
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/krusty/plugin-host
-          key: plugin-host-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
+          key: plugin-host-${{ github.job }}-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
       - name: plugin host tests
         run: cargo test --profile gate -p krusty-plugin-host -- --include-ignored
 
