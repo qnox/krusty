@@ -73,8 +73,8 @@ use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_im
 pub(crate) use module_members::*;
 use operand_nullness::{operand_nonnull, operand_null_only};
 pub(crate) use representation::{
-    boxed_value_class_carrier, boxed_value_class_names, boxed_value_class_underlying,
-    instance_representation, is_boxed_value_class, type_operation_internal_name,
+    boxed_value_class_carrier, boxed_value_class_underlying, instance_representation,
+    is_boxed_value_class, type_operation_internal_name,
 };
 use representation::{erase, is_ref};
 use result_tail_boxing::box_vc_tail;

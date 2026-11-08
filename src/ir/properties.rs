@@ -278,9 +278,18 @@ pub enum IrPropertyModality {
     Abstract,
 }
 
+/// Whether a property-shaped signature declares a Kotlin property or only authenticates storage.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum IrPropertyOrigin {
+    #[default]
+    Declaration,
+    CaptureStorage,
+}
+
 #[derive(Clone, Debug)]
 pub struct IrProperty {
     pub name: String,
+    pub origin: IrPropertyOrigin,
     /// Exact source property span for a representation-dependent declaration diagnostic. Generated
     /// properties have no source declaration and leave this absent.
     pub diagnostic_span: Option<crate::diag::Span>,
@@ -366,6 +375,7 @@ impl IrProperty {
     pub(crate) fn stored_value(name: String, ty: Ty, field: u32) -> Self {
         Self {
             name,
+            origin: IrPropertyOrigin::Declaration,
             diagnostic_span: None,
             getter_diagnostic_span: None,
             setter_diagnostic_span: None,

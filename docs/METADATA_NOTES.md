@@ -638,3 +638,9 @@ The type-annotation adapter accepts exactly `IS_UNSIGNED` on BYTE, SHORT, INT an
 valid signed carriers; other flags and incompatible kinds are rejected. KSP protocol 16 transports
 `UByte`, `UShort`, `UInt` and `ULong` value tags, whose JVM adapter boxes the matching Kotlin unsigned
 wrappers. Class-reader constants and build ABI fingerprints retain their physical JVM carriers.
+
+Retained capture signatures carry `CAPTURE_STORAGE` into `IrPropertyOrigin::CaptureStorage`.
+The class metadata projection excludes only that role, after retaining each property's original IR
+index; ordinary and plugin-generated declarations remain properties. Physical fields and capture
+storage demand remain separate facts, owned by the current declaration-keyed capture plan.
+Tests: `tests/capture_storage_metadata_e2e.rs` and the FIR local-class owner tests.

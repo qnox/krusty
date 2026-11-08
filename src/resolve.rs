@@ -153,6 +153,9 @@ mod elvis_expression;
 mod type_test_narrowing;
 use type_test_narrowing::TypeTest;
 mod enum_entries;
+mod enum_entry_properties;
+pub use enum_entry_properties::EnumEntryProperty;
+use enum_entry_properties::{EnumEntryPropertyBinding, EnumEntryStorage};
 mod enum_entry_method_owner;
 pub(crate) use enum_entry_method_owner::owns_storage as enum_entry_storage_owner_matches;
 mod explicit_backing_fields;
@@ -267,6 +270,7 @@ mod receiver_flow;
 use receiver_flow::CompletedFlow;
 mod receiver_function_values;
 use receiver_function_values::ImplicitReceiverFunctionInvoke;
+pub use receiver_function_values::ReceiverFunctionPropertyCallee;
 mod package_qualifier_forms;
 mod package_qualifier_type_arguments;
 mod receiver_tower;
@@ -8610,7 +8614,7 @@ pub enum ExprLowering {
     /// owner-local ordinal becomes a stable `PropertyId` while checked FIR is built; the selected
     /// enclosing receiver is recorded independently in `implicit_receiver_selections`.
     EnumEntryPropertyRead {
-        sibling: u32,
+        property: EnumEntryProperty,
     },
     /// The accessor soft-keyword `field`, selected only when no lexical value named `field` shadows
     /// it. Lowering consumes the selection in the current accessor or fails cleanly when the access
@@ -8884,10 +8888,8 @@ pub enum ExprLowering {
         context_count: usize,
         ret: Ty,
         origin: ReceiverFnValueOrigin,
-        /// Parser-local expression carrying the selected property read when the function value
-        /// comes from a property. The active checked-body adapter consumes this coordinate and the
-        /// stable property decision attached to it; neither survives in FIR.
-        property_callee: Option<ExprId>,
+        /// The authenticated property operand; safe calls need no fabricated parser callee.
+        property_callee: Option<ReceiverFunctionPropertyCallee>,
         implicit_receiver: Option<Ty>,
         suspend: bool,
     },
@@ -8913,7 +8915,7 @@ pub enum ReceiverFnValueOrigin {
         /// Owner-local property ordinal when the dispatch property belongs to an enum-entry
         /// anonymous subclass. The checker converts it to a stable declaration before publishing
         /// FIR; ordinary classifier properties leave it absent.
-        enum_entry_property: Option<u32>,
+        enum_entry_property: Option<EnumEntryProperty>,
         /// The property has an explicit backing field. A lexical read whose receiver type is
         /// exactly the declaring class sees the field's type, including from a nested class.
         /// Only a read compiled into the declaring class loads the field; a nested class calls
@@ -8930,6 +8932,7 @@ pub enum ReceiverFnValueOrigin {
     EnumEntryPropertyStorage {
         owner: TypeName,
         field: u32,
+        declaration: Option<crate::fir::DeclarationId>,
     },
     TopLevelProperty,
 }
@@ -9008,7 +9011,7 @@ pub enum StmtLowering {
         ty: Ty,
         /// Exact enum-entry property sibling when the target belongs to an entry body. Ordinary
         /// classifier deferred properties are selected through their resolved dispatch binding.
-        enum_entry_property: Option<u32>,
+        enum_entry_property: Option<EnumEntryProperty>,
     },
     /// Selected member-property write. The backend chooses the property's physical realization.
     MemberPropertyWrite {
@@ -9733,7 +9736,7 @@ struct ScopedProperty {
     /// Exact contributing receiver rung; the same inherited declaration can have distinct runtime identities.
     dispatch_receiver_identity: Option<(usize, usize)>,
     class_storage: Option<u32>,
-    enum_entry_property: Option<u32>,
+    enum_entry_property: Option<(EnumEntryProperty, Span)>,
     source_member: Option<crate::libraries::SourceMember>,
     stable_declaration: Option<crate::fir::DeclarationId>,
 }
@@ -13656,6 +13659,19 @@ impl<'a> Checker<'a> {
                     // A dispatch property is reached through the enclosing instance, not captured
                     // as a lexical value with the same spelling. The receiver candidate below owns
                     // that identity and is emitted once even when several properties are read.
+                    if matches!(
+                        local.origin,
+                        ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
+                    ) {
+                        property_shadows.insert(name.to_string());
+                        if !self.enum_entry_storage_has_declaring_receiver(scope, local) {
+                            self.diags.error(
+                                span,
+                                "selected enum-entry property has no declaring receiver",
+                            );
+                        }
+                        return;
+                    }
                     if matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. }) {
                         property_shadows.insert(name.to_string());
                         return;
@@ -13667,7 +13683,9 @@ impl<'a> Checker<'a> {
                         ReceiverFnValueOrigin::ClassStorage(storage) => {
                             AnonymousObjectCaptureSource::ClassStorage(storage)
                         }
-                        ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field } => {
+                        ReceiverFnValueOrigin::EnumEntryPropertyStorage {
+                            owner, field, ..
+                        } => {
                             AnonymousObjectCaptureSource::EnumEntryPropertyStorage { owner, field }
                         }
                         _ => AnonymousObjectCaptureSource::LexicalValue,
@@ -13703,6 +13721,7 @@ impl<'a> Checker<'a> {
                         narrows.get(name).copied().unwrap_or(local.ty)
                     };
                     candidates.push(AnonymousCaptureCandidate {
+                        enum_entry_storage: local.enum_entry_storage(),
                         name: name.to_string(),
                         ty,
                         shared_cell,
@@ -13804,6 +13823,7 @@ impl<'a> Checker<'a> {
                         );
                         Some((
                             AnonymousCaptureCandidate {
+                                enum_entry_storage: None,
                                 name: if receiver.class_receiver {
                                     "this$0".to_string()
                                 } else if depth == 0 {
@@ -16564,7 +16584,7 @@ impl<'a> Checker<'a> {
                 });
                 if unshadowed_name && !self.module_declares(&fname) && !classifier_shadows_synthetic
                 {
-                    if let Some(alias_ty) = bare_alias_target.filter(|ty| ty.is_array()) {
+                    if let Some(alias_ty) = self.compiler_constructed_array(bare_alias_target) {
                         let element = alias_ty
                             .array_elem()
                             .expect("an array alias has a semantic element type");
@@ -19043,18 +19063,16 @@ impl<'a> Checker<'a> {
                     {
                         continue;
                     }
-                    let Ok(Some(selection)) =
-                        self.select_property_read(scope, implicit_receiver.ty, &fname)
-                    else {
-                        continue;
+                    let receiver_ty = match self.record_implicit_callable_property_read(
+                        scope,
+                        callee,
+                        &fname,
+                        implicit_receiver,
+                    ) {
+                        Ok(Some(ty)) => ty,
+                        Ok(None) => continue,
+                        Err(()) => return Ty::Error,
                     };
-                    let receiver_ty = selection.ty();
-                    if !self.value_type_claims_call(scope, receiver_ty) {
-                        continue;
-                    }
-                    let receiver_ty = self.record_property_read(scope, Some(callee), selection);
-                    self.set(callee, receiver_ty);
-                    self.mark_implicit_receiver_selection(callee, implicit_receiver);
                     if let Some(ret) = self.record_invoke_or_report(
                         scope,
                         CallArgs {
@@ -20219,43 +20237,40 @@ impl<'a> Checker<'a> {
             return;
         }
         let scoped = self.lookup(scope, &name);
+        // A committed enum property cannot be retried as an ordinary setter or a lexical value.
+        let deferred_property = if let Some(local) =
+            scoped.filter(|local| local.enum_entry_storage().is_some())
+        {
+            let Some((storage, selected)) = self.selected_enum_entry_receiver(scope, local) else {
+                self.diags.error(
+                    self.assignment_target_span(s),
+                    "selected enum-entry property has no declaring receiver",
+                );
+                return;
+            };
+            self.mark_extension_receiver_stmt_used(s, selected);
+            Some((selected.ty, storage.owner, local.ty, Some(storage.property)))
+        } else {
+            scoped.and_then(|local| match local.origin {
+                ReceiverFnValueOrigin::DispatchProperty { owner, .. } if local.is_var => self
+                    .select_property_setter(Ty::obj_name(owner), &name)
+                    .is_none()
+                    .then(|| {
+                        self.implicit_receivers(scope)
+                            .into_iter()
+                            .find(|receiver| {
+                                self.receiver_is_assignable(receiver.ty, Ty::obj_name(owner))
+                            })
+                            .map(|receiver| (receiver.ty, owner, local.ty, None))
+                    })
+                    .flatten(),
+                _ => None,
+            })
+        };
         if let Some(local) = scoped {
             self.report_uninitialized_default_parameter_write(s, local.flow_identity);
         }
         self.record_local_write(s, scoped);
-        let deferred_property = scoped.and_then(|local| match local.origin {
-            ReceiverFnValueOrigin::DispatchProperty {
-                owner,
-                receiver_identity,
-                enum_entry_property,
-                ..
-            } if local.is_var => enum_entry_property
-                .and_then(|field| {
-                    self.implicit_receivers(scope)
-                        .into_iter()
-                        .find(|receiver| receiver.identity == receiver_identity)
-                        .map(|receiver| (receiver.ty, owner, local.ty, Some(field)))
-                })
-                .or_else(|| {
-                    self.select_property_setter(Ty::obj_name(owner), &name)
-                        .is_none()
-                        .then(|| {
-                            self.implicit_receivers(scope)
-                                .into_iter()
-                                .find(|receiver| {
-                                    self.receiver_is_assignable(receiver.ty, Ty::obj_name(owner))
-                                })
-                                .map(|receiver| (receiver.ty, owner, local.ty, None))
-                        })
-                        .flatten()
-                }),
-            ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field } if local.is_var => {
-                scope
-                    .this_ty()
-                    .map(|receiver| (receiver, owner, local.ty, Some(field)))
-            }
-            _ => None,
-        });
         let local = scoped
             .filter(|local| {
                 !matches!(
@@ -20302,6 +20317,13 @@ impl<'a> Checker<'a> {
         }
         if let Some((receiver, owner, ty, enum_entry_property)) = deferred_property {
             self.expect_assignable(ty, vt, self.value_diagnostic_span(value, vt), "assignment");
+            if enum_entry_property.is_some() && scoped.is_some_and(|local| !local.is_var) {
+                self.report_val_reassignment(
+                    self.assignment_target_span(s),
+                    "'val' cannot be reassigned.",
+                );
+                return;
+            }
             if let Some(ReceiverFnValueOrigin::DispatchProperty {
                 receiver_identity, ..
             }) = scoped.map(|binding| binding.origin)
@@ -39168,31 +39190,6 @@ impl<'a> Checker<'a> {
         );
     }
 
-    fn declare_enum_entry_dispatch_property(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        ty: Ty,
-        is_var: bool,
-        owner: TypeName,
-        sibling: u32,
-    ) {
-        self.declare_dispatch_property_with_provenance(
-            scope,
-            name,
-            DispatchPropertyBinding {
-                read_ty: ty,
-                declared_ty: ty,
-                error_provenance: ErrorProvenance::None,
-                owner_storage: false,
-            },
-            is_var,
-            owner,
-            Some(sibling),
-            None,
-        );
-    }
-
     fn declare_dispatch_property_with_provenance(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -39200,22 +39197,11 @@ impl<'a> Checker<'a> {
         binding: DispatchPropertyBinding,
         is_var: bool,
         owner: TypeName,
-        enum_entry_property: Option<u32>,
+        enum_entry_property: Option<EnumEntryProperty>,
         selected_receiver_identity: Option<(usize, usize)>,
     ) {
         let implicit_receivers = self.implicit_receivers(scope);
         let receiver_identity = selected_receiver_identity
-            .or_else(|| {
-                enum_entry_property
-                    .and_then(|_| owner.nested_owner())
-                    .and_then(|enum_owner| {
-                        implicit_receivers.iter().copied().find(|receiver| {
-                            receiver.extension_receiver.is_none()
-                                && receiver.ty.obj_internal() == Some(enum_owner)
-                        })
-                    })
-                    .map(|receiver| receiver.identity)
-            })
             .or_else(|| {
                 implicit_receivers
                     .iter()
@@ -39373,89 +39359,6 @@ impl<'a> Checker<'a> {
             ));
         }
         labels
-    }
-
-    fn declare_enum_entry_property_storage(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        ty: Ty,
-        is_var: bool,
-        owner: TypeName,
-        field: u32,
-    ) {
-        self.declare_with_origin(
-            scope,
-            name,
-            ty,
-            is_var,
-            ValueBindingDeclaration::ordinary(
-                ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field },
-                ErrorProvenance::None,
-            ),
-        );
-    }
-
-    /// Entry-body properties captured by a nested `inner` classifier. Enum entries have no AST
-    /// declaration of their own, so the nested class records the enum as `inner_of`; recover the
-    /// intervening entry scope once and publish the same stable sibling identities used while the
-    /// entry body itself is checked.
-    fn enclosing_enum_entry_properties(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        class: &ClassDecl,
-        visible_properties: &[ScopedProperty],
-    ) -> Vec<ScopedProperty> {
-        let Some((_, outer, _, entry)) = enclosing_enum_entry_context(self.file, class) else {
-            return Vec::new();
-        };
-        let property_scope = scope.child(ScopeKind::Block);
-        let property_scope = &property_scope;
-        for property in visible_properties {
-            self.declare_scoped_property(property_scope, property, false);
-        }
-        let outer_internal = type_name(&class_internal(self.file, &outer.name));
-        let entry_owner = type_name_nested_child(outer_internal, &entry.name);
-        let mut properties = Vec::new();
-        for (field, property) in entry
-            .props
-            .iter()
-            .enumerate()
-            .filter(|(_, property)| property.span.lo < class.span.lo)
-        {
-            let ty = property
-                .ty
-                .as_ref()
-                .map(|reference| self.type_ref_ty(property_scope, reference))
-                .or_else(|| {
-                    property
-                        .init
-                        .map(|initializer| self.expr(property_scope, initializer))
-                })
-                .unwrap_or(Ty::Error);
-            self.declare_enum_entry_dispatch_property(
-                property_scope,
-                &property.name,
-                ty,
-                property.is_var,
-                entry_owner,
-                field as u32,
-            );
-            properties.push(ScopedProperty {
-                name: property.name.clone(),
-                ty,
-                owner_storage_ty: None,
-                is_var: property.is_var,
-                owner: entry_owner,
-                dispatch_receiver_identity: None,
-                class_storage: None,
-                enum_entry_property: Some(field as u32),
-                source_visible: true,
-                source_member: None,
-                stable_declaration: None,
-            });
-        }
-        properties
     }
 
     fn declare_enclosing_enum_entry_methods(
@@ -44089,6 +43992,22 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // Push only this declaration's semantic class chain. A local or anonymous declaration is
+            // checked at its lexical construction site, so `this_labels` already contains its lexical
+            // receivers. Reconstructing those labels from `lexical_class_context` would duplicate one
+            // semantic receiver, while a synthetic capture label would invent another receiver that
+            // does not exist at runtime; either corrupts the coordinate recorded for `this@Outer`.
+            let mut labels = self.body_class_captured_receiver_labels(d);
+            labels.extend(class_context_receivers.iter().filter_map(|receiver| {
+                receiver
+                    .label
+                    .clone()
+                    .map(|label| (label, receiver.ty, false, receiver.declaration_role()))
+            }));
+            labels.extend(self.stable_class_receiver_labels(cl, scope.this_ty()));
+            let enclosing_label_depth = self.this_labels.len();
+            let label_depth = labels.len();
+            self.this_labels.extend(labels);
             // An inner class declared inside one enum entry captures the entry receiver and its
             // preceding properties. Keep this lexical publication shared with Pass-1 inference.
             let entry_properties = self.enclosing_enum_entry_properties(scope, cl, &props);
@@ -44192,6 +44111,7 @@ impl<'a> Checker<'a> {
                 }
                 self.active_lexical_policies
                     .truncate(class_suppression_depth);
+                self.this_labels.truncate(enclosing_label_depth);
                 return;
             }
             // A local class's lexical captures are concrete fields, not unresolved outer locals once
@@ -44453,22 +44373,6 @@ impl<'a> Checker<'a> {
                 body_local_class,
                 &mut props,
             );
-            // Push only this declaration's semantic class chain. A local or anonymous declaration is
-            // checked at its lexical construction site, so `this_labels` already contains its lexical
-            // receivers. Reconstructing those labels from `lexical_class_context` would duplicate one
-            // semantic receiver, while a synthetic capture label would invent another receiver that
-            // does not exist at runtime; either corrupts the coordinate recorded for `this@Outer`.
-            let mut labels = self.body_class_captured_receiver_labels(d);
-            labels.extend(class_context_receivers.iter().filter_map(|receiver| {
-                receiver
-                    .label
-                    .clone()
-                    .map(|label| (label, receiver.ty, false, receiver.declaration_role()))
-            }));
-            labels.extend(self.stable_class_receiver_labels(cl, scope.this_ty()));
-            let enclosing_label_depth = self.this_labels.len();
-            let label_depth = labels.len();
-            self.this_labels.extend(labels);
             let methods: Vec<&FunDecl> = cl.methods.iter().collect();
             self.check_conflicting_member_overloads(d, current_owner, &methods);
             if let Some(internal) = current_owner {
@@ -44993,14 +44897,23 @@ impl<'a> Checker<'a> {
                         if let Some(initializer) = bp.init {
                             self.finish_executable_root(initializer);
                         }
-                        let _ = current_owner.expect("enum class must have a source owner");
+                        let _owner = current_owner.expect("enum class must have a source owner");
+                        let Some(selected_property) =
+                            self.enum_entry_property_for(d, entry_index as u32, field as u32)
+                        else {
+                            self.diags
+                                .error(bp.span, "enum-entry property has no active declaration");
+                            continue;
+                        };
                         self.declare_enum_entry_property_storage(
                             entry_scope,
                             &bp.name,
                             ty,
                             bp.is_var,
-                            entry_owner,
-                            field as u32,
+                            EnumEntryStorage {
+                                owner: entry_owner,
+                                property: selected_property,
+                            },
                         );
                         entry_props.push(ScopedProperty {
                             name: bp.name.clone(),
@@ -45008,9 +44921,10 @@ impl<'a> Checker<'a> {
                             owner_storage_ty: None,
                             is_var: bp.is_var,
                             owner: entry_owner,
-                            dispatch_receiver_identity: None,
+                            dispatch_receiver_identity: entry_scope
+                                .innermost_class_receiver_identity(),
                             class_storage: Some(field as u32),
-                            enum_entry_property: Some(field as u32),
+                            enum_entry_property: Some((selected_property, bp.span)),
                             source_visible: true,
                             source_member: None,
                             stable_declaration: None,
@@ -45150,13 +45064,24 @@ impl<'a> Checker<'a> {
                             .find(|candidate| candidate.name == property.name)
                             .map(|candidate| candidate.ty)
                             .unwrap_or(Ty::Error);
+                        let Some(selected_property) =
+                            self.enum_entry_property_for(d, entry_index as u32, field as u32)
+                        else {
+                            self.diags.error(
+                                property.span,
+                                "enum-entry property has no active declaration",
+                            );
+                            continue;
+                        };
                         self.declare_enum_entry_property_storage(
                             &entry_init_scope,
                             &property.name,
                             ty,
                             true,
-                            entry_owner,
-                            field as u32,
+                            EnumEntryStorage {
+                                owner: entry_owner,
+                                property: selected_property,
+                            },
                         );
                     }
                     for step in &entry.init_order {
@@ -53100,17 +53025,22 @@ impl<'a> Checker<'a> {
                     // shape beside its nominal reflection type; invoking the read consumes it.
                     self.read_callable_reference_types.insert(e, function);
                 }
-                let storage_read = match l.origin {
-                    ReceiverFnValueOrigin::ClassStorage(storage) => {
-                        Some(ExprLowering::ClassStorageRead(storage))
+                if matches!(
+                    l.origin,
+                    ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
+                ) {
+                    if self.publish_enum_entry_storage_read(scope, e, l) {
+                        return self.set(e, self.local_narrowing(scope, &n).unwrap_or(l.ty));
                     }
-                    ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field } => {
-                        Some(ExprLowering::EnumEntryStorageRead { owner, field })
-                    }
-                    _ => None,
-                };
-                if let Some(read) = storage_read {
-                    self.expr_lowers.insert(e, read);
+                    self.diags.error(
+                        self.span(e),
+                        "selected enum-entry property has no declaring receiver",
+                    );
+                    return self.set(e, Ty::Error);
+                }
+                if let ReceiverFnValueOrigin::ClassStorage(storage) = l.origin {
+                    self.expr_lowers
+                        .insert(e, ExprLowering::ClassStorageRead(storage));
                     self.read_flow_roots
                         .insert(e, scope::PathRoot::Value(l.flow_identity));
                     self.anonymous_super_read_provenance.insert(
@@ -53127,27 +53057,21 @@ impl<'a> Checker<'a> {
                     owner_storage,
                 } = l.origin
                 {
-                    if let Some(sibling) = enum_entry_property {
-                        let receivers = self.implicit_receivers(scope);
-                        let receiver = owner
-                            .nested_owner()
-                            .and_then(|enum_owner| {
-                                receivers.iter().copied().find(|receiver| {
-                                    receiver.extension_receiver.is_none()
-                                        && receiver.ty.obj_internal() == Some(enum_owner)
-                                })
-                            })
-                            .or_else(|| {
-                                receivers
-                                    .into_iter()
-                                    .find(|receiver| receiver.identity == receiver_identity)
-                            });
-                        if let Some(receiver) = receiver {
-                            self.mark_implicit_receiver_selection(e, receiver);
-                            self.expr_lowers
-                                .insert(e, ExprLowering::EnumEntryPropertyRead { sibling });
+                    if let Some(property) = enum_entry_property {
+                        if self.publish_enum_entry_property_read(
+                            scope,
+                            e,
+                            owner,
+                            property,
+                            receiver_identity,
+                        ) {
                             return self.set(e, self.local_narrowing(scope, &n).unwrap_or(l.ty));
                         }
+                        self.diags.error(
+                            self.span(e),
+                            "selected enum-entry property has no declaring receiver",
+                        );
+                        return self.set(e, Ty::Error);
                     }
                     // Dispatch properties are present in the lexical value scope for shadowing, but
                     // they are not locals. Walk the actual implicit-receiver tower before committing
@@ -54261,25 +54185,30 @@ impl<'a> Checker<'a> {
                 if let Some(binding) = self.lookup(scope, &name) {
                     if let ReceiverFnValueOrigin::DispatchProperty {
                         owner,
-                        enum_entry_property: Some(sibling),
+                        receiver_identity,
+                        enum_entry_property: Some(property),
                         ..
                     } = binding.origin
                     {
-                        if owner.nested_owner() == rt.obj_internal() {
-                            if let Some(selection) =
-                                self.implicit_receiver_selections.get(&receiver).cloned()
-                            {
-                                self.implicit_receiver_selections.insert(e, selection);
-                            } else if let Some(selected) = self
-                                .implicit_receivers(scope)
-                                .into_iter()
-                                .find(|candidate| candidate.current && candidate.ty == rt)
-                            {
-                                self.mark_implicit_receiver_selection(e, selected);
+                        // The explicit receiver must select this property's recorded instance.
+                        // A different labeled class continues its own ordinary member selection.
+                        if self.implicit_receiver_identities.get(&receiver)
+                            == Some(&receiver_identity)
+                        {
+                            if self.publish_enum_entry_property_read(
+                                scope,
+                                e,
+                                owner,
+                                property,
+                                receiver_identity,
+                            ) {
+                                return self.set(e, binding.ty);
                             }
-                            self.expr_lowers
-                                .insert(e, ExprLowering::EnumEntryPropertyRead { sibling });
-                            return self.set(e, binding.ty);
+                            self.diags.error(
+                                self.span(e),
+                                "selected enum-entry property receiver is unavailable",
+                            );
+                            return self.set(e, Ty::Error);
                         }
                     }
                 }
