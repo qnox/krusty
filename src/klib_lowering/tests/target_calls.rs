@@ -614,20 +614,18 @@ fn klib_target_storage_leaves_reject_conflicting_missing_and_malformed_contracts
     );
 }
 
-/// Each builtin scalar's own `hashCode()` is the provider's primitive-hash operation, and Native
-/// realizes that operation itself. A stdlib body that calls one (`IntArray.contentHashCode` calls
-/// `Int.hashCode()`) therefore reaches a target leaf rather than an ordinary member body that a
-/// dependency support unit has no contract to emit.
+/// Each builtin scalar's own `hashCode()` is the provider's primitive-hash operation. A target that
+/// realizes that operation itself (Native does; `krusty-native` asserts the capability) therefore
+/// reaches a target leaf when a stdlib body calls one (`IntArray.contentHashCode` calls
+/// `Int.hashCode()`), rather than an ordinary member body that a dependency support unit has no
+/// contract to emit.
 #[test]
-fn klib_target_primitive_hash_codes_are_native_dependency_leaves() {
-    use crate::backend::Backend;
-    use crate::native::{CraneliftBackend, NativeTarget};
+fn klib_target_primitive_hash_codes_are_target_dependency_leaves() {
     let Some(root) = distribution_root() else {
         return;
     };
     let libraries = stdlib(&root);
-    let backend = CraneliftBackend::new(NativeTarget::ALL[0]);
-    let capability = |operation| backend.realizes_dependency_intrinsic(operation);
+    let capability = |operation| operation == CompilerIntrinsic::PrimitiveHashCode;
     for scalar in [
         "kotlin/Boolean",
         "kotlin/Char",
