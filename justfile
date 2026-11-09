@@ -276,7 +276,9 @@ kotlinc VERSION=`just max-version`:
     url="https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-compiler-${ver}.zip"
     tmp="$(mktemp -d)"
     echo "downloading kotlin-compiler ${ver}…" >&2
-    curl -fsSL --retry 3 "$url" -o "$tmp/kotlinc.zip" || { echo "failed to download $url" >&2; rm -rf "$tmp"; exit 1; }
+    # GitHub's release CDN answers 504 for minutes at a time. curl doubles its wait from one second,
+    # so eight retries span about four minutes; a connection that never opens fails within 30s.
+    curl -fsSL --connect-timeout 30 --retry 8 --retry-max-time 300 "$url" -o "$tmp/kotlinc.zip" || { echo "failed to download $url" >&2; rm -rf "$tmp"; exit 1; }
     mkdir -p "$dest"
     if command -v unzip >/dev/null 2>&1; then unzip -q "$tmp/kotlinc.zip" -d "$dest"
     elif command -v python3 >/dev/null 2>&1; then python3 -c "import zipfile; zipfile.ZipFile('$tmp/kotlinc.zip').extractall('$dest')"
@@ -657,7 +659,7 @@ survey *ARGS:
     v="$(just max-version)"
     export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
     box="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
-    cargo build --release --bin survey >&2
+    cargo build --release -p krusty-jvm --bin survey >&2
     if [ -n "{{ARGS}}" ]; then
         ./target/release/survey "$box" --samples {{ARGS}}
     else

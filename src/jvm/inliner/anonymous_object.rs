@@ -38,8 +38,8 @@ use super::class_roles::ClassRoles;
 use super::name_generator::NameGenerator;
 use super::{InlineError, ObjectLambda};
 
-pub(crate) use sam_wrapper::copy_sam_wrapper;
-pub(crate) use suspend_methods::CallSiteSource;
+pub use sam_wrapper::copy_sam_wrapper;
+pub use suspend_methods::CallSiteSource;
 use suspend_methods::ContinuationMachine;
 pub(crate) use type_remapper::{MalformedType, TypeRemapper};
 
@@ -62,7 +62,7 @@ const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl
 
 /// Why an anonymous object could not be regenerated.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RegenerationError {
+pub enum RegenerationError {
     /// A shape the ported stages do not regenerate yet.
     Unsupported(&'static str),
     /// A member could not be written as it was.
@@ -87,7 +87,7 @@ impl From<MalformedType> for RegenerationError {
 
 /// The method an object is regenerated for (`InlineCallSiteInfo`).
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct CallSite<'a> {
+pub struct CallSite<'a> {
     pub owner: &'a str,
     pub method: &'a str,
     pub descriptor: &'a str,
@@ -99,7 +99,7 @@ pub(crate) struct CallSite<'a> {
 }
 
 /// One object to regenerate (`AnonymousObjectTransformationInfo`).
-pub(crate) struct Regeneration<'a> {
+pub struct Regeneration<'a> {
     pub original: &'a ClassNode,
     pub new_class: &'a str,
     /// The descriptor the inline body calls the original's constructor through.
@@ -114,7 +114,7 @@ pub(crate) struct Regeneration<'a> {
     /// capture or otherwise name one of them and must point at the call-site class.
     pub prior_classes: &'a [(String, String)],
     /// The call's reified arguments, which specialize `reifiedOperationMarker` in the copy.
-    pub(in crate::jvm) reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
+    pub reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
     /// The caller's class-file major version.
     pub major: u16,
     /// The `@Metadata` stamp the caller writes.
@@ -149,7 +149,7 @@ enum MachineRebuild {
 
 /// The regenerated class.
 #[derive(Debug)]
-pub(crate) struct Regenerated {
+pub struct Regenerated {
     pub bytes: Vec<u8>,
     /// The regenerated constructor's descriptor, which the call site now calls.
     pub constructor_desc: String,
@@ -165,7 +165,7 @@ pub(crate) struct Regenerated {
 
 /// A SAM wrapper copied into the calling class.
 #[derive(Debug)]
-pub(crate) struct SamWrapperCopy {
+pub struct SamWrapperCopy {
     /// The wrapper the inline body constructs.
     pub original: String,
     pub name: String,
@@ -181,7 +181,7 @@ pub(super) fn is_captured_field_name(name: &str) -> bool {
 
 /// Copy `regeneration.original` as `regeneration.new_class`, whose own regenerated classes are
 /// named by `names`.
-pub(crate) fn regenerate(
+pub fn regenerate(
     regeneration: &Regeneration<'_>,
     names: &mut NameGenerator,
 ) -> Result<Regenerated, RegenerationError> {

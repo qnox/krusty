@@ -53,7 +53,7 @@ pub enum IrLocalPropertyLayout {
 
 impl IrLocalPropertyLayout {
     /// The accessor functions this layout materialized.
-    pub(crate) fn accessor_functions(&self) -> impl Iterator<Item = FunId> {
+    pub fn accessor_functions(&self) -> impl Iterator<Item = FunId> {
         let (getter, setter) = match self {
             Self::TopLevelStorage { getter, setter, .. } | Self::Member { getter, setter, .. } => {
                 (*getter, *setter)
@@ -69,7 +69,7 @@ impl super::IrFile {
     /// The selected declaration's layout at this operation's recorded dispatch classifier.
     /// An anonymous-class specialization preserves property order and clones its accessors;
     /// its source chain authenticates that projection without resolving a property by spelling.
-    pub(crate) fn property_layout_at(
+    pub fn property_layout_at(
         &self,
         operation: super::ExprId,
         target: crate::fir::PropertyId,
