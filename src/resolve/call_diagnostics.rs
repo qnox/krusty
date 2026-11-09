@@ -246,7 +246,7 @@ impl Checker<'_> {
                 param_names: &candidate.call_sig.param_names,
                 param_defaults: &candidate.call_sig.param_defaults,
                 required: candidate.callable.params.len(),
-                vararg: false,
+                vararg_index: None,
                 context_count: candidate.context_count,
                 ret: candidate.callable.ret,
                 source_display: Some(display),
