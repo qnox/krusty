@@ -156,7 +156,7 @@ pub struct IrModuleClassifier {
 impl super::IrFile {
     /// Source classifier kind for an exact common-IR identity, regardless of whether the
     /// declaration belongs to this file or another file in the module.
-    pub(crate) fn source_classifier_kind(&self, classifier: TypeName) -> Option<IrClassifierKind> {
+    pub fn source_classifier_kind(&self, classifier: TypeName) -> Option<IrClassifierKind> {
         if let Some(class) = self
             .classes
             .iter()

@@ -62,7 +62,7 @@ use builtins_customizer::JvmBuiltInsCustomizer;
 use generic_signatures::{
     concrete_generic_ret, mark_receiver_fun_params, parse_field_gsig, suspend_return_from_gsig,
 };
-pub(in crate::jvm) use generic_signatures::{parse_class_gsig, parse_method_gsig};
+pub use generic_signatures::{parse_class_gsig, parse_method_gsig};
 use inline_capability::{metadata_inline, property_accessor_inline, property_getter_inline};
 use java_nullability::{
     java_field_type, java_result_enhancement, java_type_argument_nullability, java_type_nullability,
@@ -2670,7 +2670,7 @@ fn interface_holder_method(
     }))
 }
 
-pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
+pub fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
         params.into_iter().map(declared_desc_to_ty).collect(),
@@ -4340,7 +4340,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
 }
 
 impl JvmLibraries {
-    pub(super) fn range_construction(&self, lo: Ty, hi: Ty) -> Option<RangeConstruction> {
+    pub fn range_construction(&self, lo: Ty, hi: Ty) -> Option<RangeConstruction> {
         let (internal, elem, trailing_nulls) = match (lo, hi) {
             (Ty::Char, Ty::Char) => ("kotlin/ranges/CharRange", Ty::Char, 0),
             (Ty::UInt, Ty::UInt) => ("kotlin/ranges/UIntRange", Ty::UInt, 1),

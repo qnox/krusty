@@ -1372,7 +1372,7 @@ pub fn build_package(
     )
 }
 
-pub(crate) fn build_package_with_intersection_approximation(
+pub fn build_package_with_intersection_approximation(
     funcs: &[FnMeta],
     props: &[PropMeta],
     aliases: &[TypeAliasMeta],

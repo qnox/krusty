@@ -29,13 +29,12 @@ mod local_call_parameters;
 mod local_classifier_provenance;
 mod lowering_temporaries;
 mod ranges;
-mod single_source_lowering;
 
-use lambda_return_flow::expression_subtree_contains;
-pub(crate) use single_source_lowering::{
+pub(crate) use super::single_source_lowering::{
     lower_single_source, lower_single_source_with_jvm_stdlib, lower_single_source_with_platform,
     lower_source_from_set, lower_with_jvm_stdlib_into,
 };
+use lambda_return_flow::expression_subtree_contains;
 
 use super::lower_body;
 

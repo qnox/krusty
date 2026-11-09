@@ -129,7 +129,7 @@ impl Checker<'_> {
     }
 
     /// Whether statement `s` always transfers control (so subsequent statements in its block are dead).
-    pub(super) fn stmt_diverges(&self, s: StmtId) -> bool {
+    pub fn stmt_diverges(&self, s: StmtId) -> bool {
         match self.file.stmt(s) {
             Stmt::Return(..) | Stmt::Break(_) | Stmt::Continue(_) => true,
             Stmt::Expr(e) => self.expr_diverges(*e),

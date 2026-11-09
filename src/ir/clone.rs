@@ -288,7 +288,7 @@ pub(crate) fn make_expression_children_unique(ir: &mut IrFile, root: ExprId) {
 
 /// As [`make_expression_children_unique`], returning every `(source, clone)` identity so backend
 /// side tables can copy their exact per-expression contracts instead of inferring them again.
-pub(crate) fn make_expression_children_unique_tracked(
+pub fn make_expression_children_unique_tracked(
     ir: &mut IrFile,
     root: ExprId,
 ) -> Vec<(ExprId, ExprId)> {

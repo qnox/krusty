@@ -180,7 +180,7 @@ pub struct IrParameterIdentity {
 
 impl IrParameterIdentity {
     /// Exact original constructor receiver transported as this callable's captured value.
-    pub(crate) fn constructor_receiver(&self) -> Option<(crate::fir::DeclarationId, u32)> {
+    pub fn constructor_receiver(&self) -> Option<(crate::fir::DeclarationId, u32)> {
         match self.role {
             IrParameterRole::CapturedValue {
                 capture:
@@ -371,7 +371,7 @@ impl FnParamInfo {
         info
     }
 
-    pub(crate) fn prepend_generated(&mut self, identity: IrParameterIdentity) {
+    pub fn prepend_generated(&mut self, identity: IrParameterIdentity) {
         assert_eq!(
             identity.provenance,
             IrParameterProvenance::CompilerGenerated,
@@ -414,7 +414,7 @@ impl IrFile {
     }
 
     /// The exact checked declaration that supplied inherited defaults for `fid`.
-    pub(crate) fn inherited_param_default_provider(
+    pub fn inherited_param_default_provider(
         &self,
         fid: u32,
     ) -> Option<crate::fir::ResolvedFunctionOverrideTarget> {
@@ -453,10 +453,7 @@ impl IrFile {
     /// but consumers must not branch on that origin. Presence is optional for functions that have
     /// no source/debug parameter surface; when present, the identities are complete and exactly
     /// parallel to the current semantic parameter list.
-    pub(crate) fn function_parameter_identities(
-        &self,
-        function: FunId,
-    ) -> Option<&[IrParameterIdentity]> {
+    pub fn function_parameter_identities(&self, function: FunId) -> Option<&[IrParameterIdentity]> {
         let source = self
             .fn_params
             .get(&function)
@@ -493,7 +490,7 @@ impl IrFile {
     /// lead with a capture or an extension receiver. [`IrVarargParameter::index`] counts the
     /// declared context and value parameters, so the position is the declared parameter at that
     /// ordinal.
-    pub(crate) fn vararg_parameter_position(&self, function: FunId) -> Option<usize> {
+    pub fn vararg_parameter_position(&self, function: FunId) -> Option<usize> {
         let vararg = self.declared_parameters(function).vararg?;
         self.function_parameter_identities(function)?
             .iter()

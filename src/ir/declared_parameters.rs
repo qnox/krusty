@@ -181,7 +181,7 @@ impl IrFile {
     }
 
     /// Take `function`'s declared parameter facts, leaving it with none.
-    pub(crate) fn take_declared_parameters(&mut self, function: FunId) -> IrDeclaredParameters {
+    pub fn take_declared_parameters(&mut self, function: FunId) -> IrDeclaredParameters {
         std::mem::take(self.declared_parameters_mut(function))
     }
 
