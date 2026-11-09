@@ -66,7 +66,7 @@ impl LoweringCheckpoint {
             .retain(|function, _| *function < first);
         ir.extension_receiver_fns
             .retain(|function| *function < first);
-        ir.fn_context_counts.retain(|function, _| *function < first);
+        ir.truncate_declared_parameters(first);
         ir.singleton_extension_unread_receivers
             .retain(|function, _| *function < first);
         first
