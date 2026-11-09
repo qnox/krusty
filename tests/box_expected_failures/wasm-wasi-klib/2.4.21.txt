@@ -65,7 +65,6 @@ arrays/arraysOfInlineClass/accessArrayOfUnsigned.kt
 arrays/arraysOfInlineClass/arrayOfInlineClassOfArrayOfInlineClass.kt
 arrays/collectionAssignGetMultiIndex.kt
 arrays/collectionGetMultiIndex.kt
-arrays/constantArrayOfAny.kt
 arrays/forEachBooleanArray.kt
 arrays/forEachByteArray.kt
 arrays/forEachCharArray.kt
@@ -252,8 +251,6 @@ branching/when_with_try1.kt
 bridges/complexMultiInheritance.kt
 bridges/complexTraitImpl.kt
 bridges/covariantGenericDiamond.kt
-bridges/declarationDifferentSignature/simpleConcreteDeclarationDifferentSignature.kt
-bridges/declarationDifferentSignature/simpleConcreteDeclarationOverridesAbstractDifferentSignature.kt
 bridges/delegationComplexWithList.kt
 bridges/diamond.kt
 bridges/fakeGenericCovariantOverride.kt
@@ -522,7 +519,6 @@ casts/functions/safeAsFunKBig.kt
 casts/functions/safeAsFunKSmall.kt
 casts/isNullablePrimitive.kt
 casts/kt22714.kt
-casts/kt48927_privateMethodOnDerivedCastToBase.kt
 casts/kt50577.kt
 casts/kt53677.kt
 casts/kt54707.kt
@@ -533,7 +529,6 @@ casts/kt73931.kt
 casts/kt81257.kt
 casts/kt82732.kt
 casts/kt89267.kt
-casts/lambdaToUnitCast.kt
 casts/literalExpressionAsGenericArgument/vararg.kt
 casts/mutableCollections/asWithMutable.kt
 casts/mutableCollections/isWithMutable.kt
@@ -578,7 +573,6 @@ classes/innerClass.kt
 classes/kt1018.kt
 classes/kt1535.kt
 classes/kt1538.kt
-classes/kt1721.kt
 classes/kt1980.kt
 classes/kt2391.kt
 classes/kt2417.kt
@@ -639,7 +633,6 @@ collectionLiterals/array.kt
 collectionLiterals/companionBlockOf.kt
 collectionLiterals/genericCollection.kt
 collectionLiterals/primitiveArrays.kt
-collectionLiterals/resolvesToOperator.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collectionLiterals/unsignedArrays.kt
@@ -927,7 +920,6 @@ controlflow/for_loops_let_with_nullable.kt
 controlflow/for_loops_nested.kt
 controlflow/for_loops_overflow.kt
 controlflow/for_loops_types.kt
-controlflow/smartcastOnThisInInitializationSection.kt
 controlflow/unreachable1.kt
 coroutines/32defaultParametersInSuspend.kt
 coroutines/accessorForSuspend.kt
@@ -1627,7 +1619,6 @@ delegatedProperty/valInInnerClass.kt
 delegatedProperty/varInInnerClass.kt
 delegation/delegationDifferentModule.kt
 delegation/delegationDifferentModule2.kt
-delegation/delegationToIntersectionType3.kt
 delegation/delegationToVar.kt
 delegation/genericProperty.kt
 delegation/ifWithCallableReferenceInLazy.kt
@@ -1650,7 +1641,6 @@ diagnostics/functions/tailRecursion/realStringRepeat.kt
 diagnostics/functions/tailRecursion/recursiveCallInInlineLambda.kt
 diagnostics/functions/tailRecursion/recursiveCallInInlineLambdaWithCapture.kt
 diagnostics/functions/tailRecursion/whenWithIs.kt
-diagnostics/vararg/kt4172.kt
 directInvokeOptimization/boundInnerContructorRef.kt
 directInvokeOptimization/contextParameters.kt
 directInvokeOptimization/samConversion.kt
@@ -1659,7 +1649,6 @@ directInvokeOptimization/unboundMemberRef.kt
 elvis/genericElvisWithMoreSpecificLHS.kt
 elvis/genericElvisWithNullLHS.kt
 elvis/genericNull.kt
-elvis/kt6694ExactAnnotationForElvis.kt
 elvis/ofNonNullableResultType.kt
 elvis/primitive.kt
 enum/companionAccessingEnumValue.kt
@@ -1774,14 +1763,12 @@ extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
 extensionFunctions/extensionFunctionWithExtensionInSAMInterface.kt
 extensionFunctions/extensionFunctionWithInlineModifier.kt
-extensionFunctions/extensionMemberWithTypeParameter.kt
 extensionFunctions/kt1953.kt
 extensionFunctions/kt1953_class.kt
 extensionFunctions/kt23675.kt
 extensionFunctions/kt3285.kt
 extensionFunctions/kt4228.kt
 extensionFunctions/kt475.kt
-extensionFunctions/kt606.kt
 extensionFunctions/kt865.kt
 extensionFunctions/memberExtensionEqualsHashCodeToStringInInterface.kt
 extensionFunctions/nestedExtensionFunctionAsASupertype.kt
@@ -1793,7 +1780,6 @@ extensionFunctions/suspendConversionForExtensionFunAsASuperType.kt
 extensionFunctions/thisMethodInObjectLiteral.kt
 extensionFunctions/virtual.kt
 extensionProperties/contextPropertyInInterface.kt
-extensionProperties/extensionMemberWithTypeParameter.kt
 extensionProperties/extensionPropertyDelegated.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
 extensionProperties/extensionPropertyInInnerClass.kt
@@ -1801,7 +1787,6 @@ extensionProperties/extensionPropertyInSAMInterface.kt
 extensionProperties/extensionPropertyWithAnonymoesExtensionWithALabel.kt
 extensionProperties/extensionPropertyWithAnonymousExtensionFunWithTypeParam.kt
 extensionProperties/extensionPropertyWithExtensionAsReceiver.kt
-extensionProperties/extensionPropertyWithExtensionNestedType.kt
 extensionProperties/extensionPropertyWithInline.kt
 extensionProperties/extensionProperyWithExtensionType.kt
 extensionProperties/genericContextOverride.kt
@@ -1943,7 +1928,6 @@ functions/defaultargs1.kt
 functions/functionExpression/functionExpression.kt
 functions/functionExpression/functionExpressionWithThisReference.kt
 functions/functionExpression/functionLiteralExpression.kt
-functions/invoke/castFunctionToExtension.kt
 functions/invoke/invoke.kt
 functions/invoke/kt3190.kt
 functions/kt1038.kt
@@ -1953,7 +1937,6 @@ functions/kt2929.kt
 functions/kt3214.kt
 functions/kt395.kt
 functions/kt47449.kt
-functions/kt48058.kt
 functions/kt58825_arrayOverloads.kt
 functions/localFunction.kt
 functions/localFunctions/callBetweenLocalFunctions.kt
@@ -1967,7 +1950,6 @@ functions/localFunctions/localFunctionInConstructor.kt
 functions/localFunctions/nameClashAcrossDifferentContainers.kt
 ieee754/anyCastToPrimitiveCompareTo1.kt
 ieee754/anyCastToPrimitiveCompareTo2.kt
-ieee754/anyToReal.kt
 ieee754/asComparableToDouble.kt
 ieee754/asComparableToDouble_properIeeeComparisons.kt
 ieee754/comparableToTWithT_properIeeeComparisons.kt
@@ -1985,7 +1967,6 @@ ieee754/greaterFloat_properIeeeComparisons.kt
 ieee754/inline.kt
 ieee754/lessDouble_properIeeeComparisons.kt
 ieee754/lessFloat_properIeeeComparisons.kt
-ieee754/nullableAnyToReal.kt
 ieee754/nullableDoubleEquals.kt
 ieee754/nullableDoubleEqualsLV13.kt
 ieee754/nullableDoubleNotEquals.kt
@@ -2015,7 +1996,6 @@ increment/prefixIncrementOnClassSmartCast.kt
 increment/prefixNullableClassIncrement.kt
 inference/builderInferenceLeakingVariable.kt
 inference/capturedSelfInsideIntersection.kt
-inference/capturedSelfInsideIntersection2.kt
 inference/capturedSelfInsideIntersection3.kt
 inference/capturedTypeWhenSubject.kt
 inference/capturedTypesSubstitutionIntoAbbreviation.kt
@@ -2023,14 +2003,12 @@ inference/eagerLambdaAnalysisSamAndLambda.kt
 inference/eagerLambdaAnalysisSuspendAndNotSuspend.kt
 inference/eagerLambdaAnalysisSuspendAndSam.kt
 inference/earlierReifiedFix.kt
-inference/ifWithAssignmentAndNothingBranch.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
 inference/kt35684.kt
 inference/kt36446.kt
 inference/kt38664.kt
 inference/kt39824.kt
 inference/kt49838.kt
-inference/lambdaWithStarReturn.kt
 inference/lambdasWithExtensionFunctionType.kt
 inference/lastExpressionOfLambdaWithNothingConstraint.kt
 inference/mapCollectChainWithNullResult.kt
@@ -2055,7 +2033,6 @@ inference/pcla/issues/kt54400b.kt
 inference/pcla/issues/kt54767a.kt
 inference/pcla/issues/kt54767b.kt
 inference/pcla/issues/kt60291a.kt
-inference/pcla/issues/kt63733.kt
 inference/pcla/issues/kt63840a.kt
 inference/pcla/issues/kt64066.kt
 inference/pcla/issues/kt64069.kt
@@ -2065,7 +2042,6 @@ inference/pcla/issues/kt65300j.kt
 inference/pcla/issues/kt66229.kt
 inference/pcla/issues/kt67993.kt
 inference/pcla/issues/kt74819e.kt
-inference/pcla/issues/kt76058.kt
 inference/pcla/issues/kt76171.kt
 inference/pcla/memberScope.kt
 inference/pcla/nestedNonExhaustiveIf.kt
@@ -2092,7 +2068,6 @@ inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/Suspen
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/TypeParameter.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSinks/ImmutableExtensionProperties.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSinks/MutableExtensionPropertiesMaterializeCase.kt
-inference/pcla/pcaRootIsDelegatedConstructorCall.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inference/pcla/posptonedPCLACallInsideStringInterpolation.kt
 inference/pcla/propagateInferenceSessionIntoDeclarationAnalyzers.kt
@@ -2108,9 +2083,6 @@ inference/safeCastWithElvis.kt
 inference/suspendExtensionRecevierFromConstraint.kt
 inference/tryCatchAtAssignment.kt
 inference/tryCatchAtAssignmentWithSmartCast.kt
-inference/unsafeVarianceCodegen.kt
-inference/whenAtAssignmentWithSmartCast.kt
-inference/whenAtAssignmentWithSmartCastInsideCapturedLambda.kt
 initializers/correctOrder1.kt
 initializers/correctOrder2.kt
 initializers/files/globalInitedAfterAccessingFile.kt
@@ -2210,7 +2182,6 @@ inline/kt26117.kt
 inline/kt26787.kt
 inline/kt66017.kt
 inline/kt66017_inlineFromTheSameModule.kt
-inline/kt67866.kt
 inline/kt69041.kt
 inline/lambdaAsAny.kt
 inline/lambdaInLambda.kt
@@ -3237,7 +3208,6 @@ localClass/innerTakesCapturedFromOuter.kt
 localClass/localFunctionCallFromLocalClass.kt
 localClass/localFunctionInLocalClass.kt
 localClass/noPrimaryConstructor.kt
-localClass/signatureConflictHiddenByTypeParameter.kt
 localClass/tryCatch.kt
 localClass/virtualCallFromConstructor.kt
 localClasses/closureWithSelfInstantiation.kt
@@ -3320,7 +3290,6 @@ multiplatform/k2/basic/extensionFunctionAsASupertypeConversion.kt
 multiplatform/k2/basic/extensionFunctionInDelegatedSam.kt
 multiplatform/k2/basic/interfaceMethodFromSuperTypeIsImplementedInOtherExpectSuperClass.kt
 multiplatform/k2/basic/intersectionOverrideWithDefaultParameterInCommonModule.kt
-multiplatform/k2/basic/kt-56329.kt
 multiplatform/k2/basic/localIntersectionOverrideInCommonModule.kt
 multiplatform/k2/basic/localIntersectionOverrideWithDefaultParameterInCommonModule.kt
 multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
@@ -3526,7 +3495,6 @@ primitiveTypes/booleanHashCode.kt
 primitiveTypes/conversions.kt
 primitiveTypes/equalityWithObject/boxedEqPrimitiveEvaluationOrder.kt
 primitiveTypes/equalityWithObject/intEqualsNullableIntWithSmartCasts.kt
-primitiveTypes/equalityWithObject/kt42281.kt
 primitiveTypes/equalityWithObject/objectWithAsymmetricEqualsEqPrimitive.kt
 primitiveTypes/equalityWithObject/whenIntAsNullableAny.kt
 primitiveTypes/equalityWithObject/whenNullableBoxed.kt
@@ -4525,7 +4493,6 @@ regressions/kt1779.kt
 regressions/kt1800.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
-regressions/kt2470.kt
 regressions/kt24913.kt
 regressions/kt32949.kt
 regressions/kt33638.kt
@@ -4585,7 +4552,6 @@ reified/isNumber.kt
 reified/isString.kt
 reified/isTNullable.kt
 reified/kt16445.kt
-reified/kt36237.kt
 reified/kt39256_privateInlineWithAnonymousObject.kt
 reified/lambda.kt
 reified/lambdaNameClash.kt
@@ -4662,7 +4628,6 @@ serialization/serializedVararg.kt
 size/helloWorld.kt
 size/objectsOptimization.kt
 smartCasts/genericSet.kt
-smartCasts/invokeRecieverSmartcastK2.kt
 smartCasts/kt17725.kt
 smartCasts/kt19100.kt
 smartCasts/kt44814.kt
@@ -4779,7 +4744,6 @@ toArray/kt3177-toTypedArray.kt
 toArray/returnToTypedArray.kt
 traits/diamondPropertyAccessors.kt
 traits/doubleGenericDiamond.kt
-traits/genericMethod.kt
 traits/interfaceWithNonAbstractFunIndirectGeneric.kt
 traits/kt2399.kt
 traits/kt5393_property.kt
@@ -4884,7 +4848,6 @@ unsignedTypes/forInUnsignedRangeLiteral.kt
 unsignedTypes/forInUnsignedRangeWithCoercion.kt
 unsignedTypes/forInUnsignedUntil.kt
 unsignedTypes/generic.kt
-unsignedTypes/implicitIntegerCoercionNamedArg.kt
 unsignedTypes/inUnsignedDownTo.kt
 unsignedTypes/inUnsignedRange.kt
 unsignedTypes/inUnsignedRangeLiteral.kt
@@ -5008,7 +4971,6 @@ wasm-old-exception-handling/tryCatchWithHandleResult.kt
 wasm-old-exception-handling/tryFinally.kt
 wasm-old-exception-handling/tryFinallyInsideInlineLambda.kt
 wasm-old-exception-handling/tryFinallyWithHandleResult.kt
-wasmStringSwitch/typeOperatorCast.kt
 when/enumOptimization/bigEnum.kt
 when/enumOptimization/duplicatingItems.kt
 when/enumOptimization/enumInsideClassObject.kt

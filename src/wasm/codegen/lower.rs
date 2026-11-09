@@ -1236,8 +1236,11 @@ impl<'a> Body<'a> {
                 arg,
                 type_operand,
             } => self.type_test(id, op, arg, type_operand)?,
+            // A cast to a non-null type is the cast to its nullable form, then a null check: `as
+            // String` on an `Any` reads the reference as the runtime's string and traps on `null`,
+            // as a cast to a class of the file does.
             IrExpr::TypeOp {
-                op: op @ (IrTypeOp::ImplicitCoercion | IrTypeOp::Cast),
+                op: op @ (IrTypeOp::ImplicitCoercion | IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
                 type_operand,
             } => {
@@ -1272,7 +1275,12 @@ impl<'a> Body<'a> {
                         }
                         self.numeric_narrowing(arg, type_operand)?;
                     }
-                    Some(_) => self.value(arg, type_operand)?,
+                    Some(target) => {
+                        self.value(arg, type_operand)?;
+                        if op == IrTypeOp::CastNonNull && matches!(target, ValType::Ref { .. }) {
+                            self.code.ref_as_non_null();
+                        }
+                    }
                 }
             }
             IrExpr::NotNullAssert { operand, .. } => {
