@@ -58,6 +58,11 @@ pub struct Lambda {
     /// A suspend lambda (`isSuspend`): its body's suspension points pass a fake continuation,
     /// which only a suspend method's `$$forInline` copy replaces.
     pub suspend: bool,
+    /// The body's last instruction is a `void` return the lambda adapter wrote so a branch to the
+    /// instruction after the lambda's own return stays inside the method. Only the lambda inliner
+    /// removes that instruction. An ordinary inline body, and a lambda the adapter did not close
+    /// this way, has none.
+    pub generated_return_landing: bool,
 }
 
 impl Lambda {
@@ -596,7 +601,11 @@ fn inline_lambda(
     let mut node = remap_lambda(&node, lambda, host, value_param_shift)?;
     let end = node.new_label();
     node.nodes.push(Node::Label(end));
-    returns::process_returns(&mut node, end);
+    if lambda.generated_return_landing {
+        returns::process_returns_dropping_generated_landing(&mut node, end);
+    } else {
+        returns::process_returns(&mut node, end);
+    }
     Ok(node)
 }
 

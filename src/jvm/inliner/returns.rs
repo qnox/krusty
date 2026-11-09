@@ -132,9 +132,43 @@ pub(super) fn normalize_local_returns(node: &mut MethodNode) -> Result<(), Inlin
     Ok(())
 }
 
+/// Remove the `void` return the lambda adapter appended so an after-return join stayed inside
+/// the method.
+///
+/// That return is the body's last instruction. The passes before this one copy the node without
+/// appending an instruction after it, and the inliner has just placed `end` behind it. Removing
+/// this instruction, and nothing else, leaves the join on `end`.
+fn drop_generated_return_landing(node: &mut MethodNode) {
+    let Some(landing) = node
+        .nodes
+        .iter()
+        .rposition(|entry| matches!(entry, Node::Insn(_)))
+    else {
+        return;
+    };
+    if matches!(node.nodes[landing], Node::Insn(Insn::Op(RETURN)))
+        && !is_marked_return(&node.nodes, landing)
+    {
+        node.nodes.remove(landing);
+    }
+}
+
 /// Replace every return with `nop; goto end` and place a fresh label after the jump. A marked
 /// return stays, with the fresh label after it.
 pub(super) fn process_returns(node: &mut MethodNode, end: LabelId) {
+    rewrite_returns(node, end);
+}
+
+/// [`process_returns`] for a lambda whose adapter recorded a generated return landing.
+///
+/// That one return is removed. Every other return of the lambda is rewritten like any other
+/// return.
+pub(super) fn process_returns_dropping_generated_landing(node: &mut MethodNode, end: LabelId) {
+    drop_generated_return_landing(node);
+    rewrite_returns(node, end);
+}
+
+fn rewrite_returns(node: &mut MethodNode, end: LabelId) {
     let mut at = 0;
     while at < node.nodes.len() {
         if is_marked_return(&node.nodes, at) {
@@ -158,5 +192,93 @@ pub(super) fn process_returns(node: &mut MethodNode, end: LabelId) {
         } else {
             at += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_non_local_return_marker, non_local_return_marker, process_returns,
+        process_returns_dropping_generated_landing, GOTO, RETURN,
+    };
+    use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
+
+    /// Two unmarked `void` returns with only a label and a line between them, then `end`.
+    fn two_void_returns() -> (MethodNode, LabelId, LabelId) {
+        let mut node = MethodNode::new(0, "f", "()V");
+        let between = node.new_label();
+        let end = node.new_label();
+        node.nodes = vec![
+            Node::Insn(Insn::Op(RETURN)),
+            Node::Label(between),
+            Node::Line {
+                line: 4,
+                start: between,
+            },
+            Node::Insn(Insn::Op(RETURN)),
+            Node::Label(end),
+        ];
+        (node, between, end)
+    }
+
+    fn goto_ends(node: &MethodNode, end: LabelId) -> usize {
+        node.instructions()
+            .filter(|insn| matches!(insn, Insn::Jump { op: GOTO, target } if *target == end))
+            .count()
+    }
+
+    #[test]
+    fn an_ordinary_inline_body_rewrites_both_unmarked_void_returns() {
+        let (mut node, between, end) = two_void_returns();
+        process_returns(&mut node, end);
+        assert_eq!(
+            node.instructions()
+                .filter(|insn| matches!(insn, Insn::Op(RETURN)))
+                .count(),
+            0
+        );
+        assert_eq!(goto_ends(&node, end), 2);
+        assert!(node.nodes.contains(&Node::Label(between)));
+    }
+
+    #[test]
+    fn a_generated_landing_is_removed_and_the_lambda_return_is_rewritten() {
+        let (mut node, between, end) = two_void_returns();
+        process_returns_dropping_generated_landing(&mut node, end);
+        assert_eq!(
+            node.instructions()
+                .filter(|insn| matches!(insn, Insn::Op(RETURN)))
+                .count(),
+            0
+        );
+        assert_eq!(goto_ends(&node, end), 1);
+        assert!(node.nodes.contains(&Node::Label(between)));
+    }
+
+    #[test]
+    fn a_marked_return_is_not_taken_for_the_generated_landing() {
+        let (mut node, _, end) = two_void_returns();
+        let landing = node
+            .nodes
+            .iter()
+            .rposition(|entry| matches!(entry, Node::Insn(_)))
+            .expect("the body has a return");
+        node.nodes
+            .insert(landing, non_local_return_marker(String::new()));
+        process_returns_dropping_generated_landing(&mut node, end);
+        assert_eq!(
+            node.nodes
+                .iter()
+                .filter(|entry| is_non_local_return_marker(entry))
+                .count(),
+            1
+        );
+        assert_eq!(
+            node.instructions()
+                .filter(|insn| matches!(insn, Insn::Op(RETURN)))
+                .count(),
+            1
+        );
+        assert_eq!(goto_ends(&node, end), 1);
     }
 }

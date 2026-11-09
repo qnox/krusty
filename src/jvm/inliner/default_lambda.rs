@@ -138,6 +138,7 @@ pub fn load(
         capture_names: captured.into_iter().map(|field| Some(field.name)).collect(),
         default_class: Some(class.name.clone()),
         suspend: false,
+        generated_return_landing: false,
         node,
     })
 }

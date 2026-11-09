@@ -4675,8 +4675,8 @@ struct Emitter<'a> {
     /// The suspensions of the function being emitted, by call expression, each with the value
     /// class box its resumption unboxes. Empty for every function whose machine the IR pass owns.
     machine_suspensions: HashMap<u32, Option<(TypeName, Ty)>>,
-    /// The deferred result value of each inline-return frame, by the frame's label.
-    inline_return_frame_results: HashMap<String, (u32, Ty)>,
+    /// Results and deferred loop exits of inline-return frames in the method being emitted.
+    inline_returns: inline_return_frames::InlineReturnState,
     /// Inline-return results whose expansion is discarded. A break to that frame leaves the
     /// value in its slot: the landing label does not read it, so it must not travel on the stack.
     discarded_inline_results: HashSet<u32>,
@@ -4863,7 +4863,7 @@ impl<'a> Emitter<'a> {
             frame: frame_map::FrameMap::default(),
             continuation_slot: None,
             machine_suspensions: HashMap::default(),
-            inline_return_frame_results: HashMap::default(),
+            inline_returns: inline_return_frames::InlineReturnState::default(),
             discarded_inline_results: HashSet::default(),
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::default(),
