@@ -21,7 +21,6 @@ use krusty::fx_hash::{HashMap, HashSet};
 mod absent_arguments;
 pub(super) mod any_members;
 mod arrays;
-pub(super) mod box_members;
 mod boxing;
 mod callable_reference_identity;
 mod dependency_exports;
@@ -30,6 +29,7 @@ mod exceptions;
 mod function_values;
 mod generated_members;
 mod intrinsic_operations;
+pub(super) mod library_members;
 mod objects;
 mod scalar_instructions;
 mod scalar_value_classes;
@@ -903,7 +903,7 @@ impl<'a> Body<'a> {
     /// Emit `id`, leaving its value on the stack when it has one.
     fn expression(&mut self, id: u32) -> Result<(), Unsupported> {
         let node = self.ir.expr(id).clone();
-        if let Some(result) = self.box_member_expression(id, &node) {
+        if let Some(result) = self.library_member_expression(id, &node) {
             return result;
         }
         if let Some(result) = self.emitted_dependency_expression(id, &node) {
@@ -1543,10 +1543,11 @@ impl<'a> Body<'a> {
                 impl_fn,
                 &captures,
                 function_values::FunctionEquality::Identity,
+                self.type_of(id)?,
                 sam.as_deref(),
             )?,
             IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
-                self.callable_reference(&reference)?
+                self.callable_reference(id, &reference)?
             }
             IrExpr::InvokeFunction {
                 func,

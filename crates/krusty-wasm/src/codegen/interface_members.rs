@@ -33,6 +33,9 @@ use super::super::interface_dispatch::{ClassRef, MemberRef};
 use super::super::objects::{ObjectRoot, REFERENCE};
 use super::callable_registry::CallableRegistry;
 use super::classes::{accessor_function, field_carrier, Accessor, FileClasses};
+use super::lower::library_members::{
+    library_member_identity, library_member_owner, library_member_signature, MemberRole,
+};
 use super::lower::{carrier, Unsupported};
 
 /// A function's wasm parameters (the receiver first) and results.
@@ -76,6 +79,14 @@ pub(super) struct Destination<'a> {
 
 /// A function and the signature it is carried as.
 type Placed = (u32, Signature);
+
+/// A member of a dependency's interface a class implements.
+#[derive(Clone, Copy)]
+struct DependencyMember {
+    member: MemberRef,
+    /// Whether it is a library classifier's member rather than a source module's.
+    library: bool,
+}
 
 /// Publish the identities of the file's interface members and record what its classes implement.
 pub(super) fn record(
@@ -412,48 +423,11 @@ impl FileRecorder<'_, '_, '_> {
                 if !edge.overridden_is_interface {
                     continue;
                 }
-                let Some(member) =
-                    self.dependency_member(target, |identity| Some(member_identity(identity)))
-                else {
+                let Some(member) = self.dependency_member(target, MemberRole::Function) else {
                     continue;
                 };
-                let implementation = match edge.implementation {
-                    ResolvedFunctionOverrideTarget::Module(callable) => Some(callable),
-                    ResolvedFunctionOverrideTarget::External(_) => None,
-                };
-                let interface_number = implementation
-                    .filter(|_| edge.implementation_function.is_none())
-                    .and_then(|callable| {
-                        self.recording.numbers.number(PlanKey::Callable(callable))
-                    });
-                let placed = match interface_number {
-                    Some(number) => numbered.get(&number).cloned().ok_or_else(|| {
-                        self.declined("an interface default implementing a dependency's member")
-                    })?,
-                    None => {
-                        let function = edge
-                            .implementation_function
-                            .or_else(|| {
-                                implementation.and_then(|callable| {
-                                    ir.checked_callable_functions.get(&callable).copied()
-                                })
-                            })
-                            .ok_or_else(|| {
-                                self.declined("a dependency's interface member with no body here")
-                            })?;
-                        let key = function_key(ir, owner, function);
-                        let slot = self.classes.tables.slot(owner, &key).ok_or_else(|| {
-                            self.declined("a dependency's interface member with no slot")
-                        })?;
-                        self.slot_function(slot)?
-                    }
-                };
-                let placed = self.thunk(
-                    (&edge.declared_parameters, edge.declared_result),
-                    (&edge.implementation_parameters, edge.implementation_result),
-                    placed,
-                )?;
-                self.implement(member, placed)?;
+                let placed = self.function_edge_implementation(owner, edge, numbered);
+                self.settle(member, placed)?;
             }
             self.dependency_property_implementations(owner, numbered)?;
             for default in ir.inherited_defaults.get(&name).into_iter().flatten() {
@@ -461,22 +435,19 @@ impl FileRecorder<'_, '_, '_> {
                 else {
                     continue;
                 };
-                let setter = match default.name {
-                    InheritedMemberName::Function(_) => None,
-                    InheritedMemberName::PropertyGetter(_) => Some(false),
-                    InheritedMemberName::PropertySetter(_) => Some(true),
+                let role = match default.name {
+                    InheritedMemberName::Function(_) => MemberRole::Function,
+                    InheritedMemberName::PropertyGetter(_) => MemberRole::Getter,
+                    InheritedMemberName::PropertySetter(_) => MemberRole::Setter,
                 };
-                let Some(member) = self.dependency_member(declaration, |identity| match setter {
-                    None => Some(member_identity(identity)),
-                    Some(setter) => property_member_identity(identity, setter),
-                }) else {
+                let Some(member) = self.dependency_member(declaration, role) else {
                     continue;
                 };
                 if self
                     .program
                     .objects
                     .interfaces
-                    .implements(self.record, member)
+                    .implements(self.record, member.member)
                 {
                     continue;
                 }
@@ -488,15 +459,67 @@ impl FileRecorder<'_, '_, '_> {
                     .and_then(|identity| self.program.callables.dependency(identity))
                     .ok_or_else(|| {
                         self.declined("a default a dependency's interface declares with no body")
-                    })?;
-                self.program
-                    .objects
-                    .interfaces
-                    .implement(self.record, member, function)?;
+                    });
+                let record = self.record;
+                let implemented = function.and_then(|function| {
+                    self.program
+                        .objects
+                        .interfaces
+                        .implement(record, member.member, function)
+                });
+                self.settle(member, implemented.map(|()| None))?;
             }
             current = self.classes.tables.table(owner).superclass;
         }
         Ok(())
+    }
+
+    /// The function `owner` implements the dependency member `edge` overrides with: its own or
+    /// inherited override, read off its own table so the most derived one stands, or a default of
+    /// this module's interface, at that interface member's number (`numbered`).
+    fn function_edge_implementation(
+        &mut self,
+        owner: ClassId,
+        edge: &krusty::ir::IrFunctionOverride,
+        numbered: &HashMap<u32, Placed>,
+    ) -> Result<Option<Placed>, Unsupported> {
+        let ir = self.recording.ir;
+        let implementation = match edge.implementation {
+            ResolvedFunctionOverrideTarget::Module(callable) => Some(callable),
+            ResolvedFunctionOverrideTarget::External(_) => None,
+        };
+        let interface_number = implementation
+            .filter(|_| edge.implementation_function.is_none())
+            .and_then(|callable| self.recording.numbers.number(PlanKey::Callable(callable)));
+        let placed = match interface_number {
+            Some(number) => numbered.get(&number).cloned().ok_or_else(|| {
+                self.declined("an interface default implementing a dependency's member")
+            })?,
+            None => {
+                let function = edge
+                    .implementation_function
+                    .or_else(|| {
+                        implementation.and_then(|callable| {
+                            ir.checked_callable_functions.get(&callable).copied()
+                        })
+                    })
+                    .ok_or_else(|| {
+                        self.declined("a dependency's interface member with no body here")
+                    })?;
+                let key = function_key(ir, owner, function);
+                let slot =
+                    self.classes.tables.slot(owner, &key).ok_or_else(|| {
+                        self.declined("a dependency's interface member with no slot")
+                    })?;
+                self.slot_function(slot)?
+            }
+        };
+        self.thunk(
+            (&edge.declared_parameters, edge.declared_result),
+            (&edge.implementation_parameters, edge.implementation_result),
+            placed,
+        )
+        .map(Some)
     }
 
     /// The getter and setter `owner` implements each property of a dependency's interface with.
@@ -518,67 +541,116 @@ impl FileRecorder<'_, '_, '_> {
                 .into_iter()
                 .filter(|setter| !setter || edge.overridden_setter_value.is_some());
             for setter in roles {
-                let Some(member) = self.dependency_member(target, |identity| {
-                    property_member_identity(identity, setter)
-                }) else {
+                let role = if setter {
+                    MemberRole::Setter
+                } else {
+                    MemberRole::Getter
+                };
+                let Some(member) = self.dependency_member(target, role) else {
                     continue;
                 };
-                let interface_number = match edge.implementation {
-                    ResolvedPropertyOverrideTarget::Module(property) => {
-                        self.recording.numbers.number(if setter {
-                            PlanKey::Setter(property)
-                        } else {
-                            PlanKey::Getter(property)
-                        })
-                    }
-                    ResolvedPropertyOverrideTarget::External(_) => None,
-                };
-                let placed = match interface_number {
-                    Some(number) => numbered.get(&number).cloned(),
-                    None => {
-                        let key = if setter {
-                            SlotKey::Setter(edge.overridden)
-                        } else {
-                            SlotKey::Getter(edge.overridden)
-                        };
-                        match self.classes.tables.slot(owner, &key) {
-                            Some(slot) => Some(self.slot_function(slot)?),
-                            None => None,
-                        }
-                    }
-                }
-                .ok_or_else(|| self.declined("a dependency's interface property with no slot"))?;
-                let (declared_params, declared_result) = accessor_types(edge.declared_type, setter);
-                let (implemented_params, implemented_result) =
-                    accessor_types(edge.implementation_type, setter);
-                let placed = self.thunk(
-                    (&declared_params, declared_result),
-                    (&implemented_params, implemented_result),
-                    placed,
-                )?;
-                self.implement(member, placed)?;
+                let placed = self.property_edge_implementation(owner, edge, setter, numbered);
+                self.settle(member, placed)?;
             }
         }
         Ok(())
     }
 
-    /// The member of a source module's interface the dependency declaration `target` is, by the
-    /// identity `identity` computes from its published one; `None` for a library's member.
+    /// The getter, or with `setter` the setter, `owner` implements the dependency property `edge`
+    /// overrides with.
+    fn property_edge_implementation(
+        &mut self,
+        owner: ClassId,
+        edge: &krusty::ir::IrPropertyOverride,
+        setter: bool,
+        numbered: &HashMap<u32, Placed>,
+    ) -> Result<Option<Placed>, Unsupported> {
+        let interface_number = match edge.implementation {
+            ResolvedPropertyOverrideTarget::Module(property) => {
+                self.recording.numbers.number(if setter {
+                    PlanKey::Setter(property)
+                } else {
+                    PlanKey::Getter(property)
+                })
+            }
+            ResolvedPropertyOverrideTarget::External(_) => None,
+        };
+        let placed = match interface_number {
+            Some(number) => numbered.get(&number).cloned(),
+            None => {
+                let key = if setter {
+                    SlotKey::Setter(edge.overridden)
+                } else {
+                    SlotKey::Getter(edge.overridden)
+                };
+                match self.classes.tables.slot(owner, &key) {
+                    Some(slot) => Some(self.slot_function(slot)?),
+                    None => None,
+                }
+            }
+        }
+        .ok_or_else(|| self.declined("a dependency's interface property with no slot"))?;
+        let (declared_params, declared_result) = accessor_types(edge.declared_type, setter);
+        let (implemented_params, implemented_result) =
+            accessor_types(edge.implementation_type, setter);
+        self.thunk(
+            (&declared_params, declared_result),
+            (&implemented_params, implemented_result),
+            placed,
+        )
+        .map(Some)
+    }
+
+    /// The member the dependency declaration `target` is in `role`: a member of a source module's
+    /// interface, by the identity its module published, or else a library classifier's member,
+    /// which a call through it may name too. `None` for a declaration no member stands for.
     fn dependency_member(
-        &self,
+        &mut self,
         target: krusty::fir::ExternalCallableId,
-        identity: impl FnOnce(&krusty::backend::KlibDependencyCallable) -> Option<Vec<u8>>,
-    ) -> Option<MemberRef> {
-        let published = self
-            .recording
-            .callables
-            .callable(target)?
-            .dependency_callable
-            .as_ref()?;
-        self.program
-            .objects
-            .interfaces
-            .identified(&identity(published)?)
+        role: MemberRole,
+    ) -> Option<DependencyMember> {
+        let fact = self.recording.callables.callable(target)?;
+        let identity = library_member_identity(fact, role)?;
+        let interfaces = &mut self.program.objects.interfaces;
+        if let Some(member) = interfaces.identified(&identity) {
+            return Some(DependencyMember {
+                member,
+                library: false,
+            });
+        }
+        let signature = library_member_signature(fact, role).ok()?;
+        let owner = library_member_owner(fact)?;
+        let member = interfaces
+            .library(self.program.module, owner, &identity, signature)
+            .ok()?;
+        Some(DependencyMember {
+            member,
+            library: true,
+        })
+    }
+
+    /// Record what `placed` found the class implements `member` with, unless a more derived class
+    /// of the chain already did. A library member's implementation this generator cannot write
+    /// declines only a call through the member, so it is recorded on the member instead.
+    fn settle(
+        &mut self,
+        member: DependencyMember,
+        placed: Result<Option<Placed>, Unsupported>,
+    ) -> Result<(), Unsupported> {
+        let implemented = placed.and_then(|placed| match placed {
+            Some(placed) => self.implement(member.member, placed),
+            None => Ok(()),
+        });
+        match implemented {
+            Err(reason) if member.library => {
+                self.program
+                    .objects
+                    .interfaces
+                    .unimplementable(member.member, reason);
+                Ok(())
+            }
+            implemented => implemented,
+        }
     }
 
     /// Record `placed` for `member` unless a more derived class of the chain already did.

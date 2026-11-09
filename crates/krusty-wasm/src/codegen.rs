@@ -260,6 +260,18 @@ impl Backend for WasmBackend {
     }
 
     fn check_module(&self, state: &Self::State, diags: &mut DiagSink) {
+        if let Some(construct) = state
+            .started
+            .as_ref()
+            .filter(|_| !state.declined)
+            .and_then(|started| started.runtime.objects.interfaces.declined())
+        {
+            diags.error(
+                krusty::diag::Span::new(0, 0),
+                format!("{DECLINE_PREFIX}{construct} yet"),
+            );
+            return;
+        }
         if state.started.is_some() && !state.declined && state.entry.is_none() {
             diags.error(
                 krusty::diag::Span::new(0, 0),
