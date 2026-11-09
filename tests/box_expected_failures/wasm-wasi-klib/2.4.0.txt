@@ -633,7 +633,6 @@ compileKotlinAgainstKotlin/inlineClasses/privateConstructorWithPrivateField.kt
 compileKotlinAgainstKotlin/inlineClasses/privateConstructorWithPrivateFieldUsingTypeTable.kt
 compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 compileKotlinAgainstKotlin/inlineClasses/suspendFunWithDefaultMangling.kt
-compileKotlinAgainstKotlin/innerClassConstructor.kt
 compileKotlinAgainstKotlin/interfaceDelegationAndBridgesProcessing.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superCall.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superCallFromInterface.kt
@@ -665,7 +664,6 @@ compileKotlinAgainstKotlin/sealedClass.kt
 compileKotlinAgainstKotlin/secondaryConstructors.kt
 compileKotlinAgainstKotlin/simpleValAnonymousObject.kt
 compileKotlinAgainstKotlin/specialBridgesInDependencies.kt
-compileKotlinAgainstKotlin/typeAliasesKt13181.kt
 compileKotlinAgainstKotlin/unsignedTypesInAnnotations.kt
 compileKotlinAgainstKotlin/useDeserializedFunInterface.kt
 constants/comparisonFalse.kt
@@ -2944,7 +2942,6 @@ ir/enumClass3.kt
 ir/fileClassInitializers.kt
 ir/kt41765.kt
 ir/kt52677.kt
-ir/kt55318.kt
 ir/lambdaWithLoop.kt
 ir/primitiveNumberComparisons/comparableToDouble.kt
 ir/primitiveNumberComparisons/doubleEqeq.kt
@@ -4585,7 +4582,6 @@ typeMapping/kt3863.kt
 typeMapping/kt3976.kt
 typeMapping/nullableNothing.kt
 typealias/abbreviationWithCapturedType.kt
-typealias/deserializedAbbreviationWithRedundantArgument.kt
 typealias/localTypeAliases.kt
 typealias/nestedTypeAliasesAndStaticScope.kt
 typealias/nestedTypeAliasesAndTypeArguments.kt
