@@ -4,7 +4,9 @@
 //! object crosses a catch boundary. The base carrier extends the ordinary object prefix so later
 //! hierarchy support can extend its layout without changing exception transport.
 
-use super::encode::{Code, CompositeType, HeapType, Module, SubType, ValType};
+use super::encode::{
+    Code, CompositeType, FieldType, HeapType, Module, StorageType, SubType, ValType,
+};
 use super::objects::{immutable, ObjectRoot, REFERENCE};
 
 mod class_registry;
@@ -20,11 +22,11 @@ impl ExceptionTransport {
     pub(super) fn declare(module: &mut Module, objects: &mut ObjectRoot, string: ValType) -> Self {
         let tag = module.exception_tag(vec![REFERENCE]);
         let structure = module.subtype(SubType {
-            composite: CompositeType::Struct(vec![
-                immutable(ValType::reference(objects.any_table)),
-                immutable(string),
-                immutable(REFERENCE),
-            ]),
+            composite: CompositeType::Struct(
+                std::iter::once(immutable(ValType::reference(objects.any_table)))
+                    .chain(Self::base_fields(string))
+                    .collect(),
+            ),
             supertype: Some(objects.object),
             open: true,
         });
@@ -48,6 +50,28 @@ impl ExceptionTransport {
             table,
             classes: class_registry::RuntimeClasses::new(structure, objects.any_table, string),
         }
+    }
+
+    /// The message and cause every exception struct carries after its dispatch table. A
+    /// constructor of a class extending a runtime exception writes them once its object exists,
+    /// so they are mutable.
+    pub(super) fn base_fields(string: ValType) -> [FieldType; 2] {
+        [string, REFERENCE].map(|value| FieldType {
+            storage: StorageType::Val(value),
+            mutable: true,
+        })
+    }
+
+    /// Store the `message` and `cause` locals into the exception fields of the `object` local.
+    pub(super) fn store_base(&self, code: &mut Code, object: u32, message: u32, cause: u32) {
+        code.local_get(object)
+            .ref_cast(false, HeapType::Concrete(self.structure))
+            .local_get(message)
+            .struct_set(self.structure, MESSAGE_FIELD)
+            .local_get(object)
+            .ref_cast(false, HeapType::Concrete(self.structure))
+            .local_get(cause)
+            .struct_set(self.structure, CAUSE_FIELD);
     }
 
     pub(super) fn ensure_class(
@@ -78,6 +102,10 @@ impl ExceptionTransport {
 
     pub(super) fn message(&self, code: &mut Code) {
         code.ref_cast(false, HeapType::Concrete(self.structure))
-            .struct_get(self.structure, 1);
+            .struct_get(self.structure, MESSAGE_FIELD);
     }
 }
+
+/// The exception struct fields holding the message and the cause.
+const MESSAGE_FIELD: u32 = 1;
+const CAUSE_FIELD: u32 = 2;

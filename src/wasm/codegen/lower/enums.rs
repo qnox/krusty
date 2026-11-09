@@ -36,7 +36,10 @@ impl Body<'_> {
     /// this allocation builds one, otherwise their defaults, which the constant's allocation
     /// replaces.
     pub(super) fn enum_base_fields(&mut self, class: ClassId) -> Result<(), Unsupported> {
-        if self.classes.map_or(0, |classes| classes.base_fields(class)) == 0 {
+        if !self
+            .classes
+            .is_some_and(|classes| classes.is_enum_rooted(class))
+        {
             return Ok(());
         }
         match self.enum_base.take() {

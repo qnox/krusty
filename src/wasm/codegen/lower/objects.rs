@@ -38,7 +38,7 @@ mod override_bridges;
 mod tests;
 
 impl Body<'_> {
-    fn file_classes(&self) -> Result<&FileClasses, Unsupported> {
+    pub(super) fn file_classes(&self) -> Result<&FileClasses, Unsupported> {
         self.classes
             .ok_or_else(|| "an object of a class declared in another file".to_string())
     }
@@ -164,8 +164,16 @@ impl Body<'_> {
         {
             chain.push(parent);
         }
+        let exception_rooted = classes.exception_base(class).is_some();
         self.code.global_get(table);
         self.enum_base_fields(class)?;
+        if exception_rooted {
+            // A runtime exception's message and cause, which its constructor's delegation to
+            // the runtime class writes.
+            self.code
+                .ref_null(HeapType::Concrete(self.runtime.string))
+                .ref_null(HeapType::Eq);
+        }
         for &owner in chain.iter().rev() {
             for field in &self.ir.classes[owner as usize].fields {
                 let value = carrier(field.ty)?.ok_or("a `Unit`-typed field")?;
@@ -1604,6 +1612,13 @@ impl Body<'_> {
                     self.constructor_of(parent, declaration.super_ctor.ordinal)?;
                 self.delegate(constructor, &params, 0, &declaration.super_args)?;
             }
+            None if self.file_classes()?.exception_base(class).is_some() => {
+                self.exception_delegation(
+                    &name,
+                    &declaration.super_ctor_params,
+                    &declaration.super_args,
+                )?;
+            }
             None if !declaration.super_args.is_empty() => {
                 return Err(format!("a superclass constructor call (`{name}`)"));
             }
@@ -1642,6 +1657,52 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// A delegation to a runtime exception class's constructor, which this module has no body
+    /// for: the message and cause it stores are written into the object's exception fields, in
+    /// the place and order the call would run. `params` are the selected constructor's own
+    /// parameters. A message alone or a message with a cause is stored as given; Throwable renders
+    /// a message from a lone cause itself, which is the runtime's and declines here.
+    fn exception_delegation(
+        &mut self,
+        name: &str,
+        params: &[Ty],
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let message_type = Ty::nullable(Ty::String);
+        let cause_type = Ty::nullable(Ty::obj("kotlin/Throwable"));
+        let (message, cause) = match (params, args) {
+            ([], []) => return Ok(()),
+            ([message], [operand]) if *message == message_type => (*operand, None),
+            ([message, cause], [operand, reason])
+                if *message == message_type && *cause == cause_type =>
+            {
+                (*operand, Some(*reason))
+            }
+            _ => {
+                return Err(format!(
+                    "a runtime exception constructor that renders its message (`{name}`)"
+                ))
+            }
+        };
+        let message_local = self.local(STRING);
+        self.value(message, message_type)?;
+        self.code.local_set(message_local);
+        let cause_local = self.local(REFERENCE);
+        match cause {
+            Some(cause) => {
+                self.value(cause, cause_type)?;
+            }
+            None => {
+                self.code.ref_null(HeapType::Eq);
+            }
+        }
+        self.code.local_set(cause_local);
+        self.runtime
+            .exceptions
+            .store_base(&mut self.code, 0, message_local, cause_local);
+        Ok(())
+    }
+
     fn secondary_constructor(&mut self, class: ClassId, ordinal: usize) -> Result<(), Unsupported> {
         let declaration = &self.ir.classes[class as usize];
         let name = declaration.fq_name();
@@ -1661,18 +1722,23 @@ impl Body<'_> {
                 let forwarded = secondary.prefix_params.len();
                 self.delegate(constructor, &params, forwarded, &secondary.delegate_args)?;
             }
-            CtorDelegateTarget::Super { target, .. } => {
-                match self.file_classes()?.tables.table(class).superclass {
-                    Some(parent) => {
-                        let (constructor, params) = self.constructor_of(parent, target.ordinal)?;
-                        self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
-                    }
-                    None if !secondary.delegate_args.is_empty() => {
-                        return Err(format!("a superclass constructor call (`{name}`)"));
-                    }
-                    None => {}
+            CtorDelegateTarget::Super {
+                target,
+                target_params,
+                ..
+            } => match self.file_classes()?.tables.table(class).superclass {
+                Some(parent) => {
+                    let (constructor, params) = self.constructor_of(parent, target.ordinal)?;
+                    self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
                 }
-            }
+                None if self.file_classes()?.exception_base(class).is_some() => {
+                    self.exception_delegation(&name, target_params, &secondary.delegate_args)?;
+                }
+                None if !secondary.delegate_args.is_empty() => {
+                    return Err(format!("a superclass constructor call (`{name}`)"));
+                }
+                None => {}
+            },
             CtorDelegateTarget::ImplicitEnumBase => {
                 return Err(format!("an enum constructor (`{name}`)"));
             }

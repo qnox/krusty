@@ -34,6 +34,7 @@ use crate::backend::class_tables::{
     self, AnyMember, NumberedClassTables, Representation, Slot, SlotKey, ANY_SLOTS,
 };
 use crate::backend::local_properties::RealizedLocalPropertyAccess;
+use crate::backend::BackendClassifierSource;
 use crate::fir::{PropertyId, ResolvedPropertyOverrideTarget};
 use crate::ir::{ClassId, FunId, IrClass, IrExpr, IrFile, IrLocalPropertyLayout};
 use crate::types::{Ty, TypeName};
@@ -41,8 +42,10 @@ use crate::types::{Ty, TypeName};
 use super::super::encode::{
     Code, CompositeType, FieldType, HeapType, Module, StorageType, SubType, ValType,
 };
+use super::super::exception_transport::ExceptionTransport;
 use super::super::interface_dispatch::ClassRef;
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
+use super::super::runtime::Runtime;
 use super::lower::{carrier, parameter_carrier, Unsupported, STRING};
 
 mod companion_construction;
@@ -54,9 +57,11 @@ mod annotation_class_tests;
 mod constructor_prefix_tests;
 
 /// How the WasmGC form carries values, as the shared tables ask it.
-struct WasmRepresentation;
+struct WasmRepresentation<'a> {
+    classifiers: &'a dyn BackendClassifierSource,
+}
 
-impl Representation for WasmRepresentation {
+impl Representation for WasmRepresentation<'_> {
     fn same(&self, a: Ty, b: Ty) -> bool {
         a == b
             || match (carrier(a), carrier(b)) {
@@ -70,10 +75,34 @@ impl Representation for WasmRepresentation {
     }
 
     /// `kotlin.Enum` is a base no file declares: its `name` and `ordinal` are the `$Enum` struct's
-    /// ([`ObjectRoot::enum_base`]).
+    /// ([`ObjectRoot::enum_base`]). So is a runtime exception class: its message and cause are its
+    /// runtime struct's ([`super::super::exception_transport`]).
     fn owns_base(&self, superclass: TypeName) -> bool {
         superclass == crate::types::wk::kotlin_enum()
+            || is_runtime_exception(self.classifiers, superclass)
     }
+}
+
+/// Whether `classifier` is a runtime exception class: one whose authenticated declaration gives it
+/// the runtime's Throwable storage.
+pub(super) fn is_runtime_exception(
+    classifiers: &dyn BackendClassifierSource,
+    classifier: TypeName,
+) -> bool {
+    classifiers
+        .classifier(classifier)
+        .is_some_and(|fact| fact.runtime_exception.is_some())
+}
+
+/// The base no file declares that a class's struct extends, through its superclasses of this file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnedBase {
+    /// `kotlin.Any`: only the dispatch table.
+    None,
+    /// `kotlin.Enum`: `$Enum`'s `name` and `ordinal`.
+    Enum,
+    /// A runtime exception class, by its runtime struct: its message and cause.
+    Exception(u32),
 }
 
 /// A synthesized property accessor a table slot holds: the field it reads or writes.
@@ -139,9 +168,9 @@ pub(super) struct FileClasses {
     pub(super) bridges: Vec<(OverrideBridge, u32, u32)>,
     /// The checked property each realized member read or write (by expression) selected.
     properties: HashMap<u32, PropertyId>,
-    /// Whether each class extends `kotlin.Enum`, itself or through a superclass of this file, so
-    /// its struct leads with `$Enum`'s two fields.
-    enum_rooted: Vec<bool>,
+    /// The base no file declares that each class extends, itself or through a superclass of this
+    /// file, whose fields lead its struct after the dispatch table.
+    bases: Vec<OwnedBase>,
 }
 
 impl FileClasses {
@@ -159,12 +188,26 @@ impl FileClasses {
     }
 
     /// How many fields of `class`'s struct, after the dispatch table, a base no file declares
-    /// contributes: `kotlin.Enum`'s `name` and `ordinal`.
+    /// contributes: `kotlin.Enum`'s `name` and `ordinal`, or a runtime exception's message and
+    /// cause.
     pub(super) fn base_fields(&self, class: ClassId) -> u32 {
-        if self.enum_rooted[class as usize] {
-            ENUM_BASE_FIELDS
-        } else {
-            0
+        match self.bases[class as usize] {
+            OwnedBase::None => 0,
+            OwnedBase::Enum => ENUM_BASE_FIELDS,
+            OwnedBase::Exception(_) => EXCEPTION_BASE_FIELDS,
+        }
+    }
+
+    /// Whether `class`'s struct extends `kotlin.Enum`'s.
+    pub(super) fn is_enum_rooted(&self, class: ClassId) -> bool {
+        self.bases[class as usize] == OwnedBase::Enum
+    }
+
+    /// The runtime exception struct `class`'s struct extends, if it extends one.
+    pub(super) fn exception_base(&self, class: ClassId) -> Option<u32> {
+        match self.bases[class as usize] {
+            OwnedBase::Exception(structure) => Some(structure),
+            OwnedBase::None | OwnedBase::Enum => None,
         }
     }
 
@@ -183,6 +226,9 @@ impl FileClasses {
 
 /// `kotlin.Enum`'s `name` and `ordinal`: fields 1 and 2 of `$Enum`.
 pub(super) const ENUM_BASE_FIELDS: u32 = 2;
+
+/// A runtime exception's message and cause: fields 1 and 2 of its runtime struct.
+const EXCEPTION_BASE_FIELDS: u32 = 2;
 
 /// The wasm signature of a method of the file: the receiver, then its parameters.
 pub(super) fn method_type(
@@ -204,8 +250,11 @@ pub(super) fn method_type(
 
 /// The module-wide numbering of the interface members of `classes`, as every file of the module
 /// reads it.
-pub(super) fn module_plan(classes: &ModuleClasses) -> ModuleSlotPlan {
-    ModuleSlotPlan::interfaces_only(classes, &WasmRepresentation)
+pub(super) fn module_plan(
+    classes: &ModuleClasses,
+    classifiers: &dyn BackendClassifierSource,
+) -> ModuleSlotPlan {
+    ModuleSlotPlan::interfaces_only(classes, &WasmRepresentation { classifiers })
 }
 
 /// Reject, by name, a class this form does not lay out.
@@ -247,6 +296,31 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     Err(format!("{construct} (`{name}`)"))
 }
 
+/// Reject a class overriding a runtime exception's property. Its message and cause are fields the
+/// runtime reads directly, so an override has no slot that reading would reach.
+fn check_exception_storage(
+    ir: &IrFile,
+    classifiers: &dyn BackendClassifierSource,
+    id: ClassId,
+) -> Result<(), Unsupported> {
+    let class = &ir.classes[id as usize];
+    let overrides = ir
+        .property_overrides
+        .get(&class.fq_name)
+        .is_some_and(|edges| {
+            edges
+                .iter()
+                .any(|edge| is_runtime_exception(classifiers, edge.overridden_owner))
+        });
+    if overrides {
+        return Err(format!(
+            "an override of a runtime exception's property (`{}`)",
+            class.fq_name()
+        ));
+    }
+    Ok(())
+}
+
 /// Whether a body `ir` emits constructs the class named `name`. Orphan expressions and
 /// cloning-only inline templates are not emitted, so a construction there is no obligation.
 fn constructs(ir: &IrFile, name: TypeName) -> bool {
@@ -263,26 +337,39 @@ fn constructs(ir: &IrFile, name: TypeName) -> bool {
 pub(super) fn declare(
     ir: &IrFile,
     module: &mut Module,
-    objects: &mut ObjectRoot,
+    runtime: &mut Runtime,
+    classifiers: &dyn BackendClassifierSource,
     functions: &[Option<u32>],
     properties: &RealizedProperties,
     plan: &ModuleSlotPlan,
 ) -> Result<FileClasses, Unsupported> {
     for class in 0..ir.classes.len() {
         check_supported(ir, class as ClassId)?;
+        check_exception_storage(ir, classifiers, class as ClassId)?;
     }
-    let tables = class_tables::build_numbered(&WasmRepresentation, ir, plan)?;
-    let slot_types = slot_types(ir, module, objects, &tables)?;
+    let tables = class_tables::build_numbered(&WasmRepresentation { classifiers }, ir, plan)?;
+    let slot_types = slot_types(ir, module, &runtime.objects, &tables)?;
 
-    let enum_rooted: Vec<bool> = (0..ir.classes.len())
-        .map(|class| {
-            let mut root = class as ClassId;
-            while let Some(parent) = tables.table(root).superclass {
-                root = parent;
-            }
-            ir.classes[root as usize].superclass == crate::types::wk::kotlin_enum()
-        })
-        .collect();
+    let mut bases = Vec::with_capacity(ir.classes.len());
+    for class in 0..ir.classes.len() {
+        let mut root = class as ClassId;
+        while let Some(parent) = tables.table(root).superclass {
+            root = parent;
+        }
+        let superclass = ir.classes[root as usize].superclass;
+        bases.push(if superclass == crate::types::wk::kotlin_enum() {
+            OwnedBase::Enum
+        } else if is_runtime_exception(classifiers, superclass) {
+            OwnedBase::Exception(runtime.exceptions.ensure_class(
+                module,
+                classifiers,
+                superclass,
+            )?)
+        } else {
+            OwnedBase::None
+        });
+    }
+    let objects = &mut runtime.objects;
     let mut forms: Vec<ClassForm> = ir.classes.iter().map(|_| ClassForm::default()).collect();
     for &id in &tables.order {
         let class = &ir.classes[id as usize];
@@ -292,17 +379,19 @@ pub(super) fn declare(
         let table = tables.table(id);
         let parent = table.superclass.map(|parent| &forms[parent as usize]);
         let mut fields = vec![immutable(ValType::reference(objects.any_table))];
-        if enum_rooted[id as usize] {
-            fields.extend([immutable(STRING), immutable(ValType::I32)]);
+        match bases[id as usize] {
+            OwnedBase::None => {}
+            OwnedBase::Enum => fields.extend([immutable(STRING), immutable(ValType::I32)]),
+            OwnedBase::Exception(_) => fields.extend(ExceptionTransport::base_fields(STRING)),
         }
         if let Some(parent) = table.superclass {
             fields.extend(inherited_fields(ir, &tables, parent)?);
         }
         fields.extend(own_fields(class)?);
-        let root = if enum_rooted[id as usize] {
-            objects.enum_base
-        } else {
-            objects.object
+        let root = match bases[id as usize] {
+            OwnedBase::None => objects.object,
+            OwnedBase::Enum => objects.enum_base,
+            OwnedBase::Exception(structure) => structure,
         };
         let structure = module.subtype(SubType {
             composite: CompositeType::Struct(fields),
@@ -452,7 +541,7 @@ pub(super) fn declare(
             .filter(|access| access.direct_member)
             .map(|access| (access.operation, access.target))
             .collect(),
-        enum_rooted,
+        bases,
     })
 }
 
