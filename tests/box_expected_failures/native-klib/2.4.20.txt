@@ -273,11 +273,9 @@ companionBlocksAndExtensions/resolutionPriority.kt
 companionBlocksAndExtensions/suspend.kt
 companionBlocksAndExtensions/visibility.kt
 compileKotlinAgainstKotlin/adaptedSuspendFunctionReference.kt
-compileKotlinAgainstKotlin/companionObjectInEnum.kt
 compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
-compileKotlinAgainstKotlin/enum.kt
 compileKotlinAgainstKotlin/genericSetter.kt
 compileKotlinAgainstKotlin/inlineClasses/callDeserializedPropertyOnInlineClassType.kt
 compileKotlinAgainstKotlin/inlineClasses/constructorWithInlineClassParametersInBinaryDependencies.kt
@@ -312,7 +310,6 @@ compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleCallWithHierarchy.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleProp.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simplePropWithHierarchy.kt
 compileKotlinAgainstKotlin/kt14012.kt
-compileKotlinAgainstKotlin/nestedEnum.kt
 compileKotlinAgainstKotlin/privateSuperType.kt
 compileKotlinAgainstKotlin/privateSuperType2.kt
 compileKotlinAgainstKotlin/privateSuperTypeDefaults.kt
@@ -320,7 +317,6 @@ compileKotlinAgainstKotlin/privateSuperTypeDefaults2.kt
 compileKotlinAgainstKotlin/propertyReference.kt
 compileKotlinAgainstKotlin/sealedClass.kt
 compileKotlinAgainstKotlin/secondaryConstructors.kt
-compileKotlinAgainstKotlin/starImportEnum.kt
 compileKotlinAgainstKotlin/typeAliasesKt13181.kt
 compileKotlinAgainstKotlin/useDeserializedFunInterface.kt
 constants/comparisonFalse.kt
@@ -407,7 +403,6 @@ coroutines/bridges/lambdaWithLongReceiver.kt
 coroutines/bridges/lambdaWithMultipleParameters.kt
 coroutines/bridges/mapSuspendAbstractClear.kt
 coroutines/bridges/mapSuspendClear.kt
-coroutines/builderInferenceAndGenericArrayAcessCall.kt
 coroutines/captureInfixFun.kt
 coroutines/captureMutableLocalVariableInsideCoroutineBlock.kt
 coroutines/captureUnaryOperator.kt
@@ -982,7 +977,6 @@ enum/lambdaInDefault.kt
 enum/loop.kt
 enum/multipleModules.kt
 enum/nested.kt
-enum/openMethodNoOverrides.kt
 enum/ordinalsWithEnumEntitiesOverrides.kt
 enum/reorderedArguments.kt
 enum/sortEnumEntries.kt
@@ -1559,7 +1553,6 @@ multiplatform/k2/defaultArguments/withTypeParameter.kt
 multiplatform/k2/delegation/delegationToExpectInterfaceByExpectFun.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
 multiplatform/k2/enumStaticMethods.kt
-multiplatform/k2/exhaustiveness/commonEnum.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
@@ -1658,7 +1651,6 @@ properties/accessorForProtectedPropertyWithPrivateSetterInObjectLiteral.kt
 properties/accessorForProtectedPropertyWithPrivateSetterViaSuper.kt
 properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
 properties/backingField/backingFieldWithSmartTypeParameters.kt
-properties/backingField/equalsHashCodeWithValueClassExplicitBackingFieldAndSupertype.kt
 properties/complexPropertyInitializer.kt
 properties/eagerInitializationGlobal1.kt
 properties/eagerInitializationGlobal2.kt
@@ -2427,7 +2419,6 @@ regressions/multimodule/inlineTextTrim.kt
 regressions/multimodule/inlineUnsignedConstructionAndData.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
-regressions/resolvedCallForGetOperator.kt
 reified/callChain.kt
 reified/callableReferenceInlinedFun.kt
 reified/callableReferenceInlinedFunFromOtherModule.kt

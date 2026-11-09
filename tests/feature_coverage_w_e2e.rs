@@ -1,10 +1,10 @@
 //! End-to-end codegen coverage (round-tripped on a real JVM) for three backend passes:
-//!   * `src/jvm/value_classes.rs` — `@JvmInline value class` box/unbox at use sites (args, returns,
+//!   * `crates/krusty-jvm/src/value_classes.rs` — `@JvmInline value class` box/unbox at use sites (args, returns,
 //!     nullable boxing, interface dispatch, members, collections, map keys),
-//!   * `src/jvm/ir_emit.rs` — bytecode-shape edges (mixed-width arithmetic + conversions, `when`
+//!   * `crates/krusty-jvm/src/ir_emit.rs` — bytecode-shape edges (mixed-width arithmetic + conversions, `when`
 //!     switches, string concat, nested arrays, bit ops on Int/Long, inc/dec in loops, compound
 //!     assignment on array elements and fields), and unsigned-type (`UInt`/`ULong`/`UIntArray`) codegen,
-//!   * `src/jvm/suspend.rs` — the suspend state machine driven from a Java `Continuation`.
+//!   * `crates/krusty-jvm/src/suspend.rs` — the suspend state machine driven from a Java `Continuation`.
 //!
 //! Value-class / unsigned / bytecode-shape tests use the `box(): String -> "OK"` harness
 //! (`common::compile_and_run_box`). Suspend tests can't be driven from a non-suspend `box()` (krusty

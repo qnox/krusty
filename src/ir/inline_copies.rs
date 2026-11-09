@@ -19,14 +19,14 @@ use crate::types::{Ty, TypeName};
 /// exact callable identity, semantic owner, the callee's source file, and the call line; a target
 /// formats the physical source-map path and line range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct IrInlineCopyProvenance {
+pub struct IrInlineCopyProvenance {
     /// Exact common-IR declaration whose body was copied. A backend uses this identity to obtain
     /// an already-resolved physical realization; it must not reconstruct one from source names.
-    pub(crate) function: super::FunId,
-    pub(crate) owner: Option<TypeName>,
+    pub function: super::FunId,
+    pub owner: Option<TypeName>,
     /// The source file that declares the inline function.
-    pub(crate) source: crate::fir::SourceFileId,
-    pub(crate) call_line: Option<u32>,
+    pub source: crate::fir::SourceFileId,
+    pub call_line: Option<u32>,
 }
 
 #[derive(Default)]
@@ -53,14 +53,14 @@ pub(super) struct InlineExpansions {
 
 impl IrFile {
     /// Record `copy` as copied from an inline function's own body.
-    pub(crate) fn mark_inline_copy(&mut self, copy: ExprId) {
+    pub fn mark_inline_copy(&mut self, copy: ExprId) {
         self.inline_expansions.copies.insert(copy);
     }
 
     /// Record the declaration identity, owner, and source file whose body `copy` came from. An
     /// already-provenanced nested copy keeps its inner frames and appends this containing
     /// expansion.
-    pub(crate) fn record_inline_copy_owner(
+    pub fn record_inline_copy_owner(
         &mut self,
         copy: ExprId,
         function: super::FunId,
@@ -95,10 +95,7 @@ impl IrFile {
         }
     }
 
-    pub(crate) fn inline_copy_provenance(
-        &self,
-        expression: ExprId,
-    ) -> Option<&[IrInlineCopyProvenance]> {
+    pub fn inline_copy_provenance(&self, expression: ExprId) -> Option<&[IrInlineCopyProvenance]> {
         self.inline_expansions
             .provenance
             .get(&expression)
@@ -117,30 +114,30 @@ impl IrFile {
 
     /// A clone keeps what its source was: an inline copy (expanding an inline call copies an
     /// inline body that may already hold another expansion), or an operand left unread.
-    pub(crate) fn copy_inline_copy_mark(&mut self, source: ExprId, target: ExprId) {
+    pub fn copy_inline_copy_mark(&mut self, source: ExprId, target: ExprId) {
         self.inline_expansions.inherit(source, target);
     }
 
-    pub(crate) fn is_inline_copy(&self, expression: ExprId) -> bool {
+    pub fn is_inline_copy(&self, expression: ExprId) -> bool {
         self.inline_expansions.copies.contains(&expression)
     }
 
     /// Record `operand`, passed to an inline expansion, as never read by the inlined body.
-    pub(crate) fn mark_unread_inline_operand(&mut self, operand: ExprId) {
+    pub fn mark_unread_inline_operand(&mut self, operand: ExprId) {
         self.inline_expansions.unread_operands.insert(operand);
     }
 
-    pub(crate) fn is_unread_inline_operand(&self, operand: ExprId) -> bool {
+    pub fn is_unread_inline_operand(&self, operand: ExprId) -> bool {
         self.inline_expansions.unread_operands.contains(&operand)
     }
 
-    pub(crate) fn record_inline_declared_type(&mut self, declaration: ExprId, ty: Ty) {
+    pub fn record_inline_declared_type(&mut self, declaration: ExprId, ty: Ty) {
         self.inline_expansions
             .declared_inline_types
             .insert(declaration, ty);
     }
 
-    pub(crate) fn inline_declared_type(&self, declaration: ExprId) -> Option<Ty> {
+    pub fn inline_declared_type(&self, declaration: ExprId) -> Option<Ty> {
         self.inline_expansions
             .declared_inline_types
             .get(&declaration)
@@ -168,7 +165,7 @@ impl IrFile {
         self.inline_expansions.result_boundaries.insert(expression);
     }
 
-    pub(crate) fn is_inline_result_boundary(&self, expression: ExprId) -> bool {
+    pub fn is_inline_result_boundary(&self, expression: ExprId) -> bool {
         self.inline_expansions
             .result_boundaries
             .contains(&expression)
@@ -180,7 +177,7 @@ impl IrFile {
             .insert(expression);
     }
 
-    pub(crate) fn retains_inline_unit_line(&self, expression: ExprId) -> bool {
+    pub fn retains_inline_unit_line(&self, expression: ExprId) -> bool {
         self.inline_expansions
             .retained_unit_lines
             .contains(&expression)

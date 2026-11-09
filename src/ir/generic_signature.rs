@@ -40,12 +40,12 @@ pub struct IrTypeParameter {
 
 impl IrTypeParameter {
     /// A use of this parameter as a type.
-    pub(crate) fn ty(&self) -> Ty {
+    pub fn ty(&self) -> Ty {
         Ty::ty_param(&self.semantic_name, self.upper_bound())
     }
 
     /// The representative upper bound: the first declared bound, else `Any?`.
-    pub(crate) fn upper_bound(&self) -> Ty {
+    pub fn upper_bound(&self) -> Ty {
         self.bounds
             .first()
             .map_or(Ty::nullable(Ty::obj("kotlin/Any")), |(bound, _)| *bound)
@@ -55,7 +55,7 @@ impl IrTypeParameter {
 impl IrGenericSig {
     /// The type parameters the signed declaration itself declares, without the ones a lifted
     /// local or anonymous function captures from an enclosing declaration.
-    pub(crate) fn declared_type_parameters(&self) -> impl Iterator<Item = &IrTypeParameter> {
+    pub fn declared_type_parameters(&self) -> impl Iterator<Item = &IrTypeParameter> {
         self.type_params
             .iter()
             .filter(|parameter| !parameter.captured_from_enclosing)

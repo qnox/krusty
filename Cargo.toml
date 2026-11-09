@@ -12,7 +12,7 @@ categories = ["compilers", "development-tools"]
 autotests = false
 
 [workspace]
-members = ["crates/krusty-build", "crates/krusty-cli", "crates/krusty-lsp", "crates/krusty-plugin-host", "crates/krusty-plugin-ir", "crates/krusty-test-support", "crates/krusty-toolchain"]
+members = ["crates/krusty-build", "crates/krusty-jvm", "crates/krusty-native", "crates/krusty-wasm", "crates/krusty-cli", "crates/krusty-lsp", "crates/krusty-plugin-host", "crates/krusty-plugin-ir", "crates/krusty-test-modules", "crates/krusty-test-support", "crates/krusty-toolchain"]
 default-members = [".", "crates/krusty-cli"]
 resolver = "2"
 
@@ -38,17 +38,12 @@ stacker = "0.1.24"
 # Heap profiler, OFF by default (optional dep, enabled only by the `dhat-heap` feature) so normal
 # builds pay zero cost. See the `dhat-heap` feature.
 dhat = { version = "0.3", optional = true }
-# Reading the relocatable ELF objects krusty's linker takes in (the prebuilt runtime's and the
-# program's). Only the ELF reader: the linker writes its executable by hand, and reads no other
-# object format, archive or compressed section. The code generator brings its own dependency.
-object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
-cranelift-codegen = { version = "0.137", features = ["x86", "arm64", "riscv64"] }
-cranelift-frontend = "0.137"
-cranelift-module = "0.137"
-cranelift-object = "0.137"
-target-lexicon = "0.13.5"
 
 [features]
+# Exposes the lowering fixtures (`fir_lower::single_source_lowering`) that the backend crates'
+# unit tests build their IR with. Only those crates' dev-dependencies enable it.
+test-support = []
+
 # Opt-in compiler tracing (`trace_compiler!`). OFF by default so release/gate/conformance builds pay
 # ZERO cost — every trace site compiles to nothing. Build with `--features trace`, then set
 # `KRUSTY_TRACE=all` or a category list (`KRUSTY_TRACE=resolve,suspend`) to emit diagnostics on stderr.
@@ -68,8 +63,13 @@ dhat-heap = ["dep:dhat"]
 [dev-dependencies]
 # Compiler-dependent integration with the real plugin and KSP hosts lives in the e2e target.
 krusty-plugin-host = { path = "crates/krusty-plugin-host" }
+# Declares the e2e target's modules from the `tests/*_e2e.rs` files present.
+krusty-test-modules = { path = "crates/krusty-test-modules" }
 # The kotlinc command-line conformance test compares the CLI's argument parser with kotlinc's own.
 krusty-cli = { path = "crates/krusty-cli" }
+krusty-jvm = { path = "crates/krusty-jvm" }
+krusty-native = { path = "crates/krusty-native" }
+krusty-wasm = { path = "crates/krusty-wasm" }
 rayon = "1"
 libc = "0.2"
 syn = { version = "3", features = ["full", "visit"] }
@@ -78,10 +78,8 @@ pprof = { version = "0.15", features = ["flamegraph"] }
 # pprof's own backtrace backend, used directly so the harness can symbolize each sampled instruction
 # pointer once instead of once per stack (see `write_flamegraph`). Already in the tree via pprof.
 backtrace = "0.3"
-# The linker's unit tests build their input objects with `object`'s ELF writer, so each relocation
-# is exercised on every architecture without a C toolchain. Its extra dependencies are already in
-# the tree (via `zip`).
-object = { version = "0.40.0", default-features = false, features = ["write_core", "elf", "std"] }
+# The Native e2e tests read the objects the backend emits.
+object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
 
 [lib]
 name = "krusty"
@@ -111,7 +109,29 @@ debug-assertions = false
 debug = false
 incremental = true
 
+# Every third-party dependency is opt-level 2 as well; `"*"` does not cover workspace members.
+# The compiler spends real time inside them: the Cranelift backend, `sha2` digesting each KLIB
+# input generation, and the `zip` and `flate2` readers. At opt-level 0, digesting the 14 MB Native
+# stdlib KLIB took 220 ms instead of 12 ms, and the Native box corpus ran in 188s; with optimized
+# dependencies it ran in 131s on the same 4-core host with the same case outcomes. A cold build of
+# the conformance binary went from 6m17s to 6m31s; CI restores dependencies from its cache.
+[profile.gate.package."*"]
+opt-level = 2
+
 [profile.gate.package.krusty]
+opt-level = 2
+codegen-units = 16
+
+# The backend crates run inside the same in-process corpus and e2e compiles as `krusty`.
+[profile.gate.package.krusty-jvm]
+opt-level = 2
+codegen-units = 16
+
+[profile.gate.package.krusty-native]
+opt-level = 2
+codegen-units = 16
+
+[profile.gate.package.krusty-wasm]
 opt-level = 2
 codegen-units = 16
 
@@ -131,6 +151,14 @@ inherits = "gate"
 lto = "off"
 
 [profile.klib-test.package.krusty]
+opt-level = 1
+codegen-units = 256
+
+[profile.klib-test.package.krusty-jvm]
+opt-level = 1
+codegen-units = 256
+
+[profile.klib-test.package.krusty-native]
 opt-level = 1
 codegen-units = 256
 
@@ -170,7 +198,7 @@ path = "tests/e2e.rs"
 
 [[test]]
 name = "klib_e2e"
-path = "tests/klib_e2e.rs"
+path = "tests/klib.rs"
 required-features = ["focused-klib-tests"]
 
 [[test]]
