@@ -613,3 +613,64 @@ fn klib_target_storage_leaves_reject_conflicting_missing_and_malformed_contracts
         None
     );
 }
+
+/// Each builtin scalar's own `hashCode()` is the provider's primitive-hash operation. A target that
+/// realizes that operation itself (Native does; `krusty-native` asserts the capability) therefore
+/// reaches a target leaf when a stdlib body calls one (`IntArray.contentHashCode` calls
+/// `Int.hashCode()`), rather than an ordinary member body that a dependency support unit has no
+/// contract to emit.
+#[test]
+fn klib_target_primitive_hash_codes_are_target_dependency_leaves() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let capability = |operation| operation == CompilerIntrinsic::PrimitiveHashCode;
+    for scalar in [
+        "kotlin/Boolean",
+        "kotlin/Char",
+        "kotlin/Byte",
+        "kotlin/Short",
+        "kotlin/Int",
+        "kotlin/Long",
+        "kotlin/Float",
+        "kotlin/Double",
+    ] {
+        let classifier = libraries.classifier(type_name(scalar)).unwrap();
+        let selected = classifier.declared_callables["hashCode"]
+            .functions()
+            .iter()
+            .map(|candidate| {
+                libraries
+                    .external_callable(candidate.callable.external_identity.unwrap())
+                    .unwrap()
+            })
+            .filter(|provider| provider.callable.params.is_empty())
+            .collect::<Vec<_>>();
+        let [provider] = selected.as_slice() else {
+            panic!("{scalar} declares one `hashCode()`: {selected:?}");
+        };
+        let selected = provider.klib_body_callable().unwrap();
+        assert_eq!(
+            selected.compiler_intrinsic(),
+            Some(CompilerIntrinsic::PrimitiveHashCode),
+            "{scalar}"
+        );
+        for facts in [
+            KlibCalleeFacts::new([selected]),
+            KlibCalleeFacts::with_declarations([], [selected]),
+        ] {
+            assert_eq!(
+                facts
+                    .target_intrinsic(
+                        selected.identity(),
+                        libraries.declaration_bodies(),
+                        &capability
+                    )
+                    .unwrap(),
+                Some(CompilerIntrinsic::PrimitiveHashCode),
+                "{scalar}"
+            );
+        }
+    }
+}

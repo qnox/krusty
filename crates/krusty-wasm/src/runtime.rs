@@ -32,6 +32,7 @@ use super::host::Host;
 use super::identity::IdentityObjects;
 use super::objects::ObjectRoot;
 use super::reference_arrays::ReferenceArrays;
+use super::type_objects::{TypeDescription, TypeObject, TypeObjects};
 
 /// Where a host write's bytes are staged in linear memory. The first 16 bytes are left for the
 /// host's own use (a WASI iovec).
@@ -76,6 +77,8 @@ pub(super) struct Runtime {
     /// The table types of the function values this module creates.
     pub(super) functions: FunctionShapes,
     pub(super) callable_references: CallableReferences,
+    /// The `KType` objects `typeOf` sites make.
+    type_objects: TypeObjects,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
 }
@@ -155,6 +158,7 @@ impl Runtime {
             boxes: Boxes::default(),
             functions: FunctionShapes::default(),
             callable_references,
+            type_objects: TypeObjects::default(),
             constants: HashMap::default(),
         };
         runtime.define_string_equals(module);
@@ -173,6 +177,22 @@ impl Runtime {
             .hashing
             .define(module, &runtime.objects, runtime.string, runtime.chars);
         runtime
+    }
+
+    /// The `KType` object describing `description`.
+    pub(super) fn type_object(
+        &mut self,
+        module: &mut Module,
+        description: TypeDescription,
+    ) -> Result<TypeObject, String> {
+        let string = self.string_type();
+        self.type_objects.object(
+            module,
+            &mut self.objects,
+            string,
+            self.hashing.string_hash,
+            description,
+        )
     }
 
     /// Push a new `String` holding `units`.

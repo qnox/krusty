@@ -47,6 +47,11 @@ impl Body<'_> {
                 self.scalar_string_function(ty).expect("checked above")
             }
             ty if self.class_of_type(ty).is_some() => return self.object_to_string(ty),
+            ty if ty.non_null().obj_internal()
+                == Some(super::super::super::type_objects::ktype()) =>
+            {
+                return self.type_object_to_string(ty)
+            }
             other => {
                 return Err(format!(
                     "a string template part of type `{}`",

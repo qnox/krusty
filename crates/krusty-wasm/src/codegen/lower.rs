@@ -34,6 +34,7 @@ mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
 mod string_conversion;
+mod type_of;
 
 #[cfg(test)]
 use tests::lower_alone;
@@ -400,29 +401,26 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         TyKind::Nullable(Ty::String) => STRING,
         // Nullable scalars keep their semantic type until this representation boundary. They
         // use the same boxes as erased values; nullable Unit can hold its singleton or null.
-        TyKind::Nullable(
-            Ty::Boolean
-            | Ty::Byte
-            | Ty::Short
-            | Ty::Char
-            | Ty::Int
-            | Ty::Long
-            | Ty::Float
-            | Ty::Double
-            | Ty::Unit
-            | Ty::Nothing,
-        ) => REFERENCE,
+        TyKind::Nullable(Ty::Unit | Ty::Nothing) => REFERENCE,
+        TyKind::Nullable(inner)
+            if matches!(
+                carrier(inner),
+                Ok(Some(
+                    ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64
+                ))
+            ) =>
+        {
+            REFERENCE
+        }
         // Every object, interface and `Any` value, and a type parameter's: a reference the
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
         TyKind::Intersection(..) if is_reference_intersection(ty) => REFERENCE,
         TyKind::DefinitelyNotNull(inner) if inner.is_ty_param() => REFERENCE,
-        // A function value is an object (see `super::super::function_values`).
-        TyKind::Fun(signature) if !signature.suspend => REFERENCE,
-        TyKind::Fun(_) => return Err("a suspend function value".into()),
-        TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Fun(signature) if !signature.suspend) => {
-            REFERENCE
-        }
+        // A function value is an object (see `super::super::function_values`); a suspend one is
+        // invoked with its caller's continuation as one more argument.
+        TyKind::Fun(_) => REFERENCE,
+        TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Fun(_)) => REFERENCE,
         TyKind::Nullable(inner)
             if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..))
                 || is_reference_intersection(inner) =>
@@ -539,9 +537,14 @@ fn expression_type(
         {
             result
         }
-        // A SAM-converted lambda may have no checked type to ask about; it declines here as
-        // it does where it is lowered.
-        IrExpr::Lambda { sam: Some(_), .. } => return Err(function_values::SAM_CONVERSION.into()),
+        // A function-value invocation common lowering synthesized (such as the body of a
+        // SAM-converted callable reference) yields its recorded semantic result.
+        IrExpr::InvokeFunction { ret, .. } if ir.checked_type(id).is_none() => *ret,
+        // A SAM-converted lambda may have no checked type to ask about; it is an instance of its
+        // interface.
+        IrExpr::Lambda {
+            sam: Some(target), ..
+        } if ir.checked_type(id).is_none() => Ty::obj_name(target.classifier),
         node => ir
             .checked_type(id)
             .ok_or_else(|| format!("{} without a checked type", describe_node(node)))?,
@@ -1125,6 +1128,24 @@ impl<'a> Body<'a> {
                 ));
                 self.direct_call(function, &frame, &args)?;
             }
+            // The target stdlib's own `typeOf` body only says it is a compiler intrinsic.
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::External {
+                target,
+                substitutions,
+                ..
+            } = &**call_callee
+                && args.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::TypeOf)
+                }) =>
+            {
+                self.type_of_call(*target, substitutions)?;
+            }
             IrExpr::Call {
                 callee: ref call_callee,
                 dispatch_receiver,
@@ -1231,6 +1252,13 @@ impl<'a> Body<'a> {
                 type_operand,
             } if self.is_unboxing_cast(arg, type_operand) => {
                 self.checked_unbox_cast(arg, type_operand)?
+            }
+            IrExpr::TypeOp {
+                op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
+                arg,
+                type_operand,
+            } if matches!(type_operand.non_null().kind(), TyKind::Fun(_)) => {
+                self.function_cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast),
@@ -1529,16 +1557,14 @@ impl<'a> Body<'a> {
             IrExpr::Lambda {
                 impl_fn,
                 captures,
-                sam: None,
+                sam,
                 ..
             } => self.function_value(
                 impl_fn,
                 &captures,
                 function_values::FunctionEquality::Identity,
+                sam.as_deref(),
             )?,
-            IrExpr::Lambda { sam: Some(_), .. } => {
-                return Err(function_values::SAM_CONVERSION.into());
-            }
             IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
                 self.callable_reference(&reference)?
             }

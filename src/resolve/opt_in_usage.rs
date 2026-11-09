@@ -607,7 +607,7 @@ impl Checker<'_> {
             {
                 continue;
             }
-            let marker = kotlin_qualified_name(requirement.marker);
+            let marker = requirement.marker.kotlin_qualified_name();
             let message =
                 match requirement
                     .message
@@ -628,21 +628,4 @@ impl Checker<'_> {
             }
         }
     }
-}
-
-/// The dotted Kotlin qualified name kotlinc prints for a classifier (`ClassId.asFqNameString`),
-/// which is also the spelling `-opt-in` takes.
-fn kotlin_qualified_name(classifier: TypeName) -> String {
-    let mut nested = Vec::new();
-    let mut top_level = classifier;
-    while let Some(owner) = top_level.nested_owner() {
-        nested.push(top_level.nested_segment_ref());
-        top_level = owner;
-    }
-    let mut name = top_level.render().replace('/', ".");
-    for segment in nested.iter().rev() {
-        name.push('.');
-        name.push_str(segment);
-    }
-    name
 }
