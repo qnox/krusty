@@ -221,7 +221,7 @@ impl BodyLowering<'_> {
         destructured: bool,
     ) -> Lowered<ExprId> {
         let variable = self.arena.variable(binding);
-        let ty = super::semantic_type(self.arena, self.header.type_parameters(), variable.ty)?;
+        let ty = self.semantic(variable.ty)?;
         let element_ty = self.lowered_type(element);
         let init = if super::is_value_of(element_ty, ty) {
             element
