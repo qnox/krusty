@@ -29,13 +29,12 @@ mod local_call_parameters;
 mod local_classifier_provenance;
 mod lowering_temporaries;
 mod ranges;
-mod single_source_lowering;
 
-use lambda_return_flow::expression_subtree_contains;
-pub(crate) use single_source_lowering::{
+pub(crate) use super::single_source_lowering::{
     lower_single_source, lower_single_source_with_jvm_stdlib, lower_single_source_with_platform,
     lower_source_from_set, lower_with_jvm_stdlib_into,
 };
+use lambda_return_flow::expression_subtree_contains;
 
 use super::lower_body;
 
@@ -2549,7 +2548,7 @@ fn consuming_sink_retains_member_function_context_arity() {
         .find_map(|(id, function)| (function.name == "four").then_some(id as u32))
         .expect("member context function");
 
-    assert_eq!(ir.fn_context_counts.get(&function), Some(&1));
+    assert_eq!(ir.declared_parameters(function).context_count, 1);
 }
 
 #[test]

@@ -8,6 +8,7 @@
 #   just lint       fmt-check + clippy-baseline-check (fails on NEW clippy findings)
 #   just fmt        apply rustfmt
 #   just clippy-baseline   refreeze the accepted clippy findings (clippy-baseline.tsv)
+#   just legacy-baseline   lower legacy-baseline.tsv to the current legacy surface
 #   just test       full test suite (optionally `just test -- <args>`)
 #   just test-all   suite against every supported Kotlin version, in parallel
 #   just kotlinc    download+unpack the reference kotlinc dist; prints bin path
@@ -45,7 +46,7 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests release-tests fmt-check clippy-baseline-check
+lint: versioning-tests release-tests legacy-ratchet-tests fmt-check legacy-baseline-check clippy-baseline-check
 
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
@@ -68,13 +69,17 @@ release-tests:
 test-lsp:
     cargo test --profile gate -p krusty-lsp --all-targets
 
-# rustfmt must be clean (the repo is fully formatted; `just fmt` fixes any drift).
+# rustfmt must be clean (the repo is fully formatted; `just fmt` fixes any drift). The e2e target
+# declares its `tests/*_e2e.rs` modules through a macro, which `cargo fmt` does not follow, so those
+# files are passed to rustfmt directly.
 fmt-check:
     cargo fmt --all --check
+    rustfmt --edition 2021 --check tests/*_e2e.rs
 
 # Apply rustfmt across the workspace.
 fmt:
     cargo fmt --all
+    rustfmt --edition 2021 tests/*_e2e.rs
 
 # Emit current clippy findings as a stable, line-number-independent fingerprint set:
 #   <count><TAB><file><TAB><message>   (one per file+message, so a new occurrence bumps the count)
@@ -128,6 +133,23 @@ clippy-baseline-check:
         exit 1
     fi
     echo "clippy: no new findings beyond baseline"
+
+# The legacy surface the resolution-engine migration deletes may only shrink. A ratcheted entry
+# point gaining a use, `fn select_*` gaining a definition, or the signature bridge gaining a line
+# fails here.
+# Fail when legacy-baseline.tsv's legacy surface grows.
+legacy-baseline-check:
+    bash scripts/legacy-ratchet.sh check
+
+# Run after deleting legacy surface. It never raises a row: an increase is a hand edit that review
+# has to accept.
+# Lower legacy-baseline.tsv to the current legacy surface.
+legacy-baseline:
+    bash scripts/legacy-ratchet.sh tighten
+
+# Test the legacy-surface ratchet against a disposable repository.
+legacy-ratchet-tests:
+    bash scripts/test-legacy-ratchet.sh
 
 # Full test suite through the canonical self-provisioning harness.
 test *ARGS:
@@ -254,7 +276,9 @@ kotlinc VERSION=`just max-version`:
     url="https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-compiler-${ver}.zip"
     tmp="$(mktemp -d)"
     echo "downloading kotlin-compiler ${ver}…" >&2
-    curl -fsSL "$url" -o "$tmp/kotlinc.zip" || { echo "failed to download $url" >&2; rm -rf "$tmp"; exit 1; }
+    # GitHub's release CDN answers 504 for minutes at a time. curl doubles its wait from one second,
+    # so eight retries span about four minutes; a connection that never opens fails within 30s.
+    curl -fsSL --connect-timeout 30 --retry 8 --retry-max-time 300 "$url" -o "$tmp/kotlinc.zip" || { echo "failed to download $url" >&2; rm -rf "$tmp"; exit 1; }
     mkdir -p "$dest"
     if command -v unzip >/dev/null 2>&1; then unzip -q "$tmp/kotlinc.zip" -d "$dest"
     elif command -v python3 >/dev/null 2>&1; then python3 -c "import zipfile; zipfile.ZipFile('$tmp/kotlinc.zip').extractall('$dest')"
@@ -360,11 +384,15 @@ box-corpus VERSION=`just max-version`:
         # Keep cone mode: a fresh sparse clone checks out the repository-root files that cone mode
         # owns. Switching to non-cone while excluding them can leave those paths in place and abort
         # the update before the requested corpus directory is materialized.
-        git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs >&2
+        git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs $bytecode_dirs >&2
     }
     # Kotlin's command-line test corpus (`.args`/`.out` pairs) and the third-party annotation
     # sources some of its cases put on the classpath; kotlin_cli_jvm_conformance runs it.
     cli_dirs="compiler/testData/cli third-party/annotations third-party/java8-annotations third-party/jsr305"
+    # Kotlin's bytecode-shape corpora: instruction-count expectations over textified class files
+    # (bytecodeText) and whole-class declaration listings (bytecodeListing);
+    # kotlin_bytecode_text_conformance and kotlin_bytecode_listing_conformance run them.
+    bytecode_dirs="compiler/testData/codegen/bytecodeText compiler/testData/codegen/bytecodeListing"
     mock_dir=""
     if [ -d "$root/.git" ] && [ -d "$box" ]; then
         mock_dir="$(mock_dir_at_tag)"
@@ -372,7 +400,7 @@ box-corpus VERSION=`just max-version`:
     complete=0
     if [ -n "$mock_dir" ] && [ -f "$root/$mock_dir/rt.jar" ]; then
         complete=1
-        for dir in $cli_dirs; do [ -d "$root/$dir" ] || complete=0; done
+        for dir in $cli_dirs $bytecode_dirs; do [ -d "$root/$dir" ] || complete=0; done
     fi
     if [ "$complete" = 1 ]; then
         echo "$box"
@@ -385,10 +413,10 @@ box-corpus VERSION=`just max-version`:
         exit 1
     fi
     if [ -n "$mock_dir" ]; then
-        # A cache provisioned before the mock JDK or the CLI corpus was needed: extend it rather
+        # A cache provisioned before the mock JDK, the CLI corpus or the bytecode corpora was needed: extend it rather
         # than accept it.
-        echo "adding the mock JDK and the CLI corpus to the Kotlin codegen/box corpus (v${ver})…" >&2
-        git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs >&2 \
+        echo "adding the mock JDK, the CLI corpus and the bytecode corpora to the Kotlin codegen/box corpus (v${ver})…" >&2
+        git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs $bytecode_dirs >&2 \
             || { echo "failed to extend the v${ver} corpus checkout" >&2; exit 1; }
     else
         # No checkout, or a restored one whose tree cannot name its mock JDK: provision afresh.
@@ -635,7 +663,7 @@ survey *ARGS:
     v="$(just max-version)"
     export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
     box="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
-    cargo build --release --bin survey >&2
+    cargo build --release -p krusty-jvm --bin survey >&2
     if [ -n "{{ARGS}}" ]; then
         ./target/release/survey "$box" --samples {{ARGS}}
     else

@@ -195,7 +195,7 @@ impl ClassWriter {
 
     /// The frames of a body still being emitted, entered with `entry` (one local per slot), by
     /// instruction index with their locals one per slot. `None` when they cannot be computed.
-    pub(crate) fn builder_frames(
+    pub fn builder_frames(
         &self,
         bytes: &[u8],
         code: &CodeBuilder,

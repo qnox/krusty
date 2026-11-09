@@ -16,7 +16,7 @@ pub(crate) struct KlibBodyClassParameters {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct KlibBodyClassContract {
+pub struct KlibBodyClassContract {
     pub(crate) module: String,
     pub(crate) signature: KlibPublicIdSignature,
     pub(crate) classifier: TypeName,
@@ -35,6 +35,11 @@ impl KlibBodyClassContract {
     /// as it does an unsigned integer, rather than as an instance of a class.
     pub(crate) fn is_builtin_type(&self) -> bool {
         crate::types::builtin_semantic(self.classifier).is_some()
+    }
+
+    /// This class applied to its declared formals. A non-generic class is the bare classifier.
+    pub(crate) fn self_type(&self) -> Ty {
+        Ty::obj_args_name(self.classifier, &self.parameters.formals)
     }
 }
 

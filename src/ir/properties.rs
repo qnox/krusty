@@ -36,7 +36,7 @@ impl IrFile {
     ///
     /// Plugins and targets consume this common declaration edge instead of rediscovering a
     /// property from a generated accessor's spelling.
-    pub(crate) fn property_accessor_parameters(
+    pub fn property_accessor_parameters(
         &self,
         class_index: usize,
         source_order: u32,
@@ -354,11 +354,6 @@ pub struct IrProperty {
     /// property). `None` for a plain backing-field property, whose accessor has no source body at all.
     pub getter: Option<FunId>,
     pub setter: Option<FunId>,
-    /// The JVM name a backend must use for the synthesized accessor when the plain spelling is wrong —
-    /// a value-class-typed property's accessor is `@JvmName`-mangled. Stamped by the pass that knows the
-    /// value classes; `None` means the ordinary spelling applies.
-    pub getter_jvm_name: Option<String>,
-    pub setter_jvm_name: Option<String>,
     /// Some use of a private property side reaches it from outside the declaring class — either the
     /// whole property is private, or a write reaches a private default setter. A target records the
     /// representation bridge that preserves that checked access; silently changing the call or
@@ -400,8 +395,6 @@ impl IrProperty {
             setter_visibility: crate::types::Visibility::Public,
             getter: None,
             setter: None,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
             needs_access_bridge: false,
             accessor_annotations: Default::default(),
         }
@@ -410,7 +403,7 @@ impl IrProperty {
     /// Whether this mutable declaration has a compiler-default setter whose resolved visibility is
     /// private. This is a stable Kotlin declaration fact: it does not depend on whether a backend has
     /// materialized an accessor function.
-    pub(crate) fn has_private_default_setter(&self) -> bool {
+    pub fn has_private_default_setter(&self) -> bool {
         self.is_var && !self.modifiers.declared_setter && self.setter_visibility.is_private()
     }
 }

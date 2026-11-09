@@ -36,7 +36,7 @@ fn declarations(unit: &DependencyBodyUnit) -> Vec<String> {
         .map(|(index, function)| {
             let id = crate::ir::FunId::try_from(index).expect("fits");
             format!(
-                "{} {:?} -> {:?} static={} dispatch={:?} identities={:?} extension={} contexts={:?}",
+                "{} {:?} -> {:?} static={} dispatch={:?} identities={:?} extension={} contexts={}",
                 function.name,
                 function.params,
                 function.ret,
@@ -44,7 +44,7 @@ fn declarations(unit: &DependencyBodyUnit) -> Vec<String> {
                 function.dispatch_receiver,
                 ir.fn_params[&id].identities,
                 ir.extension_receiver_fns.contains(&id),
-                ir.fn_context_counts.get(&id),
+                ir.declared_parameters(id).context_count,
             )
         })
         .collect()
@@ -75,10 +75,10 @@ fn a_callee_no_checked_call_selected_is_declared_from_its_header() {
         [
             "a [Obj(TypeName(\"kotlin/Int\"), [])] -> Obj(TypeName(\"kotlin/Int\"), []) static=true \
              dispatch=None identities=[IrParameterIdentity { source_name: Some(\"a\"), role: Value, \
-             provenance: SourceDeclared }] extension=false contexts=None",
+             provenance: SourceDeclared }] extension=false contexts=0",
             "b [Obj(TypeName(\"kotlin/Int\"), [])] -> Obj(TypeName(\"kotlin/Int\"), []) static=true \
              dispatch=None identities=[IrParameterIdentity { source_name: Some(\"a\"), role: Value, \
-             provenance: SourceDeclared }] extension=false contexts=None",
+             provenance: SourceDeclared }] extension=false contexts=0",
         ]
     );
 }
@@ -1477,6 +1477,7 @@ fn stdlib_calls_reach_header_declared_callees() {
     let mut reached = std::collections::BTreeMap::<String, usize>::new();
     let mut lowered_with_callees = Vec::new();
     let mut undeclared = Vec::new();
+    let mut opaque_pointed = Vec::new();
     for (package, record) in stdlib_records(&root, &libraries) {
         let mut unit = DependencyBodyUnit::default();
         let callable = record.klib_body_callable().expect("signed");
@@ -1497,6 +1498,14 @@ fn stdlib_calls_reach_header_declared_callees() {
                 if !std::ptr::eq(innermost, &decline) {
                     let text = innermost.to_string();
                     let (_, reason) = text.split_once(" (").expect("a decline names its reason");
+                    if package == "kotlinx/cinterop"
+                        && matches!(
+                            record.name.as_str(),
+                            "interpretOpaquePointed" | "interpretNullableOpaquePointed"
+                        )
+                    {
+                        opaque_pointed.push(decline.to_string());
+                    }
                     *reached.entry(reason.to_owned()).or_default() += 1;
                 }
             }
@@ -1504,6 +1513,21 @@ fn stdlib_calls_reach_header_declared_callees() {
     }
     assert_eq!(undeclared, Vec::<String>::new());
     assert_eq!(lowered_with_callees, Vec::<String>::new());
+    // Both name the same-library private class `OpaqueNativePointed` and then call
+    // `interpretNullablePointed`, an external identity intrinsic. That declaration serializes
+    // no body, so each call is unserialized.
+    opaque_pointed.sort();
+    assert_eq!(
+        opaque_pointed,
+        [
+            "the KLIB body of `kotlinx.cinterop.interpretNullableOpaquePointed` (it reaches the \
+             KLIB body of `kotlinx.cinterop.interpretNullablePointed` (its library serializes none))"
+                .to_owned(),
+            "the KLIB body of `kotlinx.cinterop.interpretOpaquePointed` (it reaches the KLIB body \
+             of `kotlinx.cinterop.interpretNullablePointed` (its library serializes none))"
+                .to_owned(),
+        ]
+    );
     // Selected generic roots now pass their own declared headers and can reach unselected
     // generic callees. These exact deeper-decline counts are measured on every manifest release;
     // they are not expected-failure allowances for executable conformance tests. Elvis and safe-call
@@ -1519,7 +1543,6 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
                 ("it declares type parameters)", 205),
-                ("it uses a block of a compiler-introduced form)", 1),
                 ("it uses a call of a file-private declaration)", 6),
                 ("it uses a call of a member function)", 74),
                 (
@@ -1529,7 +1552,11 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
-                ("its library serializes none)", 98),
+                (
+                    "it uses an object literal with a superclass constructor argument)",
+                    1,
+                ),
+                ("its library serializes none)", 100),
             ]
         } else {
             vec![
@@ -1538,7 +1565,6 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
                 ("it declares type parameters)", 187),
-                ("it uses a block of a compiler-introduced form)", 1),
                 ("it uses a call of a file-private declaration)", 4),
                 ("it uses a call of a member function)", 71),
                 (
@@ -1548,7 +1574,11 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
-                ("its library serializes none)", 98),
+                (
+                    "it uses an object literal with a superclass constructor argument)",
+                    1,
+                ),
+                ("its library serializes none)", 100),
             ]
         };
     assert_eq!(

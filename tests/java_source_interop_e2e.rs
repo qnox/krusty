@@ -395,7 +395,7 @@ fn run_kotlin_first(kotlin: &str, java: &[(&str, &str)]) -> String {
     let outputs = krusty::compiler::emit_analyzed(
         analysis,
         &stems,
-        &krusty::jvm::JvmBackend::new(classpath),
+        &krusty_jvm::JvmBackend::new(classpath),
         "main",
         &mut diagnostics,
     );
@@ -451,38 +451,417 @@ fn run_kotlin_first(kotlin: &str, java: &[(&str, &str)]) -> String {
 /// withdrawing every header instead made each Kotlin reference into the module's Java unresolved.
 #[test]
 fn an_unresolved_type_in_one_java_source_keeps_the_module_java_headers() {
-    let result = common::compiler_diagnostics(
-        &[
-            (
-                "p/Good.java",
-                "package p;\npublic class Good { public static String ok() { return \"O\"; } }\n",
-            ),
-            (
-                "p/Partial.java",
-                "package p;\nimport missing.dependency.Absent;\npublic class Partial {\n    \
-                 public static String name() { return \"K\"; }\n    \
-                 public static Absent absent() { return null; }\n}\n",
-            ),
-            (
-                "Main.kt",
-                "package p\n\nfun box(): String = Good.ok() + Partial.name()\n",
-            ),
-        ],
-        &[common::stdlib_jar()],
-    );
-    let mut krusty = errors(&result.krusty_stderr);
-    krusty.extend(errors(&result.krusty_stdout));
-    assert_eq!(
-        errors(&result.reference_stderr),
-        Vec::<ObservedError>::new()
-    );
+    let sources = [
+        (
+            "p/Good.java",
+            "package p;\npublic class Good { public static String ok() { return \"O\"; } }\n",
+        ),
+        (
+            "p/Partial.java",
+            "package p;\nimport missing.dependency.Absent;\npublic class Partial {\n    \
+             public static String name() { return \"K\"; }\n    \
+             public static Absent absent() { return null; }\n}\n",
+        ),
+        (
+            "Main.kt",
+            "package p\n\nfun box(): String = Good.ok() + Partial.name()\n",
+        ),
+    ];
+    let result = common::compiler_diagnostics(&sources, &[common::stdlib_jar()]);
+    let texts = sources.map(|(_, text)| text);
+    assert_eq!(result.krusty_code, result.reference_code);
     assert_eq!(result.reference_code, 0, "{}", result.reference_stderr);
-    assert_eq!(krusty, Vec::<ObservedError>::new());
     assert_eq!(
-        result.krusty_code, 0,
-        "{}{}",
-        result.krusty_stdout, result.krusty_stderr
+        diagnostic_ledger(&result.reference_stderr, &texts),
+        Vec::<String>::new()
     );
+    assert_eq!(
+        diagnostic_ledger(&result.krusty_stderr, &texts),
+        Vec::<String>::new()
+    );
+    assert_stdout_has_no_errors(&result.krusty_stdout, &texts);
+}
+
+/// Java sources whose declarations name `Absent`, which nothing provides. kotlinc's Java model keeps
+/// the unresolved type under its written name, so each Kotlin use of a declaration naming it reports
+/// the missing class, and a healthy member of the same class does not.
+const UNRESOLVED_JAVA_SOURCES: [(&str, &str); 3] = [
+    (
+        "p/Partial.java",
+        "package p;\nimport missing.dependency.Absent;\npublic class Partial {\n    \
+         public static String name() { return \"K\"; }\n    \
+         public static Absent absent() { return null; }\n    \
+         public static void take(Absent value) {}\n    \
+         public static <T extends Absent> T bounded() { return null; }\n    \
+         public static java.util.List<Absent> list() { return null; }\n    \
+         public static Absent FIELD = null;\n    \
+         public static Absent[] array() { return null; }\n    \
+         public static java.util.List<Absent> generic() { return null; }\n}\n",
+    ),
+    (
+        "p/Derived.java",
+        "package p;\nimport missing.dependency.Absent;\npublic class Derived extends Absent {\n    \
+         public static String ok() { return \"O\"; }\n}\n",
+    ),
+    (
+        "p/Healthy.java",
+        "package p;\npublic class Healthy { public static String ok() { return \"O\"; } }\n",
+    ),
+];
+
+const UNRESOLVED_JAVA_USES: &str = "package p\n\n\
+     fun healthy() = Healthy.ok() + Partial.name()\n\
+     fun returned() = Partial.absent()\n\
+     fun parameter() = Partial.take(null)\n\
+     fun bound() { Partial.bounded<Nothing>() }\n\
+     fun argument() = Partial.list()\n\
+     fun field() = Partial.FIELD\n\
+     fun through() = Derived.ok()\n\
+     fun constructed() = Derived()\n\
+     class Inheriting : Derived()\n\
+     fun indexedArray() = Partial.array()[0]\n\
+     fun indexedGeneric() = Partial.generic()[0]\n\
+     fun mismatch() = Partial.take(Any())\n\
+     fun boundCall() = Partial.bounded(Any())\n";
+
+/// A Kotlin use of a Java source declaration that names an unresolved type reports exactly what
+/// kotlinc reports: the missing class at a return, parameter, type argument, field, index, or
+/// rejected argument, nothing at a type-parameter bound, and the missing supertype through and
+/// below a class that inherits it. `bounded(Any())` keeps the ordinary inference diagnostics.
+/// Healthy members of the same classes stay usable.
+#[test]
+fn uses_of_unresolved_java_source_types_report_kotlincs_diagnostics() {
+    let mut sources = UNRESOLVED_JAVA_SOURCES.to_vec();
+    sources.push(("Main.kt", UNRESOLVED_JAVA_USES));
+    let result = common::compiler_diagnostics(&sources, &[common::stdlib_jar()]);
+    let texts = source_texts(&sources);
+    assert_same_diagnostic_ledger(&result, &texts, &unresolved_java_use_ledger("Absent"));
+}
+
+/// The same uses through class files compiled against a dependency that is absent: kotlinc names
+/// the missing class by its full name here, because the class file records it. The rendered bound
+/// of `bounded` stays the simple name kotlinc prints.
+#[test]
+fn uses_of_classfile_signatures_naming_an_absent_class_report_kotlincs_diagnostics() {
+    let mut java = UNRESOLVED_JAVA_SOURCES
+        .iter()
+        .map(|(path, text)| (path.to_string(), text.to_string()))
+        .collect::<Vec<_>>();
+    java.push((
+        "missing/dependency/Absent.java".to_string(),
+        "package missing.dependency;\npublic class Absent {}\n".to_string(),
+    ));
+    let Some((classes, _)) = common::javac_compile(&java, &[]) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    std::fs::remove_file(classes.join("missing/dependency/Absent.class"))
+        .expect("javac emitted the dependency class");
+    let kotlin = [("Main.kt", UNRESOLVED_JAVA_USES)];
+    let result = common::compiler_diagnostics(&kotlin, &[common::stdlib_jar(), classes.clone()]);
+    cleanup(&classes);
+    let class = "missing.dependency.Absent";
+    let mut expected = unresolved_java_use_ledger(class);
+    let bound = expected
+        .last_mut()
+        .expect("the bound call is the last diagnostic");
+    *bound = bound.replace(&format!("<T : {class}!>"), "<T : Absent!>");
+    assert_same_diagnostic_ledger(&result, &[UNRESOLVED_JAVA_USES], &expected);
+}
+
+fn source_texts<'a>(sources: &'a [(&str, &str)]) -> Vec<&'a str> {
+    sources.iter().map(|(_, text)| *text).collect()
+}
+
+fn unresolved_java_use_ledger(class: &str) -> Vec<String> {
+    let missing = format!(
+        "cannot access class '{class}'. Check your module classpath for missing or conflicting dependencies."
+    );
+    let supertype = |owner: &str| {
+        format!(
+            "cannot access '{class}' which is a supertype of '{owner}'. Check your module classpath for missing or conflicting dependencies."
+        )
+    };
+    let at = |line, column, message: &str| format!("Main.kt:{line}:{column}: error: {message}");
+    vec![
+        at(4, 26, &missing),
+        at(5, 27, &missing),
+        at(7, 26, &missing),
+        at(8, 23, &missing),
+        at(9, 25, &supertype("p.Derived")),
+        at(11, 1, &supertype("p.Inheriting")),
+        at(12, 22, &missing),
+        at(12, 30, &missing),
+        at(13, 24, &missing),
+        at(13, 32, &missing),
+        at(14, 26, &missing),
+        at(
+            14,
+            31,
+            &format!("argument type mismatch: actual type is 'Any', but '{class}!' was expected."),
+        ),
+        at(
+            15,
+            27,
+            "cannot infer type for type parameter 'T'. Specify it explicitly.",
+        ),
+        at(
+            15,
+            35,
+            &format!("too many arguments for 'static fun <T : {class}!> bounded(): T!'."),
+        ),
+    ]
+}
+
+fn assert_same_diagnostic_ledger(
+    result: &common::CompilerDiagnosticResult,
+    sources: &[&str],
+    expected: &[String],
+) {
+    let reference = diagnostic_ledger(&result.reference_stderr, sources);
+    let krusty = diagnostic_ledger(&result.krusty_stderr, sources);
+    assert_eq!(result.krusty_code, result.reference_code);
+    assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);
+    assert_eq!(reference, expected, "kotlinc ledger:\n{reference:#?}");
+    assert_eq!(krusty, reference, "krusty ledger:\n{krusty:#?}");
+    assert_stdout_has_no_errors(&result.krusty_stdout, sources);
+}
+
+fn assert_stdout_has_no_errors(stdout: &str, sources: &[&str]) {
+    let errors = diagnostic_ledger(stdout, sources)
+        .into_iter()
+        .filter(|entry| entry.contains(": error:") || entry.starts_with("error:"))
+        .collect::<Vec<_>>();
+    assert_eq!(errors, Vec::<String>::new(), "stdout contained errors");
+}
+
+/// Ordered diagnostic ledger. Located diagnostics keep message continuations. A following source
+/// line and its caret are the compiler's excerpt, not part of the message. A module diagnostic
+/// (`error: …` with no location) is its own entry.
+fn diagnostic_ledger(output: &str, sources: &[&str]) -> Vec<String> {
+    let source_lines = sources
+        .iter()
+        .flat_map(|source| source.lines())
+        .collect::<std::collections::HashSet<_>>();
+    let mut ledger = Vec::new();
+    let mut lines = output.lines().peekable();
+    while let Some(line) = lines.next() {
+        if let Some(header) = located_diagnostic(line) {
+            let mut entry = header;
+            while let Some(next) = lines.peek().copied() {
+                if located_diagnostic(next).is_some()
+                    || module_diagnostic(next).is_some()
+                    || source_lines.contains(next)
+                    || is_caret_line(next)
+                    || next.starts_with("krusty:")
+                {
+                    break;
+                }
+                entry.push('\n');
+                entry.push_str(lines.next().expect("peeked continuation"));
+            }
+            if lines.peek().is_some_and(|next| source_lines.contains(next)) {
+                lines.next();
+            }
+            if lines.peek().is_some_and(|next| is_caret_line(next)) {
+                lines.next();
+            }
+            ledger.push(entry);
+        } else if let Some(module) = module_diagnostic(line) {
+            ledger.push(module);
+        }
+    }
+    ledger
+}
+
+fn located_diagnostic(line: &str) -> Option<String> {
+    let (location, severity, message) =
+        ["error", "warning", "info"].iter().find_map(|severity| {
+            let (location, message) = line.split_once(&format!(": {severity}: "))?;
+            Some((location, *severity, message))
+        })?;
+    let mut fields = location.rsplitn(3, ':');
+    let column = fields.next()?.parse::<usize>().ok()?;
+    let line_no = fields.next()?.parse::<usize>().ok()?;
+    let file = std::path::Path::new(fields.next()?).file_name()?.to_str()?;
+    Some(format!("{file}:{line_no}:{column}: {severity}: {message}"))
+}
+
+fn module_diagnostic(line: &str) -> Option<String> {
+    ["error", "warning", "info"].iter().find_map(|severity| {
+        let message = line.strip_prefix(&format!("{severity}: "))?;
+        Some(format!("{severity}: {message}"))
+    })
+}
+
+fn is_caret_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty() && trimmed.bytes().all(|byte| byte == b'^')
+}
+
+/// A continuation that is neither a source excerpt nor a caret stays in the ledger, and a module
+/// diagnostic is not discarded for lack of a location.
+#[test]
+fn diagnostic_ledger_keeps_continuations_and_module_errors() {
+    let output = "\
+Main.kt:1:1: error: first\n\
+the detail continues\n\
+fun shown() = 1\n\
+^\n\
+error: the module itself failed\n\
+Main.kt:2:1: warning: noted\n";
+    let sources = ["fun shown() = 1\nfun other() = 2\n"];
+    assert_eq!(
+        diagnostic_ledger(output, &sources),
+        vec![
+            "Main.kt:1:1: error: first\nthe detail continues".to_string(),
+            "error: the module itself failed".to_string(),
+            "Main.kt:2:1: warning: noted".to_string(),
+        ]
+    );
+}
+
+/// A none-applicable overload family has no resolved callee. `take(Absent)` beside `take(String)`
+/// does not add a missing class to the rejection: kotlinc lists both candidates and their argument
+/// mismatches, and nothing else.
+#[test]
+fn a_rejected_overload_naming_a_missing_class_is_not_a_resolved_callee() {
+    let sources = [
+        (
+            "p/Partial.java",
+            "package p;\nimport missing.dependency.Absent;\npublic class Partial {\n    \
+             public static void take(Absent v) {}\n    \
+             public static void take(String v) {}\n}\n",
+        ),
+        ("Use.kt", "package p\nfun use() = Partial.take(Any())\n"),
+    ];
+    let result = common::compiler_diagnostics(&sources, &[common::stdlib_jar()]);
+    // Captured from kotlinc 2.4.21. The family has no resolved callee, so neither ledger names a
+    // missing class. Krusty still rejects the static as unresolved rather than listing each
+    // candidate's argument mismatch.
+    assert_exact_compiler_ledgers(
+        &result,
+        &source_texts(&sources),
+        1,
+        1,
+        &["\
+Use.kt:2:21: error: none of the following candidates is applicable:
+
+static fun take(v: Absent!): Unit:
+  Argument type mismatch: actual type is 'Any', but 'Absent!' was expected.
+
+static fun take(v: String!): Unit:
+  Argument type mismatch: actual type is 'Any', but 'String!' was expected."],
+        &["Use.kt:2:13: error: unresolved Java static 'Partial.take' for given argument types"],
+    );
+}
+
+/// A root-package class spelled the same as an unresolved import, or as an ambiguous inherited
+/// member type, does not satisfy that reference. kotlinc binds the root class and reports nothing;
+/// the reference here stays unresolved evidence, so each program's ledger is its own.
+#[test]
+fn a_root_package_class_does_not_satisfy_unresolved_or_ambiguous_java_types() {
+    let unresolved = [
+        (
+            "Absent.java",
+            "public class Absent { public String token() { return \"root\"; } }\n",
+        ),
+        (
+            "p/Partial.java",
+            "package p;\nimport missing.dependency.Absent;\n\
+             public class Partial { public Absent absent() { return null; } }\n",
+        ),
+        (
+            "Use.kt",
+            "package p\nfun use() = Partial().absent().token()\n",
+        ),
+    ];
+    let unresolved_result = common::compiler_diagnostics(&unresolved, &[common::stdlib_jar()]);
+    assert_exact_compiler_ledgers(
+        &unresolved_result,
+        &source_texts(&unresolved),
+        0,
+        1,
+        &[],
+        &[
+            "Use.kt:2:23: error: cannot access class 'Absent'. Check your module classpath for missing or conflicting dependencies.",
+            "Use.kt:2:32: error: unresolved reference 'token' on receiver of type 'Absent'.",
+        ],
+    );
+
+    let ambiguous = [
+        (
+            "Item.java",
+            "public class Item { public String root() { return \"r\"; } }\n",
+        ),
+        (
+            "lib/A.java",
+            "package lib;\npublic interface A { interface Item { String root(); } }\n",
+        ),
+        (
+            "lib/B.java",
+            "package lib;\npublic interface B { interface Item { String other(); } }\n",
+        ),
+        (
+            "p/Both.java",
+            "package p;\npublic abstract class Both implements lib.A, lib.B {\n    \
+             public abstract Item item();\n}\n",
+        ),
+        ("ItemUse.kt", "fun use(b: p.Both) = b.item().root()\n"),
+    ];
+    let ambiguous_result = common::compiler_diagnostics(&ambiguous, &[common::stdlib_jar()]);
+    assert_exact_compiler_ledgers(
+        &ambiguous_result,
+        &source_texts(&ambiguous),
+        0,
+        1,
+        &[],
+        &[
+            "ItemUse.kt:1:24: error: cannot access class 'Item'. Check your module classpath for missing or conflicting dependencies.",
+            "ItemUse.kt:1:31: error: unresolved reference 'root' on receiver of type 'Item'.",
+        ],
+    );
+}
+
+/// Each compiler's complete ordered ledger and exit status. The lists are independent, so a case
+/// the compilers answer differently still pins both, including an empty ledger.
+fn assert_exact_compiler_ledgers(
+    result: &common::CompilerDiagnosticResult,
+    sources: &[&str],
+    reference_code: i32,
+    krusty_code: i32,
+    reference: &[&str],
+    krusty: &[&str],
+) {
+    let owned = |entries: &[&str]| {
+        entries
+            .iter()
+            .map(|entry| entry.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        result.reference_code, reference_code,
+        "kotlinc exit\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        result.krusty_code, krusty_code,
+        "krusty exit\n{}",
+        result.krusty_stderr
+    );
+    assert_eq!(
+        diagnostic_ledger(&result.reference_stderr, sources),
+        owned(reference),
+        "kotlinc ledger:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        diagnostic_ledger(&result.krusty_stderr, sources),
+        owned(krusty),
+        "krusty ledger:\n{}",
+        result.krusty_stderr
+    );
+    assert_stdout_has_no_errors(&result.krusty_stdout, sources);
 }
 
 #[test]

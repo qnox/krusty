@@ -22,6 +22,7 @@ mod class_storage;
 mod closure_forms;
 mod constructor_calls;
 mod decline;
+mod enum_classes;
 mod function_lowering;
 mod inline_templates;
 mod ir_builtins;
@@ -30,6 +31,7 @@ mod local_values;
 mod lowering_checkpoint;
 mod primitive_calls;
 mod range_membership;
+mod same_library_class;
 #[cfg(test)]
 mod tests;
 mod type_evidence;

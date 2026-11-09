@@ -10,20 +10,20 @@ use super::{ExprId, IrBinOp, IrExpr, IrFile};
 use crate::types::{TyKind, TypeName};
 
 /// A subject `when` that switches on an enum's keys.
-pub(crate) struct EnumSwitchWhen {
+pub struct EnumSwitchWhen {
     /// The block holding the subject temporary and the `when`.
-    pub(crate) block: ExprId,
+    pub block: ExprId,
     /// The subject temporary's value index.
-    pub(crate) subject: u32,
-    pub(crate) classifier: TypeName,
-    pub(crate) nullable: bool,
-    pub(crate) when: ExprId,
+    pub subject: u32,
+    pub classifier: TypeName,
+    pub nullable: bool,
+    pub when: ExprId,
 }
 
 impl EnumSwitchWhen {
     /// The operand of a comparison `lhs == rhs` that is compared with the subject, when one side
     /// reads the subject.
-    pub(crate) fn compared_operand(&self, ir: &IrFile, lhs: ExprId, rhs: ExprId) -> Option<ExprId> {
+    pub fn compared_operand(&self, ir: &IrFile, lhs: ExprId, rhs: ExprId) -> Option<ExprId> {
         let reads_subject = |operand: ExprId| matches!(ir.expr(operand), IrExpr::GetValue(value) if *value == self.subject);
         if reads_subject(lhs) {
             Some(rhs)
@@ -92,7 +92,7 @@ impl EnumSwitchWhen {
 
 impl IrFile {
     /// `block` as a subject `when` that switches on its enum subject's keys, if it is one.
-    pub(crate) fn enum_switch_when(&self, block: ExprId) -> Option<EnumSwitchWhen> {
+    pub fn enum_switch_when(&self, block: ExprId) -> Option<EnumSwitchWhen> {
         let IrExpr::Block {
             stmts,
             value: Some(when),

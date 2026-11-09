@@ -1,7 +1,7 @@
 //! BACKEND-REJECTION coverage: valid Kotlin that the front end accepts but the IR *backend* cleanly
 //! DECLINES to lower, emitting a "not yet supported by the IR backend" style diagnostic (a non-zero
 //! exit). The box corpus contains only SUPPORTED programs, so these bail branches
-//! (`src/jvm/backend.rs`, `src/ir_lower.rs`, `src/jvm/suspend.rs`, `src/jvm/value_classes.rs`) are
+//! (`crates/krusty-jvm/src/backend.rs`, `src/ir_lower.rs`, `crates/krusty-jvm/src/suspend.rs`, `crates/krusty-jvm/src/value_classes.rs`) are
 //! otherwise never exercised. Each test drives the same front-end + JVM backend pipeline in-process
 //! (front end passes; the backend bails) and asserts the compile is rejected.
 //!
@@ -63,7 +63,7 @@ fn delegated_property_map_accepted() {
     ));
 }
 
-// --- Suspend-function shapes the state-machine builder declines (src/jvm/suspend.rs → lower_suspend
+// --- Suspend-function shapes the state-machine builder declines (crates/krusty-jvm/src/suspend.rs → lower_suspend
 //     returns false; backend surfaces "this suspend-function shape is not yet supported"). Each shape
 //     exercises a distinct un-handled control-flow construct around a suspension point. ---
 

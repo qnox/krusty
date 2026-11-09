@@ -274,11 +274,9 @@ companionBlocksAndExtensions/resolutionPriority.kt
 companionBlocksAndExtensions/suspend.kt
 companionBlocksAndExtensions/visibility.kt
 compileKotlinAgainstKotlin/adaptedSuspendFunctionReference.kt
-compileKotlinAgainstKotlin/companionObjectInEnum.kt
 compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
-compileKotlinAgainstKotlin/enum.kt
 compileKotlinAgainstKotlin/genericSetter.kt
 compileKotlinAgainstKotlin/inlineClasses/callDeserializedPropertyOnInlineClassType.kt
 compileKotlinAgainstKotlin/inlineClasses/constructorWithInlineClassParametersInBinaryDependencies.kt
@@ -313,7 +311,6 @@ compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleCallWithHierarchy.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleProp.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simplePropWithHierarchy.kt
 compileKotlinAgainstKotlin/kt14012.kt
-compileKotlinAgainstKotlin/nestedEnum.kt
 compileKotlinAgainstKotlin/privateSuperType.kt
 compileKotlinAgainstKotlin/privateSuperType2.kt
 compileKotlinAgainstKotlin/privateSuperTypeDefaults.kt
@@ -321,7 +318,6 @@ compileKotlinAgainstKotlin/privateSuperTypeDefaults2.kt
 compileKotlinAgainstKotlin/propertyReference.kt
 compileKotlinAgainstKotlin/sealedClass.kt
 compileKotlinAgainstKotlin/secondaryConstructors.kt
-compileKotlinAgainstKotlin/starImportEnum.kt
 compileKotlinAgainstKotlin/typeAliasesKt13181.kt
 compileKotlinAgainstKotlin/useDeserializedFunInterface.kt
 constants/comparisonFalse.kt
@@ -408,7 +404,6 @@ coroutines/bridges/lambdaWithLongReceiver.kt
 coroutines/bridges/lambdaWithMultipleParameters.kt
 coroutines/bridges/mapSuspendAbstractClear.kt
 coroutines/bridges/mapSuspendClear.kt
-coroutines/builderInferenceAndGenericArrayAcessCall.kt
 coroutines/captureInfixFun.kt
 coroutines/captureMutableLocalVariableInsideCoroutineBlock.kt
 coroutines/captureUnaryOperator.kt
@@ -896,7 +891,6 @@ defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
 defaultArguments/function/defaultLambdaInline.kt
 defaultArguments/kt48391.kt
 defaultArguments/protected.kt
-defaultArguments/suspendLambdaInTailrecDefault.kt
 delegatedProperty/DelegationByFunctionWithEnumUpperBound.kt
 delegatedProperty/callableReferenceAsSecondArgumentOfDelegate.kt
 delegatedProperty/correctFieldsOrder.kt
@@ -983,7 +977,6 @@ enum/lambdaInDefault.kt
 enum/loop.kt
 enum/multipleModules.kt
 enum/nested.kt
-enum/openMethodNoOverrides.kt
 enum/ordinalsWithEnumEntitiesOverrides.kt
 enum/reorderedArguments.kt
 enum/sortEnumEntries.kt
@@ -1108,12 +1101,8 @@ ieee754/explicitEqualsCall.kt
 ieee754/safeCall.kt
 increment/augmentedAssignmentWithComplexRhs.kt
 inference/builderInferenceLeakingVariable.kt
-inference/eagerLambdaAnalysisSuspendAndNotSuspend.kt
-inference/eagerLambdaAnalysisSuspendAndSam.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
-inference/kt35684.kt
 inference/kt39824.kt
-inference/kt49838.kt
 inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
 inference/pcla/builderCallAsReturnTypeInLocalClass.kt
@@ -1121,7 +1110,6 @@ inference/pcla/callableReferenceAndCoercionToUnit.kt
 inference/pcla/callableReferencesProperCompletion.kt
 inference/pcla/issues/kt42139.kt
 inference/pcla/issues/kt47052.kt
-inference/pcla/issues/kt47744.kt
 inference/pcla/issues/kt48633.kt
 inference/pcla/issues/kt49887.kt
 inference/pcla/issues/kt54767a.kt
@@ -1133,16 +1121,12 @@ inference/pcla/issues/kt74819e.kt
 inference/pcla/issues/kt76171.kt
 inference/pcla/memberScope.kt
 inference/pcla/nestedNonExhaustiveIf.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/SuspendingFunction.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
-inference/pcla/specialCallsWithCallableReferencesDontRewriteAtSlice.kt
-inference/pcla/specialCallsWithLambdas.kt
 inference/pcla/substituteStubTypeIntoCR.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt
 inference/pcla/topDownCompletionBreakedByNonBuilderInferenceSession.kt
 inference/pcla/withoutAnnotation.kt
 inference/plusAssignInsideLambda.kt
-inference/suspendExtensionRecevierFromConstraint.kt
 initializers/correctOrder1.kt
 initializers/correctOrder2.kt
 initializers/correctOrder3.kt
@@ -1560,7 +1544,6 @@ multiplatform/k2/defaultArguments/withTypeParameter.kt
 multiplatform/k2/delegation/delegationToExpectInterfaceByExpectFun.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
 multiplatform/k2/enumStaticMethods.kt
-multiplatform/k2/exhaustiveness/commonEnum.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
@@ -1659,7 +1642,6 @@ properties/accessorForProtectedPropertyWithPrivateSetterInObjectLiteral.kt
 properties/accessorForProtectedPropertyWithPrivateSetterViaSuper.kt
 properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
 properties/backingField/backingFieldWithSmartTypeParameters.kt
-properties/backingField/equalsHashCodeWithValueClassExplicitBackingFieldAndSupertype.kt
 properties/complexPropertyInitializer.kt
 properties/eagerInitializationGlobal1.kt
 properties/eagerInitializationGlobal2.kt
@@ -2428,7 +2410,6 @@ regressions/multimodule/inlineTextTrim.kt
 regressions/multimodule/inlineUnsignedConstructionAndData.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
-regressions/resolvedCallForGetOperator.kt
 reified/callChain.kt
 reified/callableReferenceInlinedFun.kt
 reified/callableReferenceInlinedFunFromOtherModule.kt
@@ -2454,7 +2435,6 @@ reified/method.kt
 reified/multipleTypeParameters.kt
 reified/noValueParameters.kt
 reified/parameterSwap.kt
-reified/reifiedIntersectionType.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/safecast.kt
 reified/spreads.kt
@@ -2528,7 +2508,6 @@ suspendConversion/basicSuspendConversionDefault.kt
 suspendConversion/chainedFunSuspendConversionForSimpleExpression.kt
 suspendConversion/conversionOfInterfaceInheritingFunctionN.kt
 suspendConversion/kt50949_suspendConversionForExtensionFunction.kt
-suspendConversion/overloadResolutionBySuspendModifier.kt
 suspendConversion/severalConversionsInOneCall.kt
 suspendConversion/suspendAndFunConversionInDisabledMode.kt
 suspendConversion/suspendConversionOfAliasedType.kt
@@ -2591,7 +2570,6 @@ typeErasure/twoFunWithTypeParametersInlineFunWithReifiedTypeParameters.kt
 typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParameters.kt
 typealias/abbreviationWithCapturedType.kt
 typealias/deserializedAbbreviationWithRedundantArgument.kt
-typealias/incorrectTypeOfTypealiasForSuspendFTMM.kt
 typealias/localTypeAliases.kt
 typealias/privateInKlib.kt
 typealias/typeAliasAsBareType.kt
