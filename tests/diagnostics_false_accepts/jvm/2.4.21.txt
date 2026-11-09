@@ -490,7 +490,6 @@ compiler/testData/diagnostics/tests/diagnostics/interfaceWithSuperclass.kt
 compiler/testData/diagnostics/tests/diagnostics/javaInheritsPrivateKtClass2.kt
 compiler/testData/diagnostics/tests/diagnostics/javaInheritsPrivateKtClassEnabled.kt
 compiler/testData/diagnostics/tests/diagnostics/outerClassArgumentsRequiredFromSuper.kt
-compiler/testData/diagnostics/tests/diagnostics/primaryConstructorRequiredForDataClass.kt
 compiler/testData/diagnostics/tests/diagnostics/projectionsOnNonClassTypeArguments.kt
 compiler/testData/diagnostics/tests/diagnostics/superclassNotAccessibleFromInterface.kt
 compiler/testData/diagnostics/tests/diagnostics/supertypeInitializedInInterface.kt
@@ -1002,9 +1001,6 @@ compiler/testData/diagnostics/tests/modifiers/inlineValueClass.kt
 compiler/testData/diagnostics/tests/modifiers/primaryConstructorMissingBrackets.kt
 compiler/testData/diagnostics/tests/moreThanOneOverriddenMissingK2.kt
 compiler/testData/diagnostics/tests/multifile/Annotations.kt
-compiler/testData/diagnostics/tests/multimodule/BoxedInaccessibleGenericTypeUsedByDependencies.kt
-compiler/testData/diagnostics/tests/multimodule/FalsePositiveInaccessibleGenericTypeWithError.kt
-compiler/testData/diagnostics/tests/multimodule/FalsePositiveInaccessibleTypeInDefaultArg.kt
 compiler/testData/diagnostics/tests/multimodule/InaccessibleIntersectionType.kt
 compiler/testData/diagnostics/tests/multimodule/LambdaReceiversOfInaccessibleTypes.kt
 compiler/testData/diagnostics/tests/multimodule/duplicateClass/differentGenericArgumentsReversed.kt
@@ -1385,7 +1381,6 @@ compiler/testData/diagnostics/tests/sealed/interfaces/sealedFunInterface.kt
 compiler/testData/diagnostics/tests/sealed/privateTypeInConstructor.kt
 compiler/testData/diagnostics/tests/sealed/sealedInheritorErrorMessage.kt
 compiler/testData/diagnostics/tests/secondaryConstructors/companionObjectScope.kt
-compiler/testData/diagnostics/tests/secondaryConstructors/dataClasses.kt
 compiler/testData/diagnostics/tests/secondaryConstructors/generics3.kt
 compiler/testData/diagnostics/tests/secondaryConstructors/headerCallChecker/accessBaseGenericFromInnerExtendingSameBase2.kt
 compiler/testData/diagnostics/tests/secondaryConstructors/headerCallChecker/accessBaseGenericFromInnerExtendingSameBase2After.kt
