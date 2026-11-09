@@ -34,6 +34,10 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.eager_lambda_analysis = features.has("EagerLambdaAnalysis");
     file.allow_eager_supertype_accessibility_checks =
         features.has("AllowEagerSupertypeAccessibilityChecks");
+    file.sam_constructor_missing_dependency = features
+        .table()
+        .get("ForbidSamConstructorCallsWithMissingDependencySupertype")
+        .map(|_| features.has("ForbidSamConstructorCallsWithMissingDependencySupertype"));
     file.lambda_implementation_uses_inferred_result =
         features.language_version() < crate::language_version::LanguageVersion::V2_4;
     file.full_value_classes = features.has("FullValueClasses");
@@ -252,5 +256,41 @@ mod tests {
             ),
         );
         assert!(at_since.forbid_useless_type_arguments);
+    }
+
+    #[test]
+    fn sam_constructor_missing_dependency_follows_the_release_that_introduced_it() {
+        let mut before = File::default();
+        apply_file_features(
+            &mut before,
+            &LangFeatures::for_release(
+                KotlinVersion::V2_4_21,
+                LanguageVersion::V2_4,
+                LanguageVersion::V2_4,
+            ),
+        );
+        assert_eq!(before.sam_constructor_missing_dependency, None);
+
+        let mut beta = File::default();
+        apply_file_features(
+            &mut beta,
+            &LangFeatures::for_release(
+                KotlinVersion::V2_5_0_BETA2,
+                LanguageVersion::V2_5,
+                LanguageVersion::V2_5,
+            ),
+        );
+        assert_eq!(beta.sam_constructor_missing_dependency, Some(false));
+
+        let mut at_since = File::default();
+        apply_file_features(
+            &mut at_since,
+            &LangFeatures::for_release(
+                KotlinVersion::V2_5_0_BETA2,
+                LanguageVersion::V2_6,
+                LanguageVersion::V2_6,
+            ),
+        );
+        assert_eq!(at_since.sam_constructor_missing_dependency, Some(true));
     }
 }

@@ -48,7 +48,9 @@ impl KlibStamp {
     /// What `compiler` stamps on a library compiled at source-language level `language`.
     ///
     /// Read off `kotlinc-native -p library -Xmetadata-klib -language-version <language>`: 2.4.0 and
-    /// 2.4.10 stamp `1.4.1` below language 2.3, and 2.4.20 stamps the language level itself. Keyed
+    /// 2.4.10 stamp `1.4.1` below language 2.3, and 2.4.20 stamps the language level itself.
+    /// 2.5.0-Beta2 writes `abi_version` 2.5.0 and that same language-level `metadata_version`
+    /// (measured at 2.2 through 2.7; 2.0 and 2.1 are rejected before a library is written). Keyed
     /// by exact releases, as the supported language levels are.
     pub fn new(compiler: KotlinVersion, language: LanguageVersion) -> Self {
         let legacy_stamp = matches!(compiler, KotlinVersion::V2_4_0 | KotlinVersion::V2_4_10)
@@ -443,7 +445,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         // Measured with kotlinc-native, recorded at the release where they change; a later release
-        // writes the stamps of the newest record at or below it.
+        // writes the stamps of the newest record at or below it. 2.5.0-Beta2's `abi_version` is
+        // 2.5.0 and its `metadata_version` is the language level, measured at 2.2, 2.3 and 2.4.
+        // That compiler rejects 2.0 and 2.1 before writing a library; those rows follow the same
+        // measured rule.
         let recorded: &[(KotlinVersion, [&str; 5])] = &[
             (
                 KotlinVersion::V2_4_0,
@@ -463,6 +468,16 @@ mod tests {
                     "2.2: abi_version=2.4.0 metadata_version=2.2.0",
                     "2.3: abi_version=2.4.0 metadata_version=2.3.0",
                     "2.4: abi_version=2.4.0 metadata_version=2.4.0",
+                ],
+            ),
+            (
+                KotlinVersion::V2_5_0_BETA2,
+                [
+                    "2.0: abi_version=2.5.0 metadata_version=2.0.0",
+                    "2.1: abi_version=2.5.0 metadata_version=2.1.0",
+                    "2.2: abi_version=2.5.0 metadata_version=2.2.0",
+                    "2.3: abi_version=2.5.0 metadata_version=2.3.0",
+                    "2.4: abi_version=2.5.0 metadata_version=2.4.0",
                 ],
             ),
         ];

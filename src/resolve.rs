@@ -47591,7 +47591,7 @@ impl<'a> Checker<'a> {
             );
             if self.callable_reference_types.get(&argument).copied() == Some(sam_function) {
                 if let Some(conversion) = self.sam_conversion_record(scope, argument, actual, sam) {
-                    self.resolved_sam_conversions.insert(argument, conversion);
+                    self.note_sam_conversion(argument, conversion);
                 }
                 return;
             }
@@ -47599,7 +47599,7 @@ impl<'a> Checker<'a> {
                 let recorded = self.sam_conversion_record(scope, argument, actual, sam);
                 self.expr_expected(scope, argument, sam_function);
                 if let Some(recorded) = recorded {
-                    self.resolved_sam_conversions.insert(argument, recorded);
+                    self.note_sam_conversion(argument, recorded);
                 }
                 return;
             }
@@ -47660,7 +47660,7 @@ impl<'a> Checker<'a> {
                     if let Some(conversion) =
                         self.sam_conversion_record(scope, argument, actual, sam)
                     {
-                        self.resolved_sam_conversions.insert(argument, conversion);
+                        self.note_sam_conversion(argument, conversion);
                     }
                     return;
                 }
@@ -47676,7 +47676,7 @@ impl<'a> Checker<'a> {
                     if let Some(conversion) =
                         self.sam_conversion_record(scope, argument, actual, sam)
                     {
-                        self.resolved_sam_conversions.insert(argument, conversion);
+                        self.note_sam_conversion(argument, conversion);
                     }
                     return;
                 }
@@ -47687,7 +47687,7 @@ impl<'a> Checker<'a> {
                 && !self.sam_argument_already_implements(argument, actual, expected)
             {
                 if let Some(conversion) = self.sam_conversion_record(scope, argument, actual, sam) {
-                    self.resolved_sam_conversions.insert(argument, conversion);
+                    self.note_sam_conversion(argument, conversion);
                 }
                 return;
             }
@@ -49079,7 +49079,7 @@ impl<'a> Checker<'a> {
                     self.expect_assignable(sam.ret, returned, self.span(e), "lambda return");
                 }
                 if let Some(conversion) = self.sam_conversion_record(scope, e, function, sam) {
-                    self.resolved_sam_conversions.insert(e, conversion);
+                    self.note_sam_conversion(e, conversion);
                 }
                 return expected;
             }

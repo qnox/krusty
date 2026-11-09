@@ -185,6 +185,7 @@ const MODELED_FEATURES: &[&str] = &[
     "ForbidArrayOfNothingInLhsOfClassLiteral",
     "ForbidExternalEnumEntriesAndPrimaryConstructorProperties",
     "ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects",
+    "ForbidSamConstructorCallsWithMissingDependencySupertype",
     "ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds",
     "ForbidUselessTypeArgumentsIn25",
     "ForbidUselessTypeArgumentsIn26",
@@ -207,6 +208,20 @@ const MODELED_FEATURES: &[&str] = &[
     "ReportTypeVarianceConflictsInDnnAndFlexible",
     "UnitConversionsOnArbitraryExpressions",
     "WhenGuards",
+];
+
+/// Progressive features a supported release turns on that no phase implements. `-progressive`
+/// still enables them, as kotlinc does, and does not refuse the compilation for a gap recorded
+/// here. A feature leaves this list once a phase checks it (`LangFeatures::has`) and joins
+/// [`MODELED_FEATURES`]. Sorted.
+const UNIMPLEMENTED_FEATURES: &[&str] = &[
+    "ConcurrentMapPurelyImplemented",
+    "EnforceMissingNamedArgumentsOnJavaAnnotation",
+    "ForbidJavaClassPropertyReferences",
+    "ForbidNonTopLevelEagerInitialization",
+    "JsIntegerDivisionCheck",
+    "ProhibitVarInJsModuleFile",
+    "ReportSubclassCantCallCompanionProtectedNonStaticWithGenerics",
 ];
 
 /// Features kotlinc consults only while the second feature is disabled, so they have no effect
@@ -235,6 +250,12 @@ impl LangFeatures {
     /// be recorded by name without changing compilation semantics.
     pub fn models(name: &str) -> bool {
         MODELED_FEATURES.binary_search(&name).is_ok()
+    }
+
+    /// Whether `name` is a kotlinc feature this compiler deliberately does not implement.
+    /// [`UNIMPLEMENTED_FEATURES`] is that record.
+    pub fn unimplemented(name: &str) -> bool {
+        UNIMPLEMENTED_FEATURES.binary_search(&name).is_ok()
     }
 
     /// Whether enabling `name` under these settings changes nothing krusty does not model: the
@@ -531,6 +552,49 @@ mod tests {
                 tables.iter().any(|table| table.get(name).is_some()),
                 "{name} is not a kotlinc language feature of a supported release"
             );
+        }
+    }
+
+    #[test]
+    fn unimplemented_features_are_sorted_kotlinc_features_no_phase_models() {
+        assert!(UNIMPLEMENTED_FEATURES
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]));
+        let tables: Vec<_> = KotlinVersion::supported()
+            .into_iter()
+            .map(|version| FeatureTable::for_version(version).unwrap())
+            .collect();
+        for name in UNIMPLEMENTED_FEATURES {
+            assert!(
+                !LangFeatures::models(name),
+                "{name} is modeled, so it does not belong in the unimplemented record"
+            );
+            assert!(
+                tables.iter().any(|table| table.get(name).is_some()),
+                "{name} is not a kotlinc language feature of a supported release"
+            );
+        }
+    }
+
+    /// `-progressive` on a release's default language turns on every progressive feature that
+    /// level does not already enable. Each of those is modeled or recorded as unimplemented;
+    /// a new one fails here rather than slipping through the command line.
+    #[test]
+    fn progressive_features_a_default_compilation_turns_on_are_modeled_or_recorded() {
+        for version in KotlinVersion::supported() {
+            let language = LanguageVersion::default_for(version);
+            let features = LangFeatures::for_release(version, language, language);
+            for feature in features.table().progressive() {
+                if features.has(&feature.name) {
+                    continue;
+                }
+                assert!(
+                    LangFeatures::models(&feature.name)
+                        || LangFeatures::unimplemented(&feature.name),
+                    "{version} progressive {} is neither modeled nor recorded",
+                    feature.name
+                );
+            }
         }
     }
 
