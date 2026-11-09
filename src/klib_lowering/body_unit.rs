@@ -1378,16 +1378,15 @@ impl<'s> Linker<'_, 's> {
         match self
             .sources
             .bodies
-            .callee_origin(&self.active_module, &signature)
+            .linked_origin(&self.active_module, &signature)
         {
             KlibCalleeOrigin::Exact(identity) => Ok(identity),
             KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(
                 Box::new(callee.clone()),
             )),
             KlibCalleeOrigin::Missing if callee.declaration().segments().len() > 1 => {
-                // A member no library serializes is, in a complete library set, a fake override:
-                // its real declaration is reached through serialized class declarations, which
-                // lowering does not follow yet.
+                // A member no library serializes is, in a complete library set, a fake override
+                // whose declared hierarchy did not bind it to one real declaration.
                 Err(KlibBodyDeclineReason::UnsupportedOperation(
                     "a call of a member no library serializes, such as a fake override",
                 ))

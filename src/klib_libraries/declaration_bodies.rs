@@ -30,6 +30,9 @@ pub struct KlibDeclarationBodies {
     /// The producer-declared module graph. These are manifest `depends` edges, not the roles the
     /// current compilation assigned its inputs.
     dependencies: HashMap<String, Vec<String>>,
+    /// Member references no library serializes, keyed by the referencing body module, bound to
+    /// the real declaration they inherit; `None` when the declared hierarchy offers several.
+    inherited: HashMap<(String, KlibIrSignature), Option<KlibDependencyCallable>>,
 }
 
 pub(crate) struct KlibClassMember<'a> {
@@ -45,6 +48,7 @@ impl Default for KlibDeclarationBodies {
             modules: HashMap::default(),
             owners: HashMap::default(),
             dependencies: HashMap::default(),
+            inherited: HashMap::default(),
         }
     }
 }
@@ -268,6 +272,7 @@ impl KlibDeclarationBodies {
                 .into_iter()
                 .map(|(module, dependencies)| (module, dependencies.into_iter().collect()))
                 .collect(),
+            inherited: HashMap::default(),
         })
     }
 
@@ -322,8 +327,8 @@ impl KlibDeclarationBodies {
         reachable
     }
 
-    /// Exact references consumed by prepared template linking. No inherited alias enters the
-    /// declaration index or the narrower intrinsic-support call graph.
+    /// Exact callable references these bodies serialize, by the module serializing them. No
+    /// inherited alias enters the declaration index or the narrower intrinsic-support call graph.
     pub(super) fn callable_references(&self) -> Vec<(String, KlibDeclarationSignature)> {
         let mut references = HashSet::default();
         for (module, &library) in &self.modules {
@@ -336,6 +341,59 @@ impl KlibDeclarationBodies {
             }
         }
         references.into_iter().collect()
+    }
+
+    /// Member references of ordinary bodies that no reachable library serializes, as a fake
+    /// override is not. Only these may later bind to an inherited declaration.
+    pub(super) fn unserialized_member_references(&self) -> Vec<(String, KlibDeclarationSignature)> {
+        self.callable_references()
+            .into_iter()
+            .filter(|(module, reference)| {
+                matches!(reference, KlibDeclarationSignature::Public(public)
+                    if public.declaration().segments().len() > 1)
+                    && matches!(
+                        self.callee_origin(module, reference),
+                        KlibCalleeOrigin::Missing
+                    )
+            })
+            .collect()
+    }
+
+    /// Publish the frozen inherited bindings of [`Self::unserialized_member_references`].
+    pub(super) fn bind_inherited_members(
+        &mut self,
+        bindings: impl IntoIterator<
+            Item = (
+                (String, KlibDeclarationSignature),
+                Option<KlibDependencyCallable>,
+            ),
+        >,
+    ) {
+        self.inherited = bindings
+            .into_iter()
+            .map(|((module, reference), binding)| ((module, ir_signature(&reference)), binding))
+            .collect();
+    }
+
+    /// The declaration a call in an ordinary body links to: the serialized origin, or for a
+    /// member no library serializes, the real declaration it inherits through its declared
+    /// supertypes. A call never links to a declaration that is neither.
+    pub(crate) fn linked_origin(
+        &self,
+        body_module: &str,
+        declaration: &KlibDeclarationSignature,
+    ) -> KlibCalleeOrigin {
+        match self.callee_origin(body_module, declaration) {
+            KlibCalleeOrigin::Missing => match self
+                .inherited
+                .get(&(body_module.to_owned(), ir_signature(declaration)))
+            {
+                Some(Some(identity)) => KlibCalleeOrigin::Exact(identity.clone()),
+                Some(None) => KlibCalleeOrigin::Ambiguous,
+                None => KlibCalleeOrigin::Missing,
+            },
+            origin => origin,
+        }
     }
 
     /// Resolve a call symbol in the graph of the KLIB body which serialized it.
@@ -449,7 +507,7 @@ impl KlibDeclarationBodies {
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(
-                |declaration| match self.callee_origin(&identity.module, &declaration) {
+                |declaration| match self.linked_origin(&identity.module, &declaration) {
                     KlibCalleeOrigin::Exact(callee) => Some(callee),
                     KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
                 },

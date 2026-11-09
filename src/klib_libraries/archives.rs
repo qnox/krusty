@@ -427,7 +427,7 @@ impl<'a> OpenedKlibLibraries<'a> {
         });
         let libraries = KlibLibraries::over_with_bodies_and_snapshot(
             std::rc::Rc::new(inventory),
-            std::rc::Rc::new(bodies),
+            bodies,
             std::rc::Rc::new(inline_bodies),
             body_snapshot,
         );
