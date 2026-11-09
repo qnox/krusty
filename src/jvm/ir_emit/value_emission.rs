@@ -819,7 +819,8 @@ impl super::Emitter<'_> {
                         }
                     }
                     crate::ir::IrIntrinsic::ArrayGet => {
-                        self.emit_array_get(dispatch_receiver.unwrap(), args[0], code)
+                        let result = self.value_ty(e);
+                        self.emit_array_get(dispatch_receiver.unwrap(), args[0], result, code)
                     }
                     crate::ir::IrIntrinsic::ArraySet => {
                         self.emit_array_set(dispatch_receiver.unwrap(), args[0], args[1], code)

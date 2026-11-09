@@ -21,8 +21,27 @@ pub(super) fn reference_array_scalar_adapter(element: Ty) -> Option<Ty> {
         .or_else(|| boxed_prim_of(element))
 }
 
+/// Box a reference-array element that is still a JVM scalar. An element that is already the boxed
+/// value, including `null`, stays as it is: a second unsigned `box-impl` does not accept a reference.
+pub(super) fn box_reference_scalar(
+    emitter: &mut Emitter<'_>,
+    primitive: Option<Ty>,
+    produced: Ty,
+    code: &mut CodeBuilder,
+) {
+    if let Some(primitive) = primitive.filter(|_| produced.is_jvm_scalar()) {
+        box_prim_free(emitter.cw, code, primitive);
+    }
+}
+
 impl Emitter<'_> {
-    pub(super) fn emit_array_get(&mut self, array: u32, index: u32, code: &mut CodeBuilder) {
+    pub(super) fn emit_array_get(
+        &mut self,
+        array: u32,
+        index: u32,
+        result: Ty,
+        code: &mut CodeBuilder,
+    ) {
         let element = self.array_elem(array);
         let reference_array = self.value_ty(array).is_reference_array();
         if self.must_spill_across(index) {
@@ -33,9 +52,12 @@ impl Emitter<'_> {
         }
         let (operation, words) = array_load_op(element, reference_array);
         code.array_load(operation, words);
+        // A non-null unsigned element is the carrier its consumer compares. A nullable element is
+        // the box or `null`; unboxing it would pass that `null` to `unbox-impl`.
         if let Some(primitive) = reference_array
             .then(|| reference_array_scalar_adapter(element))
             .flatten()
+            .filter(|_| result.is_jvm_scalar())
         {
             let array_descriptor = type_descriptor(self.value_ty(array));
             let component = array_descriptor
@@ -64,12 +86,13 @@ impl Emitter<'_> {
             self.emit_value(index, code);
             self.emit_value(value, code);
         }
-        if let Some(primitive) = reference_array
+        // `null` and an already-boxed value class are references. Only a carrier still on the
+        // stack is passed to `box-impl`.
+        let produced = self.value_ty(value);
+        let primitive = reference_array
             .then(|| reference_array_scalar_adapter(element))
-            .flatten()
-        {
-            box_prim_free(self.cw, code, primitive);
-        }
+            .flatten();
+        box_reference_scalar(self, primitive, produced, code);
         let (operation, words) = array_store_op(element, reference_array);
         code.array_store(operation, words);
     }

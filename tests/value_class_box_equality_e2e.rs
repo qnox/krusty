@@ -1,4 +1,7 @@
-//! The JVM and Native oracles for the shared value-class equality programs.
+//! JVM and Native oracles for the shared value-class programs.
+//!
+//! Equality is checked on both backends. Nullable reference-array stores are checked on the JVM,
+//! where an element is the box or `null`.
 
 use super::common;
 
@@ -31,5 +34,24 @@ fn a_value_class_compares_a_reference_payload_with_its_equals() {
     oracles(
         include_str!("box_regressions/ValueClassPayloadEquality.kt"),
         "ValueClassPayloadEquality",
+    );
+}
+
+#[test]
+fn nullable_unsigned_reference_arrays_store_boxes() {
+    common::expect_box_same_as_kotlinc(
+        include_str!("box_regressions/NullableUnsignedReferenceArrays.kt"),
+        "NullableUnsignedReferenceArrays",
+    );
+}
+
+#[test]
+fn nullable_value_class_reference_arrays_store_boxes() {
+    common::expect_box_same_as_kotlinc(
+        &prepared(
+            include_str!("box_regressions/ValueClassReferenceArray.kt"),
+            krusty::conformance::TestTarget::Jvm,
+        ),
+        "ValueClassReferenceArray",
     );
 }
