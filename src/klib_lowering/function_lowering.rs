@@ -81,6 +81,17 @@ impl FunctionHeader {
         self.values.get(symbol).copied()
     }
 
+    /// The value slot and published identity of the parameter `symbol`, when it is one.
+    pub(super) fn parameter_identity(
+        &self,
+        symbol: &KlibIrSymbol,
+    ) -> Option<(u32, &IrParameterIdentity)> {
+        let value = self.value(symbol)?;
+        let offset = self.parameter_count() - self.params.len();
+        let index = usize::try_from(value.index).ok()?.checked_sub(offset)?;
+        Some((value.index, self.identities.get(index)?))
+    }
+
     /// How many value slots the parameters take; a body's local variables follow them.
     pub(super) fn parameter_count(&self) -> usize {
         self.params.len()

@@ -195,7 +195,7 @@ impl Backend for WasmBackend {
             .as_ref()
             .is_none_or(|(module, _)| module != file.module_name)
         {
-            let plan = classes::module_plan(file.classifiers.module().classes());
+            let plan = classes::module_plan(file.classifiers.module().classes(), &file.classifiers);
             state.slot_plan = Some((file.module_name.to_owned(), plan));
         }
         let plan = &state.slot_plan.as_ref().expect("planned just above").1;

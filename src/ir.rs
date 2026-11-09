@@ -2799,6 +2799,16 @@ impl IrFile {
             _ => None,
         }
     }
+
+    /// The checker-selected constructor a source construction reaches; `None` for a construction
+    /// synthesized without a checked selection.
+    pub fn construction_target(
+        &self,
+        construction: ExprId,
+    ) -> Option<crate::ir::IrConstructorTarget> {
+        self.construction_targets.get(&construction).copied()
+    }
+
     pub fn add_expr(&mut self, mut e: IrExpr) -> ExprId {
         let id = self.exprs.len() as u32;
         match &mut e {
