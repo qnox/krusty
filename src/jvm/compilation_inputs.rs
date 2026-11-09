@@ -6,11 +6,14 @@
 
 use std::path::{Path, PathBuf};
 
+/// The environment variable that turns off per-class `@Metadata` in shipping output.
+pub const NO_CLASS_METADATA_VARIABLE: &str = "KRUSTY_NO_CLASS_METADATA";
+
 /// The environment variables a JVM compilation's output depends on, beyond the files it reads. A
 /// build key must include each one's presence and value. Variables that only steer diagnostics,
 /// tracing or caches do not belong here.
 pub const OUTPUT_ENVIRONMENT: [&str; 2] = [
-    crate::jvm::backend::NO_CLASS_METADATA_VARIABLE,
+    NO_CLASS_METADATA_VARIABLE,
     crate::kotlin_version::REFERENCE_VERSION_VARIABLE,
 ];
 

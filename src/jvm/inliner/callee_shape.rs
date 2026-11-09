@@ -15,7 +15,7 @@ const NEW: u8 = 0xbb;
 
 /// A body shape the ported stages do not inline yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum UnsupportedShape {
+pub enum UnsupportedShape {
     /// It reads a `$WhenMappings` table, which kotlinc regenerates for the call site.
     WhenMappings,
     /// It reads `$assertionsDisabled`, a field kotlinc moves to the calling class.
@@ -24,7 +24,7 @@ pub(crate) enum UnsupportedShape {
 
 /// The first shape in `callee` that needs a later stage of the port, if any. Anonymous objects and
 /// SAM wrappers are regenerated for the call site by the method inliner.
-pub(crate) fn unsupported_shape(callee: &MethodNode) -> Option<UnsupportedShape> {
+pub fn unsupported_shape(callee: &MethodNode) -> Option<UnsupportedShape> {
     callee.instructions().find_map(|insn| match insn {
         Insn::Field {
             op: GETSTATIC,
@@ -48,7 +48,7 @@ pub(crate) fn unsupported_shape(callee: &MethodNode) -> Option<UnsupportedShape>
 }
 
 /// Whether `callee` constructs an object that the call site regenerates.
-pub(crate) fn constructs_regenerated_object(callee: &MethodNode, classes: &dyn ClassRoles) -> bool {
+pub fn constructs_regenerated_object(callee: &MethodNode, classes: &dyn ClassRoles) -> bool {
     callee
         .instructions()
         .any(|insn| matches!(insn, Insn::Type { op: NEW, class } if classes.is_regenerated(class)))
@@ -58,7 +58,7 @@ pub(crate) fn constructs_regenerated_object(callee: &MethodNode, classes: &dyn C
 /// point (`isBeforeSuspendMarker`/`isBeforeInlineSuspendMarker`) or a backward jump (a loop) is
 /// entered with nothing under it on the stack, which kotlinc arranges by spilling the caller's
 /// stack.
-pub(crate) fn requires_empty_stack_on_entry(callee: &MethodNode) -> bool {
+pub fn requires_empty_stack_on_entry(callee: &MethodNode) -> bool {
     use crate::jvm::bytecode_passes::coroutines::markers::{
         int_constant, is_suspend_inline_marker, SuspendMarker,
     };
@@ -106,7 +106,7 @@ pub(crate) fn requires_empty_stack_on_entry(callee: &MethodNode) -> bool {
 /// first, in declaration order, each once (or as a run of identical loads), with nothing that could
 /// observe the order in between, and never touched again. The call site then evaluates each
 /// argument where its parameter is loaded instead of storing it to a temporary.
-pub(crate) fn can_inline_arguments_in_place(callee: &MethodNode) -> bool {
+pub fn can_inline_arguments_in_place(callee: &MethodNode) -> bool {
     let Some(mut sizes) =
         crate::jvm::names::parse_method_descriptor(&callee.desc).map(|(parameters, _)| {
             parameters

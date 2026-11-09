@@ -9,8 +9,8 @@
 
 use super::jdk_modules;
 
-const NATIVE_SYS_HEADER: &str = include_str!("../../src/native/runtime/krusty_sys.h");
-const NATIVE_RUNTIME_HEADER: &str = include_str!("../../src/native/runtime/krusty_rt.h");
+const NATIVE_SYS_HEADER: &str = include_str!("../../crates/krusty-native/runtime/krusty_sys.h");
+const NATIVE_RUNTIME_HEADER: &str = include_str!("../../crates/krusty-native/runtime/krusty_rt.h");
 
 /// The runtime's syscall surface, for tests that pin the native concurrency contract.
 pub fn native_sys_header() -> &'static str {
@@ -32,10 +32,10 @@ const NATIVE_DECLINE: &str = "krusty: the native backend does not support ";
 /// string, a crash, a failed link — fails the test it came from, which is where the shape that
 /// provoked it is already written down.
 pub(super) fn also_run_natively(src: &str, stem: &str, expected: &str) {
-    let Some(target) = krusty::native::NativeTarget::host() else {
+    let Some(target) = krusty_native::NativeTarget::host() else {
         return;
     };
-    if !krusty::native::can_link(target) {
+    if !krusty_native::can_link(target) {
         return;
     }
     match native_box_outcome(src, stem, target) {
@@ -56,10 +56,10 @@ pub(super) fn also_run_natively(src: &str, stem: &str, expected: &str) {
 /// Same rule as [`expect_native_box`]: a decline fails the test, and a build that cannot reach
 /// the host target skips.
 pub fn expect_native_sources(sources: &[(&str, &str)], expected: &str) {
-    let Some(target) = krusty::native::NativeTarget::host() else {
+    let Some(target) = krusty_native::NativeTarget::host() else {
         return;
     };
-    if !krusty::native::can_link(target) {
+    if !krusty_native::can_link(target) {
         return;
     }
     let stem = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
@@ -112,8 +112,8 @@ pub fn expect_native_sources_decline(sources: &[(&str, &str)], reason: &str) {
 /// What the native backend says declining the module `sources` (`(stem, text)`), or `None` where
 /// this host cannot link. Emitting or running the program fails the test.
 pub fn native_decline(sources: &[(&str, &str)]) -> Option<String> {
-    let target = krusty::native::NativeTarget::host()?;
-    if !krusty::native::can_link(target) {
+    let target = krusty_native::NativeTarget::host()?;
+    if !krusty_native::can_link(target) {
         return None;
     }
     let stem = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
@@ -138,10 +138,10 @@ pub fn native_decline(sources: &[(&str, &str)]) -> Option<String> {
 /// the report ARE the observable behaviour, so they are what gets pinned.
 #[allow(dead_code)]
 pub fn expect_native_exit(src: &str, stem: &str, code: i32, said: &str) {
-    let Some(target) = krusty::native::NativeTarget::host() else {
+    let Some(target) = krusty_native::NativeTarget::host() else {
         return;
     };
-    if !krusty::native::can_link(target) {
+    if !krusty_native::can_link(target) {
         return;
     }
     match native_box_outcome(src, stem, target) {
@@ -210,7 +210,7 @@ impl NativeBox {
 }
 
 #[allow(dead_code)]
-fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarget) -> NativeBox {
+fn native_box_outcome(src: &str, stem: &str, target: krusty_native::NativeTarget) -> NativeBox {
     native_sources_outcome(&[(stem, src)], target)
 }
 
@@ -292,11 +292,11 @@ fn analyze_natively(
 /// why there is none.
 pub fn native_image(
     sources: &[(&str, &str)],
-    target: krusty::native::NativeTarget,
+    target: krusty_native::NativeTarget,
 ) -> Result<Vec<u8>, NativeBox> {
     let objects = native_objects(sources, target)?;
     let object_refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
-    krusty::native::link_program(&object_refs, target)
+    krusty_native::link_program(&object_refs, target)
         .map_err(|error| NativeBox::Failed(format!("link: {error}")))
 }
 
@@ -304,10 +304,10 @@ pub fn native_image(
 /// are none.
 pub fn native_objects(
     sources: &[(&str, &str)],
-    target: krusty::native::NativeTarget,
+    target: krusty_native::NativeTarget,
 ) -> Result<Vec<Vec<u8>>, NativeBox> {
     use krusty::diag::DiagSink;
-    use krusty::native::{CraneliftBackend, Entry};
+    use krusty_native::{CraneliftBackend, Entry};
 
     let mut diags = DiagSink::new();
     let Some((analysis, stems)) = native_analysis(sources, &mut diags) else {
@@ -416,7 +416,7 @@ pub fn run_native_image(
 /// `box` or `main`; the rest are the declarations it calls.
 fn native_sources_outcome(
     sources: &[(&str, &str)],
-    target: krusty::native::NativeTarget,
+    target: krusty_native::NativeTarget,
 ) -> NativeBox {
     let image = match native_image(sources, target) {
         Ok(image) => image,
@@ -440,8 +440,8 @@ fn native_sources_outcome(
     // `OK` — which the JVM path never sees, because there the answer is a return value rather
     // than a stream. Reading the last LINE instead would take `"FAIL\nOK"` for `OK`.
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    match stdout.split_once(krusty::native::BOX_RESULT_FRAME) {
-        Some((_, answer)) if answer.contains(krusty::native::BOX_RESULT_FRAME) => {
+    match stdout.split_once(krusty_native::BOX_RESULT_FRAME) {
+        Some((_, answer)) if answer.contains(krusty_native::BOX_RESULT_FRAME) => {
             NativeBox::Failed("the program printed more than one box result frame".to_string())
         }
         Some((_, answer)) => NativeBox::Answered(answer.to_owned()),

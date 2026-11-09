@@ -661,7 +661,7 @@ survey *ARGS:
     v="$(just max-version)"
     export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
     box="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
-    cargo build --release --bin survey >&2
+    cargo build --release -p krusty-jvm --bin survey >&2
     if [ -n "{{ARGS}}" ]; then
         ./target/release/survey "$box" --samples {{ARGS}}
     else
