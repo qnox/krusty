@@ -1557,6 +1557,18 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// Initialize `class`'s companion object, as Kotlin/Wasm does when one of the class's
+    /// constructors starts: before its delegation arguments run and before the superclass
+    /// constructor, once, through the companion's own getter.
+    fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let Some(companion) = self.ir.classes[class as usize].companion_class else {
+            return Ok(());
+        };
+        self.singleton(companion)?;
+        self.code.drop_();
+        Ok(())
+    }
+
     fn primary_constructor(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let declaration = self.ir.classes[class as usize].clone();
         let name = declaration.fq_name();
@@ -1570,6 +1582,7 @@ impl Body<'_> {
                 "a superclass constructor call with omitted arguments (`{name}`)"
             ));
         }
+        self.initialize_companion(class)?;
         for &statement in &declaration.super_arg_prelude {
             self.statement(statement)?;
         }
@@ -1651,6 +1664,7 @@ impl Body<'_> {
                 "a constructor delegating with omitted arguments (`{name}`)"
             ));
         }
+        self.initialize_companion(class)?;
         for &statement in &secondary.delegate_prelude {
             self.statement(statement)?;
         }
