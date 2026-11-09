@@ -1875,7 +1875,6 @@ funInterface/castFromAny.kt
 funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype.kt
 funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype2.kt
 funInterface/equality/localFunctionReferences.kt
-funInterface/funConversionInVararg.kt
 funInterface/funInterfaceInheritance.kt
 funInterface/funInterfaceTypealias.kt
 funInterface/funInterfaceWithSuspendMethod.kt
