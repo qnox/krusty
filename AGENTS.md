@@ -315,7 +315,8 @@ Follow data ownership rather than starting at the changed test:
    metadata becomes common semantic structures at this boundary rather than leaking JVM queries into
    resolution.
 5. Lowering and emission: inspect `src/ir_lower.rs` for accidental lookup or semantic decisions,
-   then the relevant file under `src/jvm/` only for physical representation.
+   then the relevant file in the backend crate (`crates/krusty-jvm/src/`, or the class-file layer
+   under `src/jvm/`) only for physical representation.
 6. Tests: require a repository-owned regression plus kotlinc comparison through the harness when
    behavior or diagnostics are in question. Do not accept a corpus pin as the only regression.
 

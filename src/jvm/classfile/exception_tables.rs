@@ -5,7 +5,7 @@ use super::{CodeBuilder, Label};
 impl CodeBuilder {
     /// The method expanded inline bytecode, so [`Self::resolved_exceptions`] sorts the table the
     /// way kotlinc's inliner does.
-    pub(crate) fn note_inlined_bytecode(&mut self) {
+    pub fn note_inlined_bytecode(&mut self) {
         self.inlined_bytecode = true;
     }
 

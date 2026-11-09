@@ -1,6 +1,6 @@
 //! End-to-end "box" coverage for value/inline classes and unsigned types. Each test compiles a
 //! `fun box(): String` with krusty, runs it on a real JVM under verification, and asserts `"OK"`.
-//! Targets `src/jvm/value_classes.rs` and `src/jvm/inline.rs`.
+//! Targets `crates/krusty-jvm/src/value_classes.rs` and `src/jvm/inline.rs`.
 
 use super::common;
 
