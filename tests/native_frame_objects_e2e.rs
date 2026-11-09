@@ -6,8 +6,8 @@ use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
 
 use krusty::backend::Backend as _;
 use krusty::diag::DiagSink;
-use krusty::native::{CraneliftBackend, Entry, NativeTarget};
 use krusty::source::SourceInput;
+use krusty_native::{CraneliftBackend, Entry, NativeTarget};
 
 use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 

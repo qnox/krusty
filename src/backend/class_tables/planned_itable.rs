@@ -22,7 +22,7 @@ use super::{ClassTable, Representation, Slot, SlotKey, Unsupported};
 
 /// What one interface table entry holds.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum InterfaceEntry {
+pub enum InterfaceEntry {
     /// An entry of this file: a class slot's contents, a bridge, or an interface's own body.
     Slot(Slot),
     /// The body an interface another file of the module declares, which that file defines under
@@ -32,13 +32,13 @@ pub(crate) enum InterfaceEntry {
 
 /// The interface tables of every class of a file, indexed by `ClassId`.
 #[derive(Debug)]
-pub(crate) struct InterfaceTables {
+pub struct InterfaceTables {
     /// Indexed by member number; an interface's own is what an implementor supplying nothing
     /// would hold, which is where an object a lambda becomes starts.
-    pub(crate) tables: Vec<Vec<InterfaceEntry>>,
+    pub tables: Vec<Vec<InterfaceEntry>>,
     /// The module interfaces each class implements (an interface: extends, itself first), in a
     /// deterministic order.
-    pub(crate) implemented: Vec<Vec<TypeName>>,
+    pub implemented: Vec<Vec<TypeName>>,
 }
 
 /// How a class implements one numbered spelling.

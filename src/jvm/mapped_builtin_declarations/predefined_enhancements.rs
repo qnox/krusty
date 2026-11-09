@@ -91,7 +91,7 @@ fn predefined_enhancements() -> &'static [PredefinedEnhancement] {
 /// is still declared: substituting a type argument into it keeps the position's nullability
 /// (`V?` stays nullable, `V & Any` drops the argument's `?`, and a flexible `V!` reads the
 /// argument as a platform type).
-pub(in crate::jvm) fn enhance_jdk_signature(
+pub fn enhance_jdk_signature(
     jvm_owner: TypeName,
     physical_name: &str,
     descriptor: &str,

@@ -443,6 +443,8 @@ use qualifiers::*;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
 pub(crate) use serialization_generated_members::resolve as resolve_serialization_generated_member_statuses;
 use stable_path::StablePathRead;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use streaming_signature_bridge::publish_checked_local_signatures;
 use streaming_signature_bridge::*;
 pub(crate) use streaming_signature_bridge::{
     extract_source_contract_candidates, finalize_streamed_top_level_conflicts,
@@ -452,8 +454,7 @@ pub(crate) use streaming_signature_bridge::{
 };
 #[cfg(test)]
 pub(crate) use streaming_signature_bridge::{
-    publish_checked_local_signatures, publish_checked_local_signatures_in_active_root,
-    publish_discovered_local_capture_declarations,
+    publish_checked_local_signatures_in_active_root, publish_discovered_local_capture_declarations,
 };
 use type_join::join_type_projection;
 
@@ -13451,32 +13452,6 @@ impl<'a> Checker<'a> {
             },
         );
         Ty::Error
-    }
-
-    /// Whether a selected parameter can supply a language-defined construction strategy for a
-    /// collection literal. This is intentionally a target-availability query, not a second call
-    /// resolver: overload applicability for the factory itself is checked exactly once when the
-    /// enclosing callable has won and `check_collection_literal` commits the expression.
-    fn collection_literal_target_available(&self, expected: Ty) -> bool {
-        let expected = expected.non_null();
-        if expected.array_elem().is_some() {
-            return true;
-        }
-        let Some(classifier) = expected.kotlin_class_internal() else {
-            return false;
-        };
-        if standard_factory(classifier).is_some() {
-            return true;
-        }
-        self.resolver()
-            .classifier_call_candidates(classifier, "of")
-            .into_iter()
-            .flat_map(|(_, candidates)| candidates)
-            .chain(
-                self.resolver()
-                    .classifier_associated_callables(classifier, "of"),
-            )
-            .any(|candidate| candidate.flags.operator)
     }
 
     fn check_call(
