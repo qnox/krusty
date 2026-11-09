@@ -292,7 +292,6 @@ callableReference/bound/multiCase.kt
 callableReference/bound/nullReceiver.kt
 callableReference/bound/primitiveReceiver.kt
 callableReference/bound/receiverEvaluatedOnce.kt
-callableReference/bound/simpleFunction.kt
 callableReference/bound/simpleProperty.kt
 callableReference/callableReferenceOfCompanionConst.kt
 callableReference/callableReferenceOfCompanionProperty.kt
@@ -422,7 +421,6 @@ classes/kt1980.kt
 classes/kt2417.kt
 classes/kt2566_2.kt
 classes/kt343.kt
-classes/kt500.kt
 classes/kt508.kt
 classes/kt8011.kt
 classes/kt8011a.kt
@@ -1405,7 +1403,6 @@ fakeOverride/substitutionInLocal.kt
 fakeOverride/varianceOverload.kt
 fieldRename/delegates.kt
 finally/kt4134.kt
-finally/notChainCatch.kt
 finally/someStuff.kt
 fir/functionsDifferInTypeParameterBounds.kt
 fir/inferenceWithTypeAliasFromOtherModule.kt
@@ -3827,7 +3824,6 @@ wasm-new-exception-handling/finally7.kt
 wasm-new-exception-handling/finally8.kt
 wasm-new-exception-handling/finally9.kt
 wasm-new-exception-handling/kt4134.kt
-wasm-new-exception-handling/notChainCatch.kt
 wasm-new-exception-handling/rethrow.kt
 wasm-new-exception-handling/returnsDifferentTypes.kt
 wasm-new-exception-handling/someStuff.kt
@@ -3862,7 +3858,6 @@ wasm-old-exception-handling/finally7.kt
 wasm-old-exception-handling/finally8.kt
 wasm-old-exception-handling/finally9.kt
 wasm-old-exception-handling/kt4134.kt
-wasm-old-exception-handling/notChainCatch.kt
 wasm-old-exception-handling/rethrow.kt
 wasm-old-exception-handling/returnsDifferentTypes.kt
 wasm-old-exception-handling/someStuff.kt
