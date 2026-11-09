@@ -1011,7 +1011,6 @@ exceptions/rethrow.kt
 exceptions/throw_from_catch.kt
 extensionFunctions/extensionFunctionAsSupertype.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
-extensionFunctions/extensionFunctionWithInlineModifier.kt
 extensionFunctions/suspendConversionForExtensionFunAsAFunType.kt
 extensionFunctions/suspendConversionForExtensionFunAsAPropertyType.kt
 extensionFunctions/suspendConversionForExtensionFunAsASuperType.kt
@@ -1215,7 +1214,6 @@ inline/lambdaInLambda.kt
 inline/lambdaReassignment.kt
 inline/lambdaReassignmentWithCapture.kt
 inline/lateinitProperty.kt
-inline/localDeclarationsClash.kt
 inline/localInlineExtensionFunction.kt
 inline/localInlineFunction.kt
 inline/localInlineFunctionComplex.kt

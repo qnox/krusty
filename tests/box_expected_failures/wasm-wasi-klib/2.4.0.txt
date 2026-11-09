@@ -1575,7 +1575,6 @@ extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionFakeOverride.kt
 extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
-extensionFunctions/extensionFunctionWithInlineModifier.kt
 extensionFunctions/kt1953.kt
 extensionFunctions/kt1953_class.kt
 extensionFunctions/kt23675.kt
@@ -1953,7 +1952,6 @@ inline/lambdaInLambda.kt
 inline/lambdaReassignment.kt
 inline/lambdaReassignmentWithCapture.kt
 inline/lateinitProperty.kt
-inline/localDeclarationsClash.kt
 inline/localFunctionInInitializerBlock.kt
 inline/localInlineExtensionFunction.kt
 inline/localInlineFunction.kt
