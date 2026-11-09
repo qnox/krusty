@@ -459,12 +459,16 @@ diagnostic markers and adds the helper files its directives select, as kotlinc's
 `inference/inferenceUtils.kt`). It compares only whether each compiler rejects the case.
 
 A false accept, a case kotlinc rejects and krusty compiles without an error, is the divergence it
-ratchets in `tests/diagnostics_false_accepts/jvm/<version>.txt`. A case kotlinc gives no verdict on
-(it crashes, or javac refuses the case's Java) is excused only where
-`tests/diagnostics_not_scored/jvm/<version>.txt` lists it, and the run proves that list in both
-directions. A listed false accept leaves the list only on a definite verdict from both compilers: an
-entry whose case lost kotlinc's or krusty's verdict fails the run, and blessing refuses while one
-does. Rewrite both lists with:
+ratchets in `tests/diagnostics_false_accepts/jvm/<version>.txt`. kotlinc rejects a case only by
+exiting with a compilation error (status 1) anchored at a Kotlin source position. A case kotlinc
+gives no verdict on (an internal error or crash status, an error with no source position, or javac
+refusing the case's Java) is excused only where `tests/diagnostics_not_scored/jvm/<version>.txt`
+lists it, and the run proves that list in both directions. A harness that cannot observe a case (a
+missing kotlinc or javac, the reference JDK configuration, a scratch or transport failure, a case it
+cannot prepare) fails the run whatever the lists say, and blessing then writes neither list. A
+listed false accept leaves the list only on a definite verdict from both compilers: an entry whose
+case lost kotlinc's or krusty's verdict fails the run, and blessing refuses while one does. Rewrite
+both lists with:
 
 ```sh
 KRUSTY_BLESS_DIAGNOSTICS_EXPECTATIONS=1 just diagnostics-conformance "$(just conformance-bin)" <v>
