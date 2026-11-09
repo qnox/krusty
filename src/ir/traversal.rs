@@ -471,7 +471,7 @@ fn default_expr_stub_safe_with_locals(
 /// Expressions in one function body's value namespace, each once. A nested lambda's captures read
 /// this namespace, while its `inline_body` uses the lambda function's own slots and return
 /// boundary, so a rewrite of this body's values never reaches through that boundary.
-pub(crate) fn value_namespace_expressions(ir: &IrFile, body: ExprId) -> Vec<ExprId> {
+pub fn value_namespace_expressions(ir: &IrFile, body: ExprId) -> Vec<ExprId> {
     let mut seen = crate::fx_hash::HashSet::default();
     let mut pending = vec![body];
     let mut expressions = Vec::new();

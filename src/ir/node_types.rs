@@ -24,7 +24,7 @@ pub struct IrNodeTypes {
 
 /// The types of every expression node, by [`ExprId`].
 #[derive(Default)]
-pub(crate) struct IrNodeTypeColumn {
+pub struct IrNodeTypeColumn {
     nodes: Vec<IrNodeTypes>,
 }
 
@@ -58,12 +58,12 @@ impl IrNodeTypeColumn {
 
 impl IrNodeTypeColumn {
     /// The checked logical type of `expression`.
-    pub(crate) fn logical(&self, expression: ExprId) -> Option<Ty> {
+    pub fn logical(&self, expression: ExprId) -> Option<Ty> {
         self.get(expression).logical
     }
 
     /// The physical type `expression` has before a semantic read coercion.
-    pub(crate) fn physical(&self, expression: ExprId) -> Option<Ty> {
+    pub fn physical(&self, expression: ExprId) -> Option<Ty> {
         self.get(expression).physical
     }
 }
@@ -83,12 +83,12 @@ impl InheritedFacts for IrNodeTypeColumn {
 
 impl IrFile {
     /// Give `target` the types `source` has.
-    pub(crate) fn copy_types(&mut self, source: ExprId, target: ExprId) {
+    pub fn copy_types(&mut self, source: ExprId, target: ExprId) {
         self.types.inherit(source, target);
     }
 
     /// The node types, for a view that borrows them beside other parts of the file.
-    pub(crate) fn node_types(&self) -> &IrNodeTypeColumn {
+    pub fn node_types(&self) -> &IrNodeTypeColumn {
         &self.types
     }
 
@@ -141,7 +141,7 @@ impl IrFile {
     }
 
     /// Every expression with a logical type, in arena order.
-    pub(crate) fn logical_types(&self) -> impl Iterator<Item = (ExprId, Ty)> + '_ {
+    pub fn logical_types(&self) -> impl Iterator<Item = (ExprId, Ty)> + '_ {
         self.types
             .all()
             .filter_map(|(expression, types)| Some((expression, types.logical?)))
