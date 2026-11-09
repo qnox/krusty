@@ -310,7 +310,7 @@ pub(super) fn emit_own_member_forward(
             target: JdHolderTarget::AccessBridge,
             annotations: ForwardAnnotations {
                 declared: ir.function_annotations.get(&fid),
-                parameters: ir.fn_param_annotations.get(&fid).map_or(&[], Vec::as_slice),
+                parameters: &ir.declared_parameters(fid).annotations,
             },
         },
     );
@@ -520,16 +520,12 @@ fn jd_nullability_annotation(ty: &Ty) -> Option<&'static str> {
 /// declaration path does.
 fn jd_declared_param_tys(ir: &IrFile, fid: u32) -> Vec<Ty> {
     let f = &ir.functions[fid as usize];
-    let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
+    let declared = ir.declared_parameters(fid);
     f.params
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            if declared_nullable
-                .and_then(|v| v.get(i))
-                .copied()
-                .unwrap_or(false)
-            {
+            if declared.is_nullable(i) {
                 Ty::nullable(*t)
             } else {
                 *t

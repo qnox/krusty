@@ -670,14 +670,10 @@ fn copy_function_implementation_facts(
     ir.set_method_visibility(target, ir.method_visibility(source));
     copy_map!(fn_source_names);
     copy_map!(fn_params);
-    copy_map!(fn_param_declared_nullable);
     copy_map!(fn_declared_spellings);
-    copy_map!(fn_context_counts);
-    copy_map!(fn_param_annotations);
-    copy_map!(fn_param_no_infer);
     copy_map!(fn_return_value_statuses);
-    copy_map!(fn_varargs);
     ir.copy_function_position(source, target);
+    ir.copy_declared_parameters(source, target);
     copy_map!(fn_source_order);
     copy_map!(fn_continuation_ordinal);
     copy_map!(fn_contracts);

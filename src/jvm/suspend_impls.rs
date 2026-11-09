@@ -70,6 +70,19 @@ fn move_list_marker(markers: &mut [u32], implementation: u32, declaration: u32) 
     }
 }
 
+/// The declaration's parameter facts become the trampoline's. The body carrier keeps only the
+/// parameter annotations its physical parameters still carry, after the holder receiver it gains.
+fn split_declared_parameters(ir: &mut IrFile, implementation: u32, declaration: u32) {
+    let declared = ir.take_declared_parameters(implementation);
+    if !declared.annotations.is_empty() {
+        ir.declared_parameters_mut(implementation).annotations =
+            std::iter::once(crate::ir::DeclarationAnnotations::default())
+                .chain(declared.annotations.iter().cloned())
+                .collect();
+    }
+    *ir.declared_parameters_mut(declaration) = declared;
+}
+
 /// Transfer facts owned by the Kotlin declaration to its new trampoline identity.
 ///
 /// The original id now names only the backend's synthetic body carrier. Signature shapes are the
@@ -77,11 +90,6 @@ fn move_list_marker(markers: &mut [u32], implementation: u32, declaration: u32) 
 /// copied below rather than moved.
 fn move_declaration_facts(ir: &mut IrFile, implementation: u32, declaration: u32) {
     copy_fact(&mut ir.function_annotations, implementation, declaration);
-    move_fact(
-        &mut ir.fn_param_declared_nullable,
-        implementation,
-        declaration,
-    );
     move_fact(&mut ir.fn_declared_spellings, implementation, declaration);
     // Both surfaces project parameter/debug names from the declaration spelling: the trampoline
     // is the metadata declaration, while the static body carrier still owns the implementation's
@@ -95,8 +103,6 @@ fn move_declaration_facts(ir: &mut IrFile, implementation: u32, declaration: u32
         implementation,
         declaration,
     );
-    move_fact(&mut ir.fn_context_counts, implementation, declaration);
-    move_fact(&mut ir.fn_param_no_infer, implementation, declaration);
     move_fact(
         &mut ir.fn_return_value_statuses,
         implementation,
@@ -107,7 +113,6 @@ fn move_declaration_facts(ir: &mut IrFile, implementation: u32, declaration: u32
         implementation,
         declaration,
     );
-    move_fact(&mut ir.fn_varargs, implementation, declaration);
     move_header_and_end_lines(ir, implementation, declaration);
 
     move_marker(&mut ir.extension_receiver_fns, implementation, declaration);
@@ -249,15 +254,7 @@ pub(crate) fn lower_suspend_impls(ir: &mut IrFile) {
                 ir.fn_params.insert(fid, implementation_info);
                 ir.fn_params.insert(trampoline, declaration_info);
             }
-            if let Some(declaration_annotations) = ir.fn_param_annotations.get(&fid).cloned() {
-                ir.fn_param_annotations
-                    .insert(trampoline, declaration_annotations.clone());
-                let mut implementation_annotations =
-                    vec![crate::ir::DeclarationAnnotations::default()];
-                implementation_annotations.extend(declaration_annotations);
-                ir.fn_param_annotations
-                    .insert(fid, implementation_annotations);
-            }
+            split_declared_parameters(ir, fid, trampoline);
             // NOT the declaration line: kotlinc gives the trampoline a LocalVariableTable and no
             // LineNumberTable at all. It is a forwarder with no source statement of its own.
             // It DOES record locals — kotlinc gives it `$this`, the declared parameters and

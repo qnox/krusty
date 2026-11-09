@@ -84,7 +84,7 @@ pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability
     .flatten();
     // A parameter's declared `?` lives in a side-table (not in `f.params`, which stays non-null for the
     // mangle); consult it so a nullable reference parameter is annotated `@Nullable`, not `@NotNull`.
-    let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
+    let declared = ir.declared_parameters(fid);
     // A value-class member's static `-impl` has one backend-generated carrier before its source
     // parameters. Declaration-side facts never acquire that physical prefix.
     let value_class_receiver_prefix = usize::from(ir.jvm_value_class_receiver_impls.contains(&fid));
@@ -120,10 +120,7 @@ pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability
                 let nullable = if value_class_parameters.is_some() {
                     semantic.is_nullable()
                 } else {
-                    source_index
-                        .and_then(|index| declared_nullable.and_then(|values| values.get(index)))
-                        .copied()
-                        .unwrap_or(false)
+                    source_index.is_some_and(|index| declared.is_nullable(index))
                 };
                 // A parameter is a value slot: a `Unit` one is the `kotlin.Unit` reference.
                 let physical = crate::jvm::method_descriptors::jvm_value_ty(t);

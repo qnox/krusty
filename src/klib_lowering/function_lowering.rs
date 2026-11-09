@@ -1060,7 +1060,7 @@ pub(super) fn declare_function(ir: &mut IrFile, header: &FunctionHeader) -> FunI
         ir.extension_receiver_fns.insert(function);
     }
     if header.context_count != 0 {
-        ir.fn_context_counts.insert(function, header.context_count);
+        ir.declared_parameters_mut(function).context_count = header.context_count;
     }
     if let Some(receiver) = header.singleton_extension_unread_receiver() {
         ir.singleton_extension_unread_receivers

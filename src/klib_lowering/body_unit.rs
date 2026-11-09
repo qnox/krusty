@@ -1328,7 +1328,7 @@ impl CallLinker for Linker<'_, '_> {
             receiver: None,
             params: declaration.params.clone(),
             ret: declaration.ret,
-            context_count: ir.fn_context_counts.get(&function).copied().unwrap_or(0),
+            context_count: ir.declared_parameters(function).context_count,
             singleton_dispatch: None,
             type_parameters: selected
                 .and_then(|selected| selected.generic_signature())

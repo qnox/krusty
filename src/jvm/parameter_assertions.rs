@@ -26,11 +26,7 @@ fn realize_function(ir: &mut IrFile, function: FunId) {
     else {
         return;
     };
-    let declared_nullable = ir
-        .fn_param_declared_nullable
-        .get(&function)
-        .cloned()
-        .unwrap_or_default();
+    let declared_nullable = ir.declared_parameters(function).nullable.clone();
     // A guard quotes the parameter's name. A value parameter whose provider publishes none (a
     // Java-declared parameter of a mapped collection interface, forwarded by delegation) has no
     // spelling to quote, and a name is never invented for it.

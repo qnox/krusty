@@ -494,7 +494,7 @@ impl IrFile {
     /// declared context and value parameters, so the position is the declared parameter at that
     /// ordinal.
     pub(crate) fn vararg_parameter_position(&self, function: FunId) -> Option<usize> {
-        let vararg = self.fn_varargs.get(&function)?;
+        let vararg = self.declared_parameters(function).vararg?;
         self.function_parameter_identities(function)?
             .iter()
             .enumerate()

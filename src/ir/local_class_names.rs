@@ -1250,8 +1250,8 @@ impl super::IrFile {
         for annotations_by_function in self.function_annotations.values_mut() {
             annotations(annotations_by_function, names);
         }
-        for annotations_by_parameter in self.fn_param_annotations.values_mut() {
-            for parameter_annotations in annotations_by_parameter {
+        for parameters in self.all_declared_parameters_mut() {
+            for parameter_annotations in &mut parameters.annotations {
                 annotations(parameter_annotations, names);
             }
         }
