@@ -18,13 +18,15 @@
 //! implementations (`super::super::interface_dispatch`, `super::interface_implementations`).
 //!
 //! **Refusals.** Anything this form does not cover declines by name: a class kind other than an
-//! ordinary class, interface or `object`, a superclass declared in another file, and an override
-//! whose function-type or accessor signature needs a bridge in a class table.
+//! ordinary class, interface or `object`, a superclass declared in another file, and an `invoke`
+//! whose function-type signature needs a bridge in a class table.
 //!
 //! **Bridges.** An override whose representation differs from the base member it overrides
 //! (`Derived : Base<Int>` returning an `i32` where `Base<T>` returns a reference) stands in the
 //! base's slot through a bridge: a function of the base's signature that converts each operand
-//! and dispatches through the override's own slot (see `Slot::Bridge`).
+//! and dispatches through the override's own slot (see `Slot::Bridge`). A property accessor is
+//! bridged the same way (`Slot::AccessorBridge`): `override val value: String` stands in for
+//! `Holder<String?>.value: T & Any`, whose getter answers a reference.
 
 use krusty::fx_hash::HashMap;
 
@@ -114,14 +116,63 @@ pub(super) struct Accessor {
     pub(super) setter: bool,
 }
 
-/// A representation bridge a table slot holds (see [`Slot::Bridge`]): `class` is the class that
-/// introduced it, whose table type every receiver reaching the bridge has.
+/// A representation bridge a table slot holds (see [`Slot::Bridge`] and [`Slot::AccessorBridge`]):
+/// `class` is the class that introduced it, whose table type every receiver reaching the bridge
+/// has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct OverrideBridge {
     pub(super) class: ClassId,
-    pub(super) declared: FunId,
-    pub(super) target_slot: Option<u32>,
-    pub(super) target: FunId,
+    pub(super) member: BridgedMember,
+}
+
+/// The member a bridge wears the base's signature of, and where it forwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum BridgedMember {
+    /// A method: the base method `declared`, forwarded through `target_slot` (see
+    /// [`Slot::Bridge`]) to `target`.
+    Method {
+        declared: FunId,
+        target_slot: Option<u32>,
+        target: FunId,
+    },
+    /// A property accessor: the property type as the base declares it and as the implementation
+    /// has it, forwarded through `target_slot` (see [`Slot::AccessorBridge`]).
+    Accessor {
+        declared: Ty,
+        implemented: Ty,
+        setter: bool,
+        target_slot: u32,
+    },
+}
+
+impl BridgedMember {
+    /// The bridge `entry` stands for, or `None` for an entry that is not one this form carries.
+    fn of(entry: &Slot) -> Option<Self> {
+        match *entry {
+            Slot::Bridge {
+                declared,
+                target_slot,
+                target,
+            } => Some(Self::Method {
+                declared,
+                target_slot,
+                target,
+            }),
+            Slot::AccessorBridge {
+                declared,
+                implemented,
+                receiver: None,
+                setter,
+                target_slot,
+            } => Some(Self::Accessor {
+                declared,
+                implemented,
+                setter,
+                target_slot,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// The lazily constructed instance of an `object` declaration.
@@ -247,6 +298,17 @@ pub(super) fn method_type(
     }
     let results = carrier(declaration.ret)?.into_iter().collect();
     Ok(module.func_type(params, results))
+}
+
+/// The function type of an accessor of a property of type `ty`, as a class table carries it: the
+/// receiver, then the value a setter takes; a getter answers the value.
+fn accessor_type(module: &mut Module, ty: Ty, setter: bool) -> Result<u32, Unsupported> {
+    let value = carrier(ty)?.ok_or_else(|| "a `Unit` property".to_string())?;
+    Ok(if setter {
+        module.func_type(vec![REFERENCE, value], Vec::new())
+    } else {
+        module.func_type(vec![REFERENCE], vec![value])
+    })
 }
 
 /// The module-wide numbering of the interface members of `classes`, as every file of the module
@@ -471,46 +533,37 @@ pub(super) fn declare(
                     };
                     accessor_function(module, &mut accessors, accessor, ty)
                 }
-                Slot::Bridge {
-                    declared,
-                    target_slot,
-                    target,
-                } => {
-                    let known = bridges.iter().find(|(bridge, ..)| {
-                        bridge.declared == *declared
-                            && bridge.target_slot == *target_slot
-                            && bridge.target == *target
-                    });
-                    match known {
+                Slot::Bridge { .. } | Slot::AccessorBridge { .. } | Slot::FunctionBridge { .. } => {
+                    let member = BridgedMember::of(entry).ok_or_else(|| {
+                        format!(
+                            "an override carried differently from the member it overrides (`{}`)",
+                            class.fq_name()
+                        )
+                    })?;
+                    // The class that introduced the bridge: every receiver reaching this entry
+                    // is an instance of it, so its table type is the one to cast to, whichever
+                    // subclass's table this happens to be built for first. It is part of the
+                    // bridge's identity, because two unrelated hierarchies can bridge accessors
+                    // of the same types at the same slot.
+                    let mut introducer = id;
+                    while let Some(parent) = tables.table(introducer).superclass {
+                        if tables.table(parent).vtable.get(slot) != Some(entry) {
+                            break;
+                        }
+                        introducer = parent;
+                    }
+                    let bridge = OverrideBridge {
+                        class: introducer,
+                        member,
+                    };
+                    match bridges.iter().find(|(known, ..)| *known == bridge) {
                         Some((_, function, _)) => *function,
                         None => {
-                            // The class that introduced the bridge: every receiver reaching this
-                            // entry is an instance of it, so its table type is the one to cast to,
-                            // whichever subclass's table this happens to be built for first.
-                            let mut introducer = id;
-                            while let Some(parent) = tables.table(introducer).superclass {
-                                if tables.table(parent).vtable.get(slot) != Some(entry) {
-                                    break;
-                                }
-                                introducer = parent;
-                            }
                             let function = module.declare();
-                            let bridge = OverrideBridge {
-                                class: introducer,
-                                declared: *declared,
-                                target_slot: *target_slot,
-                                target: *target,
-                            };
                             bridges.push((bridge, function, ty));
                             function
                         }
                     }
-                }
-                Slot::FunctionBridge { .. } | Slot::AccessorBridge { .. } => {
-                    return Err(format!(
-                        "an override carried differently from the member it overrides (`{}`)",
-                        class.fq_name()
-                    ));
                 }
             };
             module.reference_function(function);
@@ -661,7 +714,10 @@ fn slot_types(
                     None => None,
                 },
                 Slot::Bridge { declared, .. } => Some(method_type(module, ir, *declared)?),
-                Slot::FunctionBridge { .. } | Slot::AccessorBridge { .. } => None,
+                Slot::AccessorBridge {
+                    declared, setter, ..
+                } => Some(accessor_type(module, *declared, *setter)?),
+                Slot::FunctionBridge { .. } => None,
             };
             own[slot] = ty;
         }
@@ -741,15 +797,7 @@ fn property_key_type(
             if let Some(function) = function {
                 return method_type(module, ir, function);
             }
-            let value = carrier(*ty)?.ok_or_else(|| "a `Unit` property".to_string())?;
-            let mut params = vec![REFERENCE];
-            let results = if setter {
-                params.push(value);
-                Vec::new()
-            } else {
-                vec![value]
-            };
-            return Ok(module.func_type(params, results));
+            return accessor_type(module, *ty, setter);
         }
         Some(IrLocalPropertyLayout::MemberExtension {
             getter,
