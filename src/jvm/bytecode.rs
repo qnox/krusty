@@ -7,7 +7,7 @@
 /// The length in bytes of the instruction at `pc` (opcode + operands), including the
 /// variable-length `tableswitch`/`lookupswitch`/`wide` forms. Returns `None` for an out-of-range,
 /// malformed, or truncated instruction.
-pub(crate) fn instruction_len(code: &[u8], pc: usize) -> Option<usize> {
+pub fn instruction_len(code: &[u8], pc: usize) -> Option<usize> {
     let op = *code.get(pc)?;
     let len = match op {
         0xc4 => match code.get(pc + 1)? {
@@ -75,7 +75,7 @@ pub(crate) const CODEGEN_MARKER_OP: u8 = 0xff;
 
 /// Which `InlineMarker` method a [`CODEGEN_MARKER_OP`] stands for; its one operand byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CodegenMarker {
+pub enum CodegenMarker {
     /// `mark(I)V`: the id is pushed by an ordinary constant instruction before it.
     Mark = 1,
     BeforeInlineCall = 2,
@@ -87,7 +87,7 @@ pub(crate) enum CodegenMarker {
 }
 
 impl CodegenMarker {
-    pub(crate) const OWNER: &'static str = "kotlin/jvm/internal/InlineMarker";
+    pub const OWNER: &'static str = "kotlin/jvm/internal/InlineMarker";
 
     pub(crate) fn from_operand(operand: u8) -> Option<CodegenMarker> {
         Some(match operand {
@@ -100,7 +100,7 @@ impl CodegenMarker {
     }
 
     /// The `InlineMarker` method's name and descriptor.
-    pub(crate) fn method(self) -> (&'static str, &'static str) {
+    pub fn method(self) -> (&'static str, &'static str) {
         match self {
             CodegenMarker::Mark => ("mark", "(I)V"),
             CodegenMarker::BeforeInlineCall => ("beforeInlineCall", "()V"),

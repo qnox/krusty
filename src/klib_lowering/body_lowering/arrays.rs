@@ -1,6 +1,6 @@
 //! Serialized array operands use the same packed vararg node as checked source lowering.
 
-use super::{mismatch, semantic_type, BodyLowering, ExprId, IrExpr, Lowered, Ty};
+use super::{mismatch, BodyLowering, ExprId, IrExpr, Lowered, Ty};
 use crate::metadata::klib_ir::tree::{KlibIrTypeId, KlibIrVarargElement};
 
 impl BodyLowering<'_> {
@@ -12,7 +12,7 @@ impl BodyLowering<'_> {
     ) -> Lowered<ExprId> {
         let element =
             super::super::function_lowering::vararg_parameters::array_element(array_type)?;
-        if semantic_type(self.arena, self.header.type_parameters(), element_type)? != element {
+        if self.semantic(element_type)? != element {
             return Err(mismatch(
                 "a serialized vararg expression disagrees with its packed array element",
             ));
