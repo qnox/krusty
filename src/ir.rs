@@ -1297,6 +1297,15 @@ pub struct IrValueClassTypeOperation {
 
 /// A call-site copy of a lambda implementation.
 ///
+/// The inline function whose body an expansion copied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum IrInlineCallee {
+    /// A same-module inline callable, by its stable checked identity.
+    Module(crate::fir::CallableId),
+    /// An inline dependency function, expanded from its template in this file.
+    Dependency(crate::fir::ExternalCallableId),
+}
+
 /// The record keeps the checked declaration identities and lexical containment that caused the
 /// copy. Source spellings are retained only as rendering provenance. A backend decides whether the
 /// copy needs a separate artifact and owns every physical name and ordinal used for that artifact.
@@ -1315,8 +1324,8 @@ pub struct IrSpecializedFunction {
     /// Source spelling of that declaration, or the deliberately empty spelling of a constructor or
     /// unnamed initializer. This is rendering provenance, never the expansion identity.
     pub caller_source_name: String,
-    /// Stable checked identity of the same-module inline callable that was expanded.
-    pub inline_callee: crate::fir::CallableId,
+    /// The inline callable that was expanded.
+    pub inline_callee: IrInlineCallee,
     /// Source spelling retained for target-specific debug/artifact rendering.
     pub inline_callee_source_name: String,
     /// Specialized implementation lexically containing this one. Nested copies retain containment
@@ -1343,7 +1352,7 @@ pub struct IrSpecializedAnonymousClass {
     pub caller: Option<IrEnclosure>,
     pub caller_is_default: bool,
     pub caller_source_name: String,
-    pub inline_callee: crate::fir::CallableId,
+    pub inline_callee: IrInlineCallee,
     pub inline_callee_source_name: String,
     /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
     /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
