@@ -1278,6 +1278,9 @@ mod dependency_constructor_exports;
 #[path = "wasm_escaping_closures.rs"]
 mod escaping_closures;
 
+#[path = "wasm_type_of.rs"]
+mod type_of;
+
 #[test]
 fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
     expect_wasm_box(

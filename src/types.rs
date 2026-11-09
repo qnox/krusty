@@ -10,6 +10,7 @@ mod diagnostic_rendering;
 mod intersection;
 pub use intersection::declaration_approximation;
 mod overridden_declaration;
+mod qualified_name;
 mod semantic_call_role;
 mod semantic_callable_owner;
 pub use classifier_declarations::{

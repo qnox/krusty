@@ -34,6 +34,7 @@ mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
 mod string_conversion;
+mod type_of;
 
 #[cfg(test)]
 use tests::lower_alone;
@@ -1127,6 +1128,24 @@ impl<'a> Body<'a> {
                     krusty::backend::default_arguments::mask_words(params.len()),
                 ));
                 self.direct_call(function, &frame, &args)?;
+            }
+            // The target stdlib's own `typeOf` body only says it is a compiler intrinsic.
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::External {
+                target,
+                substitutions,
+                ..
+            } = &**call_callee
+                && args.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::TypeOf)
+                }) =>
+            {
+                self.type_of_call(*target, substitutions)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
