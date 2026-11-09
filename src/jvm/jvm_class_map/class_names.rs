@@ -1,9 +1,10 @@
 //! `JavaToKotlinClassMap`'s name mapping between Kotlin classifiers and JVM classes: the JVM class
 //! a Kotlin classifier is on the platform (`mapKotlinToJava`), and the Kotlin classifier a JVM
 //! class is read as (`mapJavaToKotlin`). Unlike erasure, a primitive maps to its box, a companion
-//! with an intrinsic mapping to its `CompanionObject` class, and `kotlin.Nothing` only one way.
+//! with an intrinsic mapping to its `CompanionObject` class, and `kotlin.Nothing` and the atomics
+//! only one way.
 
-use super::{wrapper_to_kotlin_prim, ERASURE_GROUPS, NOTHING_JVM};
+use super::{wrapper_to_kotlin_prim, ERASURE_GROUPS};
 use crate::fx_hash::HashMap as FxHashMap;
 use crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY;
 use crate::types::{type_name, type_name_child, TypeName, KFUNCTION_INTERNAL};
@@ -39,9 +40,9 @@ struct ClassMap {
     java_to_kotlin: FxHashMap<TypeName, TypeName>,
 }
 
-/// The pairs `JavaToKotlinClassMap`'s `init` adds, in its order: the mapped builtins and
-/// collections, the primitive boxes, the intrinsic companions, the numbered function interfaces
-/// and the atomics, which map one way.
+/// The pairs `JavaToKotlinClassMap`'s `init` adds: the erasure groups (mapped builtins,
+/// collections and the one-way `Nothing` and atomics), the primitive boxes, the intrinsic
+/// companions and the numbered function interfaces.
 fn class_map() -> &'static ClassMap {
     static MAP: std::sync::OnceLock<ClassMap> = std::sync::OnceLock::new();
     MAP.get_or_init(|| {
@@ -55,7 +56,7 @@ fn class_map() -> &'static ClassMap {
                 map.kotlin_to_java.insert(type_name(kotlin), java);
             }
             if let Some(kotlin) = group.kotlin_names.first() {
-                if group.jvm_name != NOTHING_JVM {
+                if group.maps_java_source_to_kotlin {
                     map.java_to_kotlin.insert(java, type_name(kotlin));
                 }
             }
@@ -99,20 +100,6 @@ fn class_map() -> &'static ClassMap {
             both(
                 type_name_child(kotlin, &format!("Function{arity}")),
                 type_name_child(functions, &format!("Function{arity}")),
-            );
-        }
-        for (kotlin, java) in [
-            ("AtomicInt", "AtomicInteger"),
-            ("AtomicLong", "AtomicLong"),
-            ("AtomicBoolean", "AtomicBoolean"),
-            ("AtomicReference", "AtomicReference"),
-            ("AtomicIntArray", "AtomicIntegerArray"),
-            ("AtomicLongArray", "AtomicLongArray"),
-            ("AtomicArray", "AtomicReferenceArray"),
-        ] {
-            map.kotlin_to_java.insert(
-                type_name_child(type_name("kotlin/concurrent/atomics"), kotlin),
-                type_name_child(type_name("java/util/concurrent/atomic"), java),
             );
         }
         map

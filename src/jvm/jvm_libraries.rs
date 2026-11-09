@@ -1796,12 +1796,12 @@ impl JvmLibraries {
                 } else if m.is_static() {
                     provider_normalization::publish_classifier_static(&mut companion, member);
                 } else {
-                    // `java.lang.Number.intValue` and the other numeric conversions are Kotlin's
-                    // `Number.toInt` declarations. The realization table records the classfile
-                    // owner (`java/lang/Number`); the requested name may be the Kotlin mapped
-                    // identity (`kotlin/Number`) because class lookup translates it first.
+                    // `java.lang.Number.intValue` is Kotlin's `Number.toInt`. The table records the
+                    // classfile owner (`java/lang/Number`); the requested name may be the Kotlin
+                    // identity (`kotlin/Number`), which class lookup translates first.
                     if let Some(source) =
                         super::mapped_builtin_declarations::source_name_for_realization(
+                            internal_name,
                             ci.this_class,
                             &m.name,
                             &member.descriptor,
