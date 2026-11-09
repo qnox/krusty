@@ -395,7 +395,7 @@ fn run_kotlin_first(kotlin: &str, java: &[(&str, &str)]) -> String {
     let outputs = krusty::compiler::emit_analyzed(
         analysis,
         &stems,
-        &krusty::jvm::JvmBackend::new(classpath),
+        &krusty_jvm::JvmBackend::new(classpath),
         "main",
         &mut diagnostics,
     );

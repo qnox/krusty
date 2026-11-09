@@ -7,14 +7,14 @@ use crate::fx_hash::HashMap;
 
 /// Reified arguments at one inline call site, in the forms the body's markers consume.
 #[derive(Clone, Debug, Default)]
-pub(in crate::jvm) struct ReifiedArguments {
-    pub(in crate::jvm) classes: HashMap<String, ReifiedArgument>,
-    pub(in crate::jvm) type_of: HashMap<String, Vec<crate::jvm::type_of::TypeOfInsn>>,
+pub struct ReifiedArguments {
+    pub classes: HashMap<String, ReifiedArgument>,
+    pub type_of: HashMap<String, Vec<crate::jvm::type_of::TypeOfInsn>>,
 }
 
 /// The call-site value of one reified type parameter of an inline body.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::jvm) enum ReifiedArgument {
+pub enum ReifiedArgument {
     /// A concrete JVM class (internal name): the marker is erased and its type-bearing op
     /// repointed. `classifier` is the argument's semantic classifier identity when it names one
     /// (not a function type, an array or `Nothing`); a declaration fact such as an enum's entries
@@ -37,7 +37,7 @@ pub(in crate::jvm) enum ReifiedArgument {
 /// How a call site reads the entries of one concrete enum, as kotlinc's
 /// `ReifiedTypeInliner.processSpecialEnumFunction` decides it from the enum's declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::jvm) enum EnumEntriesRead {
+pub enum EnumEntriesRead {
     /// The enum's provider published a static entries accessor: call exactly that target.
     Accessor {
         owner: String,
@@ -52,7 +52,7 @@ pub(in crate::jvm) enum EnumEntriesRead {
 
 /// The call site's answer to [`EnumEntriesRead`] for each enum an inlined body reads the entries
 /// of. A read that claims a mapping field claims it for the class the body is inlined into.
-pub(in crate::jvm) trait EnumEntriesReads {
+pub trait EnumEntriesReads {
     /// How the enum `classifier` (JVM class `internal`) is read. `None` when its declaration is
     /// not an enum this call site can read, which the inliner refuses.
     fn entries(

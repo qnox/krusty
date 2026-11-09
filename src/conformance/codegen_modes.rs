@@ -6,7 +6,7 @@
 //! precedence. Both select through [`UnitCodegenModes::of_unit`]: a mode is read from the Kotlin
 //! sources of the unit being compiled, never broadcast from one unit's directive to another.
 
-use crate::jvm::ir_emit::{JvmDefaultMode, LambdaMode, LambdaModes};
+use crate::jvm::emit_modes::{JvmDefaultMode, LambdaMode, LambdaModes};
 
 use super::{
     jvm_default_mode, lambda_mode, needs_unmodeled_jvm_default_mode, needs_unmodeled_lambda_mode,

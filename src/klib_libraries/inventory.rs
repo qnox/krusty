@@ -22,6 +22,35 @@ pub(super) struct CompanionExtension<T> {
     pub(super) signed: T,
 }
 
+/// Where inventory construction published each top-level function signature, so stdlib authority
+/// is decided by lookup rather than by scanning every function published so far.
+#[derive(Default)]
+struct PublishedFunctions {
+    /// Signatures the compilation-designated stdlib has published.
+    authoritative: HashSet<KlibPublicIdSignature>,
+    /// The stores holding at least one function with the signature; a store may repeat.
+    stores: HashMap<KlibPublicIdSignature, Vec<FunctionStore>>,
+}
+
+impl PublishedFunctions {
+    fn record(&mut self, function: &SignedFunction, store: FunctionStore) {
+        if function.compiler_builtin_owner {
+            self.authoritative.insert(function.signature.clone());
+        }
+        self.stores
+            .entry(function.signature.clone())
+            .or_default()
+            .push(store);
+    }
+}
+
+/// One publication store of the inventory, keyed as the inventory keys it.
+#[derive(Clone, Copy)]
+enum FunctionStore {
+    Package(TypeName),
+    Companion(TypeName),
+}
+
 /// One decoded package fragment with the archive authority needed while its declarations are
 /// signed and normalized. Keeping these facts named prevents tuple position from becoming an
 /// accidental provider contract as archive semantics grow.
@@ -152,6 +181,7 @@ impl PackageInventory {
         // package fragments from the same module must not become duplicate candidates, while two
         // modules' equal internal signatures remain distinct so exact friendship can select one.
         let mut declared_signatures = HashSet::default();
+        let mut published_functions = PublishedFunctions::default();
         for ArchivePackageInput {
             segments,
             package,
@@ -215,11 +245,15 @@ impl PackageInventory {
                 inventory.intrinsics.insert(&function);
                 if !declared_signatures.insert((module.clone(), function.signature.clone())) {
                     if function.compiler_builtin_owner {
-                        inventory.insert_selected_function(identity, function);
+                        inventory.insert_selected_function(
+                            &mut published_functions,
+                            identity,
+                            function,
+                        );
                     }
                     continue;
                 }
-                inventory.insert_selected_function(identity, function);
+                inventory.insert_selected_function(&mut published_functions, identity, function);
             }
             let signed = package
                 .properties
@@ -349,12 +383,19 @@ impl PackageInventory {
         }
     }
 
-    /// Publish a signed function in the namespace selected by its own metadata.
-    fn insert_function(&mut self, package: TypeName, function: SignedFunction) {
+    /// Publish a signed function in the namespace selected by its own metadata, and record that
+    /// namespace in `published` so a later stdlib declaration can withdraw it.
+    fn insert_function(
+        &mut self,
+        published: &mut PublishedFunctions,
+        package: TypeName,
+        function: SignedFunction,
+    ) {
         if function.declaration.is_static {
             // A static top-level declaration is a companion extension; one without a classifier
             // receiver names nothing it could be called through.
             if let Some(classifier) = companion_receiver(&function.declaration.receiver) {
+                published.record(&function, FunctionStore::Companion(classifier));
                 self.companion_functions
                     .entry(classifier)
                     .or_default()
@@ -365,6 +406,7 @@ impl PackageInventory {
             }
             return;
         }
+        published.record(&function, FunctionStore::Package(package));
         self.functions.entry(package).or_default().push(function);
     }
 
@@ -375,31 +417,41 @@ impl PackageInventory {
     /// not just a boolean copied onto whichever dependency metadata happened to be read first.
     /// Removing from both publication stores also keeps the declaration in the namespace selected
     /// by its authoritative placement metadata.
-    fn insert_selected_function(&mut self, package: TypeName, function: SignedFunction) {
+    fn insert_selected_function(
+        &mut self,
+        published: &mut PublishedFunctions,
+        package: TypeName,
+        function: SignedFunction,
+    ) {
         let signature = &function.signature;
-        let authoritative_exists = self
-            .functions
-            .values()
-            .flatten()
-            .any(|prior| prior.compiler_builtin_owner && &prior.signature == signature)
-            || self.companion_functions.values().flatten().any(|prior| {
-                prior.signed.compiler_builtin_owner && &prior.signed.signature == signature
-            });
-        if authoritative_exists && !function.compiler_builtin_owner {
-            return;
+        if !function.compiler_builtin_owner {
+            if published.authoritative.contains(signature) {
+                return;
+            }
+        } else {
+            published.authoritative.remove(signature);
+            for store in published.stores.remove(signature).unwrap_or_default() {
+                match store {
+                    FunctionStore::Package(package) => {
+                        if let Some(functions) = self.functions.get_mut(&package) {
+                            functions.retain(|prior| &prior.signature != signature);
+                            if functions.is_empty() {
+                                self.functions.remove(&package);
+                            }
+                        }
+                    }
+                    FunctionStore::Companion(classifier) => {
+                        if let Some(functions) = self.companion_functions.get_mut(&classifier) {
+                            functions.retain(|prior| &prior.signed.signature != signature);
+                            if functions.is_empty() {
+                                self.companion_functions.remove(&classifier);
+                            }
+                        }
+                    }
+                }
+            }
         }
-        if function.compiler_builtin_owner {
-            self.functions
-                .values_mut()
-                .for_each(|functions| functions.retain(|prior| &prior.signature != signature));
-            self.functions.retain(|_, functions| !functions.is_empty());
-            self.companion_functions.values_mut().for_each(|functions| {
-                functions.retain(|prior| &prior.signed.signature != signature);
-            });
-            self.companion_functions
-                .retain(|_, functions| !functions.is_empty());
-        }
-        self.insert_function(package, function);
+        self.insert_function(published, package, function);
     }
 
     /// The top-level declarations whose IR holds a parameter default that metadata says exists:

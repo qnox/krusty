@@ -521,8 +521,8 @@ impl BackendModuleFacts {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_classifiers(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_classifiers(
         source: impl IntoIterator<Item = (TypeName, LibraryType)>,
         body_local_classifiers: impl IntoIterator<Item = TypeName>,
     ) -> Result<Self, BackendFactError> {
@@ -610,7 +610,7 @@ impl BackendModuleFacts {
     }
 
     /// The dispatch shape of every named class of the module, when the target asked for it.
-    pub(crate) fn classes(&self) -> &super::class_tables::module_classes::ModuleClasses {
+    pub fn classes(&self) -> &super::class_tables::module_classes::ModuleClasses {
         &self.classes
     }
 
@@ -633,7 +633,7 @@ impl BackendModuleFacts {
 
     /// The checked defaults `classifier` inherits without overriding, independent of which source
     /// file is currently entering Pass 2.
-    pub(crate) fn inherited_defaults(
+    pub fn inherited_defaults(
         &self,
         classifier: TypeName,
     ) -> Option<&[crate::fir::ResolvedInheritedDefault]> {
@@ -727,7 +727,7 @@ pub struct CheckedBackendClassifiers<'a> {
 }
 
 impl<'a> CheckedBackendClassifiers<'a> {
-    pub(crate) fn new(module: &'a BackendModuleFacts, dependencies: &'a dyn SymbolSource) -> Self {
+    pub fn new(module: &'a BackendModuleFacts, dependencies: &'a dyn SymbolSource) -> Self {
         Self {
             module,
             dependencies,
