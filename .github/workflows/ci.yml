@@ -70,6 +70,10 @@ jobs:
   # Fork PRs still run on ubuntu-latest: self-hosted runners never take fork PR jobs.
   lint:
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # Cancels the rest of a pull request run after a lint failure.
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -80,16 +84,20 @@ jobs:
       # Commit messages are checked here so a push does not queue a second workflow for them.
       # The check finishes in seconds; a separate job was still waiting on a runner.
       - name: attribution commits
+        id: attribution
         env:
           RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.event.after) || github.event_name == 'merge_group' && format('{0}..{1}', github.event.merge_group.base_sha, github.event.merge_group.head_sha) || 'HEAD^1..HEAD^2' }}
         run: scripts/check-attribution.sh "$RANGE"
       - name: validate pinned IntelliJ patch
+        id: intellij_patch
         run: scripts/check-intellij-patch.sh
       # The release job runs tools/krusty-gradle's wrapper with the signing key, without setup-gradle's
       # wrapper validation; every committed wrapper is checked here instead.
       - name: validate Gradle wrappers
+        id: gradle_wrappers
         run: scripts/check-gradle-wrappers.sh
       - name: outcome manifests only shrink
+        id: outcome_lists
         env:
           BASE: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.after }}
@@ -112,7 +120,24 @@ jobs:
       - *just-on-path
       - *install-just
       - name: lint
+        id: lint
         run: just lint
+      # A pull request that fails a check cannot merge, and its run would otherwise keep every other
+      # job queued for the shared hosted runners. Cancel the rest of the run; the required
+      # aggregate still reports the failure. Only a failed check cancels: a runner or setup failure
+      # (such as setup-java) leaves the run alone. Master and merge-queue runs always run to
+      # completion.
+      - name: cancel the rest of a pull request run after a lint failure
+        if: >-
+          failure() && github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && (steps.attribution.outcome == 'failure' || steps.intellij_patch.outcome == 'failure'
+          || steps.gradle_wrappers.outcome == 'failure' || steps.outcome_lists.outcome == 'failure'
+          || steps.lint.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh run cancel "$GITHUB_RUN_ID"
 
   # krusty-plugin-host is outside the default members and the coverage packages, so its own
   # compiler-independent tests run here. Compiler-dependent plugin integrations run in `ci`.
