@@ -9,7 +9,7 @@ use crate::jvm::inline::MethodBodies;
 pub(crate) use crate::jvm::inline::RegeneratedClass;
 
 /// Where the inliner learns the declared role of a class the body names.
-pub(crate) trait ClassRoles {
+pub trait ClassRoles {
     /// The role of `internal`, or `None` for a class the call site does not regenerate (including
     /// one whose class file is not available).
     fn regenerated_class(&self, internal: &str) -> Option<RegeneratedClass>;

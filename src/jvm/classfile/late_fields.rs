@@ -114,7 +114,7 @@ impl ClassWriter {
     /// Realize the deferred fields that lead the field table now: they intern before the
     /// annotations of the eagerly declared fields after them, which the emitter attaches before
     /// `finish` (a class's `$$delegatedProperties` and `Companion` ahead of its instance fields).
-    pub(in crate::jvm) fn realize_leading_late_fields(&mut self) {
+    pub fn realize_leading_late_fields(&mut self) {
         let late = std::mem::take(&mut self.late_fields);
         let (leading, trailing) = late
             .into_iter()

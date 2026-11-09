@@ -9,14 +9,12 @@ fn storage_target(operation: CompilerIntrinsic) -> bool {
 
 #[test]
 fn klib_target_string_plus_authenticates_both_actual_declaration_shapes() {
-    use crate::backend::Backend;
-    use crate::native::{CraneliftBackend, NativeTarget};
     let Some(root) = distribution_root() else {
         return;
     };
     let libraries = stdlib(&root);
-    let backend = CraneliftBackend::new(NativeTarget::ALL[0]);
-    let capability = |operation| backend.realizes_dependency_intrinsic(operation);
+    // A target that realizes string concatenation as its own leaf, as the Native backend does.
+    let capability = |operation| matches!(operation, CompilerIntrinsic::StringPlus);
     let member = libraries.classifier(type_name("kotlin/String")).unwrap();
     let candidates = &member.declared_callables["plus"];
     let extension = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "plus");

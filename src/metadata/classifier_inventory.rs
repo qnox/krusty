@@ -4,7 +4,7 @@ use crate::ir::{IrClass, IrFile};
 use crate::types::ClassifierDeclarationName;
 
 /// Direct declared children in source order, then published generated names and the companion.
-pub(crate) fn nested_classifiers(ir: &IrFile, class: &IrClass) -> Vec<String> {
+pub fn nested_classifiers(ir: &IrFile, class: &IrClass) -> Vec<String> {
     let mut declared = ir
         .classes
         .iter()
