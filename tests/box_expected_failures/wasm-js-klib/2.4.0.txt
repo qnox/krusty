@@ -1795,7 +1795,6 @@ extensionProperties/extensionPropertyInSAMInterface.kt
 extensionProperties/extensionPropertyWithAnonymoesExtensionWithALabel.kt
 extensionProperties/extensionPropertyWithAnonymousExtensionFunWithTypeParam.kt
 extensionProperties/extensionPropertyWithExtensionAsReceiver.kt
-extensionProperties/extensionPropertyWithExtensionNestedType.kt
 extensionProperties/extensionPropertyWithInline.kt
 extensionProperties/extensionProperyWithExtensionType.kt
 extensionProperties/genericContextOverride.kt
@@ -1936,7 +1935,6 @@ functions/defaultargs1.kt
 functions/functionExpression/functionExpression.kt
 functions/functionExpression/functionExpressionWithThisReference.kt
 functions/functionExpression/functionLiteralExpression.kt
-functions/invoke/castFunctionToExtension.kt
 functions/invoke/invoke.kt
 functions/invoke/kt3190.kt
 functions/kt1038.kt
@@ -1947,7 +1945,6 @@ functions/kt2929.kt
 functions/kt3214.kt
 functions/kt395.kt
 functions/kt47449.kt
-functions/kt48058.kt
 functions/kt58825_arrayOverloads.kt
 functions/localFunction.kt
 functions/localFunctions/callBetweenLocalFunctions.kt
