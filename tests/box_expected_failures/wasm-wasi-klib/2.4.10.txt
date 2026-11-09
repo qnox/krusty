@@ -575,7 +575,6 @@ classes/defaultObjectSameNamesAsInOuter.kt
 classes/delegationGenericArg.kt
 classes/delegationGenericArgUpperBound.kt
 classes/delegationGenericLongArg.kt
-classes/exceptionConstructor.kt
 classes/implementComparableInSubclass.kt
 classes/initializerBlockDImpl.kt
 classes/inner/instantiateInDerived.kt
@@ -883,11 +882,9 @@ controlStructures/quicksort.kt
 controlStructures/slowDsl/slowHtmlLikeDsl.kt
 controlStructures/tryCatchInExpressions/differentTypes.kt
 controlStructures/tryCatchInExpressions/kt8608.kt
-controlStructures/tryCatchInExpressions/multipleCatchBlocks.kt
 controlStructures/tryCatchInExpressions/nonLocalReturnInTryFinally.kt
 controlStructures/tryCatchInExpressions/tryCatchAfterWhileTrue.kt
 controlStructures/tryCatchInExpressions/tryFinallyOfTypeUnit.kt
-controlStructures/tryCatchInExpressions/tryInsideTry.kt
 controlflow/break.kt
 controlflow/break1.kt
 controlflow/for_loops.kt
@@ -1725,7 +1722,6 @@ evaluate/ushortOperations.kt
 exceptions/catch1.kt
 exceptions/catch2.kt
 exceptions/catch7.kt
-exceptions/extend0.kt
 exceptions/kt69534.kt
 exceptions/rethrow.kt
 exceptions/throw0.kt
@@ -2062,7 +2058,6 @@ inference/plusAssignInsideLambda.kt
 inference/referenceToCatchParameterFromLambdaExpression.kt
 inference/safeCastWithElvis.kt
 inference/suspendExtensionRecevierFromConstraint.kt
-inference/tryCatchAtAssignment.kt
 inference/tryCatchAtAssignmentWithSmartCast.kt
 inference/unsafeVarianceCodegen.kt
 inference/whenAtAssignmentWithSmartCast.kt
@@ -4907,7 +4902,6 @@ wasm-new-exception-handling/catch5.kt
 wasm-new-exception-handling/catch6.kt
 wasm-new-exception-handling/catch7.kt
 wasm-new-exception-handling/catch8.kt
-wasm-new-exception-handling/extend0.kt
 wasm-new-exception-handling/finally1.kt
 wasm-new-exception-handling/finally10.kt
 wasm-new-exception-handling/finally11.kt
@@ -4944,7 +4938,6 @@ wasm-old-exception-handling/catch5.kt
 wasm-old-exception-handling/catch6.kt
 wasm-old-exception-handling/catch7.kt
 wasm-old-exception-handling/catch8.kt
-wasm-old-exception-handling/extend0.kt
 wasm-old-exception-handling/finally1.kt
 wasm-old-exception-handling/finally10.kt
 wasm-old-exception-handling/finally11.kt
