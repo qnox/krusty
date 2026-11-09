@@ -573,8 +573,11 @@ impl Checker<'_> {
                 args,
                 arg_tys,
             },
-            &validation_params,
-            &validation_params,
+            SelectedParameters {
+                applied: &validation_params,
+                declared: &validation_params,
+                call_site: None,
+            },
             &candidate.call_sig,
             None,
         ) {
