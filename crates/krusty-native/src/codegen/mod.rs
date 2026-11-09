@@ -125,6 +125,8 @@ pub struct CodegenModule {
     /// The exported entry answering each preceding source module's object instance, by the
     /// object's classifier.
     dependency_singletons: krusty::fx_hash::HashMap<krusty::backend::DependencyClassifier, String>,
+    /// The exported entry answering each constant of a preceding file's enum.
+    dependency_enum_constants: krusty::fx_hash::HashMap<krusty::backend::EnumConstant, String>,
     next_dependency_symbol: usize,
     next_dependency_support_object: usize,
     next_disambiguated_source_object: usize,
@@ -232,6 +234,7 @@ impl Backend for CraneliftBackend {
         krusty::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
         // Before default arguments: a constant leaving constructor arguments out is then an
         // ordinary construction for that lowering.
+        krusty::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
         krusty::backend::enums::realize(
             &mut file.ir,
             krusty::backend::enums::Contract::KotlinNative,
@@ -241,6 +244,20 @@ impl Backend for CraneliftBackend {
             &mut file.callables,
             |function| file.dependency_exports.callable(function).is_some(),
         );
+        // After default arguments, so a `$default` entry's call of the declaration is the one
+        // that gains the continuation, and before dispatch entries, which copy the signature.
+        if let Err(declined) =
+            krusty::backend::coroutines::add_continuation_parameters(&mut file.ir)
+        {
+            diags.error(
+                krusty::diag::Span::new(0, 0),
+                format!(
+                    "krusty: the native backend does not support {} yet",
+                    declined.construct()
+                ),
+            );
+            return Vec::new();
+        }
         krusty::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
         if let Err(error) =
             krusty::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)
@@ -444,6 +461,45 @@ impl Backend for CraneliftBackend {
                 },
             );
         }
+        let mut constants = file.dependency_exports.enum_constant_entries().to_vec();
+        constants.sort_unstable_by_key(|(_, entry)| *entry);
+        for (constant, entry) in constants {
+            let symbol = format!("kt_klib_enum_constant_{}", state.next_dependency_symbol);
+            state.next_dependency_symbol += 1;
+            let signature = match krusty::backend::DependencyFunctionSignature::from_ir(
+                &file.ir, entry, None,
+            ) {
+                Ok(signature) => signature,
+                Err(error) => {
+                    diags.error(
+                        krusty::diag::Span::new(0, 0),
+                        format!("internal error: {error}"),
+                    );
+                    return Vec::new();
+                }
+            };
+            if state
+                .dependency_enum_constants
+                .insert(constant, symbol.clone())
+                .is_some()
+            {
+                diags.error(
+                    krusty::diag::Span::new(0, 0),
+                    "internal error: two files export one enum constant",
+                );
+                return Vec::new();
+            }
+            dependency_exports.insert(
+                entry,
+                DependencyExportDefinition {
+                    symbol,
+                    signature,
+                    member_receiver: None,
+                    default_entry: None,
+                    dispatch_entry: None,
+                },
+            );
+        }
         let lowered = match lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
@@ -463,6 +519,7 @@ impl Backend for CraneliftBackend {
                 dependency_signatures: &file.dependency_exports,
                 dependency_symbols: &state.dependency_symbols,
                 dependency_singletons: &state.dependency_singletons,
+                dependency_enum_constants: &state.dependency_enum_constants,
             },
             self.target,
             &object_stem,

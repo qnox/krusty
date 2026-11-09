@@ -5,7 +5,7 @@ use krusty::fx_hash::{HashMap, HashSet};
 use krusty::libraries::{RuntimeExceptionKind, RuntimeExceptionLayout};
 use krusty::types::TypeName;
 
-use super::{immutable, CompositeType, Module, SubType, ValType, REFERENCE};
+use super::{immutable, CompositeType, Module, SubType, ValType};
 
 #[cfg(test)]
 mod tests;
@@ -73,11 +73,11 @@ impl RuntimeClasses {
                 Some((_, structure)) => *structure,
                 None if layout.kind == RuntimeExceptionKind::Throwable => self.base,
                 None => module.subtype(SubType {
-                    composite: CompositeType::Struct(vec![
-                        immutable(ValType::reference(self.table)),
-                        immutable(self.string),
-                        immutable(REFERENCE),
-                    ]),
+                    composite: CompositeType::Struct(
+                        std::iter::once(immutable(ValType::reference(self.table)))
+                            .chain(super::ExceptionTransport::base_fields(self.string))
+                            .collect(),
+                    ),
                     supertype: Some(parent),
                     open: true,
                 }),

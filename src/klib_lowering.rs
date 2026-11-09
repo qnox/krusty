@@ -22,6 +22,7 @@ mod class_storage;
 mod closure_forms;
 mod constructor_calls;
 mod decline;
+mod enum_classes;
 mod function_lowering;
 mod inline_templates;
 mod ir_builtins;
