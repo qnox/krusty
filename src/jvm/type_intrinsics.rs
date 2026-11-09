@@ -16,12 +16,12 @@ const TYPE_INTRINSICS: &str = "kotlin/jvm/internal/TypeIntrinsics";
 const MAPPED_MARKER: &str = "kotlin/jvm/internal/markers/KMappedMarker";
 
 /// The marker interface a suspend function value implements. `SuspendFunctionN` is not a class.
-pub(crate) const SUSPEND_FUNCTION_MARKER: &str = "kotlin/coroutines/jvm/internal/SuspendFunction";
+pub const SUSPEND_FUNCTION_MARKER: &str = "kotlin/coroutines/jvm/internal/SuspendFunction";
 
 /// kotlinc's `KOTLIN_MARKER_INTERFACES`: the marker interface a class implementing a Kotlin
 /// collection classifier also implements, which is what the `TypeIntrinsics` checks read at run
 /// time. A read-only face is a `KMappedMarker`; a mutable one is its own `KMutableX`.
-pub(crate) fn collection_marker(collection: MappedCollection) -> &'static str {
+pub fn collection_marker(collection: MappedCollection) -> &'static str {
     if !collection.mutable {
         return MAPPED_MARKER;
     }
@@ -67,21 +67,21 @@ fn jvm_interface(kind: CollectionKind) -> &'static str {
 
 /// One `invokestatic` on `TypeIntrinsics`, and the `int` arity pushed before it, if any.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct IntrinsicCall {
-    pub(crate) arity: Option<u16>,
-    pub(crate) name: String,
-    pub(crate) descriptor: String,
+pub struct IntrinsicCall {
+    pub arity: Option<u16>,
+    pub name: String,
+    pub descriptor: String,
 }
 
 impl IntrinsicCall {
-    pub(crate) fn owner(&self) -> &'static str {
+    pub fn owner(&self) -> &'static str {
         TYPE_INTRINSICS
     }
 }
 
 /// An instance test that is not a single `instanceof`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum InstanceCheck {
+pub enum InstanceCheck {
     /// One `TypeIntrinsics` call, leaving an `int` 0/1.
     Call(IntrinsicCall),
     /// `instanceof SuspendFunction`, and `isFunctionOfArity` only when that marker matches.
@@ -90,7 +90,7 @@ pub(crate) enum InstanceCheck {
 }
 
 /// `TypeIntrinsics.instanceOf`: the check that replaces `instanceof`, leaving an `int` 0/1.
-pub(crate) fn instance_check(role: TypeCheckRole) -> InstanceCheck {
+pub fn instance_check(role: TypeCheckRole) -> InstanceCheck {
     match role {
         TypeCheckRole::MutableCollection(kind) => InstanceCheck::Call(IntrinsicCall {
             arity: None,
@@ -107,7 +107,7 @@ pub(crate) fn instance_check(role: TypeCheckRole) -> InstanceCheck {
 }
 
 /// `TypeIntrinsics.isFunctionOfArity(x, arity)`.
-pub(crate) fn function_arity_check(arity: u16) -> IntrinsicCall {
+pub fn function_arity_check(arity: u16) -> IntrinsicCall {
     IntrinsicCall {
         arity: Some(arity),
         name: "isFunctionOfArity".to_owned(),
@@ -117,7 +117,7 @@ pub(crate) fn function_arity_check(arity: u16) -> IntrinsicCall {
 
 /// `TypeIntrinsics.checkcast` for a non-safe cast.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CastCheck {
+pub enum CastCheck {
     /// The call made before the `checkcast`, and whether that `checkcast` is still written (a
     /// mutable collection's `asMutableX` already returns the JVM interface).
     Call {
@@ -130,7 +130,7 @@ pub(crate) enum CastCheck {
 }
 
 /// `TypeIntrinsics.checkcast` for a non-safe cast.
-pub(crate) fn cast(role: TypeCheckRole) -> CastCheck {
+pub fn cast(role: TypeCheckRole) -> CastCheck {
     match role {
         TypeCheckRole::MutableCollection(kind) => CastCheck::Call {
             call: IntrinsicCall {

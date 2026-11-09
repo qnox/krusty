@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use krusty::jvm::class_comparison::{compare_classes, is_kotlin_class};
+use krusty_jvm::class_comparison::{compare_classes, is_kotlin_class};
 use serde::{Deserialize, Serialize};
 
 /// How krusty's output of a compilation differs from kotlinc's. Paths are relative to the output
@@ -38,7 +38,7 @@ impl OutputComparison {
 }
 
 /// One file both compilers wrote differently, and why: a class's primary
-/// [`DifferenceKind`](krusty::jvm::class_comparison::DifferenceKind) identifier, `kotlin-module`
+/// [`DifferenceKind`](krusty_jvm::class_comparison::DifferenceKind) identifier, `kotlin-module`
 /// for the module's `.kotlin_module` file, or `other-file`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileDifference {

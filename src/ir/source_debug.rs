@@ -9,15 +9,15 @@ use crate::fir::SourceFileId;
 
 /// One compilation input, in source-id order: its simple name (`Lib.kt`).
 #[derive(Clone, Debug)]
-pub(crate) struct SourceFileDebug {
-    pub(crate) name: Arc<str>,
+pub struct SourceFileDebug {
+    pub name: Arc<str>,
     /// One past the last physical newline, matching the highest source line FIR records.
-    pub(crate) line_count: u32,
+    pub line_count: u32,
 }
 
 /// The module's source files, addressable by [`SourceFileId`].
 #[derive(Clone, Debug, Default)]
-pub(crate) struct SourceDebug {
+pub struct SourceDebug {
     files: Vec<SourceFileDebug>,
     current: Option<SourceFileId>,
 }
@@ -51,15 +51,15 @@ impl SourceDebug {
         }
     }
 
-    pub(crate) fn file(&self, source: SourceFileId) -> Option<&SourceFileDebug> {
+    pub fn file(&self, source: SourceFileId) -> Option<&SourceFileDebug> {
         self.files.get(source.raw() as usize)
     }
 
-    pub(crate) fn is_current(&self, source: SourceFileId) -> bool {
+    pub fn is_current(&self, source: SourceFileId) -> bool {
         self.current == Some(source)
     }
 
-    pub(crate) fn current(&self) -> Option<SourceFileId> {
+    pub fn current(&self) -> Option<SourceFileId> {
         self.current
     }
 }

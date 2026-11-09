@@ -239,7 +239,7 @@ pub enum IrVirtualTarget {
 impl Callee {
     /// A virtual call that a target backend or a compiler plugin builds for its own realization.
     /// It names no frontend selection: the frontend selected no member for it.
-    pub(crate) fn realized_virtual(
+    pub fn realized_virtual(
         owner: TypeName,
         name: String,
         descriptor: String,
@@ -262,7 +262,7 @@ impl Callee {
     /// Default-dispatch calls still point at the source function; only their emitted entry point is
     /// synthetic. Keeping that classification here prevents every IR consumer from maintaining its
     /// own list of local/static and ordinary/default variants.
-    pub(crate) fn source_function(&self) -> Option<FunId> {
+    pub fn source_function(&self) -> Option<FunId> {
         match self {
             Callee::Local(function)
             | Callee::LocalWithDefaults { function, .. }

@@ -587,6 +587,16 @@ Measured against kotlinc 2.4.20:
 - `Class.property`, `Class.function` and `Class.type_alias` serialize in the order the records were
   built, which is the d2 interning order. With `var <M> Slot<M>.member` declared before
   `val later`, both lists put `member` first.
+- The functions the compiler adds to a class without a source position share one run of
+  `Class.function`, after the declared functions and a data class's `componentN` and `copy`:
+  a data or value class's generated `equals`/`hashCode`/`toString`, a compiler plugin's members on
+  a data class, and the `interface by` forwarders, sorted together by
+  `FirCallableDeclarationComparator` (name, extension receiver, return type, parameters).
+  `data class Named(...) : Greeter by greeter` lists `answer`, `equals`, `greet`, `hashCode`,
+  `toString`. A class without generated structural members lists its forwarders alone, sorted the
+  same way, at the end. On the JVM the forwarders' methods follow the generated structural methods
+  whichever order they were added in (`tests/box_regressions/dataClassDelegatedMemberOrder.kt`,
+  `member_schedule::tests`).
 
 ## `Property.flags` HAS_CONSTANT
 

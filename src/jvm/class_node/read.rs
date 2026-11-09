@@ -9,7 +9,7 @@ use crate::jvm::method_node::{Constant, MalformedCode, MethodNode};
 
 /// Why a class could not be read as a whole.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ClassReadError {
+pub enum ClassReadError {
     /// The bytes are not a class file or end early.
     Malformed(&'static str),
     /// The class carries an attribute a copy would lose.
