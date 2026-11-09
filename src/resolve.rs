@@ -56216,7 +56216,7 @@ impl<'a> Checker<'a> {
             self.clear_selected_generic_call(e);
         }
         self.mark_selected_inline_lambdas(e, selected.flags.inline, &shape.call_sig);
-        let context_args = shape.context_sources;
+        let context_args = shape.context_sources.clone();
         let implicit_context_args = context_args.iter().flatten().cloned().collect::<Vec<_>>();
         self.mark_context_extension_receiver_used(scope, e, &implicit_context_args);
         let selected_receiver = selected.receiver.unwrap_or(rt);
@@ -56392,7 +56392,7 @@ impl<'a> Checker<'a> {
             resolved.context_args = context_args;
             self.resolved_calls
                 .insert(e, ResolvedCall::Extension(Box::new(resolved)));
-            self.record_resolved_extension_sam_arguments(scope, e, args);
+            self.record_selected_sam_mapped_arguments(scope, e, args, argument_names, &shape);
             return Some(ret);
         }
 
