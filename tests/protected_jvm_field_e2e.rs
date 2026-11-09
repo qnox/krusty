@@ -185,8 +185,16 @@ class Child : Parent() {
 #[test]
 fn a_cross_package_subclass_bridges_its_nested_protected_jvm_field_accesses() {
     assert_classes_like_kotlinc(
-        &[("a/Parent.kt", PACKAGED_PARENT), ("b/Child.kt", BRIDGED_CHILD)],
-        &["a/Parent", "b/Child", "b/Child$fromObject$1", "b/Child$Nested"],
+        &[
+            ("a/Parent.kt", PACKAGED_PARENT),
+            ("b/Child.kt", BRIDGED_CHILD),
+        ],
+        &[
+            "a/Parent",
+            "b/Child",
+            "b/Child$fromObject$1",
+            "b/Child$Nested",
+        ],
     );
 }
 
@@ -195,7 +203,10 @@ fn a_cross_package_subclass_bridges_its_nested_protected_jvm_field_accesses() {
 #[test]
 fn a_cross_package_subclass_accesses_a_protected_jvm_field_from_nested_code() {
     common::expect_box_ok_files_with_stdlib(
-        &[("a/Parent.kt", PACKAGED_PARENT), ("b/Child.kt", PACKAGED_CHILD)],
+        &[
+            ("a/Parent.kt", PACKAGED_PARENT),
+            ("b/Child.kt", PACKAGED_CHILD),
+        ],
         "ProtectedJvmFieldCrossPackage",
     );
 }
