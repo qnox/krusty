@@ -798,6 +798,13 @@ impl<'a> Body<'a> {
         self.coerce_emitted_value(carried, target_ty)
     }
 
+    /// Whether a cast of `arg` to `target` reads a scalar out of a reference: the operand is
+    /// carried as a reference and the target as a scalar.
+    fn is_unboxing_cast(&self, arg: u32, target: Ty) -> bool {
+        matches!(self.carrier_of(arg), Ok(Some(ValType::Ref { .. })))
+            && matches!(carrier(target), Ok(Some(target)) if !matches!(target, ValType::Ref { .. }))
+    }
+
     fn carrier_of(&self, id: u32) -> Result<Option<ValType>, Unsupported> {
         match self.type_of(id)? {
             Some(ty) => carrier(ty),
@@ -1192,6 +1199,14 @@ impl<'a> Body<'a> {
                 || self.interface_of_type(type_operand).is_some() =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
+            }
+            // `as Int` on a reference reads the value out of its box once the cast has checked it.
+            IrExpr::TypeOp {
+                op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
+                arg,
+                type_operand,
+            } if self.is_unboxing_cast(arg, type_operand) => {
+                self.checked_unbox_cast(arg, type_operand)?
             }
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast),
