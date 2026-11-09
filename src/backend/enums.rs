@@ -72,7 +72,7 @@ struct Realized {
 /// a constructor that reaches back into its own enum observes, and the two differ there; once the
 /// enum is built they agree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Contract {
+pub enum Contract {
     /// kotlinc-native's `EnumClassLowering`: every constant is allocated and published before the
     /// first is constructed, each is then constructed in place; `values()` stores each constant
     /// at its current ordinal in name order (`valuesForEnum`); `entries` is built after the
@@ -87,7 +87,7 @@ pub(crate) enum Contract {
 
 /// Build the entry answering each constant of every enum `exports` publishes from `ir`, before
 /// [`realize`] rewrites the entries' reads into reads of the constants' storage.
-pub(crate) fn publish_constants(ir: &mut IrFile, exports: &mut super::DependencyExportSignatures) {
+pub fn publish_constants(ir: &mut IrFile, exports: &mut super::DependencyExportSignatures) {
     let enums = exports.enums().to_vec();
     for class in enums {
         let classifier = ir.classes[class as usize].fq_name_id();
@@ -119,7 +119,7 @@ pub(crate) fn publish_constants(ir: &mut IrFile, exports: &mut super::Dependency
 }
 
 /// Realize every enum class `ir` declares and rewrite every emitted use of one.
-pub(crate) fn realize(ir: &mut IrFile, contract: Contract) {
+pub fn realize(ir: &mut IrFile, contract: Contract) {
     let enums: Vec<ClassId> = (0..ir.classes.len())
         .map(|class| ClassId::try_from(class).expect("too many classes"))
         .filter(|&class| is_enum(&ir.classes[class as usize]))
@@ -140,14 +140,14 @@ pub(crate) fn realize(ir: &mut IrFile, contract: Contract) {
 /// One of `kotlin.Enum`'s two properties, which a target answers from the storage its enum base
 /// contributes to every constant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BaseMember {
+pub enum BaseMember {
     Name,
     Ordinal,
 }
 
 /// The `kotlin.Enum` property an external property read names: the getter frozen at the
 /// frontend/backend boundary is declared by `kotlin.Enum`, under the name its provider decoded.
-pub(crate) fn base_member(
+pub fn base_member(
     callables: &super::CheckedBackendCallables,
     target: crate::fir::ExternalPropertyId,
 ) -> Option<BaseMember> {

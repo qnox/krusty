@@ -13,7 +13,7 @@ use crate::types::TypeName;
 
 /// The metadata split of `classifier`. `Ok(None)` means every semantic argument is its own.
 /// `Err(classifier)` means the backend boundary supplied no declaration fact.
-pub(crate) fn inner_classifier(
+pub fn inner_classifier(
     ir: &IrFile,
     symbols: &dyn BackendClassifierSource,
     classifier: TypeName,

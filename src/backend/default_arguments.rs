@@ -28,8 +28,8 @@ mod masks;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use entries::{published_entry, published_identities};
-pub(crate) use masks::{mask_words, omission_masks};
+pub use entries::{published_entry, published_identities};
+pub use masks::{mask_words, omission_masks};
 
 use super::CheckedBackendCallables;
 use crate::fx_hash::HashSet;
@@ -40,7 +40,7 @@ use crate::ir::{FunId, IrFile};
 /// lowering; each expression an entry copies from a default gets the facts of its original.
 /// `exported` says which declarations a later module calls by their dependency export; each of
 /// those publishes its entry too.
-pub(crate) fn realize(
+pub fn realize(
     ir: &mut IrFile,
     callables: &mut CheckedBackendCallables,
     exported: impl Fn(FunId) -> bool,

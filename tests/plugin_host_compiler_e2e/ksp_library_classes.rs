@@ -41,7 +41,7 @@ fn dependency(paths: &[PathBuf]) -> PathBuf {
         &LangFeatures::from_source(&text),
         &mut diagnostics,
     );
-    let backend = krusty::jvm::JvmBackend::new(Rc::new(Classpath::new(paths.to_vec())));
+    let backend = krusty_jvm::JvmBackend::new(Rc::new(Classpath::new(paths.to_vec())));
     let artifacts = krusty::compiler::emit_analyzed(
         analysis,
         &["Dependency".to_string()],

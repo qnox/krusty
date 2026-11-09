@@ -2,55 +2,48 @@
 //!
 //! A backend consumes checked frontend output and emits target artifacts.
 
-pub(crate) mod class_tables;
-pub(crate) mod construction_entries;
+pub mod class_tables;
+pub mod construction_entries;
 mod constructor_selection;
-pub(crate) mod coroutines;
-pub(crate) mod counted_loops;
-pub(crate) mod default_arguments;
+pub mod coroutines;
+pub mod counted_loops;
+pub mod default_arguments;
 mod dependency_accessor;
 mod dependency_call_shape;
 mod dependency_facts;
 mod dependency_metadata;
 mod dependency_signature;
-pub(crate) mod dispatch_entries;
+pub mod dispatch_entries;
 mod entry;
-pub(crate) mod enums;
-pub(crate) mod interface_identity;
-pub(crate) mod local_properties;
+pub mod enums;
+pub mod interface_identity;
+pub mod local_properties;
 mod module_facts;
-pub(crate) mod property_entries;
+pub mod property_entries;
 mod source_class_members;
-pub(crate) mod value_classes;
+pub mod value_classes;
 
-pub(crate) use constructor_selection::selected_constructor;
-pub(crate) use dependency_call_shape::{
-    DeclaredOperandRoles, DependencyCallShape, DependencyExportCall,
-};
-#[cfg(test)]
-pub(crate) use dependency_facts::referenced_dependencies;
+pub use constructor_selection::selected_constructor;
+pub use dependency_call_shape::{DeclaredOperandRoles, DependencyCallShape, DependencyExportCall};
+#[cfg(any(test, feature = "test-support"))]
+pub use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
     CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
-pub(crate) use dependency_metadata::{
-    authenticated_singleton_receiver, has_standalone_dependency_code,
-    inert_staged_singleton_bindings,
-};
+pub(crate) use dependency_metadata::has_standalone_dependency_code;
+pub use dependency_metadata::KlibDependencyCallable;
+pub use dependency_metadata::{authenticated_singleton_receiver, inert_staged_singleton_bindings};
 pub use dependency_metadata::{
-    DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata,
+    DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata, EnumConstant,
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
-pub(crate) use dependency_metadata::{
-    EnumConstant, ExportedConstructor, ExportedPropertyAccessor, KlibDependencyCallable,
-};
-pub(crate) use dependency_signature::{
-    instantiate_dependency_signature, DependencyFunctionSignature,
-};
+pub(crate) use dependency_metadata::{ExportedConstructor, ExportedPropertyAccessor};
+pub use dependency_signature::{instantiate_dependency_signature, DependencyFunctionSignature};
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.
-pub(crate) use crate::ir::MainEntryParameters;
-pub(crate) use entry::ProgramEntry;
+pub use crate::ir::MainEntryParameters;
+pub use entry::ProgramEntry;
 pub use entry::{Entry, BOX_RESULT_FRAME};
 
 pub use module_facts::{

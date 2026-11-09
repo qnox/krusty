@@ -23,7 +23,8 @@ use crate::types::{type_name_child, TypeName};
 
 /// The decoded function declarations of a set of KLIB libraries, joined by exact signature.
 pub struct KlibDeclarationBodies {
-    libraries: Vec<KlibIrModuleTrees>,
+    /// Decoded trees are immutable and may be shared with other compilations over the same archive.
+    libraries: Vec<std::sync::Arc<KlibIrModuleTrees>>,
     modules: HashMap<String, usize>,
     /// Which library defines each linkable identity.
     owners: HashMap<(String, KlibIrSignature), usize>,
@@ -79,7 +80,7 @@ impl Default for KlibDeclarationBodies {
 pub struct KlibBodyLibrary {
     module: String,
     dependencies: Vec<String>,
-    trees: KlibIrModuleTrees,
+    trees: std::sync::Arc<KlibIrModuleTrees>,
 }
 
 impl KlibBodyLibrary {
@@ -91,6 +92,18 @@ impl KlibBodyLibrary {
             manifest.depends().into_iter().map(str::to_owned),
             trees,
         ))
+    }
+
+    /// As [`Self::from_manifest`], over trees another compilation of the same archive decoded.
+    pub(crate) fn from_manifest_shared(
+        manifest: &KlibManifest,
+        trees: std::sync::Arc<KlibIrModuleTrees>,
+    ) -> Option<Self> {
+        Some(Self {
+            module: manifest.unique_name()?.to_owned(),
+            dependencies: manifest.depends().into_iter().map(str::to_owned).collect(),
+            trees,
+        })
     }
 
     #[cfg(test)]
@@ -110,7 +123,7 @@ impl KlibBodyLibrary {
         Self {
             module,
             dependencies: dependencies.into_iter().collect(),
-            trees,
+            trees: std::sync::Arc::new(trees),
         }
     }
 }
