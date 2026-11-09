@@ -190,13 +190,15 @@ impl std::fmt::Display for KlibDeclarationBodiesError {
 impl std::error::Error for KlibDeclarationBodiesError {}
 
 impl KlibDeclarationBodies {
-    /// Exactly one raw class header in this module with the requested function/constructor/getter
-    /// as a direct member. The current property primitives are reads: a getter stored in a setter
-    /// slot grants no authority. Equal names in other archives and inherited members do not join.
+    /// Exactly one raw class header in this module with the requested function/constructor or
+    /// accessor as a direct member. An accessor is found only in the slot of its `role`: a getter
+    /// stored in a setter slot grants no authority. Equal names in other archives and inherited
+    /// members do not join.
     pub(crate) fn class_member_header(
         &self,
         identity: &KlibDependencyCallable,
         signature: &KlibPublicIdSignature,
+        role: crate::libraries::KlibAccessorRole,
     ) -> Result<Option<KlibClassMember<'_>>, &'static str> {
         let Some(&library) = self.modules.get(&identity.module) else {
             return Ok(None);
@@ -241,7 +243,10 @@ impl KlibDeclarationBodies {
                     && property.base.symbol.signature
                         == KlibIrSignature::Public(accessor.property().clone()) =>
                 {
-                    [property.getter, property.setter]
+                    match role {
+                        crate::libraries::KlibAccessorRole::Getter => [property.getter, None],
+                        crate::libraries::KlibAccessorRole::Setter => [property.setter, None],
+                    }
                 }
                 _ => [None, None],
             })
