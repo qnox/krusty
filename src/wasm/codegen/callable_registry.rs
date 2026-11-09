@@ -280,6 +280,12 @@ impl CallableRegistry {
                     if !defaults.is_empty() && default_entry.is_none() {
                         continue;
                     }
+                    if callable.compiler_operation()
+                        == Some(crate::backend::BackendCompilerIntrinsic::TypeOf)
+                    {
+                        // `typeOf` keeps its checked call, and emission makes the `KType` it names.
+                        continue;
+                    }
                     if super::lower::any_members::call_member(ir, callables, expression).is_some() {
                         // `kotlin.Any`'s members, and the declarations overriding them, are
                         // realized through the receiver's own representation.
