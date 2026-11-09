@@ -46,9 +46,22 @@ impl BodyLowering<'_> {
     }
 
     /// A parameter's default, lowered as checked FIR lowers the source default: a value of the
-    /// parameter's declared type, which may read the parameters before it.
+    /// parameter's declared type, which may read the parameters before it. A default of a proper
+    /// subtype of that type, such as the `String` default of a `CharSequence` parameter, is
+    /// converted to it at the declaration boundary, as checked FIR lowering converts the proven
+    /// assignment there; the subtyping comes from the calling compilation's declarations.
     fn default_value(mut self, default: KlibIrExprId, declared: Ty) -> Lowered<ExprId> {
-        self.declared_operand(default, declared)
+        let lowered = self.expression(default)?;
+        let actual = self.lowered_type(lowered);
+        if !super::is_value_of(actual, declared)
+            && self
+                .linker
+                .is_subtype(self.header.type_parameters(), actual, declared)
+        {
+            let converted = self.coercion(lowered, declared);
+            return Ok(self.typed(converted, declared));
+        }
+        self.declared_lowered(lowered, declared)
     }
 }
 
