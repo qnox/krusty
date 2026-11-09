@@ -33,6 +33,11 @@ if [ -z "$row" ]; then
   echo "unknown corpus project: $name" >&2
   exit 2
 fi
+lane=${row##*$'\t'}
+if [ "$lane" = lsp ]; then
+  echo "$name is in the language-server metric set; this corpus does not build it" >&2
+  exit 2
+fi
 IFS=$'\t' read -r _ _ _ gradle_root jdk _ android_variant <<<"$row"
 checkout=$work/src/$name
 logs=$work/logs
