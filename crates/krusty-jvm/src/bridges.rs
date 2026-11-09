@@ -650,32 +650,35 @@ fn superclass_method_bridges(
                 continue;
             }
         }
+        if parameter_identities.len() != concrete_params.len()
+            || declared_parameters.len() != concrete_params.len()
+        {
+            return Err(SkipReason::Bridges);
+        }
+        let parameters: Vec<BridgeParameter> = parameter_identities
+            .into_iter()
+            .zip(declared_parameters)
+            .map(|(identity, semantic)| BridgeParameter { identity, semantic })
+            .collect();
         if let Some(existing) = ir.classes[cid].bridges.iter_mut().find(|bridge| {
             bridge.name == bridge_name
                 && bridge.erased_params == base_params
                 && bridge.erased_ret == base_ret
         }) {
             // Several resolved override edges erase to one physical bridge. The nearest
-            // declaration (`AbstractCollection.contains`) need not be the collection member that
-            // carries the type-safe role; a farther edge (`Collection.contains`) does. The role
-            // is already on that edge, so the bridge keeps it.
-            if existing.collection_barrier.is_none() {
+            // declaration (`AbstractCollection.contains`, a Java `HashSet.remove`) need not be the
+            // collection member that carries the type-safe role; a farther edge
+            // (`Collection.contains`) does. kotlinc's special bridge is that declaration's, so
+            // the bridge takes its role and its parameters from that edge.
+            if existing.collection_barrier.is_none() && edge.collection_barrier.is_some() {
                 existing.collection_barrier = edge.collection_barrier;
+                existing.overridden_owner = Some(edge.overridden_owner);
+                existing.parameters = parameters;
             }
             continue;
         }
         let target_name =
             (internal_name_bridge || bridge_name != target_name).then_some(target_name);
-        if parameter_identities.len() != concrete_params.len()
-            || declared_parameters.len() != concrete_params.len()
-        {
-            return Err(SkipReason::Bridges);
-        }
-        let parameters = parameter_identities
-            .into_iter()
-            .zip(declared_parameters)
-            .map(|(identity, semantic)| BridgeParameter { identity, semantic })
-            .collect();
         order.push(
             own_fid
                 .and_then(|function| ir.fn_source_order.get(&function).copied())

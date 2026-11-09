@@ -53,6 +53,7 @@ use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull
 mod static_properties;
 mod synthetic_properties;
 pub mod unsigned_intrinsics;
+mod type_safe_builtin_overrides;
 use static_properties::StaticAccessor;
 use synthetic_properties::{accessor_property_name, setter_name_for_getter, AccessorInventory};
 
@@ -1138,8 +1139,19 @@ impl JvmLibraries {
         receiver: Ty,
         target_internal: TypeName,
     ) -> crate::fx_hash::HashMap<String, Ty> {
+        self.receiver_type_application_name(receiver, target_internal)
+            .map(|(formals, arguments)| formals.into_iter().zip(arguments).collect())
+            .unwrap_or_default()
+    }
+
+    /// The target node's formals and the arguments `receiver` applies to them, in order.
+    fn receiver_type_application_name(
+        &self,
+        receiver: Ty,
+        target_internal: TypeName,
+    ) -> Option<(Vec<String>, Vec<Ty>)> {
         let TyKind::Obj(start, start_args) = receiver.kind() else {
-            return crate::fx_hash::HashMap::default();
+            return None;
         };
         let target = super::jvm_class_map::to_jvm_type_name(target_internal);
         let mut seen = crate::fx_hash::HashSet::default();
@@ -1169,11 +1181,11 @@ impl JvmLibraries {
                 continue;
             }
             let formals = formals.unwrap_or_default();
+            if internal == target {
+                return Some((formals, targs));
+            }
             let binds: crate::fx_hash::HashMap<String, Ty> =
                 formals.iter().cloned().zip(targs.iter().copied()).collect();
-            if internal == target {
-                return binds;
-            }
             match (supers, &ci) {
                 (Some(supers), _) => {
                     for sup in supers {
@@ -1194,7 +1206,7 @@ impl JvmLibraries {
                 (None, None) => {}
             }
         }
-        crate::fx_hash::HashMap::default()
+        None
     }
 
     /// Class bindings excluding method parameters that shadow them.
@@ -1692,6 +1704,35 @@ impl JvmLibraries {
                             m.descriptor.as_str(),
                         )),
                     );
+                    if let Some(params) = (uses_java_type_semantics
+                        && !m.is_static()
+                        && m.name != "<init>"
+                        && !super::jvm_class_map::is_mapped_collection_face(internal_name))
+                    .then(|| {
+                        self.type_safe_builtin_override_params(
+                            &ci,
+                            &class_bounds,
+                            type_safe_builtin_overrides::JavaMethod {
+                                name: &m.name,
+                                descriptor: &m.descriptor,
+                                parameter_nullability: &m.parameter_nullability,
+                            },
+                        )
+                    })
+                    .flatten()
+                    {
+                        member
+                            .generic_sig
+                            .get_or_insert_with(|| GenericSig {
+                                formals: Vec::new(),
+                                formal_bounds: Vec::new(),
+                                receiver: None,
+                                params: Vec::new(),
+                                ret: member.ret,
+                                return_policy: Default::default(),
+                            })
+                            .params = params;
+                    }
                 }
                 let value_arity = member.params.len();
                 if member.suspend() {
