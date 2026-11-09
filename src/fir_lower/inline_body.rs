@@ -13,16 +13,30 @@ use super::BodyLowering;
 /// The first line a body's emission marks: its own, or the first position a block reaches.
 /// An `@InlineOnly` expansion whose lambda starts on the call's line separates the two with the
 /// synthetic inline line, so the marker's attribution is decided from this line.
+///
+/// A type operation without a position of its own evaluates its operand first, so the operand's
+/// line is the first one: a lambda result converted to the inline function's return type
+/// (`s.let { parse(it) }` where an `Int?` is expected) starts on its value's line.
 fn first_body_line(ir: &crate::ir::IrFile, body: ExprId) -> Option<u32> {
     let mut expression = body;
     loop {
         if let Some(&line) = ir.expr_lines.get(&expression) {
             return (line != 0).then_some(line);
         }
-        let IrExpr::Block { stmts, value } = ir.expr(expression) else {
-            return None;
+        expression = match ir.expr(expression).clone() {
+            IrExpr::Block { stmts, value } => stmts.first().copied().or(value)?,
+            IrExpr::TypeOp { arg, .. } => arg,
+            // A unit or value inline-return frame is a `while` around the body. The frame has
+            // no line of its own; the first line is still the body's.
+            IrExpr::While { body, label, .. }
+                if label.as_ref().is_some_and(|label| {
+                    ir.inline_return_frames.values().any(|frame| frame == label)
+                }) =>
+            {
+                body
+            }
+            _ => return None,
         };
-        expression = *stmts.first().or(value.as_ref())?;
     }
 }
 
@@ -173,9 +187,9 @@ impl BodyLowering<'_> {
                 arg: argument,
                 type_operand: runtime.reified_runtime.get(),
             });
-            self.ir.logical_types.insert(operation, Ty::Boolean);
+            self.ir.set_logical_type(operation, Ty::Boolean);
             let expanded = self.wrap_call_statements(statements, operation);
-            self.ir.logical_types.insert(expanded, Ty::Boolean);
+            self.ir.set_logical_type(expanded, Ty::Boolean);
             self.ir.external_inline_expansions.insert(expanded);
             return Some(expanded);
         }
@@ -413,6 +427,7 @@ impl BodyLowering<'_> {
                 internal: recovery.classifier,
                 args: vec![value],
                 ctor_params: Some(vec![constructor_parameter.get()]),
+                declared_params: None,
                 ctor_desc: None,
                 external_target: Some(recovery.constructor),
                 defaults: Box::new([]),
@@ -1026,6 +1041,7 @@ impl BodyLowering<'_> {
             default_provider: None,
             receiver_ty: Some(call.receiver),
             declared_receiver: None,
+            declaring_receiver: None,
             parameters: &call.parameters,
             result,
             declared_result: None,
@@ -1154,7 +1170,7 @@ impl BodyLowering<'_> {
         let initial = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let declaration = self.ir.add_expr(IrExpr::Variable {
             index: result_slot,
-            ty: Ty::obj("java/lang/Object"),
+            ty: Ty::nullable(Ty::obj("kotlin/Any")),
             init: Some(initial),
             named: false,
         });
@@ -1606,8 +1622,8 @@ impl BodyLowering<'_> {
                 if let Some(line) = self.ir.source_line(body) {
                     self.ir.set_source_line(wrapped, line);
                 }
-                if let Some(&ty) = self.ir.logical_types.get(&body) {
-                    self.ir.logical_types.insert(wrapped, ty);
+                if let Some(ty) = self.ir.logical_type(body) {
+                    self.ir.set_logical_type(wrapped, ty);
                 }
                 wrapped
             }

@@ -58,6 +58,64 @@ fn index_workspace_files_returns_exact_diagnostics_and_clears_the_latch() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+/// The support probe returns before the chunk is analyzed. An empty module support set does not
+/// call the worker; a support file on disk does, and a clean support compile is not a crash.
+#[test]
+fn support_probe_compiles_disk_support_and_skips_the_chunk() {
+    let directory =
+        std::env::temp_dir().join(format!("krusty-support-probe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let open_path = directory.join("Open.kt");
+    std::fs::write(&open_path, "fun open(): Int = 1\n").unwrap();
+    let open_uri = path_to_file_uri(&open_path).unwrap();
+
+    let options = krusty_lsp::LspOptions::parse(std::iter::empty::<String>()).unwrap();
+    let worker =
+        krusty_lsp::AnalysisWorker::spawn(supervisor_executable(), options.effective_classpath())
+            .expect("analysis worker");
+    let mut host = WorkerHost::new(worker, options);
+    host.set_workspace_root(Some(directory.clone()));
+
+    let before = host.worker.completed_analysis_count();
+    let empty = host.index_pass_kind(
+        vec![(open_uri.clone(), "fun open(): Int = 1\n".to_string())],
+        true,
+    );
+    assert!(!empty.crashed);
+    assert!(empty.outcome.conclusive);
+    assert!(empty.outcome.files.is_empty());
+    assert_eq!(
+        host.worker.completed_analysis_count(),
+        before,
+        "empty disk support must return before the worker runs"
+    );
+
+    let support_path = directory.join("Support.kt");
+    std::fs::write(&support_path, "fun support(): Int = 1\n").unwrap();
+    host.set_workspace_root(Some(directory.clone()));
+    let before_support = host.worker.completed_analysis_count();
+    let probed = host.index_pass_kind(
+        vec![(open_uri.clone(), "fun open(): Int = 1\n".to_string())],
+        true,
+    );
+    assert!(!probed.crashed);
+    assert!(probed.outcome.conclusive);
+    assert!(probed.outcome.files.is_empty());
+    assert_eq!(
+        host.worker.completed_analysis_count(),
+        before_support + 1,
+        "disk support must be compiled by the worker, not the empty short-circuit"
+    );
+
+    let indexed =
+        host.index_pass_kind(vec![(open_uri, "fun open(): Int = 1\n".to_string())], false);
+    assert!(!indexed.crashed);
+    assert_eq!(indexed.outcome.files.len(), 1);
+    assert!(indexed.outcome.files[0].diagnostics.is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 fn supervisor_executable() -> std::path::PathBuf {
     if let Some(published) = std::env::var_os("KRUSTY_LSP_BIN") {
         let published = std::path::PathBuf::from(published);

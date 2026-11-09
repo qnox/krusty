@@ -31,7 +31,7 @@ impl BodyLowering<'_> {
             ));
         }
         let symbol = variable.base.symbol.clone();
-        let input = super::semantic_type(self.arena, self.header.type_parameters(), variable.ty)?;
+        let input = self.semantic(variable.ty)?;
         if !input.is_nullable() || !ty.is_nullable() {
             return Err(mismatch("a safe call is not over and of nullable types"));
         }
@@ -98,7 +98,7 @@ impl BodyLowering<'_> {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });
         self.ir.whens.exhaustive.insert(guarded, ty);
-        self.ir.logical_types.insert(guarded, ty);
+        self.ir.set_logical_type(guarded, ty);
         self.ir.null_guards.insert(guarded);
         let block = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],

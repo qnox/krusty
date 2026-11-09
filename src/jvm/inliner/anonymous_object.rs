@@ -38,8 +38,8 @@ use super::class_roles::ClassRoles;
 use super::name_generator::NameGenerator;
 use super::{InlineError, ObjectLambda};
 
-pub(crate) use sam_wrapper::copy_sam_wrapper;
-pub(crate) use suspend_methods::CallSiteSource;
+pub use sam_wrapper::copy_sam_wrapper;
+pub use suspend_methods::CallSiteSource;
 use suspend_methods::ContinuationMachine;
 pub(crate) use type_remapper::{MalformedType, TypeRemapper};
 
@@ -62,12 +62,10 @@ const SOURCE_DEBUG_EXTENSION_DESC: &str = "Lkotlin/jvm/internal/SourceDebugExten
 /// The package of the coroutine base classes (`isCoroutineSuperClass`).
 const COROUTINE_BASE_PACKAGE: &str = "kotlin/coroutines/jvm/internal/";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
-/// The internal-name prefix of the `FunctionN` interfaces, as a field descriptor.
-const FUNCTION_TYPE_PREFIX: &str = "Lkotlin/jvm/functions/Function";
 
 /// Why an anonymous object could not be regenerated.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RegenerationError {
+pub enum RegenerationError {
     /// A shape the ported stages do not regenerate yet.
     Unsupported(&'static str),
     /// A member could not be written as it was.
@@ -92,7 +90,7 @@ impl From<MalformedType> for RegenerationError {
 
 /// The method an object is regenerated for (`InlineCallSiteInfo`).
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct CallSite<'a> {
+pub struct CallSite<'a> {
     pub owner: &'a str,
     pub method: &'a str,
     pub descriptor: &'a str,
@@ -104,7 +102,7 @@ pub(crate) struct CallSite<'a> {
 }
 
 /// One object to regenerate (`AnonymousObjectTransformationInfo`).
-pub(crate) struct Regeneration<'a> {
+pub struct Regeneration<'a> {
     pub original: &'a ClassNode,
     pub new_class: &'a str,
     /// The descriptor the inline body calls the original's constructor through.
@@ -119,13 +117,17 @@ pub(crate) struct Regeneration<'a> {
     /// capture or otherwise name one of them and must point at the call-site class.
     pub prior_classes: &'a [(String, String)],
     /// The call's reified arguments, which specialize `reifiedOperationMarker` in the copy.
-    pub(in crate::jvm) reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
+    pub reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
     /// The caller's class-file major version.
     pub major: u16,
     /// The `@Metadata` stamp the caller writes.
     pub metadata_stamp: crate::jvm::classfile::MetadataStamp,
     /// The call's inline lambdas the constructor call passes, which the copy inlines.
     pub lambdas: &'a [ObjectLambda<'a>],
+    /// The constructor arguments that pass a function value of an inline suspend parameter the
+    /// call does not inline, each of whose invokes the copy's suspend methods mark as a
+    /// suspension point.
+    pub suspend_values: &'a [usize],
     /// The caller's source map, which the lambdas' lines are lines of.
     pub caller_lines: &'a SourceMap,
     /// Which classes the original names are regenerated in turn.
@@ -150,7 +152,7 @@ enum MachineRebuild {
 
 /// The regenerated class.
 #[derive(Debug)]
-pub(crate) struct Regenerated {
+pub struct Regenerated {
     pub bytes: Vec<u8>,
     /// The regenerated constructor's descriptor, which the call site now calls.
     pub constructor_desc: String,
@@ -166,7 +168,7 @@ pub(crate) struct Regenerated {
 
 /// A SAM wrapper copied into the calling class.
 #[derive(Debug)]
-pub(crate) struct SamWrapperCopy {
+pub struct SamWrapperCopy {
     /// The wrapper the inline body constructs.
     pub original: String,
     pub name: String,
@@ -182,7 +184,7 @@ pub(super) fn is_captured_field_name(name: &str) -> bool {
 
 /// Copy `regeneration.original` as `regeneration.new_class`, whose own regenerated classes are
 /// named by `names`.
-pub(crate) fn regenerate(
+pub fn regenerate(
     regeneration: &Regeneration<'_>,
     names: &mut NameGenerator,
 ) -> Result<Regenerated, RegenerationError> {
@@ -338,10 +340,11 @@ pub(crate) fn regenerate(
         &declared,
         regeneration.constructor_desc,
     )?;
+    // The fields holding function values the call passes for its inline suspend parameters
+    // without inlining them, read before the lambdas' fields are taken out of the plan.
+    let suspend_value_fields =
+        plan.argument_fields(regeneration.constructor_desc, regeneration.suspend_values)?;
     let lambdas = plan_lambdas(&mut plan, regeneration)?;
-    if lambda_machine {
-        refuse_uninlined_function_invokes(&methods, original, &declared, &lambdas, regeneration)?;
-    }
     plan.desc = remapper.map_desc(&plan.desc)?;
     for field in &mut plan.fields {
         field.desc = remapper.map_desc(&field.desc)?;
@@ -439,7 +442,7 @@ pub(crate) fn regenerate(
                         &continuations,
                     )
                 });
-            let code = if regenerates_objects {
+            let mut code = if regenerates_objects {
                 let mut code = code.clone();
                 remapper.remap_method(&mut code)?;
                 let mut objects = NestedObjects {
@@ -473,6 +476,16 @@ pub(crate) fn regenerate(
             } else {
                 copy_body(code, &remapper, &mut lines)?
             };
+            // `surroundInvokesWithSuspendMarkersIfNeeded`: the machine a `$$forInline` copy is
+            // rebuilt into suspends at each invoke of a function value the call does not inline.
+            if machine.is_some() {
+                super::suspend_invoke_markers::surround_field_invokes(
+                    &mut code,
+                    new,
+                    &suspend_value_fields,
+                )
+                .map_err(|error| RegenerationError::Inlining(Box::new(error)))?;
+            }
             method.code = Some(code);
         }
         let Some(machine) = machine else {
@@ -553,6 +566,7 @@ pub(crate) fn regenerate(
                 },
                 prior_classes: &prior_classes,
                 lambdas: &[],
+                suspend_values: &[],
                 continuation: Some(&machine),
                 ..*regeneration
             },
@@ -627,48 +641,6 @@ pub(crate) fn regenerate(
         nested,
         sam_wrappers,
     })
-}
-
-/// A suspend lambda's machine is rebuilt over its `invokeSuspend$$forInline`, where an `invoke` of
-/// a captured function value the call does not inline is a suspension point only once kotlinc's
-/// `surroundInvokesWithSuspendMarkersIfNeeded` marks it, which the port does not do yet: such a
-/// copy is refused rather than given a machine that misses the suspension.
-fn refuse_uninlined_function_invokes(
-    methods: &[&ClassMethod],
-    original: &ClassNode,
-    declared: &[DeclaredCapture<'_>],
-    lambdas: &[FieldLambda<'_>],
-    regeneration: &Regeneration<'_>,
-) -> Result<(), RegenerationError> {
-    let functions: Vec<&str> = declared
-        .iter()
-        .filter(|field| field.desc.starts_with(FUNCTION_TYPE_PREFIX))
-        .filter(|field| !lambdas.iter().any(|lambda| lambda.field == field.name))
-        .map(|field| field.name)
-        .collect();
-    if functions.is_empty() {
-        return Ok(());
-    }
-    for method in methods {
-        if !suspend_methods::is_lambda_machine(original, method) {
-            continue;
-        }
-        let Some(code) = &method.code else { continue };
-        if !matches!(
-            lambda_inlining::invokes_field_lambda(
-                code,
-                &original.name,
-                &functions,
-                regeneration.classes
-            ),
-            Ok(false)
-        ) {
-            return Err(RegenerationError::Unsupported(
-                "a suspend lambda that invokes a function value its call does not inline",
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Declare the spill fields `machine` needs that the original did not already declare, which the

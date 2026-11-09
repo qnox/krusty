@@ -16,7 +16,7 @@ pub(crate) struct KlibBodyClassParameters {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct KlibBodyClassContract {
+pub struct KlibBodyClassContract {
     pub(crate) module: String,
     pub(crate) signature: KlibPublicIdSignature,
     pub(crate) classifier: TypeName,
@@ -28,4 +28,34 @@ pub(crate) struct KlibBodyClassContract {
     pub(crate) is_expect: bool,
     /// Exact primary declaration, including a private primary that is not a public candidate.
     pub(crate) primary_constructor: Option<KlibPublicIdSignature>,
+}
+
+impl KlibBodyClassContract {
+    /// Whether the common type model carries this class's instances as one of its builtin types,
+    /// as it does an unsigned integer, rather than as an instance of a class.
+    pub(crate) fn is_builtin_type(&self) -> bool {
+        crate::types::builtin_semantic(self.classifier).is_some()
+    }
+
+    /// This class applied to its declared formals. A non-generic class is the bare classifier.
+    pub(crate) fn self_type(&self) -> Ty {
+        Ty::obj_args_name(self.classifier, &self.parameters.formals)
+    }
+}
+
+/// A complete declared instance layout. Its field ordinals belong to this exact producer class;
+/// retaining the layout grants no constructor, initializer, singleton or descriptor definition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct KlibClassStorage {
+    pub(crate) declaration: KlibBodyClassContract,
+    pub(crate) superclass: Ty,
+    pub(crate) fields: Vec<KlibStoredField>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct KlibStoredField {
+    pub(crate) name: String,
+    pub(crate) ty: Ty,
+    pub(crate) final_: bool,
+    pub(crate) private: bool,
 }

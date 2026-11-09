@@ -66,7 +66,7 @@ impl DependencyBodyProviderSnapshot {
 /// manifest edges, including metadata-only edge nodes. Input order is not semantic, so construction
 /// sorts the already canonical provider identities before comparison.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DependencyBodySnapshot {
+pub struct DependencyBodySnapshot {
     providers: Box<[DependencyBodyProviderSnapshot]>,
 }
 

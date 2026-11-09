@@ -2,6 +2,60 @@
 
 use super::*;
 
+pub(super) enum LibraryConstructorSelection {
+    Selected,
+    Rejected,
+    NoMatch(Option<std::sync::Arc<RejectedProviderConstructors>>),
+}
+
+/// Immutable evidence from one constructor selection attempt, in declaration order. Mapping
+/// declines remain recorded but do not claim a type mismatch in candidate diagnostics.
+pub(super) struct RejectedProviderConstructors {
+    classifier: TypeName,
+    generic: bool,
+    candidates: Box<[CtorDelegationCandidate]>,
+    rejected: Box<[ConstructorCandidateRejection]>,
+}
+
+impl RejectedProviderConstructors {
+    fn new(
+        classifier: TypeName,
+        declaration: &crate::libraries::LibraryType,
+        candidates: Vec<CtorDelegationCandidate>,
+        rejected: Vec<ConstructorCandidateRejection>,
+    ) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            classifier,
+            generic: declaration.own_type_parameter_count != 0,
+            candidates: candidates.into_boxed_slice(),
+            rejected: rejected.into_boxed_slice(),
+        })
+    }
+
+    pub(super) fn classifier(&self) -> TypeName {
+        self.classifier
+    }
+
+    pub(super) fn generic(&self) -> bool {
+        self.generic
+    }
+
+    pub(super) fn type_mismatches(
+        &self,
+    ) -> impl Iterator<Item = (&CtorDelegationCandidate, &ConstructorCandidateRejection)> {
+        self.rejected.iter().filter_map(move |rejection| {
+            if rejection.mapped_mismatches.is_empty() {
+                return None;
+            }
+            let candidate = self
+                .candidates
+                .get(rejection.candidate_index)
+                .expect("a rejected constructor index belongs to the selected candidate group");
+            Some((candidate, rejection))
+        })
+    }
+}
+
 impl Checker<'_> {
     /// Select one provider constructor tier through the same argument mapper and specificity
     /// operation used by source primary/secondary constructors. Every provider declaration already
@@ -30,7 +84,7 @@ impl Checker<'_> {
                 let Some(context) = crate::symbol_resolver::BoundInnerConstructorContext::new(
                     &source, receiver, classifier,
                 ) else {
-                    return Ok(LibraryConstructorSelection::NoMatch);
+                    return Ok(LibraryConstructorSelection::NoMatch(None));
                 };
                 Some(context)
             }
@@ -38,8 +92,10 @@ impl Checker<'_> {
         };
         self.contextualize_constructor_arrays(scope, call, internal, args, arg_names);
         for &argument in args {
+            // An empty array factory stays postponed until the selected parameter supplies it.
             if self.expr_types[argument.0 as usize] == Ty::Error
                 && !self.file.is_callable_syntax(argument)
+                && !self.postponed_empty_reference_array_factory(scope, argument)
             {
                 self.expr(scope, argument);
             }
@@ -288,7 +344,7 @@ impl Checker<'_> {
                             let mut carries_enclosing_context = false;
                             for formal in &signature.formals {
                                 if ty_mentions_param(declared, std::slice::from_ref(formal)) {
-                                    enclosing_context_formals.insert(formal.clone());
+                                    enclosing_context_formals.insert(*formal);
                                     carries_enclosing_context = true;
                                 }
                             }
@@ -298,7 +354,8 @@ impl Checker<'_> {
                         }
                         let mut actual = kind.ty();
                         let mut bounded = declared.non_null();
-                        while let TyKind::TyParam(_, bound) = bounded.kind() {
+                        while let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = bounded.kind()
+                        {
                             let value_bound = self.integer_literal_semantic_type(bound);
                             if kind.adapts_integer_literal_to(value_bound) {
                                 actual = value_bound;
@@ -309,9 +366,8 @@ impl Checker<'_> {
                         Some((source, parameter, actual, whole_array))
                     })
                     .collect::<Vec<_>>();
-                // Inside the constructed class (or an inner class that sees its formals), the
-                // class's own `T` is a fixed type, while this call infers a fresh `T`.
-                let lexical = scope.lexical_tparam_identities();
+                // The call infers its own `T`, distinct from the class's `T` when that is in
+                // scope as a fixed type (inside the class or an inner class).
                 let source = self.fed_source();
                 let inference_actuals = actuals
                     .iter()
@@ -338,7 +394,7 @@ impl Checker<'_> {
                     .collect::<Vec<_>>();
                 let constraints = crate::symbol_resolver::CallSiteVariables::solve(
                     signature,
-                    |formal| lexical.iter().any(|identity| identity == formal),
+                    self.call_site(call),
                     |signature| {
                         crate::symbol_resolver::infer_generic_call_constraints_with_argument_ordinals(
                             &source,
@@ -419,7 +475,7 @@ impl Checker<'_> {
                             let Some(index) = signature
                                 .formals
                                 .iter()
-                                .position(|candidate| candidate == &formal)
+                                .position(|candidate| candidate == formal)
                             else {
                                 continue;
                             };
@@ -429,14 +485,16 @@ impl Checker<'_> {
                             {
                                 continue;
                             }
-                            let Some(&fixed) = expected_bindings.get(&formal).filter(|&&fixed| {
-                                fixed.non_null().is_ty_param()
-                                    && Self::type_is_lexically_fixed(scope, fixed)
-                            }) else {
+                            let Some(&fixed) =
+                                expected_bindings.get(formal.as_str()).filter(|&&fixed| {
+                                    fixed.non_null().is_ty_param()
+                                        && Self::type_is_lexically_fixed(scope, fixed)
+                                })
+                            else {
                                 continue;
                             };
                             let mut trial = bindings.clone();
-                            trial.insert(formal.clone(), fixed);
+                            trial.insert(crate::types::TyParamName::new(&formal), fixed);
                             if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
                                 signature,
                                 &trial,
@@ -495,9 +553,9 @@ impl Checker<'_> {
                 // postponed producer completes from its declared upper bound. Substitute preceding
                 // solutions so dependent bounds (`U : Base<T>`) retain their semantic application.
                 for (index, formal) in classifier.type_params().iter().enumerate() {
-                    if !enclosing_context_formals.contains(formal)
+                    if !enclosing_context_formals.contains(&crate::types::TyParamName::new(formal))
                         || bindings
-                            .get(formal)
+                            .get(formal.as_str())
                             .is_some_and(|binding| *binding != Ty::Error)
                     {
                         continue;
@@ -508,7 +566,7 @@ impl Checker<'_> {
                         .take(index)
                         .filter_map(|known_formal| {
                             bindings
-                                .get(known_formal)
+                                .get(known_formal.as_str())
                                 .copied()
                                 .filter(|binding| *binding != Ty::Error)
                                 .map(|binding| (known_formal.clone(), binding))
@@ -522,7 +580,7 @@ impl Checker<'_> {
                         .filter(|bound| *bound != Ty::Error)
                     {
                         bindings.insert(
-                            formal.clone(),
+                            crate::types::TyParamName::new(formal),
                             crate::symbol_resolver::ty_subst_keep_unbound(bound, &known),
                         );
                     }
@@ -547,7 +605,7 @@ impl Checker<'_> {
                     .zip(explicit_type_arguments.iter().copied())
                 {
                     if !explicit.mentions_error() && !explicit.mentions_pending() {
-                        bindings.insert(formal.clone(), explicit);
+                        bindings.insert(crate::types::TyParamName::new(formal), explicit);
                     }
                 }
                 // Expected-result inference runs after argument inference and may replace a class
@@ -633,13 +691,17 @@ impl Checker<'_> {
                     candidate_index,
                     resolved,
                 } => (candidate_index, *resolved),
-                SourceConstructorSelection::NoMatch { mismatch } => {
+                SourceConstructorSelection::NoMatch { mismatch, rejected } => {
                     if let Some(mismatch) = mismatch {
+                        let rejections = RejectedProviderConstructors::new(
+                            internal, classifier, candidates, rejected,
+                        );
                         return Err(LibraryConstructorFailure::TypeMismatch {
                             source_argument: mismatch.source_argument,
                             expected: mismatch.expected,
                             actual: mismatch.actual,
                             result: members.first().map(|member| member.ret),
+                            rejections,
                         });
                     }
                     if candidates.is_empty() {
@@ -692,14 +754,19 @@ impl Checker<'_> {
                             ));
                         }
                     }
-                    return Ok(LibraryConstructorSelection::NoMatch);
+                    let rejections = (!rejected.is_empty()).then(|| {
+                        RejectedProviderConstructors::new(
+                            internal, classifier, candidates, rejected,
+                        )
+                    });
+                    return Ok(LibraryConstructorSelection::NoMatch(rejections));
                 }
                 SourceConstructorSelection::Ambiguous => {
-                    return Ok(LibraryConstructorSelection::NoMatch);
+                    return Ok(LibraryConstructorSelection::NoMatch(None));
                 }
             };
         let Some(member) = members.get(candidate_index).cloned() else {
-            return Ok(LibraryConstructorSelection::NoMatch);
+            return Ok(LibraryConstructorSelection::NoMatch(None));
         };
         let annotation = if classifier.is_annotation() {
             let Some(construction) = dependency_annotation_defaults::dependency_construction(
@@ -707,7 +774,7 @@ impl Checker<'_> {
                 classifier,
                 &member,
             ) else {
-                return Ok(LibraryConstructorSelection::NoMatch);
+                return Ok(LibraryConstructorSelection::NoMatch(None));
             };
             Some(construction)
         } else {
@@ -766,7 +833,7 @@ impl Checker<'_> {
             }
         };
         if !self.expect_selected_constructor_args(scope, call, args, arg_names, &target) {
-            return Ok(LibraryConstructorSelection::NoMatch);
+            return Ok(LibraryConstructorSelection::NoMatch(None));
         }
         if let Expr::Call { callee, .. } = self.file.expr(call) {
             self.reject_inaccessible_classifier_expression(*callee, internal);
@@ -774,10 +841,13 @@ impl Checker<'_> {
         self.check_selected_constructor_lambdas(scope, args, &selected.argument_types);
         let publication =
             constructor_commitment::ConstructorDeclarationShape::provider(classifier, &member);
-        self.commit_constructor(call, target.clone(), publication);
+        self.commit_constructor(scope, call, target.clone(), publication);
         if let Some(Some(bindings)) = member_bindings.get(candidate_index) {
             self.record_library_constructor_type_arguments(call, internal, classifier, bindings);
         }
         Ok(LibraryConstructorSelection::Selected)
     }
 }
+
+#[cfg(test)]
+mod tests;

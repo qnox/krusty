@@ -7,6 +7,14 @@
 
 use super::*;
 
+/// How a core member function may be written at a call site besides `receiver.name(…)`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Notation {
+    Plain,
+    Infix,
+    Operator,
+}
+
 /// Publish the compiler-owned realization attached to each exact core declaration. These names
 /// define declarations in this provider; consumers receive the selected callable identity and its
 /// typed intrinsic and never classify a later source or JVM spelling.
@@ -16,28 +24,43 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         owner: TypeName,
         receiver: Ty,
         name: &str,
-        parameter: Option<Ty>,
+        params: &[Ty],
         result: Ty,
-        semantics: (CompilerIntrinsic, bool),
+        semantics: (CompilerIntrinsic, Notation),
     ) {
-        let (intrinsic, infix) = semantics;
-        let params = parameter.into_iter().collect::<Vec<_>>();
+        let (intrinsic, notation) = semantics;
+        let infix = notation == Notation::Infix;
+        let operator = notation == Notation::Operator;
+        let params = params.to_vec();
         let mut callable =
             LibraryCallable::library(owner, name, params.clone(), result, result, "");
         callable.compiler_intrinsic = Some(intrinsic);
         let mut declaration = FunctionInfo::plain(FnKind::Member, Some(receiver), callable);
         declaration.call_sig = CallSig::metadata_plain(params.len());
         declaration.flags.infix = infix;
+        declaration.flags.operator = operator;
 
+        // A class cannot declare two members with one name and one parameter list, so a decoded
+        // declaration with this name and these parameters is the core declaration itself. A core
+        // member mentions no type parameter but its owner's, which each provider spells its own
+        // way (`Array<T>.set(Int, T)`), so a type parameter matches the provider's type parameter.
+        let same_parameter = |declared: &Ty, core: &Ty| {
+            declared == core || declared.is_ty_param() && core.is_ty_param()
+        };
         if let Some(callables) = classifier.declared_callables.get_mut(name) {
             let (mut functions, properties) = std::mem::take(callables).into_parts();
             if let Some(existing) = functions.overloads.iter_mut().find(|candidate| {
+                let declared = candidate.semantic_params();
                 candidate.kind == FnKind::Member
-                    && candidate.semantic_params().as_ref() == params.as_slice()
-                    && candidate.callable.ret.canonical_semantic() == result
+                    && declared.len() == params.len()
+                    && declared
+                        .iter()
+                        .zip(&params)
+                        .all(|(declared, core)| same_parameter(declared, core))
             }) {
                 existing.callable.compiler_intrinsic = Some(intrinsic);
                 existing.flags.infix |= infix;
+                existing.flags.operator |= operator;
             } else {
                 functions.overloads.push(declaration);
             }
@@ -59,11 +82,24 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         ty: Ty,
         intrinsic: CompilerIntrinsic,
     ) {
+        let role = super::builtin_declaration::semantic_call_role(
+            super::builtin_declaration::BuiltinMemberDeclaration {
+                owner,
+                name,
+                params: &[],
+                ret: ty,
+                is_property: true,
+                is_operator: false,
+                is_infix: false,
+                annotations: &[],
+            },
+        );
         if let Some(callables) = classifier.declared_callables.get_mut(name) {
             let (functions, mut properties) = std::mem::take(callables).into_parts();
             if !properties.overloads.is_empty() {
                 for property in &mut properties.overloads {
                     property.getter.compiler_intrinsic = Some(intrinsic);
+                    property.getter.semantic_role = role;
                 }
                 *callables = Callables::from_parts(functions, properties);
                 return;
@@ -72,6 +108,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         }
         let mut getter = LibraryCallable::library(owner, name, Vec::new(), ty, ty, "");
         getter.compiler_intrinsic = Some(intrinsic);
+        getter.semantic_role = role;
         let property = PropertyInfo {
             return_value_status: None,
             name: name.to_string(),
@@ -155,6 +192,46 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             Ty::Int,
             CompilerIntrinsic::ArraySize,
         );
+        // `operator fun get(index: Int): E` and `operator fun set(index: Int, value: E)`, where `E`
+        // is `Array<T>`'s formal or the primitive array's element.
+        let (receiver, element) = match crate::types::prim_array_element(owner) {
+            Some(element) => (Ty::obj_name(owner), element),
+            None => {
+                let element =
+                    Ty::ty_param("T", Ty::nullable(Ty::obj_name(crate::types::wk::any())));
+                (Ty::obj_args_name(owner, &[element]), element)
+            }
+        };
+        member_function(
+            classifier,
+            owner,
+            receiver,
+            "get",
+            &[Ty::Int],
+            element,
+            (CompilerIntrinsic::ArrayGet, Notation::Operator),
+        );
+        // `operator fun set(index: Int, value: E)`.
+        member_function(
+            classifier,
+            owner,
+            receiver,
+            "set",
+            &[Ty::Int, element],
+            Ty::Unit,
+            (CompilerIntrinsic::ArraySet, Notation::Operator),
+        );
+    }
+    if owner == crate::types::wk::string() {
+        member_function(
+            classifier,
+            owner,
+            Ty::String,
+            "get",
+            &[Ty::Int],
+            Ty::Char,
+            (CompilerIntrinsic::StringGet, Notation::Operator),
+        );
     }
     let bit_receiver = if owner.matches("kotlin/Int") {
         Some(Ty::Int)
@@ -176,9 +253,9 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
                 owner,
                 receiver,
                 name,
-                Some(receiver),
+                &[receiver],
                 receiver,
-                (intrinsic, true),
+                (intrinsic, Notation::Infix),
             );
         }
         member_function(
@@ -186,9 +263,9 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             owner,
             receiver,
             "inv",
-            None,
+            &[],
             receiver,
-            (CompilerIntrinsic::PrimitiveBitNot, false),
+            (CompilerIntrinsic::PrimitiveBitNot, Notation::Plain),
         );
         if matches!(receiver, Ty::Int | Ty::Long) {
             for (name, intrinsic) in [
@@ -201,9 +278,9 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
                     owner,
                     receiver,
                     name,
-                    Some(Ty::Int),
+                    &[Ty::Int],
                     receiver,
-                    (intrinsic, true),
+                    (intrinsic, Notation::Infix),
                 );
             }
         }
@@ -211,6 +288,99 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
 }
 
 impl EmptySymbolSource {
+    /// The core declarations of `(namespace, name)` before this provider identifies them. A
+    /// provider that federates them into its own declarations assigns its own identities.
+    pub(crate) fn declarations(
+        namespace: crate::symbol_source::SymbolNamespace,
+        name: &str,
+    ) -> std::rc::Rc<ResolvedSymbols> {
+        let crate::symbol_source::SymbolNamespace::Package(package) = namespace else {
+            return std::rc::Rc::new(ResolvedSymbols::default());
+        };
+        if let Some(function) = super::function_classifiers::classifier_name_in(package, name)
+            .and_then(super::function_classifiers::classifier)
+        {
+            let internal = function.identity();
+            return std::rc::Rc::new(ResolvedSymbols {
+                classifier_name: Some(internal),
+                classifier_declaration: Some(ClassifierDeclaration::Ordinary(internal)),
+                classifier: Some(super::function_classifiers::synthetic(function)),
+                ..ResolvedSymbols::default()
+            });
+        }
+        if package.matches("kotlin/text") {
+            return std::rc::Rc::new(ResolvedSymbols {
+                callables: Self::builtin_text_callables(name),
+                ..ResolvedSymbols::default()
+            });
+        }
+        if package.matches("kotlin/io") {
+            return std::rc::Rc::new(ResolvedSymbols {
+                callables: Self::builtin_console_callables(name),
+                ..ResolvedSymbols::default()
+            });
+        }
+        if package.matches("kotlin/coroutines/intrinsics") {
+            return std::rc::Rc::new(ResolvedSymbols {
+                callables: Self::builtin_coroutine_intrinsic_callables(name),
+                ..ResolvedSymbols::default()
+            });
+        }
+        if package.matches("kotlin/reflect") {
+            // Reference base classifiers are language declarations. KProperty participates in the
+            // delegated-property convention; KFunction is the common supertype of compiler-minted
+            // KFunctionN declarations. Only their identity and result parameter are synthesized;
+            // an artifact may enrich the records with ordinary members.
+            let Some(internal) = matches!(name, "KProperty" | "KFunction")
+                .then(|| crate::types::type_name(&format!("kotlin/reflect/{name}")))
+            else {
+                return std::rc::Rc::new(ResolvedSymbols::default());
+            };
+            let mut classifier = LibraryType::declaration_header();
+            classifier.declaration_name = Some(crate::types::ClassifierDeclarationName::TopLevel {
+                package,
+                name: name.into(),
+            });
+            classifier.kind = TypeKind::Interface;
+            classifier.type_parameters =
+                TypeParameters::invariant(vec!["R".to_string()], vec![Vec::new()]);
+            classifier.own_type_parameter_count = classifier.type_params().len();
+            return std::rc::Rc::new(ResolvedSymbols {
+                classifier_name: Some(internal),
+                classifier_declaration: Some(ClassifierDeclaration::Ordinary(internal)),
+                classifier: Some(std::sync::Arc::new(classifier)),
+                ..ResolvedSymbols::default()
+            });
+        }
+        if !package.matches("kotlin") {
+            return std::rc::Rc::new(ResolvedSymbols::default());
+        }
+        let callables = Self::builtin_kotlin_callables(name);
+        // The provider publishes the identity of each classifier it declares. Asking whether the
+        // name was already interned would make a declaration's existence depend on what else this
+        // process had seen: `IntArray.size` resolved only after another compilation named it.
+        if !Self::declares_classifier(name) {
+            return std::rc::Rc::new(ResolvedSymbols {
+                callables,
+                ..ResolvedSymbols::default()
+            });
+        }
+        let internal = crate::types::type_name_child(package, name);
+        let mut classifier = Self::builtin_classifier(name, internal);
+        classifier.declaration_name = Some(crate::types::ClassifierDeclarationName::TopLevel {
+            package,
+            name: name.into(),
+        });
+        std::rc::Rc::new(ResolvedSymbols {
+            builtin_classifier: false,
+            classifier_name: Some(internal),
+            classifier_declaration: Some(ClassifierDeclaration::Ordinary(internal)),
+            classifier: Some(std::sync::Arc::new(classifier)),
+            callables,
+            importable_declaration: false,
+        })
+    }
+
     /// Whether the core provider declares a classifier `kotlin.<name>`: the scalar and string
     /// types, the specialized arrays, and the language declarations below. This inventory is the
     /// provider's own, so it also owns those identities instead of finding them already interned.
@@ -332,12 +502,6 @@ impl EmptySymbolSource {
                         annotations: &[],
                     },
                 );
-                if callable.semantic_role == Some(crate::types::SemanticCallRole::KotlinAnyEquals) {
-                    callable.compiler_core_declaration =
-                        Some(CompilerCoreDeclaration::KotlinAnyEquals);
-                    callable.declaration_owner =
-                        Some(crate::types::SemanticCallableOwner::Classifier(internal));
-                }
                 if name == "toString" {
                     // The target-free core provider has no dependency registry from which it could
                     // allocate an `ExternalCallableId`. Preserve the selected declaration as the
@@ -617,6 +781,20 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
         })
     }
 
+    fn external_callable(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+    ) -> Option<crate::libraries::ExternalCallableRealization> {
+        super::core_identities::external_callable(identity)
+    }
+
+    fn external_property(
+        &self,
+        identity: crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization> {
+        super::core_identities::external_property(identity)
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         (parent == TypeName::ROOT && name == "kotlin")
             || (parent.matches("kotlin")
@@ -624,96 +802,28 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
             || (parent.matches("kotlin/coroutines") && name == "intrinsics")
     }
 
+    /// Each declaration this provider publishes carries the identity it assigned.
     fn symbols(
         &self,
         namespace: crate::symbol_source::SymbolNamespace,
         name: &str,
     ) -> std::rc::Rc<ResolvedSymbols> {
-        let crate::symbol_source::SymbolNamespace::Package(package) = namespace else {
-            return std::rc::Rc::new(ResolvedSymbols::default());
-        };
-        if let Some(function) = super::function_classifiers::classifier_name_in(package, name)
-            .and_then(super::function_classifiers::classifier)
-        {
-            let internal = function.identity();
-            return std::rc::Rc::new(ResolvedSymbols {
-                classifier_name: Some(internal),
-                classifier_declaration: Some(ClassifierDeclaration::Ordinary(internal)),
-                classifier: Some(super::function_classifiers::synthetic(function)),
-                ..ResolvedSymbols::default()
-            });
+        let mut symbols = (*Self::declarations(namespace, name)).clone();
+        if let Some(classifier) = &mut symbols.classifier {
+            if let Some(internal) = symbols.classifier_name {
+                super::core_identities::register_classifier(
+                    std::sync::Arc::make_mut(classifier),
+                    internal,
+                );
+            }
         }
-        if package.matches("kotlin/text") {
-            return std::rc::Rc::new(ResolvedSymbols {
-                callables: Self::builtin_text_callables(name),
-                ..ResolvedSymbols::default()
-            });
-        }
-        if package.matches("kotlin/io") {
-            return std::rc::Rc::new(ResolvedSymbols {
-                callables: Self::builtin_console_callables(name),
-                ..ResolvedSymbols::default()
-            });
-        }
-        if package.matches("kotlin/coroutines/intrinsics") {
-            return std::rc::Rc::new(ResolvedSymbols {
-                callables: Self::builtin_coroutine_intrinsic_callables(name),
-                ..ResolvedSymbols::default()
-            });
-        }
-        if package.matches("kotlin/reflect") {
-            // Reference base classifiers are language declarations. KProperty participates in the
-            // delegated-property convention; KFunction is the common supertype of compiler-minted
-            // KFunctionN declarations. Only their identity and result parameter are synthesized;
-            // an artifact may enrich the records with ordinary members.
-            let Some(internal) = matches!(name, "KProperty" | "KFunction")
-                .then(|| crate::types::type_name(&format!("kotlin/reflect/{name}")))
-            else {
-                return std::rc::Rc::new(ResolvedSymbols::default());
-            };
-            let mut classifier = LibraryType::declaration_header();
-            classifier.declaration_name = Some(crate::types::ClassifierDeclarationName::TopLevel {
+        if let crate::symbol_source::SymbolNamespace::Package(package) = namespace {
+            symbols.callables = super::core_identities::register_package_callables(
                 package,
-                name: name.into(),
-            });
-            classifier.kind = TypeKind::Interface;
-            classifier.type_parameters =
-                TypeParameters::invariant(vec!["R".to_string()], vec![Vec::new()]);
-            classifier.own_type_parameter_count = classifier.type_params().len();
-            return std::rc::Rc::new(ResolvedSymbols {
-                classifier_name: Some(internal),
-                classifier_declaration: Some(ClassifierDeclaration::Ordinary(internal)),
-                classifier: Some(std::sync::Arc::new(classifier)),
-                ..ResolvedSymbols::default()
-            });
+                std::mem::take(&mut symbols.callables),
+            );
         }
-        if !package.matches("kotlin") {
-            return std::rc::Rc::new(ResolvedSymbols::default());
-        }
-        let callables = Self::builtin_kotlin_callables(name);
-        // The provider publishes the identity of each classifier it declares. Asking whether the
-        // name was already interned would make a declaration's existence depend on what else this
-        // process had seen: `IntArray.size` resolved only after another compilation named it.
-        if !Self::declares_classifier(name) {
-            return std::rc::Rc::new(ResolvedSymbols {
-                callables,
-                ..ResolvedSymbols::default()
-            });
-        }
-        let internal = crate::types::type_name_child(package, name);
-        let mut classifier = Self::builtin_classifier(name, internal);
-        classifier.declaration_name = Some(crate::types::ClassifierDeclarationName::TopLevel {
-            package,
-            name: name.into(),
-        });
-        std::rc::Rc::new(ResolvedSymbols {
-            builtin_classifier: false,
-            classifier_name: Some(internal),
-            classifier_declaration: Some(ClassifierDeclaration::Ordinary(internal)),
-            classifier: Some(std::sync::Arc::new(classifier)),
-            callables,
-            importable_declaration: false,
-        })
+        std::rc::Rc::new(symbols)
     }
 }
 

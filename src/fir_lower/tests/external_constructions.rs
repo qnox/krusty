@@ -40,7 +40,9 @@ fn a_java_generic_constructor_records_its_declared_type_parameter_destination() 
         ctor_params.as_deref(),
         Some([Ty::platform_nullable(Ty::obj("Money"))].as_slice())
     );
-    let declared = ir.construction_declared_params[construction].as_ref();
+    let declared = ir
+        .construction_declared_params(*construction)
+        .expect("declared parameters");
     // Java's unannotated class formal `V` is the platform `V!` with Kotlin's implicit `Any?` bound.
     let formal = Ty::platform_nullable(Ty::ty_param("V", Ty::nullable(Ty::obj("kotlin/Any"))));
     assert_eq!(declared, [formal]);

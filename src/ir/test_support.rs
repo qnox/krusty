@@ -3,8 +3,9 @@
 use super::{DeclarationAnnotations, IrClass};
 
 /// A minimal well-formed `IrClass` for tests that build IR by hand and only exercise fields/functions.
-pub(crate) fn blank_class(fq: &str) -> IrClass {
+pub fn blank_class(fq: &str) -> IrClass {
     IrClass {
+        declaration_context: None,
         fq_name: fq.into(),
         declaration_name: None,
         is_source_declared: false,
@@ -73,6 +74,7 @@ pub(crate) fn blank_class(fq: &str) -> IrClass {
 
 /// A minimal generated secondary constructor delegating to the primary one, with no parameters,
 /// delegation arguments or body.
+#[cfg(test)]
 pub(crate) fn blank_secondary_ctor() -> super::IrSecondaryCtor {
     super::IrSecondaryCtor {
         annotations: DeclarationAnnotations::default(),
@@ -96,7 +98,23 @@ pub(crate) fn blank_secondary_ctor() -> super::IrSecondaryCtor {
             default_masks: Vec::new(),
         },
         synthetic: false,
+        platform_visible: false,
         vc_params: false,
         param_checks: Vec::new(),
     }
+}
+
+/// Copy a class-method fixture through the same fact-preserving operation common lowering uses.
+pub fn clone_class_method(
+    ir: &mut super::IrFile,
+    source: super::FunId,
+    shape: super::IrFunction,
+    bindings: &crate::fx_hash::HashMap<String, crate::types::Ty>,
+) -> super::FunId {
+    super::clone_class_method(ir, source, shape, bindings)
+}
+
+/// A public stored-property fixture using the common dependency-declaration defaults.
+pub fn stored_property(name: String, ty: crate::types::Ty, field: u32) -> super::IrProperty {
+    super::IrProperty::stored_value(name, ty, field)
 }

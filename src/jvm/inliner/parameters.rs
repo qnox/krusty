@@ -17,7 +17,7 @@ const CHECKCAST: u8 = 0xc0;
 
 /// How one parameter's value reaches the inlined body.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Binding {
+pub enum Binding {
     /// Stored to a temporary of the inline frame right after its argument is evaluated.
     Temporary,
     /// Read from the caller local the argument already lives in (kotlinc's `genOrGetLocal`), so no
@@ -51,7 +51,7 @@ pub(crate) enum Binding {
 
 /// One parameter of the inlined callee, in declaration order.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Parameter {
+pub struct Parameter {
     pub category: Category,
     pub binding: Binding,
 }
@@ -59,7 +59,7 @@ pub(crate) struct Parameter {
 /// The inlined callee's parameters, `this` included, followed by the values its inline lambdas
 /// capture (kotlinc's captured parameters, which `prepareNode` places after the real ones).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Parameters {
+pub struct Parameters {
     pub parameters: Vec<Parameter>,
     /// Each lambda's captured values, the lambdas in argument order.
     pub captured: Vec<Parameter>,
@@ -68,6 +68,11 @@ pub(crate) struct Parameters {
     /// caller has in no local, so its slot follows the temporaries of the arguments before that
     /// lambda. Without an owner, a captured temporary follows every argument.
     pub capture_owners: Vec<usize>,
+    /// The parameters, by index into `parameters`, that take a function value for an inline
+    /// suspend parameter: kotlinc's `NonInlineArgumentForInlineSuspendParameter.OTHER`. An object
+    /// the body constructs keeps such a value in a field, and its regenerated suspend methods mark
+    /// each invoke of it as a suspension point.
+    pub non_inline_suspend: Vec<usize>,
 }
 
 /// Where one of the body's slots lives in the caller.
@@ -135,10 +140,24 @@ impl Parameters {
         None
     }
 
+    /// Whether a parameter's declaration slot holds a function value of an inline suspend parameter
+    /// the call does not inline.
+    pub(super) fn non_inline_suspend_at(&self, slot: usize) -> bool {
+        let mut declaration = 0usize;
+        for (index, parameter) in self.parameters.iter().enumerate() {
+            let words = parameter.category.words() as usize;
+            if slot < declaration + words {
+                return self.non_inline_suspend.contains(&index);
+            }
+            declaration += words;
+        }
+        false
+    }
+
     /// The temporary each parameter is stored to, relative to the inline frame's base, indexed like
     /// [`Self::all`]; `None` for a parameter that is not a temporary. Temporaries are numbered in
     /// store order: the arguments in turn, each lambda's captured temporaries at its argument.
-    pub(crate) fn temporaries(&self) -> Vec<Option<u16>> {
+    pub fn temporaries(&self) -> Vec<Option<u16>> {
         let real = self.parameters.len();
         let mut slots = vec![None; real + self.captured.len()];
         let mut next = 0u16;
@@ -333,6 +352,7 @@ mod tests {
             ],
             captured: vec![parameter(Category::Reference, Binding::Temporary)],
             capture_owners: vec![0],
+            non_inline_suspend: Vec::new(),
         };
         assert_eq!(
             parameters.temporaries(),
@@ -356,6 +376,7 @@ mod tests {
                 },
             )],
             capture_owners: vec![0],
+            non_inline_suspend: Vec::new(),
         };
         assert_eq!(parameters.temporaries(), vec![None, Some(0), None]);
     }
@@ -372,6 +393,7 @@ mod tests {
             ],
             captured: vec![parameter(Category::Reference, Binding::Temporary)],
             capture_owners: vec![0],
+            non_inline_suspend: Vec::new(),
         };
         assert_eq!(
             parameters.temporaries(),

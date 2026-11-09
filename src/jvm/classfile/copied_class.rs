@@ -4,9 +4,8 @@
 
 use std::rc::Rc;
 
-use super::constant_pool_queries::PoolLookup;
 use super::inner_classes::InnerClassTable;
-use super::method_rewrite::{BodyStage, MethodIdentity};
+use super::method_rewrite::BodyStage;
 use super::pool_layout::Unnamed;
 use super::{u2, ClassWriter, FieldInfo, MethodInfo};
 use crate::jvm::bytecode_passes::descriptors;
@@ -18,7 +17,7 @@ use crate::jvm::source_map::SourceMap;
 
 /// Why a declaration could not be copied as it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CopyError {
+pub enum CopyError {
     /// The declaration carries something this writer does not write.
     Unsupported(&'static str),
     /// The body does not lay out.
@@ -29,7 +28,7 @@ const ACC_STATIC: u16 = 0x0008;
 
 impl ClassWriter {
     /// The value classes this class's code may box, which a class copied for its code shares.
-    pub(crate) fn value_classes(&self) -> Rc<ValueClassDescriptors> {
+    pub fn value_classes(&self) -> Rc<ValueClassDescriptors> {
         Rc::clone(&self.value_classes)
     }
 
@@ -88,7 +87,7 @@ impl ClassWriter {
     /// `ClassVisitor.visitMethod` followed by the method's body, as `MethodNode.accept` visits it:
     /// the declaration, its annotations, then the code and its local variables. The body then
     /// passes through kotlinc's method optimizations, which every class writer applies.
-    pub(crate) fn add_copied_method(&mut self, method: &ClassMethod) -> Result<(), CopyError> {
+    pub fn add_copied_method(&mut self, method: &ClassMethod) -> Result<(), CopyError> {
         self.add_copied_method_at(method, BodyStage::Emitted)
     }
 
@@ -169,7 +168,9 @@ impl ClassWriter {
         };
         // kotlinc's optimizing method visitor buffers the body and optimizes it before any of its
         // constants reach the class's pool, so a constant only the original body used is not
-        // interned at all.
+        // interned at all. It optimizes the body once: the passes are not idempotent, and a second
+        // run folds what the first left (an inline-only callee's stored receiver, whose `nop` the
+        // first run's cleanup removed after its store/load analysis).
         let node = &self.optimized_before_writing(method, node, stage);
         let assembled = node.assemble(self).map_err(CopyError::Assemble)?;
         info.lvt = assembled
@@ -192,23 +193,6 @@ impl ClassWriter {
         info.lnt = assembled.line_numbers;
         self.methods.push(info);
         let index = self.methods.len() - 1;
-        let identity = MethodIdentity {
-            access: method.access,
-            name: &method.name,
-            desc: &method.desc,
-        };
-        let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
-        let optimized = self.optimized(
-            &self.methods[index],
-            identity,
-            node.clone(),
-            None,
-            stage,
-            &mut pool,
-        );
-        if let Some(optimized) = optimized {
-            self.methods[index].take_rewritten(optimized);
-        }
         self.intern_copied_frame_classes(index, &method.name, &method.desc);
         Ok(())
     }

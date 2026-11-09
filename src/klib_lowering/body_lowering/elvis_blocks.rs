@@ -48,7 +48,7 @@ impl BodyLowering<'_> {
             branches: vec![(Some(condition), fallback), (None, present)],
         });
         self.ir.whens.elvises.insert(when, 0); // Serialized bodies supply no source line.
-        self.ir.logical_types.insert(when, ty);
+        self.ir.set_logical_type(when, ty);
         let block = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],
             value: Some(when),
@@ -72,7 +72,7 @@ impl BodyLowering<'_> {
                 "an Elvis block does not declare a compiler temporary",
             ));
         }
-        let input = super::semantic_type(self.arena, self.header.type_parameters(), variable.ty)?;
+        let input = self.semantic(variable.ty)?;
         let expression = self.arena.expr(conditional);
         let KlibIrExprKind::When {
             branches,

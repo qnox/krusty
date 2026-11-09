@@ -6,7 +6,7 @@
 
 use super::common;
 
-use krusty::jvm::ir_emit::JvmDefaultMode;
+use krusty_jvm::ir_emit::JvmDefaultMode;
 use std::path::Path;
 
 /// An interface exercising every member kind whose realization `-jvm-default` changes: a property

@@ -85,7 +85,7 @@ pub(super) fn finish_tailrec_body(
         },
         origin,
     );
-    if let Some(&line) = ir.fn_decl_lines.get(&frame.function) {
+    if let Some(line) = ir.function_position(frame.function).decl_line {
         ir.expr_lines.insert(exit, line);
     }
     roots.push(exit);
@@ -286,7 +286,7 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> TailC
                 // tail call and runs the check on every frame, so it stays opaque here.
                 IrExpr::NotNullAssert {
                     operand,
-                    check: crate::ir::NullCheck::Named(_),
+                    check: crate::ir::NullCheck::Named { .. },
                 } => {
                     let operand = *operand;
                     self.visit_held(operand, tail, edge);

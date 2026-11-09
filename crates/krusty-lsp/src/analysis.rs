@@ -93,7 +93,6 @@ const MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES: usize = 8 * 1024 * 1024;
 /// headroom left, so 512 MiB: ~3.2M declarations at the worst-case ~167 bytes/entry charge (real
 /// retained bytes run about 3x smaller, ~52/entry). A pathological workspace stops growing the
 /// index instead of the process.
-pub(crate) const MAX_PROJECT_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES: usize = 512 * 1024 * 1024;
 pub(crate) const MAX_WORKSPACE_SYMBOL_QUERY_BYTES: usize = 1024;
 const MAX_WORKSPACE_SYMBOL_CONTAINER_DEPTH: usize = 128;
 /// A leading-wildcard query scans the retained index. Bound the greedy matcher's total transitions
@@ -114,7 +113,6 @@ const WORKSPACE_SYMBOL_INDEX_FIXED_WIRE_BYTES: usize = 256;
 /// (intellij-community) and the largest generated one 4.9 MiB (a k8s client), so 64 MiB only ever
 /// skips pathological sources -- and a skip now names the file in the client log instead of
 /// failing silently.
-pub const MAX_INDEXED_FILE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SOURCE_SET_FOLDING_RANGE_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_FOLDING_RANGE_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const FOLDING_RANGE_WIRE_FIXED_BYTES: usize = 192;
@@ -167,24 +165,30 @@ pub(crate) struct DocumentSymbolBudget {
     wire_bytes: usize,
 }
 
+/// The wire size an index built for one worker message may reach. The project-wide index the
+/// session retains is not built for a message and is `unlimited`.
 struct WorkspaceSymbolBudget {
     wire_bytes: usize,
-    max_wire_bytes: usize,
+    max_wire_bytes: Option<usize>,
 }
 
 impl WorkspaceSymbolBudget {
     fn new() -> Self {
-        Self::with_limit(MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES)
+        Self::with_limit(Some(MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES))
     }
 
-    fn with_limit(max_wire_bytes: usize) -> Self {
+    fn unlimited() -> Self {
+        Self::with_limit(None)
+    }
+
+    fn with_limit(max_wire_bytes: Option<usize>) -> Self {
         Self {
             wire_bytes: WORKSPACE_SYMBOL_INDEX_FIXED_WIRE_BYTES,
             max_wire_bytes,
         }
     }
 
-    fn from_index_within(index: &WorkspaceSymbolIndex, max_wire_bytes: usize) -> Self {
+    fn from_index_within(index: &WorkspaceSymbolIndex, max_wire_bytes: Option<usize>) -> Self {
         let mut budget = Self::with_limit(max_wire_bytes);
         let string_bytes = index
             .packages
@@ -207,7 +211,9 @@ impl WorkspaceSymbolBudget {
     }
 
     fn remaining_entry_capacity(&self) -> usize {
-        self.max_wire_bytes.saturating_sub(self.wire_bytes) / WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES
+        self.max_wire_bytes.map_or(usize::MAX, |max| {
+            max.saturating_sub(self.wire_bytes) / WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES
+        })
     }
 
     fn reserve_merged_entry(
@@ -249,10 +255,13 @@ impl WorkspaceSymbolBudget {
     }
 
     fn reserve(&mut self, bytes: usize) -> bool {
-        if bytes > self.max_wire_bytes.saturating_sub(self.wire_bytes) {
+        if self
+            .max_wire_bytes
+            .is_some_and(|max| bytes > max.saturating_sub(self.wire_bytes))
+        {
             return false;
         }
-        self.wire_bytes += bytes;
+        self.wire_bytes = self.wire_bytes.saturating_add(bytes);
         true
     }
 }
@@ -508,20 +517,9 @@ pub struct DocumentSymbolIndex {
 /// package id, name id, declaration lo/hi)`.
 type WorkspaceSymbolEntry = [u32; 13];
 
-/// How many oversized-file skips keep their URI for the client log; the rest stay a count.
-pub(crate) const MAX_OMISSION_EXAMPLES: usize = 3;
-
-/// Bounded provenance for an incomplete symbol index: which ceiling was hit and what it cost.
-///
-/// Carried beside `complete` because the flag alone cannot say *why* search is missing symbols,
-/// and the client log built from this is the only place a user can learn which file to exclude or
-/// which limit is undersized.
+/// What a symbol index built for one worker message left out, and why: the message's wire budget.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct WorkspaceIndexOmissions {
-    /// Files skipped before parse for exceeding [`MAX_INDEXED_FILE_BYTES`].
-    pub oversized_files: usize,
-    /// Up to [`MAX_OMISSION_EXAMPLES`] `(uri, bytes)` witnesses of those skips.
-    pub oversized_examples: Vec<(String, u64)>,
     /// Declarations dropped when a chunk or retention budget was spent.
     pub dropped_entries: usize,
     /// Chunk builds that stopped early on a spent budget, leaving later files unparsed.
@@ -530,23 +528,10 @@ pub struct WorkspaceIndexOmissions {
 
 impl WorkspaceIndexOmissions {
     pub fn is_empty(&self) -> bool {
-        self.oversized_files == 0 && self.dropped_entries == 0 && self.truncated_chunks == 0
-    }
-
-    fn note_oversized(&mut self, uri: &str, bytes: u64) {
-        self.oversized_files += 1;
-        if self.oversized_examples.len() < MAX_OMISSION_EXAMPLES {
-            self.oversized_examples.push((uri.to_string(), bytes));
-        }
+        self.dropped_entries == 0 && self.truncated_chunks == 0
     }
 
     fn absorb(&mut self, other: Self) {
-        self.oversized_files += other.oversized_files;
-        for example in other.oversized_examples {
-            if self.oversized_examples.len() < MAX_OMISSION_EXAMPLES {
-                self.oversized_examples.push(example);
-            }
-        }
         self.dropped_entries += other.dropped_entries;
         self.truncated_chunks += other.truncated_chunks;
     }
@@ -1013,62 +998,19 @@ impl DocumentSymbolIndex {
 /// rather than once per later chunk, and the segment count stays around `log2(entries / chunk)` --
 /// under a dozen for either reference corpus. Segments are disjoint by file, so a query reads them
 /// in sequence with no reconciliation beyond the shadowing every layer already does.
+#[derive(Default)]
 pub struct ProjectSymbolIndex {
     /// Oldest and largest first; the newest chunk is last.
     segments: Vec<WorkspaceSymbolIndex>,
-    /// Tracked here rather than read back off the segments, because a chunk whose every file was
-    /// skipped contributes no segment to carry the flag.
-    complete: bool,
-    /// Aggregated from every admitted chunk, and held here rather than on the segments: a chunk
-    /// trimmed down to zero entries contributes no segment, and a merge would otherwise re-count
-    /// what its operands recorded.
-    omissions: WorkspaceIndexOmissions,
-}
-
-impl Default for ProjectSymbolIndex {
-    fn default() -> Self {
-        Self {
-            segments: Vec::new(),
-            complete: true,
-            omissions: WorkspaceIndexOmissions::default(),
-        }
-    }
 }
 
 impl ProjectSymbolIndex {
     /// Re-index `uris` from `segment`, dropping whatever any segment held for them.
     pub fn replace_files(&mut self, uris: &[String], segment: WorkspaceSymbolIndex) {
-        self.replace_files_within(uris, segment, MAX_PROJECT_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES);
-    }
-
-    /// The budgeted implementation behind [`Self::replace_files`]. Keeping the ceiling here, at
-    /// the aggregate that owns every segment, prevents an unmerged tail from sitting outside a
-    /// limit that was previously checked only when two adjacent segments happened to coalesce.
-    fn replace_files_within(
-        &mut self,
-        uris: &[String],
-        mut segment: WorkspaceSymbolIndex,
-        max_wire_bytes: usize,
-    ) {
         for existing in &mut self.segments {
             existing.remove_files(uris);
         }
         self.segments.retain(|segment| segment.entry_count() > 0);
-
-        // Spend every untouched segment before admitting the replacement. The accounting is the
-        // same conservative entry/string accounting used by merge budgets, so adding a small tail
-        // cannot exceed the whole-layer ceiling merely because its neighbour is more than twice
-        // its size and therefore does not merge yet.
-        let reserved = self
-            .segments
-            .iter()
-            .map(WorkspaceSymbolIndex::retained_wire_bytes)
-            .sum::<usize>();
-        segment.retain_accounted_wire_budget(max_wire_bytes.saturating_sub(reserved));
-        self.complete &= segment.is_complete();
-        // Drained into the aggregate BEFORE the zero-entry return: a chunk trimmed to nothing is
-        // precisely the omission most worth reporting.
-        self.omissions.absorb(segment.take_omissions());
         if segment.entry_count() == 0 {
             return;
         }
@@ -1083,23 +1025,10 @@ impl ProjectSymbolIndex {
                 .segments
                 .pop()
                 .expect("two segments were just observed");
-            // The ceiling is on the whole layer, so what the untouched segments already hold is
-            // spent before this merge starts -- their string tables as well as their entries, or
-            // the layer settles above its ceiling by whatever those tables weigh.
-            let reserved = self.segments[..self.segments.len() - 1]
-                .iter()
-                .map(WorkspaceSymbolIndex::retained_wire_bytes)
-                .sum::<usize>();
-            let target = self
-                .segments
+            self.segments
                 .last_mut()
-                .expect("two segments were just observed");
-            target.merge_within(merged, max_wire_bytes.saturating_sub(reserved));
-            // Both operands were drained at their own admission, so anything on the target now is
-            // merge-drop provenance; left there it would never be read again and the client log
-            // would fall back to the vague no-cause clause.
-            let residue = target.take_omissions();
-            self.omissions.absorb(residue);
+                .expect("two segments were just observed")
+                .merge_within(merged, None);
         }
     }
 
@@ -1117,17 +1046,6 @@ impl ProjectSymbolIndex {
 
     pub fn segment_count(&self) -> usize {
         self.segments.len()
-    }
-
-    /// Whether every declaration the sweep offered is actually in here. False once a file was too
-    /// large to parse or the layer reached its retention ceiling.
-    pub fn is_complete(&self) -> bool {
-        self.complete && self.segments.iter().all(WorkspaceSymbolIndex::is_complete)
-    }
-
-    /// What is known to be missing and why, aggregated across every chunk this index absorbed.
-    pub fn omissions(&self) -> &WorkspaceIndexOmissions {
-        &self.omissions
     }
 }
 
@@ -1182,13 +1100,10 @@ impl WorkspaceSymbolIndex {
         result
     }
 
-    /// Index files nobody has opened, from their text on disk.
+    /// Index files nobody has opened, from their text on disk, keeping every declaration.
     ///
     /// Parse-only: nothing here needs resolution, and full analysis of a whole project would cost
-    /// orders of magnitude more than the search it serves. A file past
-    /// [`MAX_INDEXED_FILE_BYTES`] is skipped rather than parsed -- a single generated or sparse
-    /// multi-megabyte source otherwise stalls the build for tens of seconds -- and marks the index
-    /// incomplete so callers can report the gap.
+    /// orders of magnitude more than the search it serves.
     pub fn from_disk_sources(files: &[(&str, &str)]) -> Self {
         Self::from_uri_sources(files.iter().copied())
     }
@@ -1205,16 +1120,12 @@ impl WorkspaceSymbolIndex {
         S: AsRef<str>,
     {
         let mut result = Self::default();
-        let mut budget = WorkspaceSymbolBudget::new();
+        let mut budget = WorkspaceSymbolBudget::unlimited();
         let mut interning = WorkspaceSymbolInterning::default();
 
         for (uri, source) in files {
             let uri = uri.as_ref();
             let source = source.as_ref();
-            if source.len() > MAX_INDEXED_FILE_BYTES {
-                result.note_oversized_file(uri, source.len() as u64);
-                continue;
-            }
             if !interning.files.contains_key(uri)
                 && !budget.reserve(workspace_symbol_string_wire_cost(uri))
             {
@@ -1344,25 +1255,6 @@ impl WorkspaceSymbolIndex {
             return false;
         }
         true
-    }
-
-    /// Record a file skipped before parse for exceeding [`MAX_INDEXED_FILE_BYTES`].
-    ///
-    /// The disk adapter checks metadata before allocating a file, so an oversized file never
-    /// reaches the builder at all; this explicit channel is what distinguishes the bounded
-    /// omission — with the URI a user needs to act on it — from a genuinely empty chunk.
-    pub(crate) fn note_oversized_file(&mut self, uri: &str, bytes: u64) {
-        self.complete = false;
-        self.omissions.note_oversized(uri, bytes);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn omissions(&self) -> &WorkspaceIndexOmissions {
-        &self.omissions
-    }
-
-    pub(crate) fn take_omissions(&mut self) -> WorkspaceIndexOmissions {
-        std::mem::take(&mut self.omissions)
     }
 
     pub fn remap_files(&mut self, remaps: &[(u32, u32)], retained_file_count: usize) {
@@ -1664,17 +1556,6 @@ impl WorkspaceSymbolIndex {
         self.retain_entries_within(max_wire_bytes);
     }
 
-    /// Retain against the conservative accounting used by the segmented project layer. JSON wire
-    /// size is intentionally not the trigger here: `retained_wire_bytes` also reserves both search
-    /// permutations at their worst-case integer width, and mixing those two measures would let the
-    /// aggregate exceed the ceiling even though each segment passed its own exact-wire check.
-    fn retain_accounted_wire_budget(&mut self, max_wire_bytes: usize) {
-        if self.retained_wire_bytes() <= max_wire_bytes {
-            return;
-        }
-        self.retain_entries_within(max_wire_bytes);
-    }
-
     fn retain_entries_within(&mut self, max_wire_bytes: usize) {
         let old = std::mem::take(self);
         let old_entry_count = old.entries.len();
@@ -1683,7 +1564,7 @@ impl WorkspaceSymbolIndex {
             omissions: old.omissions.clone(),
             ..Self::default()
         };
-        let mut budget = WorkspaceSymbolBudget::with_limit(max_wire_bytes);
+        let mut budget = WorkspaceSymbolBudget::with_limit(Some(max_wire_bytes));
         let mut package_ids = HashMap::<String, u32>::new();
         let mut name_ids = HashMap::<String, u32>::new();
         let mut file_ids = HashMap::<String, u32>::new();
@@ -1742,12 +1623,15 @@ impl WorkspaceSymbolIndex {
     }
 
     pub fn merge_from(&mut self, other: Self) {
-        self.merge_within(other, MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES);
+        self.merge_within(
+            other,
+            Some(MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES),
+        );
     }
 
-    /// Merge under an explicit retention ceiling. The source-set default bounds one worker message;
-    /// the project-wide index is retained by the session and gets its own, larger, ceiling.
-    pub fn merge_within(&mut self, mut other: Self, max_wire_bytes: usize) {
+    /// Merge under an explicit retention ceiling. `Some` bounds one worker message; the project-wide
+    /// index the session retains passes `None` and keeps every declaration.
+    pub fn merge_within(&mut self, mut other: Self, max_wire_bytes: Option<usize>) {
         let self_is_bound = !self.files.is_empty();
         let other_is_bound = !other.files.is_empty();
         if !self.entries.is_empty() && !other.entries.is_empty() && self_is_bound != other_is_bound
@@ -2199,7 +2083,9 @@ impl WorkspaceSymbolIndex {
         self.entries.len()
     }
 
-    /// What this index costs against a retention budget: its entries plus every string table.
+    /// The index's size in the wire accounting a worker message budget uses: its entries plus every
+    /// string table. Reported by the sizing probe.
+    #[cfg(test)]
     fn retained_wire_bytes(&self) -> usize {
         self.entries
             .len()
@@ -3478,17 +3364,6 @@ pub struct IndexedFile {
     pub text: String,
 }
 
-/// Global ceiling on one model generation's cached source inventory.
-pub const MAX_WORKSPACE_INDEX_FILES: usize = 200_000;
-/// URI payload and record bytes retained by the producer's cached source inventory.
-pub const MAX_WORKSPACE_INDEX_URI_BYTES: usize = 16 * 1024 * 1024;
-
-/// One owned URI's payload plus its `String` record. Queue layers multiply this by the number of
-/// representations they retain, keeping producer and consumer accounting on the same unit.
-pub fn workspace_index_uri_bytes(uri: &str) -> usize {
-    uri.len().saturating_add(std::mem::size_of::<String>())
-}
-
 #[derive(Clone)]
 pub struct DocumentAnalysis {
     pub diagnostics: Vec<Diagnostic>,
@@ -4098,7 +3973,6 @@ mod tests {
         }
         paths.sort();
         let mut project = ProjectSymbolIndex::default();
-        let mut chunk_incomplete = 0usize;
         for chunk in paths.chunks(128) {
             let sources: Vec<(String, String)> = chunk
                 .iter()
@@ -4112,7 +3986,6 @@ mod tests {
                     .iter()
                     .map(|(uri, text)| (uri.as_str(), text.as_str())),
             );
-            chunk_incomplete += usize::from(!segment.is_complete());
             let uris: Vec<String> = sources.into_iter().map(|(uri, _)| uri).collect();
             project.replace_files(&uris, segment);
         }
@@ -4122,15 +3995,12 @@ mod tests {
             .map(|layer| layer.retained_wire_bytes())
             .sum::<usize>();
         eprintln!(
-            "PROBE files={} entries={} segments={} accounted_bytes={} ({:.1} MiB) \
-             complete={} incomplete_chunks={}",
+            "PROBE files={} entries={} segments={} accounted_bytes={} ({:.1} MiB)",
             paths.len(),
             project.entry_count(),
             project.segment_count(),
             retained,
             retained as f64 / (1024.0 * 1024.0),
-            project.is_complete(),
-            chunk_incomplete,
         );
     }
 
@@ -4655,75 +4525,6 @@ mod tests {
     }
 
     #[test]
-    fn the_project_budget_covers_unmerged_segments_as_one_layer() {
-        let mut project = ProjectSymbolIndex::default();
-        let (first_uris, first) = project_chunk(0, 8);
-        let first_cost = first.retained_wire_bytes();
-        let limit = first_cost.saturating_add(first_cost / 2);
-        project.replace_files_within(&first_uris, first, limit);
-
-        let (second_uris, second) = project_chunk(1, 8);
-        project.replace_files_within(&second_uris, second, limit);
-
-        let retained = project
-            .segments
-            .iter()
-            .map(WorkspaceSymbolIndex::retained_wire_bytes)
-            .sum::<usize>();
-        assert!(retained <= limit, "retained {retained} bytes over {limit}");
-        assert!(
-            !project.is_complete(),
-            "admitting only part of the second unmerged segment must be observable"
-        );
-        // The trim's cost is recorded, not just flagged: the client log reports how many
-        // declarations the retention ceiling actually took.
-        assert!(
-            project.omissions().dropped_entries > 0,
-            "a retention trim must record how many declarations it dropped"
-        );
-    }
-
-    #[test]
-    fn coalesce_time_merge_drops_reach_the_project_aggregate() {
-        // Segments are drained of omissions at admission; a drop recorded DURING the coalesce
-        // merge lands on the retained target segment, which is never read for provenance again.
-        // The residue must be absorbed into the project aggregate or the client log falls back to
-        // the vague no-cause clause. The drop itself is simulated by seeding the second segment's
-        // entries against a budget the coalesce cannot honor.
-        let mut project = ProjectSymbolIndex::default();
-        let (first_uris, first) = project_chunk(0, 8);
-        let first_cost = first.retained_wire_bytes();
-        project.replace_files_within(&first_uris, first, usize::MAX);
-        assert_eq!(project.omissions().dropped_entries, 0);
-        // Seed the retained segment with merge-shaped residue: entries the next coalesce drops
-        // land exactly here, and only the post-merge drain can surface them.
-        project
-            .segments
-            .last_mut()
-            .expect("one segment was just admitted")
-            .omissions
-            .dropped_entries += 3;
-
-        // Admit a second chunk sized to coalesce with the first (within a factor of two).
-        let (second_uris, second) = project_chunk(1, 8);
-        project.replace_files_within(&second_uris, second, first_cost.saturating_mul(4));
-
-        assert_eq!(
-            project.omissions().dropped_entries,
-            3,
-            "declarations dropped during a coalesce merge must be visible on the aggregate"
-        );
-        // And the retained segments hold no stranded provenance the aggregate does not know.
-        assert!(
-            project
-                .segments
-                .iter()
-                .all(|segment| segment.omissions.is_empty()),
-            "segment-held omissions would never be read again"
-        );
-    }
-
-    #[test]
     fn a_broad_query_is_bounded_by_the_response_symbol_cap() {
         let sources: Vec<(String, String)> = (0..MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS * 2)
             .map(|n| {
@@ -4897,12 +4698,14 @@ mod tests {
         assert!(indexed.is_complete());
     }
 
+    /// Parse-only indexing keeps every file whatever its size: a declaration past several
+    /// megabytes of generated text is as searchable as one in a small file.
     #[test]
-    fn parse_only_indexing_skips_files_past_the_per_file_cap() {
+    fn parse_only_indexing_keeps_large_files() {
         let small = "package demo\nclass SmallDiskType\n";
         let large = format!(
-            "package demo\nclass LargeDiskType\n// {}\n",
-            "x".repeat(MAX_INDEXED_FILE_BYTES)
+            "package demo\n{}class LargeDiskType\n",
+            "// generated\n".repeat(512 * 1024)
         );
         let indexed = WorkspaceSymbolIndex::from_disk_sources(&[
             ("file:///Small.kt", small),
@@ -4910,11 +4713,8 @@ mod tests {
         ]);
 
         assert_eq!(indexed.encode("SmallDiskType").len(), 1);
-        assert!(
-            indexed.encode("LargeDiskType").is_empty(),
-            "an oversized file must be skipped before it is parsed"
-        );
-        assert!(!indexed.is_complete());
+        assert_eq!(indexed.encode("LargeDiskType").len(), 1);
+        assert!(indexed.is_complete());
     }
 
     #[test]

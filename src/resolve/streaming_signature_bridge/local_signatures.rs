@@ -131,7 +131,7 @@ pub(crate) fn publish_checked_local_signatures_in_pass_two_root(
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn publish_checked_local_signatures(
     file: &File,
     source: crate::fir::SourceFileId,
@@ -521,7 +521,9 @@ fn publish_checked_local_signatures_selected(
         let semantic_own = info.resolved_declaration_type_parameters(class.span.lo);
         let mut parameters = Vec::with_capacity(arguments.len());
         for (ordinal, argument) in arguments.iter().copied().enumerate() {
-            let TyKind::TyParam(semantic_name, bound) = argument.kind() else {
+            let (TyKind::TyParam(semantic_name, bound) | TyKind::Var(semantic_name, bound)) =
+                argument.kind()
+            else {
                 return false;
             };
             if ordinal < own_count {
@@ -1715,7 +1717,12 @@ fn publish_checked_local_signatures_selected(
                     }
                     let Some(semantic_name) = semantic_type_parameters
                         .and_then(|parameters| parameters.get(ordinal))
-                        .or_else(|| generic.and_then(|generic| generic.formals.get(ordinal)))
+                        .map(String::as_str)
+                        .or_else(|| {
+                            generic
+                                .and_then(|generic| generic.formals.get(ordinal))
+                                .map(|formal| formal.as_str())
+                        })
                     else {
                         type_parameters_failed = true;
                         break;

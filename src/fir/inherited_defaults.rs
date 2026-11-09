@@ -33,6 +33,15 @@ pub enum InheritedDefaultBody {
     JavaDefaultMethod,
 }
 
+/// One type parameter an inherited member declares: its semantic name (the identity its
+/// occurrences in the member's types carry) and its declared bounds as the classifier's applied
+/// supertype substitutes them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InheritedTypeParameter {
+    pub semantic_name: Box<str>,
+    pub bounds: Box<[crate::fir::ResolvedTypeParameterBound]>,
+}
+
 /// One interface member a classifier inherits with a body and does not override.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedInheritedDefault {
@@ -59,6 +68,10 @@ pub struct ResolvedInheritedDefault {
     /// member declares these; a call to the inherited declaration still uses the declared shape.
     pub applied_parameters: Box<[Ty]>,
     pub applied_result: Ty,
+    /// The declaration's own type parameters with their bounds as the classifier's applied
+    /// supertype substitutes them, in declaration order. A realization that republishes the member
+    /// declares them in its generic signature.
+    pub type_parameters: Box<[InheritedTypeParameter]>,
     pub suspend: bool,
     /// The declaration's last physical parameter is its declared `vararg` (kotlinc's
     /// `ACC_VARARGS` condition for the compatibility surface that republishes it).

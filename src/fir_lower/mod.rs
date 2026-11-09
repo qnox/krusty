@@ -313,7 +313,7 @@ pub(crate) fn lower_body_with_context(
                     arg: value,
                     type_operand: target,
                 });
-                lowering.ir.logical_types.insert(converted, target);
+                lowering.ir.set_logical_type(converted, target);
                 converted
             } else {
                 value
@@ -987,9 +987,10 @@ fn lower_captured_receiver(
     receiver: &crate::fir::FirCapturedReceiver,
 ) -> crate::ir::IrCapturedReceiver {
     match receiver {
-        crate::fir::FirCapturedReceiver::Enclosing { classifier } => {
+        crate::fir::FirCapturedReceiver::Enclosing { classifier, owner } => {
             crate::ir::IrCapturedReceiver::Enclosing {
                 classifier: *classifier,
+                owner: *owner,
             }
         }
         crate::fir::FirCapturedReceiver::Callable { label, owner } => {
@@ -1243,6 +1244,8 @@ fn consume_trailing_unit_result(ir: &mut IrFile, roots: &mut Vec<ExprId>) {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod single_source_lowering;
 #[cfg(test)]
 pub(crate) mod tests;
 

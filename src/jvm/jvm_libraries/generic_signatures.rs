@@ -89,7 +89,10 @@ pub(super) fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
             // it, a classpath property `items: List<Int>` reads as raw `java/util/List<Integer>`:
             // `xs.sum()` is unresolved and `for (x in xs) { s += x }` compares `Int` vs `java/lang/Integer`.
             Some(canonicalize_jvm_collections(
-                crate::symbol_resolver::ty_subst(gsig.ret, &crate::fx_hash::HashMap::default()),
+                crate::symbol_resolver::ty_subst(
+                    gsig.ret,
+                    &crate::types::TyParamBindings::default(),
+                ),
             ))
         }
         _ => None,
@@ -170,7 +173,7 @@ pub(super) fn mark_receiver_fun_params(gsig: &mut GenericSig, recv_fun: &[bool],
 }
 
 /// Parse a JVM method generic signature `<formals>(params)ret` declared outside any generic class.
-pub(in crate::jvm) fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
+pub fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
     parse_member_method_gsig(sig, &crate::fx_hash::HashMap::default())
 }
 
@@ -218,7 +221,10 @@ pub(super) fn parse_member_method_gsig_with(
     // The JVM `Signature` attribute is the fallback for NON-metadata callables (Java methods): an instance
     // method has no receiver parameter and a static none either, so the receiver is not modeled here.
     Some(GenericSig {
-        formals,
+        formals: formals
+            .iter()
+            .map(crate::types::TyParamName::from)
+            .collect(),
         formal_bounds,
         receiver: None,
         params,
@@ -234,7 +240,7 @@ pub(super) fn parse_member_method_gsig_with(
 /// which is what lets a type argument propagate up the hierarchy (`List<Int>` → `Collection<Int>`).
 pub(in crate::jvm) type ParsedClassGenericSignature = (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>);
 
-pub(in crate::jvm) fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSignature> {
+pub fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSignature> {
     parse_class_gsig_with(sig, &ordinary_application)
 }
 
@@ -328,6 +334,10 @@ pub(super) fn constructor_inference_signature(
     if class_formals.is_empty() {
         return method;
     }
+    let class_formals = class_formals
+        .iter()
+        .map(crate::types::TyParamName::from)
+        .collect::<Vec<_>>();
     let result_arguments = class_formals
         .iter()
         .zip(&class_bounds)
@@ -357,9 +367,9 @@ pub(super) fn constructor_inference_signature(
             let fresh =
                 crate::types::constructor_type_parameter(owner, declaration, ordinal, formal);
             rename.insert(formal.as_str(), fresh);
-            constructor_formals.push(fresh.to_string());
+            constructor_formals.push(crate::types::TyParamName::new(fresh));
         } else {
-            constructor_formals.push(formal.clone());
+            constructor_formals.push(*formal);
         }
     }
     if !rename.is_empty() {
@@ -707,7 +717,11 @@ mod constructor_inference_signature_tests {
 
     fn void_constructor(formals: &[&str], params: &[Ty]) -> GenericSig {
         GenericSig {
-            formals: formals.iter().map(|formal| (*formal).to_string()).collect(),
+            formals: formals
+                .iter()
+                .copied()
+                .map(crate::types::TyParamName::new)
+                .collect(),
             formal_bounds: vec![Vec::new(); formals.len()],
             receiver: None,
             params: params.to_vec(),

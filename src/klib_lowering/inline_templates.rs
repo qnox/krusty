@@ -16,7 +16,8 @@
 //! template leaves the file as it was.
 
 use super::body_lowering::{
-    BodyLowering, CallLinker, LinkedAccessor, LinkedCallee, LinkedConstructor, LoweredFunction,
+    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor, LinkedAccessorTarget,
+    LinkedCallableReference, LinkedCallee, LinkedConstructor, LoweredFunction,
 };
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::function_header;
@@ -37,7 +38,7 @@ use crate::libraries::{
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::KlibIrBody;
 use crate::types::SemanticCallableOwner;
-use crate::types::{InlineExpansionMode, InlineParameterModifier, Ty};
+use crate::types::{InlineExpansionMode, InlineParameterModifier, Ty, TyKind};
 
 /// An inline dependency function's template in a file.
 #[derive(Clone, Debug)]
@@ -45,7 +46,10 @@ pub struct KlibInlineTemplate {
     /// The inline-only function holding the template.
     pub function: FunId,
     /// The semantic identities of the function's type parameters, in declaration order.
-    pub type_parameters: Vec<String>,
+    pub type_parameters: Vec<crate::types::TyParamName>,
+    /// The semantic identities of the type parameters of a member's generic class, in
+    /// declaration order: a call binds them from its dispatch receiver's type arguments.
+    pub class_type_parameters: Vec<crate::types::TyParamName>,
 }
 
 /// The functions a template's body may call.
@@ -92,9 +96,10 @@ pub fn lower_inline_template(
     let checkpoint = LoweringCheckpoint::of(ir);
     Some(
         lower(ir, declaration, prepared, callees)
-            .map(|function| KlibInlineTemplate {
+            .map(|(function, class_type_parameters)| KlibInlineTemplate {
                 function,
                 type_parameters,
+                class_type_parameters,
             })
             .map_err(|reason| {
                 checkpoint.restore(ir);
@@ -121,11 +126,12 @@ fn lower(
     declaration: Declaration<'_>,
     bodies: &KlibDeclarationBodies,
     callees: TemplateCallees<'_>,
-) -> Result<FunId, KlibBodyDeclineReason> {
+) -> Result<(FunId, Vec<crate::types::TyParamName>), KlibBodyDeclineReason> {
     let callable = declaration.callable;
     let mut calls = TemplateCalls {
         module: &callable.identity().module,
         callees,
+        bodies,
     };
     if declaration.suspend {
         return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
@@ -140,6 +146,25 @@ fn lower(
         Some(KlibIrBody::Synthetic(_)) => return Err(KlibBodyDeclineReason::SyntheticBody),
         Some(KlibIrBody::Block(statements)) => statements,
     };
+    // A member of a generic class reads the class's type parameters at their erasures; the call
+    // binds them from its dispatch receiver.
+    let class_type_parameters = callable
+        .class_contract()
+        .map(|class| {
+            class
+                .parameters
+                .formals
+                .iter()
+                .map(|formal| match formal.kind() {
+                    TyKind::TyParam(name, _) => Ok(name),
+                    _ => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                        "a class type parameter is selected as {formal:?}"
+                    ))),
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     let header = prepared_inline_header(callable, declaration.formals, arena, function)?;
     let modes = expansion_modes(
         header.params(),
@@ -175,35 +200,20 @@ fn lower(
     )
     .body(statements)?;
     ir.functions[template as usize].body = Some(body);
-    let mut defaults = Vec::with_capacity(header.params().len());
-    for (default, &declared) in header.defaults().iter().zip(header.params()) {
-        defaults.push(match *default {
-            Some(default) => Some(
-                BodyLowering::new(
-                    arena,
-                    LoweredFunction {
-                        symbol: &function.base.symbol,
-                        function: template,
-                    },
-                    &header,
-                    &builtins,
-                    ir,
-                    &mut calls,
-                )
-                .default_value(default, declared)?,
-            ),
-            None => None,
-        });
-    }
-    if defaults.iter().any(Option::is_some) {
-        ir.fn_params
-            .get_mut(&template)
-            .expect("a declared function publishes its parameters")
-            .defaults = Some(defaults);
-    }
+    publish_parameter_defaults(
+        arena,
+        LoweredFunction {
+            symbol: &function.base.symbol,
+            function: template,
+        },
+        &header,
+        &builtins,
+        ir,
+        &mut calls,
+    )?;
     ir.inline_fns.insert(template);
     ir.inline_only_fns.insert(template);
-    Ok(template)
+    Ok((template, class_type_parameters))
 }
 
 /// How a call expands each parameter, as checked FIR publishes it for a source inline function:
@@ -251,6 +261,8 @@ struct TemplateCalls<'a> {
     /// The template's declaring module, whose producer graph resolves its calls.
     module: &'a str,
     callees: TemplateCallees<'a>,
+    /// The prepared bodies of the template's library, which name its file-local classes.
+    bodies: &'a KlibDeclarationBodies,
 }
 
 impl TemplateCalls<'_> {
@@ -291,6 +303,28 @@ impl TemplateCalls<'_> {
 }
 
 impl CallLinker for TemplateCalls<'_> {
+    /// A template is expanded into a source file, whose read of the constant reaches the enum
+    /// through the entry its declaring file exports. The selected library record proves the
+    /// enum and its constant.
+    fn enum_entry(
+        &mut self,
+        _ir: &mut IrFile,
+        entry: &KlibPublicIdSignature,
+    ) -> Result<(crate::types::TypeName, String), KlibBodyDeclineReason> {
+        let classifier = member_owner(entry)?;
+        let name = entry.declaration().segments().last().ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch("an enum entry has no name".to_owned())
+        })?;
+        match self.callees.source.classifier(classifier) {
+            Some(record) if record.is_enum() && record.is_enum_entry(name) => {
+                Ok((classifier, name.clone()))
+            }
+            _ => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "the serialized enum entry {name} of {classifier:?} is selected as no enum entry"
+            ))),
+        }
+    }
+
     fn singleton(&self, classifier: crate::types::TypeName) -> Result<(), KlibBodyDeclineReason> {
         match self.callees.source.classifier(classifier) {
             Some(record) if record.is_object() => Ok(()),
@@ -368,6 +402,132 @@ impl CallLinker for TemplateCalls<'_> {
         })
     }
 
+    fn local_class(
+        &self,
+        signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Result<Option<crate::types::TypeName>, KlibBodyDeclineReason> {
+        super::same_library_class::classifier(self.bodies, self.module, signature)
+    }
+
+    fn external_override(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<ExternalCallableId, KlibBodyDeclineReason> {
+        self.callees
+            .source
+            .external_callable_by_dependency(identity)
+            .map(|(target, _)| target)
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "an override whose declaration handle was not registered".to_owned(),
+                )
+            })
+    }
+
+    fn dependency_override(
+        &self,
+        symbol: &crate::metadata::klib_ir::KlibIrSymbol,
+        supertypes: &[crate::types::Ty],
+        property: bool,
+    ) -> Result<Option<super::same_library_class::MemberOverride>, KlibBodyDeclineReason> {
+        use crate::metadata::id_signature::KlibDeclarationSignature;
+        use crate::metadata::klib_ir::KlibIrSignature;
+        let signature = match &symbol.signature {
+            KlibIrSignature::Public(public) => KlibDeclarationSignature::Public(public.clone()),
+            KlibIrSignature::Accessor(accessor) => {
+                KlibDeclarationSignature::Accessor(accessor.clone())
+            }
+            KlibIrSignature::FileLocal { .. } => return Ok(None),
+        };
+        let binding = match self.callees.references.get(self.module, &signature) {
+            KlibReferenceOrigin::Exact(binding) => binding,
+            KlibReferenceOrigin::Ambiguous => {
+                let KlibDeclarationSignature::Public(callee) = &signature else {
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "an object literal overrides an ambiguous accessor".to_owned(),
+                    ));
+                };
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.clone(),
+                )));
+            }
+            KlibReferenceOrigin::Missing => {
+                // An override symbol is the declaration itself, not a call. The prepared
+                // reference index only records calls, so a member that this body does not call
+                // is still the declaration the producer published under that signature.
+                match self
+                    .callees
+                    .declarations
+                    .callee_origin(self.module, &signature)
+                {
+                    crate::klib_libraries::KlibCalleeOrigin::Exact(declaration) => {
+                        KlibReferenceBinding {
+                            declaration,
+                            dispatch: None,
+                        }
+                    }
+                    crate::klib_libraries::KlibCalleeOrigin::Missing => return Ok(None),
+                    crate::klib_libraries::KlibCalleeOrigin::Ambiguous => {
+                        let KlibDeclarationSignature::Public(callee) = &signature else {
+                            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                                "an object literal overrides an ambiguous accessor".to_owned(),
+                            ));
+                        };
+                        return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                            callee.clone(),
+                        )));
+                    }
+                }
+            }
+        };
+        let Some((_, realization)) = self
+            .callees
+            .source
+            .external_callable_by_dependency(&binding.declaration)
+        else {
+            return Ok(None);
+        };
+        let accessor = realization
+            .klib_body_accessor
+            .as_ref()
+            .map(|accessor| matches!(accessor.role, crate::libraries::KlibAccessorRole::Getter));
+        match accessor {
+            Some(false) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an object literal overrides a property setter".to_owned(),
+                ))
+            }
+            Some(true) if !property => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a function overrides a property".to_owned(),
+                ))
+            }
+            None if property => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a property overrides a function".to_owned(),
+                ))
+            }
+            Some(true) | None => {}
+        }
+        super::same_library_class::realized_member_override(
+            binding.declaration,
+            &realization,
+            property,
+            supertypes,
+            &|sub, owner| self.applied_supertype(sub, owner),
+        )
+        .map(Some)
+    }
+
+    fn is_interface(&self, name: crate::types::TypeName) -> Result<bool, KlibBodyDeclineReason> {
+        match self.callees.source.classifier(name) {
+            Some(record) => Ok(record.is_interface()),
+            None => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "an object literal's supertype {name:?} is not a selected classifier"
+            ))),
+        }
+    }
+
     fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool {
         let oracle = crate::symbol_resolver::SourceOracle(self.callees.source);
         super::type_evidence::satisfies(Some(&oracle), parameters, argument, bound)
@@ -375,6 +535,7 @@ impl CallLinker for TemplateCalls<'_> {
 
     fn link_accessor(
         &mut self,
+        _: &mut IrFile,
         callee: &KlibAccessorIdSignature,
     ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
         let signature = KlibDeclarationSignature::Accessor(callee.clone());
@@ -425,7 +586,7 @@ impl CallLinker for TemplateCalls<'_> {
         .map(|receiver| {
             let (receiver, class_type_parameters) = receiver.unzip();
             LinkedAccessor {
-                property,
+                target: LinkedAccessorTarget::External(property),
                 write: accessors.setter == Some(target),
                 receiver,
                 params: realization.callable.params.clone(),
@@ -520,8 +681,39 @@ impl CallLinker for TemplateCalls<'_> {
             context_count,
             singleton_dispatch: None,
             type_parameters: Vec::new(),
+            type_parameter_bounds: Some(Vec::new()),
             class_type_parameters: Vec::new(),
+            parameter_defaults: Vec::new(),
         })
+    }
+
+    fn link_reference(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<LinkedCallableReference, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        let binding = self.binding(&signature, callee)?;
+        let (declaration, realization) = self
+            .callees
+            .source
+            .external_callable_by_dependency(&binding.declaration)
+            .ok_or(KlibBodyDeclineReason::Unjoined)?;
+        if realization.dependency_callable.as_ref() != Some(&binding.declaration) {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a callable reference provider changed its exact declaration".to_owned(),
+            ));
+        }
+        let call = self.link(ir, callee)?;
+        if !matches!(&call.callee, Callee::External { target, .. } if *target == declaration) {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a callable reference changed its provider handle while linking".to_owned(),
+            ));
+        }
+        let callable = realization
+            .klib_body_callable()
+            .ok_or(KlibBodyDeclineReason::Unjoined)?;
+        Ok(LinkedCallableReference::new(declaration, callable, call))
     }
 }
 
@@ -532,7 +724,7 @@ fn generic_call(
     declaration: &crate::metadata::klib_ir::tree::KlibIrFunction,
     target: ExternalCallableId,
     realization: &ExternalCallableRealization,
-    formals: Vec<String>,
+    formals: Vec<crate::types::TyParamName>,
 ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
     if declaration.type_parameters.len() != formals.len() {
         return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
@@ -577,7 +769,13 @@ fn generic_call(
         context_count,
         singleton_dispatch: None,
         type_parameters: formals,
+        type_parameter_bounds: realization
+            .callable
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.formal_bounds.clone()),
         class_type_parameters: Vec::new(),
+        parameter_defaults: Vec::new(),
     })
 }
 
@@ -664,7 +862,9 @@ fn member_call(
         context_count: realization.callable.context_count,
         singleton_dispatch: None,
         type_parameters: Vec::new(),
+        type_parameter_bounds: Some(Vec::new()),
         class_type_parameters,
+        parameter_defaults: Vec::new(),
     })
 }
 

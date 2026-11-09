@@ -80,6 +80,18 @@ impl IntoIterator for SelectedArgumentCommitment {
     }
 }
 
+/// The parameter types one selected call checks its source arguments against, each in the layout
+/// of the call's source-visible parameters.
+pub(super) struct SelectedParameters<'p> {
+    /// The selection as published, over the callee's declared formals.
+    pub(super) applied: &'p [Ty],
+    /// The parameters as declared, before the call's own type arguments apply.
+    pub(super) declared: &'p [Ty],
+    /// `applied` over the call's own variables, when selection solved the call over them: a
+    /// variable it left unsolved is still the call's, distinct from any declared formal in scope.
+    pub(super) call_site: Option<&'p [Ty]>,
+}
+
 impl Checker<'_> {
     /// Freeze one selected argument only after its contextual check has committed the nested
     /// winner. A pre-check snapshot can retain a discarded probe or miss an intersection that the
@@ -234,12 +246,12 @@ impl Checker<'_> {
     /// Validate the source arguments of one already-selected callable and commit their semantic
     /// parameter slots. Selection owns WHICH callable won; this origin-neutral seam owns Kotlin's
     /// named/default/vararg/trailing-lambda mapping for every selected callable.
+    ///
     pub(super) fn expect_selected_call_args(
         &mut self,
         scope: &CheckerScope<'_>,
         call_args: CallArgs<'_>,
-        params: &[Ty],
-        declared_params: &[Ty],
+        parameters: SelectedParameters<'_>,
         call_sig: &CallSig,
         argument_expectations: Option<&HashMap<ExprId, Ty>>,
     ) -> bool {
@@ -248,6 +260,11 @@ impl Checker<'_> {
             args,
             arg_tys,
         } = call_args;
+        let SelectedParameters {
+            applied: params,
+            declared: declared_params,
+            call_site: call_site_params,
+        } = parameters;
         let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         // Candidate probing and selected-call commitment must expose the same implicit label.
@@ -280,6 +297,7 @@ impl Checker<'_> {
             debug_assert!(false, "successful argument mapping must be invertible");
             return false;
         };
+        let site = self.call_site(call);
         let mut argument_bindings = Vec::with_capacity(args.len());
         for (source, (&argument, &parameter)) in args.iter().zip(&argument_parameters).enumerate() {
             let Some((&array_or_parameter, &probed_actual)) =
@@ -288,6 +306,9 @@ impl Checker<'_> {
                 debug_assert!(false, "selected call argument lies outside its signature");
                 return false;
             };
+            // The probe was checked under this call's variables; the selection it commits to is
+            // published over the callee's own formals.
+            let probed_actual = crate::types::ty_declared_at_call(probed_actual, site);
             let named = arg_names
                 .and_then(|names| names.get(source))
                 .is_some_and(Option::is_some);
@@ -311,6 +332,37 @@ impl Checker<'_> {
             } else {
                 inferred.unwrap_or(array_or_parameter)
             };
+            let vararg_element = call_sig.vararg_index == Some(parameter) && !whole_array;
+            // A nested generic call is completed against its parameter only once that parameter
+            // is a type of this site. Until the enclosing call solves the selected call's open
+            // variables, the nested call keeps its own and joins that enclosing system instead.
+            let open_at_call = call_site_params
+                .and_then(|call_site| call_site.get(parameter))
+                .is_some_and(|&call_site| {
+                    let call_site = if vararg_element {
+                        call_site.array_read_elem().unwrap_or(call_site)
+                    } else {
+                        call_site
+                    };
+                    crate::types::ty_mentions_call_variable(call_site, site)
+                        && crate::types::ty_declared_at_call(call_site, site) == expected
+                });
+            if open_at_call && self.unbound_contextual_result_signature(argument).is_some() {
+                crate::trace_compiler!(
+                    "lambda_apply",
+                    "defer selected argument={argument:?} expected={expected:?}",
+                );
+                argument_bindings.push(self.finalized_selected_argument_binding(
+                    scope,
+                    argument,
+                    parameter,
+                    vararg_element,
+                    source_declared_type,
+                    source_intersection,
+                    probed_actual,
+                ));
+                continue;
+            }
             let actual = self.selected_argument_type(
                 scope,
                 argument,
@@ -320,7 +372,6 @@ impl Checker<'_> {
                 parameter,
                 implicit_lambda_label.as_deref(),
             );
-            let vararg_element = call_sig.vararg_index == Some(parameter) && !whole_array;
             if whole_array {
                 self.expect_whole_array_vararg_arg(
                     Some(scope),
@@ -479,7 +530,7 @@ impl Checker<'_> {
             let resolved = signature
                 .formals
                 .iter()
-                .map(|formal| bindings.get(formal).copied())
+                .map(|formal| bindings.get(formal.as_str()).copied())
                 .collect::<Vec<_>>();
             self.replace_selected_generic_call(expression, signature, &selected.call_sig, resolved);
         } else {

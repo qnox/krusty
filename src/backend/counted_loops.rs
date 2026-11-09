@@ -36,7 +36,7 @@ use crate::ir::{
 use crate::types::Ty;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CounterLoopStyle {
+pub enum CounterLoopStyle {
     /// Keep the entry comparison at the top and the overflow guard in the update.
     PreTested,
     /// Use a top-tested Java counter loop where the induction variable cannot overflow.
@@ -46,7 +46,7 @@ pub(crate) enum CounterLoopStyle {
 /// Whether a target realizes the calls kotlinc's `ForLoopsLowering` inlines into an unsigned
 /// loop's header as nodes of their own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HeaderInlining {
+pub enum HeaderInlining {
     /// An unsigned value is its own representation, and the header's calls are ordinary calls.
     None,
     /// The JVM: an unsigned bound is converted to its `Int`/`Long` representation with the inline
@@ -58,7 +58,7 @@ pub(crate) enum HeaderInlining {
 /// How a target iterates `start until end step step`, which kotlinc builds as a progression value
 /// because `step` needs an inclusive last.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum UntilSteps {
+pub enum UntilSteps {
     /// Build the progression and read its `first`, `last` and `step`, as kotlinc does.
     Built,
     /// Count it with `end - 1` as the inclusive last when checked FIR published that form and the
@@ -68,15 +68,15 @@ pub(crate) enum UntilSteps {
 
 /// How a target realizes its counted loops: each backend names its own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CountedLoopPolicy {
-    pub(crate) style: CounterLoopStyle,
-    pub(crate) inlining: HeaderInlining,
-    pub(crate) until_steps: UntilSteps,
+pub struct CountedLoopPolicy {
+    pub style: CounterLoopStyle,
+    pub inlining: HeaderInlining,
+    pub until_steps: UntilSteps,
 }
 
 /// Realize every checked range loop. An unsigned loop compares through the function resolution
 /// selected for it, called like any other external declaration.
-pub(crate) fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
+pub fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
     let CountedLoopPolicy {
         style,
         inlining,
@@ -237,7 +237,7 @@ fn finish_membership(
 ) {
     if negated {
         let contains = ir.add_expr(contains);
-        ir.logical_types.insert(contains, Ty::Boolean);
+        ir.set_logical_type(contains, Ty::Boolean);
         ir.replace_with_negation(expression, contains);
     } else {
         ir.exprs[expression as usize] = contains;
@@ -314,7 +314,7 @@ impl Realizer<'_> {
     /// A value node whose checked type this realizer decides, recorded as lowering records one.
     fn add_checked(&mut self, expression: IrExpr, ty: Ty) -> ExprId {
         let id = self.add(expression);
-        self.ir.logical_types.insert(id, ty);
+        self.ir.set_logical_type(id, ty);
         id
     }
 
@@ -330,7 +330,7 @@ impl Realizer<'_> {
         let copy = self.ir.expr(expression).clone();
         let copy = self.add(copy);
         if let Some(ty) = self.ir.checked_type(expression) {
-            self.ir.logical_types.insert(copy, ty);
+            self.ir.set_logical_type(copy, ty);
         }
         self.keep_representation(expression, copy);
         copy
@@ -407,7 +407,7 @@ impl Realizer<'_> {
     fn bound_operand(&mut self, bound: ExprId, ty: Ty) -> Operand {
         let stable = constant_bound(self.ir, bound).is_some()
             || (self.ir.binding_read_stability.get(&bound) == Some(&IrBindingStability::Stable)
-                && self.ir.logical_types.get(&bound) == Some(&ty)
+                && self.ir.logical_type(bound) == Some(ty)
                 && matches!(self.ir.expr(bound), IrExpr::GetValue(_)));
         Operand {
             value: self.range_bound(bound, ty),

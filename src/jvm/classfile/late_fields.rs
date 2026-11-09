@@ -56,6 +56,11 @@ impl LateField {
     }
 }
 
+/// kotlinc's `generateField` writes no nullability annotation on a synthetic or enum field.
+pub(super) fn carries_nullability(access: u16) -> bool {
+    access & (super::ACC_SYNTHETIC | super::ACC_ENUM) == 0
+}
+
 impl ClassWriter {
     /// Declare a field whose pool entries intern at the FIELD-TABLE visit (after every method) —
     /// kotlinc's writer order. Use for a field the method bodies don't introduce; a field whose
@@ -109,7 +114,7 @@ impl ClassWriter {
     /// Realize the deferred fields that lead the field table now: they intern before the
     /// annotations of the eagerly declared fields after them, which the emitter attaches before
     /// `finish` (a class's `$$delegatedProperties` and `Companion` ahead of its instance fields).
-    pub(in crate::jvm) fn realize_leading_late_fields(&mut self) {
+    pub fn realize_leading_late_fields(&mut self) {
         let late = std::mem::take(&mut self.late_fields);
         let (leading, trailing) = late
             .into_iter()
@@ -161,7 +166,11 @@ impl ClassWriter {
                 .iter()
                 .map(|annotation| self.encode_annotation(annotation))
                 .collect();
-            let nullability = lf.ann.as_deref().and_then(|a| self.written_annotation(a));
+            let nullability = lf
+                .ann
+                .as_deref()
+                .filter(|_| carries_nullability(lf.access))
+                .and_then(|a| self.written_annotation(a));
             invisible_anns.extend(nullability.map(|a| {
                 let ti = self.cp.utf8(a);
                 vec![(ti >> 8) as u8, ti as u8, 0, 0]
