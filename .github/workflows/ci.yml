@@ -734,6 +734,12 @@ jobs:
           key: box-klib-references-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
           restore-keys: |
             box-klib-references-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-
+      # A restore through `restore-keys` never reports a hit, so whether a master push saves is
+      # decided by the entries it added: one archive per exact-input fingerprint, never rewritten.
+      - name: list restored KLIB box reference bytes
+        if: matrix.target != 'jvm'
+        id: klib-recordings-restored
+        run: echo "entries=$(scripts/cache-entries.sh target/cache/klib-references)" >> "$GITHUB_OUTPUT"
       - name: restore box corpus (${{ matrix.version }})
         id: box-corpus
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -909,8 +915,17 @@ jobs:
         env:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: just wasm-conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
+      - name: list new KLIB box reference bytes
+        if: always() && matrix.target != 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        id: klib-recordings-added
+        env:
+          RESTORED: ${{ steps.klib-recordings-restored.outputs.entries }}
+        run: |
+          set -euo pipefail
+          entries=$(scripts/cache-entries.sh target/cache/klib-references)
+          echo "added=$([ "$entries" != "$RESTORED" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - name: save KLIB box reference bytes
-        if: always() && matrix.target != 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.klib-recordings.outputs.cache-hit != 'true'
+        if: always() && steps.klib-recordings-added.outputs.added == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/klib-references

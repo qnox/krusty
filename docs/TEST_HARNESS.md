@@ -194,7 +194,8 @@ toolchain and JDK 17 in CI, not JVM matrix opt-in flags. Each row
 uses its target's configurable process-group deadline. The complete JVM non-box CI pass retains
 its 600-second cold serialization/reference-CLI toolchain budget. The local 120-second default
 and test inventory are unchanged; an exhausted deadline still fails. JVM rows upload `pct-<version>` and
-`jvm-byte-equality-<version>`; Native rows upload `native-pct-<version>`. A release publishes only
+`jvm-byte-equality-<version>`; Native rows upload `native-pct-<version>`, and every Native and Wasm
+row uploads its KLIB byte score as `klib-byte-equality-<version>-<target>`. A release publishes only
 after all target rows pass and every row matches its platform/version expectations.
 
 ### Box-test JDK
@@ -652,6 +653,29 @@ diff -rq target/dump-before target/dump-after
 
 Two dumps from the same build must also be identical: the compiler's output may not depend on hash
 map iteration order.
+
+## KLIB Byte Score
+
+The Native, Wasm/JS and Wasm/WASI box lanes also score KLIB bytes when their report variable is
+set: `KRUSTY_NATIVE_BYTE_REPORT`, `KRUSTY_WASM_JS_BYTE_REPORT` or `KRUSTY_WASM_WASI_BYTE_REPORT`.
+Each applicable case's module graph is compiled to KLIBs by the row's exact kotlinc (through the
+persistent server, with the target per request) and compared entry by entry, per module, with what
+krusty emitted. A case that fails or does not run scores its reference entries as unmatched. The
+lane writes `<pct> <matched> <total>` to the report file and prints the score and the reference
+cache's hit and miss counts. The reference compile is timed as the `target oracle` stage.
+
+Reference entries are cached in `KRUSTY_KLIB_REFERENCE_CACHE` (default
+`target/cache/klib-references/`), one archive per exact-input fingerprint. The fingerprint covers
+the target, the host architecture, the case source, its module plan, the derived compiler
+configuration and properties, the toolchain identity, and the `REFERENCE_FORMAT` salt in
+`tests/box_klib_bytes/reference.rs`. The harness's own sources are not hashed, so bump that salt
+whenever the way the reference is produced or stored changes. In CI each row restores the newest
+`box-klib-references-v1-<os>-<arch>-<target>-<version>-…` entry from its base, and a master push
+saves a new entry only when the run added reference archives (`scripts/cache-entries.sh`).
+
+Reference failures fail the row closed. A case whose reference cannot be compiled, even after the
+server pool's one retry, withholds the byte report rather than scoring fewer cases, and fails the
+lane. That assertion follows the box ratchet, so the row's conformance result is still reported.
 
 ## Profiling
 

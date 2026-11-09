@@ -1293,7 +1293,6 @@ pub fn run(lane: &dyn Lane) {
     // an owned fatal outcome or a broken inventory must remain visible, not fail silently under
     // the compiler-only hook.
     let _ = std::panic::take_hook();
-    bytes.finish();
 
     let mut passed = 0usize;
     let mut frontend = 0usize;
@@ -1464,11 +1463,21 @@ pub fn run(lane: &dyn Lane) {
     for (file, reason) in &failed {
         eprintln!("FAILED {}: {reason}", file.display());
     }
+    let byte_reference_failures = bytes.finish();
+    for failure in &byte_reference_failures {
+        eprintln!("KLIB byte reference failure {failure}");
+    }
     assert!(
         failed.is_empty(),
         "{} {label} conformance failure(s): every applicable non-pass must match the committed \
          expected-failure inventory, and compiler panics are never expected",
         failed.len()
+    );
+    assert!(
+        byte_reference_failures.is_empty(),
+        "{} {label} KLIB byte reference failure(s): the byte score is withheld rather than \
+         computed over fewer cases",
+        byte_reference_failures.len()
     );
 }
 

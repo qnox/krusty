@@ -17,6 +17,7 @@ use krusty::conformance::{ModuleUnit, TestTarget};
 
 use super::box_byte_score::{self, ByteScore, CaseScore, QualifiedArtifacts};
 use super::box_lane::{self, Lane, Outcome};
+use super::box_lane_profile::{self, Stage};
 
 pub(super) struct ByteRun {
     report: Option<PathBuf>,
@@ -55,8 +56,14 @@ impl ByteRun {
         self.results.lock().unwrap().push((file.to_owned(), result));
     }
 
-    pub fn finish(self) {
-        let Some(path) = self.report else { return };
+    /// Writes the byte report and returns the reference failures. A reference that cannot be
+    /// compiled fails the row closed: the report is withheld rather than scored over fewer cases.
+    /// The caller asserts the failures after its conformance ratchet, so the box result is still
+    /// reported.
+    pub fn finish(self) -> Vec<String> {
+        let Some(path) = self.report else {
+            return Vec::new();
+        };
         let mut total = ByteScore::default();
         let mut errors = Vec::new();
         let results = self.results.into_inner().unwrap();
@@ -70,17 +77,16 @@ impl ByteRun {
         super::common::byte_dump::flush_recorded_class_dumps();
         let (hits, misses) = reference::cache_stats();
         eprintln!("KLIB references: cache hits {hits}, misses {misses}");
-        assert!(
-            errors.is_empty(),
-            "KLIB byte reference failures:\n{}",
-            errors.join("\n")
-        );
+        if !errors.is_empty() {
+            return errors;
+        }
         let report = super::common::conformance_report::count_report(total.matched, total.total);
         std::fs::write(&path, &report).expect("write KLIB byte report");
         eprintln!(
             "KLIB byte equality: {report} ({} applicable cases)",
             results.len()
         );
+        errors
     }
 }
 
@@ -96,7 +102,9 @@ fn score(
         Ok(units) => units,
         Err(error) => return CaseScore::RefFail(error),
     };
-    let reference = reference::compile(target, source, &units).map(|(entries, _)| entries);
+    let reference = box_lane_profile::timed(Stage::TargetOracle, || {
+        reference::compile(target, source, &units).map(|(entries, _)| entries)
+    });
     let actual = if matches!(outcome, Outcome::Pass) {
         // A KLIB emission failure earns no byte credit; it cannot change the execution verdict.
         actual.unwrap_or_else(|error| {

@@ -63,6 +63,13 @@ pub(super) fn compile(
     Ok((result, replayed))
 }
 
+/// The reference-artifact format, bumped deliberately whenever how the reference is invoked or
+/// how its entries are stored changes. Everything a compile reads already rides the key: the
+/// target, architecture, source, module plan, derived compiler configuration and properties, and
+/// the toolchain identity. The harness's own sources are deliberately not hashed: an unrelated
+/// edit to one of them would turn every Native and Wasm row cold.
+const REFERENCE_FORMAT: &str = "klib-reference-v1";
+
 pub(super) fn key(target: TestTarget, source: &str, units: &[ModuleUnit], identity: &str) -> u128 {
     // ModuleUnit's full topology includes folded fragments, friend policy, source names and bytes.
     let plan = format!("{units:?}");
@@ -74,17 +81,8 @@ pub(super) fn key(target: TestTarget, source: &str, units: &[ModuleUnit], identi
     });
     let settings = format!("{configuration:?}/{properties:?}");
     byte_dump::fingerprint_parts(&[
-        include_bytes!("reference.rs"),
-        include_bytes!("native_interop.rs"),
-        include_bytes!("native_interop/toolchain.rs"),
-        include_bytes!("native_interop/NativeInteropTools.java"),
-        include_bytes!("reference_cache.rs"),
+        REFERENCE_FORMAT.as_bytes(),
         format!("{target:?}").as_bytes(),
-        include_bytes!("../box_klib_bytes.rs"),
-        include_bytes!("../box_reference_classes.rs"),
-        include_bytes!("../common/kotlinc_server.rs"),
-        include_bytes!("../../src/conformance/compiler_arguments.rs"),
-        include_bytes!("../../src/conformance.rs"),
         std::env::consts::ARCH.as_bytes(),
         source.as_bytes(),
         plan.as_bytes(),
