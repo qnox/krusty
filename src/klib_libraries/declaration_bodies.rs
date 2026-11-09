@@ -21,6 +21,8 @@ use crate::metadata::klib_ir::tree::{
 use crate::metadata::klib_ir::{KlibIrModuleTrees, KlibIrSignature, KlibIrSymbolKind};
 use crate::types::{type_name_child, TypeName};
 
+mod inheritance;
+
 /// The decoded function declarations of a set of KLIB libraries, joined by exact signature.
 pub struct KlibDeclarationBodies {
     libraries: Vec<KlibIrModuleTrees>,
@@ -160,9 +162,10 @@ impl std::fmt::Display for KlibDeclarationBodiesError {
 impl std::error::Error for KlibDeclarationBodiesError {}
 
 impl KlibDeclarationBodies {
-    /// Exactly one raw class header in this module with the requested function/constructor/getter
-    /// as a direct member. The current property primitives are reads: a getter stored in a setter
-    /// slot grants no authority. Equal names in other archives and inherited members do not join.
+    /// Exactly one raw class header in this module with the requested function, constructor or
+    /// accessor as a direct member. An accessor is found in its property's getter or setter slot
+    /// under its own exact signature; one serialized in both slots is not unique. Equal names in
+    /// other archives and inherited members do not join.
     pub(crate) fn class_member_header(
         &self,
         identity: &KlibDependencyCallable,
@@ -211,7 +214,7 @@ impl KlibDeclarationBodies {
                     && property.base.symbol.signature
                         == KlibIrSignature::Public(accessor.property().clone()) =>
                 {
-                    [property.getter, None]
+                    [property.getter, property.setter]
                 }
                 _ => [None, None],
             })
@@ -361,13 +364,43 @@ impl KlibDeclarationBodies {
     ///
     /// A definition in the body module wins. Otherwise exactly one reachable producer module
     /// must define the signature. Input order and equal declarations outside that graph have no
-    /// bearing on the answer.
+    /// bearing on the answer. A member no module serializes is a fake override, which resolves
+    /// to the declaration it inherits ([`Self::inherited_origin`]).
     pub(crate) fn callee_origin(
         &self,
         body_module: &str,
         declaration: &KlibDeclarationSignature,
     ) -> KlibCalleeOrigin {
+        match self.serialized_origin(body_module, declaration) {
+            KlibCalleeOrigin::Missing => self.inherited_origin(body_module, declaration),
+            origin => origin,
+        }
+    }
+
+    /// The module that serializes exactly `declaration`, as [`Self::callee_origin`] resolves it
+    /// before following inheritance.
+    fn serialized_origin(
+        &self,
+        body_module: &str,
+        declaration: &KlibDeclarationSignature,
+    ) -> KlibCalleeOrigin {
         let signature = ir_signature(declaration);
+        if let KlibDeclarationSignature::FileLocal { .. } = declaration {
+            // A file-private function is its own module's; no dependency edge reaches one.
+            let declared = self.modules.get(body_module).is_some_and(|&library| {
+                self.libraries[library]
+                    .file_private_function(&signature)
+                    .is_some()
+            });
+            return if declared {
+                KlibCalleeOrigin::Exact(KlibDependencyCallable {
+                    module: body_module.to_owned(),
+                    declaration: declaration.clone(),
+                })
+            } else {
+                KlibCalleeOrigin::Missing
+            };
+        }
         if self
             .owners
             .contains_key(&(body_module.to_owned(), signature.clone()))
@@ -418,6 +451,10 @@ impl KlibDeclarationBodies {
         identity: &KlibDependencyCallable,
     ) -> Option<(&KlibIrArena, &KlibIrFunction)> {
         let signature = ir_signature(&identity.declaration);
+        if let KlibDeclarationSignature::FileLocal { .. } = identity.declaration {
+            let library = *self.modules.get(&identity.module)?;
+            return self.libraries[library].file_private_function(&signature);
+        }
         let library = *self
             .owners
             .get(&(identity.module.clone(), signature.clone()))?;
@@ -841,6 +878,9 @@ fn ir_signature(declaration: &KlibDeclarationSignature) -> KlibIrSignature {
         KlibDeclarationSignature::Accessor(signature) => {
             KlibIrSignature::Accessor(signature.clone())
         }
+        &KlibDeclarationSignature::FileLocal { file, slot } => {
+            KlibIrSignature::FileLocal { file, slot }
+        }
     }
 }
 
@@ -852,7 +892,9 @@ fn declaration_signature(signature: &KlibIrSignature) -> Option<KlibDeclarationS
         KlibIrSignature::Accessor(signature) => {
             Some(KlibDeclarationSignature::Accessor(signature.clone()))
         }
-        KlibIrSignature::FileLocal { .. } => None,
+        &KlibIrSignature::FileLocal { file, slot } => {
+            Some(KlibDeclarationSignature::FileLocal { file, slot })
+        }
     }
 }
 

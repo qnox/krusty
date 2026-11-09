@@ -13,6 +13,16 @@ impl<'a> BodyLowering<'a> {
         self.instance_storage = Some(super::instance_storage::InstanceStorageFrame::initializer(
             class, plan,
         ));
+        // The superclass constructor's arguments read the constructor's own parameters, which the
+        // initialization frame numbers as the constructor does.
+        if let Some(superclass) = &plan.superclass {
+            let arguments = superclass
+                .arguments
+                .iter()
+                .map(|&argument| self.expression(argument))
+                .collect::<Lowered<Vec<_>>>()?;
+            self.ir.classes[class as usize].super_args = arguments;
+        }
         let mut stmts = Vec::new();
         for step in &plan.steps {
             let statement = match step {

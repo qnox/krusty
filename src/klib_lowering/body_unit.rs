@@ -848,7 +848,25 @@ impl CallLinker for Linker<'_, '_> {
         ir: &mut IrFile,
         callee: &KlibIrSignature,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
-        self.link_local_member(ir, callee)
+        let &KlibIrSignature::FileLocal { file, slot } = callee else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a file-local call names a public signature".to_owned(),
+            ));
+        };
+        let signature = KlibDeclarationSignature::FileLocal { file, slot };
+        // A top-level function private to its file is the declaration of its own tree; every
+        // other file-local function the library serializes is a member of a file-local class.
+        match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => self.link_file_private(ir, signature, identity),
+            KlibCalleeOrigin::Missing => self.link_local_member(ir, callee),
+            KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a file-private call names two top-level declarations".to_owned(),
+            )),
+        }
     }
 
     fn is_subtype(
@@ -994,7 +1012,7 @@ impl CallLinker for Linker<'_, '_> {
         if let Some(linked) = self.value_member_getter(ir, &identity)? {
             return Ok(linked);
         }
-        if let Some(linked) = self.private_value_member(ir, &identity)? {
+        if let Some(linked) = self.private_class_member(ir, &identity)? {
             let Callee::Local(function) = linked.callee else {
                 unreachable!("a value class member is a local function");
             };
@@ -1254,7 +1272,7 @@ impl CallLinker for Linker<'_, '_> {
         }
         if declaration.dispatch_receiver.is_some() && selected.is_none() {
             if let Some(linked) = self
-                .private_value_member(ir, &identity)
+                .private_class_member(ir, &identity)
                 .map_err(callee_declined)?
             {
                 return Ok(linked);
@@ -1397,17 +1415,13 @@ impl<'s> Linker<'_, 's> {
     /// A call of a private member of the value class whose member is being lowered. No provider
     /// records a private member, and only its class calls it, so it is emitted as the calling
     /// member is, reading the value through the same field.
-    fn private_value_member(
+    fn private_class_member(
         &mut self,
         ir: &mut IrFile,
         identity: &KlibDependencyCallable,
     ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
-        // Only a value class's private members are emitted with its members yet.
-        let Some(active) = self
-            .active_value_class
-            .clone()
-            .filter(|active| active.contract.is_value)
-        else {
+        // A private member is called only from its own class, whose member's body is active.
+        let Some(active) = self.active_value_class.clone() else {
             return Ok(None);
         };
         if self.sources.callees.get(identity).is_some()
@@ -1425,7 +1439,7 @@ impl<'s> Linker<'_, 's> {
             return Ok(None);
         }
         let (arena, declaration, header) =
-            private_value_member_header(active.contract, identity, self.sources.bodies)?;
+            private_class_member_header(active.contract, identity, self.sources.bodies)?;
         self.private_members.insert(identity.clone());
         let function = match self.functions.get(identity) {
             Some(&function) => function,
@@ -1803,19 +1817,19 @@ pub(crate) fn is_receiver_member(
         )
 }
 
-/// Whether `identity` is a private member of the value class `class` with a body, which no
+/// Whether `identity` is a private member of the materialized class `class` with a body, which no
 /// provider records and which a member of the class emitted from KLIB emits with it.
-pub(crate) fn is_private_value_member(
+pub(crate) fn is_private_class_member(
     bodies: &KlibDeclarationBodies,
     identity: &KlibDependencyCallable,
     class: &crate::libraries::KlibBodyClassContract,
 ) -> bool {
-    private_value_member_header(class, identity, bodies).is_ok()
+    private_class_member_header(class, identity, bodies).is_ok()
 }
 
 /// The header of `identity`, a private member of the value class `class` with a body, proved
 /// against the class's raw header and read at the class's declared formals.
-fn private_value_member_header<'b>(
+fn private_class_member_header<'b>(
     class: &crate::libraries::KlibBodyClassContract,
     identity: &KlibDependencyCallable,
     bodies: &'b KlibDeclarationBodies,
@@ -1824,7 +1838,7 @@ fn private_value_member_header<'b>(
     block_statements(member.function)?;
     let header = super::function_lowering::raw_function_header_with_class(
         None,
-        HeaderPurpose::PrivateValueMember(class.classifier),
+        HeaderPurpose::PrivateClassMember(class.classifier),
         member.arena,
         member.function,
         member.types,
@@ -2043,6 +2057,55 @@ impl Linker<'_, '_> {
                 primitive
             },
         )
+    }
+
+    /// The top-level function private to the active body's file that `identity` names. No
+    /// provider records one: the unit emits it from its serialized header alone, as a function of
+    /// the unit that it publishes to no one.
+    fn link_file_private(
+        &mut self,
+        ir: &mut IrFile,
+        signature: KlibDeclarationSignature,
+        identity: KlibDependencyCallable,
+    ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+        let callee_declined = |reason| {
+            KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
+                signature.clone(),
+                reason,
+            )))
+        };
+        let (arena, declaration) = self
+            .sources
+            .bodies
+            .function(&identity)
+            .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
+        if !declaration.type_parameters.is_empty() {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call of a generic declaration",
+            ));
+        }
+        self.private_members.insert(identity.clone());
+        let function = match self.functions.get(&identity) {
+            Some(function) => *function,
+            None => self
+                .declare(ir, &identity, None, arena, declaration)
+                .map_err(callee_declined)?,
+        };
+        let parameter_defaults = parameter_defaults(declaration);
+        let declared = &ir.functions[function as usize];
+        Ok(LinkedCallee {
+            callee: Callee::Local(function),
+            receiver: None,
+            params: declared.params.clone(),
+            ret: declared.ret,
+            context_count: ir.fn_context_counts.get(&function).copied().unwrap_or(0),
+            singleton_dispatch: None,
+            type_parameters: Vec::new(),
+            type_parameter_bounds: Some(Vec::new()),
+            class_type_parameters: Vec::new(),
+            parameter_defaults,
+            edge: super::CallEdge::default(),
+        })
     }
 }
 

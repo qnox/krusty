@@ -509,11 +509,35 @@ impl BodyLowering<'_> {
             Callee::External { target, .. } => Some(*target),
             _ => None,
         };
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Box::new(callee),
-            dispatch_receiver,
-            args,
-        });
+        // A member dispatch reaches on an instance of a class this unit materializes, which a
+        // subclass may override, is called through the class's dispatch table.
+        let overridable = match (&callee, dispatch_receiver) {
+            (Callee::Local(function), Some(receiver)) => self
+                .ir
+                .overridable_method(*function)
+                .map(|slot| (slot, receiver)),
+            (Callee::LocalWithDefaults { function, .. }, Some(_))
+                if self.ir.overridable_method(*function).is_some() =>
+            {
+                return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a dispatched call leaving arguments to their defaults",
+                ));
+            }
+            _ => None,
+        };
+        let call = match overridable {
+            Some(((class, index), receiver)) => self.ir.add_expr(IrExpr::MethodCall {
+                class,
+                index,
+                receiver,
+                args: args.into_iter().map(Some).collect(),
+            }),
+            None => self.ir.add_expr(IrExpr::Call {
+                callee: Box::new(callee),
+                dispatch_receiver,
+                args,
+            }),
+        };
         if let Some(role) = linked.edge.semantic_role {
             self.ir.semantic_call_roles.insert(call, role);
         }

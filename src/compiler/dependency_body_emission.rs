@@ -711,6 +711,28 @@ fn prepare_bodyless_externals(
                 pending.push_back(callee);
                 continue;
             }
+            // An abstract member of a class the unit materializes is a slot of its dispatch
+            // table, which every call of it dispatches through.
+            match emitted_roots::member_class_constructor(
+                platform,
+                bodies,
+                capabilities.callees,
+                &callee,
+            ) {
+                Ok(Some(_))
+                    if bodies.function(&callee).is_some_and(|(_, function)| {
+                        crate::metadata::semantic::declaration_modality(function.base.flags)
+                            == crate::metadata::semantic::KotlinModality::Abstract
+                    }) =>
+                {
+                    continue
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                    return false;
+                }
+            }
             if !capabilities.target_realizes_bodyless {
                 diags.error(
                     Span::new(0, 0),

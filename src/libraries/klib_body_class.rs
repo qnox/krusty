@@ -49,15 +49,18 @@ impl KlibBodyClassContract {
     }
 
     /// Whether a support unit materializes this class and emits its members as functions of the
-    /// class it materializes: a value class, or a final class without type parameters, whose
-    /// members all dispatch statically. A builtin type of the common type model is neither.
+    /// class it materializes: a value class, or a class without type parameters that is not
+    /// sealed. A builtin type of the common type model is neither.
     pub(crate) fn emits_members(&self) -> bool {
         if self.is_builtin_type() {
             return false;
         }
         self.is_value
             || (self.kind == super::TypeKind::Class
-                && self.modality == KotlinModality::Final
+                && matches!(
+                    self.modality,
+                    KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
+                )
                 && !self.is_inner
                 && !self.is_expect
                 && self.parameters.formals.is_empty())

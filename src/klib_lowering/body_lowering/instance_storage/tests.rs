@@ -297,7 +297,7 @@ impl Fixture {
         implicit: bool,
     ) -> (IrFile, Lowered<ExprId>) {
         let purpose = if matches!(access, Access::ValueReadOnly) {
-            HeaderPurpose::PrivateValueMember(self.owner)
+            HeaderPurpose::PrivateClassMember(self.owner)
         } else {
             HeaderPurpose::Body(None)
         };

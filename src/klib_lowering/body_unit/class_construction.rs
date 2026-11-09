@@ -39,8 +39,39 @@ impl<'u, 's> Linker<'u, 's> {
                 .expect("the plan authenticated its receiver")
                 .ty,
         )?;
+        // The superclass is materialized first, from its own admitted initialization.
+        let superclass = match &plan.superclass {
+            Some(call) => {
+                let selected = match self.sources.callees.get(&call.constructor) {
+                    Some(KlibCalleeFact::Selected(callables)) => callables[0],
+                    _ => {
+                        return Err(KlibBodyDeclineReason::SignatureMismatch(
+                            "a superclass constructor has no unique provider declaration"
+                                .to_owned(),
+                        ))
+                    }
+                };
+                self.materialize_class(ir, &call.constructor, selected)?;
+                let class = *self.classes.get(&call.constructor).ok_or(
+                    KlibBodyDeclineReason::UnsupportedDeclaration(
+                        "a superclass without ordinary initialization",
+                    ),
+                )?;
+                Some(class)
+            }
+            None => None,
+        };
         let mut class = IrClass::synthetic(classifier);
-        class.supertypes.push(plan.storage.superclass);
+        class.supertypes.clone_from(&plan.supertypes);
+        class.is_open =
+            plan.header.contract.modality != crate::metadata::semantic::KotlinModality::Final;
+        class.is_abstract =
+            plan.header.contract.modality == crate::metadata::semantic::KotlinModality::Abstract;
+        if let Some(superclass) = superclass {
+            let superclass = &ir.classes[superclass as usize];
+            class.superclass = superclass.fq_name;
+            class.super_ctor_params = superclass.ctor_args.iter().map(|arg| arg.ty).collect();
+        }
         class.fields = plan
             .storage
             .fields
@@ -114,9 +145,10 @@ impl<'u, 's> Linker<'u, 's> {
             fields: plan.field_declarations.clone(),
             contract: plan.header.contract,
         };
-        for function in &plan.overrides {
-            self.declare_override(ir, member.clone(), plan.header.arena, function)?;
+        for function in &plan.dispatched {
+            self.declare_dispatched(ir, member.clone(), plan.header.arena, function)?;
         }
+        // The initialization reads the class's private members as its members do.
         self.pending.push_back(PendingBody {
             identity: identity.clone(),
             arena: plan.header.arena,
@@ -125,7 +157,7 @@ impl<'u, 's> Linker<'u, 's> {
             header,
             function,
             initialization: Some((class, plan)),
-            value_member: None,
+            value_member: Some(member),
             local_body: None,
         });
         Ok(())
@@ -260,10 +292,10 @@ impl<'u, 's> Linker<'u, 's> {
         })
     }
 
-    /// Declare `function`, an override of one of `Any`'s members which the materialized class
-    /// `member` declares, as a method of the class, with the override edge a backend dispatches
-    /// through. The class always carries it: no call site selects it, as dispatch reaches it.
-    fn declare_override(
+    /// Declare `function`, a member dispatch on an instance of the materialized class `member`
+    /// reaches, as a method of the class, with the override edges a backend dispatches through.
+    /// The class always carries it: a call site may select it only through what it overrides.
+    fn declare_dispatched(
         &mut self,
         ir: &mut IrFile,
         member: super::MemberClass<'s>,
@@ -310,8 +342,25 @@ impl<'u, 's> Linker<'u, 's> {
         let identity = exact(&function.base.symbol)?;
         let (selected, implementation) = provided(&identity)?;
         let mut edges = Vec::with_capacity(function.overridden.len());
-        for overridden in &function.overridden {
-            let (declaration, target) = provided(&exact(overridden)?)?;
+        let overridden = function
+            .overridden
+            .iter()
+            .map(|symbol| {
+                let crate::metadata::klib_ir::KlibIrSignature::Public(signature) =
+                    &symbol.signature
+                else {
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "an override names a declaration without a public signature".to_owned(),
+                    ));
+                };
+                self.sources
+                    .bodies
+                    .overridden_declarations(module, signature)
+                    .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for overridden in overridden.iter().flatten() {
+            let (declaration, target) = provided(overridden)?;
             let Some(crate::types::SemanticCallableOwner::Classifier(owner)) =
                 declaration.declaration_owner()
             else {
@@ -319,26 +368,40 @@ impl<'u, 's> Linker<'u, 's> {
                     "an overridden declaration is not a class member".to_owned(),
                 ));
             };
-            edges.push((declaration, target, owner));
+            let interface = declaration
+                .class_contract()
+                .is_some_and(|class| class.kind == crate::libraries::TypeKind::Interface);
+            edges.push((declaration, target, owner, interface));
         }
         let header = body_header(Some(selected), arena, function, self.sources.bodies)?;
         if header.value_receiver().is_none() {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "a materialized class's override has no receiver".to_owned(),
+                "a materialized class's dispatched member has no receiver".to_owned(),
             ));
         }
         let class = member.class;
-        let declared = self.queue(
-            ir,
-            &identity,
-            Some(selected),
-            arena,
-            function,
-            super::BodyHeader {
-                header,
-                value_member: Some(member),
-            },
-        )?;
+        let declared = if function.body.is_some() {
+            self.queue(
+                ir,
+                &identity,
+                Some(selected),
+                arena,
+                function,
+                super::BodyHeader {
+                    header,
+                    value_member: Some(member),
+                },
+            )?
+        } else {
+            // An abstract member is a slot without an implementation.
+            let declared = declare_function(ir, &header);
+            self.functions.insert(identity.clone(), declared);
+            if let Some(receiver) = header.value_receiver() {
+                self.value_receivers.insert(identity.clone(), receiver);
+            }
+            declared
+        };
+        ir.dependency_methods.insert(implementation, declared);
         ir.classes[class as usize].methods.push(declared);
         ir.note_class_method(class, declared);
         let implementation_owner = ir.classes[class as usize].fq_name;
@@ -350,7 +413,7 @@ impl<'u, 's> Linker<'u, 's> {
             .function_overrides
             .entry(implementation_owner)
             .or_default();
-        for (declaration, target, owner) in edges {
+        for (declaration, target, owner, interface) in edges {
             records.push(crate::ir::IrFunctionOverride {
                 implementation: crate::fir::ResolvedFunctionOverrideTarget::External(
                     implementation,
@@ -361,7 +424,7 @@ impl<'u, 's> Linker<'u, 's> {
                 overridden_owner: owner,
                 overridden_semantic_role: declaration.semantic_role(),
                 collection_barrier: None,
-                overridden_is_interface: false,
+                overridden_is_interface: interface,
                 name: function.name.clone(),
                 declared_parameters: declaration.params().to_vec(),
                 declared_result: declaration.ret(),

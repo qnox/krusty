@@ -476,11 +476,11 @@ pub(super) fn function_header_with_emitted_dispatch(
 pub(super) enum HeaderPurpose {
     Body(Option<Ty>),
     External,
-    /// The body of a private member of the value class `TypeName`, which no provider records. A
+    /// The body of a private member of the materialized class `TypeName`, which no provider records. A
     /// private member is called only from its class, so the calling member's authenticated class
     /// is its class ([`super::class_headers::authenticate_private_member`] proves the raw header
     /// against it first), and it is emitted as that class's other members are.
-    PrivateValueMember(TypeName),
+    PrivateClassMember(TypeName),
 }
 
 pub(super) fn raw_function_header(
@@ -547,16 +547,16 @@ fn header(
     vararg_parameters::reject_dispatch_marker(function.dispatch_receiver.as_ref())?;
     let emitted_singleton_dispatch = match purpose {
         HeaderPurpose::Body(singleton) => singleton,
-        HeaderPurpose::External | HeaderPurpose::PrivateValueMember(_) => None,
+        HeaderPurpose::External | HeaderPurpose::PrivateClassMember(_) => None,
     };
-    let private_value_class = match purpose {
-        HeaderPurpose::PrivateValueMember(class) => {
+    let private_member_class = match purpose {
+        HeaderPurpose::PrivateClassMember(class) => {
             if selected.is_some()
                 || crate::metadata::semantic::declaration_visibility(function.base.flags)
                     != crate::types::Visibility::Private
             {
                 return Err(mismatch(
-                    "a value class member without a provider record is not private".to_owned(),
+                    "a class member without a provider record is not private".to_owned(),
                 ));
             }
             Some(class)
@@ -621,20 +621,19 @@ fn header(
                     "a dispatch receiver",
                 ));
             }
-            (Some(receiver), None) if private_value_class.is_some() => {
+            (Some(receiver), None) if private_member_class.is_some() => {
                 let serialized = semantic_type(arena, types, receiver.ty)?;
-                if serialized.kotlin_class_internal() != private_value_class {
+                if serialized.kotlin_class_internal() != private_member_class {
                     return Err(mismatch(
-                        "a private value class member's receiver is not its calling class"
-                            .to_owned(),
+                        "a private class member's receiver is not its calling class".to_owned(),
                     ));
                 }
                 value_receiver = Some((&receiver.base.symbol, serialized));
                 Some(serialized)
             }
-            (None, None) if private_value_class.is_some() => {
+            (None, None) if private_member_class.is_some() => {
                 return Err(mismatch(
-                    "a private value class member has no dispatch receiver".to_owned(),
+                    "a private class member has no dispatch receiver".to_owned(),
                 ));
             }
             (Some(_), None) if emitted_singleton_dispatch.is_none() => {

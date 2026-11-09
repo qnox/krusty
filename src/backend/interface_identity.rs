@@ -26,6 +26,11 @@ pub(crate) fn member_identity(member: &crate::libraries::KlibDependencyCallable)
             bytes.extend_from_slice(&accessor.member_id().to_le_bytes());
             bytes.extend_from_slice(&accessor.mask().to_le_bytes());
         }
+        &crate::libraries::KlibDeclarationSignature::FileLocal { file, slot } => {
+            bytes.push(2);
+            bytes.extend_from_slice(&file.to_le_bytes());
+            bytes.extend_from_slice(&slot.to_le_bytes());
+        }
     }
     bytes
 }

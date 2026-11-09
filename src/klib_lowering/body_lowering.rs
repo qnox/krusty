@@ -189,7 +189,8 @@ pub(super) trait CallLinker {
         unsupported("a call of a file-private constructor")
     }
 
-    /// The function a file-local call invokes. Template linkers keep the refusal.
+    /// The function a file-local call invokes: a top-level function private to the lowered
+    /// body's file, or a member of a file-local class. Template linkers keep the refusal.
     fn link_local_function(
         &mut self,
         _ir: &mut IrFile,

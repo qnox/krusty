@@ -29,7 +29,7 @@ pub(super) fn declarations(
     capabilities: &super::DependencyLeafCapabilities<'_>,
     requires_ordinary: bool,
 ) -> Result<FrozenClosure, String> {
-    // Each callee, with the value class whose member's body calls it.
+    // Each callee, with the materialized class whose member's body calls it.
     let mut pending = roots
         .iter()
         .map(|root| (root.identity().clone(), None))
@@ -39,18 +39,21 @@ pub(super) fn declarations(
     let mut member_edges = HashMap::default();
     // Declaration-only evidence already pushed, which the closure never walks.
     let mut declared = HashSet::default();
-    while let Some((identity, value_class)) = pending.pop_front() {
+    // Members of a materialized class that dispatch reaches: their bodies are emitted even where
+    // a call of one folds to a common operation, as a virtual call runs the body.
+    let mut dispatched = HashSet::default();
+    while let Some((identity, member_class)) = pending.pop_front() {
         if !visited.insert(identity.clone()) {
             continue;
         }
-        // A private member of a value class has no provider declaration; the member calling it
+        // A private member of a materialized class has no provider declaration; the member calling it
         // authenticates its class, and it is emitted as that member is.
-        if let Some(class) = value_class.filter(|class| {
+        if let Some(class) = member_class.filter(|class| {
             platform
                 .external_callable_by_dependency(&identity)
                 .is_none()
                 && !externals.contains_key(&identity)
-                && crate::klib_lowering::is_private_value_member(bodies, &identity, class)
+                && crate::klib_lowering::is_private_class_member(bodies, &identity, class)
         }) {
             pending.extend(
                 bodies
@@ -60,9 +63,24 @@ pub(super) fn declarations(
             );
             continue;
         }
+        // A top-level function private to its file has no provider declaration either; only a
+        // body of its own module calls it, and it is emitted with that body.
+        if let crate::libraries::KlibDeclarationSignature::FileLocal { .. } = identity.declaration {
+            pending.extend(
+                bodies
+                    .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+                    .into_iter()
+                    .map(|callee| (callee, None)),
+            );
+            continue;
+        }
         // Positive common-lowering capability, never a missing-provider fallback. Earlier emitted
         // exports remain exact external edges and retain their declaration authentication.
-        if !externals.contains_key(&identity) && capabilities.folds_common_builtin(&identity) {
+        let dispatched_member = dispatched.contains(&identity);
+        if !externals.contains_key(&identity)
+            && !dispatched_member
+            && capabilities.folds_common_builtin(&identity)
+        {
             continue;
         }
         // Intrinsic support already admits body-bearing raw headers without a source/provider
@@ -101,7 +119,11 @@ pub(super) fn declarations(
         let selected = realization
             .klib_body_callable()
             .ok_or("a dependency provider has no KLIB body contract")?;
-        let facts = capabilities.callees.with_declaration(selected);
+        let superclasses = superclass_realizations(platform, bodies, &identity);
+        let facts = with_realized_declarations(
+            capabilities.callees.with_declaration(selected),
+            &superclasses,
+        );
         let constructor = facts
             .authenticates_constructor(&identity, bodies)
             .map_err(|reason| format!("an invalid constructor declaration: {reason:?}"))?;
@@ -110,8 +132,22 @@ pub(super) fn declarations(
                 .constructor_initialization_callees(&identity, bodies)
                 .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
             {
-                pending.extend(callees.into_iter().map(|callee| (callee, None)));
+                // The initialization reads the class's private members as its members do.
+                let member_class = selected
+                    .class_contract()
+                    .filter(|class| class.emits_members())
+                    .cloned();
+                pending.extend(
+                    callees
+                        .into_iter()
+                        .map(|callee| (callee, member_class.clone())),
+                );
             }
+            dispatched.extend(
+                facts
+                    .constructor_dispatched_members(&identity, bodies)
+                    .map_err(|reason| format!("an invalid class member: {reason:?}"))?,
+            );
             // The declarations the class's overrides override, which their edges name.
             for overridden in facts
                 .constructor_overridden_declarations(&identity, bodies)
@@ -170,7 +206,7 @@ pub(super) fn declarations(
             && !member
             && !external_member
             && !constructor
-            && primitive.is_none()
+            && (dispatched_member || primitive.is_none())
             && target.is_none()
             && !getter
             && intrinsics.get(&identity).is_none()
@@ -200,15 +236,15 @@ pub(super) fn declarations(
             {
                 pending.push_back((primary, None));
             }
-            let value_class = selected
+            let member_class = selected
                 .class_contract()
-                .filter(|class| class.is_value && class.emits_members())
+                .filter(|class| class.emits_members())
                 .cloned();
             pending.extend(
                 bodies
                     .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
                     .into_iter()
-                    .map(|callee| (callee, value_class.clone())),
+                    .map(|callee| (callee, member_class.clone())),
             );
         }
         declarations.push((declaration_target, realization));
@@ -393,12 +429,52 @@ fn ordinary_class_constructor(
     if bodies.function_has_body(&identity).is_none() {
         return Ok(None);
     }
-    let admitted = callees
-        .with_declaration(constructor)
+    let superclasses = superclass_realizations(platform, bodies, &identity);
+    let admitted = with_realized_declarations(callees.with_declaration(constructor), &superclasses)
         .constructor_initialization_callees(&identity, bodies)
         .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
         .is_some();
     Ok(admitted.then_some(identity))
+}
+
+/// The realizations of the superclass constructors a class's primary constructor `identity`
+/// delegates through. Admitting the class's initialization admits theirs, which reads their
+/// declarations, so a closure records them first.
+fn superclass_realizations(
+    platform: &dyn SemanticPlatform,
+    bodies: &KlibDeclarationBodies,
+    identity: &KlibDependencyCallable,
+) -> Vec<crate::libraries::ExternalCallableRealization> {
+    let mut realizations = Vec::new();
+    let mut constructor = identity.clone();
+    let mut visited = HashSet::default();
+    while let Some(superclass) =
+        crate::klib_lowering::delegated_superclass_constructor(bodies, &constructor)
+    {
+        if !visited.insert(superclass.clone()) {
+            break;
+        }
+        let Some((_, realization)) = platform.external_callable_by_dependency(&superclass) else {
+            break;
+        };
+        realizations.push(realization);
+        constructor = superclass;
+    }
+    realizations
+}
+
+/// `facts` with the declarations of `realizations`.
+fn with_realized_declarations<'a>(
+    mut facts: crate::klib_lowering::KlibCalleeFacts<'a>,
+    realizations: &'a [crate::libraries::ExternalCallableRealization],
+) -> crate::klib_lowering::KlibCalleeFacts<'a> {
+    for selected in realizations
+        .iter()
+        .filter_map(crate::libraries::ExternalCallableRealization::klib_body_callable)
+    {
+        facts = facts.with_declaration(selected);
+    }
+    facts
 }
 
 /// The primary constructor which materializes the ordinary class declaring the member
