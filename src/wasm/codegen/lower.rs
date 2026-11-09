@@ -45,6 +45,8 @@ pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntr
         || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
+        || operation == crate::backend::BackendCompilerIntrinsic::ArraySet
+        || operation == crate::backend::BackendCompilerIntrinsic::ArraySize
         || operation == crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
 }
 
@@ -1143,7 +1145,28 @@ impl<'a> Body<'a> {
                 let (Some(receiver), [index]) = (dispatch_receiver, args.as_slice()) else {
                     return Err("an authenticated array read with malformed operands".into());
                 };
-                self.reference_array_get(receiver, *index)?;
+                self.array_get(receiver, *index)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(crate::backend::BackendCompilerIntrinsic::ArraySet)
+                }) =>
+            {
+                let (Some(receiver), [index, value]) = (dispatch_receiver, args.as_slice()) else {
+                    return Err("an authenticated array store with malformed operands".into());
+                };
+                self.array_set(receiver, *index, *value)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1303,7 +1326,18 @@ impl<'a> Body<'a> {
                 spreads,
                 elements,
             } => {
-                self.reference_array_literal(array_type, &spreads, &elements)?;
+                if arrays::is_int_array(array_type) {
+                    self.int_array_literal(&spreads, &elements)?;
+                } else {
+                    self.reference_array_literal(array_type, &spreads, &elements)?;
+                }
+            }
+            IrExpr::NewArray { array_type, size } => {
+                if arrays::is_int_array(array_type) {
+                    self.new_int_array(size)?;
+                } else {
+                    return Err("the expression `NewArray`".into());
+                }
             }
             IrExpr::Try {
                 body,
@@ -1477,6 +1511,12 @@ impl<'a> Body<'a> {
             } => self.invoke_function(func, &args, &params, ret)?,
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
+            }
+            IrExpr::Checked(operation) => {
+                return Err(format!(
+                    "the expression `Checked` ({})",
+                    checked_operation_name(&operation)
+                ));
             }
             other => return Err(describe_node(&other)),
         }
@@ -1917,6 +1957,27 @@ fn callee_kind(callee: &Callee) -> String {
             "a function of another file".to_string()
         }
         _ => "a function through this calling convention".to_string(),
+    }
+}
+
+fn checked_operation_name(operation: &crate::ir::IrCheckedOperation) -> &'static str {
+    use crate::ir::IrCheckedOperation;
+    match operation {
+        IrCheckedOperation::Call { .. } => "Call",
+        IrCheckedOperation::ConstructorDelegation { .. } => "ConstructorDelegation",
+        IrCheckedOperation::PropertyRead { .. } => "PropertyRead",
+        IrCheckedOperation::PropertyWrite { .. } => "PropertyWrite",
+        IrCheckedOperation::ExternalPropertyRead { .. } => "ExternalPropertyRead",
+        IrCheckedOperation::ExternalPropertyWrite { .. } => "ExternalPropertyWrite",
+        IrCheckedOperation::LateinitFieldRead { .. } => "LateinitFieldRead",
+        IrCheckedOperation::BackingFieldRead { .. } => "BackingFieldRead",
+        IrCheckedOperation::BackingFieldWrite { .. } => "BackingFieldWrite",
+        IrCheckedOperation::RangeConstruction { .. } => "RangeConstruction",
+        IrCheckedOperation::RangeContains { .. } => "RangeContains",
+        IrCheckedOperation::ComparableRangeContains { .. } => "ComparableRangeContains",
+        IrCheckedOperation::IllegalProgressionStep { .. } => "IllegalProgressionStep",
+        IrCheckedOperation::RangeLoop { .. } => "RangeLoop",
+        IrCheckedOperation::PropertyReference { .. } => "PropertyReference",
     }
 }
 

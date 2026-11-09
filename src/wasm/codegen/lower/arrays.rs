@@ -1,4 +1,7 @@
-//! Reference-element array storage and checked reads, owned by the Wasm representation boundary.
+//! Array storage and checked reads, owned by the Wasm representation boundary.
+//!
+//! `Array<T>` stores references. `IntArray` stores `i32` elements in its own identity object.
+//! Other primitive arrays stay declined.
 
 use crate::backend::BackendCompilerIntrinsic;
 use crate::ir::{IrCheckedOperation, IrPropertyDispatch};
@@ -11,6 +14,39 @@ use super::*;
 
 const I32_ADD: u8 = 0x6a;
 const I32_GE_U: u8 = 0x4f;
+
+/// `IntArray`: a non-reference array whose element is `Int`.
+pub(super) fn is_int_array(array: Ty) -> bool {
+    let array = array.non_null();
+    !array.is_reference_array() && array.array_elem() == Some(Ty::Int)
+}
+
+/// A getter frame whose length this representation can answer: a reference array, or `IntArray`.
+fn sized_array(source: Ty) -> bool {
+    let source = source.non_null();
+    source.is_reference_array() || is_int_array(source)
+}
+
+/// The complete selected getter frame, before any receiver is evaluated.
+/// The source type is the representation the length is read from.
+fn array_size_receiver(operation: &IrCheckedOperation) -> Result<(u32, Ty), Unsupported> {
+    let IrCheckedOperation::ExternalPropertyRead {
+        dispatch: IrPropertyDispatch::Ordinary,
+        receiver: Some(receiver),
+        arguments,
+        parameters,
+        result: Ty::Int,
+        source_receiver: Some(source),
+        ..
+    } = operation
+    else {
+        return Err("an authenticated array size read with a mismatched getter frame".into());
+    };
+    if !arguments.is_empty() || !parameters.is_empty() || !sized_array(*source) {
+        return Err("an authenticated array size read with a mismatched getter frame".into());
+    }
+    Ok((*receiver, source.non_null()))
+}
 
 fn reference_element(array: Ty) -> Result<Ty, Unsupported> {
     if !array.non_null().is_reference_array() {
@@ -32,26 +68,6 @@ fn reference_element(array: Ty) -> Result<Ty, Unsupported> {
     Ok(element)
 }
 
-/// The complete selected getter frame, before any receiver is evaluated.
-fn array_size_receiver(operation: &IrCheckedOperation) -> Result<u32, Unsupported> {
-    let IrCheckedOperation::ExternalPropertyRead {
-        dispatch: IrPropertyDispatch::Ordinary,
-        receiver: Some(receiver),
-        arguments,
-        parameters,
-        result: Ty::Int,
-        source_receiver: Some(source),
-        ..
-    } = operation
-    else {
-        return Err("an authenticated array size read with a mismatched getter frame".into());
-    };
-    if !arguments.is_empty() || !parameters.is_empty() || !source.non_null().is_reference_array() {
-        return Err("an authenticated array size read with a mismatched getter frame".into());
-    }
-    Ok(*receiver)
-}
-
 impl Body<'_> {
     pub(super) fn is_array_size_property(&self, target: crate::fir::ExternalPropertyId) -> bool {
         self.callables.property(target).is_some_and(|property| {
@@ -63,11 +79,29 @@ impl Body<'_> {
         })
     }
 
+    /// Length of a getter whose dispatch, result, and source receiver are the checked frame.
+    /// `IntArray` reads its own `i32` storage; every other admitted receiver is a reference array.
     pub(super) fn checked_array_size(
         &mut self,
         operation: &IrCheckedOperation,
     ) -> Result<(), Unsupported> {
-        self.reference_array_size(array_size_receiver(operation)?)
+        let (receiver, source) = array_size_receiver(operation)?;
+        let array = self.array_receiver(receiver)?;
+        self.value(receiver, array)?;
+        if is_int_array(source) {
+            if !is_int_array(array) {
+                return Err(
+                    "an authenticated array size read with a mismatched getter frame".into(),
+                );
+            }
+            self.int_array_storage();
+        } else if array.non_null().is_reference_array() {
+            self.reference_array_storage();
+        } else {
+            return Err("an array size read without reference-array storage".into());
+        }
+        self.code.array_len();
+        Ok(())
     }
 
     pub(super) fn reference_array_literal(
@@ -216,20 +250,169 @@ impl Body<'_> {
             .struct_get(object, crate::wasm::reference_arrays::STORAGE_FIELD);
     }
 
-    /// The length of the backing storage selected by a checked reference-array receiver.
-    pub(super) fn reference_array_size(&mut self, receiver: u32) -> Result<(), Unsupported> {
-        let array = self
-            .type_of(receiver)?
-            .ok_or_else(|| "an array receiver without a checked type".to_string())?;
-        // Length belongs to the wrapper's backing storage, independent of its element carrier.
-        // Reading it neither loads nor boxes an element of Array<T>.
-        if !array.non_null().is_reference_array() {
-            return Err("an array size read without reference-array storage".into());
+    pub(super) fn array_get(&mut self, receiver: u32, index: u32) -> Result<(), Unsupported> {
+        let array = self.array_receiver(receiver)?;
+        if is_int_array(array) {
+            self.int_array_get(receiver, index)
+        } else {
+            self.reference_array_get(receiver, index)
         }
+    }
+
+    pub(super) fn array_set(
+        &mut self,
+        receiver: u32,
+        index: u32,
+        value: u32,
+    ) -> Result<(), Unsupported> {
+        let array = self.array_receiver(receiver)?;
+        if is_int_array(array) {
+            self.int_array_set(receiver, index, value)
+        } else {
+            self.reference_array_set(receiver, index, value)
+        }
+    }
+
+    pub(super) fn array_size(&mut self, receiver: u32) -> Result<(), Unsupported> {
+        let array = self.array_receiver(receiver)?;
         self.value(receiver, array)?;
-        self.reference_array_storage();
+        if is_int_array(array) {
+            self.int_array_storage();
+        } else {
+            reference_element(array)?;
+            self.reference_array_storage();
+        }
         self.code.array_len();
         Ok(())
+    }
+
+    fn array_receiver(&mut self, receiver: u32) -> Result<Ty, Unsupported> {
+        self.type_of(receiver)?
+            .ok_or_else(|| "an array receiver without a checked type".to_string())
+    }
+
+    pub(super) fn new_int_array(&mut self, size: u32) -> Result<(), Unsupported> {
+        // The size expression runs once. A negative length is `IllegalArgumentException` on the
+        // Kotlin exception path: `array.new_default` would trap, and a trap never reaches `catch`.
+        self.value(size, Ty::Int)?;
+        let length = self.local(ValType::I32);
+        self.code.local_set(length);
+        let exception = self.runtime.exceptions.ensure_class(
+            self.module,
+            self.classifiers,
+            RuntimeExceptionKind::IllegalArgument.classifier(),
+        )?;
+        self.code
+            .local_get(length)
+            .i32_const(0)
+            .op(LT_S32)
+            .if_(BlockType::Empty);
+        self.code.local_get(length).call(self.runtime.string_of_i32);
+        let message = self.local(STRING);
+        self.code.local_set(message);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            exception,
+            Some(message),
+            self.runtime.string,
+        );
+        self.code.throw(self.runtime.exceptions.tag).end();
+        self.code
+            .local_get(length)
+            .array_new_default(self.runtime.ints);
+        self.wrap_int_array();
+        Ok(())
+    }
+
+    pub(super) fn int_array_literal(
+        &mut self,
+        spreads: &[bool],
+        elements: &[u32],
+    ) -> Result<(), Unsupported> {
+        if spreads.len() != elements.len() {
+            return Err("a malformed array literal's spread inventory".into());
+        }
+        if spreads.contains(&true) {
+            return Err("a spread into an IntArray".into());
+        }
+        for &element in elements {
+            self.value(element, Ty::Int)?;
+        }
+        let length = u32::try_from(elements.len())
+            .map_err(|_| "an array literal exceeding Wasm's length space".to_string())?;
+        self.code.array_new_fixed(self.runtime.ints, length);
+        self.wrap_int_array();
+        Ok(())
+    }
+
+    fn wrap_int_array(&mut self) {
+        let storage = self.local(ValType::reference(self.runtime.ints));
+        let object = self.runtime.int_arrays.object;
+        self.code
+            .local_set(storage)
+            .global_get(self.runtime.int_arrays.table)
+            .call(self.runtime.identity.allocate)
+            .local_get(storage)
+            .struct_new(object);
+    }
+
+    fn int_array_storage(&mut self) {
+        let object = self.runtime.int_arrays.object;
+        self.code
+            .ref_cast(false, HeapType::Concrete(object))
+            .struct_get(object, crate::wasm::reference_arrays::STORAGE_FIELD);
+    }
+
+    fn int_array_get(&mut self, receiver: u32, index: u32) -> Result<(), Unsupported> {
+        let (storage, offset) = self.int_slot_operands(receiver, index)?;
+        let storage = self.int_array_backing(storage);
+        self.check_reference_slot(storage, offset)?;
+        self.code
+            .local_get(storage)
+            .ref_as_non_null()
+            .local_get(offset)
+            .array_get(self.runtime.ints);
+        Ok(())
+    }
+
+    fn int_array_set(&mut self, receiver: u32, index: u32, value: u32) -> Result<(), Unsupported> {
+        let (storage, offset) = self.int_slot_operands(receiver, index)?;
+        let stored = self.local(ValType::I32);
+        self.value(value, Ty::Int)?;
+        self.code.local_set(stored);
+        let storage = self.int_array_backing(storage);
+        self.check_reference_slot(storage, offset)?;
+        self.code
+            .local_get(storage)
+            .ref_as_non_null()
+            .local_get(offset)
+            .local_get(stored)
+            .array_set(self.runtime.ints);
+        Ok(())
+    }
+
+    fn int_slot_operands(&mut self, receiver: u32, index: u32) -> Result<(u32, u32), Unsupported> {
+        let array = self.array_receiver(receiver)?;
+        if !is_int_array(array) {
+            return Err(format!("IntArray storage for `{}`", describe(array)));
+        }
+        let storage = self.local(ValType::nullable(self.runtime.int_arrays.object));
+        let offset = self.local(ValType::I32);
+        self.value(receiver, array)?;
+        self.code
+            .ref_cast(true, HeapType::Concrete(self.runtime.int_arrays.object))
+            .local_set(storage);
+        self.value(index, Ty::Int)?;
+        self.code.local_set(offset);
+        Ok((storage, offset))
+    }
+
+    fn int_array_backing(&mut self, array: u32) -> u32 {
+        let storage = self.local(ValType::reference(self.runtime.ints));
+        self.code.local_get(array);
+        self.int_array_storage();
+        self.code.local_set(storage);
+        storage
     }
 
     pub(super) fn reference_array_get(
