@@ -17,9 +17,13 @@
 //! the summary counts the cases where kotlinc disagrees with that, which is where this runner does
 //! not reproduce JetBrains' test configuration.
 //!
-//! A case kotlinc cannot finish (a crash, javac refusing the case's Java, a directive the oracle
-//! does not model) is not scored, and only where `tests/diagnostics_not_scored/jvm/<version>.txt`
-//! lists it: the run proves that list in both directions, so a case losing its oracle fails.
+//! A case kotlinc gives no verdict on (an internal error or crash status, javac refusing the case's
+//! Java, a directive the oracle does not model) is not scored, and only where
+//! `tests/diagnostics_not_scored/jvm/<version>.txt` lists it: the run proves that list in both
+//! directions, so a case losing its oracle fails. kotlinc rejects a case only by exiting with a
+//! compilation error anchored at a source position. A harness that cannot observe a case (a missing
+//! tool or JDK, its configuration, a scratch or transport failure, a case it cannot prepare) is
+//! fatal whatever the lists say, and refuses blessing.
 //!
 //! False accepts ratchet: `tests/diagnostics_false_accepts/jvm/<version>.txt` lists the cases krusty
 //! accepts although kotlinc rejects them. A case joining or leaving the list fails until the list is
@@ -45,7 +49,7 @@ use krusty::kotlin_version::KotlinVersion;
 use super::box_inventory;
 use super::box_jvm_compile::{compile_box_case, CompileFailure, COROUTINE_HELPERS};
 use super::box_ratchet;
-use super::box_reference_classes::{self, strip_diagnostic_markers};
+use super::box_reference_classes::{self, strip_diagnostic_markers, ReferenceFailure};
 use super::common;
 use super::krusty_case_workers::{serve, Reply, Workers};
 
@@ -151,14 +155,25 @@ fn reference(
     stem: &str,
     classpath: &[PathBuf],
     jdk: krusty::conformance::BoxJdk<'_>,
-) -> Verdict {
-    match box_reference_classes::reference_compile(source, stem, classpath, jdk, COROUTINE_HELPERS)
-    {
-        Ok(_) => Verdict::Accepted,
-        Err(reason) if box_reference_classes::is_source_rejection(&reason) => {
-            Verdict::Rejected(vec![reason])
+) -> Result<Verdict, String> {
+    kotlinc_verdict(
+        box_reference_classes::reference_verdict(source, stem, classpath, jdk, COROUTINE_HELPERS)
+            .map(|_| ()),
+    )
+}
+
+/// The verdict a reference compile observed, or the harness failure that kept it from observing
+/// one. Only that failure is fatal: a reference without a verdict is the case's own property.
+fn kotlinc_verdict(compiled: Result<(), ReferenceFailure>) -> Result<Verdict, String> {
+    match compiled {
+        Ok(()) => Ok(Verdict::Accepted),
+        Err(failure @ ReferenceFailure::Rejected { .. }) => {
+            Ok(Verdict::Rejected(vec![failure.to_string()]))
         }
-        Err(reason) => Verdict::Failed(reason),
+        Err(
+            failure @ (ReferenceFailure::KotlincNoVerdict { .. } | ReferenceFailure::NoVerdict(_)),
+        ) => Ok(Verdict::Failed(failure.to_string())),
+        Err(ReferenceFailure::Harness(reason)) => Err(reason),
     }
 }
 
@@ -283,24 +298,33 @@ struct Case {
     kotlinc_rejects: bool,
 }
 
-fn run_case(root: &Path, jdks: &BoxJdkRoots, workers: &Workers, file: &Path) -> Case {
+/// A harness failure that kept the run from observing a case: never a property of the case.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Fatal {
+    key: String,
+    reason: String,
+}
+
+/// One case's scored outcome, or the fatal harness observation that kept the run from scoring it.
+fn run_case(
+    root: &Path,
+    jdks: &BoxJdkRoots,
+    workers: &Workers,
+    file: &Path,
+) -> Result<Case, Fatal> {
     let key = box_inventory::key(root, file);
-    let scored = |outcome, upstream_disagrees, kotlinc_rejects| Case {
+    let fatal = |reason: String| Fatal {
         key: key.clone(),
-        outcome,
-        upstream_disagrees,
-        kotlinc_rejects,
+        reason,
     };
     let source = std::fs::read_to_string(file)
-        .unwrap_or_else(|error| panic!("read {}: {error}", file.display()));
+        .map_err(|error| fatal(format!("read {}: {error}", file.display())))?;
     let stem = case_stem(file);
-    let prepared = match prepare(root, &source, stem) {
-        Ok(prepared) => prepared,
-        Err(reason) => return scored(Outcome::NotScored(reason), false, false),
-    };
+    let prepared =
+        prepare(root, &source, stem).map_err(|reason| fatal(format!("prepare: {reason}")))?;
     let classpath = common::classpath_jars_for(&prepared);
     let jdk = jdks.select(&prepared);
-    let reference = reference(&prepared, stem, &classpath, jdk);
+    let reference = reference(&prepared, stem, &classpath, jdk).map_err(fatal)?;
     let kotlinc_rejects = matches!(reference, Verdict::Rejected(_));
     let upstream_disagrees = matches!(
         (&reference, expects_errors(&source)),
@@ -319,7 +343,12 @@ fn run_case(root: &Path, jdks: &BoxJdkRoots, workers: &Workers, file: &Path) -> 
         }
         _ => Outcome::Agree,
     };
-    scored(outcome, upstream_disagrees, kotlinc_rejects)
+    Ok(Case {
+        key,
+        outcome,
+        upstream_disagrees,
+        kotlinc_rejects,
+    })
 }
 
 /// Every case of the diagnostics corpora: `<name>.kt` files whose name has no other dot.
@@ -422,12 +451,20 @@ fn krusty_rejects_what_kotlinc_rejects_in_its_diagnostics_test_data() {
         deadline: case_deadline(),
     };
     // Each pool thread owns one krusty worker process and waits on kotlinc's reference server.
-    let cases: Vec<Case> = cases(&root)
+    let observed: Vec<Result<Case, Fatal>> = cases(&root)
         .par_iter()
         .map(|file| run_case(&root, &jdks, &workers, file))
         .collect();
+    let mut cases = Vec::new();
+    let mut fatal = Vec::new();
+    for observation in observed {
+        match observation {
+            Ok(case) => cases.push(case),
+            Err(observation) => fatal.push(observation),
+        }
+    }
 
-    let mut false_accepts = BTreeMap::new();
+    let mut false_accepts = 0;
     let mut false_rejects = 0;
     let mut krusty_failed = BTreeMap::<String, usize>::new();
     let mut not_scored = BTreeMap::<String, usize>::new();
@@ -438,9 +475,7 @@ fn krusty_rejects_what_kotlinc_rejects_in_its_diagnostics_test_data() {
         upstream_disagrees += usize::from(case.upstream_disagrees);
         match &case.outcome {
             Outcome::Agree => {}
-            Outcome::FalseAccept(error) => {
-                false_accepts.insert(case.key.clone(), error.clone());
-            }
+            Outcome::FalseAccept(_) => false_accepts += 1,
             Outcome::FalseReject(_) => false_rejects += 1,
             Outcome::KrustyFailed(reason) => {
                 *krusty_failed
@@ -452,12 +487,13 @@ fn krusty_rejects_what_kotlinc_rejects_in_its_diagnostics_test_data() {
     }
     eprintln!(
         "diagnostics corpus ({version}): {} cases; kotlinc rejects {rejected_by_kotlinc}, krusty \
-         accepts {} of them ({} false accepts); {false_rejects} false rejects; krusty failed on {}; \
-         {upstream_disagrees} kotlinc verdicts disagree with RUN_PIPELINE_TILL",
-        cases.len(),
-        false_accepts.len(),
-        percent(false_accepts.len(), rejected_by_kotlinc),
+         accepts {false_accepts} of them ({} false accepts); {false_rejects} false rejects; krusty \
+         failed on {}; {upstream_disagrees} kotlinc verdicts disagree with RUN_PIPELINE_TILL; {} \
+         fatal harness observations",
+        cases.len() + fatal.len(),
+        percent(false_accepts, rejected_by_kotlinc),
         krusty_failed.values().sum::<usize>(),
+        fatal.len(),
     );
     for (reason, count) in &krusty_failed {
         eprintln!("  krusty failed: {count} × {reason}");
@@ -466,7 +502,79 @@ fn krusty_rejects_what_kotlinc_rejects_in_its_diagnostics_test_data() {
         eprintln!("  not scored: {count} × {reason}");
     }
 
-    let found: BTreeSet<String> = false_accepts.keys().cloned().collect();
+    let bless = box_ratchet::bless_requested(
+        std::env::var("KRUSTY_BLESS_DIAGNOSTICS_EXPECTATIONS")
+            .ok()
+            .as_deref(),
+    )
+    .unwrap_or_else(|error| panic!("{}", error.replace("BOX", "DIAGNOSTICS")));
+    assert!(
+        !bless || std::env::var_os("CI").is_none(),
+        "KRUSTY_BLESS_DIAGNOSTICS_EXPECTATIONS is refused under CI: expectations are blessed locally"
+    );
+    let listed = Expectations {
+        false_accepts: read_list(FALSE_ACCEPTS, version),
+        not_scored: read_list(NOT_SCORED, version),
+    };
+    let problems = judge(&cases, &fatal, &listed, bless, &mut |directory, keys| {
+        let header = if directory == FALSE_ACCEPTS {
+            FALSE_ACCEPTS_HEADER
+        } else {
+            NOT_SCORED_HEADER
+        };
+        box_ratchet::record(
+            directory,
+            "jvm",
+            version,
+            keys,
+            &render_list(header, version, keys),
+        )
+        .unwrap_or_else(|error| panic!("record the {version} {directory}: {error}"));
+    });
+    assert!(
+        problems.is_empty(),
+        "{} diagnostics case(s) disagree with the expectations{}:\n  {}",
+        problems.len(),
+        if bless { "; nothing was blessed" } else { "" },
+        problems.join("\n  ")
+    );
+    assert!(
+        rejected_by_kotlinc > 0,
+        "kotlinc rejected no case: check the corpus and the reference compiler"
+    );
+}
+
+/// The listed false accepts and unscored cases a run is proved against.
+struct Expectations {
+    false_accepts: BTreeSet<String>,
+    not_scored: BTreeSet<String>,
+}
+
+/// Every disagreement between the run and `listed`. A fatal harness observation fails the run
+/// whatever the lists say about its key. Blessing calls `record` with each list's new keys, and
+/// only when nothing kept a case from a verdict: neither a fatal observation nor a listed false
+/// accept that one compiler gave no verdict on.
+fn judge(
+    cases: &[Case],
+    fatal: &[Fatal],
+    listed: &Expectations,
+    bless: bool,
+    record: &mut dyn FnMut(&'static str, &BTreeSet<String>),
+) -> Vec<String> {
+    let version = krusty::kotlin_version::target();
+    let mut problems: Vec<String> = fatal
+        .iter()
+        .map(|Fatal { key, reason }| format!("{key}: the harness could not observe it ({reason})"))
+        .collect();
+    // A key a fatal observation kept from scoring is reported as that observation only.
+    let unobserved: BTreeSet<&String> = fatal.iter().map(|fatal| &fatal.key).collect();
+    let found: BTreeMap<&String, &String> = cases
+        .iter()
+        .filter_map(|case| match &case.outcome {
+            Outcome::FalseAccept(error) => Some((&case.key, error)),
+            _ => None,
+        })
+        .collect();
     let unscored: BTreeSet<String> = cases
         .iter()
         .filter(|case| matches!(case.outcome, Outcome::NotScored(_)))
@@ -476,67 +584,49 @@ fn krusty_rejects_what_kotlinc_rejects_in_its_diagnostics_test_data() {
         .iter()
         .map(|case| (&case.key, &case.outcome))
         .collect();
-    let listed_false_accepts = read_list(FALSE_ACCEPTS, version);
     // A listed false accept leaves the list only on a definite observation: both compilers ran and
     // agreed. One whose case lost its verdict proves nothing, and blessing must not drop it.
-    let mut problems: Vec<String> = listed_false_accepts
-        .iter()
-        .filter_map(|key| match outcomes.get(key) {
-            Some(Outcome::NotScored(reason)) => Some(format!(
-                "{key}: listed as a false accept, but kotlinc gave no verdict ({reason})"
-            )),
-            Some(Outcome::KrustyFailed(reason)) => Some(format!(
-                "{key}: listed as a false accept, but krusty gave no verdict ({})",
-                first_line(reason)
-            )),
-            Some(_) => None,
-            None => Some(format!(
-                "{key}: listed as a false accept but absent from the corpus"
-            )),
-        })
-        .collect();
-    let bless = box_ratchet::bless_requested(
-        std::env::var("KRUSTY_BLESS_DIAGNOSTICS_EXPECTATIONS")
-            .ok()
-            .as_deref(),
-    )
-    .unwrap_or_else(|error| panic!("{}", error.replace("BOX", "DIAGNOSTICS")));
+    problems.extend(
+        listed
+            .false_accepts
+            .iter()
+            .filter_map(|key| match outcomes.get(key) {
+                Some(Outcome::NotScored(reason)) => Some(format!(
+                    "{key}: listed as a false accept, but kotlinc gave no verdict ({reason})"
+                )),
+                Some(Outcome::KrustyFailed(reason)) => Some(format!(
+                    "{key}: listed as a false accept, but krusty gave no verdict ({})",
+                    first_line(reason)
+                )),
+                Some(_) => None,
+                None if unobserved.contains(key) => None,
+                None => Some(format!(
+                    "{key}: listed as a false accept but absent from the corpus"
+                )),
+            }),
+    );
     if bless {
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "KRUSTY_BLESS_DIAGNOSTICS_EXPECTATIONS is refused under CI: expectations are blessed locally"
-        );
-        assert!(
-            problems.is_empty(),
-            "cannot bless while listed false accepts lack a verdict:\n  {}",
-            problems.join("\n  ")
-        );
-        for (directory, keys, header) in [
-            (FALSE_ACCEPTS, &found, FALSE_ACCEPTS_HEADER),
-            (NOT_SCORED, &unscored, NOT_SCORED_HEADER),
-        ] {
-            box_ratchet::record(
-                directory,
-                "jvm",
-                version,
-                keys,
-                &render_list(header, version, keys),
-            )
-            .unwrap_or_else(|error| panic!("record the {version} {directory}: {error}"));
+        if problems.is_empty() {
+            let found = found.keys().map(|key| key.to_string()).collect();
+            record(FALSE_ACCEPTS, &found);
+            record(NOT_SCORED, &unscored);
+        }
+        return problems;
+    }
+    for (key, error) in &found {
+        if !listed.false_accepts.contains(*key) {
+            problems.push(format!(
+                "{key}: krusty newly accepts it; kotlinc reports {error}"
+            ));
         }
     }
-    let expected = read_list(FALSE_ACCEPTS, version);
-    for key in found.difference(&expected) {
-        problems.push(format!(
-            "{key}: krusty newly accepts it; kotlinc reports {}",
-            false_accepts[key]
-        ));
-    }
-    for key in expected.difference(&found) {
-        if matches!(
-            outcomes.get(key),
-            Some(Outcome::Agree | Outcome::FalseReject(_))
-        ) {
+    for key in &listed.false_accepts {
+        if !found.contains_key(key)
+            && matches!(
+                outcomes.get(key),
+                Some(Outcome::Agree | Outcome::FalseReject(_))
+            )
+        {
             problems.push(format!(
                 "{key}: no longer a false accept; remove it from {}",
                 box_ratchet::read_path(FALSE_ACCEPTS, "jvm", version).display()
@@ -545,26 +635,143 @@ fn krusty_rejects_what_kotlinc_rejects_in_its_diagnostics_test_data() {
     }
     // A case kotlinc gives no verdict on is excused only where it is listed, so a case that loses its
     // oracle fails instead of quietly leaving the score.
-    let expected_unscored = read_list(NOT_SCORED, version);
-    for key in unscored.difference(&expected_unscored) {
+    for key in unscored.difference(&listed.not_scored) {
         if let Some(Outcome::NotScored(reason)) = outcomes.get(key) {
             problems.push(format!("{key}: kotlinc gave no verdict ({reason})"));
         }
     }
-    for key in expected_unscored.difference(&unscored) {
-        problems.push(format!(
-            "{key}: listed as not scored, but kotlinc gave a verdict; remove it from {}",
-            box_ratchet::read_path(NOT_SCORED, "jvm", version).display()
-        ));
+    for key in listed.not_scored.difference(&unscored) {
+        if !unobserved.contains(key) {
+            problems.push(format!(
+                "{key}: listed as not scored, but kotlinc gave a verdict; remove it from {}",
+                box_ratchet::read_path(NOT_SCORED, "jvm", version).display()
+            ));
+        }
     }
-    assert!(
-        rejected_by_kotlinc > 0,
-        "kotlinc rejected no case: check the corpus and the reference compiler"
-    );
-    assert!(
-        problems.is_empty(),
-        "{} diagnostics case(s) disagree with the expectations:\n  {}",
-        problems.len(),
-        problems.join("\n  ")
-    );
+    problems
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LISTED: &str = "compiler/testData/diagnostics/tests/listed.kt";
+
+    fn case(key: &str, outcome: Outcome) -> Case {
+        Case {
+            key: key.to_string(),
+            outcome,
+            upstream_disagrees: false,
+            kotlinc_rejects: false,
+        }
+    }
+
+    fn listed_as_unscored_and_false_accept() -> Expectations {
+        Expectations {
+            false_accepts: BTreeSet::from([LISTED.to_string()]),
+            not_scored: BTreeSet::from([LISTED.to_string()]),
+        }
+    }
+
+    #[test]
+    fn only_a_harness_failure_of_the_reference_is_fatal() {
+        assert_eq!(
+            kotlinc_verdict(Err(ReferenceFailure::Harness("kotlinc unavailable".into()))),
+            Err("kotlinc unavailable".to_string())
+        );
+        assert_eq!(
+            kotlinc_verdict(Err(ReferenceFailure::KotlincNoVerdict {
+                module: "main".into(),
+                code: 2,
+                diagnostics: "/w/Case.kt:1:1: error: x\n".into(),
+            })),
+            Ok(Verdict::Failed(
+                "reference module main: exit code 2: /w/Case.kt:1:1: error: x".into()
+            ))
+        );
+        assert_eq!(
+            kotlinc_verdict(Err(ReferenceFailure::Rejected {
+                module: "main".into(),
+                diagnostics: "/w/Case.kt:1:1: error: x\n".into(),
+            })),
+            Ok(Verdict::Rejected(vec![
+                "reference module main: /w/Case.kt:1:1: error: x".into()
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_missing_binary_or_configuration_at_a_listed_key_fails_the_run() {
+        for reason in [
+            "kotlinc unavailable",
+            "no reference JDK is selected: set KRUSTY_REF_JAVA_HOME or JAVA_HOME",
+        ] {
+            let fatal = [Fatal {
+                key: LISTED.to_string(),
+                reason: reason.to_string(),
+            }];
+            let problems = judge(
+                &[],
+                &fatal,
+                &listed_as_unscored_and_false_accept(),
+                false,
+                &mut |directory, _| panic!("a check run recorded {directory}"),
+            );
+            assert_eq!(
+                problems,
+                vec![format!(
+                    "{LISTED}: the harness could not observe it ({reason})"
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_is_recorded_after_a_fatal_observation() {
+        let other = "compiler/testData/diagnostics/tests/other.kt";
+        let cases = [case(other, Outcome::FalseAccept("kotlinc error".into()))];
+        let fatal = [Fatal {
+            key: LISTED.to_string(),
+            reason: "reference module main: javac unavailable".to_string(),
+        }];
+        let mut recorded = Vec::new();
+        let problems = judge(
+            &cases,
+            &fatal,
+            &listed_as_unscored_and_false_accept(),
+            true,
+            &mut |directory, keys| recorded.push((directory, keys.clone())),
+        );
+        assert_eq!(
+            problems,
+            vec![format!(
+                "{LISTED}: the harness could not observe it (reference module main: javac unavailable)"
+            )]
+        );
+        assert_eq!(recorded, Vec::new());
+
+        // The same run without the fatal observation records both lists.
+        let cases = [
+            case(other, Outcome::FalseAccept("kotlinc error".into())),
+            case(
+                LISTED,
+                Outcome::NotScored("kotlinc failed: exit code 2".into()),
+            ),
+        ];
+        let listed = Expectations {
+            false_accepts: BTreeSet::new(),
+            not_scored: BTreeSet::from([LISTED.to_string()]),
+        };
+        let problems = judge(&cases, &[], &listed, true, &mut |directory, keys| {
+            recorded.push((directory, keys.clone()))
+        });
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!(
+            recorded,
+            vec![
+                (FALSE_ACCEPTS, BTreeSet::from([other.to_string()])),
+                (NOT_SCORED, BTreeSet::from([LISTED.to_string()])),
+            ]
+        );
+    }
 }
