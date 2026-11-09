@@ -99,7 +99,7 @@ impl IrPropertyFunctionReference {
 
     /// The getter is an inline accessor whose body each read splices, so no accessor method
     /// performs the read.
-    pub(crate) fn getter_is_spliced(&self) -> bool {
+    pub fn getter_is_spliced(&self) -> bool {
         matches!(
             &self.target,
             crate::fir::FirPropertyReferenceTarget::SpecializedModule {
@@ -111,7 +111,7 @@ impl IrPropertyFunctionReference {
 
     /// The checked property reference this value is, with its bound receiver operand and the
     /// reference's adaptation in place.
-    pub(crate) fn checked_operation(
+    pub fn checked_operation(
         &self,
         bound_receiver: Option<ExprId>,
         adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
@@ -185,7 +185,7 @@ impl IrFile {
     /// The arity is a literal lambda's: the function type's parameters, and for a suspend function
     /// type the `Continuation` its adapter takes after them once a backend gives the adapter its
     /// CPS signature, as a suspend literal's arity counts its implementation's continuation.
-    pub(crate) fn callable_reference_inline_template(
+    pub fn callable_reference_inline_template(
         &self,
         expression: ExprId,
     ) -> Option<(FunId, Vec<ExprId>, ExprId, usize)> {

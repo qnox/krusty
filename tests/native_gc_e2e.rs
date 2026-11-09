@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use krusty::native::NativeTarget;
+use krusty_native::NativeTarget;
 
 use super::common;
 
@@ -70,7 +70,7 @@ fn c_compiler() -> Option<String> {
 /// The host target, when this build can link for it and a C compiler exists for the test program.
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target) && c_compiler().is_some()).then_some(target)
+    (krusty_native::can_link(target) && c_compiler().is_some()).then_some(target)
 }
 
 /// Compile the C program to a freestanding object with the runtime's own flags — except at `-O0`,
@@ -794,7 +794,7 @@ fn the_collector_reclaims_garbage_and_keeps_what_is_reachable() {
     // runtime, through krusty's linker — only the entry point is the program's own.
     let scratch = Scratch::new("collector");
     let object = compile_c(scratch.path(), PROGRAM);
-    let image = krusty::native::link_program(&[&object], target)
+    let image = krusty_native::link_program(&[&object], target)
         .unwrap_or_else(|error| panic!("the test program must link against the runtime: {error}"));
     let executable = scratch.path().join("program");
     std::fs::write(&executable, &image).expect("write executable");
@@ -834,7 +834,7 @@ fn the_runtime_ships_the_collector_with_every_program() {
     // for every target this build carries, independent of whether a C compiler is present here.
     let mut carried = 0;
     for &target in NativeTarget::ALL {
-        let Some(objects) = krusty::native::runtime_objects(target) else {
+        let Some(objects) = krusty_native::runtime_objects(target) else {
             continue;
         };
         carried += 1;
