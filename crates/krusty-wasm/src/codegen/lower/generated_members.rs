@@ -27,9 +27,8 @@ impl Body<'_> {
         ty: Ty,
     ) -> Result<(), Unsupported> {
         if ty.non_null().is_array() {
-            // kotlinc hashes an array property by its CONTENTS, which the runtime does not
-            // compute yet.
-            return Err(format!("the content hash of a `{}` property", describe(ty)));
+            // kotlinc hashes an array property by its CONTENTS, not by the array's identity.
+            return self.generated_array_hash(value, ty);
         }
         // `Unit` has one instance. Its hash is that instance's fixed identity hash, whether the
         // property is spelled as the scalar or as `kotlin.Unit`. Another class in the file may
