@@ -39,7 +39,7 @@ impl Parser<'_> {
         let script_start = self.t[..self.i]
             .iter()
             .rev()
-            .find(|token| token.kind != TokenKind::Newline)
+            .find(|token| token.kind != TokenKind::Semicolon)
             .map_or_else(|| self.script_text_start(), |token| token.span.lo);
         let declaration_index = self.file.decls.len();
         let start = Span::new(script_start, script_start);
@@ -51,7 +51,7 @@ impl Parser<'_> {
         // The statement the script ends with, if no declaration follows it.
         let mut trailing_statement = None;
         loop {
-            self.skip_newlines();
+            self.skip_semicolons();
             if self.at(TokenKind::Eof) {
                 break;
             }

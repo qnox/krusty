@@ -67,6 +67,7 @@ mod declaration_types;
 mod declared_nullability;
 mod declared_property_access;
 mod declared_property_accessor;
+use declared_property_accessor::accessor_jvm_names;
 mod default_impls;
 mod delegated_property_array;
 mod field_nullability;
@@ -721,27 +722,6 @@ fn value_class_is_readable(ir: &IrFile, fq_name: crate::types::TypeName) -> bool
         || ir.module_readable_value_classes.contains(&fq_name)
 }
 
-/// The JVM accessor spellings a class's synthesized property accessors are emitted under: the value-class
-/// pass's stamp when the plain convention is not the physical ABI (`val k: K` → `getK-XLNMDGE`), else the
-/// convention itself. The constant-pool seeder, the debug tables (`LineNumberTable`/`LocalVariableTable`)
-/// and the `@Metadata` record all key on the accessor by NAME, so they must ask the same question the
-/// emission does — a seeded/annotated `getK` beside an emitted `getK-XLNMDGE` interns a constant nothing
-/// uses, drops the accessor's debug info, and (in the record) advertises a method that does not exist.
-/// The convention itself is [`crate::names::property_getter_name`] — the same helper the accessor
-/// EMISSION uses, so a Kotlin `is`-prefixed property (`val isOpen`, whose accessor keeps the source
-/// name rather than becoming `getIsOpen`) is spelled one way everywhere.
-fn accessor_jvm_names(c: &crate::ir::IrClass, field_name: &str) -> (String, String) {
-    let declaration = c.properties.iter().find(|p| p.name == field_name);
-    (
-        declaration
-            .and_then(|p| p.getter_jvm_name.clone())
-            .unwrap_or_else(|| crate::names::property_getter_name(field_name)),
-        declaration
-            .and_then(|p| p.setter_jvm_name.clone())
-            .unwrap_or_else(|| crate::names::property_setter_name(field_name)),
-    )
-}
-
 /// The primary constructor's declared annotations in class-file order — RUNTIME-visible first, then
 /// the BINARY-retained invisible ones. The pool seeder and the `@Metadata` mirror both read this
 /// single sequence, so the two halves cannot drift apart.
@@ -828,7 +808,7 @@ fn attach_synth_nullability(
         let Some(a) = ann(hoisted.ty) else {
             continue;
         };
-        let (getter, setter) = accessor_jvm_names(c, &property.name);
+        let (getter, setter) = accessor_jvm_names(ir, c, &property.name);
         let pd = desc(hoisted.ty);
         if property
             .getter
@@ -868,16 +848,16 @@ fn attach_synth_nullability(
         let Some(a) = declared_property_annotation(c, index) else {
             continue;
         };
-        let (getter, setter) = accessor_jvm_names(c, &f.name);
+        let (getter, setter) = accessor_jvm_names(ir, c, &f.name);
         // The accessor's own descriptor: an explicit backing field (`val x: Any? field: String`)
         // stores a narrower type than the getter returns.
         let accessor_desc = c
             .properties
             .iter()
-            .find(|property| property.backing_field == Some(index as u32))
+            .position(|property| property.backing_field == Some(index as u32))
             .map_or_else(
                 || desc(f.ty),
-                |property| desc(declared_property_accessor_jvm(ir, property, f)),
+                |property| desc(declared_property_accessor_jvm(ir, c, property as u32, f)),
             );
         cw.set_method_nullability(&getter, &format!("(){accessor_desc}"), Some(a), &[]);
         if !f.is_final() {
@@ -4076,7 +4056,7 @@ fn emit_placed_method(
     let marked = placement.is_for_inline_copy()
         || crate::jvm::suspend_inline_functions::keeps_marked_body(ir, fid);
     // Suspend lowering does not preserve source-local expression IDs.
-    e.record_locals = (ir.fn_decl_lines.contains_key(&fid)
+    e.record_locals = (ir.function_position(fid).decl_line.is_some()
         || ir.fn_debug_locals.contains(&fid)
         || ir
             .generated_function_publication(fid)
@@ -4384,10 +4364,10 @@ fn emit_placed_method(
     // (`fun foo() { throw … }`): an unreachable `return` after `athrow` has no stack-map frame and
     // the verifier rejects it. Skip it exactly when the body can't fall through.
     if ret == Ty::Unit && !e.discarding_diverges(body) {
-        // kotlinc maps the implicit `return` to the body's closing-`}` line. `fn_close_lines` has
+        // kotlinc maps the implicit `return` to the body's closing-`}` line. the close line has
         // entries only for PARSED declarations, so a synthesized body (no entry) keeps its
         // decl-line fallback table.
-        if let Some(&close) = ir.fn_close_lines.get(&fid) {
+        if let Some(close) = ir.function_position(fid).close_line {
             code.mark_line(close);
         }
         code.implicit_ret_void();
@@ -4756,8 +4736,8 @@ struct Emitter<'a> {
     /// The suspensions of the function being emitted, by call expression, each with the value
     /// class box its resumption unboxes. Empty for every function whose machine the IR pass owns.
     machine_suspensions: HashMap<u32, Option<(TypeName, Ty)>>,
-    /// The deferred result value of each inline-return frame, by the frame's label.
-    inline_return_frame_results: HashMap<String, (u32, Ty)>,
+    /// Results and deferred loop exits of inline-return frames in the method being emitted.
+    inline_returns: inline_return_frames::InlineReturnState,
     /// Inline-return results whose expansion is discarded. A break to that frame leaves the
     /// value in its slot: the landing label does not read it, so it must not travel on the stack.
     discarded_inline_results: HashSet<u32>,
@@ -4932,7 +4912,7 @@ impl<'a> Emitter<'a> {
             frame: frame_map::FrameMap::default(),
             continuation_slot: None,
             machine_suspensions: HashMap::default(),
-            inline_return_frame_results: HashMap::default(),
+            inline_returns: inline_return_frames::InlineReturnState::default(),
             discarded_inline_results: HashSet::default(),
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::default(),
@@ -5385,6 +5365,7 @@ impl<'a> Emitter<'a> {
     fn emit_property_read(&mut self, operation: PropertyOperation<'_>, code: &mut CodeBuilder) {
         use crate::jvm::inline::PropertyAccess;
         let receiver_ty = operation.receiver.map(|receiver| self.value_ty(receiver));
+        let receiver_class = self.ir.dispatch_classes.get(&operation.expression).copied();
         let selected = self
             .ir
             .property_selected_accessors
@@ -5416,6 +5397,7 @@ impl<'a> Emitter<'a> {
                         *target,
                         selected.map(|(name, _)| name.as_str()),
                         operation.interface,
+                        receiver_class,
                     ),
             };
             if let Some(mut access) = access {
@@ -5446,6 +5428,7 @@ impl<'a> Emitter<'a> {
             None,
             selected.map(|(name, _)| name.as_str()),
             operation.interface,
+            receiver_class,
         ) {
             self.retarget_explicit_backing_read(&operation, &mut access);
             return self.emit_realized_property_read(&operation, access, code);
@@ -5497,6 +5480,7 @@ impl<'a> Emitter<'a> {
         code: &mut CodeBuilder,
     ) {
         use crate::jvm::inline::PropertyAccess;
+        let receiver_class = self.ir.dispatch_classes.get(&operation.expression).copied();
         let stamped = self
             .ir
             .property_accessor_jvm_realizations
@@ -5514,7 +5498,7 @@ impl<'a> Emitter<'a> {
                     access.clone()
                 }
                 crate::jvm::property_realizations::PropertyRealization::Local(target) => self
-                    .local_property_write_access(*target)
+                    .local_property_write_access(*target, receiver_class)
                     .expect("a realized local member property write has exact JVM access"),
             })
             .or_else(|| {
@@ -5523,7 +5507,9 @@ impl<'a> Emitter<'a> {
                     .get(&operation.expression)
                     .and_then(|accessor| self.bodies.external_property_access(*accessor))
             })
-            .or_else(|| self.declared_property_write_access(operation.owner, operation.name))
+            .or_else(|| {
+                self.declared_property_write_access(operation.owner, operation.name, receiver_class)
+            })
             .or_else(|| {
                 self.bodies
                     .property_write_access(operation.owner, operation.name)
@@ -5780,10 +5766,11 @@ impl<'a> Emitter<'a> {
                 receiver,
                 owner,
                 name,
+                operation,
                 ..
             } => {
                 receiver.is_some_and(|receiver| self.emits_control_flow(receiver))
-                    || self.lateinit_read_guards_inline(*owner, name)
+                    || self.lateinit_read_guards_inline(operation.unwrap_or(e), *owner, name)
             }
             IrExpr::SetField {
                 receiver, value, ..

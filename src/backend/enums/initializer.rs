@@ -65,8 +65,6 @@ fn static_slot(ir: &mut IrFile, name: String, ty: Ty) -> u32 {
         is_lateinit: false,
         owner: None,
         visibility: Visibility::Private,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         erased_declared_ty: None,
         accessors: IrStaticAccessors::ABSENT,
         line: 0,
