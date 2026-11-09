@@ -9242,6 +9242,9 @@ struct FunctionLambdaShape<'a> {
 struct ProviderMemberFamily {
     receiver: Ty,
     members: Vec<crate::libraries::FunctionInfo>,
+    /// Whether every other source of the call has already failed, so that a sole candidate that
+    /// maps the arguments but does not accept them is the one the call is reported against.
+    reports_against_sole_candidate: bool,
 }
 
 /// A call's argument expressions with their checked types — parallel slices that must stay the
@@ -14574,6 +14577,7 @@ impl<'a> Checker<'a> {
                             ProviderMemberFamily {
                                 receiver: classifier_receiver,
                                 members: candidates.clone(),
+                                reports_against_sole_candidate: false,
                             },
                             &name,
                             args,
@@ -49275,7 +49279,11 @@ impl<'a> Checker<'a> {
                 self.member_level_constructor_candidates(receiver, name),
             );
         }
-        ProviderMemberFamily { receiver, members }
+        ProviderMemberFamily {
+            receiver,
+            members,
+            reports_against_sole_candidate: false,
+        }
     }
 
     /// A lambda argument's expected shape at one parameter position of a semantic-provider
@@ -49293,7 +49301,11 @@ impl<'a> Checker<'a> {
         type_args: &[Ty],
     ) -> Option<Vec<Option<FunctionalArgumentExpectation>>> {
         let (args, partial) = args_and_partial;
-        let ProviderMemberFamily { receiver, members } = family;
+        let ProviderMemberFamily {
+            receiver,
+            members,
+            reports_against_sole_candidate,
+        } = family;
         // This resolver exists only to postpone and shape lambda syntax. Ordinary arguments are
         // already typed in `partial`; re-entering provider overload selection for them is both
         // semantically pointless and quadratic on generated call-heavy sources.
@@ -49342,14 +49354,15 @@ impl<'a> Checker<'a> {
             })
             .cloned()
             .collect::<Vec<_>>();
-        // When no candidate accepts the call's functional arguments, kotlinc still reports against
-        // the one candidate that maps every argument, and analyzes those arguments against its
-        // parameters: `take(B::g)` names the misfit reference, not the call.
-        let mut mapped = if applicable.is_empty() && slot_mapped.len() == 1 {
-            slot_mapped
-        } else {
-            applicable
-        };
+        // When no candidate of any source accepts the call's functional arguments, kotlinc still
+        // reports against the one candidate that maps every argument, and analyzes those
+        // arguments against its parameters: `take(B::g)` names the misfit reference, not the call.
+        let mut mapped =
+            if reports_against_sole_candidate && applicable.is_empty() && slot_mapped.len() == 1 {
+                slot_mapped
+            } else {
+                applicable
+            };
         // Member precedence is semantic receiver distance, not provider iteration order. Drop
         // inherited candidates when a nearer declaration is applicable before deciding whether
         // the postponed call is genuinely ambiguous.
@@ -49872,6 +49885,27 @@ impl<'a> Checker<'a> {
         let provider = (!member_extension_claimed && (extension.is_none() || !provider_needs_sam))
             .then_some(provider)
             .flatten();
+        // No source accepts the call: kotlinc analyzes its functional arguments against the one
+        // member the call is then reported against, as an inapplicable member must not block an
+        // extension that does accept them.
+        let provider = provider.or_else(|| {
+            (method_sig.is_none() && extension.is_none() && !extension_claimed)
+                .then(|| {
+                    self.provider_member_lambda_expectations(
+                        scope,
+                        call,
+                        ProviderMemberFamily {
+                            reports_against_sole_candidate: true,
+                            ..self.value_member_family(receiver, name)
+                        },
+                        name,
+                        (args, partial),
+                        explicit_type_args,
+                    )
+                })
+                .flatten()
+                .filter(|expectations| expectations.iter().any(Option::is_some))
+        });
         CallLambdaShaping {
             module,
             extension,
