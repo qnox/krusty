@@ -8,7 +8,9 @@
 use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
 /// Each scalar through a parameter, so no call folds, at the values where the rules differ:
-/// sign extension, the halves of a `Long`, the bits of a floating-point zero and of `NaN`.
+/// sign extension, the halves of a `Long`, the bits of a floating-point zero and of `NaN`. A
+/// smart-cast nullable receiver reaches the same rule, and so does a stdlib body:
+/// `contentHashCode` hashes each element of a primitive array.
 #[test]
 fn each_builtin_scalar_hashes_by_its_own_rule() {
     let source = "fun byteHash(value: Byte): Int = value.hashCode()\n\
@@ -19,6 +21,13 @@ fn each_builtin_scalar_hashes_by_its_own_rule() {
          fun booleanHash(value: Boolean): Int = value.hashCode()\n\
          fun floatHash(value: Float): Int = value.hashCode()\n\
          fun doubleHash(value: Double): Int = value.hashCode()\n\
+         fun smartCastHash(seed: Int, set: Boolean): Int {\n\
+         \x20   var value: Int? = null\n\
+         \x20   var flag: Boolean? = null\n\
+         \x20   value = seed\n\
+         \x20   flag = set\n\
+         \x20   return value.hashCode() + flag.hashCode()\n\
+         }\n\
          fun box(): String {\n\
          \x20   if (byteHash(-17) != -17 || shortHash(-300) != -300) return \"narrow\"\n\
          \x20   if (intHash(-70000) != -70000) return \"int\"\n\
@@ -30,6 +39,10 @@ fn each_builtin_scalar_hashes_by_its_own_rule() {
          \x20   if (floatHash(0.0f / 0.0f) != 2143289344 || floatHash(1.5f) != 1069547520) return \"float bits\"\n\
          \x20   if (doubleHash(-0.0) != (-2147483647 - 1)) return \"double zero\"\n\
          \x20   if (doubleHash(0.0 / 0.0) != 2146959360 || doubleHash(1.5) != 1073217536) return \"double bits\"\n\
+         \x20   if (smartCastHash(-5, true) != 1226) return \"smart cast\"\n\
+         \x20   if (intArrayOf(1, 2, 3).contentHashCode() != 30817) return \"int array\"\n\
+         \x20   if (longArrayOf(4294967297L, -1L, 3L).contentHashCode() != 29794) return \"long array\"\n\
+         \x20   if (doubleArrayOf(0.0 / 0.0, -0.0, 1.5).contentHashCode() != 569406559) return \"double array\"\n\
          \x20   return \"OK\"\n\
          }\n";
     expect_box_ok_with_stdlib(source, "PrimitiveHashCodes");
