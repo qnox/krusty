@@ -44,7 +44,8 @@ use super::common;
 mod diagnostics;
 #[path = "kotlin_box_ir_jvm_conformance/entry.rs"]
 mod entry;
-use entry::{find_box_class, CompiledClasses};
+use entry::find_box_class;
+pub(super) use entry::CompiledClasses;
 
 // BoxRunner.java source embedded at compile time; compiled once at test start.
 const BOX_RUNNER_SRC: &str = r#"
@@ -863,7 +864,7 @@ fn compile_module_test(
 /// Compile one box case with krusty through the topology its markers select: `// MODULE:` builds,
 /// then `// FILE:` multi-file sets (also used for `// WITH_COROUTINES`, which needs the generated
 /// `helpers` source compiled alongside it), then a single source file.
-fn compile_box_case(
+pub(super) fn compile_box_case(
     src: &str,
     stem: &str,
     cp_jars: &[PathBuf],
