@@ -45,3 +45,15 @@ fun box(): String {
         "GeneratedEqualsKeepsDeclaredType",
     );
 }
+
+/// A dependency's data class generates the same `equals`: its synthesized metadata `equals` names
+/// no equality bound, so a comparison with `Pair` leaves the other operand an `Any` too.
+#[test]
+fn a_dependency_data_class_equals_does_not_narrow_the_other_operand() {
+    let src = "fun pair(a: Any): Int {
+    if (a != Pair(1, 2)) return 0
+    return a.first as Int
+}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
