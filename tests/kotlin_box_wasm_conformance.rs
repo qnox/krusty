@@ -796,10 +796,13 @@ fn explicit_array_checks_share_metadata_with_the_reference_compiler() {
     let [(stem, written_source)] = sources.as_slice() else {
         panic!("one complete array-store source")
     };
+    // `ModuleStructureExtractorImpl` writes the leading text, this directive line included, into
+    // the first declared file, where it is an inert comment. The option above is the compilation
+    // context's one decision: it reaches both compilers as arguments, never by re-reading a file.
     assert_eq!(
-        krusty::conformance::WasmCompilerOptions::from_source(written_source),
-        Ok(krusty::conformance::WasmCompilerOptions::default()),
-        "the pre-FILE option belongs to compilation context, not the split program"
+        written_source,
+        &source.replacen("// FILE: ArrayStoreIndexAfterValue.kt\n", "", 1),
+        "the written file is the case's leading text followed by its declared content"
     );
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
