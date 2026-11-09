@@ -176,7 +176,10 @@ fn reference_identity(
         // reference to the same property.
         Target::Property(property) => match property.referenced_property() {
             Some(crate::ir::IrReferencedProperty::Module(property)) => {
-                format!("property_m{}", property.raw())
+                let declaration = ReferenceDeclaration::property(file.module_name, property);
+                return Ok(ReferenceIdentity::Program(
+                    declaration.marker(reference.bound_receiver.is_some()),
+                ));
             }
             Some(crate::ir::IrReferencedProperty::External(property)) => {
                 format!("property_e{}", property.raw())

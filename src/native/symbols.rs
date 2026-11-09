@@ -86,6 +86,19 @@ pub(super) fn module_constructor_symbol(
 }
 
 /// Program-wide identity of a selected source constructor declaration.
+/// The declaration identity every reference to a module property shares, whichever of the
+/// module's files writes it.
+pub(super) fn property_reference_symbol(
+    module_name: &str,
+    property: crate::fir::PropertyId,
+) -> String {
+    format!(
+        "kt_property_reference_{}_{}",
+        module_namespace(module_name),
+        property.raw()
+    )
+}
+
 pub(super) fn constructor_reference_symbol(
     module_name: &str,
     declaration: crate::fir::DeclarationId,
