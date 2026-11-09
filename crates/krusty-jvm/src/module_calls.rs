@@ -70,6 +70,13 @@ pub(super) fn jvm_field_storage(
     Some((owner, is_static))
 }
 
+/// The class whose instance field a module member property is realized as, when `@JvmField`
+/// makes its storage the declaration's JVM surface: the instance case of [`jvm_field_storage`].
+pub(super) fn instance_jvm_field_owner(property: &IrModuleProperty) -> Option<TypeName> {
+    // An instance field never lives on a facade, so no facade can be named.
+    jvm_field_storage(property, &[]).and_then(|(owner, is_static)| (!is_static).then_some(owner))
+}
+
 pub(super) fn owner_is_jvm_interface(property: &IrModuleProperty) -> bool {
     matches!(
         property.owner_kind,

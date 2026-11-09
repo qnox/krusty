@@ -51,10 +51,9 @@ mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
 mod static_properties;
 mod synthetic_properties;
-mod unsigned_intrinsics;
+pub mod unsigned_intrinsics;
 use static_properties::StaticAccessor;
 use synthetic_properties::{accessor_property_name, setter_name_for_getter, AccessorInventory};
-pub use unsigned_intrinsics::realizes_jdk_unsigned_operation;
 
 use super::mapped_builtin_declarations::MappedBuiltinMember;
 use crate::language_version::LanguageVersion;

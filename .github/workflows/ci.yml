@@ -218,9 +218,10 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus
-          # The checkout carries the box corpus, the mock JDK its tests compile against, and the CLI
-          # corpus. A key hit is never re-saved, so the salt changes whenever those inputs do.
-          key: box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}
+          # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
+          # corpus and the bytecode corpora. A key hit is never re-saved, so the salt changes
+          # whenever those inputs do.
+          key: box-and-cli-corpus-v2-${{ hashFiles('kotlin-versions') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit
         if: steps.box-corpus.outputs.cache-hit == 'true'
@@ -590,8 +591,11 @@ jobs:
             ~/.konan/dependencies
             target/cache/krusty-deps
           key: native-conformance-konan-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      # Every Native row replays the kotlinc-native results its box lane and focused checks
+      # recorded: the box lane's owned multimodule fixtures alone run 68 kotlinc-native graphs,
+      # about three quarters of a cold row's case time. Master records what is missing.
       - name: restore recorded kotlinc-native bytes
-        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max
+        if: matrix.target == 'native'
         id: native-recordings
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -600,7 +604,7 @@ jobs:
           restore-keys: |
             recorded-kotlinc-native-bytes-${{ matrix.version }}-
       - name: select kotlinc-native recording mode
-        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max
+        if: matrix.target == 'native'
         id: native-recording-mode
         env:
           CACHE_HIT: ${{ steps.native-recordings.outputs.cache-hit }}
@@ -617,9 +621,10 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
-          # The checkout carries the box corpus, the mock JDK its tests compile against, and the CLI
-          # corpus. A key hit is never re-saved, so the salt changes whenever those inputs do.
-          key: box-and-cli-corpus-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
+          # corpus and the bytecode corpora. A key hit is never re-saved, so the salt changes
+          # whenever those inputs do.
+          key: box-and-cli-corpus-v2-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit (${{ matrix.version }})
         if: steps.box-corpus.outputs.cache-hit == 'true'
@@ -712,6 +717,9 @@ jobs:
         # and focused deadlines unchanged; a corpus timeout still fails this row.
         env:
           KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
+          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
+          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
         run: |
           chmod +x conformance-bin
           just native-conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" native-pct.txt
@@ -722,6 +730,10 @@ jobs:
         if: matrix.target == 'native' && (success() || steps.native_box.outcome == 'failure')
         id: native_focused
         continue-on-error: true
+        env:
+          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
+          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
         run: just native-conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       - name: upload Native conformance
         if: always() && matrix.target == 'native'
@@ -758,7 +770,7 @@ jobs:
           timeout 600s ./klib-unit-tests klib_ --nocapture
           timeout 600s ./klib-native-unit-tests klib_ --nocapture
       - name: save recorded kotlinc-native bytes
-        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max && steps.native-recording-mode.outputs.write == '1'
+        if: matrix.target == 'native' && steps.native-recording-mode.outputs.write == '1'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/native-recordings
@@ -899,9 +911,10 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [native, wasm-js, wasm-wasi]
-    # Native retains its prior hosted capacity. Wasm uses the guarded self-hosted pool.
+    # Native and Wasm use the guarded self-hosted pool. Native once reached its suite deadline on
+    # these 8 GB runners; sharing decoded KLIB trees (#3274) halved its lane and its peak memory.
     # Separate target rows preserve independent measurements.
-    runs-on: ${{ (matrix.target == 'native' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps: *conformance-steps
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
@@ -1312,10 +1325,12 @@ jobs:
           scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
 
   # Every covered master commit builds its own immutable release artifacts, even after master
-  # advances. All six platforms can build concurrently on their hosted runners.
+  # advances. All six platforms can build concurrently on their hosted runners. Release builds
+  # are paused unless the KRUSTY_RELEASE_BUILDS repository variable is 'true': they hold six
+  # hosted runners per master commit, and the release job below is skipped with them.
   build-release:
     needs: [ci-and-conformance]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.KRUSTY_RELEASE_BUILDS == 'true'
     strategy:
       fail-fast: false
       matrix:

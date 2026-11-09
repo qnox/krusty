@@ -672,15 +672,18 @@ fn declare_static(
     let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
     // A HOISTED companion property's field is PRIVATE regardless of the property's declared
     // visibility (kotlinc: every access goes through the accessors/bridges, never the field) —
-    // EXCEPT under `@JvmField`, where the PUBLIC field IS the property's whole JVM surface
-    // (kotlinc emits it public even for an `internal` declaration, with no accessors at all).
+    // EXCEPT under `@JvmField`, where the field IS the property's whole JVM surface and takes the
+    // declaration's visibility (public for an `internal` one, protected for a `protected` one),
+    // with no accessors at all.
     let hoisted = ir.is_jvm_companion_hoisted_static(static_index);
     let jvm_field = ir.is_jvm_field_static(static_index);
     let block_storage = companion_blocks::storage_is_private(ir, static_index);
     let lateinit_visibility = hoisted_lateinit_field_visibility(ir, static_index);
     let acc = if let Some(visibility) = lateinit_visibility {
         0x0008 | static_visibility_access(visibility) | final_flag
-    } else if (s.visibility.is_private() || hoisted || block_storage) && !jvm_field {
+    } else if jvm_field {
+        0x0008 | static_visibility_access(s.visibility) | final_flag
+    } else if s.visibility.is_private() || hoisted || block_storage {
         0x000A | final_flag // PRIVATE | STATIC [| FINAL]
     } else {
         0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
@@ -812,13 +815,16 @@ pub(super) fn emit_enum_static_fields(
         .sort_by_key(|(index, declaration)| (declaration.line, declaration.source_order, *index));
     for (index, s) in owner_statics {
         // A `var` is reassignable, so it must not carry ACC_FINAL (see the class path). A hoisted
-        // companion property's field is private unless `@JvmField` makes it the property's surface.
+        // companion property's field is private unless `@JvmField` makes it the property's surface,
+        // at the declaration's visibility.
         let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
         let jvm_field = ir.is_jvm_field_static(index);
         let private = s.visibility.is_private() || ir.is_jvm_companion_hoisted_static(index);
         let acc = if let Some(visibility) = hoisted_lateinit_field_visibility(ir, index) {
             0x0008 | static_visibility_access(visibility) | final_flag
-        } else if private && !jvm_field {
+        } else if jvm_field {
+            0x0008 | static_visibility_access(s.visibility) | final_flag
+        } else if private {
             0x000A | final_flag // PRIVATE | STATIC [| FINAL]
         } else {
             0x0009 | final_flag // PUBLIC | STATIC [| FINAL]

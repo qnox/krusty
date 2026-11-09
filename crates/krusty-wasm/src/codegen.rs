@@ -161,6 +161,7 @@ impl Backend for WasmBackend {
         krusty::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
         // Before default arguments: a constant leaving constructor arguments out is then an
         // ordinary construction for that lowering.
+        krusty::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
         krusty::backend::enums::realize(&mut file.ir, krusty::backend::enums::Contract::KotlinWasm);
         krusty::backend::default_arguments::realize(
             &mut file.ir,
@@ -194,7 +195,7 @@ impl Backend for WasmBackend {
             .as_ref()
             .is_none_or(|(module, _)| module != file.module_name)
         {
-            let plan = classes::module_plan(file.classifiers.module().classes());
+            let plan = classes::module_plan(file.classifiers.module().classes(), &file.classifiers);
             state.slot_plan = Some((file.module_name.to_owned(), plan));
         }
         let plan = &state.slot_plan.as_ref().expect("planned just above").1;
