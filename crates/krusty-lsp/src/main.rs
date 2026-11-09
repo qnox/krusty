@@ -403,6 +403,17 @@ fn run_parity_command(args: &[String]) -> bool {
         plans.len(),
         started.elapsed()
     );
+    let classpath = plans
+        .iter()
+        .flat_map(|plan| plan.classpath.iter().cloned())
+        .collect::<Vec<_>>();
+    let fetched = krusty_lsp::project::maven_repository::ensure_maven_repository_jars(&classpath);
+    if fetched.installed > 0 || fetched.failed > 0 {
+        eprintln!(
+            "krusty-lsp parity: downloaded {} Maven repository jar(s), {} still missing",
+            fetched.installed, fetched.failed
+        );
+    }
     let scratch = ParityScratch::create().unwrap_or_else(|error| {
         eprintln!("krusty-lsp: cannot create parity scratch directory: {error}");
         std::process::exit(1);
@@ -560,6 +571,8 @@ fn parity_failure_line(module: &str, status: &str, elapsed: Duration) -> String 
         "java_stub_failed": false,
         "missing_classpath_entries": 0,
         "open_complete": false,
+        "definition_query_us": null,
+        "references_query_us": null,
         "error_count": 0,
         "warning_count": 0,
         "diagnostics": [],
@@ -1242,6 +1255,15 @@ impl WorkerHost {
                     &classpath,
                     jdk_home.as_deref(),
                 );
+                let fetched =
+                    krusty_lsp::project::maven_repository::ensure_maven_repository_jars(&classpath);
+                if fetched.failed > 0 {
+                    logs.push(format!(
+                        "krusty: {} Maven repository jar(s) could not be downloaded; those \
+                         classpath entries stay missing",
+                        fetched.failed
+                    ));
+                }
                 let missing_classpath =
                     krusty_lsp::project::classpath_presence::missing_classpath_warning(
                         &classpath,
@@ -2196,6 +2218,10 @@ mod tests {
         assert_eq!(
             value["open_complete"], false,
             "a module that produced no analysis did not open completely"
+        );
+        assert!(
+            value["definition_query_us"].is_null() && value["references_query_us"].is_null(),
+            "a module that produced no analysis did not time a navigation query"
         );
         assert_eq!(value["truncated"], false);
         assert_eq!(value["java_stub_failed"], false);

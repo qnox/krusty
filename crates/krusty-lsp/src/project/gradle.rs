@@ -1,6 +1,7 @@
 //! Gradle project-model provider using an injected init script.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -12,6 +13,9 @@ use super::provider::{ProbeError, ProjectProvider};
 use super::runner::{Command, CommandRunner, GRADLE};
 
 const PROBE_VERSION: &str = "6";
+/// The Kotlin compiler's first `krustyModel` configuration downloads its build and resolves every
+/// project. The ordinary 120-second probe ceiling kills that before the model is printed.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 const SENTINEL: &str = "KRUSTY_MODEL_JSON ";
 const TASK: &str = "krustyModel";
 const MAX_FAILURE_DETAILS: usize = 8;
@@ -291,15 +295,17 @@ impl GradleProvider {
     }
 
     pub fn command(&self) -> Command {
-        Command::new(self.gradle.clone(), self.root.clone()).args([
-            "--quiet".to_string(),
-            "--console=plain".to_string(),
-            // Gradle's configuration cache rejects the probe's execution-time project access.
-            "--no-configuration-cache".to_string(),
-            "--init-script".to_string(),
-            self.init_script.to_string_lossy().into_owned(),
-            TASK.to_string(),
-        ])
+        Command::new(self.gradle.clone(), self.root.clone())
+            .args([
+                "--quiet".to_string(),
+                "--console=plain".to_string(),
+                // Gradle's configuration cache rejects the probe's execution-time project access.
+                "--no-configuration-cache".to_string(),
+                "--init-script".to_string(),
+                self.init_script.to_string_lossy().into_owned(),
+                TASK.to_string(),
+            ])
+            .with_timeout(PROBE_TIMEOUT)
     }
 
     fn write_init_script(&self) -> Result<(), ProbeError> {
@@ -648,6 +654,11 @@ mod tests {
         assert_eq!(command.args[2], "--no-configuration-cache");
         assert_eq!(command.args[3], "--init-script");
         assert_eq!(command.args[5], TASK);
+        assert_eq!(
+            command.timeout,
+            Duration::from_secs(45 * 60),
+            "a large Gradle configuration must outlive the ordinary probe ceiling"
+        );
 
         let script = std::fs::read_to_string(&command.args[4]).unwrap();
         assert!(script.contains("lenient = true"), "{script}");

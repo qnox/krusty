@@ -9,6 +9,7 @@ pub mod jdk;
 pub mod jps;
 mod lock;
 pub mod maven;
+pub mod maven_repository;
 pub mod model;
 pub mod provider;
 pub mod report;
