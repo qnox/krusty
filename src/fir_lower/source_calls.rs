@@ -103,6 +103,9 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) default_provider: Option<ExternalCallableId>,
     pub(super) receiver_ty: Option<ResolvedTy>,
     pub(super) declared_receiver: Option<ResolvedTy>,
+    /// The checked dispatch receiver applied as the member's generic declaring class, when the
+    /// receiver names a subclass of it.
+    pub(super) declaring_receiver: Option<ResolvedTy>,
     pub(super) parameters: &'a [ResolvedTy],
     pub(super) result: ResolvedTy,
     pub(super) declared_result: Option<ResolvedTy>,
@@ -364,6 +367,7 @@ impl BodyLowering<'_> {
             default_provider,
             receiver_ty,
             declared_receiver,
+            declaring_receiver,
             parameters,
             result,
             declared_result,
@@ -425,6 +429,9 @@ impl BodyLowering<'_> {
                         template,
                         parameter_types: &parameter_types,
                         dispatch_receiver,
+                        dispatch_type: declaring_receiver
+                            .or(receiver_ty)
+                            .map(|receiver| receiver.get()),
                         extension_receiver,
                         extension_receiver_parameter,
                         arguments,
@@ -732,6 +739,7 @@ impl BodyLowering<'_> {
             internal: factory_classifier,
             args: factory_arguments,
             ctor_params: Some(factory_parameters.iter().map(|ty| ty.get()).collect()),
+            declared_params: None,
             ctor_desc: None,
             external_target: Some(factory),
             defaults: Box::new([]),
@@ -1344,14 +1352,12 @@ impl BodyLowering<'_> {
             internal: classifier,
             args,
             ctor_params: Some(physical_parameter_types),
+            declared_params: Some(declared_parameter_types.into_boxed_slice()),
             ctor_desc: None,
             external_target: Some(declaration),
             defaults: defaults.into_boxed_slice(),
             default_prefix_count,
         });
-        self.ir
-            .construction_declared_params
-            .insert(construction, declared_parameter_types.into_boxed_slice());
         self.record_annotation_construction(construction, classifier, annotation)?;
         Some(self.wrap_call_statements(statements, construction))
     }
@@ -1465,6 +1471,7 @@ impl BodyLowering<'_> {
                     internal: *classifier,
                     args,
                     ctor_params: Some(ctor_params),
+                    declared_params: None,
                     ctor_desc: None,
                     external_target: None,
                     defaults: Box::new([]),
@@ -1553,14 +1560,12 @@ impl BodyLowering<'_> {
             internal: classifier,
             args,
             ctor_params: (!primary_in_current_file).then_some(declaration_parameter_types),
+            declared_params: Some(declared_parameters),
             ctor_desc: None,
             external_target: None,
             defaults: defaults.into_boxed_slice(),
             default_prefix_count,
         });
-        self.ir
-            .construction_declared_params
-            .insert(construction, declared_parameters);
         self.ir.construction_targets.insert(construction, target);
         self.ir
             .module_constructions
@@ -1773,16 +1778,6 @@ impl BodyLowering<'_> {
         }
         let selected_declaration_parameter_types = declaration_parameter_types.clone();
         let declaration_result = signature.result.get();
-        // A call whose whole operand list consists of implicit context values begins at the first
-        // generated load: there is no written receiver or value argument to own a later start.
-        // Calls that also have an extension/value operand keep the ordinary operand-then-dispatch
-        // line sequence. Record the semantic shape here while the declaration still distinguishes
-        // context parameters; JVM emission only consumes the resulting debug provenance.
-        let starts_at_implicit_context = callable.shape.context_parameter_count != 0
-            && declared_extension_receiver.is_none()
-            && usize::try_from(callable.shape.context_parameter_count)
-                .ok()
-                .is_some_and(|count| count == selected_parameter_types.len());
         // kotlinc inlines every call of a same-module inline function, whichever class declares
         // it: the checked template is cloned here with its receiver as an explicit operand, and a
         // target backend adds the synthetic accessors its private member uses need.
@@ -1988,85 +1983,6 @@ impl BodyLowering<'_> {
             &selected_declaration_parameter_types,
             &default_argument_positions,
         );
-        if starts_at_implicit_context {
-            let first = match self.ir.expr(call) {
-                IrExpr::Call { args, .. } => args.first().copied(),
-                _ => None,
-            };
-            // Local-declaration lifting has already turned an enclosing context receiver into an
-            // explicit captured-receiver parameter. Its load is synthetic setup: kotlinc starts
-            // the source call's line at dispatch, after the load. A non-captured implicit context
-            // argument remains owned by the call from its first generated operand.
-            let captured_context = first.is_some_and(|operand| {
-                let mut value = operand;
-                let value = loop {
-                    match self.ir.expr(value) {
-                        IrExpr::GetValue(value) => break *value,
-                        IrExpr::GetField { class, index, .. } => {
-                            return self.ir.classes[*class as usize]
-                                .ctor_args
-                                .iter()
-                                .find(|argument| argument.field_index == Some(*index))
-                                .and_then(|argument| argument.capture.as_ref())
-                                .and_then(|capture| capture.receiver.as_ref())
-                                .is_some_and(|receiver| {
-                                    matches!(
-                                        receiver,
-                                        crate::ir::IrCapturedReceiver::Context { .. }
-                                    )
-                                });
-                        }
-                        IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg,
-                            ..
-                        } => value = *arg,
-                        _ => return false,
-                    }
-                };
-                // Anonymous-object and local-class members own their capture directly. Their
-                // checked body retains the exact receiver provenance and the lifted parameter
-                // slot even though they are not themselves lambda declarations.
-                if self
-                    .implicit_receiver_capture_slots
-                    .iter()
-                    .any(|(capture, slot)| {
-                        *slot == value
-                            && matches!(
-                                &capture.receiver,
-                                crate::fir::FirCapturedReceiver::Context { .. }
-                            )
-                    })
-                {
-                    return true;
-                }
-                let Some(parameters) = self
-                    .declaration_lambda
-                    .and_then(|function| self.ir.fn_params.get(&function))
-                else {
-                    return false;
-                };
-                let Some(identity) = parameters.identities.get(value as usize) else {
-                    return false;
-                };
-                let crate::ir::IrParameterRole::CapturedReceiver { ordinal } = identity.role else {
-                    return false;
-                };
-                parameters
-                    .captured_receivers
-                    .get(ordinal as usize)
-                    .is_some_and(|receiver| {
-                        matches!(receiver, crate::ir::IrCapturedReceiver::Context { .. })
-                    })
-            });
-            if captured_context {
-                if let Some(line) = source_line {
-                    self.ir.mark_dispatch_line(call, line);
-                }
-            } else if first.is_some_and(|operand| self.ir.is_positionless(operand)) {
-                self.ir.mark_generated_operand_start(call);
-            }
-        }
         // Preserve the declaration's unspecialized result on the concrete call node. Value-class
         // realization needs this checked distinction: a member declared to return `X` yields X's raw
         // carrier, while a generic `T` merely specialized to `X` yields a boxed value across erasure.
@@ -2284,8 +2200,8 @@ fn inline_argument_stays(ir: &crate::ir::IrFile, value: ExprId) -> bool {
     }
 }
 
-/// The inline template of a lambda, or of a non-suspend callable reference whose adapter is that
-/// template. The reference's target is not consulted: the adapter's captures, bound receiver, and
+/// The inline template of a lambda, or of a callable reference whose adapter is that template and
+/// whose selected declaration is not itself suspend. The reference's target is not consulted: the adapter's captures, bound receiver, and
 /// one returned value are the invocation. A stored reference never reaches this helper.
 pub(crate) fn inline_argument_template(
     ir: &crate::ir::IrFile,

@@ -1,9 +1,9 @@
-//! `krusty::jvm::class_comparison` names the primary way two classes of the same name differ.
+//! `krusty_jvm::class_comparison` names the primary way two classes of the same name differ.
 //! Each case compiles two versions of one source with krusty and compares a class between them, so
 //! the class files are real compiler output rather than hand-assembled bytes.
 
 use super::common;
-use krusty::jvm::class_comparison::{
+use krusty_jvm::class_comparison::{
     compare_classes, is_kotlin_class, ClassDifference, DifferenceKind,
 };
 

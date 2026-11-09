@@ -211,6 +211,46 @@ fn builtin_serializers() -> &'static [BuiltinSerializer] {
                 false,
             ),
             (
+                "kotlin/CharArray",
+                "kotlinx/serialization/internal/CharArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/DoubleArray",
+                "kotlinx/serialization/internal/DoubleArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/FloatArray",
+                "kotlinx/serialization/internal/FloatArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/LongArray",
+                "kotlinx/serialization/internal/LongArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/IntArray",
+                "kotlinx/serialization/internal/IntArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/ShortArray",
+                "kotlinx/serialization/internal/ShortArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/ByteArray",
+                "kotlinx/serialization/internal/ByteArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/BooleanArray",
+                "kotlinx/serialization/internal/BooleanArraySerializer",
+                false,
+            ),
+            (
                 "kotlin/uuid/Uuid",
                 "kotlinx/serialization/internal/UuidSerializer",
                 true,
@@ -755,10 +795,10 @@ fn emit_constructed_standard_serializer(
         internal: serializer,
         args: arguments,
         ctor_params: Some(vec![class_ty(KSERIALIZER_FQ); arity]),
-        ctor_desc: Some(format!(
-            "({})V",
-            "Lkotlinx/serialization/KSerializer;".repeat(arity)
-        )),
+        declared_params: None,
+        ctor_desc: Some(
+            format!("({})V", "Lkotlinx/serialization/KSerializer;".repeat(arity)).into_boxed_str(),
+        ),
         external_target: None,
         defaults: Box::new([]),
         default_prefix_count: 0,

@@ -791,7 +791,7 @@ fn delegated_type_parameters(
         .map(|(semantic_name, bounds)| {
             Some(ResolvedDelegatedTypeParameter {
                 name: crate::types::type_parameter_source_name(semantic_name).into(),
-                semantic_name: semantic_name.clone().into_boxed_str(),
+                semantic_name: semantic_name.as_str().into(),
                 bounds: resolved_types(bounds.iter().copied())?,
             })
         })
@@ -811,7 +811,7 @@ fn delegation_members(
     for name in hierarchy_names(source, interface)? {
         let delegated = crate::symbol_resolver::members_in_hierarchy(source, interface, &name);
         let own_callables = crate::symbol_resolver::members_in_hierarchy(source, own, &name);
-        let own_function_slots = own_callables
+        let own_functions = own_callables
             .functions()
             .iter()
             .filter(|function| {
@@ -820,8 +820,7 @@ fn delegation_members(
                         || function.kind == FnKind::Extension
                             && function.callable.owner == delegating_classifier)
             })
-            .map(function_slot)
-            .collect::<HashSet<_>>();
+            .collect::<Vec<_>>();
         let own_property_slots = own_callables
             .properties()
             .iter()
@@ -845,7 +844,15 @@ fn delegation_members(
             }
         }
         for (slot, candidates) in slots {
-            if own_function_slots.contains(&slot) {
+            // The class's own declaration overrides the delegated one under the shared override
+            // rule, which reads a Java `accept(p0: T!)` as overridden by `accept(t: T)`.
+            if candidates.iter().any(|candidate| {
+                own_functions.iter().any(|own| {
+                    crate::symbol_resolver::function_override_input_slots_match(
+                        source, candidate, own,
+                    )
+                })
+            }) {
                 continue;
             }
             let function = effective_function(source, index, interface, candidates)?;

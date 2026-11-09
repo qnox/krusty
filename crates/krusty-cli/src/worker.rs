@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use krusty::jvm::ir_emit::JvmDefaultMode;
+use krusty_jvm::ir_emit::JvmDefaultMode;
 
 /// One compilation the worker was asked to perform, in krusty's terms.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -157,8 +157,8 @@ fn boolean_option(flag: &str) -> Option<Option<&'static str>> {
         "--x_when_guards" => Some("-XXLanguage:+WhenGuards"),
         "--x_report_all_warnings" => Some("-Xreport-all-warnings"),
         // Diagnostics and reporting: they change what the compiler PRINTS, not what it emits.
-        "--x_render_internal_diagnostic_names"
-        | "--trace"
+        "--x_render_internal_diagnostic_names" => Some("-Xrender-internal-diagnostic-names"),
+        "--trace"
         | "--no-proc"
         | "--x_wasm_attach_js_exception"
         | "--x_wasm_generate_closed_world_multimodule"

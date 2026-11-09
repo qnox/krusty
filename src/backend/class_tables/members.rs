@@ -21,6 +21,8 @@ pub(crate) fn any_slot(role: Option<crate::types::SemanticCallRole>) -> Option<u
             | crate::types::SemanticCallRole::KotlinComparableCompareTo
             | crate::types::SemanticCallRole::KotlinFunctionInvoke
             | crate::types::SemanticCallRole::KotlinCallableReferenceName
+            | crate::types::SemanticCallRole::KotlinStringLength
+            | crate::types::SemanticCallRole::KotlinEnumName
             | crate::types::SemanticCallRole::KotlinPropertyReferenceGet(_)
             | crate::types::SemanticCallRole::KotlinPropertyReferenceSet(_)
             | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateGet(_)
@@ -58,7 +60,7 @@ pub(crate) fn implements_an_interface(ir: &IrFile, target: ResolvedPropertyOverr
 }
 
 /// The stable property identity attached to one class-property coordinate by common lowering.
-pub(crate) fn local_property_target(
+pub fn local_property_target(
     ir: &IrFile,
     owner: ClassId,
     property: usize,
@@ -168,7 +170,7 @@ pub(crate) fn property_accessor_key(
 }
 
 /// The slot key of a method of `owner`: a property accessor is keyed by its property.
-pub(crate) fn function_key(ir: &IrFile, owner: ClassId, fid: FunId) -> SlotKey {
+pub fn function_key(ir: &IrFile, owner: ClassId, fid: FunId) -> SlotKey {
     property_accessor_key(ir, owner, fid).unwrap_or(SlotKey::Function(fid))
 }
 

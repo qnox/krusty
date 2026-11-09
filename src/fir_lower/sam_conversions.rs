@@ -131,7 +131,7 @@ impl BodyLowering<'_> {
             crate::ir::FnParamInfo::identities(parameter_identities),
         );
         if let Some(line) = self.ir.source_line(function) {
-            self.ir.fn_decl_lines.insert(implementation, line);
+            self.ir.function_position_mut(implementation).decl_line = Some(line);
         }
         self.record_sam_adapter_origin(implementation);
         self.place_sam_adapter_in_lifting_sequence(implementation);
@@ -188,6 +188,11 @@ impl BodyLowering<'_> {
                     nullable: conversion.nullable,
                     kotlin_interface: conversion.kotlin_interface,
                     parameter_identities: conversion.parameter_identities.to_vec(),
+                    type_parameters: conversion
+                        .type_parameters
+                        .iter()
+                        .map(crate::ir::IrSamTypeParameter::lowered)
+                        .collect(),
                 })),
                 inline_body: None,
             }),

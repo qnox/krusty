@@ -67,7 +67,7 @@ pub enum TypeOfInsn {
 
 /// Why a `typeOf` operand has no JVM realization.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum TypeOfError {
+pub enum TypeOfError {
     /// kotlinc rejects `typeOf` of a suspend function type (`TYPEOF_SUSPEND_TYPE`).
     SuspendFunctionType,
     /// kotlinc rejects a non-reified type parameter whose bounds reach itself
@@ -111,14 +111,14 @@ enum Container {
 }
 
 /// Every type parameter this file declares, by semantic identity, with its owner.
-pub(super) struct TypeParameters<'a> {
+pub struct TypeParameters<'a> {
     ir: &'a IrFile,
     facade: &'a str,
     declarations: HashMap<&'a str, (&'a IrTypeParameter, Container)>,
 }
 
 impl<'a> TypeParameters<'a> {
-    pub(super) fn new(ir: &'a IrFile, facade: &'a str) -> Self {
+    pub fn new(ir: &'a IrFile, facade: &'a str) -> Self {
         let mut declarations = HashMap::default();
         for (&function, signature) in &ir.signatures {
             for parameter in &signature.type_params {
@@ -193,7 +193,7 @@ impl<'a> TypeParameters<'a> {
 /// `recursive_bounds` is kotlinc's `JvmSupportRecursiveTypeOf`. Without it, a non-reified parameter
 /// whose bounds reach itself has no realization. With it, that parameter is stored after
 /// `typeParameter` and every later use, including its own upper bound, loads the stored value.
-pub(super) fn generate(
+pub fn generate(
     ty: Ty,
     parameters: &TypeParameters<'_>,
     recursive_bounds: bool,
@@ -609,7 +609,7 @@ fn descriptor_words(descriptor: &str) -> (i32, i32) {
 ///
 /// Recursive parameters occupy locals at `local_base` and above. The returned value is the first
 /// slot this realization did not use.
-pub(super) fn encode(
+pub fn encode(
     instructions: &[TypeOfInsn],
     code: &mut super::classfile::CodeBuilder,
     cw: &mut super::classfile::ClassWriter,
@@ -961,6 +961,7 @@ mod tests {
                     bounds: vec![(bound, false)],
                     variance: TypeVariance::Invariant,
                     reified: false,
+                    captured_from_enclosing: false,
                 }],
                 params: Vec::new(),
                 ret: Some(Ty::Unit),

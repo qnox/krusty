@@ -20,6 +20,9 @@ EXCLUDE=(
 )
 
 set -euo pipefail
+# This producer owns the workflow output channel; tests and nested coverage runs do not.
+declare +x coverage_github_output="${GITHUB_OUTPUT:-}"
+unset GITHUB_OUTPUT
 export PATH="$HOME/.cargo/bin:$PATH"
 cd "$(dirname "$0")/.."
 
@@ -138,7 +141,10 @@ read_test_executables() {
     | ($artifact.target.kind | join(",")) as $kind
     | if ($package | package_is("krusty-lsp")) or ($package | package_is("krusty-toolchain")) then
         $artifact.executable
-      elif ($package | package_is("krusty-cli")) and $kind == "lib" then
+      elif (($package | package_is("krusty-cli")) or ($package | package_is("krusty-jvm"))
+          or ($package | package_is("krusty-native"))
+          or ($package | package_is("krusty-wasm")))
+          and $kind == "lib" then
         $artifact.executable
       elif ($package | package_is("krusty"))
           and ($kind == "lib" or ($kind == "test" and $artifact.target.name == "e2e")) then
@@ -151,7 +157,7 @@ read_test_executables() {
 phase_begin build-compiler
 compiler_json="$(mktemp)"
 if "${coverage_cargo[@]}" build --profile coverage --message-format=json \
-    -p krusty -p krusty-cli -p krusty-lsp -p krusty-toolchain --lib --bins --tests >"$compiler_json"; then
+    -p krusty -p krusty-jvm -p krusty-native -p krusty-wasm -p krusty-cli -p krusty-lsp -p krusty-toolchain --lib --bins --tests >"$compiler_json"; then
   phase_end build-compiler
 else
   status="$?"
@@ -296,3 +302,8 @@ jq -s '
 
 echo "coverage summary ($summary_out):" >&2
 jq -r 'to_entries[] | "  \(.key | (. + "         ")[0:10])  \(.value.percent*100|round/100)%  (\(.value.covered)/\(.value.count))"' "$summary_out" >&2
+
+# Publish the selected executable only after the workload and reports succeed.
+if [ -n "$coverage_github_output" ]; then
+  printf 'compiler_e2e_binary=%s\n' "$e2e_bin" >> "$coverage_github_output"
+fi

@@ -25,6 +25,42 @@ pub(crate) enum UnboundSpecialization {
     UseUpperBound,
 }
 
+/// Where an occurrence's inline bound comes from, which decides whether a non-null bound proves a
+/// written `T & Any`.
+#[derive(Clone, Copy)]
+enum Occurrences {
+    /// Receiver specialization of a member as declared: an occurrence whose bound excludes null
+    /// while its projected binding admits null is a written `T & Any`, because a classifier
+    /// argument is always within its formal's declared bound.
+    Written,
+    /// An inferred call slot: its occurrences may carry the declaration-owned formal bound, so a
+    /// non-null bound (`T : Any`) says nothing about a written `& Any`.
+    Declared,
+}
+
+/// How one member-type walk treats unbound formals and non-null occurrences.
+#[derive(Clone, Copy)]
+struct SlotPolicy {
+    unbound: UnboundSpecialization,
+    occurrences: Occurrences,
+}
+
+impl SlotPolicy {
+    const fn written(unbound: UnboundSpecialization) -> Self {
+        Self {
+            unbound,
+            occurrences: Occurrences::Written,
+        }
+    }
+
+    const fn declared(unbound: UnboundSpecialization) -> Self {
+        Self {
+            unbound,
+            occurrences: Occurrences::Declared,
+        }
+    }
+}
+
 /// A capture that closes the value input itself. Nested function/classifier slots retain their
 /// own type-mismatch diagnostics rather than prohibiting the whole source argument.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,7 +110,9 @@ pub(super) fn bind_member_return_from_call_args_tracking(
         if let Some(classifier) = source.classifier(owner) {
             for (formal, argument) in classifier.type_params.iter().zip(arguments) {
                 if !gsig.formals.iter().any(|method| method == formal) {
-                    binds.entry(formal.clone()).or_insert(*argument);
+                    binds
+                        .entry(crate::types::TyParamName::new(formal))
+                        .or_insert(*argument);
                 }
             }
         }
@@ -151,9 +189,12 @@ pub(super) fn preserve_receiver_identity_bindings(
     bindings: &mut GSigBinds,
 ) {
     match (declared.non_null().kind(), actual.non_null().kind()) {
-        (TyKind::TyParam(declared, _), TyKind::TyParam(found, _)) if declared == found => {
+        (TyKind::TyParam(declared, _), TyKind::TyParam(found, _))
+        | (TyKind::Var(declared, _), TyKind::Var(found, _))
+            if declared == found =>
+        {
             bindings
-                .entry(declared.to_string())
+                .entry(crate::types::TyParamName::new(&declared))
                 .or_insert(actual.non_null());
         }
         (TyKind::Obj(declared, declared_args), TyKind::Obj(found, actual_args))
@@ -196,21 +237,23 @@ fn specialize_member_type_with_unbound(
     ty: Ty,
     bindings: &GSigBinds,
     position: TypePosition,
-    unbound: UnboundSpecialization,
+    policy: SlotPolicy,
     input_projection: &mut Option<InputProjection>,
 ) -> Ty {
     match ty.kind() {
-        TyKind::TyParam(name, bound) => {
+        TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => {
             let Some(binding) = bindings
                 .get(name.as_str())
                 .copied()
                 .map(Ty::raw_binding_read)
             else {
-                return match unbound {
+                return match policy.unbound {
                     UnboundSpecialization::Preserve => ty,
                     UnboundSpecialization::UseUpperBound => bound.non_null(),
                 };
             };
+            let narrows_projection = matches!(policy.occurrences, Occurrences::Written)
+                && !bound.upper_bound_admits_null();
             let adjusted = |binding: Ty| {
                 if bound.upper_bound_admits_null() {
                     binding
@@ -222,7 +265,12 @@ fn specialize_member_type_with_unbound(
             match (position, binding.kind()) {
                 // The projection already carries the capture's readable bound. Applying the
                 // declaration bound again would silently narrow the actual capture before a
-                // selected-call or recovery consumer observes its value type.
+                // selected-call or recovery consumer observes its value type; only an occurrence
+                // that excludes null (`T & Any`) reads that bound without its `?`.
+                (
+                    TypePosition::Out,
+                    TyKind::OutProjection(inner) | TyKind::StarProjection(inner),
+                ) if narrows_projection => adjusted(inner),
                 (
                     TypePosition::Out,
                     TyKind::OutProjection(inner) | TyKind::StarProjection(inner),
@@ -237,10 +285,22 @@ fn specialize_member_type_with_unbound(
                 }
                 (TypePosition::Out, TyKind::InProjection(_)) => bound,
                 (TypePosition::In, TyKind::InProjection(inner)) => adjusted(inner),
+                // A classifier argument keeps the projection. An occurrence that excludes null
+                // narrows the bound the projection reads, as kotlinc approximates the capture:
+                // `Box<T & Any>` through `Holder<*>` is `Box<out Any>`.
                 (
                     TypePosition::Invariant,
-                    TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_),
-                ) => binding,
+                    TyKind::OutProjection(inner) | TyKind::StarProjection(inner),
+                ) if narrows_projection && adjusted(inner) != inner => {
+                    Ty::out_projection(adjusted(inner))
+                }
+                (TypePosition::Invariant, TyKind::InProjection(inner)) if narrows_projection => {
+                    Ty::in_projection(adjusted(inner))
+                }
+                (TypePosition::Invariant, TyKind::InProjection(_)) => binding,
+                (TypePosition::Invariant, TyKind::OutProjection(_) | TyKind::StarProjection(_)) => {
+                    binding
+                }
                 _ => adjusted(binding),
             }
         }
@@ -254,7 +314,7 @@ fn specialize_member_type_with_unbound(
                         *parameter,
                         bindings,
                         compose_position(position, crate::types::TypeVariance::In),
-                        unbound,
+                        policy,
                         &mut None,
                     )
                 })
@@ -264,7 +324,7 @@ fn specialize_member_type_with_unbound(
                 signature.ret,
                 bindings,
                 position,
-                unbound,
+                policy,
                 &mut None,
             ),
             signature.context_count,
@@ -276,7 +336,7 @@ fn specialize_member_type_with_unbound(
             inner,
             bindings,
             position,
-            unbound,
+            policy,
             input_projection,
         )),
         TyKind::PlatformNullable(inner) => {
@@ -286,7 +346,7 @@ fn specialize_member_type_with_unbound(
                 declared,
                 bindings,
                 position,
-                unbound,
+                policy,
                 input_projection,
             );
             // A flexible variable is the interval `T..T?`. A nullable binding makes both faces
@@ -305,7 +365,7 @@ fn specialize_member_type_with_unbound(
                 inner,
                 bindings,
                 position,
-                unbound,
+                policy,
                 input_projection,
             ))
         }
@@ -314,7 +374,7 @@ fn specialize_member_type_with_unbound(
             inner,
             bindings,
             compose_position(position, crate::types::TypeVariance::In),
-            unbound,
+            policy,
             &mut None,
         )),
         TyKind::OutProjection(inner) => Ty::out_projection(specialize_member_type_with_unbound(
@@ -322,7 +382,7 @@ fn specialize_member_type_with_unbound(
             inner,
             bindings,
             compose_position(position, crate::types::TypeVariance::Out),
-            unbound,
+            policy,
             &mut None,
         )),
         TyKind::StarProjection(inner) => Ty::star_projection(specialize_member_type_with_unbound(
@@ -330,7 +390,7 @@ fn specialize_member_type_with_unbound(
             inner,
             bindings,
             compose_position(position, crate::types::TypeVariance::Out),
-            unbound,
+            policy,
             &mut None,
         )),
         TyKind::Obj(internal, arguments) if !arguments.is_empty() => {
@@ -361,7 +421,7 @@ fn specialize_member_type_with_unbound(
                             *argument,
                             bindings,
                             argument_position,
-                            unbound,
+                            policy,
                             &mut None,
                         )
                     })
@@ -383,7 +443,7 @@ pub(super) fn specialize_member_type(
         ty,
         bindings,
         position,
-        UnboundSpecialization::Preserve,
+        SlotPolicy::written(UnboundSpecialization::Preserve),
         &mut None,
     )
 }
@@ -452,11 +512,15 @@ fn instantiate_slot_with_input_projection(
         };
     }
     let ty = signature.map_or(ty, |signature| {
-        let bounds: crate::fx_hash::HashMap<String, Ty> = signature
+        let bounds: crate::types::TyParamBindings = signature
             .formals
             .iter()
             .zip(&signature.formal_bounds)
-            .filter_map(|(formal, bounds)| bounds.first().map(|bound| (formal.clone(), *bound)))
+            .filter_map(|(formal, bounds)| {
+                bounds
+                    .first()
+                    .map(|bound| (crate::types::TyParamName::from(formal), *bound))
+            })
             .collect();
         if bounds.is_empty() {
             ty
@@ -464,7 +528,14 @@ fn instantiate_slot_with_input_projection(
             crate::types::ty_with_param_bounds(ty, &bounds)
         }
     });
-    specialize_member_type_with_unbound(source, ty, bindings, position, unbound, input_projection)
+    specialize_member_type_with_unbound(
+        source,
+        ty,
+        bindings,
+        position,
+        SlotPolicy::declared(unbound),
+        input_projection,
+    )
 }
 
 /// Instantiate every value-parameter slot from one semantic declaration signature. Keeping the
@@ -579,7 +650,7 @@ pub(crate) fn specialize_signature_input_type(
         ty,
         bindings,
         TypePosition::In,
-        UnboundSpecialization::Preserve,
+        SlotPolicy::declared(UnboundSpecialization::Preserve),
         &mut None,
     )
 }
@@ -594,7 +665,7 @@ pub(crate) fn specialize_signature_output_type(
         ty,
         bindings,
         TypePosition::Out,
-        UnboundSpecialization::Preserve,
+        SlotPolicy::declared(UnboundSpecialization::Preserve),
         &mut None,
     )
 }
@@ -609,7 +680,7 @@ pub(super) fn specialize_final_signature_output_type(
         ty,
         bindings,
         TypePosition::Out,
-        UnboundSpecialization::UseUpperBound,
+        SlotPolicy::declared(UnboundSpecialization::UseUpperBound),
         &mut None,
     )
 }
@@ -624,7 +695,7 @@ pub(crate) fn specialize_signature_receiver_type(
         ty,
         bindings,
         TypePosition::Invariant,
-        UnboundSpecialization::Preserve,
+        SlotPolicy::declared(UnboundSpecialization::Preserve),
         &mut None,
     )
 }
@@ -643,17 +714,15 @@ fn specialize_fixed_member_receiver(
         .into_iter()
         .find_map(|(candidate, applied, _)| (candidate == owner).then_some(applied))?;
     let bindings = super::classifier_bindings(&classifier, applied_owner);
-    let declaration_formals = classifier
-        .type_params()
-        .iter()
+    let declaration_formals = crate::types::TyParamName::all(classifier.type_params())
+        .into_iter()
         .chain(
             member
                 .generic_sig
                 .as_ref()
                 .into_iter()
-                .flat_map(|signature| &signature.formals),
+                .flat_map(|signature| signature.formals.iter().copied()),
         )
-        .cloned()
         .collect::<Vec<_>>();
     let mut specialized = member.clone();
     // `params`/`ret` are the erased callable realization for classpath members. Kotlin metadata's
@@ -676,7 +745,11 @@ fn specialize_fixed_member_receiver(
         .then_some(specialized)
 }
 
-fn member_slots_are_applied(params: &[Ty], ret: Ty, declaration_formals: &[String]) -> bool {
+fn member_slots_are_applied(
+    params: &[Ty],
+    ret: Ty,
+    declaration_formals: &[crate::types::TyParamName],
+) -> bool {
     !params
         .iter()
         .any(|parameter| crate::types::ty_mentions_param(*parameter, declaration_formals))
@@ -821,7 +894,7 @@ pub(super) fn specialize_callable(
     // A declared bare type parameter stays one: bound to a value class it is still a box read out
     // of an erased slot, and only the unsubstituted declaration says so.
     callable.declared_ret = callable.declared_ret.map(|ty| match ty.kind() {
-        TyKind::TyParam(..) => ty,
+        TyKind::TyParam(..) | TyKind::Var(..) => ty,
         _ => specialize_member_type(source, ty, bindings, TypePosition::Out),
     });
 }
@@ -884,7 +957,7 @@ mod projected_member_view_tests {
     }
 
     fn bindings(projected: Ty) -> GSigBinds {
-        GSigBinds::from_iter([("T".to_string(), projected)])
+        GSigBinds::from_iter([("T".into(), projected)])
     }
 
     #[test]
@@ -995,7 +1068,7 @@ mod projected_member_view_tests {
 
     #[test]
     fn applied_member_slots_preserve_an_enclosing_declaration_identity() {
-        let provider_formals = ["T".to_owned()];
+        let provider_formals = [crate::types::TyParamName::new("T")];
         let provider_t = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
         let source_e = Ty::ty_param("\0tp:source:emit:E", Ty::nullable(Ty::obj("kotlin/Any")));
 
@@ -1040,7 +1113,7 @@ mod projected_member_view_tests {
     fn a_spread_array_is_not_reclassified_as_one_vararg_element() {
         let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
         let signature = GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: vec![vec![Ty::platform_nullable(Ty::obj("kotlin/Any"))]],
             receiver: None,
             params: vec![Ty::platform_nullable(Ty::array(variable))],

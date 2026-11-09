@@ -43,7 +43,7 @@ pub(super) fn project_analysis_groups(
     groups
 }
 
-pub(super) fn project_group_compiler_config(
+pub(crate) fn project_group_compiler_config(
     model: Option<&ProjectModel>,
     module_index: Option<usize>,
     platform_classpath: &[PathBuf],
@@ -144,7 +144,7 @@ fn project_source_error_analysis(message: &str) -> DocumentAnalysis {
         span: krusty::diag::Span::new(0, 0),
         editor_span: None,
         identity: None,
-        warning_name: None,
+        name: None,
         severity: krusty::diag::Severity::Error,
         kind: krusty::diag::DiagnosticKind::Compiler,
         msg: message.to_string(),

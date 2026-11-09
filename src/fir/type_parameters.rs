@@ -26,7 +26,7 @@ impl ResolvedTypeParameterBound {
         {
             let bound = bound.non_null();
             match bound.kind() {
-                TyKind::Fun(_) | TyKind::TyParam(..) => true,
+                TyKind::Fun(_) | TyKind::TyParam(..) | TyKind::Var(..) => true,
                 _ => bound.obj_internal().is_some_and(classifier_is_interface),
             }
         }
@@ -96,6 +96,16 @@ struct PreparedTypeParameter {
     bounds: Box<[ResolvedTypeParameterBound]>,
 }
 
+/// One type parameter as [`ResolvedModuleIndex::publish_type_parameters_atomically`] takes it:
+/// ordinal, source and semantic names, flags, and its bounds with whether each is an interface.
+pub(crate) type WrittenTypeParameter = (
+    u32,
+    String,
+    String,
+    ResolvedTypeParameterFlags,
+    Vec<(Ty, bool)>,
+);
+
 impl ResolvedModuleIndex {
     pub(crate) fn publish_declaration_type_parameter_count(
         &mut self,
@@ -142,6 +152,38 @@ impl ResolvedModuleIndex {
             )],
         )
         .map(|mut parameters| parameters.pop().expect("one type parameter was published"))
+    }
+
+    /// Publish a declaration's `count` type parameters unless an earlier pass already published
+    /// the whole contract; a partly published contract is a broken invariant. `prepare` yields the
+    /// contract, or `None` when it cannot be formed. Returns whether the contract is published.
+    pub(crate) fn publish_type_parameters_once<I, B>(
+        &mut self,
+        declaration: DeclarationId,
+        count: usize,
+        prepare: impl FnOnce() -> Option<I>,
+    ) -> bool
+    where
+        I: IntoIterator<Item = (u32, String, String, ResolvedTypeParameterFlags, B)>,
+        B: IntoIterator<Item = (Ty, bool)>,
+    {
+        let existing = (0..count)
+            .filter(|&ordinal| {
+                let ordinal = u32::try_from(ordinal).expect("too many declaration type parameters");
+                self.type_parameters.contains_key(&(declaration, ordinal))
+            })
+            .count();
+        assert!(
+            existing == 0 || existing == count,
+            "a declaration generic contract is published atomically"
+        );
+        if existing != 0 {
+            return true;
+        }
+        prepare().is_some_and(|parameters| {
+            self.publish_type_parameters_atomically(declaration, parameters)
+                .is_ok()
+        })
     }
 
     /// Validate a declaration's complete generic contract before publishing any of it.

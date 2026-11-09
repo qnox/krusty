@@ -419,6 +419,7 @@ pub(super) fn materialize_member_delegate(
     }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {
+        origin: crate::ir::IrPropertyOrigin::Declaration,
         name: property.name.clone(),
         diagnostic_span: property.diagnostic_span,
         getter_diagnostic_span: property.getter_diagnostic_span,
@@ -444,8 +445,6 @@ pub(super) fn materialize_member_delegate(
         setter_visibility: setter_visibility(index, property.declaration, property.visibility),
         getter: Some(getter),
         setter,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         needs_access_bridge: false,
         accessor_annotations: ir
             .accessor_annotations
@@ -780,8 +779,6 @@ fn push_delegate_static(
         is_lateinit: false,
         owner,
         visibility: crate::types::Visibility::Private,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         erased_declared_ty: None,
         accessors: crate::ir::IrStaticAccessors::ABSENT,
         line: 0,

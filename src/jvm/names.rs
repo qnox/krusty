@@ -3,7 +3,7 @@
 use crate::types::{InternalName, Ty, TyKind, TypeName};
 
 /// Kotlin's JVM runtime provides numbered function interfaces only through `Function22`.
-pub(crate) const MAX_NUMBERED_FUNCTION_ARITY: usize = 22;
+pub const MAX_NUMBERED_FUNCTION_ARITY: usize = 22;
 
 /// Physical JVM functional-interface names. This table is representation state and must not leak
 /// into parser, resolver, checked FIR, or common IR; those phases retain `kotlin/FunctionN` or the
@@ -34,12 +34,12 @@ pub(super) const FUNCTION_N_INTERNAL: [&str; 23] = [
     "kotlin/jvm/functions/Function22",
 ];
 
-pub(crate) fn uses_function_n(arity: usize) -> bool {
+pub fn uses_function_n(arity: usize) -> bool {
     arity > MAX_NUMBERED_FUNCTION_ARITY
 }
 
 /// Physical JVM carrier for a Kotlin function value of the given runtime arity.
-pub(crate) fn function_interface_internal_name(arity: usize) -> String {
+pub fn function_interface_internal_name(arity: usize) -> String {
     if uses_function_n(arity) {
         "kotlin/jvm/functions/FunctionN".to_string()
     } else {
@@ -91,7 +91,7 @@ pub fn classfile_internal_name(internal: &str) -> std::borrow::Cow<'static, str>
 /// emitting thread. A repeated lookup returns that same text and does not render or allocate.
 /// Callers that already hold a [`TypeName`] use this instead of rendering the name into
 /// [`classfile_internal_name`].
-pub(super) fn classfile_internal_name_of(internal: TypeName) -> &'static str {
+pub fn classfile_internal_name_of(internal: TypeName) -> &'static str {
     thread_local! {
         static INTERNED: std::cell::RefCell<crate::fx_hash::HashMap<TypeName, &'static str>> =
             std::cell::RefCell::default();
@@ -106,7 +106,7 @@ pub(super) fn classfile_internal_name_of(internal: TypeName) -> &'static str {
 
 /// Physical JVM classfile spelling of `internal`, owned by the caller. This is for class-writer
 /// output whose lifetime is bounded by the emitted class rather than the process name catalog.
-pub(super) fn owned_classfile_internal_name(internal: TypeName) -> String {
+pub fn owned_classfile_internal_name(internal: TypeName) -> String {
     physical_classfile_name_of(internal)
 }
 
@@ -255,7 +255,7 @@ pub(super) fn parse_method_return_descriptor(desc: &str) -> Option<&str> {
     Some(ret)
 }
 
-pub(crate) fn parse_method_descriptor(desc: &str) -> Option<(Vec<&str>, &str)> {
+pub fn parse_method_descriptor(desc: &str) -> Option<(Vec<&str>, &str)> {
     let (mut rest, ret) = method_descriptor_parts(desc)?;
     let mut params = Vec::new();
     while !rest.is_empty() {
@@ -344,7 +344,7 @@ pub fn type_descriptor(ty: Ty) -> String {
 /// `type_descriptor` builds that spelling for the class file. A comparison only needs the shape:
 /// primitive tags, the interned classfile name, or one array dimension. Equal determined types
 /// return before any of that work; an undetermined type still trips the emission invariant.
-pub(crate) fn same_type_descriptor(left: Ty, right: Ty) -> bool {
+pub fn same_type_descriptor(left: Ty, right: Ty) -> bool {
     assert_determined_descriptor_type(left);
     assert_determined_descriptor_type(right);
     left == right || descriptor_shapes_match(left, right)
@@ -401,7 +401,7 @@ fn descriptor_shapes_match(left: Ty, right: Ty) -> bool {
 
 fn descriptor_shape(ty: Ty) -> DescriptorShape {
     match ty.kind() {
-        TyKind::Pending | TyKind::Error => {
+        TyKind::Pending | TyKind::Error | TyKind::Var(..) => {
             unreachable!("a not-determined type reached {}", "a JVM descriptor")
         }
         TyKind::INT | TyKind::UINT => DescriptorShape::Primitive(b'I'),
@@ -497,7 +497,7 @@ pub(crate) fn boxed_primitive_array_element(element: Ty) -> Option<TypeName> {
 }
 
 /// The class operand of `anewarray` for `element`.
-pub(crate) fn anewarray_element_class(element: Ty) -> String {
+pub fn anewarray_element_class(element: Ty) -> String {
     boxed_primitive_array_element(element)
         .map(|name| classfile_internal_name_of(name).to_string())
         .unwrap_or_else(|| instanceof_internal_name(element.non_null()))
@@ -517,7 +517,7 @@ pub(crate) fn anewarray_element_class(element: Ty) -> String {
 /// `kotlin.Nothing` is deliberately absent: it has no runtime class at all (there is no
 /// `kotlin/Nothing.class` in kotlin-stdlib), so no name here could be right. Common lowering
 /// settles `is Nothing` before a backend sees it.
-pub(crate) fn instanceof_internal_name(t: Ty) -> String {
+pub fn instanceof_internal_name(t: Ty) -> String {
     match t.kind() {
         TyKind::STRING => "java/lang/String".to_string(),
         TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) if inner.is_unsigned() => {
@@ -555,6 +555,22 @@ pub(crate) fn instanceof_internal_name(t: Ty) -> String {
         // what Kotlin's erasure means and what kotlinc emits.
         _ => "java/lang/Object".to_string(),
     }
+}
+
+/// Characters kotlinc keeps in a module suffix. `$` and every other non-identifier character
+/// become `_`; letters outside ASCII, digits, and `_` stay (`my-lib` → `my_lib`, `a.b` → `a_b`,
+/// `a$b` → `a_b`, `Я` stays).
+pub fn sanitize_module_name(module_name: &str) -> String {
+    module_name
+        .chars()
+        .map(|c| {
+            if c != '$' && (c == '_' || c.is_alphanumeric()) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

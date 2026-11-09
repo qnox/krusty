@@ -1,7 +1,6 @@
 use crate::fir::{
     FirBinaryOperation, FirConstant, FirConversion, FirConversionKind, FirExprId, FirExprKind,
-    FirIndexedAccessKind, FirJumpKind, FirReceiver, FirTypeOperation, FirUnaryOperation,
-    ResolvedTy,
+    FirJumpKind, FirReceiver, FirTypeOperation, FirUnaryOperation, ResolvedTy,
 };
 use crate::ir::{Callee, ExprId, IrBinOp, IrCatch, IrConst, IrExpr, IrIntrinsic, IrTypeOp};
 use crate::types::Ty;
@@ -273,7 +272,8 @@ impl BodyLowering<'_> {
                 target,
                 dispatch_receiver,
             } => {
-                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
+                let (dispatch_receiver, _) =
+                    self.module_property_receiver(*target, *dispatch_receiver)?;
                 self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::LateinitFieldRead {
                         target: *target,
@@ -285,7 +285,8 @@ impl BodyLowering<'_> {
                 target,
                 dispatch_receiver,
             } => {
-                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
+                let (dispatch_receiver, _) =
+                    self.module_property_receiver(*target, *dispatch_receiver)?;
                 self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::BackingFieldRead {
                         target: *target,
@@ -299,7 +300,8 @@ impl BodyLowering<'_> {
                 value,
                 conversion,
             } => {
-                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
+                let (dispatch_receiver, _) =
+                    self.module_property_receiver(*target, *dispatch_receiver)?;
                 let value = self.expression_with_conversion(*value, *conversion)?;
                 self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::BackingFieldWrite {
@@ -1018,50 +1020,6 @@ impl BodyLowering<'_> {
                     self.record_generated_class_provenance(expression_id, lowered as usize);
                 }
                 lowered
-            }
-            FirExprKind::IndexedRead {
-                kind,
-                receiver,
-                indices,
-            } => {
-                let receiver = self.expression(*receiver)?;
-                let arguments = indices
-                    .iter()
-                    .map(|index| self.expression_with_conversion(index.value, index.conversion))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let operation = match kind {
-                    FirIndexedAccessKind::Array => IrIntrinsic::ArrayGet,
-                    FirIndexedAccessKind::String => IrIntrinsic::StringGet,
-                };
-                self.ir.add_expr(IrExpr::Call {
-                    callee: Box::new(Callee::Intrinsic {
-                        operation,
-                        ret: expression.ty.get(),
-                    }),
-                    dispatch_receiver: Some(receiver),
-                    args: arguments,
-                })
-            }
-            FirExprKind::IndexedWrite {
-                receiver,
-                indices,
-                value,
-                conversion,
-            } => {
-                let receiver = self.expression(*receiver)?;
-                let mut arguments = indices
-                    .iter()
-                    .map(|index| self.expression_with_conversion(index.value, index.conversion))
-                    .collect::<Result<Vec<_>, _>>()?;
-                arguments.push(self.expression_with_conversion(*value, *conversion)?);
-                self.ir.add_expr(IrExpr::Call {
-                    callee: Box::new(Callee::Intrinsic {
-                        operation: IrIntrinsic::ArraySet,
-                        ret: expression.ty.get(),
-                    }),
-                    dispatch_receiver: Some(receiver),
-                    args: arguments,
-                })
             }
             FirExprKind::SafeCall { receiver, selector } => {
                 self.safe_call_expression(expression_id, receiver, *selector, expression.ty.get())?
@@ -1787,8 +1745,8 @@ impl BodyLowering<'_> {
                         origin: conversion_origin,
                     })
                     .map(platform_null_check)?;
-                if check == crate::ir::NullCheck::Unnamed {
-                    return Ok(self.unnamed_null_check(expression, source_type, to.get()));
+                if let crate::ir::NullCheck::Unnamed { site } = check {
+                    return Ok(self.unnamed_null_check(expression, source_type, to.get(), site));
                 }
                 // A generic external call can already carry its checked result cast. Kotlin checks
                 // the value produced by the call and then casts that checked value; keep the
@@ -1878,6 +1836,11 @@ impl BodyLowering<'_> {
                         nullable: false,
                         kotlin_interface: conversion.kotlin_interface,
                         parameter_identities: conversion.parameter_identities.to_vec(),
+                        type_parameters: conversion
+                            .type_parameters
+                            .iter()
+                            .map(crate::ir::IrSamTypeParameter::lowered)
+                            .collect(),
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,
@@ -1916,7 +1879,13 @@ impl BodyLowering<'_> {
     /// kotlinc's implicit not-null cast over a value it cannot name keeps the value in a temporary,
     /// checks the temporary, and yields it (`astore; aload; checkNotNull; aload`). A read of a
     /// stable binding is its own snapshot: `irLetS` checks and yields the binding itself.
-    fn unnamed_null_check(&mut self, value: ExprId, source_type: Ty, target: Ty) -> ExprId {
+    fn unnamed_null_check(
+        &mut self,
+        value: ExprId,
+        source_type: Ty,
+        target: Ty,
+        site: crate::ir::NullCheckSite,
+    ) -> ExprId {
         let reused = self.stable_value_read(value);
         let (stored, temporary) = match reused {
             Some(slot) => (None, slot),
@@ -1938,7 +1907,7 @@ impl BodyLowering<'_> {
         };
         let check = self.ir.add_expr(IrExpr::NotNullAssert {
             operand: checked,
-            check: crate::ir::NullCheck::Unnamed,
+            check: crate::ir::NullCheck::Unnamed { site },
         });
         let mut result = self.checked_value_read(temporary, reused.is_some());
         if source_type != target {
@@ -2383,18 +2352,8 @@ impl BodyLowering<'_> {
             });
         }
         let class = self.storage_class(owner)?;
-        // Kotlin exposes an enum entry receiver as the parent enum type, while a property declared
-        // in an entry body is owned by that entry's stable anonymous-subclass declaration. The FIR
-        // owner proves the receiver's exact runtime subtype; make that checked narrowing explicit
-        // in common IR before addressing the owner field. Backends receive no inference task.
         if self.ir.checked_enum_entry_classes.contains_key(&owner) {
-            receiver = self.ir.add_expr(IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::Cast,
-                arg: receiver,
-                type_operand: crate::types::Ty::obj_name(
-                    self.ir.classes[class as usize].fq_name_id(),
-                ),
-            });
+            receiver = self.apply_enum_entry_receiver(owner, receiver)?.0;
         }
         self.capture_field_read(receiver, class, field)
     }
@@ -2635,8 +2594,17 @@ fn lower_type_operation(operation: FirTypeOperation, target: crate::types::Ty) -
 pub(super) fn platform_null_check(
     narrowing: &crate::fir::FirPlatformNarrowing,
 ) -> crate::ir::NullCheck {
+    let site = match narrowing.site {
+        crate::fir::FirPlatformNarrowingSite::Value => crate::ir::NullCheckSite::Value,
+        crate::fir::FirPlatformNarrowingSite::ExtensionReceiver => {
+            crate::ir::NullCheckSite::ExtensionReceiver
+        }
+    };
     match &narrowing.message {
-        Some(message) => crate::ir::NullCheck::Named(message.to_string()),
-        None => crate::ir::NullCheck::Unnamed,
+        Some(message) => crate::ir::NullCheck::Named {
+            message: message.to_string(),
+            site,
+        },
+        None => crate::ir::NullCheck::Unnamed { site },
     }
 }

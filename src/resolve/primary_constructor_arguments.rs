@@ -25,6 +25,7 @@ impl Checker<'_> {
             owner: current_owner,
             anonymous: is_anonymous_object,
         } = site;
+        let capture_scope = scope;
         // An anonymous constructor header sees lexical values without its instance-property
         // overlay. Retain its authentic dispatch rung solely as the unavailable constructor
         // prefix: removing that rung would renumber enclosing receivers in the capture ledger.
@@ -39,14 +40,15 @@ impl Checker<'_> {
         // Base class constructor args are evaluated before the body and may reference ctor params.
         // A LAMBDA or callable reference arg is typed against the selected super ctor's parameter
         // type (a receiver lambda's `this` scope and a reference's function shape come from that
-        // expected type), so it is postponed here and checked below once the ctor is resolved;
-        // anything else is typed up front.
+        // expected type), so it is postponed here and checked below once the ctor is resolved.
+        // An empty `arrayOf()` is postponed for the same reason: only the selected parameter
+        // supplies its element type. Anything else is typed up front.
         let file = self.file;
-        let is_postponed = |arg: ExprId| {
+        let is_postponed = |checker: &Self, scope: &CheckerScope<'_>, arg: ExprId| {
             matches!(
                 file.expr(arg),
                 Expr::Lambda { .. } | Expr::CallableRef { .. }
-            )
+            ) || checker.postponed_empty_reference_array_factory(scope, arg)
         };
         let static_this = current_owner
             .and_then(|owner| self.applied_declared_supertype(owner))
@@ -101,7 +103,7 @@ impl Checker<'_> {
                 let previous_capture_accounting = c.suppress_receiver_capture_accounting;
                 c.suppress_receiver_capture_accounting = is_anonymous_object;
                 for &arg in &cl.base_args {
-                    if !is_postponed(arg) {
+                    if !is_postponed(c, header_scope, arg) {
                         c.expr(header_scope, arg);
                     }
                 }
@@ -143,7 +145,16 @@ impl Checker<'_> {
                         resolved: selected, ..
                     } = c.select_source_constructor(header_scope, &arguments, &candidates)
                     {
-                        let selected = *selected;
+                        let mut selected = *selected;
+                        if let (true, ResolvedCtorDelegationTarget::Super { owner, .. }) =
+                            (is_anonymous_object, &selected.target)
+                        {
+                            // Written arguments use the construction-site lexical tower;
+                            // hidden captures are read from this constructor's prefix.
+                            selected.capture_plan =
+                                c.selected_constructor_capture_plan(capture_scope, *owner);
+                        }
+                        c.record_whole_array_delegation_arguments(&arguments, &selected);
                         if let Some(receiver) = &selected.outer_receiver {
                             c.mark_selected_implicit_receiver_used(header_scope, receiver, d);
                         }
@@ -206,7 +217,7 @@ impl Checker<'_> {
                         // No unique ctor match: type the deferred lambda args without an expected type.
                         c.suppress_receiver_capture_accounting = is_anonymous_object;
                         for &arg in &cl.base_args {
-                            if is_postponed(arg) {
+                            if is_postponed(c, header_scope, arg) {
                                 c.expr(header_scope, arg);
                             }
                         }

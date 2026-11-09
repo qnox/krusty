@@ -9,7 +9,7 @@ impl Parser<'_> {
     /// not to the bodyless declaration's span.
     pub(super) fn eat_optional_declaration_body_open(&mut self) -> bool {
         let before_line_breaks = self.i;
-        self.skip_newlines();
+        self.skip_semicolons();
         if self.eat(TokenKind::LBrace) {
             true
         } else {

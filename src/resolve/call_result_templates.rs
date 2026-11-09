@@ -68,6 +68,152 @@ impl SelectedGenericCallShape {
 }
 
 impl Checker<'_> {
+    /// Whether a selected call can infer its result from `expected` after expression-owned result
+    /// transformations have been preserved. The declaration supplies the generic result shape, but
+    /// a safe call adds nullability outside that shape and contextual inference cannot erase it.
+    pub(super) fn call_result_can_bind_expected(&self, expression: ExprId, expected: Ty) -> bool {
+        // `Any`/`Any?` cannot bind anything: every result is already a subtype, so the
+        // expectation carries no constraint for a result variable. A literal declared
+        // `Map<String, Any?>` hands `Any?` to every nested value and used to re-enter each level
+        // once more for it (see `selected_argument_type` for the equal-type case).
+        if expected
+            .non_null()
+            .obj_internal()
+            .is_some_and(|owner| owner == crate::types::wk::any())
+        {
+            return false;
+        }
+        if let Expr::Elvis { lhs, rhs } = self.file.expr(expression) {
+            // An Elvis carries the selected generic-result decision of either branch. Treating only
+            // a syntactic CALL as contextual made `null ?: emptyList()` opaque to an enclosing
+            // `Collection<Int>` parameter even though the RHS had already selected `emptyList<T>`.
+            return self.call_result_can_bind_expected(*lhs, Ty::nullable(expected))
+                || self.call_result_can_bind_expected(*rhs, expected);
+        }
+        if let Expr::SafeCall { receiver, .. } = self.file.expr(expression) {
+            let receiver = self.expr_types[receiver.0 as usize];
+            if receiver.is_reference() && !expected.admits_null() {
+                return false;
+            }
+        }
+        if self
+            .file
+            .call_type_args
+            .get(&expression.0)
+            .is_some_and(|arguments| !arguments.is_empty())
+        {
+            return false;
+        }
+        if matches!(
+            self.expr_lowers.get(&expression),
+            Some(ExprLowering::CompilerSynthetic(
+                crate::synthetics::SyntheticKind::EmptyReference
+                    | crate::synthetics::SyntheticKind::ReferenceVararg
+            ))
+        ) {
+            let expected = expected.non_null();
+            let actual = self.expr_types[expression.0 as usize].non_null();
+            return expected.is_reference_array()
+                && expected.array_elem().is_some()
+                && actual.is_reference_array();
+        }
+        if matches!(self.file.expr(expression), Expr::Call { .. }) {
+            let actual = self.expr_types[expression.0 as usize];
+            let expected_owner = expected.kotlin_class_internal();
+            let actual_owner = actual.kotlin_class_internal();
+            // A nullable result keeps its nullability under every binding of its arguments.
+            if expected_owner.is_some()
+                && (!actual.is_nullable() || expected.admits_null())
+                && expected_owner == actual_owner
+                && expected_owner
+                    .and_then(|owner| self.resolver().classifier(owner))
+                    .is_some_and(|class| !class.type_params.is_empty())
+            {
+                return true;
+            }
+        }
+        let resolved = self.resolved_calls.get(&expression);
+        let generic = self.expected_type_callable_signature(expression);
+        crate::trace_compiler!(
+            "expected_call",
+            "argument expression={expression:?} expected={expected:?} selected={} generic_ret={:?}",
+            resolved.is_some(),
+            generic.as_ref().map(|signature| signature.ret),
+        );
+        let Some(generic) = generic else {
+            return false;
+        };
+        let source = self.fed_source();
+        let provisional = self.provisional_result(
+            expression,
+            self.recorded_result_evidence(expression, &generic),
+        );
+        crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
+            &source,
+            &generic,
+            expected,
+            |actual, bound| self.receiver_is_assignable(actual, bound),
+        )
+        .is_some_and(|bindings| {
+            crate::symbol_resolver::expected_result_keeps_call_evidence(
+                provisional,
+                &generic,
+                expected,
+                &bindings,
+            )
+        })
+    }
+
+    /// The argument kind of the nested generic call `argument`, whose checked type is `ty`.
+    pub(super) fn expected_type_callable_argument(
+        &self,
+        argument: ExprId,
+        ty: Ty,
+        signature: GenericSig,
+    ) -> CallArgKind {
+        CallArgKind::ExpectedTypeCallable {
+            provisional: ty,
+            generic_sig: std::sync::Arc::new(signature),
+            provisional_open: self.provisional_result(argument, ty).open,
+        }
+    }
+
+    /// `ty`, the expectation-free result of the nested call `expression`, with whether it still
+    /// names an open formal. A type parameter lexically in scope at that call is the enclosing
+    /// declaration's own type (`R` in `Box(listOf(r))` inside `fun <R>`), as fixed as a classifier.
+    pub(super) fn provisional_result(
+        &self,
+        expression: ExprId,
+        ty: Ty,
+    ) -> crate::symbol_resolver::ProvisionalResult {
+        crate::symbol_resolver::ProvisionalResult {
+            ty,
+            open: ty
+                .mentions_open_ty_param(&|formal| self.lexically_fixed_at_call(expression, formal)),
+        }
+    }
+
+    /// The nested call's result as evidence from its own inputs. A result formal its selection
+    /// recorded without a solution is still open: the checked type's default completion for it
+    /// (`Completion<Any?>` for `Completion {}`, whose lambda takes `T` from context) is not a
+    /// lower bound an enclosing expectation must keep.
+    fn recorded_result_evidence(&self, expression: ExprId, generic: &GenericSig) -> Ty {
+        let provisional = self.expr_types[expression.0 as usize];
+        let Some(recorded) = self.selected_call_type_arguments(expression) else {
+            return provisional;
+        };
+        if recorded.len() != generic.formals.len() || recorded.iter().all(Option::is_some) {
+            return provisional;
+        }
+        let solved = generic
+            .formals
+            .iter()
+            .zip(recorded)
+            .filter_map(|(formal, argument)| argument.map(|argument| (*formal, argument)))
+            .collect::<crate::symbol_resolver::GSigBinds>();
+        crate::symbol_resolver::ty_subst_keep_unbound(generic.ret, &solved)
+    }
+
     /// Whether this nested call has no input-fixed result shape and therefore receives an ordinary
     /// successful-argument score until the enclosing declarations' parameter shapes are compared.
     pub(super) fn argument_uses_context_only_result(
@@ -114,13 +260,21 @@ impl Checker<'_> {
             .is_some_and(|lexical| lexical.iter().any(|identity| identity == formal))
     }
 
-    /// `signature` as the template of the one call `call`: formals lexically in scope there are
-    /// renamed to that call's fresh variables, exactly as its constraints were solved.
+    /// The call expression that owns the inference variables solved at `call`.
+    pub(super) fn call_site(&self, call: ExprId) -> crate::types::CallSiteIdentity {
+        crate::types::CallSiteIdentity {
+            compilation: self.compilation_id,
+            file: self.file_index,
+            call: call.0,
+        }
+    }
+
+    /// `signature` as the template of the one call `call`: every formal is that call's variable,
+    /// exactly as its constraints were solved.
     fn call_site_signature(&self, call: ExprId, signature: GenericSig) -> GenericSig {
-        crate::symbol_resolver::CallSiteVariables::instantiate(&signature, |formal| {
-            self.lexically_fixed_at_call(call, formal)
-        })
-        .map_or(signature, |instance| instance.signature().clone())
+        crate::symbol_resolver::CallSiteVariables::instantiate(&signature, self.call_site(call))
+            .signature()
+            .clone()
     }
 
     /// The semantic generic signature retained by one checker-selected call. Declaration origin and
@@ -241,7 +395,7 @@ impl Checker<'_> {
             })
             .collect::<Vec<_>>();
         Some(std::borrow::Cow::Owned(GenericSig {
-            formals: classifier.type_params().clone(),
+            formals: crate::types::TyParamName::all(classifier.type_params()),
             formal_bounds: classifier.type_param_bounds().clone(),
             receiver: None,
             params: constructor_parameter_shapes(constructor).to_vec(),
@@ -376,7 +530,7 @@ impl Checker<'_> {
             .resolved_constructors
             .get(&expression)
             .and_then(|constructor| self.resolved_type_name(constructor.owner()))
-            .map(|classifier| classifier.type_params().clone())
+            .map(|classifier| crate::types::TyParamName::all(classifier.type_params()))
             .unwrap_or_default();
         let shape_mentions_result_formal = |shape: Ty| {
             signature
@@ -431,10 +585,14 @@ impl Checker<'_> {
                         .any(shape_mentions_result_formal)
                 }),
         };
-        fn is_declaration_fallback(symbolic: Ty, actual: Ty, formals: &[String]) -> bool {
+        fn is_declaration_fallback(
+            symbolic: Ty,
+            actual: Ty,
+            formals: &[crate::types::TyParamName],
+        ) -> bool {
             match (symbolic.kind(), actual.kind()) {
-                (TyKind::TyParam(formal, bound), _)
-                    if formals.iter().any(|declared| declared == formal) =>
+                (TyKind::TyParam(formal, bound) | TyKind::Var(formal, bound), _)
+                    if formals.contains(&formal) =>
                 {
                     // An alias formal (`E` of `typealias HashSet<E> = java.util.HashSet<E>`) is
                     // bounded by `Any?`; the Java target completes the same position from its own
@@ -509,7 +667,7 @@ mod tests {
         SelectedGenericCallShape::source_for_test(
             declaration,
             GenericSig {
-                formals: vec!["T".to_string()],
+                formals: vec![crate::types::TyParamName::new("T")],
                 formal_bounds: vec![Vec::new()],
                 receiver: None,
                 params: Vec::new(),

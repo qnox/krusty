@@ -288,7 +288,7 @@ pub(crate) fn make_expression_children_unique(ir: &mut IrFile, root: ExprId) {
 
 /// As [`make_expression_children_unique`], returning every `(source, clone)` identity so backend
 /// side tables can copy their exact per-expression contracts instead of inferring them again.
-pub(crate) fn make_expression_children_unique_tracked(
+pub fn make_expression_children_unique_tracked(
     ir: &mut IrFile,
     root: ExprId,
 ) -> Vec<(ExprId, ExprId)> {
@@ -347,9 +347,13 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
             }
             IrCheckedOperation::ConstructorDelegation {
                 outer_receiver,
+                capture_arguments,
                 arguments,
                 ..
             } => {
+                for (value, _) in capture_arguments.iter_mut().flatten() {
+                    *value = map(*value);
+                }
                 map_option(outer_receiver, &mut map);
                 arguments
                     .iter_mut()
@@ -469,6 +473,11 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::LateinitCheck { operand: arg, .. }
         | IrExpr::Throw { operand: arg }
         | IrExpr::EnumValueOf { arg, .. }
+        | IrExpr::EnumConstant {
+            construction: arg, ..
+        }
+        | IrExpr::EnumEntriesList { values: arg, .. }
+        | IrExpr::NoSuchEnumConstant { name: arg, .. }
         | IrExpr::EnumSwitchOrdinal { subject: arg, .. }
         | IrExpr::ReifiedTypeOp { arg, .. }
         | IrExpr::RefGet { holder: arg, .. }
@@ -578,6 +587,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumSwitchKey { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumAllocation { .. }
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation
@@ -660,18 +670,10 @@ fn copy_function_implementation_facts(
     ir.set_method_visibility(target, ir.method_visibility(source));
     copy_map!(fn_source_names);
     copy_map!(fn_params);
-    copy_map!(fn_param_declared_nullable);
     copy_map!(fn_declared_spellings);
-    copy_map!(fn_context_counts);
-    copy_map!(fn_param_annotations);
-    copy_map!(fn_param_no_infer);
     copy_map!(fn_return_value_statuses);
-    copy_map!(fn_varargs);
-    copy_map!(fn_decl_lines);
-    copy_map!(fn_close_lines);
-    copy_map!(fn_end_lines);
-    copy_map!(fn_sig_lines);
-    copy_map!(fn_signature_offsets);
+    ir.copy_function_position(source, target);
+    ir.copy_declared_parameters(source, target);
     copy_map!(fn_source_order);
     copy_map!(fn_continuation_ordinal);
     copy_map!(fn_contracts);
@@ -809,6 +811,7 @@ mod tests {
                 bounds: vec![(Ty::obj("kotlin/Any"), false)],
                 variance: Default::default(),
                 reified: true,
+                captured_from_enclosing: false,
             }],
             params: vec![parameter],
             ret: Some(parameter),
@@ -837,6 +840,58 @@ mod tests {
         assert_eq!(ir.reified_call_subst.len(), 2);
         assert_eq!(ir.reified_call_subst.get(&source), Some(&reified));
         assert_eq!(ir.reified_call_subst.get(&target), Some(&reified));
+    }
+
+    #[test]
+    fn expression_clone_keeps_constructor_declaration_types_separate_from_representation() {
+        let mut ir = IrFile::default();
+        let value = ir.add_expr(super::super::IrExpr::Const(super::super::IrConst::Int(7)));
+        let declared = Ty::obj("sample/Money");
+        let source = ir.add_expr(super::super::IrExpr::New {
+            internal: crate::types::type_name("sample/Holder"),
+            args: vec![value],
+            ctor_params: Some(vec![Ty::Int]),
+            declared_params: Some(vec![declared].into_boxed_slice()),
+            ctor_desc: Some("(I)V".into()),
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        });
+
+        let (target, copies) = clone_expression_dag(&mut ir, source);
+
+        let super::super::IrExpr::New {
+            args,
+            ctor_params,
+            ctor_desc,
+            ..
+        } = ir.expr(target)
+        else {
+            panic!("a construction copy");
+        };
+        assert_ne!(source, target);
+        assert_eq!(args, &[copies[&value]]);
+        assert_eq!(ctor_params.as_deref(), Some([Ty::Int].as_slice()));
+        assert_eq!(ctor_desc.as_deref(), Some("(I)V"));
+        assert_eq!(
+            ir.construction_declared_params(target),
+            Some([declared].as_slice())
+        );
+        let super::super::IrExpr::New {
+            declared_params, ..
+        } = &mut ir.exprs[target as usize]
+        else {
+            panic!("a construction copy");
+        };
+        declared_params.as_mut().expect("the selected declaration")[0] = Ty::String;
+        assert_eq!(
+            ir.construction_declared_params(source),
+            Some([declared].as_slice())
+        );
+        assert_eq!(
+            ir.construction_declared_params(target),
+            Some([Ty::String].as_slice())
+        );
     }
 
     #[test]
@@ -888,7 +943,7 @@ mod tests {
         let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
         let source = ir.add_fun(function("check", parameter));
         ir.set_method_visibility(source, Visibility::Private);
-        ir.fn_decl_lines.insert(source, 4);
+        ir.function_position_mut(source).decl_line = Some(4);
         ir.inline_fns.insert(source);
         ir.signatures.insert(source, signature(parameter));
         ir.callable_bound_type_parameters.insert(
@@ -899,6 +954,7 @@ mod tests {
                 bounds: vec![(parameter, false)],
                 variance: Default::default(),
                 reified: false,
+                captured_from_enclosing: false,
             }],
         );
         ir.record_lambda_type_parameters(source, vec![signature(parameter).type_params[0].clone()]);
@@ -955,7 +1011,7 @@ mod tests {
         assert_eq!(ir.functions[first as usize].params, vec![specialized]);
         assert_eq!(ir.shared_capture_parameters[&(first, 0)], parameter);
         assert_eq!(ir.method_visibility(first), Visibility::Private);
-        assert_eq!(ir.fn_decl_lines.get(&first), Some(&4));
+        assert_eq!(ir.function_position(first).decl_line, Some(4));
         assert!(ir.inline_fns.contains(&source));
         assert!(!ir.inline_fns.contains(&first));
         assert!(!ir.specialized_functions.contains_key(&source));

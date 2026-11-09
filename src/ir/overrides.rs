@@ -41,7 +41,7 @@ pub struct IrFunctionOverride {
     pub overridden: crate::fir::ResolvedFunctionOverrideTarget,
     pub overridden_owner: TypeName,
     pub overridden_semantic_role: Option<crate::types::SemanticCallRole>,
-    pub collection_barrier: Option<crate::libraries::CollectionBarrierOutcome>,
+    pub collection_barrier: Option<crate::libraries::CollectionBarrier>,
     pub overridden_is_interface: bool,
     pub name: String,
     /// The overridden declaration's own parameters and result, before the implementing class's
@@ -78,7 +78,7 @@ impl IrFile {
     /// The member functions of `owner` that override one of `Any`'s `equals`/`hashCode`/`toString`,
     /// each with the `Any` member it overrides, by the frontend's override edges. A value class
     /// generates exactly the `Any` members its source does not override.
-    pub(crate) fn any_member_overrides(
+    pub fn any_member_overrides(
         &self,
         owner: TypeName,
     ) -> crate::fx_hash::HashMap<FunId, super::IrValueClassAnyMember> {

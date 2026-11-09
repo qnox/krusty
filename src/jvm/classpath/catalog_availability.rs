@@ -16,8 +16,7 @@ pub(super) fn directory_class_is_inventoried(jp: &mut super::JarPackages, bytes:
         Err(_) => return false,
     };
     let meta = &info.meta;
-    if meta.package_functions.is_empty()
-        && meta.package_properties.is_empty()
+    if !meta.members.declares_package_members()
         && meta.type_aliases.is_empty()
         && meta.multifile_parts.is_empty()
     {

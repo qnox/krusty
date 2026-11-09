@@ -1,0 +1,180 @@
+//! Expression identity relocation when a JVM representation pass inserts a wrapper around a call.
+//!
+//! The wrapper keeps the source expression identity, while the cloned inner node becomes the call
+//! operation consumed by later JVM passes. Representation context is valid on both nodes; facts
+//! whose identity denotes the call operation move exclusively to the clone.
+
+use krusty::ir::{ExprId, IrFile};
+
+pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId) -> ExprId {
+    let expression = ir.expr(source).clone();
+    let target = ir.add_expr(expression);
+
+    macro_rules! copy_fact {
+        ($field:ident) => {
+            if let Some(value) = ir.$field.get(&source).cloned() {
+                ir.$field.insert(target, value);
+            }
+        };
+    }
+    ir.copy_types(source, target);
+    copy_fact!(property_declaration_types);
+    if ir.jvm_erased_primitive_wrapper_values.contains(&source) {
+        ir.jvm_erased_primitive_wrapper_values.insert(target);
+    }
+
+    macro_rules! move_fact {
+        ($field:ident) => {
+            if let Some(value) = ir.$field.remove(&source) {
+                ir.$field.insert(target, value);
+            }
+        };
+    }
+    // CPS and bytecode specialization consume the selected call, not its result wrapper.
+    move_fact!(suspend_calls);
+    move_fact!(suspend_call_overridden_results);
+    move_fact!(value_class_suspend_calls);
+    move_fact!(intrinsic_suspension_points);
+    move_fact!(reified_call_subst);
+    move_fact!(inline_call_type_arguments);
+    move_fact!(construction_targets);
+    move_fact!(synthesized_accessor_calls);
+    move_fact!(private_property_accessor_calls);
+    // These facts identify the selected call operation. The source expression is now the
+    // representation wrapper, so leaving a copy there would both orphan the real call and let a
+    // later consumer mistake the wrapper for the operation that owns the provider decision.
+    move_fact!(ext_call_source_receiver);
+    move_fact!(dispatch_classes);
+    move_fact!(semantic_call_roles);
+    move_fact!(call_declared_ret);
+    move_fact!(call_declared_params);
+    move_fact!(physical_call_parameters);
+    move_fact!(module_member_accesses);
+    move_fact!(jvm_protected_dependency_calls);
+    move_fact!(static_extension_receivers);
+    move_fact!(call_inline_modifiers);
+    move_fact!(value_class_unbox_type_operation_edges);
+    move_fact!(value_class_null_safe_unbox_type_operation_edges);
+    // The static a value-class member or constructor call was realized as: a private one reached
+    // from another class goes through its accessor, which only the call itself names.
+    move_fact!(jvm_member_targets);
+    // The source line is the call's: kotlinc marks it where the call starts and again at its
+    // dispatch, and writes the representation adaptation after it with no line of its own. The
+    // wrapper starts where the call does, so its start keeps the same mark.
+    if let Some(line) = ir.take_source_line(source) {
+        ir.set_source_line(target, line);
+    }
+    ir.move_generated_operand_start(source, target);
+    ir.move_compiled_inline_call(source, target);
+
+    target
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use krusty::ir::IrExpr;
+    use krusty::types::InlineParameterModifier as Modifier;
+    use krusty::types::Ty;
+
+    #[test]
+    fn reified_substitutions_move_exclusively_to_the_cloned_call() {
+        let mut ir = IrFile::default();
+        let source = ir.add_expr(IrExpr::UnitInstance);
+        let substitutions = vec![("T".to_owned(), Ty::String)];
+        ir.reified_call_subst.insert(source, substitutions.clone());
+        ir.inline_call_type_arguments
+            .insert(source, substitutions.clone());
+        ir.set_logical_type(source, Ty::String);
+
+        let target = clone_below_representation_wrapper(&mut ir, source);
+
+        assert!(!ir.reified_call_subst.contains_key(&source));
+        assert_eq!(ir.reified_call_subst.get(&target), Some(&substitutions));
+        assert!(!ir.inline_call_type_arguments.contains_key(&source));
+        assert_eq!(
+            ir.inline_call_type_arguments.get(&target),
+            Some(&substitutions)
+        );
+        assert_eq!(ir.logical_type(source), Some(Ty::String));
+        assert_eq!(ir.logical_type(target), Some(Ty::String));
+    }
+
+    #[test]
+    fn selected_call_facts_move_exclusively_to_the_cloned_operation() {
+        let mut ir = IrFile::default();
+        let source = ir.add_expr(IrExpr::Call {
+            callee: Box::new(krusty::ir::Callee::Local(7)),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let unbox_receiver = ir.add_expr(IrExpr::UnitInstance);
+        ir.ext_call_source_receiver.insert(source, Ty::String);
+        ir.semantic_call_roles
+            .insert(source, krusty::types::SemanticCallRole::KotlinAnyToString);
+        ir.call_declared_ret.insert(source, Ty::String);
+        ir.call_declared_params
+            .insert(source, vec![Ty::String].into_boxed_slice());
+        ir.static_extension_receivers.insert(source, 0);
+        ir.call_inline_modifiers.insert(
+            source,
+            vec![Modifier::None, Modifier::Crossinline].into_boxed_slice(),
+        );
+        ir.value_class_unbox_type_operation_edges
+            .insert(source, unbox_receiver);
+        ir.mark_generated_operand_start(source);
+        ir.set_same_module_inlining(krusty::ir::SameModuleInlining::CompiledBodies);
+        ir.record_compiled_inline_call(source, 7);
+
+        let target = clone_below_representation_wrapper(&mut ir, source);
+
+        assert!(!ir.ext_call_source_receiver.contains_key(&source));
+        assert_eq!(ir.ext_call_source_receiver.get(&target), Some(&Ty::String));
+        assert!(!ir.semantic_call_roles.contains_key(&source));
+        assert_eq!(
+            ir.semantic_call_roles.get(&target),
+            Some(&krusty::types::SemanticCallRole::KotlinAnyToString)
+        );
+        assert!(!ir.call_declared_ret.contains_key(&source));
+        assert_eq!(ir.call_declared_ret.get(&target), Some(&Ty::String));
+        assert!(!ir.call_declared_params.contains_key(&source));
+        assert_eq!(
+            ir.call_declared_params.get(&target).map(AsRef::as_ref),
+            Some([Ty::String].as_slice())
+        );
+        assert_eq!(ir.static_extension_receivers.remove(&target), Some(0));
+        assert!(!ir.static_extension_receivers.contains_key(&source));
+        assert_eq!(
+            ir.call_inline_modifiers.get(&target).map(AsRef::as_ref),
+            Some([Modifier::None, Modifier::Crossinline].as_slice())
+        );
+        assert!(!ir.call_inline_modifiers.contains_key(&source));
+        assert_eq!(
+            ir.value_class_unbox_type_operation_edges.remove(&target),
+            Some(unbox_receiver)
+        );
+        assert!(!ir
+            .value_class_unbox_type_operation_edges
+            .contains_key(&source));
+        assert!(!ir.starts_at_generated_operand(source));
+        assert!(ir.starts_at_generated_operand(target));
+        assert_eq!(ir.compiled_inline_call(source), None);
+        assert_eq!(ir.compiled_inline_call(target), Some(7));
+    }
+
+    #[test]
+    fn a_realized_member_target_moves_to_the_cloned_call() {
+        let mut ir = IrFile::default();
+        let source = ir.add_expr(IrExpr::Call {
+            callee: Box::new(krusty::ir::Callee::Local(3)),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        ir.record_realized_member_target(source, Some(3), None);
+
+        let target = clone_below_representation_wrapper(&mut ir, source);
+
+        assert_eq!(ir.jvm_member_targets.get(&source), None);
+        assert_eq!(ir.jvm_member_targets.get(&target), Some(&3));
+    }
+}

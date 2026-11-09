@@ -1,5 +1,8 @@
 use crate::fx_hash::HashMap;
 
+#[cfg(test)]
+mod constructor_capture_tests;
+
 use crate::fir::{
     FirBody, FirCapture, FirImplicitReceiverCapture, FirLocalCallableRef, FirStatementId,
     FirStatementKind, LocalCallableId,
@@ -271,7 +274,6 @@ impl BodyLowering<'_> {
             &lowered,
         )?;
         let declared = self.ir.functions[realization.function as usize].ret;
-        self.ir.call_declared_ret.insert(call, declared);
         Ok((call, declared))
     }
 
@@ -400,11 +402,16 @@ impl BodyLowering<'_> {
                     .ok_or_else(|| FirLoweringFailure::MissingLocalCallable(target.clone()))?,
             )
         };
-        Ok(self.ir.add_expr(IrExpr::Call {
+        let call = self.ir.add_expr(IrExpr::Call {
             callee: Box::new(callee),
             dispatch_receiver: None,
             args,
-        }))
+        });
+        // Ordinary calls and callable-reference adapters share this materializer. Both retain
+        // the lifted declaration's result before a checked use applies its own conversion.
+        let declared = self.ir.functions[realization.function as usize].ret;
+        self.ir.call_declared_ret.insert(call, declared);
+        Ok(call)
     }
 
     pub(super) fn checked_lambda(
@@ -1011,13 +1018,10 @@ impl BodyLowering<'_> {
         self.ir
             .set_method_visibility(function, crate::types::Visibility::Private);
         if let Some(vararg) = body.vararg_parameter() {
-            self.ir.fn_varargs.insert(
-                function,
-                crate::ir::IrVarargParameter {
-                    index: vararg.index as usize,
-                    is_last: vararg.is_last,
-                },
-            );
+            self.ir.declared_parameters_mut(function).vararg = Some(crate::ir::IrVarargParameter {
+                index: vararg.index as usize,
+                is_last: vararg.is_last,
+            });
         }
         if let Some((sequence, site)) = lifting_sequence(body, self.index).zip(body.lifting_site())
         {
@@ -1075,6 +1079,7 @@ impl BodyLowering<'_> {
         let parameter_identities = local_function_parameter_identities(
             self.body,
             &self.capture_slots,
+            self.ir,
             body,
             &crossinline,
         )?;
@@ -1089,12 +1094,12 @@ impl BodyLowering<'_> {
             .or_insert_with(|| crate::ir::FnParamInfo::identities(parameter_identities))
             .captured_receivers = captured_receivers;
         if let Some(line) = local_function_debug_line(body) {
-            self.ir.fn_decl_lines.insert(function, line);
+            self.ir.function_position_mut(function).decl_line = Some(line);
         }
         // A block-bodied local function falls off its closing brace, where kotlinc marks the
         // implicit `return` as it does for a declared one.
         if !body.has_implicit_return() && body.close_line() != 0 {
-            self.ir.fn_close_lines.insert(function, body.close_line());
+            self.ir.function_position_mut(function).close_line = Some(body.close_line());
         }
         if let Some(source_lambda) = body.source_lambda() {
             // An empty enclosing segment is the semantic class-initialization context. Do not put
@@ -1587,6 +1592,7 @@ fn local_function_parameters(body: &FirBody) -> Vec<Ty> {
 /// declared in `enclosing` is a parameter there or a variable; one declared further out reaches
 /// `body` through `enclosing`'s own capture slot, which already carries both facts.
 fn captured_declaration(
+    ir: &crate::ir::IrFile,
     enclosing: &FirBody,
     enclosing_slots: &HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
     capture: &crate::fir::FirCapture,
@@ -1624,10 +1630,37 @@ fn captured_declaration(
                 },
             }
         }
-        crate::fir::FirCaptureSource::ConstructorPrefix { .. } => CapturedDeclaration {
-            name: None,
-            declaration: crate::ir::IrCapturedDeclaration::Parameter,
-        },
+        crate::fir::FirCaptureSource::ConstructorPrefix { owner, field } => {
+            let class = ir
+                .checked_classifier_classes
+                .get(&owner)
+                .or_else(|| ir.checked_enum_entry_classes.get(&owner))
+                .copied()
+                .ok_or(FirLoweringFailure::MissingLocalClass(owner))?;
+            let class = &ir.classes[class as usize];
+            let argument = class
+                .ctor_args
+                .get(field as usize)
+                .filter(|_| field < class.constructor_prefix_count)
+                .ok_or(FirLoweringFailure::InvalidConstructorCapture { owner, field })?;
+            let receiver = argument.provenance == crate::ir::IrCtorParameterProvenance::Capture
+                && argument
+                    .capture
+                    .as_ref()
+                    .is_some_and(|capture| capture.receiver.is_some());
+            CapturedDeclaration {
+                name: None,
+                declaration: if receiver {
+                    crate::ir::IrCapturedDeclaration::ConstructorReceiver {
+                        owner,
+                        parameter: field,
+                    }
+                } else {
+                    // Value captures and other legacy prefix roles keep their existing identity.
+                    crate::ir::IrCapturedDeclaration::Parameter
+                },
+            }
+        }
     })
 }
 
@@ -1635,6 +1668,7 @@ fn captured_declaration(
 fn local_function_parameter_identities(
     enclosing: &FirBody,
     enclosing_slots: &HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
+    ir: &crate::ir::IrFile,
     body: &FirBody,
     crossinline: &[Option<u32>],
 ) -> Result<Vec<crate::ir::IrParameterIdentity>, FirLoweringFailure> {
@@ -1650,7 +1684,7 @@ fn local_function_parameter_identities(
         .iter()
         .enumerate()
         .map(|(ordinal, capture)| {
-            let declared = captured_declaration(enclosing, enclosing_slots, capture)?;
+            let declared = captured_declaration(ir, enclosing, enclosing_slots, capture)?;
             Ok(crate::ir::IrParameterIdentity::captured_value(
                 declared.name,
                 u32::try_from(ordinal).expect("too many captured parameters"),
@@ -1747,10 +1781,18 @@ fn local_function_debug_line(body: &FirBody) -> Option<u32> {
     if statement_line != 0 {
         return Some(statement_line);
     }
-    let crate::fir::FirStatementKind::Expression(expression) = &body.statement(root)?.kind else {
+    let crate::fir::FirStatementKind::Expression(mut expression) = body.statement(root)?.kind
+    else {
         return None;
     };
-    let source_line = body.expression_debug_lines(*expression).source;
+    // The conversion of the body's result to the callable's result type stands where the value
+    // it converts is yielded; the callable opens on the line of the body it converts.
+    while let Some(crate::fir::FirExprKind::ImplicitConversion { value, .. }) =
+        body.expr(expression).map(|expression| &expression.kind)
+    {
+        expression = *value;
+    }
+    let source_line = body.expression_debug_lines(expression).source;
     (source_line != 0).then_some(source_line)
 }
 

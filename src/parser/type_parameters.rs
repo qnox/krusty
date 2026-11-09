@@ -12,14 +12,14 @@ impl Parser<'_> {
     ) -> Vec<(String, TypeRef)> {
         let mut bounds = Vec::new();
         let save = self.i;
-        self.skip_newlines();
+        self.skip_semicolons();
         if !(self.at(TokenKind::Ident) && self.keyword_text("where")) {
             self.i = save;
             return bounds;
         }
         self.bump();
         loop {
-            self.skip_newlines();
+            self.skip_semicolons();
             let mut name = String::new();
             let name_span = self.tok().span;
             if self.at(TokenKind::Ident) {
@@ -80,14 +80,12 @@ impl Parser<'_> {
             return (names, non_null, reified, bounds, variances);
         }
         loop {
-            self.skip_plain_newlines();
             let parameter_start = self.tok().span.lo;
             let mut is_reified = false;
             let mut variance = crate::types::TypeVariance::Invariant;
             let mut annotations = Vec::new();
             let mut annotation_args = Vec::new();
             loop {
-                self.skip_plain_newlines();
                 if self.at(TokenKind::At) {
                     let (annotation, args) = self.parse_annotation();
                     if let Some(annotation) = annotation {
@@ -134,10 +132,8 @@ impl Parser<'_> {
                         });
                 }
             }
-            self.skip_plain_newlines();
             let mut inline_bound = None;
             if self.eat(TokenKind::Colon) {
-                self.skip_plain_newlines();
                 let bound = self.parse_type();
                 if bound.name == "Any" && !bound.nullable() && !name.is_empty() {
                     non_null.insert(name.clone());
@@ -155,7 +151,6 @@ impl Parser<'_> {
                 }
                 self.type_parameter_spans.push((name.clone(), span));
             }
-            self.skip_plain_newlines();
             if !self.eat(TokenKind::Comma) {
                 break;
             }

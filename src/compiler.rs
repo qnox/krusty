@@ -1,6 +1,8 @@
 //! Compiler orchestration.
 
+mod artifact_origin;
 mod backend_handoff;
+mod capture_storage;
 mod checked_body_observer;
 mod declaration_metadata;
 mod dependency_body_emission;
@@ -16,6 +18,7 @@ use crate::ast::File;
 pub use crate::backend::{Artifact, Backend, CheckedIrFile};
 use crate::diag::{DiagSink, Span};
 use crate::frontend::StreamingSourceSetAnalysis;
+pub use artifact_origin::ArtifactOrigin;
 pub(crate) use checked_body_observer::{
     CheckedBodyObserver, NoObserver, ObservedBody, ObservedModule, ObservedSource,
 };
@@ -59,6 +62,25 @@ pub fn emit_analyzed_to<B: Backend>(
     diags: &mut DiagSink,
     sink: &mut dyn FnMut(Artifact),
 ) {
+    emit_analyzed_with_origins_to(
+        analysis,
+        stems,
+        backend,
+        module_name,
+        diags,
+        &mut |_, artifact| sink(artifact),
+    );
+}
+
+/// [`emit_analyzed_to`], handing each artifact to `sink` with the input it was emitted for.
+pub fn emit_analyzed_with_origins_to<B: Backend>(
+    analysis: impl Into<StreamingSourceSetAnalysis>,
+    stems: &[String],
+    backend: &B,
+    module_name: &str,
+    diags: &mut DiagSink,
+    sink: &mut dyn FnMut(ArtifactOrigin, Artifact),
+) {
     let mut state = B::State::default();
     let mut dependency_support = dependency_body_emission::DependencySupportState::default();
     emit_analyzed_into(
@@ -82,8 +104,15 @@ pub fn emit_analyzed_to<B: Backend>(
         backend
             .finalize(state, module_name)
             .into_iter()
-            .for_each(sink);
+            .for_each(|artifact| sink(ArtifactOrigin::Module, artifact));
     }
+}
+
+/// Only the successful complete-source path below creates this handoff value. Header-only or
+/// manually unfinished IR cannot enter the storage-retirement handoff API.
+struct CompletedSourceIr {
+    local_storage_owners: crate::fx_hash::HashSet<crate::ir::ClassId>,
+    ir: crate::ir::IrFile,
 }
 
 /// What a caller of [`emit_analyzed_into`] sees of Pass 2.
@@ -93,8 +122,9 @@ struct PassTwoHooks<'a> {
     before_target: &'a mut dyn FnMut(&mut CheckedIrFile<'_>, &mut DiagSink),
     /// Sees each checked body before common lowering consumes it.
     checked_bodies: &'a mut dyn CheckedBodyObserver,
-    /// Receives each source file's target artifacts once that file is emitted.
-    artifacts: &'a mut dyn FnMut(Artifact),
+    /// Receives each source file's target artifacts once that file is emitted, with the input
+    /// each belongs to.
+    artifacts: &'a mut dyn FnMut(ArtifactOrigin, Artifact),
 }
 
 /// Lower one separately analyzed source module into an existing backend state. Backend
@@ -414,7 +444,10 @@ fn emit_analyzed_into<B: Backend>(
             continue;
         }
         let Some(mut file) = backend_handoff::checked_ir_file(
-            ir,
+            CompletedSourceIr {
+                local_storage_owners: capture_storage::source_owners(&ir, &index, source_id),
+                ir,
+            },
             source_id,
             &backend_module_facts,
             &symbols,
@@ -442,14 +475,21 @@ fn emit_analyzed_into<B: Backend>(
             diags,
         )
         .into_iter()
-        .for_each(&mut *artifacts);
+        .for_each(|artifact| {
+            artifacts(
+                ArtifactOrigin::DependencySupport {
+                    requested_by: raw_source,
+                },
+                artifact,
+            )
+        });
         if diags.has_errors() {
             continue;
         }
         backend
             .lower_ir_file(file, state, diags)
             .into_iter()
-            .for_each(&mut *artifacts);
+            .for_each(|artifact| artifacts(ArtifactOrigin::Source(raw_source), artifact));
     }
     assert!(
         default_arguments.is_empty(),
@@ -522,7 +562,7 @@ pub(crate) fn lower_analyzed_observing(
         PassTwoHooks {
             before_target: &mut |_, _| {},
             checked_bodies: observer,
-            artifacts: &mut |_| {
+            artifacts: &mut |_, _| {
                 panic!("lowering without a target must not produce target artifacts")
             },
         },

@@ -268,8 +268,10 @@ pub(super) fn expected_type_rejects_null(expected: Ty) -> bool {
             | TyKind::InProjection(_)
             | TyKind::OutProjection(_)
             | TyKind::StarProjection(_) => return false,
-            TyKind::TyParam(name, bound) if seen.insert(name) => current = bound,
-            TyKind::TyParam(..) => return false,
+            TyKind::TyParam(name, bound) | TyKind::Var(name, bound) if seen.insert(name) => {
+                current = bound
+            }
+            TyKind::TyParam(..) | TyKind::Var(..) => return false,
             _ => return !current.admits_null(),
         }
     }

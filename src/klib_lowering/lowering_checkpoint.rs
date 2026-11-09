@@ -8,6 +8,7 @@ pub(super) struct LoweringCheckpoint {
     expressions: usize,
     functions: usize,
     classes: usize,
+    class_self_types: crate::fx_hash::HashSet<crate::types::TypeName>,
 }
 
 impl LoweringCheckpoint {
@@ -16,6 +17,7 @@ impl LoweringCheckpoint {
             expressions: ir.exprs.len(),
             functions: ir.functions.len(),
             classes: ir.classes.len(),
+            class_self_types: ir.declared_class_self_type_owners(),
         }
     }
 
@@ -35,14 +37,25 @@ impl LoweringCheckpoint {
         ir.short_circuits
             .retain(|expression, _| *expression < first);
         ir.written_casts.retain(|expression| *expression < first);
+        ir.construction_targets
+            .retain(|expression, _| *expression < first);
         ir.whens
             .exhaustive
             .retain(|expression, _| *expression < first);
         ir.external_singleton_dispatches
             .retain(|expression, _| *expression < first);
         let first = FunId::try_from(self.functions).expect("a function id fits u32");
+        let removed = ir.classes[self.classes..]
+            .iter()
+            .map(|class| class.fq_name_id())
+            .collect::<Vec<_>>();
         ir.functions.truncate(self.functions);
         ir.classes.truncate(self.classes);
+        for class in removed {
+            ir.function_overrides.remove(&class);
+            ir.property_overrides.remove(&class);
+        }
+        ir.restore_declared_class_self_type_owners(&self.class_self_types);
         ir.class_method_owners
             .retain(|function, _| *function < first);
         ir.fn_source_names.retain(|function, _| *function < first);
@@ -53,7 +66,7 @@ impl LoweringCheckpoint {
             .retain(|function, _| *function < first);
         ir.extension_receiver_fns
             .retain(|function| *function < first);
-        ir.fn_context_counts.retain(|function, _| *function < first);
+        ir.truncate_declared_parameters(first);
         ir.singleton_extension_unread_receivers
             .retain(|function, _| *function < first);
         first

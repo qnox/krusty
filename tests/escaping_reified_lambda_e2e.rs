@@ -811,3 +811,135 @@ fun box(): String {\n\
     );
     let _ = std::fs::remove_dir_all(library);
 }
+
+/// What every default-stub fixture below declares: an inline function, in its own file, that
+/// returns an escaping lambda checking the call's reified type argument.
+const DEFAULT_STUB_CHECKS: &str = r#"
+interface Item
+class Token : Item
+class Other : Item
+
+inline fun <reified T : Item> lambdaCheck(): (Item) -> Boolean = { it is T }
+
+fun checked(lambda: (Item) -> Boolean): String {
+    if (!lambda(Token())) return "lambda rejects Token"
+    if (lambda(Other())) return "lambda accepts Other"
+    return "OK"
+}
+"#;
+
+const TOP_LEVEL_DEFAULT_STUB: &str = r#"
+fun withDefault(lambda: (Item) -> Boolean = lambdaCheck<Token>()) = checked(lambda)
+
+fun box(): String = withDefault()
+"#;
+
+const MEMBER_DEFAULT_STUB: &str = r#"
+class DefaultHost {
+    fun withDefault(lambda: (Item) -> Boolean = lambdaCheck<Token>()) = checked(lambda)
+}
+
+fun box(): String = DefaultHost().withDefault()
+"#;
+
+const CONSTRUCTOR_DEFAULT_STUB: &str = r#"
+class DefaultConstructorHost(val lambda: (Item) -> Boolean = lambdaCheck<Token>())
+
+fun box(): String = checked(DefaultConstructorHost().lambda)
+"#;
+
+/// The module a default-stub fixture compiles: the shared checks and the stub's caller.
+fn default_stub_module(caller: &str) -> [(&str, &str); 2] {
+    [("Checks.kt", DEFAULT_STUB_CHECKS), ("Caller.kt", caller)]
+}
+
+/// Every class of the module is kotlinc's, byte for byte: the lambda the stub regenerates is
+/// numbered under the stub, carries kotlinc's `EnclosingMethod` owner, method and descriptor, and
+/// its public ABI.
+fn assert_default_stub_module_like_kotlinc(caller: &str) {
+    let classes = common::classes_against_kotlinc_module(&default_stub_module(caller));
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+/// kotlinc's program returns `OK`, then krusty's does.
+fn assert_default_stub_runs_like_kotlinc(caller: &str) {
+    let sources = default_stub_module(caller);
+    assert_eq!(
+        common::kotlinc_box_files_result(&sources, "CallerKt"),
+        "OK",
+        "kotlinc's CallerKt"
+    );
+    common::expect_box_ok_files_with_stdlib(&sources, "CallerKt");
+}
+
+#[test]
+fn a_top_level_default_stub_regenerates_its_escaping_reified_lambda_like_kotlinc() {
+    assert_default_stub_module_like_kotlinc(TOP_LEVEL_DEFAULT_STUB);
+}
+
+#[test]
+fn a_top_level_default_stub_runs_its_escaping_reified_lambda_like_kotlinc() {
+    assert_default_stub_runs_like_kotlinc(TOP_LEVEL_DEFAULT_STUB);
+}
+
+#[test]
+fn a_member_default_stub_regenerates_its_escaping_reified_lambda_like_kotlinc() {
+    assert_default_stub_module_like_kotlinc(MEMBER_DEFAULT_STUB);
+}
+
+#[test]
+fn a_member_default_stub_runs_its_escaping_reified_lambda_like_kotlinc() {
+    assert_default_stub_runs_like_kotlinc(MEMBER_DEFAULT_STUB);
+}
+
+#[test]
+fn a_constructor_default_stub_regenerates_its_escaping_reified_lambda_like_kotlinc() {
+    assert_default_stub_module_like_kotlinc(CONSTRUCTOR_DEFAULT_STUB);
+}
+
+#[test]
+fn a_constructor_default_stub_runs_its_escaping_reified_lambda_like_kotlinc() {
+    assert_default_stub_runs_like_kotlinc(CONSTRUCTOR_DEFAULT_STUB);
+}
+
+/// One reified inline function creates both an escaping lambda and an escaping object that check
+/// the call's type argument. The expansion copies the object for the binding; the lambda's copy
+/// still checks the bound type.
+const REIFIED_LAMBDA_BESIDE_OBJECT: &str =
+    include_str!("box_regressions/reifiedLambdaBesideObject.kt");
+
+/// The call-site lambda beside the object is kotlinc's: every member, instruction, table and
+/// attribute agrees, so it tests `Token` with no reification marker left. Its constant pool is
+/// ordered as the IR expansion writes it while the callee's anonymous object keeps this call off
+/// the compiled-body route.
+#[test]
+fn a_reified_lambda_beside_a_reified_object_is_specialized_like_kotlinc() {
+    let classes = common::classes_against_kotlinc_module(&[(
+        "ReifiedBesideObject.kt",
+        REIFIED_LAMBDA_BESIDE_OBJECT,
+    )]);
+    let lambda = "ReifiedBesideObjectKt$caller$$inlined$checks$1";
+    assert!(
+        classes.reference.contains_key(lambda),
+        "kotlinc writes {lambda}"
+    );
+    assert!(
+        classes.krusty.contains_key(lambda),
+        "krusty writes {lambda}"
+    );
+    let (reference, krusty) = classes.class_listing(lambda);
+    assert_eq!(krusty, reference);
+}
+
+/// kotlinc's program returns `OK`, then krusty's does: the lambda accepts only `Token`.
+#[test]
+fn a_reified_lambda_beside_a_reified_object_runs_like_kotlinc() {
+    let sources = [("ReifiedBesideObject.kt", REIFIED_LAMBDA_BESIDE_OBJECT)];
+    assert_eq!(
+        common::kotlinc_box_files_result(&sources, "ReifiedBesideObjectKt"),
+        "OK",
+        "kotlinc's ReifiedBesideObjectKt"
+    );
+    common::expect_box_ok_files_with_stdlib(&sources, "ReifiedBesideObjectKt");
+}
