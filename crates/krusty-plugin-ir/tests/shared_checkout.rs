@@ -65,7 +65,7 @@ impl Checkouts {
 
     fn write_root_build(&self, name: &str, diagnostics: bool) -> PathBuf {
         let root = self.0.join(name);
-        fs::create_dir_all(root.join("src/native/runtime")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
         fs::create_dir(root.join(".cargo")).unwrap();
         fs::write(
             root.join(".cargo/config.toml"),
@@ -80,7 +80,7 @@ impl Checkouts {
         )
         .unwrap();
         let script = include_str!("../../../build.rs");
-        let diagnostic_build = "generate_diagnostic_names().and_then(|()| prebuild_runtime())";
+        let diagnostic_build = "if let Err(error) = generate_diagnostic_names() {";
         assert_eq!(script.matches(diagnostic_build).count(), 1);
         fs::write(
             root.join("build.rs"),
@@ -88,26 +88,13 @@ impl Checkouts {
                 script.to_string()
             } else {
                 // The older checkout predates diagnostic generation in the build entry point.
-                script.replace(diagnostic_build, "prebuild_runtime()")
+                script.replace(
+                    diagnostic_build,
+                    "if let Err(error) = Ok::<(), String>(()) {",
+                )
             },
         )
         .unwrap();
-        fs::write(
-            root.join("src/native/target_contract.rs"),
-            include_str!("../../../src/native/target_contract.rs"),
-        )
-        .unwrap();
-        let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/native/runtime");
-        for entry in fs::read_dir(runtime).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_file() {
-                fs::copy(
-                    entry.path(),
-                    root.join("src/native/runtime").join(entry.file_name()),
-                )
-                .unwrap();
-            }
-        }
         if diagnostics {
             fs::create_dir_all(root.join("src/diag/releases")).unwrap();
             fs::write(

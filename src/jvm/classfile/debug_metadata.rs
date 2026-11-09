@@ -6,7 +6,7 @@ use crate::jvm::bytecode_passes::coroutines::DebugMetadata;
 
 impl ClassWriter {
     /// Add the runtime-visible `DebugMetadata` annotation for a suspend continuation.
-    pub(crate) fn set_debug_metadata(&mut self, metadata: &DebugMetadata) {
+    pub fn set_debug_metadata(&mut self, metadata: &DebugMetadata) {
         let body = self.debug_metadata_annotation(metadata);
         self.runtime_annotations.push(body);
     }

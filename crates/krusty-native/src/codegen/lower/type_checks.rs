@@ -1,0 +1,1067 @@
+//! The type questions every lowering asks: which runtime descriptor a type names, `is` and `as`,
+//! the null check, and the objects the RUNTIME constructs — the throwables it provides and its
+//! `StringBuilder`.
+//!
+//! None of these needs a class of this file. A type written at a check or a cast names a
+//! descriptor, and the ones the runtime defines — the value types' boxes, `String`, the throwable
+//! hierarchy — are there whether or not the program declares anything. A class of the program
+//! answers the same questions through the descriptor its own emission defines; see
+//! `super::objects`.
+
+use super::*;
+use krusty::ir::TypeCheckRole;
+use krusty::types::TyKind;
+use krusty::types::TypeName;
+
+/// What an `is` against a type Kotlin settles by itself answers.
+#[derive(Clone, Copy)]
+enum Settled {
+    /// True of every value.
+    Always,
+    /// True of no value.
+    Never,
+    /// True of `null` only.
+    Null,
+    /// True of everything but `null`.
+    NotNull,
+}
+
+/// Which of Kotlin's four `Throwable` constructors a site wrote, with the operands it gave.
+///
+/// The two one-argument forms are told apart by the parameter TYPE — a `Throwable` is a cause and
+/// anything else is a message — and they are not one case with an empty field, because
+/// `Throwable(cause)` fills the MESSAGE from the cause as well.
+pub(super) enum ThrowableOperands {
+    /// `Throwable()` and `Throwable(message)`; the no-argument form carries a `null`.
+    Message(Value),
+    /// `Throwable(cause)`, whose message the runtime renders from the cause.
+    Cause(Value),
+    /// `Throwable(message, cause)`.
+    MessageAndCause { message: Value, cause: Value },
+}
+
+/// Whether the runtime, not this file, constructs `internal`.
+pub(super) fn is_runtime_constructed(file: &FileLowering<'_>, internal: TypeName) -> bool {
+    super::super::super::intrinsics::throwable_descriptor(internal).is_some()
+        || super::classifier_shapes::is_string_builder(internal)
+        || super::classifier_shapes::is_pair(internal)
+        || file.standard_collection_implementation(internal).is_some()
+}
+
+/// A type's spelling for a diagnostic: the class name when it has one, else the debug form.
+pub(super) fn type_name_of(ty: Ty) -> String {
+    match ty.non_null().obj_internal() {
+        Some(internal) => internal.render().replace('/', "."),
+        None => format!("{ty:?}"),
+    }
+}
+
+impl<'a> FileLowering<'a> {
+    /// A descriptor the runtime defines, declared as an import on first use.
+    pub(super) fn import_data(&mut self, symbol: &str) -> Result<DataId, Unsupported> {
+        if let Some(id) = self.data_imports.get(symbol) {
+            return Ok(*id);
+        }
+        let id = self
+            .module
+            .declare_data(symbol, Linkage::Import, false, false)
+            .map_err(|error| format!("importing `{symbol}` ({error})"))?;
+        self.data_imports.insert(symbol.to_string(), id);
+        Ok(id)
+    }
+
+    /// The descriptor of class `class`. A named source class's is the module symbol every other
+    /// file of the module names it by; a local, anonymous or dependency-support class's is this
+    /// object's own.
+    pub(super) fn declare_descriptor(
+        &mut self,
+        class: ClassId,
+        base: &str,
+    ) -> Result<DataId, Unsupported> {
+        let named = self.unit_kind == krusty::backend::CheckedIrUnitKind::Source
+            && !self.ir.local_class_name_provenance.contains_key(&class);
+        if !named {
+            return self.declare_local_data(&format!("kt_type_{base}"), false);
+        }
+        let symbol = super::super::super::symbols::module_descriptor_symbol(
+            self.module_name,
+            self.ir.classes[class as usize].fq_name_id(),
+        );
+        self.module
+            .declare_data(&symbol, Linkage::Hidden, false, false)
+            .map_err(|error| declined!("declaring `{symbol}` ({error})"))
+    }
+
+    /// The runtime descriptor for a represented type: a class of this file or of another file of
+    /// the module, or a built-in.
+    pub(super) fn type_descriptor(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
+        let target = ty.non_null();
+        if let Some(class) = target
+            .obj_internal()
+            .and_then(|name| self.ir.class_id_by_name(name))
+        {
+            return Ok(Some(self.classes[class as usize].descriptor));
+        }
+        // A named class another file of the module declares: that file defines its descriptor
+        // under the module symbol.
+        if let Some(name) = target.obj_internal() {
+            if self
+                .classifiers
+                .classifier(name)
+                .is_some_and(|fact| fact.source)
+            {
+                let symbol =
+                    super::super::super::symbols::module_descriptor_symbol(self.module_name, name);
+                return self.import_data(&symbol).map(Some);
+            }
+        }
+        let symbol = match target {
+            Ty::String => "kt_type_string",
+            Ty::Boolean => "kt_type_boolean",
+            Ty::Byte => "kt_type_byte",
+            Ty::Short => "kt_type_short",
+            Ty::Int => "kt_type_int",
+            Ty::Long => "kt_type_long",
+            Ty::Char => "kt_type_char",
+            Ty::Float => "kt_type_float",
+            Ty::Double => "kt_type_double",
+            Ty::Unit => "kt_type_unit",
+            // The four unsigned types. Each is a descriptor of its own precisely so that an `is`
+            // against it can answer, and so that `1u as? Int` cannot.
+            Ty::UByte => "kt_type_ubyte",
+            Ty::UShort => "kt_type_ushort",
+            Ty::UInt => "kt_type_uint",
+            Ty::ULong => "kt_type_ulong",
+            // Kotlin's two built-in supertypes of the value types. Neither has instances of its
+            // own, so each is a descriptor the boxes point at — which is why naming one here is
+            // enough for `is` and needs nothing at the site.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_number) =>
+            {
+                "kt_type_number"
+            }
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_comparable) =>
+            {
+                "kt_type_comparable"
+            }
+            // `CharSequence` is a third of the same kind: no instances of its own, and both the
+            // string and the builder point at it.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_char_sequence) =>
+            {
+                "kt_type_char_sequence"
+            }
+            // `EnumEntries` is sealed, so the runtime's `EnumEntriesList` is every instance there
+            // is, and it names this descriptor among its interfaces.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_enum_entries) =>
+            {
+                "kt_type_enum_entries_interface"
+            }
+            // `Unit` reaches a type check spelled as the object it is rather than as the carrier
+            // `Ty::Unit` names, and it is one type either way.
+            _ if target
+                .obj_internal()
+                .is_some_and(|name| name == krusty::types::wk::unit()) =>
+            {
+                "kt_type_unit"
+            }
+            // An array is not a class this file declares, so there is no class id to look one up
+            // by — but it is a type the RUNTIME names, and the descriptor an allocation already
+            // stamps on it is the one a check has to ask about. What that descriptor separates is
+            // the element WIDTH, which is Kotlin's own erasure: `Array<String>` and `Array<Foo>`
+            // are one type here, and `IntArray` is neither of them. An element the runtime lays
+            // out no array for has no descriptor to name, which is what the `None` says.
+            _ if target.is_array() => match super::arrays::array_type(target) {
+                Ok((symbol, _)) => symbol,
+                Err(_) => return Ok(None),
+            },
+            // The `Throwable` hierarchy. Like the built-in supertypes above these are the
+            // RUNTIME's classes, declared in no file, so there is no class id to find one by —
+            // and a `catch` clause is a type check against exactly these, which is what made the
+            // omission visible: everything else that asks a type question here asks it of a class
+            // the program wrote or of a value type.
+            _ if target
+                .obj_internal()
+                .and_then(super::super::super::intrinsics::throwable_descriptor)
+                .is_some() =>
+            {
+                target
+                    .obj_internal()
+                    .and_then(super::super::super::intrinsics::throwable_descriptor)
+                    .expect("just matched")
+            }
+            // A FUNCTION TYPE. The object is of a type of its own — one per lambda and per
+            // callable reference — so what a check asks about is the marker every such descriptor
+            // names, and the arity is what separates one from another.
+            _ if target
+                .obj_internal()
+                .and_then(|internal| self.function_type_descriptor(internal))
+                .is_some() =>
+            {
+                target
+                    .obj_internal()
+                    .and_then(|internal| self.function_type_descriptor(internal))
+                    .expect("just matched")
+            }
+            // A read-only collection interface (`List`, `Collection`, `Iterable`, ...). The
+            // runtime's collections are of kinds a check names none of, so each wears the
+            // interface's marker, as a class of the program implementing it does (its descriptor
+            // flattens the markers of its dependency interfaces), and that is what this compares
+            // against.
+            _ if target
+                .obj_internal()
+                .and_then(|internal| self.collection_check_descriptor(internal))
+                .is_some() =>
+            {
+                target
+                    .obj_internal()
+                    .and_then(|internal| self.collection_check_descriptor(internal))
+                    .expect("just matched")
+            }
+            // One of Kotlin's REFLECTION types, asked about the same way a function type is: the
+            // reference object's own type is one of a kind, so the markers are what it shares with
+            // the type written at the site.
+            _ if target
+                .obj_internal()
+                .and_then(super::super::super::intrinsics::reflection_type_descriptor)
+                .is_some() =>
+            {
+                target
+                    .obj_internal()
+                    .and_then(super::super::super::intrinsics::reflection_type_descriptor)
+                    .expect("just matched")
+            }
+            _ => return Ok(None),
+        };
+        self.import_data(symbol).map(Some)
+    }
+}
+
+impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
+    /// Fail loudly on a null receiver, as the runtime's `kt_dispatch` did: a member access on
+    /// `null` is a checked failure, never a load from address zero.
+    pub(super) fn null_check(&mut self, receiver: Value) -> Result<(), Unsupported> {
+        let is_null = self.is_null(receiver);
+        let fail = self.builder.create_block();
+        let proceed = self.builder.create_block();
+        self.builder.ins().brif(is_null, fail, &[], proceed, &[]);
+        self.continue_in(fail);
+        self.runtime_call("kt_null_receiver", &[], Ty::Unit, &[])?;
+        self.builder.ins().trap(TrapCode::unwrap_user(2));
+        self.continue_in(proceed);
+        Ok(())
+    }
+
+    /// The receiver of a member access, evaluated to a reference.
+    pub(super) fn receiver(&mut self, receiver: u32) -> Result<Option<Value>, Unsupported> {
+        let value = self.reference(receiver)?;
+        Ok((!self.terminated).then_some(value))
+    }
+
+    /// Realize `x!!`: evaluate the receiver once, reject `null`, and otherwise pass its value
+    /// through. A nullable primitive is unboxed after the check.
+    ///
+    /// An asserted nullable substitution of an erased generic number is one boundary, not a
+    /// stored wrapper followed by an assertion. It consumes the physical reference before the
+    /// declaration coercion can check it as that wrapper; after the null check Kotlin reads it
+    /// through `Number.toX`.
+    pub(super) fn not_null_assert(&mut self, operand: u32) -> Result<Option<Value>, Unsupported> {
+        let ty = self.physical_type(operand);
+        let (value, primitive) = match self.asserted_declaration_number(operand) {
+            Some((produced, primitive)) => (self.reference(produced)?, Some(primitive)),
+            None => match ty {
+                // Preserve the expression's representation across `!!`. In particular, a value
+                // class over a reference carrier is already a nullable pointer, but coercing it
+                // to `Any` here would allocate its value-class box and hand that box to a
+                // consumer which still expects the underlying carrier.
+                Some(_) => {
+                    let Some(value) = self.expression(operand)? else {
+                        return Ok(None);
+                    };
+                    (value, None)
+                }
+                None => (self.reference(operand)?, None),
+            },
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        // The erased generic-number boundary above is always a reference. Every other reference
+        // carrier can be null and is checked in place; a scalar cannot represent null, so `!!`
+        // is only the identity operation for it.
+        let checked = if primitive.is_some() || ty.is_none_or(|ty| self.carrier(ty) == Carrier::Ref)
+        {
+            self.runtime_call("kt_not_null", &[any()], any(), &[value])?
+                .expect("`kt_not_null` returns its argument")
+        } else {
+            value
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        if let Some(primitive) = primitive {
+            return self.number_result(checked, primitive);
+        }
+        // `!!` changes the semantic occurrence from nullable to non-null even when both happen to
+        // use a reference carrier. That distinction matters for value classes: `Outer?` may be a
+        // box because its underlying value already admits null, while `Outer` is the underlying
+        // reference itself. Convert between the two semantic types rather than comparing only
+        // their machine carriers.
+        match ty {
+            Some(source) => self.convert(checked, Some(source), source.non_null()),
+            None => Ok(Some(checked)),
+        }
+    }
+
+    /// The descriptor a CAST to `ty` must be checked against, or `None` when the cast is a
+    /// representation change rather than a question about an object.
+    ///
+    /// Anything the target holds as a REFERENCE and the runtime names is a question about an
+    /// object, so `as` and `as?` ask it exactly as `is` does — a class of this file, an array, a
+    /// `String`. A SCALAR target is excluded although
+    /// [`FileLowering::type_descriptor`] names one for it: `x as Int` is an unboxing, whose whole
+    /// realization is the coercion the caller falls through to, and routing it through `kt_cast`
+    /// would hand back the box where the site expects the number.
+    fn checked_cast_target(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
+        // A cast to a type PARAMETER is a cast to its bound, which is the only thing left of it at
+        // run time and exactly what kotlinc checks: `fun <T : CharSequence> f(x: Any?) = x as T`
+        // rejects a non-`CharSequence` inside `f`, before the call site's own cast to the argument
+        // it was given. An unbounded parameter bounds at `Any?`, where there is nothing to check.
+        let ty = match ty.non_null().kind() {
+            TyKind::TyParam(_, bound) => bound,
+            _ => ty,
+        };
+        let target = ty.non_null();
+        if let Some(class) = target
+            .obj_internal()
+            .and_then(|name| self.file.ir.class_id_by_name(name))
+        {
+            return Ok(Some(self.file.classes[class as usize].descriptor));
+        }
+        if self.carrier(target) != Carrier::Ref {
+            return Ok(None);
+        }
+        self.file.type_descriptor(target)
+    }
+
+    /// The descriptor an `is`/`!is` operation asks the runtime about.
+    ///
+    /// A checked function type names its semantic arity marker. Keep that substitution at the
+    /// instance-test boundary: casts and ordinary representation queries retain their nominal or
+    /// erased representation path, since values such as property references and user classes are
+    /// callable without necessarily wearing the native FunctionN runtime marker.
+    fn instance_check_descriptor(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
+        match self.file.ir.type_check_role(ty.non_null()) {
+            Some(role @ TypeCheckRole::FunctionOfArity(_))
+            | Some(role @ TypeCheckRole::SuspendFunctionOfArity(_)) => {
+                let Some(symbol) = super::classifier_shapes::function_check_descriptor(role) else {
+                    return Ok(None);
+                };
+                self.file.import_data(symbol).map(Some)
+            }
+            Some(TypeCheckRole::MutableCollection(_)) | None => self.file.type_descriptor(ty),
+        }
+    }
+
+    /// The `is` checks Kotlin settles by the type alone — `Nothing`, which has no instances, and
+    /// `Any`, which every non-`null` value is one of — and `None` when the question really is
+    /// about the object.
+    fn settled_by_language(type_operand: Ty) -> Option<Settled> {
+        let target = type_operand.non_null();
+        let nullable = type_operand.is_nullable();
+        let any = target
+            .obj_internal()
+            .is_some_and(super::super::super::intrinsics::is_any);
+        let settled = match (target, any) {
+            // `x is Nothing` is false; `x is Nothing?` admits only `null`.
+            (Ty::Nothing, _) => Settled::Null,
+            // `x is Any` is "not null"; `x is Any?` is true of everything.
+            (_, true) if nullable => Settled::Always,
+            (_, true) => Settled::NotNull,
+            _ => return None,
+        };
+        Some(match (settled, nullable) {
+            (Settled::Null, false) => Settled::Never,
+            (other, _) => other,
+        })
+    }
+
+    /// A check [`Self::settled_by_language`] answered. The receiver is evaluated either way: the
+    /// constant is the answer, not the expression, and a receiver may have effects.
+    fn language_instance_check(
+        &mut self,
+        op: IrTypeOp,
+        arg: u32,
+        settled: Settled,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(object) = self.receiver(arg)? else {
+            return Ok(None);
+        };
+        let mut answer = match settled {
+            Settled::Always => self.builder.ins().iconst(types::I8, 1),
+            Settled::Never => self.builder.ins().iconst(types::I8, 0),
+            Settled::Null => self.is_null(object),
+            Settled::NotNull => {
+                let is_null = self.is_null(object);
+                let one = self.builder.ins().iconst(types::I8, 1);
+                self.builder.ins().bxor(is_null, one)
+            }
+        };
+        if op == IrTypeOp::NotInstanceOf {
+            let one = self.builder.ins().iconst(types::I8, 1);
+            answer = self.builder.ins().bxor(answer, one);
+        }
+        Ok(Some(answer))
+    }
+
+    /// The object a runtime cast let through, as the site's `target` carries it.
+    fn checked_object(
+        &mut self,
+        checked: Option<Value>,
+        target: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        match checked {
+            Some(object) if !self.terminated => {
+                self.convert(object, Some(Ty::nullable(any())), target)
+            }
+            other => Ok(other),
+        }
+    }
+
+    /// `is`, `as`, `as?` and the coercions the frontend inserts.
+    pub(super) fn type_operation(
+        &mut self,
+        op: IrTypeOp,
+        arg: u32,
+        type_operand: Ty,
+        declaration_result: bool,
+    ) -> Result<Option<Value>, Unsupported> {
+        // This exact coercion was placed between a call's declared result and the substitution
+        // selected at the call site. A bare type parameter physically returns a reference, but
+        // the operation that reads it depends on the selected result. Kotlin discards a `Unit`
+        // result, reads a non-null number through `Number.toX`, and checks every other concrete
+        // result against its own runtime type before adapting the representation. A nullable
+        // primitive remains in that last group: storing `f<T>()` into `Int?` checks the `Integer`
+        // wrapper rather than accepting an arbitrary `Number`.
+        //
+        // The common-IR marker is the authority: an ordinary implicit coercion is still only a
+        // representation change and must not acquire any of these declaration-boundary semantics.
+        if declaration_result
+            && op == IrTypeOp::ImplicitCoercion
+            && self
+                .declared_call_result(arg)
+                .is_some_and(|declared| declared.non_null().is_ty_param())
+        {
+            if type_operand == Ty::Unit {
+                return self.coerce(arg, type_operand);
+            }
+            if !type_operand.is_nullable() && type_operand.is_numeric() {
+                let Some(value) = self.receiver(arg)? else {
+                    return Ok(None);
+                };
+                return self.number_result(value, type_operand);
+            }
+            return self.type_operation(IrTypeOp::Cast, arg, type_operand, false);
+        }
+        match op {
+            IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => {
+                // Two of Kotlin's types answer without asking the object anything, because their
+                // membership is settled by the language rather than by a descriptor. `Nothing` has
+                // no instances at all, and everything that is not `null` is an `Any`. The
+                // nullability of the operand carries the rest: `is Nothing?` is exactly `== null`,
+                // and `is Any?` is true of everything. The receiver is still evaluated — the
+                // constant is the answer, not the expression.
+                if let Some(settled) = Self::settled_by_language(type_operand) {
+                    return self.language_instance_check(op, arg, settled);
+                }
+                let Some(descriptor) = self.instance_check_descriptor(type_operand)? else {
+                    return Err(declined!(
+                        "an `is` check against `{}`",
+                        type_name_of(type_operand)
+                    ));
+                };
+                // A SCALAR operand is asked the same way, through its box. Kotlin has no subtyping
+                // among the primitive types, so the answer is settled statically — but `5 is
+                // Number` and `1u is Comparable<*>` are true, and each primitive's box carries the
+                // descriptor that says so (an unsigned one its own, which is what makes `1u is
+                // Int` false). Boxing and asking is therefore both correct and the only rule
+                // needed, where a static answer would need the hierarchy this generator lacks.
+                let Some(object) = self.receiver(arg)? else {
+                    return Ok(None);
+                };
+                let descriptor = self.data_address(descriptor);
+                let mut result = self
+                    .runtime_call(
+                        "kt_is_instance",
+                        &[any(), any()],
+                        Ty::Boolean,
+                        &[object, descriptor],
+                    )?
+                    .expect("`kt_is_instance` returns a Boolean");
+                if type_operand.is_nullable() {
+                    // `x is T?` admits `null`; `kt_is_instance(null, …)` is false, so `or` it in.
+                    let is_null = self.is_null(object);
+                    result = self.builder.ins().bor(result, is_null);
+                }
+                if op == IrTypeOp::NotInstanceOf {
+                    let one = self.builder.ins().iconst(types::I8, 1);
+                    result = self.builder.ins().bxor(result, one);
+                }
+                Ok(Some(result))
+            }
+            // A cast to something WEARING a descriptor is a question the runtime answers; a cast
+            // to anything else is a representation change, and the coercion is its whole
+            // realization.
+            IrTypeOp::Cast | IrTypeOp::CastNonNull => {
+                // A cast whose TARGET is a primitive but whose SOURCE is a reference is still a
+                // question about the object: `(1 as Any) as Byte` is a `ClassCastException` in
+                // Kotlin, because a boxed `Int` is not a `Byte` — the widths are convertible and
+                // the TYPES are not. Unboxing first and converting would answer `1` to a program
+                // Kotlin refuses, so the descriptor is asked before anything is read out. It is
+                // the same `kt_cast`, against the value type's own descriptor, which is exactly
+                // what those descriptors exist for.
+                let target = type_operand.non_null();
+                // A cast whose TARGET is a primitive is still a question about the object whenever
+                // the source is not already that same primitive. Two sources reach here:
+                //
+                //  - a reference: `(1 as Any) as Byte`, plainly an object question;
+                //  - a DIFFERENT primitive: `it as Byte` where `it` is an erased type parameter
+                //    the call substituted to `Int`. Kotlin has no cast between two primitive types
+                //    — `val x: Int = 1; x as Byte` does not compile — so a scalar-to-other-scalar
+                //    cast can only have come from erasure, and the question it is really asking is
+                //    the one the value's own box would answer.
+                //
+                // Unboxing first and converting would answer `1` to a program Kotlin refuses with
+                // a ClassCastException, so the descriptor is asked before anything is read out.
+                let source_carrier = self.physical_type(arg).map(|ty| self.carrier(ty));
+                if self.carrier(target) != Carrier::Ref
+                    && source_carrier.is_none_or(|source| source != self.carrier(target))
+                {
+                    let Some(descriptor) = self.file.type_descriptor(target)? else {
+                        return self.coerce(arg, type_operand);
+                    };
+                    let Some(object) = self.receiver(arg)? else {
+                        return Ok(None);
+                    };
+                    let descriptor = self.data_address(descriptor);
+                    let helper = if type_operand.is_nullable() {
+                        "kt_cast"
+                    } else {
+                        "kt_cast_non_null"
+                    };
+                    let checked =
+                        self.runtime_call(helper, &[any(), any()], any(), &[object, descriptor])?;
+                    let Some(checked) = checked else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    return self.convert(checked, Some(Ty::nullable(target)), type_operand);
+                }
+                let Some(descriptor) = self.checked_cast_target(type_operand)? else {
+                    // No descriptor to test against: an erased type PARAMETER, or a classifier
+                    // this file does not declare. The type is gone — but whether the cast was a
+                    // NON-NULL one is not, and Kotlin still checks that much: `null as T` where
+                    // `T : Any` raises a NullPointerException, and so does `t as (T & Any)`.
+                    // Without it the null travels on to a caller that unboxes it, which is a fault
+                    // rather than an answer.
+                    //
+                    // The node's OWN operation is what decides, never the spelling of the target:
+                    // an unbounded `T` is not nullable as a `Ty` and `null as T` is still legal,
+                    // because `T` may be instantiated with a nullable type. Reading the target
+                    // instead made eight programs throw that Kotlin accepts.
+                    //
+                    // The type is erased, but its NAME is not: it is rendered here, as kotlinc's
+                    // IR renderer spells it, for the message `kt_cast_non_null_erased` raises.
+                    let coerced = self.coerce(arg, type_operand)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    let Some(value) = coerced else {
+                        return Ok(None);
+                    };
+                    if op != IrTypeOp::CastNonNull
+                        || type_operand.is_nullable()
+                        || self.carrier(type_operand) != Carrier::Ref
+                    {
+                        return Ok(Some(value));
+                    }
+                    return self.erased_non_null_cast(value, type_operand);
+                };
+                let helper = if op == IrTypeOp::Cast || type_operand.is_nullable() {
+                    "kt_cast"
+                } else {
+                    "kt_cast_non_null"
+                };
+                let Some(object) = self.receiver(arg)? else {
+                    return Ok(None);
+                };
+                let descriptor = self.data_address(descriptor);
+                let checked =
+                    self.runtime_call(helper, &[any(), any()], any(), &[object, descriptor])?;
+                // What passed the check is an OBJECT; where the target is a value class carried
+                // as its value, the value is read out of it.
+                self.checked_object(checked, type_operand)
+            }
+            IrTypeOp::SafeCast => {
+                let Some(descriptor) = self.checked_cast_target(type_operand)? else {
+                    return Err(declined!("an `as?` to `{}`", type_name_of(type_operand)));
+                };
+                let Some(object) = self.receiver(arg)? else {
+                    return Ok(None);
+                };
+                let descriptor = self.data_address(descriptor);
+                let checked = self.runtime_call(
+                    "kt_safe_cast",
+                    &[any(), any()],
+                    any(),
+                    &[object, descriptor],
+                )?;
+                self.checked_object(checked, Ty::nullable(type_operand))
+            }
+            IrTypeOp::ImplicitCoercion => {
+                let arg = self
+                    .erased_nullable_carrier(arg, type_operand)
+                    .unwrap_or(arg);
+                self.coerce(arg, type_operand)
+            }
+        }
+    }
+
+    /// The declaration result attached to the terminal call beneath a result-boundary wrapper.
+    /// Blocks are transparent because argument ordering may have wrapped a checked call in its
+    /// evaluation statements; no other shape is reinterpreted as a call.
+    fn declared_call_result(&self, mut expression: u32) -> Option<Ty> {
+        loop {
+            match self.file.ir.expr(expression) {
+                IrExpr::Call { .. } | IrExpr::MethodCall { .. } => {
+                    return self.file.ir.call_declared_ret.get(&expression).copied();
+                }
+                IrExpr::Block {
+                    value: Some(value), ..
+                } => expression = *value,
+                _ => return None,
+            }
+        }
+    }
+
+    /// The erased call result beneath `f<T>()!!` when the selected nullable substitution is a
+    /// numeric primitive. The assertion consumes the call's reference directly: the intermediate
+    /// nullable wrapper was never a stored or explicitly cast value, so checking it as (for
+    /// example) `Integer` would reject the `Long` that Kotlin's following `Number.intValue`
+    /// accepts.
+    pub(super) fn asserted_declaration_number(&self, expression: u32) -> Option<(u32, Ty)> {
+        if !self
+            .file
+            .ir
+            .declaration_result_coercions
+            .contains(&expression)
+        {
+            return None;
+        }
+        let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = self.file.ir.expr(expression)
+        else {
+            return None;
+        };
+        let primitive = type_operand.nullable_primitive()?;
+        if !primitive.is_numeric()
+            || !self
+                .declared_call_result(*arg)
+                .is_some_and(|declared| declared.non_null().is_ty_param())
+        {
+            return None;
+        }
+        Some((*arg, primitive))
+    }
+
+    /// Read an erased reference as a non-null Kotlin number. The cast to `Number` is observable:
+    /// an unchecked generic result can hold a string, which must raise `ClassCastException`
+    /// rather than reaching the runtime conversion as an impossible descriptor.
+    pub(super) fn number_result(
+        &mut self,
+        value: Value,
+        target: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        debug_assert!(target.is_numeric() && !target.is_nullable());
+        let descriptor = self
+            .file
+            .type_descriptor(Ty::obj("kotlin/Number"))?
+            .expect("the native runtime defines kotlin.Number");
+        let descriptor = self.data_address(descriptor);
+        let Some(number) = self.runtime_call(
+            "kt_cast_non_null",
+            &[any(), any()],
+            any(),
+            &[value, descriptor],
+        )?
+        else {
+            return Ok(None);
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let suffix = scalar_suffix(target).expect("a numeric primitive has a scalar suffix");
+        self.runtime_call(
+            &format!("kt_number_to_{suffix}"),
+            &[any()],
+            target,
+            &[number],
+        )
+    }
+
+    /// `value as T` for an erased `T`: `null` raises the NullPointerException naming `T`, and
+    /// anything else passes unchanged.
+    ///
+    /// The name is rendered the way the JVM backend renders it, with one difference: this target
+    /// has no file facades, so a top-level function's type parameter is qualified by its package.
+    /// `T of generic`, where the JVM says `T of NullCastKt.generic`.
+    fn erased_non_null_cast(
+        &mut self,
+        value: Value,
+        target: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let package = self
+            .file
+            .ir
+            .package
+            .as_deref()
+            .filter(|package| !package.is_empty())
+            .map(|package| krusty::types::type_name(&package.replace('.', "/")));
+        let rendered = self
+            .file
+            .ir
+            .rendered_cast_target(target, &|_| package, false);
+        let data = self.file.string_data(rendered.as_bytes())?;
+        let global = self
+            .file
+            .module
+            .declare_data_in_func(data, self.builder.func);
+        let pointer = self.builder.ins().symbol_value(types::I64, global);
+        let length = self.builder.ins().iconst(types::I32, rendered.len() as i64);
+        self.runtime_call(
+            "kt_cast_non_null_erased",
+            &[any(), Ty::obj("kotlin/Any"), Ty::Int],
+            any(),
+            &[value, pointer, length],
+        )
+    }
+
+    /// The erased reference beneath `Object -> P -> P?`, when that is what `arg` is.
+    ///
+    /// A generic declaration returns through an erased reference, and lowering records reading it
+    /// as a specialized primitive `P` and then widening that to `P?` as two coercions: `fun <T>
+    /// f(): T = null as T` stored into an `Int?`. Realized one after the other they unbox a
+    /// reference that may be `null` only to box it again, and a `null` fails the unbox. The pair
+    /// is one reference conversion, so the widening takes the reference directly. This is the
+    /// same fold the JVM backend makes at its result boundary.
+    fn erased_nullable_carrier(&self, arg: u32, target: Ty) -> Option<u32> {
+        let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: inner,
+            type_operand,
+        } = self.file.ir.expr(arg)
+        else {
+            return None;
+        };
+        let primitive = target.nullable_primitive()?;
+        (*type_operand == primitive
+            && self.carrier(primitive) != Carrier::Ref
+            && self
+                .physical_type(*inner)
+                .is_some_and(|ty| self.carrier(ty) == Carrier::Ref))
+        .then_some(*inner)
+    }
+
+    /// Construction of a type the RUNTIME owns: declared in no file, and allocated and filled by
+    /// the runtime rather than laid out here. [`is_runtime_constructed`] says which types those are.
+    pub(super) fn runtime_construction(
+        &mut self,
+        internal: TypeName,
+        args: &[u32],
+        selected: Option<&[Ty]>,
+    ) -> Result<Option<Value>, Unsupported> {
+        let name = internal.render();
+        // A `Throwable` the RUNTIME provides. These classes are declared in no file either, but they do carry state — the
+        // message — so the runtime allocates and fills one rather than the generator doing it.
+        if let Some(descriptor) = super::super::super::intrinsics::throwable_descriptor(internal) {
+            return self.runtime_throwable(descriptor, &name, args, selected);
+        }
+        // `Pair(a, b)`, the runtime's two-field carrier. Declared in no file either, and the
+        // runtime already builds one for every `a to b` and for each step of a `withIndex` walk —
+        // so the written constructor reaches the same object rather than a second shape of it.
+        // Both operands cross as references, which is what a `Pair`'s fields hold.
+        if super::classifier_shapes::is_pair(internal) {
+            return match args {
+                [first, second] => self.pair_of(*first, *second),
+                _ => Err(declined!("this constructor of `{name}`")),
+            };
+        }
+        // `ArrayList()`, the runtime's growable list. Declared in no file either, like `Any` and
+        // the throwables above, so the runtime allocates it rather than the generator laying one
+        // out. The capacity overload is a HINT with nothing observable depending on it; a copy
+        // constructor takes a collection and declines, because sharing that collection's storage
+        // would let a write through the new list reach it.
+        if self.file.standard_collection_implementation(internal)
+            == Some(super::classifier_shapes::StandardCollectionImplementation::List)
+        {
+            return match (args, selected) {
+                ([], _) => self.runtime_call("kt_mutable_list_new", &[], any(), &[]),
+                ([argument], Some([only])) if *only == Ty::Int => {
+                    let Some(capacity) = self.coerce(*argument, Ty::Int)? else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call(
+                        "kt_mutable_list_with_capacity",
+                        &[Ty::Int],
+                        any(),
+                        &[capacity],
+                    )
+                }
+                _ => Err(declined!("this constructor of `{name}`")),
+            };
+        }
+        // `HashMap()` / `HashSet()` and their linked spellings, the runtime's growable tables.
+        // Declared in no file either, for the reason the list above is not. The empty form and the
+        // initial-capacity one are realized: the capacity is a hint, but a negative one throws as
+        // Kotlin's does. The load-factor overload and a copy constructor, which takes a collection
+        // whose walk would have to be the map's own, decline with what they were passed in sight.
+        if let Some(kind) = self
+            .file
+            .standard_collection_implementation(internal)
+            .and_then(|implementation| match implementation {
+                super::classifier_shapes::StandardCollectionImplementation::Map => Some("map"),
+                super::classifier_shapes::StandardCollectionImplementation::Set => Some("set"),
+                super::classifier_shapes::StandardCollectionImplementation::List => None,
+            })
+        {
+            return match (args, selected) {
+                ([], _) => self.runtime_call(&format!("kt_{kind}_new"), &[], any(), &[]),
+                ([argument], Some([only])) if *only == Ty::Int => {
+                    let Some(capacity) = self.coerce(*argument, Ty::Int)? else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call(
+                        &format!("kt_hash_{kind}_with_capacity"),
+                        &[Ty::Int],
+                        any(),
+                        &[capacity],
+                    )
+                }
+                _ => Err(declined!("this constructor of `{name}`")),
+            };
+        }
+        // `StringBuilder()`, the runtime's growable text buffer. Declared in no file either, for
+        // the same reason the list above is not. The capacity overload is a HINT; `StringBuilder(s)`
+        // COPIES the text, because a builder is about to be written through and the string it was
+        // handed is a value.
+        if super::classifier_shapes::is_string_builder(internal) {
+            return match (args, selected) {
+                ([], _) => self.runtime_call("kt_string_builder_new", &[], any(), &[]),
+                ([argument], Some([only])) if only.non_null() == Ty::Int => {
+                    let Some(capacity) = self.coerce(*argument, Ty::Int)? else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call(
+                        "kt_string_builder_with_capacity",
+                        &[Ty::Int],
+                        any(),
+                        &[capacity],
+                    )
+                }
+                ([argument], _) => {
+                    let text = self.reference(*argument)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call("kt_string_builder_with_text", &[any()], any(), &[text])
+                }
+                _ => Err(declined!("this constructor of `{name}`")),
+            };
+        }
+        Err(declined!("construction of `{name}`"))
+    }
+
+    /// The operands a `Throwable` constructor was given, as its two fields take them.
+    ///
+    /// Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. The two
+    /// one-argument forms are told apart by the parameter TYPE — a `Throwable` is a cause and
+    /// anything else is a message — and they differ in more than which field they fill, because
+    /// `Throwable(cause)` takes its MESSAGE from the cause as well. That rendering belongs to the
+    /// runtime, which is where `toString` lives, so this answers which form was written and lets
+    /// the caller pick the entry point. `Ok(None)` means the lowering left.
+    pub(super) fn throwable_operands(
+        &mut self,
+        name: &str,
+        args: &[u32],
+        selected: Option<&[Ty]>,
+    ) -> Result<Option<ThrowableOperands>, Unsupported> {
+        let cause_operand = |ty: &Ty| {
+            ty.non_null()
+                .obj_internal()
+                .and_then(super::super::super::intrinsics::throwable_descriptor)
+                .is_some()
+        };
+        match (args, selected) {
+            // `Throwable(cause)`: the runtime fills the message from it.
+            ([argument], Some([only])) if cause_operand(only) => {
+                let Some(cause) =
+                    self.coerce(*argument, Ty::nullable(Ty::obj("kotlin/Throwable")))?
+                else {
+                    return Err(declined!("a `Unit` cause for `{name}`"));
+                };
+                if self.terminated {
+                    return Ok(None);
+                }
+                Ok(Some(ThrowableOperands::Cause(cause)))
+            }
+            // `Throwable(message, cause)`.
+            ([message, cause], Some([first, second])) if cause_operand(second) => {
+                let Some(message) =
+                    self.throwable_message_operand(name, &[*message], Some(&[*first]))?
+                else {
+                    return Ok(None);
+                };
+                let Some(cause) = self.coerce(*cause, Ty::nullable(Ty::obj("kotlin/Throwable")))?
+                else {
+                    return Err(declined!("a `Unit` cause for `{name}`"));
+                };
+                if self.terminated {
+                    return Ok(None);
+                }
+                Ok(Some(ThrowableOperands::MessageAndCause { message, cause }))
+            }
+            _ => {
+                let Some(message) = self.throwable_message_operand(name, args, selected)? else {
+                    return Ok(None);
+                };
+                Ok(Some(ThrowableOperands::Message(message)))
+            }
+        }
+    }
+
+    /// The message operand a `Throwable` constructor was given, as its `message` field takes it: a
+    /// `null` reference where the constructor took none.
+    ///
+    /// Only the no-argument and one-message forms reach here; the forms carrying a cause are told
+    /// apart by [`Self::throwable_operands`] before this is asked. `Ok(None)` means the lowering
+    /// left.
+    fn throwable_message_operand(
+        &mut self,
+        name: &str,
+        args: &[u32],
+        selected: Option<&[Ty]>,
+    ) -> Result<Option<Value>, Unsupported> {
+        use super::super::super::intrinsics::ThrowableMessage;
+        let message = match (args, selected) {
+            ([], _) => None,
+            ([argument], Some([only])) => {
+                match super::super::super::intrinsics::throwable_message(only) {
+                    Some(kind) => Some((*argument, kind)),
+                    None => return Err(declined!("this constructor of `{name}`")),
+                }
+            }
+            _ => return Err(declined!("this constructor of `{name}`")),
+        };
+        let Some((argument, kind)) = message else {
+            // Kotlin's `null` message, which `toString` reports as the type name alone.
+            return Ok(Some(self.builder.ins().iconst(types::I64, 0)));
+        };
+        // A `Rendered` message is its `toString`, which is what the runtime's own renderer
+        // answers — so a scalar overload (`AssertionError(42)`) crosses as the box that renderer
+        // takes, and a reference goes straight to it.
+        let value = match kind {
+            ThrowableMessage::Verbatim => self.expression(argument)?,
+            ThrowableMessage::Rendered => {
+                let value = self.coerce(argument, Ty::nullable(Ty::obj("kotlin/Any")))?;
+                if self.terminated {
+                    return Ok(None);
+                }
+                let Some(value) = value else {
+                    return Err(declined!("a `Unit` message for `{name}`"));
+                };
+                self.runtime_call("kt_to_string", &[any()], any(), &[value])?
+            }
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        match value {
+            Some(value) => Ok(Some(value)),
+            None => Err(declined!("a `Unit` message for `{name}`")),
+        }
+    }
+
+    /// `Throwable(…)` and its subclasses, as the runtime declares them — all four of Kotlin's
+    /// constructors, each reaching the runtime entry point that fills what it was given.
+    fn runtime_throwable(
+        &mut self,
+        descriptor: &str,
+        name: &str,
+        args: &[u32],
+        selected: Option<&[Ty]>,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(operands) = self.throwable_operands(name, args, selected)? else {
+            return Ok(None);
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let descriptor = self.file.import_data(descriptor)?;
+        let descriptor = self.data_address(descriptor);
+        let (symbol, mut arguments) = match operands {
+            ThrowableOperands::Message(message) => ("kt_throwable_new", vec![message]),
+            ThrowableOperands::Cause(cause) => ("kt_throwable_new_from_cause", vec![cause]),
+            ThrowableOperands::MessageAndCause { message, cause } => {
+                ("kt_throwable_new_with_cause", vec![message, cause])
+            }
+        };
+        arguments.insert(0, descriptor);
+        let signature = vec![any(); arguments.len()];
+        let thrown = self.runtime_call(symbol, &signature, any(), &arguments)?;
+        Ok(Some(thrown.expect("a throwable constructor answers one")))
+    }
+
+    /// The runtime reader for `e.message` or `e.cause`, and `None` for any other accessor.
+    pub(super) fn throwable_field(
+        &self,
+        target: krusty::fir::ExternalPropertyId,
+    ) -> Option<&'static str> {
+        let property = self.file.callables.property(target)?;
+        let getter = self.file.callables.callable(property.getter)?;
+        super::super::super::intrinsics::throwable_field(getter.physical_owner, &property.name)
+    }
+
+    /// `e.message` and `e.cause` — the two fields a `Throwable` carries, read by the runtime
+    /// rather than by an offset here, because the class is the runtime's and so is its layout.
+    pub(super) fn throwable_field_read(
+        &mut self,
+        symbol: &str,
+        receiver: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let value = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call(symbol, &[any()], any(), &[value])
+    }
+}
