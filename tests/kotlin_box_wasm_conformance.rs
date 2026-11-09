@@ -1265,3 +1265,21 @@ fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
         "wasmFinallyValueAndKotlinThrow",
     );
 }
+
+/// The shared `NullableUnsignedArrayElements` program: nullable unsigned elements stay boxed.
+#[test]
+fn wasm_shared_nullable_unsigned_array_program() {
+    let src = include_str!("box_regressions/NullableUnsignedArrayElements.kt");
+    expect_reference_box(src, "NullableUnsignedArrayElements");
+    expect_wasm_box(src, "NullableUnsignedArrayElements");
+}
+
+/// The shared `ArrayOfNullsAnyElement` program, prepared for each target the way the box lanes
+/// prepare it: `OPTIONAL_JVM_INLINE_ANNOTATION` is `@JvmInline` on the JVM and absent on Wasm.
+#[test]
+fn wasm_shared_array_of_nulls_program() {
+    let source = include_str!("box_regressions/ArrayOfNullsAnyElement.kt");
+    let prepared = |target| krusty::conformance::prepare_test_source(source, target);
+    expect_reference_box(&prepared(TestTarget::Jvm), "ArrayOfNullsAnyElement");
+    expect_wasm_box(&prepared(TestTarget::WasmJs), "ArrayOfNullsAnyElement");
+}
