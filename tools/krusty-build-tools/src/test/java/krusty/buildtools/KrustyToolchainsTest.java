@@ -3,6 +3,7 @@ package krusty.buildtools;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.File;
@@ -37,7 +38,25 @@ class KrustyToolchainsTest {
     @Test
     void loadsAsTheBuildToolsApiImplementationForItsKotlinRelease() {
         assertInstanceOf(KrustyToolchains.class, toolchains);
-        assertEquals(KotlinVersion.CURRENT.toString(), toolchains.getCompilerVersion());
+        // The exact release identity, as the stdlib on the test classpath records it:
+        // KotlinVersion.CURRENT drops a pre-release classifier such as -Beta2.
+        assertEquals(KotlinVersion.class.getPackage().getImplementationVersion(), toolchains.getCompilerVersion());
+    }
+
+    @Test
+    void forwardsOneCommandLineApplicationAndRefusesToReplaceArgumentsWithinIt() {
+        CompilerArguments.Builder arguments = new CompilerArguments.Builder();
+        arguments.applyCommandLineArguments(List.of("-no-stdlib", "-module-name=box"));
+        assertEquals(List.of("-no-stdlib", "-module-name=box"), arguments.build().toArgumentStrings());
+
+        UnsupportedOperationException refusal = assertThrows(
+            UnsupportedOperationException.class,
+            () -> arguments.applyCommandLineArguments(List.of("-module-name=other")));
+        assertEquals(
+            "krusty forwards compiler arguments as one command line and cannot replace individual"
+                + " arguments applied earlier; apply every argument in one applyCommandLineArguments call",
+            refusal.getMessage());
+        assertEquals(List.of("-no-stdlib", "-module-name=box"), arguments.build().toArgumentStrings());
     }
 
     @Test
