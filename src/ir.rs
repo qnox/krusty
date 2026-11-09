@@ -85,6 +85,8 @@ pub use local_delegates::IrLocalDelegateAccess;
 pub(crate) use local_delegates::{
     IrInlineDeclaration, IrLocalDelegateAccessorPlan, IrLocalDelegatePlan,
 };
+mod function_positions;
+pub use function_positions::IrFunctionPosition;
 mod local_property_references;
 mod module_records;
 mod negations;
@@ -2325,28 +2327,12 @@ pub struct IrFile {
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.
     /// kotlinc attributes both the property's getter and its constructor-side initializer to this line.
     pub prop_decl_lines: crate::fx_hash::HashMap<(TypeName, String), u32>,
-    /// FunId → 1-based source line of its `fun` declaration, for the method's `LineNumberTable`.
-    /// A side map (not a field on `IrFunction`) so the 40-odd construction sites stay untouched.
-    pub fn_decl_lines: crate::fx_hash::HashMap<u32, u32>,
+    /// The source position of every function declaration (`src/ir/function_positions.rs`).
+    pub(crate) function_positions: function_positions::IrFunctionPositions,
     /// Functions whose debug representation retains receiver/parameter bindings even when the body
     /// deliberately has no executable source line. Generated declarations use this explicit
     /// source/debug contract instead of inventing a line merely to retain their binding names.
     pub fn_debug_locals: crate::fx_hash::HashSet<FunId>,
-    /// FunId → 1-based source line of a BLOCK body's closing `}` — kotlinc maps a `Unit` fn's
-    /// implicit `return` there in the `LineNumberTable`. Same side-map rationale as `fn_decl_lines`.
-    pub fn_close_lines: crate::fx_hash::HashMap<u32, u32>,
-    /// FunId → 1-based source line the declaration ENDS on (a block's `}` or an expression body's
-    /// last line). kotlinc returns a generated forwarder of the declaration on this line.
-    pub fn_end_lines: crate::fx_hash::HashMap<u32, u32>,
-    /// FunId → 1-based source line of the DECLARATION itself, never body-rewritten. `fn_decl_lines`
-    /// holds the line the method BODY maps to (an expression body's own line); a `$default` stub's
-    /// LineNumberTable instead points here — the two differ exactly when an expression body starts
-    /// on a later line than the signature. Same side-map rationale as `fn_decl_lines`.
-    pub fn_sig_lines: crate::fx_hash::HashMap<u32, u32>,
-    /// FunId → source byte offset of the `fun` keyword. The JVM backend reports a platform
-    /// declaration clash at this position. A method with no entry is a bridge, a default stub, or
-    /// another representation, not a source declaration.
-    pub fn_signature_offsets: crate::fx_hash::HashMap<u32, u32>,
     /// FunId → the SOURCE BYTE OFFSET of the declaration a class member realizes (a property's
     /// accessors carry the property's offset). kotlinc emits class members in DECLARATION order,
     /// interleaving property accessors among functions; lowering groups them by kind, so the JVM

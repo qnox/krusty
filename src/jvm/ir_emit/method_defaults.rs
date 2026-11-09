@@ -413,10 +413,7 @@ pub(super) fn default_stub_access(ir: &IrFile, fid: u32) -> u16 {
 /// The declaration's signature line, where a default stub's own instructions stand. An accessor
 /// records only its declaration line, which is its header's.
 pub(super) fn signature_line(ir: &IrFile, fid: u32) -> Option<u32> {
-    ir.fn_sig_lines
-        .get(&fid)
-        .or_else(|| ir.fn_decl_lines.get(&fid))
-        .copied()
+    ir.function_position(fid).header_line()
 }
 
 pub(super) fn emit_default_param_overwrites(
@@ -824,11 +821,7 @@ fn emit_published_default_accessor(
     code.link();
     let flags = if access.is_interface { 0x1009 } else { 0x1019 };
     cw.add_method(flags, &name, &descriptor, &code);
-    if let Some(&line) = ir
-        .fn_sig_lines
-        .get(&fid)
-        .or_else(|| ir.fn_decl_lines.get(&fid))
-    {
+    if let Some(line) = ir.function_position(fid).header_line() {
         cw.set_method_lines(&name, &descriptor, &[(0, line)]);
     }
 }
