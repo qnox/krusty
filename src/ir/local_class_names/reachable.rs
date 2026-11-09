@@ -351,10 +351,8 @@ fn remap_owned_function(ir: &mut IrFile, function: FunId, names: &IdentityRemap<
     if let Some(applied) = ir.function_annotations.get_mut(&function) {
         annotations(applied, names);
     }
-    if let Some(parameters) = ir.fn_param_annotations.get_mut(&function) {
-        for parameter in parameters {
-            annotations(parameter, names);
-        }
+    for parameter in &mut ir.declared_parameters_mut(function).annotations {
+        annotations(parameter, names);
     }
     ir.remap_lambda_type_parameter_classifiers(function, |value| ty(value, names));
     if let Some(signature) = ir.signatures.get_mut(&function) {

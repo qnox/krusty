@@ -321,3 +321,30 @@ fun box(): String {
 "#;
     common::expect_box_same_as_kotlinc(SRC, "BodyLocalExtensionProperty");
 }
+
+/// A body-local member extension property that declares its own type parameters publishes them
+/// with its header, as a member function does; the anonymous object's semantic group is then
+/// complete (`bytecodeListing/anonymousObjectInGenericFun.kt`).
+#[test]
+fn a_body_local_generic_extension_property_publishes_its_type_parameters() {
+    const SRC: &str = r#"fun <T> make(): String {
+    val x = object {
+        val <S> S.extVal: Int
+            get() = 1
+
+        var <S> S.extVar: Int
+            get() = 2
+            set(value) {}
+
+        fun total(): Int {
+            "a".extVar = 5
+            return "a".extVal + 4.extVar
+        }
+    }
+    return if (x.total() == 3) "OK" else "fail ${x.total()}"
+}
+
+fun box(): String = make<Any>()
+"#;
+    common::expect_box_same_as_kotlinc(SRC, "BodyLocalGenericExtensionProperty");
+}

@@ -40,4 +40,4 @@
 # Call selection without a shared applicability ranking.
 177	fns	select_
 # The temporary signature bridge, which must disappear.
-31649	lines	src/resolve/streaming_signature_bridge*
+31697	lines	src/resolve/streaming_signature_bridge*

@@ -13,17 +13,17 @@
 //! classes) and is not one of these.
 //!
 //! A member is recorded the first time a call goes through it, and a box the first time a value of
-//! its primitive is boxed; whichever comes second writes the box's implementation.
+//! its classifier is boxed; whichever comes second writes the box's implementation.
 
 use krusty::backend::{BackendCompilerIntrinsic, KlibDependencyCallable, PrimitiveImplementation};
 use krusty::fx_hash::HashMap;
-use krusty::types::Ty;
+use krusty::types::{Ty, TypeName};
 
 use super::super::encode::{Code, Module, ValType};
 use super::super::interface_dispatch::MemberRef;
 use super::super::numeric_conversions;
 use super::super::runtime::Runtime;
-use super::{define, BoxForm, Primitive};
+use super::{define, BoxForm};
 
 /// A function's wasm parameters (the receiver first) and results.
 type Signature = (Vec<ValType>, Vec<ValType>);
@@ -39,9 +39,9 @@ pub(crate) struct BoxMembers {
 struct Member {
     member: MemberRef,
     signature: Signature,
-    /// What the box of each primitive whose classifier is below the member's runs, or why this
-    /// generator cannot write it.
-    implementations: Vec<(Primitive, Result<Operation, String>)>,
+    /// What the box of each primitive whose classifier is below the member's runs, by that
+    /// classifier's identity, or why this generator cannot write it.
+    implementations: Vec<(TypeName, Result<Operation, String>)>,
 }
 
 /// What a box's implementation of a member does with the value it holds.
@@ -77,8 +77,8 @@ impl Runtime {
         let implementations = implementations
             .iter()
             .filter_map(|implementation| {
-                let primitive = Primitive::of(implementation.receiver)?;
-                Some((primitive, operation(primitive, implementation, &signature)))
+                let identity = implementation.receiver.obj_internal()?;
+                Some((identity, operation(implementation, &signature)))
             })
             .collect();
         let index = self.boxes.members.members.len();
@@ -91,48 +91,43 @@ impl Runtime {
             .members
             .by_identity
             .insert(identity.clone(), index);
-        let mut forms = self
-            .boxes
-            .forms
-            .iter()
-            .map(|(primitive, form)| (*primitive, *form))
-            .collect::<Vec<_>>();
-        forms.sort_unstable_by_key(|(primitive, _)| *primitive);
-        for (primitive, form) in forms {
-            self.implement_box_member(module, index, primitive, form)?;
+        // In declaration order, so the functions are written the same way on every run.
+        let mut forms = self.boxes.forms.values().copied().collect::<Vec<_>>();
+        forms.sort_unstable_by_key(|form| form.structure);
+        for form in forms {
+            self.implement_box_member(module, index, form)?;
         }
         Ok(member)
     }
 
-    /// Write the implementation of every recorded member by the new box of `primitive`.
+    /// Write the implementation of every recorded member by the new box `form`.
     pub(super) fn implement_box_members(
         &mut self,
         module: &mut Module,
-        primitive: Primitive,
         form: BoxForm,
     ) -> Result<(), String> {
         for index in 0..self.boxes.members.members.len() {
-            self.implement_box_member(module, index, primitive, form)?;
+            self.implement_box_member(module, index, form)?;
         }
         Ok(())
     }
 
-    /// Write the box of `primitive`'s implementation of the member at `index`, if it has one.
+    /// Write the box `form`'s implementation of the member at `index`, if it has one.
     fn implement_box_member(
         &mut self,
         module: &mut Module,
         index: usize,
-        primitive: Primitive,
         form: BoxForm,
     ) -> Result<(), String> {
         let recorded = &self.boxes.members.members[index];
         let member = recorded.member;
+        let identity = form.boxed.obj_internal();
         let Some((_, operation)) = recorded
             .implementations
             .iter()
-            .find(|(known, _)| *known == primitive)
+            .find(|(known, _)| Some(*known) == identity)
         else {
-            // The primitive's classifier is not below the member's: no value of it reaches it.
+            // The boxed classifier is not below the member's: no value of it reaches it.
             return Ok(());
         };
         let operation = operation.clone()?;
@@ -140,7 +135,7 @@ impl Runtime {
         code.local_get(0);
         form.emit_unbox(&mut code);
         match operation {
-            Operation::Convert(to) => numeric_conversions::convert(&mut code, primitive.ty(), to)?,
+            Operation::Convert(to) => numeric_conversions::convert(&mut code, form.boxed, to)?,
         }
         let function = define(
             module,
@@ -153,15 +148,16 @@ impl Runtime {
     }
 }
 
-/// What the box of `primitive` runs for a member carried as `signature`, from its override.
+/// What the box of `implementation`'s receiver runs for a member carried as `signature`, from its
+/// override.
 fn operation(
-    primitive: Primitive,
     implementation: &PrimitiveImplementation,
     (params, results): &Signature,
 ) -> Result<Operation, String> {
+    let receiver = implementation.receiver;
     let Some(declaration) = &implementation.declaration else {
         return Err(format!(
-            "a `{primitive:?}` box inheriting a library class member's implementation"
+            "a `{receiver:?}` box inheriting a library class member's implementation"
         ));
     };
     match declaration.operation {
@@ -171,11 +167,11 @@ fn operation(
                 && *results
                     == Vec::from_iter(numeric_conversions::numeric_carrier(declaration.ret)) =>
         {
-            numeric_conversions::convert(&mut Code::default(), primitive.ty(), declaration.ret)?;
+            numeric_conversions::convert(&mut Code::default(), receiver, declaration.ret)?;
             Ok(Operation::Convert(declaration.ret))
         }
         operation => Err(format!(
-            "a `{primitive:?}` box implementing a library class member as {operation:?}"
+            "a `{receiver:?}` box implementing a library class member as {operation:?}"
         )),
     }
 }

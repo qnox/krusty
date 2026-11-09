@@ -10,10 +10,6 @@ use crate::encode::{CompositeType, SubType};
 use crate::function_values::INVOKE_FIELD;
 use crate::objects::immutable;
 
-/// Why a lambda or callable reference converted to a `fun interface` declines: SAM conversion
-/// has no Wasm representation yet.
-pub(super) const SAM_CONVERSION: &str = "a lambda converted to a `fun interface`";
-
 /// What `==` on a function value compares.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FunctionEquality {
@@ -25,12 +21,14 @@ pub(super) enum FunctionEquality {
 
 impl Body<'_> {
     /// A new function value whose body is `function`, carrying `captures` as its leading
-    /// arguments.
+    /// arguments. With `sam`, the value is also an instance of that `fun interface`, whose member
+    /// it implements.
     pub(super) fn function_value(
         &mut self,
         function: FunId,
         captures: &[u32],
         equality: FunctionEquality,
+        sam: Option<&krusty::ir::IrSamTarget>,
     ) -> Result<(), Unsupported> {
         let declaration = self
             .ir
@@ -126,9 +124,13 @@ impl Body<'_> {
         };
         let to_string = self.runtime.objects.trap(self.module, to_string_ty);
         let objects = &mut self.runtime.objects;
-        let (_, itable) = objects
-            .interfaces
-            .class(self.module, objects.itable, vec![structure]);
+        let (record, itable) =
+            objects
+                .interfaces
+                .class(self.module, objects.itable, vec![structure]);
+        if let Some(target) = sam {
+            self.implement_sam(record, invoke, target)?;
+        }
         let mut init = Code::default();
         for function in [equals, hash_code, to_string] {
             self.module.reference_function(function);
@@ -196,7 +198,77 @@ impl Body<'_> {
                 kind,
                 receiver: reference.bound_receiver.map(|_| reference.captures.len()),
             },
+            None,
         )
+    }
+
+    /// Make the function value of `record`, whose boxed entry is `invoke`, an instance of the
+    /// `fun interface` `target` names: its member forwards to the entry, boxing each argument and
+    /// unboxing the result to the member's own carriers.
+    fn implement_sam(
+        &mut self,
+        record: crate::interface_dispatch::ClassRef,
+        invoke: u32,
+        target: &krusty::ir::IrSamTarget,
+    ) -> Result<(), Unsupported> {
+        if target.suspend {
+            return Err("a suspend functional interface".into());
+        }
+        let krusty::ir::IrSamMethod::Module(method) = target.method_target else {
+            return Err("a functional interface declared outside this module".into());
+        };
+        // The object implements only the abstract member. An interface default it would inherit
+        // has no body this object could stand on yet.
+        let interface = self
+            .ir
+            .class_id_by_name(target.classifier)
+            .ok_or("a functional interface declared outside this module")?;
+        let declares_default = self.ir.classes[interface as usize]
+            .methods
+            .iter()
+            .any(|&function| self.ir.functions[function as usize].body.is_some());
+        if declares_default
+            || self
+                .ir
+                .inherited_defaults
+                .get(&target.classifier)
+                .is_some_and(|defaults| !defaults.is_empty())
+        {
+            return Err("a functional interface with default members".into());
+        }
+        let (member, params, result) = self.sam_member(method)?;
+        let mut code = Code::default();
+        let mut locals = Vec::new();
+        code.local_get(0);
+        for (index, &param) in params.iter().enumerate() {
+            if carrier(param)?.is_none() {
+                return Err("a functional interface member taking a `Unit` value".into());
+            }
+            code.local_get(index as u32 + 1);
+            self.pack_result(&mut code, &mut locals, params.len() as u32 + 1, param)?;
+        }
+        code.call(invoke);
+        if carrier(result)?.is_none() {
+            code.drop_();
+        } else {
+            self.unpack_argument(&mut code, result)?;
+        }
+        let ty = self.runtime.objects.interfaces.ty(member);
+        let thunk = self.module.declare();
+        self.module.define(thunk, Function { ty, locals, code });
+        let interfaces = &mut self.runtime.objects.interfaces;
+        interfaces.implement(record, member, thunk)?;
+        let hierarchy = self
+            .ir
+            .classifier_hierarchies
+            .get(&target.classifier)
+            .into_iter()
+            .flatten()
+            .map(|applied| applied.classifier);
+        for interface in std::iter::once(target.classifier).chain(hierarchy) {
+            interfaces.instance_of(record, interface);
+        }
+        Ok(())
     }
 
     /// `function(args)`, where `function` is a function value taking `params` and answering
@@ -231,6 +303,44 @@ impl Body<'_> {
         self.coerce_emitted_value(any, ret)
     }
 
+    /// `value as F` for a function type `F`: the value, which must be a function value invoked
+    /// with `F`'s arguments. A suspend function type is invoked with its caller's continuation as
+    /// one more argument, so `suspend () -> R` and `(Continuation<R>) -> Any?` share a shape, as
+    /// kotlinc's `SuspendFunction0` is a `Function1`. `null` passes a nullable target.
+    pub(super) fn function_cast(
+        &mut self,
+        arg: u32,
+        target: Ty,
+        non_null: bool,
+    ) -> Result<(), Unsupported> {
+        let TyKind::Fun(signature) = target.non_null().kind() else {
+            return Err("a function cast to a type that is not a function type".into());
+        };
+        let arity = signature.params.len() + usize::from(signature.suspend);
+        let shape = self.runtime.function_shape(self.module, arity);
+        let object = self.runtime.objects.object;
+        self.value(arg, Ty::obj_name(krusty::types::wk::any()))?;
+        let value = self.local(REFERENCE);
+        self.code.local_tee(value);
+        if !non_null {
+            self.code.ref_is_null().if_(BlockType::Empty).else_();
+            self.code.local_get(value);
+        }
+        self.code
+            .ref_cast(false, HeapType::Concrete(object))
+            .struct_get(object, 0)
+            .ref_test(false, HeapType::Concrete(shape.table))
+            .if_(BlockType::Empty)
+            .else_()
+            .unreachable()
+            .end();
+        if !non_null {
+            self.code.end();
+        }
+        self.code.local_get(value);
+        Ok(())
+    }
+
     /// Convert the reference on top of `code`'s stack to the carrier of `ty`.
     fn unpack_argument(&mut self, code: &mut Code, ty: Ty) -> Result<(), Unsupported> {
         match carrier(ty)? {
@@ -240,10 +350,10 @@ impl Body<'_> {
                 code.ref_cast(true, heap);
                 Ok(())
             }
-            Some(_) => {
+            Some(value) => {
                 let form = self
                     .runtime
-                    .box_form(self.module, ty)?
+                    .box_form(self.module, ty, value)?
                     .ok_or_else(|| format!("a function value taking a `{}` value", describe(ty)))?;
                 form.emit_unbox(code);
                 Ok(())
@@ -267,9 +377,12 @@ impl Body<'_> {
             }
             Some(ValType::Ref { .. }) => {}
             Some(value) => {
-                let form = self.runtime.box_form(self.module, ty)?.ok_or_else(|| {
-                    format!("a function value answering a `{}` value", describe(ty))
-                })?;
+                let form = self
+                    .runtime
+                    .box_form(self.module, ty, value)?
+                    .ok_or_else(|| {
+                        format!("a function value answering a `{}` value", describe(ty))
+                    })?;
                 let scratch = form.needs_scratch().then(|| {
                     locals.push(value);
                     first + locals.len() as u32 - 1
