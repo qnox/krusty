@@ -422,7 +422,7 @@ impl Checker<'_> {
                             ClassStorageSource { owner, identity },
                             capture.shared_cell,
                         );
-                        self.retain_capture_declaration(scope, &capture);
+                        self.retain_capture_declaration(scope, capture);
                     }
                 }
             }
