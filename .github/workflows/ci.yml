@@ -1007,7 +1007,7 @@ jobs:
           tests="$tests verify_task_reports_an_unsupported_kotlin_gradle_plugin verify_task_reports_projects_that_each_load_the_plugin"
           tests="$tests verify_task_reports_kotlin_dsl_compiles_after_kotlinc_compiles_them"
           tests="$tests verify_task_reports_a_kotlin_gradle_plugin_older_than_the_plugin_api"
-          tests="$tests multiplatform_jvm_compiles_through_krusty"
+          tests="$tests multiplatform_jvm_compiles_through_krusty body_only_dependency_edit_keeps_dependent_compile_up_to_date"
           tests="$tests oss_corpus_init_script_applies_the_packaged_plugin"
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"

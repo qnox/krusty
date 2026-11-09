@@ -233,6 +233,7 @@ mod recording_tests;
 mod tests {
     use super::*;
 
+    mod body_only_dependents;
     mod compiler_options;
     use krusty::plugins::registry::PluginDiagnostic;
 
