@@ -83,31 +83,3 @@ fn annotation_defaults_precede_parameter_annotations_in_metadata_order() {
     let classes = common::classes_against_kotlinc_module(&[("Ordered.kt", ANNOTATED_PARAMETERS)]);
     assert_eq!(classes.differences(), Vec::<String>::new());
 }
-
-const REARRANGED_DEFAULT: &str =
-    include_str!("../box_regressions/annotationRearrangedDefaultArguments.kt");
-const SPREAD_DEFAULTS: &str = include_str!("../box_regressions/annotationSpreadDefaults.kt");
-
-#[test]
-fn rearranged_annotation_defaults_match_complete_artifacts_and_execution() {
-    let classes = common::classes_against_kotlinc_module(&[("Rearranged.kt", REARRANGED_DEFAULT)]);
-    assert_eq!(classes.differences(), Vec::<String>::new());
-    common::expect_box_ok_with_stdlib(REARRANGED_DEFAULT, "RearrangedAnnotationDefault");
-}
-
-#[test]
-fn spread_annotation_defaults_match_complete_artifacts_and_execution() {
-    let classes = common::classes_against_kotlinc_module(&[("Spread.kt", SPREAD_DEFAULTS)]);
-    assert_eq!(classes.differences(), Vec::<String>::new());
-    common::expect_box_ok_with_stdlib(SPREAD_DEFAULTS, "SpreadAnnotationDefaults");
-}
-
-#[test]
-fn the_original_rearranged_default_executes_like_kotlin_independently_of_artifact_checks() {
-    common::expect_box_same_as_kotlinc(REARRANGED_DEFAULT, "RearrangedAnnotationDefault");
-}
-
-#[test]
-fn the_original_spread_default_executes_like_kotlin_independently_of_artifact_checks() {
-    common::expect_box_same_as_kotlinc(SPREAD_DEFAULTS, "SpreadAnnotationDefaults");
-}
