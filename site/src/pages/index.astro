@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import Base from "../layouts/Base.astro";
 import { gist, readFigure } from "../lib/figures";
+import { collectMetrics } from "../../scripts/metrics.mjs";
 
 const repo = "https://github.com/qnox/krusty";
 const release = `${repo}/releases/latest`;
@@ -57,6 +58,9 @@ const figures = [
   },
 ];
 const values = await Promise.all(figures.map((figure) => readFigure(figure.file)));
+// The headline real-project figure, from the same nightly data as the metrics page.
+const corpusTotal = collectMetrics(process.env.KRUSTY_METRICS_INPUT).corpus?.total;
+const identicalTenths = corpusTotal && corpusTotal.classes ? Math.floor((corpusTotal.identical * 1000) / corpusTotal.classes) / 10 : null;
 const fmt = (n: number) => n.toLocaleString("en-US");
 
 type Level = "yes" | "partial" | "no";
@@ -180,9 +184,18 @@ const plugins: { name: string; level: Level; html: string }[] = [
             </article>
           );
         })}
+        <article class="tile">
+          <h3 class="tile-label">Real projects: byte-identical classes</h3>
+          <p class="tile-value">{identicalTenths !== null ? `${identicalTenths.toFixed(1)}%` : "–"}</p>
+          <div class="meter" role="img" aria-label={identicalTenths !== null ? `${identicalTenths.toFixed(1)}%` : "not available"} style={`--value: ${identicalTenths ?? 0}%`}>
+            <span />
+          </div>
+          <p class="tile-meta">{corpusTotal ? `${fmt(corpusTotal.identical)} of ${fmt(corpusTotal.classes)} classes` : "Not measured"}</p>
+          <p class="figure-explain">Classes identical to kotlinc's, whole file, across popular open-source projects built nightly with their own Gradle builds. <a href="/metrics/">All metrics</a></p>
+        </article>
       </div>
       <p class="fine">
-        How each figure is counted: <a href={blob("docs/TEST_HARNESS.md")}>docs/TEST_HARNESS.md</a>. Other suites
+        <a href="/metrics/">All metrics</a>, per project and per Kotlin version, regenerated nightly. How each figure is counted: <a href={blob("docs/TEST_HARNESS.md")}>docs/TEST_HARNESS.md</a>. Other suites
         (kotlinx.serialization, KSP and the rest) are correctness gates and count toward none of these figures.
       </p>
     </div>

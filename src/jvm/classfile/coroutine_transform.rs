@@ -19,7 +19,7 @@ use crate::jvm::bytecode_passes::coroutines::{
 /// A method the emitter asks the transformer to rewrite, and what the transformer needs about it
 /// beyond its body (the rest of [`NamedFunction`] is the class's own).
 #[derive(Clone, Debug)]
-pub(crate) struct CoroutineRequest {
+pub struct CoroutineRequest {
     /// The internal name of the function's continuation class.
     pub continuation_class: String,
     /// The function's first line. A synthetic function has none, and then no suspension point
@@ -38,7 +38,7 @@ pub(crate) struct CoroutineRequest {
 
 /// What the transformation of one function found.
 #[derive(Clone, Debug)]
-pub(crate) enum CoroutineOutcome {
+pub enum CoroutineOutcome {
     /// A state machine: its continuation class declares these spill fields, in this order, and
     /// carries this `@DebugMetadata`.
     StateMachine {
@@ -53,7 +53,7 @@ pub(crate) enum CoroutineOutcome {
 
 /// One transformed function, by its continuation class.
 #[derive(Clone, Debug)]
-pub(crate) struct TransformedCoroutine {
+pub struct TransformedCoroutine {
     pub continuation_class: String,
     pub outcome: CoroutineOutcome,
 }
@@ -67,7 +67,7 @@ pub(super) struct Coroutines {
 impl ClassWriter {
     /// Ask for the method `name``desc`, already added, to be transformed into a state machine when
     /// the class is written.
-    pub(crate) fn request_coroutine_transform(
+    pub fn request_coroutine_transform(
         &mut self,
         name: &str,
         desc: &str,

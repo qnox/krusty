@@ -7,7 +7,7 @@
 
 use super::{focused_wasm_lane_available, WasmLane};
 use crate::box_lane::{Lane, Outcome};
-use krusty::wasm::WasmTarget;
+use krusty_wasm::WasmTarget;
 
 const SOURCE: &str = "import kotlin.reflect.typeOf\n\
 class G<T>\n\
