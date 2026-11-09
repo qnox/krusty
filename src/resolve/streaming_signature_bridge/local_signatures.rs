@@ -1,12 +1,12 @@
 //! Active-file publication of checked local declaration signatures and captures.
 
 use super::*;
+use crate::fir::ResolvedTypeParameterFlags;
 use crate::resolve::TypeInfo;
-use crate::types::TyKind;
+use crate::types::{TyKind, TypeVariance};
 
 #[cfg(test)]
 mod tests;
-mod written_type_parameters;
 
 /// Same-parse test adapter for capture storage discovered by the legacy retained-file fixture.
 /// Production ordinary bodies publish no capture declaration; their checked FIR carries field
@@ -264,6 +264,33 @@ fn selected_checked_failure(
     exact_declarations.is_none_or(|exact| {
         exact.contains(&declaration) || selected_local_declarations.contains(&declaration)
     })
+}
+
+/// A body-local member function's or extension property's written generic contract, with the
+/// semantic identities its checked header bound; `None` until every formal and bound is known.
+fn written_type_parameters(
+    info: &TypeInfo,
+    (names, bounds, reified): (&[String], &[(String, TypeRef)], &HashSet<String>),
+    start: u32,
+) -> Option<Vec<crate::fir::WrittenTypeParameter>> {
+    let semantic = info.resolved_declaration_type_parameters(start);
+    let pairs = (semantic.len() == names.len()).then(|| names.iter().zip(semantic).enumerate())?;
+    pairs
+        .map(|(ordinal, (name, semantic))| {
+            let written = bounds.iter().filter(|(formal, _)| formal == name);
+            let bounds = written.map(|(_, bound)| info.resolved_type_bound(bound));
+            let reified = reified.contains(name);
+            let flags = ResolvedTypeParameterFlags::new(TypeVariance::Invariant, false, reified);
+            let bounds = bounds.collect::<Option<_>>()?;
+            Some((
+                ordinal as u32,
+                name.clone(),
+                semantic.clone(),
+                flags,
+                bounds,
+            ))
+        })
+        .collect()
 }
 
 fn publish_checked_local_signatures_selected(
@@ -1176,13 +1203,15 @@ fn publish_checked_local_signatures_selected(
                         failed.push(declaration);
                         continue;
                     }
-                    let type_parameters_failed = !written_type_parameters::WrittenTypeParameters {
-                        names: &method.type_params,
-                        bounds: &method.type_param_bounds,
-                        reified: &method.reified_type_params,
-                        declaration_start: method.signature_span.lo,
-                    }
-                    .publish(info, index, declaration);
+                    let written = (
+                        &method.type_params[..],
+                        &method.type_param_bounds[..],
+                        &method.reified_type_params,
+                    );
+                    let start = method.signature_span.lo;
+                    let prepare = || written_type_parameters(info, written, start);
+                    let type_parameters_failed =
+                        !index.publish_type_parameters_once(declaration, written.0.len(), prepare);
                     if type_parameters_failed
                         || (!signature_published
                             && index
@@ -1311,13 +1340,13 @@ fn publish_checked_local_signatures_selected(
                     };
                     // An extension property declares its own formals (`val <T> T.x`), and its
                     // semantic header is complete only once they are published.
-                    let type_parameters = written_type_parameters::WrittenTypeParameters {
-                        names: &property.type_params,
-                        bounds: &property.type_param_bounds,
-                        reified: &property.reified_type_params,
-                        declaration_start: property.span.lo,
-                    };
-                    if !type_parameters.publish(info, index, declaration) {
+                    let written = (
+                        &property.type_params[..],
+                        &property.type_param_bounds[..],
+                        &property.reified_type_params,
+                    );
+                    let prepare = || written_type_parameters(info, written, property.span.lo);
+                    if !index.publish_type_parameters_once(declaration, written.0.len(), prepare) {
                         failed.push(declaration);
                         continue;
                     }
