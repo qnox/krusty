@@ -2,8 +2,9 @@
 //!
 //! A reference array (`Array<T>`) stores references, a scalar element as its box. A primitive
 //! array (`IntArray`, `CharArray`, …) stores its element's own value, a narrow one packed to its
-//! width. Each classifier is its own object type, so `ref.test` tells an `IntArray` from a
-//! `FloatArray`; a primitive array's type is declared the first time a module uses it.
+//! width. Each classifier is its own object type, declared the first time a module uses it, so a
+//! later type test can tell an `IntArray` from a `FloatArray`; tests and casts against array types
+//! still decline today.
 
 use crate::fx_hash::HashMap;
 use crate::types::{Ty, TyKind};
