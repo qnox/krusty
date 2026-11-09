@@ -26,7 +26,7 @@ mod constructions;
 mod elvis_blocks;
 mod instance_storage;
 mod loops;
-pub(in crate::klib_lowering) mod object_literals;
+mod object_literals;
 mod range_membership;
 mod safe_calls;
 mod string_templates;

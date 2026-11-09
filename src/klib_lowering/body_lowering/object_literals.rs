@@ -6,7 +6,7 @@
 //! field and reads the field, which is the class an inlined call copies. This module lowers that
 //! shape. A local class written as its own statement stays declined.
 
-use super::{mismatch, unsupported, BodyLowering, Lowered};
+use super::{mismatch, unsupported, BodyLowering, KlibBodyDeclineReason, Lowered};
 use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{
     ClassId, ExprId, FunId, IrClass, IrConstructorCapture, IrCtorArg, IrCtorParameterProvenance,
@@ -369,10 +369,8 @@ impl BodyLowering<'_> {
         );
         let statements = match &function.body {
             Some(crate::metadata::klib_ir::tree::KlibIrBody::Block(statements)) => statements,
-            Some(_) => {
-                return Err(crate::klib_lowering::decline::KlibBodyDeclineReason::SyntheticBody)
-            }
-            None => return Err(crate::klib_lowering::decline::KlibBodyDeclineReason::NoBody),
+            Some(_) => return Err(KlibBodyDeclineReason::SyntheticBody),
+            None => return Err(KlibBodyDeclineReason::NoBody),
         };
         let frame = self.enter_member(function, owner, captures, ret)?;
         let lowered = self.block(statements);
