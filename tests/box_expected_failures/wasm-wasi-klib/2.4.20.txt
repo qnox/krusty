@@ -4423,7 +4423,6 @@ regressions/collectionSizeInInlineBody.kt
 regressions/collectionSizeOrDefault.kt
 regressions/dataClassInInlineFunctionWithTypeParameters.kt
 regressions/dataClassInRegularFunctionWithTypeParameters.kt
-regressions/dependencyInlineObjectCaptures.kt
 regressions/directInvokeDestructuring.kt
 regressions/directInvokeNameBasedDestructuring.kt
 regressions/floatingRangeContainsMixedWidths.kt
