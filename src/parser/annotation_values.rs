@@ -18,7 +18,7 @@ impl Parser<'_> {
     /// The arguments of an annotation argument list after its `(`, up to its `)`.
     fn parse_annotation_arg_items(&mut self) -> Vec<ExprId> {
         let mut out = Vec::new();
-        self.skip_newlines();
+        self.skip_semicolons();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             // optional named argument `name = value` — the label binds the value to an element by
             // NAME, so it is recorded rather than skipped (annotation elements have defaults and
@@ -35,11 +35,11 @@ impl Parser<'_> {
                 }
                 out.push(e);
             }
-            self.skip_newlines();
+            self.skip_semicolons();
             if !self.eat(TokenKind::Comma) {
                 break;
             }
-            self.skip_newlines();
+            self.skip_semicolons();
         }
         out
     }
@@ -89,7 +89,7 @@ impl Parser<'_> {
     pub(super) fn parse_annotation_array_literal(&mut self) -> ExprId {
         let start = self.tok().span;
         self.bump(); // '['
-        self.skip_newlines();
+        self.skip_semicolons();
         // Keep the annotation syntax through nested calls. The checker owns direct-slot context
         // and ordinary constructor-argument inference; neither is a parser-selected factory.
         let mut elements = Vec::new();
@@ -97,11 +97,11 @@ impl Parser<'_> {
             if let Some(element) = self.parse_annotation_value() {
                 elements.push(element);
             }
-            self.skip_newlines();
+            self.skip_semicolons();
             if !self.eat(TokenKind::Comma) {
                 break;
             }
-            self.skip_newlines();
+            self.skip_semicolons();
         }
         self.expect(TokenKind::RBracket, "']'");
         self.file

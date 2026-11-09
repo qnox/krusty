@@ -247,6 +247,14 @@ fn effect_pb(
             p.field_message(3, &cb); // Effect.conclusion_of_conditional_effect
             p.field_varint(5, 2); // Effect.condition_kind = HOLDSIN_CONDITION
         }
+        Effect::ReturnsResultOf { lambda } => {
+            p.field_varint(1, 3); // Effect.effect_type = RETURNS_RESULT_OF
+            p.repeated_message(2, &expression_param_ref_pb(*lambda)); // Effect.effect_constructor_argument
+        }
+        Effect::ReturnsParameter { param } => {
+            p.field_varint(1, 4); // Effect.effect_type = RETURNS_PARAMETER
+            p.repeated_message(2, &expression_param_ref_pb(*param)); // Effect.effect_constructor_argument
+        }
     }
     p
 }
@@ -1372,7 +1380,7 @@ pub fn build_package(
     )
 }
 
-pub(crate) fn build_package_with_intersection_approximation(
+pub fn build_package_with_intersection_approximation(
     funcs: &[FnMeta],
     props: &[PropMeta],
     aliases: &[TypeAliasMeta],
@@ -1387,6 +1395,7 @@ pub(crate) fn build_package_with_intersection_approximation(
     let mut st = StringTable::with_local_classifiers(
         &lookups.local_classifiers,
         &lookups.enum_entry_bodies,
+        &lookups.anonymous_classifiers,
         lookups.intersection_approximation,
         lookups.inner_classifiers,
     );
@@ -1940,6 +1949,62 @@ mod tests {
             .iter()
             .find(|f| f.kotlin_name == "whenString")
             .expect("whenString in package functions");
+        assert_eq!(function.contract.as_deref(), Some(&contract));
+    }
+
+    /// kotlinc 2.5's return-value-checker effects, `returnsResultOf(block)` and
+    /// `returnsParameter(this)`, read back through the JVM reader.
+    #[test]
+    fn returns_result_contracts_round_trip_through_metadata() {
+        use crate::contracts::{Contract, Effect, InvocationKind, ParamRef};
+        let contract = Contract {
+            effects: vec![
+                Effect::CallsInPlace {
+                    param: ParamRef::Param(0),
+                    kind: InvocationKind::ExactlyOnce,
+                },
+                Effect::ReturnsResultOf {
+                    lambda: ParamRef::Param(0),
+                },
+                Effect::ReturnsParameter {
+                    param: ParamRef::Receiver,
+                },
+            ],
+        };
+        let (d1, d2) = build_package(
+            &[FnMeta {
+                receiver: Some(Ty::obj("kotlin/Any")),
+                jvm_desc: Some(
+                    "(Ljava/lang/Object;Lkotlin/jvm/functions/Function0;)Ljava/lang/Object;".into(),
+                ),
+                inline: true,
+                contract: Some(std::sync::Arc::new(contract.clone())),
+                ..FnMeta::plain(
+                    "either",
+                    vec![(
+                        "block".into(),
+                        Ty::obj_args("kotlin/Function0", &[Ty::obj("kotlin/Any")]),
+                    )],
+                    Ty::obj("kotlin/Any"),
+                )
+            }],
+            &[],
+            &[],
+            (None, &[]),
+            true,
+        );
+        let d1s: String = d1.iter().map(|&b| b as char).collect();
+        let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", None)
+            .expect("decode generated metadata");
+        let members = meta
+            .members
+            .decode(&[], &meta.type_parameter_scope)
+            .expect("decode generated members");
+        let function = members
+            .package_functions
+            .iter()
+            .find(|f| f.kotlin_name == "either")
+            .expect("either in package functions");
         assert_eq!(function.contract.as_deref(), Some(&contract));
     }
 

@@ -619,3 +619,42 @@ fn a_companion_block_member_actualizes_its_expect() {
     .expect("krusty compiles and runs the split source set");
     assert_eq!(got, "OK");
 }
+
+/// An `expect` interface actualized by an `actual typealias` to a Java interface is that interface
+/// on the platform. A common declaration that extends it (another `expect` interface, an abstract
+/// class) plans its inherited members over the Java interface's members, not over the `expect`
+/// declaration's, which the platform does not have (mirai's `MutableQueue`/`MutableDeque`).
+///
+/// PLATFORM-SPECIFIC: the actuals are `java.util.Queue` and `java.util.Deque`.
+#[test]
+fn an_expect_interface_actualized_by_a_java_typealias_plans_its_subtypes() {
+    const COMMON: &str = r#"// LANGUAGE: +MultiPlatformProjects
+expect interface Queueish<E> : MutableCollection<E> {
+    override fun add(element: E): Boolean
+    fun poll(): E?
+}
+
+expect interface Dequeish<E> : Queueish<E> {
+    fun addFirst(element: E)
+}
+
+abstract class Pile<E> : Queueish<E>
+
+expect fun <E> newDeque(): Dequeish<E>
+"#;
+
+    const PLATFORM: &str = r#"// LANGUAGE: +MultiPlatformProjects
+actual typealias Queueish<E> = java.util.Queue<E>
+actual typealias Dequeish<E> = java.util.Deque<E>
+
+actual fun <E> newDeque(): Dequeish<E> = java.util.ArrayDeque()
+
+fun box(): String {
+    val deque = newDeque<String>()
+    deque.add("K")
+    deque.addFirst("O")
+    return deque.poll() + deque.poll()
+}
+"#;
+    run_source_set_same_as_kotlinc(COMMON, PLATFORM);
+}

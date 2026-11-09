@@ -325,8 +325,11 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
 - Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter
   of an enclosing declaration by id alone (`Type.type_parameter`). Ids come from kotlinc's
   per-declaration interner: the class's own parameters first, then each captured one on first use,
-  and a member's first use is numbered in that member's own scope. Test:
-  `tests/metadata_captured_type_parameters_e2e.rs`.
+  and a member's first use is numbered in that member's own scope. A use-site application of that
+  classifier records only its own arguments. Lexical captures are not type arguments and are not
+  `Type.outer_type`; an `inner` class still writes its enclosing instance there. Tests:
+  `tests/metadata_captured_type_parameters_e2e.rs`,
+  `tests/facade_local_classifier_metadata_e2e.rs`.
 - Nested and inner classes (kotlinc 2.4.0, 2.4.10, 2.4.20): a nested class, inner or not, is
   serialized under its outer classes, so every enclosing class's parameters hold the ids before its
   own, outermost first. The class header (type-parameter bounds, supertypes, the inline-class
@@ -515,7 +518,7 @@ keeps abbreviation off type equality for the same reason). The spelling therefor
   `member_spellings`.
 - Class metadata is built from the IR alone, so the spelling reaches it on IR side tables
   (`fn_declared_spellings`, `class_declared_spellings`, `prop_declared_spellings`), filled at
-  lowering — the same mechanism `fn_param_declared_nullable` already used. Property spellings use
+  lowering — the same mechanism the declared parameter nullability uses. Property spellings use
   `(classifier identity, stable declaration order)`, not `(classifier, source name)`: ordinary and
   member-extension properties may legally share a name.
 
@@ -584,6 +587,16 @@ Measured against kotlinc 2.4.20:
 - `Class.property`, `Class.function` and `Class.type_alias` serialize in the order the records were
   built, which is the d2 interning order. With `var <M> Slot<M>.member` declared before
   `val later`, both lists put `member` first.
+- The functions the compiler adds to a class without a source position share one run of
+  `Class.function`, after the declared functions and a data class's `componentN` and `copy`:
+  a data or value class's generated `equals`/`hashCode`/`toString`, a compiler plugin's members on
+  a data class, and the `interface by` forwarders, sorted together by
+  `FirCallableDeclarationComparator` (name, extension receiver, return type, parameters).
+  `data class Named(...) : Greeter by greeter` lists `answer`, `equals`, `greet`, `hashCode`,
+  `toString`. A class without generated structural members lists its forwarders alone, sorted the
+  same way, at the end. On the JVM the forwarders' methods follow the generated structural methods
+  whichever order they were added in (`tests/box_regressions/dataClassDelegatedMemberOrder.kt`,
+  `member_schedule::tests`).
 
 ## `Property.flags` HAS_CONSTANT
 
@@ -638,3 +651,9 @@ The type-annotation adapter accepts exactly `IS_UNSIGNED` on BYTE, SHORT, INT an
 valid signed carriers; other flags and incompatible kinds are rejected. KSP protocol 16 transports
 `UByte`, `UShort`, `UInt` and `ULong` value tags, whose JVM adapter boxes the matching Kotlin unsigned
 wrappers. Class-reader constants and build ABI fingerprints retain their physical JVM carriers.
+
+Retained capture signatures carry `CAPTURE_STORAGE` into `IrPropertyOrigin::CaptureStorage`.
+The class metadata projection excludes only that role, after retaining each property's original IR
+index; ordinary and plugin-generated declarations remain properties. Physical fields and capture
+storage demand remain separate facts, owned by the current declaration-keyed capture plan.
+Tests: `tests/capture_storage_metadata_e2e.rs` and the FIR local-class owner tests.

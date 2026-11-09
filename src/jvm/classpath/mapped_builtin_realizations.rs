@@ -16,26 +16,25 @@ use crate::types::TypeName;
 /// Consumers traverse the metadata supertype graph themselves so applied type arguments remain
 /// attached to the declaration that owns them.
 #[derive(Clone, Debug)]
-pub(in crate::jvm) struct DecodedBuiltinMember {
-    pub(in crate::jvm) declaration_owner: TypeName,
-    pub(in crate::jvm) source_name: String,
-    pub(in crate::jvm) physical_name: String,
-    pub(in crate::jvm) descriptor: String,
-    pub(in crate::jvm) kind: MappedBuiltinMemberKind,
-    pub(in crate::jvm) generic_sig: GenericSig,
-    pub(in crate::jvm) parameter_names: Vec<String>,
+pub struct DecodedBuiltinMember {
+    pub declaration_owner: TypeName,
+    pub source_name: String,
+    pub physical_name: String,
+    pub descriptor: String,
+    pub kind: MappedBuiltinMemberKind,
+    pub generic_sig: GenericSig,
+    pub parameter_names: Vec<String>,
+    /// The declaration's modality is `abstract` in the builtins metadata.
+    pub is_abstract: bool,
     /// The declaration is `@PlatformDependent`: a JVM member of the mapped JDK class that Kotlin
     /// sees only where that JDK declares it (`MutableMap.remove(key, value)`).
-    pub(in crate::jvm) platform_dependent: bool,
+    pub platform_dependent: bool,
 }
 
 impl Classpath {
     /// Direct declarations of one builtin classifier. All semantic shape comes from metadata; the
     /// physical name is the exact target realization selected for that declaration and signature.
-    pub(in crate::jvm) fn decoded_builtin_members_name(
-        &self,
-        owner: TypeName,
-    ) -> Vec<DecodedBuiltinMember> {
+    pub fn decoded_builtin_members_name(&self, owner: TypeName) -> Vec<DecodedBuiltinMember> {
         let file = self.builtins_file_for_package(Self::builtins_package_for(owner));
         let Some(class) = file.get_name(owner) else {
             return Vec::new();
@@ -68,6 +67,7 @@ impl Classpath {
                     kind,
                     generic_sig: member.generic_sig.clone(),
                     parameter_names: member.param_names.clone(),
+                    is_abstract: member.is_abstract,
                     platform_dependent: member
                         .annotations
                         .contains(&crate::types::wk::platform_dependent()),
@@ -167,7 +167,7 @@ impl Classpath {
 
     /// Exact type-safe collection policy inherited by a decoded declaration. The walk follows
     /// metadata identities; a same-spelled user or platform method never enters it.
-    pub(in crate::jvm) fn collection_bridge_policy_name(
+    pub fn collection_bridge_policy_name(
         &self,
         declaration_owner: TypeName,
         source_name: &str,

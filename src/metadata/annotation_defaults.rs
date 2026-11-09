@@ -2,7 +2,7 @@
 
 /// FIR's serializer gates the payload on the physical metadata version, independently of the
 /// source-language feature that enables declaration annotation records.
-pub(crate) fn supported([major, minor, _]: [i32; 3]) -> bool {
+pub fn supported([major, minor, _]: [i32; 3]) -> bool {
     major > 2 || (major == 2 && minor >= 2)
 }
 

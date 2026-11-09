@@ -447,7 +447,7 @@ impl Spelled {
 impl DeclaredSpellings {
     /// Whether the receiver, a value parameter or the result is an actualized expect class: a
     /// reader derives its descriptor from the expect class, so kotlinc records the physical one.
-    pub(crate) fn names_actualized_expect(&self) -> bool {
+    pub fn names_actualized_expect(&self) -> bool {
         std::iter::once(&self.receiver)
             .chain(&self.params)
             .chain(std::iter::once(&self.ret))

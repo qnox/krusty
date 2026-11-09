@@ -83,7 +83,6 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         | IrIntrinsic::ArraySize
         | IrIntrinsic::StringGet
         | IrIntrinsic::StringLength
-        | IrIntrinsic::EnumName
         | IrIntrinsic::EnumOrdinal
         | IrIntrinsic::NullableAnyToString
         | IrIntrinsic::CoroutineContext => Ok(()),
@@ -223,6 +222,7 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
         IrCheckedOperation::ConstructorDelegation {
             target,
             outer_parameter,
+            capture_arguments,
             arguments,
             substitutions,
             ..
@@ -230,6 +230,9 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
             validate_constructor_target(target)?;
             if let Some(outer) = outer_parameter {
                 reject("constructor outer parameter", *outer)?;
+            }
+            for (_, ty) in capture_arguments.iter().flatten() {
+                reject("constructor capture parameter", *ty)?;
             }
             for argument in arguments {
                 validate_argument(argument)?;
@@ -1116,6 +1119,7 @@ mod tests {
                 default_masks: Vec::new(),
             },
             synthetic: false,
+            platform_visible: false,
             vc_params: false,
             param_checks: Vec::new(),
         });

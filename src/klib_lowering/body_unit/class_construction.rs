@@ -14,7 +14,11 @@ impl<'u, 's> Linker<'u, 's> {
         if self.classes.contains_key(identity) {
             return Ok(());
         }
-        let Some(plan) = super::super::class_initialization::plan(selected, self.sources.bodies)?
+        let Some(plan) = super::super::class_initialization::plan(
+            selected,
+            self.sources.bodies,
+            self.sources.callees,
+        )?
         else {
             return Ok(());
         };
@@ -25,8 +29,31 @@ impl<'u, 's> Linker<'u, 's> {
             ));
         }
         let header = super::super::function_lowering::initializer_header(&plan)?;
+        let self_type = super::super::klib_types::semantic_type(
+            plan.header.arena,
+            &plan.header.types,
+            plan.header
+                .class
+                .this_receiver
+                .as_ref()
+                .expect("the plan authenticated its receiver")
+                .ty,
+        )?;
         let mut class = IrClass::synthetic(classifier);
         class.supertypes.push(plan.storage.superclass);
+        let parameters = &plan.header.contract.parameters;
+        for (formal, bounds) in parameters.formals.iter().zip(&parameters.bounds) {
+            let crate::types::TyKind::TyParam(identity, _) = formal.kind() else {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a materialized class parameter has no declared formal identity".to_owned(),
+                ));
+            };
+            let identity = identity.as_str().to_owned();
+            class.type_params.push(identity.clone());
+            class
+                .type_param_bounds
+                .extend(bounds.iter().map(|bound| (identity.clone(), *bound)));
+        }
         class.fields = plan
             .storage
             .fields
@@ -65,6 +92,7 @@ impl<'u, 's> Linker<'u, 's> {
         class.ctor_param_count = 0;
         class.explicit_param_stores = true;
         let class = ir.add_class(class);
+        ir.record_declared_class_self_type(classifier, self_type);
         let function = declare_function(ir, &header);
         ir.functions[function as usize].is_static = false;
         ir.functions[function as usize].dispatch_receiver = Some(classifier);
@@ -72,7 +100,7 @@ impl<'u, 's> Linker<'u, 's> {
         ir.classes[class as usize].methods.push(function);
         ir.note_class_method(class, function);
         let receiver = ir.add_expr(IrExpr::GetValue(0));
-        ir.set_logical_type(receiver, Ty::obj_name(classifier));
+        ir.set_logical_type(receiver, self_type);
         let args = header
             .params()
             .iter()
@@ -103,6 +131,7 @@ impl<'u, 's> Linker<'u, 's> {
             function,
             initialization: Some((class, plan)),
             value_member: None,
+            local_body: None,
         });
         Ok(())
     }

@@ -9,6 +9,8 @@ use super::intern;
 static TYPE_PARAMETER_SOURCES: OnceLock<Mutex<HashMap<&'static str, &'static str>>> =
     OnceLock::new();
 static NEXT_METADATA_TYPE_PARAMETER: AtomicU64 = AtomicU64::new(0);
+static NESTED_RESULT_TYPE_VARIABLES: OnceLock<Mutex<crate::fx_hash::HashSet<&'static str>>> =
+    OnceLock::new();
 static CALL_SITE_VARIABLES: OnceLock<Mutex<HashMap<&'static str, CallSiteVariable>>> =
     OnceLock::new();
 static POSTPONED_VARIABLE_ORIGINS: OnceLock<Mutex<HashMap<&'static str, PostponedVariableOrigin>>> =
@@ -43,7 +45,7 @@ pub(crate) fn metadata_type_parameter(source: &str) -> &'static str {
 /// Intern one declaration-owned type-parameter identity and retain its source spelling separately.
 /// The semantic key is opaque: callers compare it only by identity and never parse declaration
 /// coordinates or spelling out of it.
-pub(crate) fn declaration_type_parameter(
+pub fn declaration_type_parameter(
     compilation: u64,
     file: u32,
     declaration_start: u32,
@@ -114,6 +116,33 @@ pub(crate) fn call_site_type_variable(
     fresh
 }
 
+/// The variable an enclosing call solves for a nested call's formal that the nested call's own
+/// inputs left unfixed (`update(column, wrap("x"))` with `fun <T : Any> wrap(label: String)`). The
+/// nested call's provisional result names it in place of the declaration formal, so enclosing
+/// overload selection reads that argument as a result-only producer rather than as a fixed type.
+pub(crate) fn nested_result_type_variable(declared: &'static str) -> &'static str {
+    let fresh = intern(&format!("\0nested-result:{declared}"));
+    let mut sources = TYPE_PARAMETER_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::default()))
+        .lock()
+        .unwrap();
+    let source = sources.get(declared).copied().unwrap_or(declared);
+    sources.insert(fresh, source);
+    NESTED_RESULT_TYPE_VARIABLES
+        .get_or_init(|| Mutex::new(crate::fx_hash::HashSet::default()))
+        .lock()
+        .unwrap()
+        .insert(fresh);
+    fresh
+}
+
+/// Whether `identity` was produced by [`nested_result_type_variable`].
+pub(crate) fn is_nested_result_type_variable(identity: &str) -> bool {
+    NESTED_RESULT_TYPE_VARIABLES
+        .get()
+        .is_some_and(|variables| variables.lock().unwrap().contains(identity))
+}
+
 /// `ty` with call `site`'s own inference variables expressed as the formals they stand for. A call
 /// publishes its selection over the called declaration's formals; another call's variable is not
 /// this call's to translate and stays.
@@ -125,6 +154,13 @@ pub(crate) fn ty_declared_at_call(ty: super::Ty, site: CallSiteIdentity) -> supe
         },
         _ => symbol.with_symbol_bound(bound),
     })
+}
+
+/// Whether `ty` names one of call `site`'s own inference variables: a variable that call's
+/// selection has not solved. A declaration formal never does, even when it is the called
+/// declaration's own formal in scope at a recursive call.
+pub(crate) fn ty_mentions_call_variable(ty: super::Ty, site: CallSiteIdentity) -> bool {
+    ty_declared_at_call(ty, site) != ty
 }
 
 /// The call and formal behind a call's inference variable; `None` for every other identity.
@@ -248,7 +284,7 @@ pub(crate) fn generated_function_type_parameter(
 
 /// The source spelling carried by a declaration-scoped semantic type-parameter key. Diagnostics and
 /// metadata show the written name even though inference uses the full identity.
-pub(crate) fn type_parameter_source_name(name: &str) -> &str {
+pub fn type_parameter_source_name(name: &str) -> &str {
     TYPE_PARAMETER_SOURCES
         .get_or_init(|| Mutex::new(HashMap::default()))
         .lock()

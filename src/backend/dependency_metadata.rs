@@ -30,7 +30,7 @@ pub(crate) fn has_standalone_dependency_code(ir: &crate::ir::IrFile, callable: F
 /// body recorded. The receiver node may be a local read after inline callable-reference staging;
 /// its syntax carries no authority. The per-expression singleton classifier frozen from common IR
 /// is the semantic proof, while a present receiver preserves the source call's operand shape.
-pub(crate) fn authenticated_singleton_receiver(
+pub fn authenticated_singleton_receiver(
     receiver: Option<crate::ir::ExprId>,
     selected_classifier: Option<crate::types::TypeName>,
     expected: crate::types::Ty,
@@ -48,7 +48,7 @@ pub(crate) fn authenticated_singleton_receiver(
 /// dependency call, and that every such call joins to the same inert exported receiver effect.
 /// A shared `GetValue` node used in any second position fails the edge-count equality and remains
 /// evaluated.
-pub(crate) fn inert_staged_singleton_bindings(
+pub fn inert_staged_singleton_bindings(
     ir: &crate::ir::IrFile,
     mut singleton_dispatch: impl FnMut(crate::ir::ExprId) -> Option<crate::types::TypeName>,
     mut receiver_is_inert: impl FnMut(crate::fir::ExternalCallableId, crate::types::TypeName) -> bool,
@@ -206,10 +206,23 @@ pub struct DependencyExportSignatures {
     /// constructs through. A target realizes each as an ordinary exported callable (see
     /// `super::construction_entries`), since constructing an object needs its layout.
     constructors: Vec<(ExportedConstructor, KlibDependencyCallable)>,
+    /// Concrete default property accessors whose checked operations a target exports as bodies.
+    property_accessors: Vec<(ExportedPropertyAccessor, KlibDependencyCallable)>,
     /// Every object declaration of this file another module may read as a value, and, once a
     /// target realized it, the entry answering its instance (see `super::construction_entries`).
     singletons: Vec<crate::ir::ClassId>,
     singleton_entries: Vec<(crate::types::TypeName, FunId)>,
+    /// Every enum class of this file another module may read a constant of, and, once a target
+    /// realized it, the entry answering each constant (see `super::enums`).
+    enums: Vec<crate::ir::ClassId>,
+    enum_constant_entries: Vec<(EnumConstant, FunId)>,
+}
+
+/// One constant of an enum class, as a read of it names it: the enum and the constant's name.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct EnumConstant {
+    pub classifier: crate::types::TypeName,
+    pub name: Box<str>,
 }
 
 /// One constructor [`DependencyExportSignatures`] publishes: the class and which of its
@@ -221,7 +234,34 @@ pub struct ExportedConstructor {
     pub secondary: Option<usize>,
 }
 
+/// The selected property and accessor operation; declaration signatures remain metadata-owned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExportedPropertyAccessor {
+    Getter(crate::fir::PropertyId),
+    Setter(crate::fir::PropertyId),
+}
+
 impl DependencyExportSignatures {
+    pub(crate) fn property_accessors(
+        &self,
+    ) -> &[(ExportedPropertyAccessor, KlibDependencyCallable)] {
+        &self.property_accessors
+    }
+
+    pub(crate) fn record_property_accessor(
+        &mut self,
+        accessor: ExportedPropertyAccessor,
+        identity: KlibDependencyCallable,
+    ) {
+        assert!(
+            !self
+                .property_accessors
+                .iter()
+                .any(|(prior, _)| *prior == accessor),
+            "one property accessor exports one declaration identity"
+        );
+        self.property_accessors.push((accessor, identity));
+    }
     /// The public dependency identity exported for `callable`, when the declaration is visible to
     /// another module and has a callable realization.
     pub fn callable(&self, callable: FunId) -> Option<&KlibDependencyCallable> {
@@ -283,7 +323,7 @@ impl DependencyExportSignatures {
     }
 
     /// Every constructor this file publishes, in record order.
-    pub(crate) fn constructors(&self) -> &[(ExportedConstructor, KlibDependencyCallable)] {
+    pub fn constructors(&self) -> &[(ExportedConstructor, KlibDependencyCallable)] {
         &self.constructors
     }
 
@@ -307,12 +347,32 @@ impl DependencyExportSignatures {
     }
 
     /// Every object instance entry a target realized, by the object's classifier.
-    pub(crate) fn singleton_entries(&self) -> &[(crate::types::TypeName, FunId)] {
+    pub fn singleton_entries(&self) -> &[(crate::types::TypeName, FunId)] {
         &self.singleton_entries
     }
 
+    /// Record an enum class another module may read a constant of.
+    pub(crate) fn record_enum(&mut self, class: crate::ir::ClassId) {
+        self.enums.push(class);
+    }
+
+    /// Every enum class this file publishes, in record order.
+    pub(crate) fn enums(&self) -> &[crate::ir::ClassId] {
+        &self.enums
+    }
+
+    /// Record the target-realized entry answering one constant of a published enum.
+    pub(crate) fn record_enum_constant_entry(&mut self, constant: EnumConstant, entry: FunId) {
+        self.enum_constant_entries.push((constant, entry));
+    }
+
+    /// Every enum constant entry a target realized.
+    pub fn enum_constant_entries(&self) -> &[(EnumConstant, FunId)] {
+        &self.enum_constant_entries
+    }
+
     /// Record one declaration at the metadata owner that computed its exact identity.
-    pub(crate) fn record_callable(&mut self, callable: FunId, identity: KlibDependencyCallable) {
+    pub fn record_callable(&mut self, callable: FunId, identity: KlibDependencyCallable) {
         let previous = self.callables.insert(callable, identity);
         assert!(
             previous.is_none(),
@@ -354,7 +414,7 @@ impl DependencyExportSignatures {
         );
     }
 
-    pub(crate) fn record_singleton_extension_unread_receiver(
+    pub fn record_singleton_extension_unread_receiver(
         &mut self,
         callable: FunId,
         receiver: crate::types::Ty,
@@ -373,7 +433,7 @@ impl DependencyExportSignatures {
         );
     }
 
-    pub(crate) fn record_singleton_member_receiver(
+    pub fn record_singleton_member_receiver(
         &mut self,
         callable: FunId,
         classifier: crate::types::TypeName,

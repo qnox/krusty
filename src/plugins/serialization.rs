@@ -2354,6 +2354,15 @@ mod tests {
                 crate::ir::IrGeneratedClassRole::SerializationSerializer,
             )
             .expect("generic serializer class");
+        let serializer = ir.classes[ser_id as usize].fq_name_id();
+        assert_eq!(
+            ir.declared_class_self_type(serializer),
+            Some(Ty::obj_args_name(
+                serializer,
+                &[Ty::ty_param("T", Ty::nullable(class_ty("kotlin/Any")))],
+            )),
+            "the generated declaration retains its full applied receiver type"
+        );
         let tps_fid =
             GeneratedSerializerMembers::declared(&ir, ir.classes[ser_id as usize].fq_name_id())
                 .type_parameter_serializers;
@@ -2677,11 +2686,11 @@ mod tests {
         // not miscompile. `run` here is a non-`@Serializable` no-op, so the marker survives.
         let (mut ir, _mid, _) = placeholder("encodeToString");
         assert!(
-            !crate::jvm::ir_emit::jvm_can_emit(&ir),
+            !crate::jvm::emission_readiness::jvm_can_emit(&ir),
             "a surviving PluginPlaceholder must be declined by jvm_can_emit"
         );
         // After specialization the file is emittable again.
         specialize_expression_placeholders(&mut ir, &PluginContext::default());
-        assert!(crate::jvm::ir_emit::jvm_can_emit(&ir));
+        assert!(crate::jvm::emission_readiness::jvm_can_emit(&ir));
     }
 }

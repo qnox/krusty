@@ -20,8 +20,9 @@ mod capture_order;
 mod capture_parameters;
 pub use capture_parameters::FirCaptureParameter;
 mod class_captures;
+pub use class_captures::ClassCaptureIdentity;
 pub(crate) use class_captures::{
-    ClassBodyContext, ClassCaptureBinding, ClassCaptureIdentity, ClassReceiverCaptureSource,
+    ClassBodyContext, ClassCaptureBinding, ClassReceiverCaptureSource,
 };
 mod lifting_sites;
 mod local_type_parameters;
@@ -239,13 +240,8 @@ pub enum FirIntrinsic {
     },
     ArrayGet,
     ArraySet,
-    ArraySize,
     StringGet,
-    StringLength,
     StringPlus,
-    /// `kotlin.Enum.name` on a receiver. Constant evaluation replaces a direct enum entry with
-    /// that entry's declaration name; every other receiver lowers to the property's call.
-    EnumName,
     NullableAnyToString,
     PrimitiveCompare {
         operand: ResolvedTy,
@@ -709,12 +705,6 @@ pub enum FirBinaryOperation {
     ShiftLeft,
     ShiftRight,
     UnsignedShiftRight,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirIndexedAccessKind {
-    Array,
-    String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1273,17 +1263,6 @@ pub enum FirExprKind {
         end: FirExprId,
         negated: bool,
     },
-    IndexedRead {
-        kind: FirIndexedAccessKind,
-        receiver: FirExprId,
-        indices: Box<[FirConvertedValue]>,
-    },
-    IndexedWrite {
-        receiver: FirExprId,
-        indices: Box<[FirConvertedValue]>,
-        value: FirExprId,
-        conversion: Option<FirConversion>,
-    },
     /// Null-guarded member/extension selection. The nested selector owns the receiver exactly once;
     /// lowering guards that selected receiver and never repeats lookup or overload selection.
     SafeCall {
@@ -1400,10 +1379,6 @@ impl FirExprKind {
             FirExprKind::ClassLiteral { .. } => 0,
             FirExprKind::LocalPropertyReference { name, .. } => name.len(),
             FirExprKind::LocalDelegateAccess { .. } => 0,
-            FirExprKind::IndexedRead { indices, .. }
-            | FirExprKind::IndexedWrite { indices, .. } => {
-                indices.len() * std::mem::size_of::<FirConvertedValue>()
-            }
             FirExprKind::AnnotationArray(expressions)
             | FirExprKind::StringTemplate(expressions) => {
                 expressions.len() * std::mem::size_of::<FirExprId>()

@@ -9,9 +9,12 @@
 //! final special bridge testing `instanceof String`, and an inherited `Base<T>.remove(T)` under
 //! `Base<String>` implements it with the erased descriptor itself, so it needs nothing.
 //!
-//! The mutable-only JDK default `removeIf` is stubbed after them. These comparisons cover every
-//! member, the `toArray` pair and the declared `containsAll` override included, byte for byte,
-//! apart from the later realizations a test names.
+//! The JDK default `removeIf` that `java.util.Collection` declares is a stub as well
+//! (`removeIf(Predicate<? super String>)`). An abstract class materializes the read-only members it
+//! leaves abstract (`abstract boolean contains(String)` and `abstract int getSize()`) with their
+//! final special bridges. These comparisons compare every member, the `toArray` pair and the
+//! declared `containsAll` override included, byte for byte, apart from the later realizations a
+//! test names.
 
 use super::common;
 
@@ -93,15 +96,6 @@ fun box(): String {{
 
 const ABSTRACT_BAG: &str = "abstract class Bag : Collection<String>\n";
 
-/// The fake-override bridges an abstract class's unimplemented `contains` and `size` get, a later
-/// realization as well.
-const ABSTRACT_FAKE_OVERRIDE_BRIDGES: &[&str] = &[
-    "public abstract boolean contains(java.lang.String);",
-    "public final boolean contains(java.lang.Object);",
-    "public abstract int getSize();",
-    "public final int size();",
-];
-
 /// The signature of a generic class's declared `contains(element: T)`, a later realization too:
 /// kotlinc writes the type-safe member without one.
 const GENERIC_DECLARED_CONTAINS: &[&str] = &[
@@ -148,6 +142,7 @@ const STUBS: &[&str] = &[
     "public boolean removeAll(java.util.Collection<?>);",
     "public boolean retainAll(java.util.Collection<?>);",
     "public void clear();",
+    "public boolean removeIf(java.util.function.Predicate<? super java.lang.String>);",
     "public final int size();",
     "public final boolean contains(java.lang.Object);",
     "public boolean add(java.lang.Object);",
@@ -260,7 +255,7 @@ fn own_collection_members_implement_their_stubs_and_the_add_bridge_forwards_like
 
 #[test]
 fn an_abstract_collection_also_gets_an_iterator_stub_like_kotlinc() {
-    assert_members_match_kotlinc_beside(
+    assert_members_match_kotlinc(
         ABSTRACT_BAG,
         &[
             "public java.util.Iterator<java.lang.String> iterator();",
@@ -270,8 +265,11 @@ fn an_abstract_collection_also_gets_an_iterator_stub_like_kotlinc() {
             "public boolean removeAll(java.util.Collection<?>);",
             "public boolean retainAll(java.util.Collection<?>);",
             "public void clear();",
+            "public abstract boolean contains(java.lang.String);",
+            "public final boolean contains(java.lang.Object);",
+            "public abstract int getSize();",
+            "public final int size();",
         ],
-        ABSTRACT_FAKE_OVERRIDE_BRIDGES,
     );
 }
 

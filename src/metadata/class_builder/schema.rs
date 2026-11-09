@@ -351,14 +351,14 @@ fn enum_entry_pb(
 }
 
 /// Everything one `Class` record is built from.
-pub(crate) struct ClassDeclaration<'a> {
+pub struct ClassDeclaration<'a> {
     pub(crate) name: TypeName,
-    pub(crate) class_id: &'a crate::metadata::class_id::ResolvedClassId,
-    pub(crate) ctor_params: &'a [(String, Ty)],
-    pub(crate) props: &'a [PropMeta],
-    pub(crate) methods: &'a [FnMeta],
-    pub(crate) enum_entries: &'a [EnumEntryMeta<'a>],
-    pub(crate) tail: &'a ClassTail<'a>,
+    pub class_id: &'a crate::metadata::class_id::ResolvedClassId,
+    pub ctor_params: &'a [(String, Ty)],
+    pub props: &'a [PropMeta],
+    pub methods: &'a [FnMeta],
+    pub enum_entries: &'a [EnumEntryMeta<'a>],
+    pub tail: &'a ClassTail<'a>,
 }
 
 /// The `Class` message for `declaration`, its strings interned into `st` in kotlinc's order.

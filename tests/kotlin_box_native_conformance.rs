@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::Command;
 
 use krusty::conformance::TestTarget;
-use krusty::native::{CraneliftBackend, Entry, NativeTarget};
+use krusty_native::{CraneliftBackend, Entry, NativeTarget};
 
 use super::box_lane::{self, Lane, Libraries, Outcome};
 use super::box_ratchet::Platform;
@@ -28,7 +28,7 @@ const DECLINE_PREFIX: &str = "krusty: the native backend does not support ";
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target) && LIBRARIES.available(TestTarget::Native)).then_some(target)
+    (krusty_native::can_link(target) && LIBRARIES.available(TestTarget::Native)).then_some(target)
 }
 
 /// Why a case is outside this harness before any compilation, or `None` when it applies.
@@ -140,7 +140,7 @@ impl NativeLane {
             );
         }
         let object_refs = objects.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        let image = match krusty::native::link_program_with_libraries(
+        let image = match krusty_native::link_program_with_libraries(
             &object_refs,
             &program.native_imports,
             target,
@@ -328,6 +328,28 @@ fn native_reference_runner_calls_the_packaged_final_module_box() {
         Outcome::Pass,
         "the Native oracle and product must both call the final module's declared box"
     );
+}
+
+#[test]
+fn native_class_properties_export_their_checked_accessors() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/classPropertyDependencyExports.kt"),
+            "classPropertyDependencyExports",
+        ),
+        (
+            include_str!("box_regressions/delegatedPropertyDependencyExports.kt"),
+            "delegatedPropertyDependencyExports",
+        ),
+    ] {
+        super::box_reference_classes::checked_box(source, stem)
+            .expect("pinned kotlinc must run the whole property export module graph");
+        assert_eq!(
+            run_native_abi_case(source, stem),
+            Outcome::Pass,
+            "property accessor declarations must retain their module export identities"
+        );
+    }
 }
 
 /// A required inline dependency function whose body cannot become a template rejects its caller:

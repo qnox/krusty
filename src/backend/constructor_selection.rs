@@ -10,14 +10,14 @@ use crate::types::Ty;
 /// identity: a default-argument entry takes its constructor's parameters and then mask words, a
 /// list a declared constructor may also have. Only a construction a compiler pass built without a
 /// selection is matched by the list it names, `selected`, and one naming none runs the primary.
-pub(crate) fn selected_constructor(
+pub fn selected_constructor(
     ir: &IrFile,
     site: ExprId,
     class: ClassId,
     selected: Option<&[Ty]>,
 ) -> Option<u32> {
     let declaration = &ir.classes[class as usize];
-    if let Some(target) = ir.construction_targets.get(&site) {
+    if let Some(target) = ir.construction_target(site) {
         let declared = match target.ordinal {
             0 => declaration.has_primary_ctor,
             ordinal => declaration.secondary_ctors.len() >= ordinal as usize,

@@ -5,7 +5,6 @@
 
 use super::super::ir_builtins::{BuiltinCallDisposition, BuiltinOperator, BuiltinRelation};
 use super::super::klib_types::function_invocation_arity;
-use super::super::klib_types::semantic_type;
 use super::{
     mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorTarget, LinkedCallee,
     Lowered,
@@ -34,7 +33,10 @@ impl BodyLowering<'_> {
         let callee = match &access.symbol.signature {
             KlibIrSignature::Public(callee) => callee,
             KlibIrSignature::FileLocal { .. } => {
-                return unsupported("a call of a file-private declaration")
+                let linked = self
+                    .linker
+                    .link_local_function(self.ir, &access.symbol.signature)?;
+                return self.linked_call(linked, access, ty);
             }
             KlibIrSignature::Accessor(accessor) => return self.accessor_call(accessor, access, ty),
         };
@@ -130,14 +132,23 @@ impl BodyLowering<'_> {
                     }
                 }
             }
-            CommonPrimitive::Intrinsic(intrinsic) => self.ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::Intrinsic {
-                    operation: intrinsic,
-                    ret: primitive.ret,
-                }),
-                dispatch_receiver: Some(receiver),
-                args: Vec::new(),
-            }),
+            // The ordinary read of the property, as checked FIR lowers a source read of it.
+            CommonPrimitive::PropertyRead(_) => {
+                let target = primitive
+                    .property
+                    .expect("an authenticated property read names its property");
+                self.ir.add_expr(IrExpr::Checked(Box::new(
+                    IrCheckedOperation::ExternalPropertyRead {
+                        target,
+                        dispatch: IrPropertyDispatch::Ordinary,
+                        receiver: Some(receiver),
+                        arguments: Vec::new(),
+                        parameters: Vec::new(),
+                        result: operands.ret,
+                        source_receiver: operands.receiver_type,
+                    },
+                )))
+            }
             // The source range operator over the receiver and the end bound, as checked FIR
             // lowers `start..end` once the provider's declaration fixed the range it builds.
             CommonPrimitive::RangeConstruction(operation) => {
@@ -641,8 +652,12 @@ impl BodyLowering<'_> {
             }
         };
         // A result read through a projected receiver argument (`Array<out T>.get`) is that
-        // projection's read type, as a source call's result is.
-        let ret = substitute(callee.ret).projection_read_ty();
+        // projection's read type, as a source call's result is; a nullable result reads its
+        // projection the same way (`MutableMap<in K, in V>.put` answers `Any?`).
+        let ret = match substitute(callee.ret).kind() {
+            crate::types::TyKind::Nullable(inner) => Ty::nullable(inner.projection_read_ty()),
+            _ => substitute(callee.ret).projection_read_ty(),
+        };
         let ret = if self.linker.same_type(ret, ty) {
             ty
         } else {
@@ -727,7 +742,7 @@ impl BodyLowering<'_> {
             let (Some(projection), Some(argument)) = (captured.get(parameter), argument) else {
                 continue;
             };
-            let value = semantic_type(self.arena, self.header.type_parameters(), *argument)?;
+            let value = self.semantic(*argument)?;
             if projection.projection_read_ty() != value {
                 return Err(mismatch(
                     "a captured projection disagrees with the call's serialized type argument",
@@ -747,7 +762,7 @@ impl BodyLowering<'_> {
                 let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
                     "a call that leaves a type argument unset",
                 ))?;
-                let value = semantic_type(self.arena, self.header.type_parameters(), argument)?;
+                let value = self.semantic(argument)?;
                 bindings.insert(*parameter, bound(parameter, value));
             }
             for param in &mut linked.params {
@@ -779,10 +794,7 @@ impl BodyLowering<'_> {
             let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
                 "a call that leaves a type argument unset",
             ))?;
-            let value = bound(
-                parameter,
-                semantic_type(self.arena, self.header.type_parameters(), argument)?,
-            );
+            let value = bound(parameter, self.semantic(argument)?);
             bindings.insert(*parameter, value);
             substitutions.push(IrCheckedSubstitution {
                 parameter: FirTypeParameterRef::External {
@@ -831,11 +843,7 @@ impl BodyLowering<'_> {
         let mut operands = Vec::with_capacity(linked.params.len());
         for (&declared, argument) in linked.params.iter().zip(values) {
             let actual = match argument.and_then(|argument| self.arena.expr(argument).ty) {
-                Some(serialized) => Some(semantic_type(
-                    self.arena,
-                    self.header.type_parameters(),
-                    serialized,
-                )?),
+                Some(serialized) => Some(self.semantic(serialized)?),
                 None => None,
             };
             operands.push((declared, actual));

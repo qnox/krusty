@@ -1,7 +1,6 @@
 use crate::fir::{
     FirBinaryOperation, FirConstant, FirConversion, FirConversionKind, FirExprId, FirExprKind,
-    FirIndexedAccessKind, FirJumpKind, FirReceiver, FirTypeOperation, FirUnaryOperation,
-    ResolvedTy,
+    FirJumpKind, FirReceiver, FirTypeOperation, FirUnaryOperation, ResolvedTy,
 };
 use crate::ir::{Callee, ExprId, IrBinOp, IrCatch, IrConst, IrExpr, IrIntrinsic, IrTypeOp};
 use crate::types::Ty;
@@ -273,7 +272,8 @@ impl BodyLowering<'_> {
                 target,
                 dispatch_receiver,
             } => {
-                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
+                let (dispatch_receiver, _) =
+                    self.module_property_receiver(*target, *dispatch_receiver)?;
                 self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::LateinitFieldRead {
                         target: *target,
@@ -285,7 +285,8 @@ impl BodyLowering<'_> {
                 target,
                 dispatch_receiver,
             } => {
-                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
+                let (dispatch_receiver, _) =
+                    self.module_property_receiver(*target, *dispatch_receiver)?;
                 self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::BackingFieldRead {
                         target: *target,
@@ -299,7 +300,8 @@ impl BodyLowering<'_> {
                 value,
                 conversion,
             } => {
-                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
+                let (dispatch_receiver, _) =
+                    self.module_property_receiver(*target, *dispatch_receiver)?;
                 let value = self.expression_with_conversion(*value, *conversion)?;
                 self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::BackingFieldWrite {
@@ -1018,50 +1020,6 @@ impl BodyLowering<'_> {
                     self.record_generated_class_provenance(expression_id, lowered as usize);
                 }
                 lowered
-            }
-            FirExprKind::IndexedRead {
-                kind,
-                receiver,
-                indices,
-            } => {
-                let receiver = self.expression(*receiver)?;
-                let arguments = indices
-                    .iter()
-                    .map(|index| self.expression_with_conversion(index.value, index.conversion))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let operation = match kind {
-                    FirIndexedAccessKind::Array => IrIntrinsic::ArrayGet,
-                    FirIndexedAccessKind::String => IrIntrinsic::StringGet,
-                };
-                self.ir.add_expr(IrExpr::Call {
-                    callee: Box::new(Callee::Intrinsic {
-                        operation,
-                        ret: expression.ty.get(),
-                    }),
-                    dispatch_receiver: Some(receiver),
-                    args: arguments,
-                })
-            }
-            FirExprKind::IndexedWrite {
-                receiver,
-                indices,
-                value,
-                conversion,
-            } => {
-                let receiver = self.expression(*receiver)?;
-                let mut arguments = indices
-                    .iter()
-                    .map(|index| self.expression_with_conversion(index.value, index.conversion))
-                    .collect::<Result<Vec<_>, _>>()?;
-                arguments.push(self.expression_with_conversion(*value, *conversion)?);
-                self.ir.add_expr(IrExpr::Call {
-                    callee: Box::new(Callee::Intrinsic {
-                        operation: IrIntrinsic::ArraySet,
-                        ret: expression.ty.get(),
-                    }),
-                    dispatch_receiver: Some(receiver),
-                    args: arguments,
-                })
             }
             FirExprKind::SafeCall { receiver, selector } => {
                 self.safe_call_expression(expression_id, receiver, *selector, expression.ty.get())?
@@ -2394,18 +2352,8 @@ impl BodyLowering<'_> {
             });
         }
         let class = self.storage_class(owner)?;
-        // Kotlin exposes an enum entry receiver as the parent enum type, while a property declared
-        // in an entry body is owned by that entry's stable anonymous-subclass declaration. The FIR
-        // owner proves the receiver's exact runtime subtype; make that checked narrowing explicit
-        // in common IR before addressing the owner field. Backends receive no inference task.
         if self.ir.checked_enum_entry_classes.contains_key(&owner) {
-            receiver = self.ir.add_expr(IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::Cast,
-                arg: receiver,
-                type_operand: crate::types::Ty::obj_name(
-                    self.ir.classes[class as usize].fq_name_id(),
-                ),
-            });
+            receiver = self.apply_enum_entry_receiver(owner, receiver)?.0;
         }
         self.capture_field_read(receiver, class, field)
     }

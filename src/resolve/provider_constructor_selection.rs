@@ -2,6 +2,60 @@
 
 use super::*;
 
+pub(super) enum LibraryConstructorSelection {
+    Selected,
+    Rejected,
+    NoMatch(Option<std::sync::Arc<RejectedProviderConstructors>>),
+}
+
+/// Immutable evidence from one constructor selection attempt, in declaration order. Mapping
+/// declines remain recorded but do not claim a type mismatch in candidate diagnostics.
+pub(super) struct RejectedProviderConstructors {
+    classifier: TypeName,
+    generic: bool,
+    candidates: Box<[CtorDelegationCandidate]>,
+    rejected: Box<[ConstructorCandidateRejection]>,
+}
+
+impl RejectedProviderConstructors {
+    fn new(
+        classifier: TypeName,
+        declaration: &crate::libraries::LibraryType,
+        candidates: Vec<CtorDelegationCandidate>,
+        rejected: Vec<ConstructorCandidateRejection>,
+    ) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            classifier,
+            generic: declaration.own_type_parameter_count != 0,
+            candidates: candidates.into_boxed_slice(),
+            rejected: rejected.into_boxed_slice(),
+        })
+    }
+
+    pub(super) fn classifier(&self) -> TypeName {
+        self.classifier
+    }
+
+    pub(super) fn generic(&self) -> bool {
+        self.generic
+    }
+
+    pub(super) fn type_mismatches(
+        &self,
+    ) -> impl Iterator<Item = (&CtorDelegationCandidate, &ConstructorCandidateRejection)> {
+        self.rejected.iter().filter_map(move |rejection| {
+            if rejection.mapped_mismatches.is_empty() {
+                return None;
+            }
+            let candidate = self
+                .candidates
+                .get(rejection.candidate_index)
+                .expect("a rejected constructor index belongs to the selected candidate group");
+            Some((candidate, rejection))
+        })
+    }
+}
+
 impl Checker<'_> {
     /// Select one provider constructor tier through the same argument mapper and specificity
     /// operation used by source primary/secondary constructors. Every provider declaration already
@@ -30,7 +84,7 @@ impl Checker<'_> {
                 let Some(context) = crate::symbol_resolver::BoundInnerConstructorContext::new(
                     &source, receiver, classifier,
                 ) else {
-                    return Ok(LibraryConstructorSelection::NoMatch);
+                    return Ok(LibraryConstructorSelection::NoMatch(None));
                 };
                 Some(context)
             }
@@ -38,8 +92,10 @@ impl Checker<'_> {
         };
         self.contextualize_constructor_arrays(scope, call, internal, args, arg_names);
         for &argument in args {
+            // An empty array factory stays postponed until the selected parameter supplies it.
             if self.expr_types[argument.0 as usize] == Ty::Error
                 && !self.file.is_callable_syntax(argument)
+                && !self.postponed_empty_reference_array_factory(scope, argument)
             {
                 self.expr(scope, argument);
             }
@@ -635,13 +691,17 @@ impl Checker<'_> {
                     candidate_index,
                     resolved,
                 } => (candidate_index, *resolved),
-                SourceConstructorSelection::NoMatch { mismatch } => {
+                SourceConstructorSelection::NoMatch { mismatch, rejected } => {
                     if let Some(mismatch) = mismatch {
+                        let rejections = RejectedProviderConstructors::new(
+                            internal, classifier, candidates, rejected,
+                        );
                         return Err(LibraryConstructorFailure::TypeMismatch {
                             source_argument: mismatch.source_argument,
                             expected: mismatch.expected,
                             actual: mismatch.actual,
                             result: members.first().map(|member| member.ret),
+                            rejections,
                         });
                     }
                     if candidates.is_empty() {
@@ -694,14 +754,19 @@ impl Checker<'_> {
                             ));
                         }
                     }
-                    return Ok(LibraryConstructorSelection::NoMatch);
+                    let rejections = (!rejected.is_empty()).then(|| {
+                        RejectedProviderConstructors::new(
+                            internal, classifier, candidates, rejected,
+                        )
+                    });
+                    return Ok(LibraryConstructorSelection::NoMatch(rejections));
                 }
                 SourceConstructorSelection::Ambiguous => {
-                    return Ok(LibraryConstructorSelection::NoMatch);
+                    return Ok(LibraryConstructorSelection::NoMatch(None));
                 }
             };
         let Some(member) = members.get(candidate_index).cloned() else {
-            return Ok(LibraryConstructorSelection::NoMatch);
+            return Ok(LibraryConstructorSelection::NoMatch(None));
         };
         let annotation = if classifier.is_annotation() {
             let Some(construction) = dependency_annotation_defaults::dependency_construction(
@@ -709,7 +774,7 @@ impl Checker<'_> {
                 classifier,
                 &member,
             ) else {
-                return Ok(LibraryConstructorSelection::NoMatch);
+                return Ok(LibraryConstructorSelection::NoMatch(None));
             };
             Some(construction)
         } else {
@@ -768,7 +833,7 @@ impl Checker<'_> {
             }
         };
         if !self.expect_selected_constructor_args(scope, call, args, arg_names, &target) {
-            return Ok(LibraryConstructorSelection::NoMatch);
+            return Ok(LibraryConstructorSelection::NoMatch(None));
         }
         if let Expr::Call { callee, .. } = self.file.expr(call) {
             self.reject_inaccessible_classifier_expression(*callee, internal);
@@ -776,10 +841,13 @@ impl Checker<'_> {
         self.check_selected_constructor_lambdas(scope, args, &selected.argument_types);
         let publication =
             constructor_commitment::ConstructorDeclarationShape::provider(classifier, &member);
-        self.commit_constructor(call, target.clone(), publication);
+        self.commit_constructor(scope, call, target.clone(), publication);
         if let Some(Some(bindings)) = member_bindings.get(candidate_index) {
             self.record_library_constructor_type_arguments(call, internal, classifier, bindings);
         }
         Ok(LibraryConstructorSelection::Selected)
     }
 }
+
+#[cfg(test)]
+mod tests;

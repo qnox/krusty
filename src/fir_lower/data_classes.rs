@@ -238,6 +238,13 @@ fn synthesize_components_and_copy(
         defaults: Box::new([]),
         default_prefix_count: 0,
     });
+    // `copy` calls the primary constructor; record that selection like a source construction's.
+    let target = super::constructors::primary_constructor_declaration(index, declaration)
+        .and_then(|primary| super::constructors::module_constructor_target(index, primary))
+        .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+    ir.construction_targets.insert(constructed, target);
+    // The construction is part of the class's own body, so a private primary stays a direct call.
+    ir.expression_owners.insert(constructed, owner);
     let returned = ir.add_expr(IrExpr::Return(Some(constructed)));
     ir.functions[copy as usize].body = Some(ir.add_expr(IrExpr::Block {
         stmts: vec![returned],
@@ -568,13 +575,18 @@ fn synthesize_equals(
 fn return_guard(ir: &mut IrFile, condition: u32, value: bool) -> u32 {
     let value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(value)));
     let returned = ir.add_expr(IrExpr::Return(Some(value)));
+    ir.set_logical_type(returned, Ty::Nothing);
     let branch = ir.add_expr(IrExpr::Block {
         stmts: vec![returned],
         value: None,
     });
-    ir.add_expr(IrExpr::When {
+    ir.set_logical_type(branch, Ty::Unit);
+    // An `if` without an `else` is a `Unit` statement, as the checker types the source form.
+    let guard = ir.add_expr(IrExpr::When {
         branches: vec![(Some(condition), branch)],
-    })
+    });
+    ir.set_logical_type(guard, Ty::Unit);
+    guard
 }
 
 fn has_method(ir: &IrFile, class: ClassId, name: &str, parameter_count: usize) -> bool {

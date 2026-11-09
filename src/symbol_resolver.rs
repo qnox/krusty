@@ -69,7 +69,9 @@ use argument_compatibility::{arg_fits_platform, arg_fits_source, untyped_lambda_
 pub(crate) use argument_compatibility::{
     function_input_types, resolution_subtype, sam_arg_matches, sam_return_matches,
 };
-pub(crate) use call_argument::{expected_result_keeps_call_evidence, CallArgKind};
+pub(crate) use call_argument::{
+    expected_result_keeps_call_evidence, CallArgKind, ProvisionalResult,
+};
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
 };
@@ -587,7 +589,7 @@ fn best_callable_member_overload<'a>(
 ) -> Option<&'a LibraryMember> {
     let adapts = |p: &Ty, arg: &CallArgKind, _i: usize| arg.adapts_integer_literal_to(*p);
     let fits = |_position: usize, param: &Ty, arg: &CallArgKind| {
-        if arg.is_omitted_default() {
+        if arg.is_omitted_default() || arg.constructible_as(*param) {
             return true;
         }
         if arg.is_lambda_literal() {
@@ -1527,36 +1529,6 @@ impl<'a> SymbolResolver<'a> {
             return None;
         };
         Some(self.commit_selected_member_function_result(receiver, selected, result))
-    }
-
-    pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
-        let functions = self.nearest_top_level_functions(&self.symbol_levels_in_scope(name));
-        crate::trace_compiler!(
-            "resolve",
-            "top-level candidate inventory {name}: {:?}",
-            functions
-                .overloads
-                .iter()
-                .map(|function| (
-                    function.kind,
-                    function.callable.owner.render(),
-                    function.callable.name.as_str(),
-                    function.semantic_params(),
-                    function.semantic_receiver(),
-                    function
-                        .generic_sig
-                        .as_ref()
-                        .map(|signature| signature.formal_bounds.as_slice()),
-                ))
-                .collect::<Vec<_>>()
-        );
-        functions
-            .into_top_level()
-            // `$default` is a physical realization attached to its source declaration, never a
-            // source-level overload candidate. Letting it into this family can select a synthetic
-            // by declaration order and later append `$default` a second time.
-            .filter(|function| !function.callable.default_call)
-            .collect()
     }
 
     /// Select from a caller-provided projection of one top-level callable family.
