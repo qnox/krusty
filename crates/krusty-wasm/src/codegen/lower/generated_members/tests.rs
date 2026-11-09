@@ -67,8 +67,9 @@ fn a_unit_property_hash_does_not_dispatch_through_any() {
             let mut ir = IrFile::default();
             // A neighbor that still inherits `Any.hashCode` is what used to make every reference
             // property hash look like it might reach that unimplemented slot.
-            ir.classes
-                .push(IrClass::synthetic(krusty::types::type_name("demo/Neighbor")));
+            ir.classes.push(IrClass::synthetic(krusty::types::type_name(
+                "demo/Neighbor",
+            )));
             let unit = ir.add_expr(IrExpr::UnitInstance);
             ir.set_logical_type(unit, ty);
             let hashed = ir.add_expr(IrExpr::Call {
