@@ -168,6 +168,12 @@ impl FileLowering<'_> {
         });
         let local = format!("kt_typeof_{}", self.type_of_objects.len());
         let object = self.declare_reflection_object(shared.as_deref(), &local)?;
+        // The program-wide name is the described type's identity, and two spellings can name one
+        // type: `(A) -> B` and `Function1<A, B>` are one object, defined once.
+        if shared.is_some() && self.comdat_objects.contains(&object) {
+            self.type_of_objects.insert(ty, object);
+            return Ok(object);
+        }
         let size = ARGUMENTS + ARGUMENT_SIZE * objects.len() as u32;
         let mut bytes = vec![0u8; size as usize];
         let mut write = |offset: u32, value: i64| {

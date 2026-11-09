@@ -81,12 +81,7 @@ impl BodyLowering<'_> {
         let (parameter_types, arguments) = (parameter_types.as_slice(), arguments.as_slice());
         let function = template.function;
         let declared = self.ir.functions.get(function as usize)?.params.clone();
-        let context_count = self
-            .ir
-            .fn_context_counts
-            .get(&function)
-            .copied()
-            .unwrap_or(0);
+        let context_count = self.ir.declared_parameters(function).context_count;
         let receiver_position = self
             .ir
             .extension_receiver_fns

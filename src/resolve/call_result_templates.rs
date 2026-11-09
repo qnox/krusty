@@ -144,7 +144,10 @@ impl Checker<'_> {
             return false;
         };
         let source = self.fed_source();
-        let provisional = self.recorded_result_evidence(expression, &generic);
+        let provisional = self.provisional_result(
+            expression,
+            self.recorded_result_evidence(expression, &generic),
+        );
         crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
             &source,
             &generic,
@@ -159,6 +162,35 @@ impl Checker<'_> {
                 &bindings,
             )
         })
+    }
+
+    /// The argument kind of the nested generic call `argument`, whose checked type is `ty`.
+    pub(super) fn expected_type_callable_argument(
+        &self,
+        argument: ExprId,
+        ty: Ty,
+        signature: GenericSig,
+    ) -> CallArgKind {
+        CallArgKind::ExpectedTypeCallable {
+            provisional: ty,
+            generic_sig: std::sync::Arc::new(signature),
+            provisional_open: self.provisional_result(argument, ty).open,
+        }
+    }
+
+    /// `ty`, the expectation-free result of the nested call `expression`, with whether it still
+    /// names an open formal. A type parameter lexically in scope at that call is the enclosing
+    /// declaration's own type (`R` in `Box(listOf(r))` inside `fun <R>`), as fixed as a classifier.
+    pub(super) fn provisional_result(
+        &self,
+        expression: ExprId,
+        ty: Ty,
+    ) -> crate::symbol_resolver::ProvisionalResult {
+        crate::symbol_resolver::ProvisionalResult {
+            ty,
+            open: ty
+                .mentions_open_ty_param(&|formal| self.lexically_fixed_at_call(expression, formal)),
+        }
     }
 
     /// The nested call's result as evidence from its own inputs. A result formal its selection

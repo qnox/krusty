@@ -31,8 +31,10 @@ mod generated_members;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
+mod scalar_value_classes;
 mod shared_cells;
 mod string_conversion;
+mod type_of;
 
 #[cfg(test)]
 use tests::lower_alone;
@@ -1127,6 +1129,24 @@ impl<'a> Body<'a> {
                 ));
                 self.direct_call(function, &frame, &args)?;
             }
+            // The target stdlib's own `typeOf` body only says it is a compiler intrinsic.
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::External {
+                target,
+                substitutions,
+                ..
+            } = &**call_callee
+                && args.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::TypeOf)
+                }) =>
+            {
+                self.type_of_call(*target, substitutions)?;
+            }
             IrExpr::Call {
                 callee: ref call_callee,
                 dispatch_receiver,
@@ -1436,6 +1456,21 @@ impl<'a> Body<'a> {
                     && self.is_array_size_property(*target) =>
             {
                 self.checked_array_size(checked_op)?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && self.is_scalar_value_storage(*target) =>
+            {
+                self.scalar_value_storage_read(*target, *receiver)?;
             }
             // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from
             // the `$Enum` fields its struct leads with.
