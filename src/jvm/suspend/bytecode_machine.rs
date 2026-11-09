@@ -109,7 +109,7 @@ pub(super) fn route(
             return Routed::Failed;
         }
     }
-    if let Some(&close) = ir.fn_close_lines.get(&fid) {
+    if let Some(close) = ir.function_position(fid).close_line {
         let own_result = route.context.orig_rets[fid as usize];
         let tail_calls: Vec<ExprId> = suspensions
             .iter()
@@ -123,7 +123,7 @@ pub(super) fn route(
     }
     // kotlinc maps a `Unit` function's implicit return to the body's closing `}`.
     let units = ensure_tail_return(ir, body, unit_return);
-    if let Some(&close) = ir.fn_close_lines.get(&fid) {
+    if let Some(close) = ir.function_position(fid).close_line {
         for unit in units {
             ir.set_source_line(unit, close);
         }
@@ -320,7 +320,7 @@ pub(super) fn eligible_points(
             "not top-level or a class member",
         ),
         (
-            &|| !ir.fn_decl_lines.contains_key(&fid),
+            &|| ir.function_position(fid).decl_line.is_none(),
             "no declaration line",
         ),
         (

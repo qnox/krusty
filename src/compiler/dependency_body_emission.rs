@@ -207,8 +207,8 @@ pub(super) fn emit_dependencies<B: Backend>(
             return Vec::new();
         }
         for callable in roots {
-            if let Err(decline) = unit.lower_root_with_intrinsics_and_externals(
-                callable, bodies, &callees, intrinsics, &externals,
+            if let Err(decline) = unit.lower_root_with_declarations(
+                callable, bodies, &callees, intrinsics, &externals, platform,
             ) {
                 if requires_intrinsic_link && !decline.is_internal_inconsistency() {
                     // A wrapper whose body uses a form lowering does not model yet is not support: the
