@@ -59,19 +59,19 @@ impl IrFile {
     }
 
     /// [`Self::has_value_param_ctor`] for a class identity.
-    pub(crate) fn has_value_param_ctor_of(&self, owner: crate::types::TypeName) -> bool {
+    pub fn has_value_param_ctor_of(&self, owner: crate::types::TypeName) -> bool {
         self.value_class_constructor_facts
             .primary_owners
             .contains(&owner)
     }
 
-    pub(crate) fn mark_value_class_parameter_construction(&mut self, call: ExprId) {
+    pub fn mark_value_class_parameter_construction(&mut self, call: ExprId) {
         self.value_class_constructor_facts
             .parameter_constructions
             .insert(call);
     }
 
-    pub(crate) fn has_value_class_parameter_construction(&self, call: ExprId) -> bool {
+    pub fn has_value_class_parameter_construction(&self, call: ExprId) -> bool {
         self.value_class_constructor_facts
             .parameter_constructions
             .contains(&call)
