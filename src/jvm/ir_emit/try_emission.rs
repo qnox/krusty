@@ -606,7 +606,17 @@ impl Emitter<'_> {
                 return;
             }
         };
-        let target = if brk { end } else { cont };
+        // A `Unit` labeled return (`return@let`, `return@outer`) breaks to the loop exit of the
+        // frame the return names. That exit is already `end`. Only the frame's synthetic trailing
+        // break falls through its closing brace instead of taking the exit.
+        let target = if brk {
+            label
+                .as_deref()
+                .and_then(|frame| self.unit_return_fallthrough(transfer, frame))
+                .unwrap_or(end)
+        } else {
+            cont
+        };
         self.mark_expression_start(transfer, code);
         let transfer_line = code.current_line();
         code.nop();
@@ -632,7 +642,7 @@ impl Emitter<'_> {
         // another load.
         if brk && !code.is_dead() {
             if let Some(label) = label {
-                if let Some(&(value, ty)) = self.inline_return_frame_results.get(label) {
+                if let Some((value, ty)) = self.inline_return_result(label) {
                     // A generic return specialized to `Unit` stores `kotlin.Unit.INSTANCE`
                     // and leaves it there. kotlinc does not carry that reference across
                     // `finally`: a later read is its own `getstatic`, and a discarded call

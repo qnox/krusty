@@ -12,7 +12,7 @@
 
 use krusty::compilation_target::CompilationTarget;
 
-#[path = "native_value_class_parameter_diagnostics_e2e.rs"]
+#[path = "value_class_declaration_e2e/native_parameters.rs"]
 mod native_parameters;
 
 use super::common::{
