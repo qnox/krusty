@@ -907,6 +907,15 @@ fn expect_reference_array_bounds(source: &str, name: &str) {
     }
 }
 
+/// The shared `unsignedValueBoxes` program: a nullable unsigned value, and one read as `Any`, is a
+/// box of its own classifier, never the signed box of the same width.
+#[test]
+fn wasm_shared_unsigned_value_boxes_program() {
+    let src = include_str!("box_regressions/unsignedValueBoxes.kt");
+    expect_reference_box(src, "unsignedValueBoxes");
+    expect_wasm_box(src, "unsignedValueBoxes");
+}
+
 // PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
 fn expect_reference_box(src: &str, stem: &str) {
     let jdk = super::common::jdk_modules();
