@@ -4514,7 +4514,6 @@ regressions/multimodule/inlineNullCheckReturnTargets.kt
 regressions/multimodule/inlineStdlibRepeat.kt
 regressions/multimodule/inlineTextTrim.kt
 regressions/multimodule/inlineTodoDefaultMessage.kt
-regressions/multimodule/inlineUnsignedConstructionAndData.kt
 regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt
 regressions/multimodule/multimoduleDirectCollectionIterator.kt
 regressions/noCapturingForTypesWithTypeVariables.kt
