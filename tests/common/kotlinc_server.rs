@@ -312,6 +312,10 @@ impl KotlincServer {
             "-Xmn256m",
         ]);
         cmd.args(jvm_properties);
+        // The JVM decodes file names in the host locale. Under a POSIX one a source whose name is
+        // not ASCII (`withСallsinplace.kt`) cannot be opened, so the reference verdict would depend
+        // on the machine. A UTF-8 locale makes it the same everywhere.
+        cmd.env("LANG", "C.UTF-8").env("LC_ALL", "C.UTF-8");
         cmd.args(["-cp", cp, "KotlincServer", lib_dir, cp])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

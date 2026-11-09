@@ -149,7 +149,6 @@ compiler/testData/diagnostics/tests/syntheticExtensions/javaProperties/FullySupp
 compiler/testData/diagnostics/tests/syntheticExtensions/samAdapters/GenericMethodInGenericClass.kt
 compiler/testData/diagnostics/tests/unnamedArgsInJavaAnnotations.kt
 compiler/testData/diagnostics/tests/when/TypeParameterWarning.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/genericsInContractTypeAssertions/withСallsinplace.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/inference/elvisOperatorAgainstFlexibleType.kt
 compiler/testData/diagnostics/testsWithStdLib/j+k/FieldSubstitution.kt
 compiler/testData/diagnostics/testsWithStdLib/j+k/StaticGenericMethod.kt
