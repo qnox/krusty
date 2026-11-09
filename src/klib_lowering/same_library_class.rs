@@ -168,9 +168,9 @@ pub(super) fn substitute_applied_signature(
         parameters
             .iter()
             .copied()
-            .map(|parameter| crate::types::ty_subst_keep_unbound(parameter, &bindings))
+            .map(|parameter| crate::types::ty_subst_applied_arguments(parameter, &bindings))
             .collect(),
-        crate::types::ty_subst_keep_unbound(result, &bindings),
+        crate::types::ty_subst_applied_arguments(result, &bindings),
     ))
 }
 
