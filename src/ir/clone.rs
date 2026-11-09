@@ -677,11 +677,7 @@ fn copy_function_implementation_facts(
     copy_map!(fn_param_no_infer);
     copy_map!(fn_return_value_statuses);
     copy_map!(fn_varargs);
-    copy_map!(fn_decl_lines);
-    copy_map!(fn_close_lines);
-    copy_map!(fn_end_lines);
-    copy_map!(fn_sig_lines);
-    copy_map!(fn_signature_offsets);
+    ir.copy_function_position(source, target);
     copy_map!(fn_source_order);
     copy_map!(fn_continuation_ordinal);
     copy_map!(fn_contracts);
@@ -951,7 +947,7 @@ mod tests {
         let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
         let source = ir.add_fun(function("check", parameter));
         ir.set_method_visibility(source, Visibility::Private);
-        ir.fn_decl_lines.insert(source, 4);
+        ir.function_position_mut(source).decl_line = Some(4);
         ir.inline_fns.insert(source);
         ir.signatures.insert(source, signature(parameter));
         ir.callable_bound_type_parameters.insert(
@@ -1019,7 +1015,7 @@ mod tests {
         assert_eq!(ir.functions[first as usize].params, vec![specialized]);
         assert_eq!(ir.shared_capture_parameters[&(first, 0)], parameter);
         assert_eq!(ir.method_visibility(first), Visibility::Private);
-        assert_eq!(ir.fn_decl_lines.get(&first), Some(&4));
+        assert_eq!(ir.function_position(first).decl_line, Some(4));
         assert!(ir.inline_fns.contains(&source));
         assert!(!ir.inline_fns.contains(&first));
         assert!(!ir.specialized_functions.contains_key(&source));
