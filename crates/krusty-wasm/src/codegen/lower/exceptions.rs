@@ -237,6 +237,17 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// The struct a caught exception class's instances are: this file's class, or the runtime
+    /// exception class.
+    fn exception_structure(&mut self, identity: TypeName) -> Result<u32, Unsupported> {
+        if let Some(class) = self.classes.and(self.ir.class_id_by_name(identity)) {
+            return Ok(self.file_classes()?.structure(class));
+        }
+        self.runtime
+            .exceptions
+            .ensure_class(self.module, self.classifiers, identity)
+    }
+
     pub(super) fn throw_value(&mut self, operand: u32) -> Result<(), Unsupported> {
         self.value(operand, Ty::obj("kotlin/Throwable"))?;
         self.code
@@ -267,10 +278,7 @@ impl Body<'_> {
                 .ok_or_else(|| format!("a catch of `{}`", describe(catch.ty)))?;
             // The frozen declaration and its complete authenticated superclass chain own the
             // physical subtype. Source spelling and handler position never infer its identity.
-            let structure =
-                self.runtime
-                    .exceptions
-                    .ensure_class(self.module, self.classifiers, identity)?;
+            let structure = self.exception_structure(identity)?;
             handlers.push((catch, structure));
         }
         let result_block = carrier(result)?.map_or(BlockType::Empty, BlockType::Value);
