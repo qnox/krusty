@@ -17,7 +17,7 @@
 //!
 //! These cases compare the whole `RuntimeVisibleAnnotations` attribute against kotlinc's, minus the
 //! `kotlin.Metadata` entry: krusty does not describe an `annotation class` in `@Metadata` at all
-//! (`class_metadata_common_shape_admitted` in `src/jvm/ir_emit.rs` bails on `is_annotation`), so
+//! (`class_metadata_common_shape_admitted` in `crates/krusty-jvm/src/ir_emit.rs` bails on `is_annotation`), so
 //! whole-class byte identity is blocked on that separate gap, with or without a declared `@Target`.
 use super::common;
 use std::path::PathBuf;

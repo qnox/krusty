@@ -131,17 +131,16 @@ use super::{
     FirCallableReferenceTarget, FirCapture, FirCaptureSource, FirCapturedReceiver,
     FirClassifierProperty, FirConstant, FirConstructorCall, FirConstructorCaptureArgument,
     FirConstructorTarget, FirControlTarget, FirControlTargetKind, FirConversion, FirConversionKind,
-    FirConvertedValue, FirDefaultValue, FirDelegateCall, FirDelegateDispatchReceiver,
-    FirDestructureEntry, FirExpr, FirExprId, FirExprKind, FirImplicitReceiverCapture,
-    FirInterfaceDelegateArgument, FirIntrinsic, FirJumpKind, FirLocalCallableRef,
-    FirLocalClassCapture, FirLocalClassCaptureSource, FirLocalDelegateDispatchParameter,
-    FirLoopHeader, FirPlatformNarrowing, FirPluginOperand, FirPropertyDelegatePlan,
-    FirPropertyReferenceTarget, FirPropertyTarget, FirRangeOperation, FirReceiver,
-    FirReferenceAdaptation, FirSamConversion, FirStatement, FirStatementId, FirStatementKind,
-    FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution, FirUnaryOperation,
-    FirValueParameter, FirVarargElement, InlineBodyStore, LocalBinding, LocalCallableId,
-    LocalDelegateBinding, LocalValueId, OriginId, OriginStore, PropertyId, ResolvedCallableHeader,
-    ResolvedModuleIndex, ResolvedTy, SourceFileId, SyntheticOriginKind,
+    FirDefaultValue, FirDelegateCall, FirDelegateDispatchReceiver, FirDestructureEntry, FirExpr,
+    FirExprId, FirExprKind, FirImplicitReceiverCapture, FirInterfaceDelegateArgument, FirIntrinsic,
+    FirJumpKind, FirLocalCallableRef, FirLocalClassCapture, FirLocalClassCaptureSource,
+    FirLocalDelegateDispatchParameter, FirLoopHeader, FirPlatformNarrowing, FirPluginOperand,
+    FirPropertyDelegatePlan, FirPropertyReferenceTarget, FirPropertyTarget, FirRangeOperation,
+    FirReceiver, FirReferenceAdaptation, FirSamConversion, FirStatement, FirStatementId,
+    FirStatementKind, FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution,
+    FirUnaryOperation, FirValueParameter, FirVarargElement, InlineBodyStore, LocalBinding,
+    LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId, OriginStore, PropertyId,
+    ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId, SyntheticOriginKind,
 };
 
 /// The unoptimized expression dispatcher currently reserves about 98 KiB. Checking before the
@@ -702,7 +701,6 @@ impl BodyFirChecker<'_> {
             | FirExprKind::NullableNumericComparison { .. }
             | FirExprKind::InRange { .. }
             | FirExprKind::IndicesContainment { .. }
-            | FirExprKind::IndexedWrite { .. }
             | FirExprKind::SafeCall { .. }
             | FirExprKind::Elvis { .. }
             | FirExprKind::StringTemplate(_)
@@ -1130,20 +1128,6 @@ impl BodyFirChecker<'_> {
             .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
         let target = self.resolved_type(span, Ty::Boolean)?;
         self.value_at_selected_boundary(expression, target)
-    }
-
-    fn builtin_index(&mut self, expression: ExprId) -> Result<FirConvertedValue, BodyCheckFailure> {
-        let span = self
-            .file
-            .expr_span(expression)
-            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
-        let target = self.resolved_type(span, Ty::Int)?;
-        let origin = self.expression_origin(expression)?;
-        let value = self.expression(expression)?;
-        Ok(FirConvertedValue {
-            value,
-            conversion: self.selected_value_conversion(expression, value, target, origin)?,
-        })
     }
 
     fn range_operation(kind: RangeKind) -> FirRangeOperation {
@@ -2549,7 +2533,6 @@ impl BodyFirChecker<'_> {
             } => {
                 let operand_bindings =
                     self.bind_compound_index_operands(*array, indices, *value, origin)?;
-                let receiver_ty = self.info.semantic_ty(*array).non_null();
                 let selected_convention = ["set", "put"].into_iter().find(|convention| {
                     self.info
                         .resolved_stmt_operator_call(statement, convention)
@@ -2595,47 +2578,11 @@ impl BodyFirChecker<'_> {
                         self.body.add_implicit_conversion(call, unit, conversion)
                     }
                 } else {
-                    if indices.len() != 1 || receiver_ty.array_elem().is_none() {
-                        return Err(self.failure(
-                            self.file.stmt_spans.get(statement.0 as usize).copied(),
-                            BodyCheckFailureKind::UnsupportedStatement(StatementForm::AssignIndex),
-                        ));
-                    }
-                    let receiver = self.expression(*array)?;
-                    let indices = indices
-                        .iter()
-                        .map(|index| self.builtin_index(*index))
-                        .collect::<Result<Vec<_>, _>>()?
-                        .into_boxed_slice();
-                    let element_type = self.resolved_type(
-                        self.file
-                            .stmt_spans
-                            .get(statement.0 as usize)
-                            .copied()
-                            .ok_or_else(|| {
-                                self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
-                            })?,
-                        receiver_ty
-                            .array_elem()
-                            .expect("checked array element type"),
-                    )?;
-                    let checked_value = self.expression(*value)?;
-                    let conversion = self.selected_value_conversion(
-                        *value,
-                        checked_value,
-                        element_type,
-                        origin,
-                    )?;
-                    self.body.add_expr(FirExpr {
-                        origin,
-                        ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
-                        kind: FirExprKind::IndexedWrite {
-                            receiver,
-                            indices,
-                            value: checked_value,
-                            conversion,
-                        },
-                    })
+                    // The checker selected `set` (or Map `put`) for every subscript store.
+                    return Err(self.failure(
+                        self.file.stmt_spans.get(statement.0 as usize).copied(),
+                        BodyCheckFailureKind::UnsupportedStatement(StatementForm::AssignIndex),
+                    ));
                 };
                 for (operand, _) in &operand_bindings {
                     self.expression_substitutions.remove(operand);
