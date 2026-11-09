@@ -45,8 +45,8 @@ fn completed(output: Output) -> (Option<i32>, String, String) {
 
 /// Whether this host links Native programs for a Kotlin/Native target and has the Native stdlib.
 fn native_compiler_available() -> bool {
-    let linkable = krusty::native::NativeTarget::host()
-        .is_some_and(|target| target.konan_name().is_some() && krusty::native::can_link(target));
+    let linkable = krusty_native::NativeTarget::host()
+        .is_some_and(|target| target.konan_name().is_some() && krusty_native::can_link(target));
     if !linkable {
         return false;
     }
