@@ -30,6 +30,8 @@ pub(super) use class_initializers::{
 };
 mod declared_type_parameters;
 pub(super) use closure_headers::{closure_header, CaptureParameter};
+mod reference_headers;
+pub(super) use reference_headers::reference_header;
 pub(super) mod vararg_parameters;
 
 /// One parameter as the body reads it.
@@ -77,6 +79,17 @@ impl FunctionHeader {
 
     pub(super) fn value(&self, symbol: &KlibIrSymbol) -> Option<ParameterValue> {
         self.values.get(symbol).copied()
+    }
+
+    /// The value slot and published identity of the parameter `symbol`, when it is one.
+    pub(super) fn parameter_identity(
+        &self,
+        symbol: &KlibIrSymbol,
+    ) -> Option<(u32, &IrParameterIdentity)> {
+        let value = self.value(symbol)?;
+        let offset = self.parameter_count() - self.params.len();
+        let index = usize::try_from(value.index).ok()?.checked_sub(offset)?;
+        Some((value.index, self.identities.get(index)?))
     }
 
     /// How many value slots the parameters take; a body's local variables follow them.

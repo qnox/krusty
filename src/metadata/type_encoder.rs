@@ -62,7 +62,7 @@ pub(crate) const PREDEFINED_STRINGS: &[&str] = &[
     "kotlin/collections/MutableListIterator",
 ];
 
-pub(crate) struct StringTable<'a> {
+pub struct StringTable<'a> {
     strings: Vec<String>,
     records: Vec<Pb>,
     /// kotlinc's `JvmStringTable.map`: ONE map for plain strings (keyed by themselves) and class ids
@@ -148,12 +148,12 @@ fn no_inner_classifiers(_: TypeName) -> Result<Option<InnerClassifier>, TypeName
 
 /// Checked type facts supplied by a metadata-emitting target.
 #[derive(Clone)]
-pub(crate) struct MetadataTypeLookups<'a> {
-    pub(crate) intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
-    pub(crate) inner_classifiers: InnerClassifiers<'a>,
-    pub(crate) local_classifiers: crate::fx_hash::HashSet<TypeName>,
-    pub(crate) enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
-    pub(crate) anonymous_classifiers: crate::fx_hash::HashSet<TypeName>,
+pub struct MetadataTypeLookups<'a> {
+    pub intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
+    pub inner_classifiers: InnerClassifiers<'a>,
+    pub local_classifiers: crate::fx_hash::HashSet<TypeName>,
+    pub enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
+    pub anonymous_classifiers: crate::fx_hash::HashSet<TypeName>,
 }
 
 impl Default for MetadataTypeLookups<'_> {
@@ -207,7 +207,7 @@ impl<'a> StringTable<'a> {
     }
 
     /// A table for a KLIB `PackageFragment`: plain strings, qualified names and type tables.
-    pub(crate) fn klib(inner_classifiers: InnerClassifiers<'a>) -> Self {
+    pub fn klib(inner_classifiers: InnerClassifiers<'a>) -> Self {
         Self {
             inner_classifiers,
             klib: Some(KlibTables::default()),
@@ -251,14 +251,14 @@ impl<'a> StringTable<'a> {
 
     /// Open a container's `TypeTable`; the declarations attached until [`Self::close_type_table`]
     /// reference types in it. A no-op for the JVM carrier, which inlines types.
-    pub(crate) fn open_type_table(&mut self) {
+    pub fn open_type_table(&mut self) {
         if let Some(klib) = &mut self.klib {
             klib.type_tables.push(KlibTypeTable::default());
         }
     }
 
     /// The `TypeTable` message of the innermost open container, or `None` when it holds no type.
-    pub(crate) fn close_type_table(&mut self) -> Option<Pb> {
+    pub fn close_type_table(&mut self) -> Option<Pb> {
         let table = self.klib.as_mut()?.type_tables.pop()?;
         (!table.types.is_empty()).then(|| {
             let mut message = Pb::new();
@@ -271,7 +271,7 @@ impl<'a> StringTable<'a> {
 
     /// The id of `ty` in the innermost open type table, interning it there; `None` for the JVM
     /// carrier, whose messages inline every type.
-    pub(crate) fn type_id(&mut self, ty: &Pb) -> Option<u32> {
+    pub fn type_id(&mut self, ty: &Pb) -> Option<u32> {
         let table = self
             .klib
             .as_mut()?
@@ -290,7 +290,7 @@ impl<'a> StringTable<'a> {
 
     /// Attach `ty` to `message`: inline as `inline_field` for the JVM carrier, by type-table id as
     /// `id_field` for a KLIB.
-    pub(crate) fn put_type(&mut self, message: &mut Pb, inline_field: u32, id_field: u32, ty: &Pb) {
+    pub fn put_type(&mut self, message: &mut Pb, inline_field: u32, id_field: u32, ty: &Pb) {
         match self.type_id(ty) {
             Some(id) => message.field_varint(id_field, u64::from(id)),
             None => message.field_message(inline_field, ty),
@@ -298,7 +298,7 @@ impl<'a> StringTable<'a> {
     }
 
     /// The serialized `QualifiedNameTable` of a KLIB fragment.
-    pub(crate) fn qualified_name_table(&self) -> Pb {
+    pub fn qualified_name_table(&self) -> Pb {
         let mut table = Pb::new();
         for name in self.klib.iter().flat_map(|klib| &klib.qualified_names) {
             table.repeated_message(1, name); // QualifiedNameTable.qualified_name = 1
@@ -307,7 +307,7 @@ impl<'a> StringTable<'a> {
     }
 
     /// The serialized `StringTable` of a KLIB fragment.
-    pub(crate) fn string_table(&self) -> Pb {
+    pub fn string_table(&self) -> Pb {
         let mut table = Pb::new();
         for string in &self.strings {
             table.field_bytes(1, string.as_bytes()); // StringTable.string = 1
@@ -317,7 +317,7 @@ impl<'a> StringTable<'a> {
 
     /// The qualified-name id of the package `segments`, interning each enclosing package first;
     /// `None` for the root package, which has no entry.
-    pub(crate) fn klib_package(&mut self, segments: &[&str]) -> Option<u32> {
+    pub fn klib_package(&mut self, segments: &[&str]) -> Option<u32> {
         let mut parent = None;
         for segment in segments {
             parent = Some(self.klib_qualified_name(parent, segment, QualifiedNameKind::Package));
@@ -393,7 +393,7 @@ impl<'a> StringTable<'a> {
     }
 
     /// kotlinc's `getStringIndex`: any string recorded under this name, a class id included.
-    pub(crate) fn local(&mut self, string: &str) -> u32 {
+    pub fn local(&mut self, string: &str) -> u32 {
         if let Some(&index) = self.names.get(string) {
             return index;
         }
@@ -428,7 +428,7 @@ impl<'a> StringTable<'a> {
             .filter(|index| !self.local_names.contains(index))
     }
 
-    pub(crate) fn class_id(&mut self, classifier: TypeName) -> u32 {
+    pub fn class_id(&mut self, classifier: TypeName) -> u32 {
         if self.klib.is_some() {
             assert!(
                 !self.local_classifiers.contains(&classifier),

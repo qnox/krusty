@@ -8,7 +8,7 @@ use super::{DependencyExportSignatures, ExportedPropertyAccessor};
 use crate::ir::{ExprId, IrCheckedOperation, IrExpr, IrFile, IrFunction, IrLocalPropertyLayout};
 use crate::types::Ty;
 
-pub(crate) fn realize(
+pub fn realize(
     ir: &mut IrFile,
     exports: &mut DependencyExportSignatures,
 ) -> Result<(), &'static str> {

@@ -23,7 +23,8 @@ use crate::types::{type_name_child, TypeName};
 
 /// The decoded function declarations of a set of KLIB libraries, joined by exact signature.
 pub struct KlibDeclarationBodies {
-    libraries: Vec<KlibIrModuleTrees>,
+    /// Decoded trees are immutable and may be shared with other compilations over the same archive.
+    libraries: Vec<std::sync::Arc<KlibIrModuleTrees>>,
     modules: HashMap<String, usize>,
     /// Which library defines each linkable identity.
     owners: HashMap<(String, KlibIrSignature), usize>,
@@ -57,6 +58,13 @@ pub(crate) struct KlibClassMember<'a> {
     pub(crate) function: &'a KlibIrFunction,
 }
 
+/// The one serialized class declaring an enum entry, in the module that serializes it.
+pub(crate) struct KlibEnumEntryClass<'a> {
+    pub(crate) module: &'a str,
+    pub(crate) arena: &'a KlibIrArena,
+    pub(crate) class: &'a crate::metadata::klib_ir::tree::KlibIrClass,
+}
+
 impl Default for KlibDeclarationBodies {
     fn default() -> Self {
         Self {
@@ -72,7 +80,7 @@ impl Default for KlibDeclarationBodies {
 pub struct KlibBodyLibrary {
     module: String,
     dependencies: Vec<String>,
-    trees: KlibIrModuleTrees,
+    trees: std::sync::Arc<KlibIrModuleTrees>,
 }
 
 impl KlibBodyLibrary {
@@ -84,6 +92,18 @@ impl KlibBodyLibrary {
             manifest.depends().into_iter().map(str::to_owned),
             trees,
         ))
+    }
+
+    /// As [`Self::from_manifest`], over trees another compilation of the same archive decoded.
+    pub(crate) fn from_manifest_shared(
+        manifest: &KlibManifest,
+        trees: std::sync::Arc<KlibIrModuleTrees>,
+    ) -> Option<Self> {
+        Some(Self {
+            module: manifest.unique_name()?.to_owned(),
+            dependencies: manifest.depends().into_iter().map(str::to_owned).collect(),
+            trees,
+        })
     }
 
     #[cfg(test)]
@@ -103,7 +123,7 @@ impl KlibBodyLibrary {
         Self {
             module,
             dependencies: dependencies.into_iter().collect(),
-            trees,
+            trees: std::sync::Arc::new(trees),
         }
     }
 }
@@ -226,6 +246,69 @@ impl KlibDeclarationBodies {
             class,
             function: arena.function(*function),
         }))
+    }
+
+    /// The class that declares the enum entry `entry` read by a body of `body_module`, resolved
+    /// in that body's producer graph as [`Self::callee_origin`] resolves a call: a declaration in
+    /// the body module wins, otherwise exactly one reachable module must declare it.
+    pub(crate) fn enum_entry_class(
+        &self,
+        body_module: &str,
+        entry: &KlibPublicIdSignature,
+    ) -> Result<Option<KlibEnumEntryClass<'_>>, &'static str> {
+        let entry = KlibIrSignature::Public(entry.clone());
+        if let Some(found) = self.module_enum_entry_class(body_module, &entry)? {
+            return Ok(Some(found));
+        }
+        let mut owner = None;
+        for module in self.body_provider_modules(body_module) {
+            if module == body_module {
+                continue;
+            }
+            if let Some(found) = self.module_enum_entry_class(&module, &entry)? {
+                if owner.replace(found).is_some() {
+                    return Err("several producer modules declare one enum entry");
+                }
+            }
+        }
+        Ok(owner)
+    }
+
+    fn module_enum_entry_class(
+        &self,
+        module: &str,
+        entry: &KlibIrSignature,
+    ) -> Result<Option<KlibEnumEntryClass<'_>>, &'static str> {
+        let Some((module, &library)) = self.modules.get_key_value(module) else {
+            return Ok(None);
+        };
+        let mut found = None;
+        for tree in self.libraries[library].trees() {
+            let mut pending = vec![&tree.declaration];
+            while let Some(member) = pending.pop() {
+                let Some(class) = class_of(&tree.arena, member) else {
+                    continue;
+                };
+                pending.extend(class.members.iter());
+                let declares = class.members.iter().any(|member| {
+                    matches!(member, KlibIrMember::EnumEntry(declared)
+                        if declared.base.symbol.kind == KlibIrSymbolKind::EnumEntry
+                            && declared.base.symbol.signature == *entry)
+                });
+                if !declares {
+                    continue;
+                }
+                if found.is_some() {
+                    return Err("several serialized classes declare one enum entry");
+                }
+                found = Some(KlibEnumEntryClass {
+                    module: module.as_str(),
+                    arena: &tree.arena,
+                    class,
+                });
+            }
+        }
+        Ok(found)
     }
 
     /// Index each named module's decoded trees. Every module occurs once; unrelated modules may

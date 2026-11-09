@@ -245,6 +245,17 @@ rg -n 'with_declarations|is_selected|requires_declaration|klib_body_callables|em
 - Compatibility branches are not harmless: if the common path replaces one, delete the branch and
   its helper. Do not retain it behind `#[allow(dead_code)]`.
 
+## One rule, one path
+
+- A Kotlin rule (applicability, candidate ranking, a common-supertype join, a type-variable
+  binding) is implemented once. A fix to a rule goes through the shared path, or deletes the path it
+  patches. Never land the same rule again for another call kind, receiver tower, or typer.
+- `legacy-baseline.tsv` counts the duplicate typers, unifiers and joins, the `fn select_*`
+  definitions, and the lines of the temporary signature bridge. The lint job and the pre-commit
+  hook fail when a row grows (`just legacy-baseline-check`). After deleting legacy surface, lower
+  the rows with `just legacy-baseline`; it never raises one. Raising a row is a hand edit that the
+  pull request must justify.
+
 ## Snapshot publication
 
 - A result derived from a filesystem or classpath snapshot must prove that snapshot is current
@@ -304,7 +315,8 @@ Follow data ownership rather than starting at the changed test:
    metadata becomes common semantic structures at this boundary rather than leaking JVM queries into
    resolution.
 5. Lowering and emission: inspect `src/ir_lower.rs` for accidental lookup or semantic decisions,
-   then the relevant file under `src/jvm/` only for physical representation.
+   then the relevant file in the backend crate (`crates/krusty-jvm/src/`, or the class-file layer
+   under `src/jvm/`) only for physical representation.
 6. Tests: require a repository-owned regression plus kotlinc comparison through the harness when
    behavior or diagnostics are in question. Do not accept a corpus pin as the only regression.
 
