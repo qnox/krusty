@@ -326,12 +326,12 @@ pub(super) fn emit_dependencies<B: Backend>(
         }
         let constructors = unit
             .allocating_constructors()
-            .map(|(identity, class)| (identity.clone(), class))
+            .map(|(identity, constructor)| (identity.clone(), constructor))
             .collect::<Vec<_>>();
-        for (identity, class) in &constructors {
+        for (identity, constructor) in &constructors {
             if unit
                 .ir()
-                .declared_class_self_type(unit.ir().classes[*class as usize].fq_name)
+                .declared_class_self_type(unit.ir().classes[constructor.class as usize].fq_name)
                 .is_none()
             {
                 diags.error(
@@ -340,13 +340,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 );
                 return Vec::new();
             }
-            exports.record_constructor(
-                crate::backend::ExportedConstructor {
-                    class: *class,
-                    secondary: None,
-                },
-                identity.clone(),
-            );
+            exports.record_constructor(*constructor, identity.clone());
         }
         let mut published = Vec::with_capacity(closed.len());
         for (identity, _) in &closed {

@@ -148,18 +148,18 @@ pub(super) fn declarations(
                     .constructor_dispatched_members(&identity, bodies)
                     .map_err(|reason| format!("an invalid class member: {reason:?}"))?,
             );
-            // The declarations the class's overrides override, which their edges name.
-            for overridden in facts
-                .constructor_overridden_declarations(&identity, bodies)
-                .map_err(|reason| format!("an invalid class override: {reason:?}"))?
+            // The declarations the class's initialization names without emitting them.
+            for declaration in facts
+                .constructor_declaration_evidence(&identity, bodies)
+                .map_err(|reason| format!("an invalid class declaration: {reason:?}"))?
             {
-                if declared.insert(overridden.clone()) {
+                if declared.insert(declaration.clone()) {
                     declarations.push(
                         platform
-                            .external_callable_by_dependency(&overridden)
+                            .external_callable_by_dependency(&declaration)
                             .ok_or_else(|| {
                                 format!(
-                                    "an overridden KLIB declaration has no provider: {overridden:?}"
+                                    "a KLIB declaration a class names has no provider: {declaration:?}"
                                 )
                             })?,
                     );

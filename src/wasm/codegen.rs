@@ -122,13 +122,15 @@ impl Backend for WasmBackend {
         true
     }
 
-    /// The runtime lays out text itself: a library body of one of `String`'s members reads a
-    /// layout this target's string does not have.
+    /// The runtime lays out text and its exception classes itself: a library body of one of
+    /// their members reads a layout this target does not have, and a library class extending
+    /// one of the exceptions delegates to the runtime's constructor.
     fn represents_dependency_classifier(
         &self,
         classifier: crate::backend::DependencyClassifier,
     ) -> bool {
         classifier == crate::types::wk::string()
+            || crate::libraries::RuntimeExceptionKind::of(classifier).is_some()
     }
 
     fn realizes_dependency_intrinsic(

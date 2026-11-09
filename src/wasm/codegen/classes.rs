@@ -230,6 +230,12 @@ pub(super) const ENUM_BASE_FIELDS: u32 = 2;
 /// A runtime exception's message and cause: fields 1 and 2 of its runtime struct.
 const EXCEPTION_BASE_FIELDS: u32 = 2;
 
+/// The type a method of `owner` receives its receiver at: a builtin value's own type, which it is
+/// carried as, and otherwise the class's.
+pub(super) fn receiver_type(owner: crate::types::TypeName) -> Ty {
+    crate::types::builtin_semantic(owner).unwrap_or_else(|| Ty::obj_name(owner))
+}
+
 /// The wasm signature of a method of the file: the receiver, then its parameters.
 pub(super) fn method_type(
     module: &mut Module,
@@ -237,7 +243,11 @@ pub(super) fn method_type(
     function: FunId,
 ) -> Result<u32, Unsupported> {
     let declaration = &ir.functions[function as usize];
-    let mut params = vec![REFERENCE];
+    let receiver = match declaration.dispatch_receiver {
+        Some(owner) => carrier(receiver_type(owner))?.ok_or("a `Unit` receiver")?,
+        None => REFERENCE,
+    };
+    let mut params = vec![receiver];
     for parameter in 0..declaration.params.len() {
         params.push(
             parameter_carrier(module, ir, function, parameter as u32)?

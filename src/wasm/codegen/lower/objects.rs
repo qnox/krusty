@@ -1150,6 +1150,21 @@ impl Body<'_> {
         if self.reaches_any_default(class, AnyMember::ToString)? {
             return Err("`kotlin.Any.toString`'s own rendering".to_string());
         }
+        self.dispatched_to_string();
+        Ok(())
+    }
+
+    /// Whether `ty` is a final class an earlier file declared which answers `member` itself.
+    pub(super) fn answered_by_earlier_final_class(&self, ty: Ty, member: AnyMember) -> bool {
+        match ty.non_null().kind() {
+            TyKind::Obj(name, _) => self.runtime.objects.final_class_answers(name, member),
+            _ => false,
+        }
+    }
+
+    /// Replace the object on the stack with its `toString()` through its dispatch table, or
+    /// `"null"`.
+    pub(super) fn dispatched_to_string(&mut self) {
         let value = self.local(REFERENCE);
         self.code.local_set(value);
         let any_table = self.runtime.objects.any_table;
@@ -1170,7 +1185,6 @@ impl Body<'_> {
             .call_ref(to_string)
             .end()
             .ref_as_non_null();
-        Ok(())
     }
 }
 

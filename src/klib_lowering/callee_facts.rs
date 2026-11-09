@@ -238,15 +238,16 @@ impl<'a> KlibCalleeFacts<'a> {
         }
     }
 
-    /// The declarations the overrides of the class `identity` constructs override.
-    pub(crate) fn constructor_overridden_declarations(
+    /// The declarations the initialization of the class `identity` constructs names without
+    /// emitting their bodies.
+    pub(crate) fn constructor_declaration_evidence(
         &self,
         identity: &KlibDependencyCallable,
         bodies: &crate::klib_libraries::KlibDeclarationBodies,
     ) -> Result<Vec<KlibDependencyCallable>, super::decline::KlibBodyDeclineReason> {
         match self.get(identity) {
             Some(KlibCalleeFact::Selected(callables)) => {
-                super::class_initialization::constructor_overridden_declarations(
+                super::class_initialization::constructor_declaration_evidence(
                     callables[0],
                     bodies,
                     self,

@@ -44,6 +44,15 @@ impl Body<'_> {
                 self.scalar_string_function(ty).expect("checked above")
             }
             ty if self.class_of_type(ty).is_some() => return self.object_to_string(ty),
+            // An instance of a final class of an earlier file, which renders itself.
+            ty if self.answered_by_earlier_final_class(
+                ty,
+                crate::backend::class_tables::AnyMember::ToString,
+            ) =>
+            {
+                self.dispatched_to_string();
+                return Ok(());
+            }
             other => {
                 return Err(format!(
                     "a string template part of type `{}`",

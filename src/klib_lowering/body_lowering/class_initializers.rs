@@ -21,7 +21,22 @@ impl<'a> BodyLowering<'a> {
                 .iter()
                 .map(|&argument| self.expression(argument))
                 .collect::<Lowered<Vec<_>>>()?;
-            self.ir.classes[class as usize].super_args = arguments;
+            let declaration = &mut self.ir.classes[class as usize];
+            if plan.primary {
+                declaration.super_args = arguments;
+            } else {
+                // The secondary constructor this initialization is for declares exactly its
+                // parameters; Kotlin declares no two constructors of a class with the same ones.
+                let params = self.header.params();
+                let secondary = declaration
+                    .secondary_ctors
+                    .iter_mut()
+                    .find(|secondary| secondary.params == params)
+                    .ok_or_else(|| {
+                        mismatch("a secondary constructor's initialization has no constructor")
+                    })?;
+                secondary.delegate_args = arguments;
+            }
         }
         let mut stmts = Vec::new();
         for step in &plan.steps {

@@ -60,6 +60,10 @@ pub(super) struct ObjectRoot {
     pub(super) identity_equals: u32,
     /// A function that traps, per function type: what an abstract slot holds.
     traps: HashMap<u32, u32>,
+    /// The `kotlin.Any` members each final class an earlier file declared answers with its own
+    /// implementation, by its classifier. A final class's instances dispatch exactly as it does.
+    final_class_members:
+        HashMap<crate::types::TypeName, Vec<crate::backend::class_tables::AnyMember>>,
     pub(super) interfaces: InterfaceDispatch,
 }
 
@@ -118,8 +122,30 @@ impl ObjectRoot {
             any_slot_types,
             identity_equals,
             traps: HashMap::default(),
+            final_class_members: HashMap::default(),
             interfaces: InterfaceDispatch::default(),
         }
+    }
+
+    /// Record that the final class `classifier` answers `members` of `kotlin.Any` itself.
+    pub(super) fn record_final_class(
+        &mut self,
+        classifier: crate::types::TypeName,
+        members: Vec<crate::backend::class_tables::AnyMember>,
+    ) {
+        self.final_class_members.insert(classifier, members);
+    }
+
+    /// Whether every instance of `classifier`, a final class an earlier file declared, answers
+    /// `member` with its class's own implementation.
+    pub(super) fn final_class_answers(
+        &self,
+        classifier: crate::types::TypeName,
+        member: crate::backend::class_tables::AnyMember,
+    ) -> bool {
+        self.final_class_members
+            .get(&classifier)
+            .is_some_and(|members| members.contains(&member))
     }
 
     /// Write what the interface dispatch of the whole program needs: see

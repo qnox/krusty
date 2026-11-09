@@ -2,7 +2,7 @@
 
 use super::demo_package::{assert_unit_is_empty, demo, operator, T};
 use super::*;
-use crate::backend::{DependencyExportSignatures, ExportedConstructor};
+use crate::backend::DependencyExportSignatures;
 use crate::libraries::{KlibBodyClassContract, KlibBodyClassParameters, TypeKind};
 use crate::metadata::klib_ir::tree::{KlibIrClass, KlibIrField};
 use crate::metadata::semantic::KotlinModality;
@@ -649,8 +649,11 @@ fn constructor_root_exports_allocation_with_exact_parameters_and_declared_self_t
     let [(identity, class)] = constructors.as_slice() else {
         panic!("one constructor")
     };
-    let (identity, class) = (identity.clone(), *class);
+    let (identity, constructor) = (identity.clone(), *class);
     assert_eq!(&identity, selected.identity());
+    // The class's primary constructor allocates it.
+    assert_eq!(constructor.secondary, None);
+    let class = constructor.class;
     let mut ir = unit.into_ir();
     let owner = type_name("demo/Act");
     assert_eq!(
@@ -677,13 +680,7 @@ fn constructor_root_exports_allocation_with_exact_parameters_and_declared_self_t
         assert!(matches!(ir.expr(*value), IrExpr::GetValue(slot) if *slot == index as u32 + 1));
     }
     let mut exports = DependencyExportSignatures::default();
-    exports.record_constructor(
-        ExportedConstructor {
-            class,
-            secondary: None,
-        },
-        identity.clone(),
-    );
+    exports.record_constructor(constructor, identity.clone());
     crate::backend::construction_entries::realize(&mut ir, &mut exports);
     let published = exports.callables().collect::<Vec<_>>();
     let [(entry, exported)] = published.as_slice() else {
@@ -737,18 +734,13 @@ fn constructor_allocation_export_does_not_guess_a_missing_self_type() {
         &Default::default(),
     )
     .unwrap();
-    let (_, class) = unit.allocating_constructors().next().unwrap();
+    let (_, constructor) = unit.allocating_constructors().next().unwrap();
+    assert_eq!(constructor.secondary, None);
     let mut ir = unit.into_ir();
     ir.restore_declared_class_self_type_owners(&Default::default());
     let before = (ir.exprs.len(), ir.functions.len());
     let mut exports = DependencyExportSignatures::default();
-    exports.record_constructor(
-        ExportedConstructor {
-            class,
-            secondary: None,
-        },
-        selected.identity().clone(),
-    );
+    exports.record_constructor(constructor, selected.identity().clone());
     crate::backend::construction_entries::realize(&mut ir, &mut exports);
     assert_eq!(exports.callables().count(), 0);
     assert!(ir.construction_entries.is_empty());

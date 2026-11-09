@@ -206,6 +206,22 @@ pub(super) fn lower_file(
                 callables: &mut *callable_registry,
             },
         )?;
+        // A later file reaches an instance of a final class of this one only through its own
+        // dispatch table, so it learns which of `kotlin.Any`'s members the class answers itself.
+        for (id, class) in ir.classes.iter().enumerate() {
+            if class.is_interface || class.is_open || class.is_abstract {
+                continue;
+            }
+            let vtable = &classes.tables.table(id as crate::ir::ClassId).vtable;
+            let answered = crate::backend::class_tables::AnyMember::ALL
+                .into_iter()
+                .filter(|member| {
+                    vtable[member.slot() as usize]
+                        != crate::backend::class_tables::Slot::AnyMember(*member)
+                })
+                .collect();
+            runtime.objects.record_final_class(class.fq_name, answered);
+        }
         Some(classes)
     };
     let context = FileContext {
@@ -248,7 +264,7 @@ pub(super) fn lower_file(
         };
         let mut parameters = Vec::new();
         if let Some(owner) = function.dispatch_receiver {
-            parameters.push(Ty::obj_name(owner));
+            parameters.push(super::classes::receiver_type(owner));
         }
         parameters.extend(function.params.iter().copied());
         let mut body = Body::new(

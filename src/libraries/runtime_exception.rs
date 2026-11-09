@@ -14,6 +14,23 @@ pub enum RuntimeExceptionKind {
 }
 
 impl RuntimeExceptionKind {
+    const ALL: [Self; 7] = [
+        Self::Throwable,
+        Self::Exception,
+        Self::RuntimeException,
+        Self::IndexOutOfBounds,
+        Self::NullPointer,
+        Self::IllegalState,
+        Self::IllegalArgument,
+    ];
+
+    /// The role whose language-runtime declaration is `classifier`, if any.
+    pub fn of(classifier: TypeName) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.classifier() == classifier)
+    }
+
     /// The language-runtime declaration this storage operation requires. A classifier at this
     /// identity still needs the authenticated role; the identity alone grants no representation.
     pub fn classifier(self) -> TypeName {

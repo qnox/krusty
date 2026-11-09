@@ -57,17 +57,26 @@ pub(super) struct ClassInitialization<'a, 'b> {
     /// the open and abstract members an open class declares. A materialized class always carries
     /// them, so dispatch never reaches an implementation the instance's class overrides.
     pub(super) dispatched: Vec<&'b KlibIrFunction>,
-    /// The superclass constructor the primary constructor delegates to, unless that is `Any`'s.
+    /// The superclass constructor the constructor delegates to, unless that is `Any`'s.
     pub(super) superclass: Option<SuperclassCall>,
+    /// Whether the constructor is the class's primary one. A class without a primary constructor
+    /// is initialized by each of its secondary constructors, which all delegate to the superclass.
+    pub(super) primary: bool,
     /// Every declared supertype, the superclass first.
     pub(super) supertypes: Vec<Ty>,
 }
 
-/// The delegation of a primary constructor to its superclass's constructor.
+/// The delegation of a constructor to its superclass's constructor.
 pub(super) struct SuperclassCall {
     pub(super) constructor: KlibDependencyCallable,
     /// The delegation's arguments, in the superclass constructor's parameter order.
     pub(super) arguments: Vec<KlibIrExprId>,
+    /// The superclass, and the parameters its selected constructor declares.
+    pub(super) owner: crate::types::TypeName,
+    pub(super) params: Vec<Ty>,
+    /// Whether the unit materializes the superclass from its own admitted initialization. A
+    /// superclass the target lays out itself is the target's, as `Any` is.
+    pub(super) materialized: bool,
 }
 
 fn mismatch(detail: &str) -> KlibBodyDeclineReason {
@@ -82,7 +91,9 @@ pub(super) fn plan<'a, 'b>(
 ) -> Result<Option<ClassInitialization<'a, 'b>>, KlibBodyDeclineReason> {
     let header = class_headers::authenticate(selected, bodies)?;
     let contract = header.contract;
+    // A class the target lays out itself is the target's to construct, as `Any` is.
     if contract.kind != TypeKind::Class
+        || callees.target_represents(contract.classifier)
         || !matches!(
             contract.modality,
             KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
@@ -91,11 +102,12 @@ pub(super) fn plan<'a, 'b>(
         || contract.is_inner
         || contract.is_expect
         || !contract.parameters.formals.is_empty()
-        || contract.primary_constructor.as_ref()
-            != match &selected.identity().declaration {
-                KlibDeclarationSignature::Public(signature) => Some(signature),
-                _ => None,
-            }
+        || contract
+            .primary_constructor
+            .as_ref()
+            .is_some_and(|primary| {
+                selected.identity().declaration != KlibDeclarationSignature::Public(primary.clone())
+            })
         || header.class.value_class_representation.is_some()
     {
         return Ok(None);
@@ -132,7 +144,12 @@ pub(super) fn plan<'a, 'b>(
             _ => return Ok(None),
         }
     }
-    if constructors.as_slice() != [&header.function.base.symbol]
+    let primary = contract.primary_constructor.is_some();
+    // A class with a primary constructor has only that one here; any secondary constructor
+    // delegates to it and is not an initialization of its own. Without one, the selected secondary
+    // constructor initializes the class.
+    if (primary && constructors.as_slice() != [&header.function.base.symbol])
+        || !constructors.contains(&&header.function.base.symbol)
         || header.function.regular_parameters.iter().any(|parameter| {
             parameter.default_value.is_some() || parameter.vararg_element_type.is_some()
         })
@@ -209,7 +226,7 @@ pub(super) fn plan<'a, 'b>(
         }
         (None, Ty::obj_name(crate::types::wk::any()))
     } else {
-        // The superclass is itself materialized, from its own admitted initialization.
+        // The superclass constructor the delegation names, by its exact declaration.
         let constructor = match bodies.callee_origin(
             &contract.module,
             &KlibDeclarationSignature::Public(signature.clone()),
@@ -226,23 +243,46 @@ pub(super) fn plan<'a, 'b>(
         else {
             return Ok(None);
         };
-        let Some(superclass) = plan(selected[0], bodies, callees)? else {
-            return Ok(None);
-        };
-        if superclass.header.contract.modality == KotlinModality::Final {
-            return Err(mismatch("a class extends a final class"));
-        }
         let Some(arguments) = arguments.into_iter().collect::<Option<Vec<_>>>() else {
             return Ok(None);
         };
-        let declared = Ty::obj_name(superclass.header.contract.classifier);
-        (
-            Some(SuperclassCall {
-                constructor,
-                arguments,
-            }),
-            declared,
-        )
+        let Some(crate::types::SemanticCallableOwner::Classifier(owner)) =
+            selected[0].declaration_owner()
+        else {
+            return Err(mismatch("a superclass constructor has no declaring class"));
+        };
+        let params = selected[0].params().to_vec();
+        if callees.target_represents(owner) {
+            // The target lays the superclass out itself and builds it from the delegation's
+            // arguments, as it does for a source class extending it.
+            (
+                Some(SuperclassCall {
+                    constructor,
+                    arguments,
+                    owner,
+                    params,
+                    materialized: false,
+                }),
+                Ty::obj_name(owner),
+            )
+        } else {
+            let Some(superclass) = plan(selected[0], bodies, callees)? else {
+                return Ok(None);
+            };
+            if superclass.header.contract.modality == KotlinModality::Final {
+                return Err(mismatch("a class extends a final class"));
+            }
+            (
+                Some(SuperclassCall {
+                    constructor,
+                    arguments,
+                    owner: superclass.header.contract.classifier,
+                    params,
+                    materialized: true,
+                }),
+                Ty::obj_name(superclass.header.contract.classifier),
+            )
+        }
     };
     if supertypes.first() != Some(&declared_superclass)
         && !(root
@@ -271,6 +311,7 @@ pub(super) fn plan<'a, 'b>(
         steps,
         dispatched,
         superclass,
+        primary,
         supertypes,
     }))
 }
@@ -299,6 +340,7 @@ pub(super) fn constructor_initialization_callees(
     let superclass = plan
         .superclass
         .as_ref()
+        .filter(|superclass| superclass.materialized)
         .map(|superclass| superclass.constructor.clone());
     Ok(Some(
         plan.header
@@ -322,7 +364,7 @@ pub(super) fn constructor_initialization_callees(
                     KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
                 }
             })
-            // The superclass is initialized first, through its own constructor.
+            // A materialized superclass is initialized first, through its own constructor.
             .chain(superclass)
             .collect(),
     ))
@@ -390,9 +432,10 @@ pub(super) fn constructor_dispatched_members(
         .collect()
 }
 
-/// The declarations the overrides of an admitted class override, which their override edges
-/// name. They are declaration evidence only: an override edge executes none of their bodies.
-pub(super) fn constructor_overridden_declarations(
+/// The declarations an admitted class initialization names without emitting their bodies: the
+/// ones its overrides override, which their override edges name, and the constructor of a
+/// superclass the target lays out, which the target builds. They are declaration evidence only.
+pub(super) fn constructor_declaration_evidence(
     selected: KlibBodyCallable<'_>,
     bodies: &KlibDeclarationBodies,
     callees: &super::KlibCalleeFacts<'_>,
@@ -400,7 +443,12 @@ pub(super) fn constructor_overridden_declarations(
     let Some(plan) = plan(selected, bodies, callees)? else {
         return Ok(Vec::new());
     };
-    let mut declarations = Vec::new();
+    let mut declarations = plan
+        .superclass
+        .iter()
+        .filter(|superclass| !superclass.materialized)
+        .map(|superclass| superclass.constructor.clone())
+        .collect::<Vec<_>>();
     for symbol in plan
         .dispatched
         .iter()

@@ -23,7 +23,12 @@ impl<'u, 's> Linker<'u, 's> {
             return Ok(());
         };
         let classifier = plan.storage.declaration.classifier;
-        if ir.class_id_by_name(classifier).is_some() {
+        // Each secondary constructor of a class without a primary one initializes the class this
+        // unit already materialized for another of them.
+        let existing = ir
+            .class_id_by_name(classifier)
+            .filter(|class| !plan.primary && self.classes.values().any(|known| known == class));
+        if existing.is_none() && ir.class_id_by_name(classifier).is_some() {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "different dependency identities claim the same materialized classifier".to_owned(),
             ));
@@ -39,9 +44,9 @@ impl<'u, 's> Linker<'u, 's> {
                 .expect("the plan authenticated its receiver")
                 .ty,
         )?;
-        // The superclass is materialized first, from its own admitted initialization.
+        // A materialized superclass is materialized first, from its own admitted initialization.
         let superclass = match &plan.superclass {
-            Some(call) => {
+            Some(call) if call.materialized => {
                 let selected = match self.sources.callees.get(&call.constructor) {
                     Some(KlibCalleeFact::Selected(callables)) => callables[0],
                     _ => {
@@ -59,18 +64,102 @@ impl<'u, 's> Linker<'u, 's> {
                 )?;
                 Some(class)
             }
-            None => None,
+            _ => None,
         };
+        let class = match existing {
+            Some(class) => class,
+            None => self.declare_materialized_class(ir, &plan, &header, self_type)?,
+        };
+        let function = declare_function(ir, &header);
+        ir.functions[function as usize].is_static = false;
+        ir.functions[function as usize].dispatch_receiver = Some(classifier);
+        ir.set_method_visibility(function, crate::types::Visibility::Private);
+        let method = u32::try_from(ir.classes[class as usize].methods.len())
+            .expect("a method index fits u32");
+        ir.classes[class as usize].methods.push(function);
+        ir.note_class_method(class, function);
+        let receiver = ir.add_expr(IrExpr::GetValue(0));
+        ir.set_logical_type(receiver, Ty::obj_name(classifier));
+        let args = header
+            .params()
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                let value = ir.add_expr(IrExpr::GetValue(
+                    u32::try_from(index + 1).expect("a value index fits u32"),
+                ));
+                ir.set_logical_type(value, *ty);
+                Some(value)
+            })
+            .collect();
+        let initialize = ir.add_expr(IrExpr::MethodCall {
+            class,
+            index: method,
+            receiver,
+            args,
+        });
+        ir.set_logical_type(initialize, Ty::Unit);
+        let secondary = if plan.primary {
+            ir.classes[class as usize].init_body = Some(initialize);
+            None
+        } else {
+            let delegate = secondary_delegation(ir, &plan, superclass)?;
+            let secondaries = &mut ir.classes[class as usize].secondary_ctors;
+            secondaries.push(materialized_secondary(&plan, &header, delegate, initialize));
+            Some(secondaries.len() - 1)
+        };
+        self.classes.insert(identity.clone(), class);
+        self.constructors.insert(
+            identity.clone(),
+            super::MaterializedConstructor {
+                initializer: function,
+                secondary,
+            },
+        );
+        let member = super::MemberClass {
+            class,
+            fields: plan.field_declarations.clone(),
+            contract: plan.header.contract,
+        };
+        if existing.is_none() {
+            for function in &plan.dispatched {
+                self.declare_dispatched(ir, member.clone(), plan.header.arena, function)?;
+            }
+        }
+        // The initialization reads the class's private members as its members do.
+        self.pending.push_back(PendingBody {
+            identity: identity.clone(),
+            arena: plan.header.arena,
+            symbol: &plan.header.function.base.symbol,
+            statements: &[],
+            header,
+            function,
+            initialization: Some((class, plan)),
+            value_member: Some(member),
+            local_body: None,
+        });
+        Ok(())
+    }
+
+    /// The class `plan` initializes, with its storage and its primary constructor's parameters
+    /// when it has one.
+    fn declare_materialized_class(
+        &self,
+        ir: &mut IrFile,
+        plan: &super::super::class_initialization::ClassInitialization<'s, 's>,
+        header: &super::super::function_lowering::FunctionHeader,
+        self_type: Ty,
+    ) -> Result<crate::ir::ClassId, KlibBodyDeclineReason> {
+        let classifier = plan.storage.declaration.classifier;
         let mut class = IrClass::synthetic(classifier);
         class.supertypes.clone_from(&plan.supertypes);
         class.is_open =
             plan.header.contract.modality != crate::metadata::semantic::KotlinModality::Final;
         class.is_abstract =
             plan.header.contract.modality == crate::metadata::semantic::KotlinModality::Abstract;
-        if let Some(superclass) = superclass {
-            let superclass = &ir.classes[superclass as usize];
-            class.superclass = superclass.fq_name;
-            class.super_ctor_params = superclass.ctor_args.iter().map(|arg| arg.ty).collect();
+        if let Some(call) = &plan.superclass {
+            class.superclass = call.owner;
+            class.super_ctor_params.clone_from(&call.params);
         }
         class.fields = plan
             .storage
@@ -82,11 +171,14 @@ impl<'u, 's> Linker<'u, 's> {
                     .with_is_private(field.private)
             })
             .collect();
+        // A class without a primary constructor is built by its secondary constructors alone.
+        class.has_primary_ctor = plan.primary;
         class.ctor_args = plan
             .header
             .function
             .regular_parameters
             .iter()
+            .filter(|_| plan.primary)
             .zip(header.params())
             .map(|(parameter, ty)| IrCtorArg {
                 name: Some(parameter.name.clone()),
@@ -111,56 +203,7 @@ impl<'u, 's> Linker<'u, 's> {
         class.explicit_param_stores = true;
         let class = ir.add_class(class);
         ir.record_declared_class_self_type(classifier, self_type);
-        let function = declare_function(ir, &header);
-        ir.functions[function as usize].is_static = false;
-        ir.functions[function as usize].dispatch_receiver = Some(classifier);
-        ir.set_method_visibility(function, crate::types::Visibility::Private);
-        ir.classes[class as usize].methods.push(function);
-        ir.note_class_method(class, function);
-        let receiver = ir.add_expr(IrExpr::GetValue(0));
-        ir.set_logical_type(receiver, Ty::obj_name(classifier));
-        let args = header
-            .params()
-            .iter()
-            .enumerate()
-            .map(|(index, ty)| {
-                let value = ir.add_expr(IrExpr::GetValue(
-                    u32::try_from(index + 1).expect("a value index fits u32"),
-                ));
-                ir.set_logical_type(value, *ty);
-                Some(value)
-            })
-            .collect();
-        let initialize = ir.add_expr(IrExpr::MethodCall {
-            class,
-            index: 0,
-            receiver,
-            args,
-        });
-        ir.set_logical_type(initialize, Ty::Unit);
-        ir.classes[class as usize].init_body = Some(initialize);
-        self.classes.insert(identity.clone(), class);
-        let member = super::MemberClass {
-            class,
-            fields: plan.field_declarations.clone(),
-            contract: plan.header.contract,
-        };
-        for function in &plan.dispatched {
-            self.declare_dispatched(ir, member.clone(), plan.header.arena, function)?;
-        }
-        // The initialization reads the class's private members as its members do.
-        self.pending.push_back(PendingBody {
-            identity: identity.clone(),
-            arena: plan.header.arena,
-            symbol: &plan.header.function.base.symbol,
-            statements: &[],
-            header,
-            function,
-            initialization: Some((class, plan)),
-            value_member: Some(member),
-            local_body: None,
-        });
-        Ok(())
+        Ok(class)
     }
 
     /// The class a member's body reads its receiver through. A final ordinary class is the one
@@ -440,5 +483,88 @@ impl<'u, 's> Linker<'u, 's> {
             });
         }
         Ok(())
+    }
+}
+
+/// The constructor a secondary constructor of a class without a primary one delegates to: its
+/// superclass's selected constructor, `Any`'s when it names none.
+fn secondary_delegation(
+    ir: &IrFile,
+    plan: &super::super::class_initialization::ClassInitialization<'_, '_>,
+    superclass: Option<crate::ir::ClassId>,
+) -> Result<crate::ir::CtorDelegateTarget, KlibBodyDeclineReason> {
+    let Some(call) = &plan.superclass else {
+        return Ok(crate::ir::CtorDelegateTarget::Super {
+            owner: crate::types::wk::any(),
+            target_params: Vec::new(),
+            target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+            default_masks: Vec::new(),
+        });
+    };
+    // A materialized superclass without a primary constructor reaches the secondary one declaring
+    // the selected parameters; Kotlin declares no two constructors of a class with the same ones.
+    let ordinal = match superclass.map(|class| &ir.classes[class as usize]) {
+        Some(parent) if !parent.has_primary_ctor => parent
+            .secondary_ctors
+            .iter()
+            .position(|secondary| secondary.params == call.params)
+            .map(|index| u32::try_from(index + 1).expect("a constructor ordinal fits u32"))
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "a superclass has no constructor with the delegation's parameters".to_owned(),
+                )
+            })?,
+        _ => 0,
+    };
+    Ok(crate::ir::CtorDelegateTarget::Super {
+        owner: call.owner,
+        target_params: call.params.clone(),
+        target: crate::ir::IrConstructorTarget {
+            ordinal,
+            access: crate::ir::IrConstructorAccess::Unrestricted,
+        },
+        default_masks: Vec::new(),
+    })
+}
+
+/// The secondary constructor `plan` initializes its class through: it delegates to `delegate`,
+/// whose arguments its initialization lowers, then runs `initialize`, the class's own field and
+/// initializer effects. It is a realization of a library declaration, which publishes its own
+/// Kotlin metadata, so it records none here.
+fn materialized_secondary(
+    plan: &super::super::class_initialization::ClassInitialization<'_, '_>,
+    header: &super::super::function_lowering::FunctionHeader,
+    delegate: crate::ir::CtorDelegateTarget,
+    initialize: crate::ir::ExprId,
+) -> crate::ir::IrSecondaryCtor {
+    let params = header.params().to_vec();
+    crate::ir::IrSecondaryCtor {
+        annotations: crate::ir::DeclarationAnnotations::default(),
+        source_order: u32::MAX,
+        lines: crate::ir::IrSecondaryCtorLines::default(),
+        prefix_params: Vec::new(),
+        declared_spellings: crate::spelling::DeclaredSpellings::default(),
+        named_params: plan
+            .header
+            .function
+            .regular_parameters
+            .iter()
+            .zip(&params)
+            .map(|(parameter, ty)| (parameter.name.clone(), *ty))
+            .collect(),
+        metadata_visibility: None,
+        generated_debug: crate::ir::IrGeneratedDeclarationDebug::None,
+        vararg_index: None,
+        defaults: vec![None; params.len()],
+        delegate_prelude: Vec::new(),
+        delegate_args: Vec::new(),
+        default_parameters: Vec::new(),
+        body: Some(initialize),
+        delegate,
+        synthetic: false,
+        platform_visible: false,
+        vc_params: false,
+        param_checks: vec![None; params.len()],
+        params,
     }
 }

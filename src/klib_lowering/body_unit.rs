@@ -171,6 +171,8 @@ pub struct DependencyBodyUnit {
     ir: IrFile,
     functions: HashMap<KlibDependencyCallable, FunId>,
     classes: HashMap<KlibDependencyCallable, crate::ir::ClassId>,
+    /// The initialization each materialized constructor of an ordinary class runs.
+    constructors: HashMap<KlibDependencyCallable, MaterializedConstructor>,
     authenticated_singleton_dispatches: HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: HashMap<KlibDependencyCallable, TypeName>,
     /// Private members of value classes, which only this unit's members of their class call.
@@ -187,6 +189,14 @@ pub struct DependencyBodyUnit {
     builtins: IrBuiltinOperators,
 }
 
+/// The private initialization function a materialized constructor runs, and the secondary
+/// constructor it is of a class without a primary one.
+#[derive(Clone, Copy)]
+struct MaterializedConstructor {
+    initializer: FunId,
+    secondary: Option<usize>,
+}
+
 /// A member function of a file-local class and the class it belongs to.
 struct LocalFunction {
     function: FunId,
@@ -199,6 +209,7 @@ impl Default for DependencyBodyUnit {
             ir: IrFile::default(),
             functions: HashMap::default(),
             classes: HashMap::default(),
+            constructors: HashMap::default(),
             authenticated_singleton_dispatches: HashMap::default(),
             authenticated_singleton_classifiers: HashMap::default(),
             private_members: HashSet::default(),
@@ -585,13 +596,23 @@ impl DependencyBodyUnit {
             .map(|(identity, &function)| (identity, function))
     }
 
-    /// Allocation exports are separate from their private instance initialization functions.
+    /// Allocation exports are separate from their private instance initialization functions. An
+    /// abstract class has none: only its subclasses' constructors initialize it.
     pub(crate) fn allocating_constructors(
         &self,
-    ) -> impl Iterator<Item = (&KlibDependencyCallable, crate::ir::ClassId)> {
-        self.classes.iter().filter_map(|(identity, &class)| {
-            (!self.ir.classes[class as usize].is_value).then_some((identity, class))
-        })
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, crate::backend::ExportedConstructor)> {
+        self.constructors
+            .iter()
+            .filter_map(|(identity, constructor)| {
+                let class = self.classes[identity];
+                (!self.ir.classes[class as usize].is_abstract).then_some((
+                    identity,
+                    crate::backend::ExportedConstructor {
+                        class,
+                        secondary: constructor.secondary,
+                    },
+                ))
+            })
     }
 
     /// Ordinary classes owned by this closed unit, keyed by their authenticated constructor.
@@ -614,6 +635,7 @@ impl DependencyBodyUnit {
         let mut linker = Linker {
             functions: &mut self.functions,
             classes: &mut self.classes,
+            constructors: &mut self.constructors,
             authenticated_singleton_dispatches: &mut self.authenticated_singleton_dispatches,
             authenticated_singleton_classifiers: &mut self.authenticated_singleton_classifiers,
             private_members: &mut self.private_members,
@@ -634,12 +656,12 @@ impl DependencyBodyUnit {
             .and_then(|(arena, function)| {
                 if callable.kind() == crate::libraries::ExternalCallableKind::Constructor {
                     linker.materialize_class(&mut self.ir, callable.identity(), callable)?;
-                    let class = linker.classes.get(callable.identity()).ok_or(
+                    let constructor = linker.constructors.get(callable.identity()).ok_or(
                         KlibBodyDeclineReason::UnsupportedDeclaration(
                             "a constructor without ordinary initialization",
                         ),
                     )?;
-                    Ok(self.ir.classes[*class as usize].methods[0])
+                    Ok(constructor.initializer)
                 } else {
                     linker.declare(
                         &mut self.ir,
@@ -724,6 +746,7 @@ impl DependencyBodyUnit {
 struct Linker<'u, 's> {
     functions: &'u mut HashMap<KlibDependencyCallable, FunId>,
     classes: &'u mut HashMap<KlibDependencyCallable, crate::ir::ClassId>,
+    constructors: &'u mut HashMap<KlibDependencyCallable, MaterializedConstructor>,
     authenticated_singleton_dispatches: &'u mut HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
     private_members: &'u mut HashSet<KlibDependencyCallable>,
