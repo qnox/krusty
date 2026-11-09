@@ -16585,15 +16585,20 @@ impl<'a> Checker<'a> {
                 });
                 // With no same-named receiver-less function, the classifier's constructors are the
                 // bare call's candidate family, and they shape its lambdas through the same
-                // operation a function family uses.
+                // operation a function family uses. Only a call with a lambda argument has a
+                // shape to take from them.
                 let receiverless_family = {
                     let functions = self.resolver().top_level_candidates(&fname);
                     match bare_constructor_classifier {
                         Some(internal)
-                            if functions.is_empty()
+                            if has_lambda_argument
+                                && functions.is_empty()
                                 && !self.lexical_value_declares(scope, &fname) =>
                         {
-                            (functions, self.scope_constructor_candidates(scope, internal, call))
+                            (
+                                functions,
+                                self.scope_constructor_candidates(scope, internal, call),
+                            )
                         }
                         _ => (functions, Vec::new()),
                     }
