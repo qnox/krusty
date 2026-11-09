@@ -72,12 +72,7 @@ pub(super) fn record_value_boundary(
             && is_ref(&parameter)
             && match representation {
                 Repr::Unboxed(value_class) | Repr::Boxed(value_class) => {
-                    let underlying = under
-                        .get(&value_class)
-                        .map(|underlying| erase(underlying, under).non_null());
-                    let own_underlying = underlying
-                        .is_some_and(|ty| ty == parameter.non_null() && !ty.is_erased_top());
-                    parameter.non_null().obj_internal() != Some(value_class) && !own_underlying
+                    parameter.non_null().obj_internal() != Some(value_class)
                 }
                 Repr::NotVc => false,
             });

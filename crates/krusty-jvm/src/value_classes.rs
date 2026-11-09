@@ -1069,6 +1069,7 @@ pub(crate) fn lower_value_classes(
         mangled_calls::rename(
             ir,
             &renamed_functions,
+            &orig_params,
             &lowered_value_members,
             &suspend_fids,
             &under,
@@ -1316,14 +1317,6 @@ pub(crate) fn lower_value_classes(
             }
             for p in &mut sc.params {
                 *p = erase(p, &under);
-            }
-            let target_params = match &mut sc.delegate {
-                krusty::ir::CtorDelegateTarget::This { target_params, .. }
-                | krusty::ir::CtorDelegateTarget::Super { target_params, .. } => target_params,
-                krusty::ir::CtorDelegateTarget::ImplicitEnumBase => continue,
-            };
-            for parameter in target_params {
-                *parameter = erase(parameter, &under);
             }
         }
     }
@@ -3526,16 +3519,9 @@ pub(crate) fn lower_value_classes(
         equality::realize(ir, id, specialized, &under, &mut fresh);
     }
 
-    // `super_ctor_params` preserves the checker-selected declaration shape long enough to drive
-    // the argument boundary operations above. Emission consumes the same selected parameter list
-    // as a physical JVM descriptor, so realize value-class carriers only after those semantic
-    // boundary decisions are complete. Shared mutable-capture positions are rewritten to their
-    // holder types by the following JVM pass from their separate exact coordinate map.
-    for class in &mut ir.classes {
-        for parameter in &mut class.super_ctor_params {
-            *parameter = erase(parameter, &under);
-        }
-    }
+    // Constructor delegations keep their selected parameter shape until here, where the argument
+    // boundary decisions above are complete; emission reads them as physical descriptors.
+    constructor_bodies::erase_delegation_targets(ir, &under);
 
     // Execute the storage realization decided above. A facade property marked erased takes the
     // carrier, and its setter takes the mangled name a value-class PARAMETER always earns (the
