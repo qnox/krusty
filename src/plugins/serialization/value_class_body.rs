@@ -215,7 +215,7 @@ impl ValueClassBody<'_> {
         let (start_line, header_line) = (class.decl_start_line, class.decl_line);
         // On a one-line declaration the implicit return is already on that line.
         if header_line != 0 && header_line != start_line {
-            ir.fn_close_lines.insert(self.function, header_line);
+            ir.function_position_mut(self.function).close_line = Some(header_line);
         }
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![call],
