@@ -112,7 +112,6 @@ arrays/kt34291_16dimensions.kt
 arrays/kt4118.kt
 arrays/kt42932.kt
 arrays/kt47483.kt
-arrays/kt503.kt
 arrays/kt55984.kt
 arrays/kt594.kt
 arrays/kt7009.kt
