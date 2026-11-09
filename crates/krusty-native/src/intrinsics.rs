@@ -51,8 +51,8 @@ impl DeclarationOwner {
         }
     }
 
-    #[cfg(test)]
-    fn classifier(physical: TypeName) -> Self {
+    /// A member's owner that is the classifier `physical` itself.
+    pub(super) fn classifier(physical: TypeName) -> Self {
         Self {
             physical,
             semantic: Some(SemanticCallableOwner::Classifier(physical)),
@@ -1988,6 +1988,19 @@ pub(super) fn runtime_companion_member(
     }
 }
 
+/// The runtime function realizing the interface member `signature` on an instance of `class`, a
+/// class the runtime makes that implements the interface: the realization of the class's own
+/// member of that signature, which overrides it. Called as [`runtime_member`]'s function is.
+pub(super) fn runtime_implementation(
+    class: TypeName,
+    signature: FunctionSignature<'_>,
+) -> Option<&'static str> {
+    runtime_member(FunctionSignature {
+        owner: DeclarationOwner::classifier(class),
+        ..signature
+    })
+}
+
 /// The runtime function realizing a selected dependency MEMBER, called with the receiver as its
 /// first argument. Receiver and arguments are passed as references, so a scalar receiver boxes —
 /// which is what `4.toString()` means anyway.
@@ -2677,6 +2690,33 @@ mod tests {
             collection(krusty::types::CollectionKind::Collection, false),
             "get"
         ));
+    }
+
+    #[test]
+    fn the_builder_realizes_the_appendable_members_its_runtime_function_answers() {
+        let builder = krusty::types::type_name("kotlin/text/StringBuilder");
+        let appendable = || member("kotlin/text/Appendable");
+        let answer = Ty::obj("kotlin/text/Appendable");
+        let text = Ty::nullable(Ty::obj("kotlin/CharSequence"));
+        assert_eq!(
+            runtime_implementation(
+                builder,
+                function(appendable(), "append", &[Ty::Char], answer)
+            ),
+            Some("kt_string_builder_append")
+        );
+        assert_eq!(
+            runtime_implementation(builder, function(appendable(), "append", &[text], answer)),
+            Some("kt_string_builder_append")
+        );
+        // The range form has no runtime function, so a call through it is not handed one.
+        assert_eq!(
+            runtime_implementation(
+                builder,
+                function(appendable(), "append", &[text, Ty::Int, Ty::Int], answer)
+            ),
+            None
+        );
     }
 
     #[test]
