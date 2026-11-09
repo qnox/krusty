@@ -10,7 +10,7 @@ pub(crate) const COMPANION_OBJECT_NAME: &str = "Companion";
 ///
 /// This common name boundary is shared by tokenization and diagnostic source rendering, so both
 /// use Kotlin's exact Unicode-category contract rather than Rust's broader alphabetic predicate.
-pub(crate) fn is_identifier_start(character: char) -> bool {
+pub fn is_identifier_start(character: char) -> bool {
     character == '_'
         || matches!(
             get_general_category(character),
@@ -23,7 +23,7 @@ pub(crate) fn is_identifier_start(character: char) -> bool {
 }
 
 /// Whether `character` may continue an ordinary (non-backticked) Kotlin identifier.
-pub(crate) fn is_identifier_continue(character: char) -> bool {
+pub fn is_identifier_continue(character: char) -> bool {
     is_identifier_start(character)
         || get_general_category(character) == GeneralCategory::DecimalNumber
 }
@@ -60,7 +60,7 @@ pub fn property_setter_name(prop: &str) -> String {
 /// `PackagePartClassUtils.getFilePartShortName`. It names more than the JVM's file facade: the
 /// Compose plugin names each file's `ComposableSingletons$<part>` object after it on every target,
 /// whatever `@file:JvmName` says.
-pub(crate) fn file_part_short_name(file_stem: &str) -> String {
+pub fn file_part_short_name(file_stem: &str) -> String {
     let sanitized: String = file_stem
         .chars()
         .map(|character| {

@@ -30,7 +30,7 @@ pub(crate) fn has_standalone_dependency_code(ir: &crate::ir::IrFile, callable: F
 /// body recorded. The receiver node may be a local read after inline callable-reference staging;
 /// its syntax carries no authority. The per-expression singleton classifier frozen from common IR
 /// is the semantic proof, while a present receiver preserves the source call's operand shape.
-pub(crate) fn authenticated_singleton_receiver(
+pub fn authenticated_singleton_receiver(
     receiver: Option<crate::ir::ExprId>,
     selected_classifier: Option<crate::types::TypeName>,
     expected: crate::types::Ty,
@@ -48,7 +48,7 @@ pub(crate) fn authenticated_singleton_receiver(
 /// dependency call, and that every such call joins to the same inert exported receiver effect.
 /// A shared `GetValue` node used in any second position fails the edge-count equality and remains
 /// evaluated.
-pub(crate) fn inert_staged_singleton_bindings(
+pub fn inert_staged_singleton_bindings(
     ir: &crate::ir::IrFile,
     mut singleton_dispatch: impl FnMut(crate::ir::ExprId) -> Option<crate::types::TypeName>,
     mut receiver_is_inert: impl FnMut(crate::fir::ExternalCallableId, crate::types::TypeName) -> bool,
@@ -312,7 +312,7 @@ impl DependencyExportSignatures {
     }
 
     /// Every constructor this file publishes, in record order.
-    pub(crate) fn constructors(&self) -> &[(ExportedConstructor, KlibDependencyCallable)] {
+    pub fn constructors(&self) -> &[(ExportedConstructor, KlibDependencyCallable)] {
         &self.constructors
     }
 
@@ -336,12 +336,12 @@ impl DependencyExportSignatures {
     }
 
     /// Every object instance entry a target realized, by the object's classifier.
-    pub(crate) fn singleton_entries(&self) -> &[(crate::types::TypeName, FunId)] {
+    pub fn singleton_entries(&self) -> &[(crate::types::TypeName, FunId)] {
         &self.singleton_entries
     }
 
     /// Record one declaration at the metadata owner that computed its exact identity.
-    pub(crate) fn record_callable(&mut self, callable: FunId, identity: KlibDependencyCallable) {
+    pub fn record_callable(&mut self, callable: FunId, identity: KlibDependencyCallable) {
         let previous = self.callables.insert(callable, identity);
         assert!(
             previous.is_none(),
@@ -383,7 +383,7 @@ impl DependencyExportSignatures {
         );
     }
 
-    pub(crate) fn record_singleton_extension_unread_receiver(
+    pub fn record_singleton_extension_unread_receiver(
         &mut self,
         callable: FunId,
         receiver: crate::types::Ty,
@@ -402,7 +402,7 @@ impl DependencyExportSignatures {
         );
     }
 
-    pub(crate) fn record_singleton_member_receiver(
+    pub fn record_singleton_member_receiver(
         &mut self,
         callable: FunId,
         classifier: crate::types::TypeName,
