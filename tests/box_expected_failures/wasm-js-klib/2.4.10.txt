@@ -4417,7 +4417,6 @@ regressions/floatingRangeContainsMixedWidths.kt
 regressions/generic.kt
 regressions/hashCodeNPE.kt
 regressions/inlineCallsInInitializerLambda.kt
-regressions/invisibleConstructorYieldsToCompanionInvoke.kt
 regressions/kt10143.kt
 regressions/kt15196.kt
 regressions/kt1779.kt

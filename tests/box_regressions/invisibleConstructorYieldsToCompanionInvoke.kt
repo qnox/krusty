@@ -17,7 +17,10 @@ class Counter private constructor(val value: Int) {
 }
 
 fun box(): String {
-    val symbol = Symbol("x").toString()
+    // The companion's `invoke` answers `Any?`; the check smart-casts it to the `Symbol` it built.
+    val created = Symbol("x")
+    if (created !is Symbol) return "not a Symbol"
+    val symbol = created.toString()
     val counter = Counter(1).value
     return if (symbol == "Symbol(x)" && counter == 2) "OK" else "$symbol $counter"
 }
