@@ -1082,11 +1082,10 @@ fn prepared_inline_filter_keeps_an_associated_member_signature() {
     let [associated] = classifier.associated_functions.as_slice() else {
         panic!("one associated member must be signed")
     };
-    let signature = KlibIrSignature::Public(associated.signature.clone());
-
     assert!(inventory
         .inline_body_selection()
-        .contains(module, &signature));
+        .of_module(module)
+        .contains(&associated.signature));
 }
 
 #[test]
