@@ -28,6 +28,18 @@ impl<'u, 's> Linker<'u, 's> {
         let bodies = self.sources.bodies;
         let callees = self.sources.callees;
         let module = identity.module.clone();
+        // A class installed through another of its members is not prepared again: the member
+        // need only belong to it.
+        let header = super::super::class_headers::authenticate(selected, bodies)?;
+        if let Some(primary) = &header.contract.primary_constructor {
+            let constructor = KlibDependencyCallable {
+                module: header.contract.module.clone(),
+                declaration: crate::libraries::KlibDeclarationSignature::Public(primary.clone()),
+            };
+            if self.classes.contains_key(&constructor) {
+                return Ok(true);
+            }
+        }
         let Some((prepared, constructor)) = super::super::same_library_class::prepare_public(
             super::super::same_library_class::LocalClassSource {
                 bodies,
@@ -39,9 +51,6 @@ impl<'u, 's> Linker<'u, 's> {
         else {
             return Ok(false);
         };
-        if self.classes.contains_key(&constructor) {
-            return Ok(true);
-        }
         self.install_class(ir, Box::new(prepared), Some(&constructor))?;
         Ok(true)
     }

@@ -29,6 +29,7 @@ pub(super) fn declarations(
         .collect::<VecDeque<_>>();
     let mut visited = HashSet::default();
     let mut declarations = Vec::new();
+    let mut classes = crate::klib_lowering::ClassInitializations::default();
     while let Some((identity, value_class)) = pending.pop_front() {
         if !visited.insert(identity.clone()) {
             continue;
@@ -96,8 +97,8 @@ pub(super) fn declarations(
             .authenticates_constructor(&identity, bodies)
             .map_err(|reason| format!("an invalid constructor declaration: {reason:?}"))?;
         if constructor {
-            if let Some(callees) = facts
-                .constructor_initialization_callees(&identity, bodies)
+            if let Some(callees) = classes
+                .callees(&facts, &identity, bodies)
                 .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
             {
                 pending.extend(callees.into_iter().map(|callee| (callee, None)));
@@ -128,8 +129,8 @@ pub(super) fn declarations(
             && !is_value_class_member(selected)
             // A producer that publishes compiled code without the body realizes the member.
             && bodies.function_has_body(&identity) == Some(true)
-            && match facts
-                .constructor_initialization_callees(&identity, bodies)
+            && match classes
+                .callees(&facts, &identity, bodies)
                 .map_err(|reason| format!("an invalid class member declaration: {reason:?}"))?
             {
                 Some(callees) => {
@@ -185,6 +186,7 @@ pub(super) fn ordinary_roots<'a>(
 ) -> Result<Vec<KlibBodyCallable<'a>>, String> {
     let mut roots = Vec::new();
     let mut seen = HashSet::default();
+    let mut classes = crate::klib_lowering::ClassInitializations::default();
     for expression in crate::ir::emitted_body_roots(&source.ir)
         .into_iter()
         .flat_map(|root| crate::ir::value_namespace_expressions(&source.ir, root))
@@ -237,14 +239,25 @@ pub(super) fn ordinary_roots<'a>(
             if bodies.function_has_body(selected.identity()) != Some(true) {
                 continue;
             }
-            if callees
-                .constructor_initialization_callees(selected.identity(), bodies)
-                .map_err(|reason| format!("an invalid constructor root: {reason:?}"))?
-                .is_some()
-                && seen.insert(selected.identity())
+            if !seen.contains(selected.identity())
+                && classes
+                    .callees(callees, selected.identity(), bodies)
+                    .map_err(|reason| format!("an invalid constructor root: {reason:?}"))?
+                    .is_some()
             {
+                seen.insert(selected.identity());
                 roots.push(selected);
             }
+            continue;
+        }
+        if seen.contains(selected.identity()) {
+            continue;
+        }
+        // A member of a classifier the target represents itself is the target's to realize.
+        if callees
+            .target_member(selected.identity(), target_represents_classifier)
+            .map_err(|reason| format!("an invalid target member declaration: {reason:?}"))?
+        {
             continue;
         }
         // This category accepts declaration-owned top-level and extension frames, the members of
@@ -254,17 +267,10 @@ pub(super) fn ordinary_roots<'a>(
             && !is_value_class_member(selected)
             && (callable.kind != ExternalCallableKind::Member
                 || bodies.function_has_body(selected.identity()) != Some(true)
-                || callees
-                    .constructor_initialization_callees(selected.identity(), bodies)
+                || classes
+                    .callees(callees, selected.identity(), bodies)
                     .map_err(|reason| format!("an invalid class member root: {reason:?}"))?
                     .is_none())
-        {
-            continue;
-        }
-        // A member of a classifier the target represents itself is the target's to realize.
-        if callees
-            .target_member(selected.identity(), target_represents_classifier)
-            .map_err(|reason| format!("an invalid target member declaration: {reason:?}"))?
         {
             continue;
         }

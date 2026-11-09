@@ -612,9 +612,6 @@ pub(super) fn prepare_public<'a>(
     }
     let arena = header.arena;
     let class = header.class;
-    if !admits_supertypes_and_overrides(source.bodies, &contract.module, arena, class) {
-        return Ok(None);
-    }
     let wanted = KlibIrSignature::Public(primary.clone());
     let mut constructors = class.members.iter().filter_map(|member| match member {
         KlibIrMember::Function(id) => Some(arena.function(*id)).filter(|f| f.constructor),
@@ -624,6 +621,9 @@ pub(super) fn prepare_public<'a>(
         // A class with secondary constructors is not this path's yet.
         return Ok(None);
     };
+    if !materializes_shape(source.bodies, &contract.module, arena, class, function) {
+        return Ok(None);
+    }
     if function.base.symbol.signature != wanted {
         return Err(mismatch(
             "a class's only constructor is not its primary constructor",
@@ -658,14 +658,18 @@ pub(super) fn prepare_public<'a>(
     Ok(Some((prepared, constructor)))
 }
 
-/// Whether every supertype of `class` is `kotlin.Any` or an interface, and every member overrides
-/// only interface members: the shapes a class installed with its members dispatches. Another
-/// shape, such as a subclass or an override of a class member, is left to its target realization.
-fn admits_supertypes_and_overrides(
+/// Whether `class` has a shape this path materializes, decided from its declarations before any
+/// authentication can fail: every supertype is `kotlin.Any` or an interface; every member function
+/// and accessor has a body, and overrides only non-generic interface functions; and its only
+/// constructor takes no vararg and does nothing but delegate and initialize its instance. Another
+/// shape, such as a subclass, an override of a class member or of a property accessor, or a vararg
+/// constructor, is left to its target realization.
+fn materializes_shape(
     bodies: &KlibDeclarationBodies,
     module: &str,
     arena: &KlibIrArena,
     class: &KlibIrClass,
+    constructor: &KlibIrFunction,
 ) -> bool {
     let any = KlibIrSignature::Public(KlibPublicIdSignature::classifier(crate::types::wk::any()));
     let interface_supertypes = class.supertypes.iter().all(|supertype| {
@@ -683,26 +687,42 @@ fn admits_supertypes_and_overrides(
             LocatedClass::One(found) if class_kind(found.base.flags) == TypeKind::Interface
         )
     });
-    let interface_overrides = || {
-        let functions = class.members.iter().flat_map(|member| match member {
-            KlibIrMember::Function(id) => vec![*id],
-            KlibIrMember::Property(property) => [property.getter, property.setter]
-                .into_iter()
-                .flatten()
-                .collect(),
-            _ => Vec::new(),
-        });
-        functions
-            .flat_map(|id| arena.function(id).overridden.iter())
-            .all(|symbol| {
-                matches!(
-                    bodies.function_owner(module, &symbol.signature),
-                    LocatedMember::One { class, .. }
-                        if class_kind(class.base.flags) == TypeKind::Interface
-                )
-            })
-    };
-    interface_supertypes && interface_overrides()
+    let mut functions = class.members.iter().flat_map(|member| match member {
+        KlibIrMember::Function(id) => vec![arena.function(*id)],
+        KlibIrMember::Property(property) => [property.getter, property.setter]
+            .into_iter()
+            .flatten()
+            .map(|id| arena.function(id))
+            .collect(),
+        _ => Vec::new(),
+    });
+    let members = functions.all(|function| {
+        function.constructor
+            || (matches!(function.body, Some(KlibIrBody::Block(_)))
+                && function.overridden.iter().all(|symbol| {
+                    symbol.kind == KlibIrSymbolKind::Function
+                        && matches!(symbol.signature, KlibIrSignature::Public(_))
+                        && matches!(
+                            bodies.function_owner(module, &symbol.signature),
+                            LocatedMember::One { class, function, .. }
+                                if class_kind(class.base.flags) == TypeKind::Interface
+                                    && function.type_parameters.is_empty()
+                                    && !function.constructor
+                        )
+                }))
+    });
+    let constructor_shape = constructor
+        .regular_parameters
+        .iter()
+        .all(|parameter| parameter.vararg_element_type.is_none())
+        && matches!(
+            &constructor.body,
+            Some(KlibIrBody::Block(statements)) if matches!(
+                statements.as_slice(),
+                [KlibIrStatement::Expression(_), KlibIrStatement::Expression(_)]
+            )
+        );
+    interface_supertypes && members && constructor_shape
 }
 
 fn prepare_class<'a>(

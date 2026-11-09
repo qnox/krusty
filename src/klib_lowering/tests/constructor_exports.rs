@@ -893,5 +893,7 @@ fn rollback_preserves_a_preexisting_self_type_without_class_storage() {
     assert_eq!(ir.declared_class_self_type(appended), None);
 }
 
+#[path = "constructor_exports/shape_gating.rs"]
+mod shape_gating;
 #[path = "constructor_exports/storage_authentication.rs"]
 mod storage_authentication;
