@@ -77,8 +77,8 @@ impl Checker<'_> {
             Expr::Call { callee, .. } => {
                 let span = self.missing_supertype_callee_span(*callee);
                 if let Some(types) = self.rejected_dependency_signatures.get(&expression) {
-                    if self.resolved_calls.get(&expression).is_none()
-                        && self.resolved_constructors.get(&expression).is_none()
+                    if !self.resolved_calls.contains_key(&expression)
+                        && !self.resolved_constructors.contains_key(&expression)
                     {
                         return Some((span, types.clone()));
                     }
@@ -218,7 +218,7 @@ impl Checker<'_> {
         span: Span,
     ) -> Option<(Span, Vec<Ty>)> {
         if let Some(types) = self.rejected_dependency_signatures.get(&expression) {
-            if self.resolved_calls.get(&expression).is_none() {
+            if !self.resolved_calls.contains_key(&expression) {
                 return Some((span, types.clone()));
             }
         }

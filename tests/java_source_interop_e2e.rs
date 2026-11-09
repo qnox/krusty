@@ -660,13 +660,10 @@ fn diagnostic_ledger(output: &str, sources: &[&str]) -> Vec<String> {
                 entry.push('\n');
                 entry.push_str(lines.next().expect("peeked continuation"));
             }
-            if lines
-                .peek()
-                .is_some_and(|next| source_lines.contains(*next))
-            {
+            if lines.peek().is_some_and(|next| source_lines.contains(next)) {
                 lines.next();
             }
-            if lines.peek().is_some_and(|next| is_caret_line(*next)) {
+            if lines.peek().is_some_and(|next| is_caret_line(next)) {
                 lines.next();
             }
             ledger.push(entry);
@@ -839,7 +836,7 @@ fn assert_exact_compiler_ledgers(
     let owned = |entries: &[&str]| {
         entries
             .iter()
-            .map(|entry| (*entry).to_string())
+            .map(|entry| entry.to_string())
             .collect::<Vec<_>>()
     };
     assert_eq!(
