@@ -119,7 +119,7 @@ fn absent_ambiguous_or_mismatched_enclosing_storage_is_refused() {
         None
     );
     assert_eq!(enclosing_field(&ir, type_name("AbsentInner"), outer), None);
-    ir.restore_declared_class_self_type_owners(&Default::default());
+    krusty::ir::test_support::forget_declared_class_self_types(&mut ir);
     assert_eq!(
         enclosing_field(&ir, inner, outer),
         None,
