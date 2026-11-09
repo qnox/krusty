@@ -2465,7 +2465,6 @@ inlineClasses/equalsOperatorWithGenericCallGeneric.kt
 inlineClasses/extLambdaInInlineClassFun2Generic.kt
 inlineClasses/extLambdaInInlineClassFunGeneric.kt
 inlineClasses/fieldNameClashGeneric.kt
-inlineClasses/funInterface/argumentIC.kt
 inlineClasses/funInterface/argumentICGeneric.kt
 inlineClasses/funInterface/argumentICGeneric2.kt
 inlineClasses/funInterface/argumentResult.kt
@@ -2473,7 +2472,6 @@ inlineClasses/funInterface/kt51121.kt
 inlineClasses/funInterface/kt51121_2.kt
 inlineClasses/funInterface/mangledSamWrappers.kt
 inlineClasses/funInterface/mangledSamWrappersGeneric.kt
-inlineClasses/funInterface/returnIC.kt
 inlineClasses/funInterface/returnICGeneric.kt
 inlineClasses/funInterface/returnICGeneric2.kt
 inlineClasses/funInterface/returnResult.kt
@@ -2669,7 +2667,6 @@ inlineClasses/kt47823.kt
 inlineClasses/kt50974_resultMultiModule.kt
 inlineClasses/kt51157.kt
 inlineClasses/kt52913.kt
-inlineClasses/kt54455.kt
 inlineClasses/kt57973.kt
 inlineClasses/kt70461.kt
 inlineClasses/kt71649.kt
@@ -2770,7 +2767,6 @@ inlineClasses/unboxGenericParameter/funInterface/primitiveGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/result.kt
 inlineClasses/unboxGenericParameter/funInterface/resultAny.kt
 inlineClasses/unboxGenericParameter/funInterface/resultAnyGeneric.kt
-inlineClasses/unboxGenericParameter/funInterface/string.kt
 inlineClasses/unboxGenericParameter/funInterface/stringGeneric.kt
 inlineClasses/unboxGenericParameter/genericArrayInlineClassCast.kt
 inlineClasses/unboxGenericParameter/lambda/any.kt
