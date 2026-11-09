@@ -262,7 +262,11 @@ fn emit_companion_bridge(
             physical_call_result_words(result),
         );
     }
-    if let Some(&line) = ir.fn_end_lines.get(&function).filter(|&&line| line != 0) {
+    if let Some(line) = ir
+        .function_position(function)
+        .end_line
+        .filter(|&line| line != 0)
+    {
         code.mark_line(line);
     }
     emit_return(result, &mut code);

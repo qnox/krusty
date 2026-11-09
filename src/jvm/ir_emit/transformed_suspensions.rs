@@ -479,10 +479,9 @@ pub(super) fn request_transform(
             // kotlinc's transformer opens the machine on the declaration's own line, which an
             // expression body on a later line does not move.
             line_number: ir
-                .fn_sig_lines
-                .get(&fid)
-                .or_else(|| ir.fn_decl_lines.get(&fid))
-                .map(|&line| line.min(u16::MAX as u32) as u16),
+                .function_position(fid)
+                .header_line()
+                .map(|line| line.min(u16::MAX as u32) as u16),
             completion_slot,
             dispatch_receiver: dispatch_receiver(ir, fid).filter(|_| machine.lambda.is_none()),
             suspend_lambda: machine

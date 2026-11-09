@@ -85,7 +85,7 @@ pub(super) fn finish_tailrec_body(
         },
         origin,
     );
-    if let Some(&line) = ir.fn_decl_lines.get(&frame.function) {
+    if let Some(line) = ir.function_position(frame.function).decl_line {
         ir.set_statement_line(exit, line);
     }
     roots.push(exit);

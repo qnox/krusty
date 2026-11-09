@@ -85,6 +85,8 @@ pub use local_delegates::IrLocalDelegateAccess;
 pub(crate) use local_delegates::{
     IrInlineDeclaration, IrLocalDelegateAccessorPlan, IrLocalDelegatePlan,
 };
+mod function_positions;
+pub use function_positions::IrFunctionPosition;
 mod local_property_references;
 mod module_records;
 mod negations;
@@ -1724,11 +1726,12 @@ pub struct IrFile {
     /// ordinary backend-neutral `IrExpr::Return`; inline expansion consumes/decrements this fact as
     /// lambda bodies cross lexical boundaries, so no source label or AST identity survives.
     pub checked_return_depths: crate::fx_hash::HashMap<ExprId, u32>,
-    /// The result declaration of each inline-return frame, by the frame's label. An inline
-    /// expansion's returns leave through `break` to that label after storing their value. A return
-    /// in the expansion's own body stores it by the declaration's value index; one in a lambda body
-    /// nested in it writes [`IrExpr::SetFrameResult`], which every renumbering of either body
-    /// leaves pointing at the same frame.
+    /// Each inline-return frame's label, keyed by the fact that owns it. A frame that stores a
+    /// result is keyed by that result's declaration. A `Unit` frame has no declaration and is keyed
+    /// by its loop. An inline expansion's returns leave through `break` to that label after storing
+    /// their value. A return in the expansion's own body stores it by the declaration's value
+    /// index; one in a lambda body nested in it writes [`IrExpr::SetFrameResult`], which every
+    /// renumbering of either body leaves pointing at the same frame.
     pub inline_return_frames: crate::fx_hash::HashMap<ExprId, String>,
     /// `try` expressions whose result is the value of a spliced inline lambda protected by the
     /// inline call's cleanup. This is semantic inline-frame provenance: a backend chooses how the
@@ -2314,28 +2317,12 @@ pub struct IrFile {
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.
     /// kotlinc attributes both the property's getter and its constructor-side initializer to this line.
     pub prop_decl_lines: crate::fx_hash::HashMap<(TypeName, String), u32>,
-    /// FunId → 1-based source line of its `fun` declaration, for the method's `LineNumberTable`.
-    /// A side map (not a field on `IrFunction`) so the 40-odd construction sites stay untouched.
-    pub fn_decl_lines: crate::fx_hash::HashMap<u32, u32>,
+    /// The source position of every function declaration (`src/ir/function_positions.rs`).
+    pub(crate) function_positions: function_positions::IrFunctionPositions,
     /// Functions whose debug representation retains receiver/parameter bindings even when the body
     /// deliberately has no executable source line. Generated declarations use this explicit
     /// source/debug contract instead of inventing a line merely to retain their binding names.
     pub fn_debug_locals: crate::fx_hash::HashSet<FunId>,
-    /// FunId → 1-based source line of a BLOCK body's closing `}` — kotlinc maps a `Unit` fn's
-    /// implicit `return` there in the `LineNumberTable`. Same side-map rationale as `fn_decl_lines`.
-    pub fn_close_lines: crate::fx_hash::HashMap<u32, u32>,
-    /// FunId → 1-based source line the declaration ENDS on (a block's `}` or an expression body's
-    /// last line). kotlinc returns a generated forwarder of the declaration on this line.
-    pub fn_end_lines: crate::fx_hash::HashMap<u32, u32>,
-    /// FunId → 1-based source line of the DECLARATION itself, never body-rewritten. `fn_decl_lines`
-    /// holds the line the method BODY maps to (an expression body's own line); a `$default` stub's
-    /// LineNumberTable instead points here — the two differ exactly when an expression body starts
-    /// on a later line than the signature. Same side-map rationale as `fn_decl_lines`.
-    pub fn_sig_lines: crate::fx_hash::HashMap<u32, u32>,
-    /// FunId → source byte offset of the `fun` keyword. The JVM backend reports a platform
-    /// declaration clash at this position. A method with no entry is a bridge, a default stub, or
-    /// another representation, not a source declaration.
-    pub fn_signature_offsets: crate::fx_hash::HashMap<u32, u32>,
     /// FunId → the SOURCE BYTE OFFSET of the declaration a class member realizes (a property's
     /// accessors carry the property's offset). kotlinc emits class members in DECLARATION order,
     /// interleaving property accessors among functions; lowering groups them by kind, so the JVM

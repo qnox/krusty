@@ -389,7 +389,7 @@ fn realize_accessor(
     ir.fn_params.insert(function, parameters);
     ir.set_method_visibility(function, Visibility::Private);
     if accessor.line != 0 {
-        ir.fn_decl_lines.insert(function, accessor.line);
+        ir.function_position_mut(function).decl_line = Some(accessor.line);
     }
     let sequence = IrLiftingSequence {
         source,

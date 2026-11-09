@@ -232,9 +232,7 @@ impl Emitter<'_> {
             None => outer.get(position)?.as_deref()?,
             Some(own) => self.loop_stack.get(own)?.2.as_deref()?,
         };
-        self.inline_return_frame_results
-            .get(label)
-            .map(|&(_, ty)| ty)
+        self.inline_return_result(label).map(|(_, ty)| ty)
     }
 
     /// The loop a marked return of an inlined node leaves, if it leaves one rather than the
@@ -265,9 +263,9 @@ impl Emitter<'_> {
             return;
         };
         if exit == LoopExit::FrameResult {
-            let Some(&(value, ty)) = label
+            let Some((value, ty)) = label
                 .as_ref()
-                .and_then(|label| self.inline_return_frame_results.get(label))
+                .and_then(|label| self.inline_return_result(label))
             else {
                 self.run.set_emit_error(
                     "a marked frame result names a loop that is not a return frame".to_string(),
@@ -285,8 +283,13 @@ impl Emitter<'_> {
             return;
         }
         let brk = exit != LoopExit::Continue;
+        // The break names one open loop. Its target is that loop's exit, the one recorded for the
+        // resolved inline-return frame, not whichever lambda brace was opened last. A frame's
+        // synthetic trailing break is emitted with the frame and is not a jump out of a nested
+        // lambda; it alone falls through the closing brace.
+        let target = if brk { end } else { cont };
         if self.emit_transfer_finalizers(depth, code) {
-            self.finish_loop_transfer(&label, if brk { end } else { cont }, brk, None, code);
+            self.finish_loop_transfer(&label, target, brk, None, code);
         }
         self.reopen_finally_segments(code);
     }

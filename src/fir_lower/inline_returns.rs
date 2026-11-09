@@ -187,13 +187,19 @@ pub(super) fn prepare_inline_template(
         value: None,
     });
     let true_value = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-    frame_statements.push(ir.add_expr(IrExpr::While {
+    let frame_loop = ir.add_expr(IrExpr::While {
         cond: true_value,
         body,
         update: None,
         post_test: false,
-        label: Some(label),
-    }));
+        label: Some(label.clone()),
+    });
+    // A value frame is recorded on its result declaration above. A `Unit` frame has no
+    // declaration; record it on the loop so a backend can tell this exit from a source `while`.
+    if result_slot.is_none() {
+        ir.inline_return_frames.insert(frame_loop, label.clone());
+    }
+    frame_statements.push(frame_loop);
     let value = match result_slot {
         Some(slot) => Some(ir.add_expr(IrExpr::GetValue(slot))),
         None if value_needed => Some(ir.add_expr(IrExpr::UnitInstance)),

@@ -31,9 +31,9 @@ pub(super) fn attach_declared_function_debug(
         Some(_) => return,
         // Another file's inline function, compiled here only to be inlined, has its parameters'
         // names but not its declaration line, which only that file's source unit carries.
-        None if ir.foreign_inline_templates.contains(&fid) => ir.fn_decl_lines.get(&fid).copied(),
+        None if ir.foreign_inline_templates.contains(&fid) => ir.function_position(fid).decl_line,
         None => {
-            let Some(&line) = ir.fn_decl_lines.get(&fid) else {
+            let Some(line) = ir.function_position(fid).decl_line else {
                 return;
             };
             Some(line)

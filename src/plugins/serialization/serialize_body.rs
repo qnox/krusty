@@ -24,7 +24,7 @@ fn record_serialize_lines(
         ir.set_statement_line(opening_expression, start_line);
     }
     if header_line != 0 {
-        ir.fn_close_lines.insert(function, header_line);
+        ir.function_position_mut(function).close_line = Some(header_line);
     }
 }
 

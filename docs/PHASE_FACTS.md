@@ -89,6 +89,14 @@ type (classifier renaming, specialization) go through `IrFile::rewrite_types` an
 accessors. `deferred_local_types` stays a sparse table: it holds a declaration's type before
 specialization, which only deferred locals have.
 
+Step 5 uses the same column shape, here parallel to `IrFile::functions`. `fn_decl_lines`,
+`fn_sig_lines`, `fn_close_lines`, `fn_end_lines` and `fn_signature_offsets` become one
+`IrFunctionPosition` per function (`src/ir/function_positions.rs`). A function copy takes the
+whole value, so the copy sites (the implementation copy in `ir/clone.rs`, the specialized-copy
+pass in metadata handoff, the suspend-impl split) no longer list the tables. A column keyed by
+`FunId` rather than a field of `IrFunction` keeps each function's facts in one value without
+editing every site that builds an `IrFunction`. The later `fn_*` families join it the same way.
+
 Positions come first although types were patched more often, because positions are what the JVM
 line-number work is waiting on: once every node has offsets, kotlinc's line-marking rule is ported
 once instead of per construct. Each step also deletes its tables from the other hand-written copy

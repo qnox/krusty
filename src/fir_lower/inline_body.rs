@@ -23,9 +23,18 @@ fn first_body_line(ir: &crate::ir::IrFile, body: ExprId) -> Option<u32> {
         if let Some(line) = ir.statement_line(expression) {
             return (line != 0).then_some(line);
         }
-        expression = match ir.expr(expression) {
-            IrExpr::Block { stmts, value } => *stmts.first().or(value.as_ref())?,
-            IrExpr::TypeOp { arg, .. } => *arg,
+        expression = match ir.expr(expression).clone() {
+            IrExpr::Block { stmts, value } => stmts.first().copied().or(value)?,
+            IrExpr::TypeOp { arg, .. } => arg,
+            // A unit or value inline-return frame is a `while` around the body. The frame has
+            // no line of its own; the first line is still the body's.
+            IrExpr::While { body, label, .. }
+                if label.as_ref().is_some_and(|label| {
+                    ir.inline_return_frames.values().any(|frame| frame == label)
+                }) =>
+            {
+                body
+            }
             _ => return None,
         };
     }

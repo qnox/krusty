@@ -2008,6 +2008,10 @@ impl CodeBuilder {
             .unwrap_or(false)
     }
 
+    pub(crate) fn owns_label(&self, label: Label) -> bool {
+        label.builder == self.id
+    }
+
     fn label_index(&self, label: Label) -> usize {
         assert_eq!(
             label.builder, self.id,
