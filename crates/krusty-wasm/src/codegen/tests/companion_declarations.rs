@@ -11,7 +11,7 @@ fn the_whole_named_companion_program_emits_both_wasm_targets() {
 }
 
 #[test]
-fn constructing_a_holder_directly_or_through_a_subclass_still_declines() {
+fn constructing_a_holder_directly_or_through_a_subclass_emits_both_wasm_targets() {
     for source in [
         "class Holder { companion object {} }\nfun box(): String { Holder(); return \"OK\" }\n",
         "open class Holder { companion object {} }\nclass Child : Holder()\nfun box(): String { Child(); return \"OK\" }\n",
@@ -19,8 +19,9 @@ fn constructing_a_holder_directly_or_through_a_subclass_still_declines() {
     ] {
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile(target, source);
-            assert!(outputs.is_empty());
-            assert_eq!(diagnostics, [format!("{}a class with a companion object (`Holder`) yet", super::super::DECLINE_PREFIX)]);
+            // Construction initializes the class and its superclasses, so it needs no decline.
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
         }
     }
 }

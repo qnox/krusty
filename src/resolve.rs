@@ -13452,32 +13452,6 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    /// Whether a selected parameter can supply a language-defined construction strategy for a
-    /// collection literal. This is intentionally a target-availability query, not a second call
-    /// resolver: overload applicability for the factory itself is checked exactly once when the
-    /// enclosing callable has won and `check_collection_literal` commits the expression.
-    fn collection_literal_target_available(&self, expected: Ty) -> bool {
-        let expected = expected.non_null();
-        if expected.array_elem().is_some() {
-            return true;
-        }
-        let Some(classifier) = expected.kotlin_class_internal() else {
-            return false;
-        };
-        if standard_factory(classifier).is_some() {
-            return true;
-        }
-        self.resolver()
-            .classifier_call_candidates(classifier, "of")
-            .into_iter()
-            .flat_map(|(_, candidates)| candidates)
-            .chain(
-                self.resolver()
-                    .classifier_associated_callables(classifier, "of"),
-            )
-            .any(|candidate| candidate.flags.operator)
-    }
-
     fn check_call(
         &mut self,
         scope: &CheckerScope<'_>,

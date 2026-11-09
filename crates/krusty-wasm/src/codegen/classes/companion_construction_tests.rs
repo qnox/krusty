@@ -1,4 +1,8 @@
-use super::*;
+//! A companion holder's constructors initialize its companion, so every construction path
+//! (a constructor reference adapter, a published export entry, or an inline template) is
+//! supported.
+
+use krusty::ir::{ClassId, IrExpr, IrFile};
 use krusty::metadata::id_signature::{
     callable_signature, CallableShape, ClassScope, DeclarationContainer, KlibDeclarationSignature,
     Placement,
@@ -25,38 +29,26 @@ fn holder(ir: &IrFile) -> ClassId {
     *class
 }
 
-fn refusal(ir: &IrFile, class: ClassId) -> Result<(), super::super::Unsupported> {
-    Err(format!(
-        "a class with a companion object (`{}`)",
-        ir.classes[class as usize].fq_name()
-    ))
-}
-
 #[test]
-fn a_constructor_reference_adapter_is_an_emitted_construction() {
+fn a_companion_holder_constructed_through_a_reference_adapter_is_supported() {
     let ir = lower(
         "class Holder { companion object {} }\n\
          fun factory(): () -> Holder = ::Holder\n",
     );
     let class = holder(&ir);
-    assert!(requires_initialization(&ir, class));
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::CallableReference(reference)
             if matches!(&reference.target, krusty::ir::IrCallableReferenceTarget::Constructor { .. })
     )));
-    assert_eq!(
-        super::super::check_supported(&ir, class),
-        refusal(&ir, class)
-    );
+    assert_eq!(super::check_supported(&ir, class), Ok(()));
 }
 
 #[test]
-fn a_realized_export_entry_is_checked_before_its_constructor_can_be_published() {
+fn a_companion_holder_with_a_realized_export_entry_is_supported() {
     let mut ir = lower("class Holder { companion object {} }\nfun box(): String = \"OK\"\n");
     let class = holder(&ir);
-    assert!(!requires_initialization(&ir, class));
-    assert_eq!(super::super::check_supported(&ir, class), Ok(()));
+    assert_eq!(super::check_supported(&ir, class), Ok(()));
     let signature = callable_signature(
         DeclarationContainer::<KotlinType> {
             package: &[],
@@ -94,15 +86,11 @@ fn a_realized_export_entry_is_checked_before_its_constructor_can_be_published() 
             .collect::<Vec<_>>(),
         [class]
     );
-    assert!(requires_initialization(&ir, class));
-    assert_eq!(
-        super::super::check_supported(&ir, class),
-        refusal(&ir, class)
-    );
+    assert_eq!(super::check_supported(&ir, class), Ok(()));
 }
 
 #[test]
-fn orphan_and_cloning_only_constructions_are_not_executable_obligations() {
+fn a_companion_holder_constructed_only_by_templates_is_supported() {
     let mut ir = lower(
         "class Holder { companion object {} }\n\
          fun template(): Holder = Holder()\nfun box(): String = \"OK\"\n",
@@ -113,15 +101,12 @@ fn orphan_and_cloning_only_constructions_are_not_executable_obligations() {
         .iter()
         .position(|function| function.name == "template")
         .expect("the source template") as u32;
-    assert!(requires_initialization(&ir, class));
     ir.inline_fns.insert(template);
     ir.inline_only_fns.insert(template);
-    assert!(!requires_initialization(&ir, class));
-    assert_eq!(super::super::check_supported(&ir, class), Ok(()));
+    assert_eq!(super::check_supported(&ir, class), Ok(()));
     ir.inline_fns.remove(&template);
     ir.inline_only_fns.remove(&template);
     ir.functions[template as usize].body = None;
     assert!(ir.exprs.iter().any(|expression| matches!(expression, IrExpr::New { internal, .. } if *internal == ir.classes[class as usize].fq_name)));
-    assert!(!requires_initialization(&ir, class));
-    assert_eq!(super::super::check_supported(&ir, class), Ok(()));
+    assert_eq!(super::check_supported(&ir, class), Ok(()));
 }

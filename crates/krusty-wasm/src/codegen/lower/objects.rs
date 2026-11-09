@@ -94,8 +94,9 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// `C(args)`: a new instance of `C`, then the constructor the construction at `site` selects
-    /// run on it.
+    /// `C(args)`: initialize `C`, then a new instance, then the constructor the construction
+    /// at `site` selects. Initialization is the `new` that precedes argument generation:
+    /// each superclass, then `C`.
     pub(super) fn construction(
         &mut self,
         site: u32,
@@ -140,6 +141,9 @@ impl Body<'_> {
                 "a constructor call with omitted arguments (`{name}`)"
             ));
         }
+        // The operand stack is empty here. Allocation leaves the instance on it, and the
+        // companion getter cannot run on top of that value.
+        self.activate_class(class, None)?;
         let object = self.local(REFERENCE);
         self.allocate(class)?;
         self.code.local_tee(object);
@@ -1267,6 +1271,23 @@ pub(super) fn define_class_functions(
                 .global_get(singleton.global)
                 .ref_is_null()
                 .if_(BlockType::Empty);
+            // A companion's getter is its owner's initialization: the owner's superclasses
+            // initialize first, then the companion's own superclasses, then the companion. The
+            // owner itself is in progress here, so the companion's chain does not re-enter it.
+            let owner = class
+                .is_companion
+                .then(|| {
+                    ir.classes
+                        .iter()
+                        .position(|owner| owner.companion_class == Some(class.fq_name_id()))
+                })
+                .flatten()
+                .map(|owner| owner as ClassId);
+            for activated in owner.into_iter().chain([id]) {
+                if let Some(parent) = classes.tables.table(activated).superclass {
+                    body.activate_class(parent, owner)?;
+                }
+            }
             body.allocate(id)?;
             body.code
                 .global_set(singleton.global)
@@ -1572,6 +1593,11 @@ impl Body<'_> {
                 "a superclass constructor call with omitted arguments (`{name}`)"
             ));
         }
+        // Construction already initialized this class and its superclasses. Asking again is
+        // idempotent, and a constructor reached from its own companion still finds the instance
+        // the getter published before that companion's constructor. An enum's companion is
+        // created after its constants, not from a constructor.
+        self.initialize_companion(class)?;
         for &statement in &declaration.super_arg_prelude {
             self.statement(statement)?;
         }
@@ -1653,6 +1679,9 @@ impl Body<'_> {
                 "a constructor delegating with omitted arguments (`{name}`)"
             ));
         }
+        // A delegation argument may use the companion before the primary constructor runs.
+        // The getter is idempotent, including when construction already initialized it.
+        self.initialize_companion(class)?;
         for &statement in &secondary.delegate_prelude {
             self.statement(statement)?;
         }
@@ -1682,6 +1711,52 @@ impl Body<'_> {
         if let Some(body) = secondary.body {
             self.statement(body)?;
         }
+        Ok(())
+    }
+
+    /// Initialize `class` the way `new` does, before any constructor argument runs.
+    ///
+    /// JVMS 5.5 initializes a superclass before the subclass. Each class's companion goes
+    /// through the singleton getter, which publishes the instance before the companion
+    /// constructor, so a companion that constructs its holder does not re-enter. `initializing`
+    /// is a class whose initialization is already in progress, so activation skips it.
+    fn activate_class(
+        &mut self,
+        class: ClassId,
+        initializing: Option<ClassId>,
+    ) -> Result<(), Unsupported> {
+        let mut chain = vec![class];
+        loop {
+            let parent = self
+                .file_classes()?
+                .tables
+                .table(*chain.last().expect("non-empty"))
+                .superclass;
+            let Some(parent) = parent else {
+                break;
+            };
+            chain.push(parent);
+        }
+        for &owner in chain.iter().rev() {
+            if Some(owner) != initializing {
+                self.initialize_companion(owner)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Run the companion's typed initializer when this class has one. The getter's result is
+    /// unused: construction needs the initialization, not the instance.
+    fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let declaration = &self.ir.classes[class as usize];
+        if declaration.is_enum || declaration.is_enum_entry {
+            return Ok(());
+        }
+        let Some(companion) = declaration.companion_class else {
+            return Ok(());
+        };
+        self.singleton(companion)?;
+        self.code.drop_();
         Ok(())
     }
 }
