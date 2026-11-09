@@ -424,38 +424,52 @@ pub(super) fn emit_prop_ref_class(
         super::enclosure::in_inline_function_scope(ir, c),
     );
 
-    seed_method_header(&mut cw, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
-    let mut get = CodeBuilder::new(2);
-    if let Some(constant) = target.getter_constant.as_ref() {
-        constant_emission::emit(constant, &mut get, &mut cw);
+    if let Some(get) = pr.get {
+        // A spliced getter's body is the carrier's own `get`.
+        emit_method(
+            ir,
+            get,
+            StaticOwner::Class(c.fq_name),
+            &c.fq_name(),
+            facade,
+            &mut cw,
+            true,
+            env,
+        );
     } else {
-        get.aload(1);
-        target
-            .getter(pr)
-            .emit_get(&mut cw, &mut get, target.getter_ret);
+        seed_method_header(&mut cw, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
+        let mut get = CodeBuilder::new(2);
+        if let Some(constant) = target.getter_constant.as_ref() {
+            constant_emission::emit(constant, &mut get, &mut cw);
+        } else {
+            get.aload(1);
+            target
+                .getter(pr)
+                .emit_get(&mut cw, &mut get, target.getter_ret);
+        }
+        box_property_reference_value(
+            &mut cw,
+            &mut get,
+            pr,
+            realization.boxed_value_class,
+            target.getter_ret,
+        );
+        get.areturn();
+        finish_code::<0x0001>(
+            &mut cw,
+            "get",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            &mut get,
+            2,
+        );
+        attach_accessor_debug(
+            &mut cw,
+            c,
+            "get",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            &["receiver0"],
+        );
     }
-    box_property_reference_value(
-        &mut cw,
-        &mut get,
-        pr,
-        realization.boxed_value_class,
-        target.getter_ret,
-    );
-    get.areturn();
-    finish_code::<0x0001>(
-        &mut cw,
-        "get",
-        "(Ljava/lang/Object;)Ljava/lang/Object;",
-        &mut get,
-        2,
-    );
-    attach_accessor_debug(
-        &mut cw,
-        c,
-        "get",
-        "(Ljava/lang/Object;)Ljava/lang/Object;",
-        &["receiver0"],
-    );
 
     if pr.mutable {
         let (setter, setter_desc) = property_setter_target(pr, target.setter_facade.is_some());
@@ -523,29 +537,43 @@ fn emit_bound_prop_ref_class(
 
     // `get()Object`: for a member ref `((Owner) this.receiver).getName()`; for an extension ref
     // `Facade.getName((Owner) this.receiver)`. Boxed if primitive.
-    seed_method_header(&mut cw, "get", "()Ljava/lang/Object;");
-    let mut get = CodeBuilder::new(1);
-    if let Some(constant) = target.getter_constant.as_ref() {
-        constant_emission::emit(constant, &mut get, &mut cw);
+    if let Some(get) = pr.get {
+        // A spliced getter's body is the carrier's own `get`.
+        emit_method(
+            ir,
+            get,
+            StaticOwner::Class(c.fq_name),
+            &c.fq_name(),
+            facade,
+            &mut cw,
+            true,
+            env,
+        );
     } else {
-        get.aload(0);
-        // kotlinc names the inherited field through the carrier itself.
-        let recv_f = cw.fieldref(&fq, "receiver", "Ljava/lang/Object;");
-        get.getfield(recv_f, 1);
-        target
-            .getter(pr)
-            .emit_get(&mut cw, &mut get, target.getter_ret);
+        seed_method_header(&mut cw, "get", "()Ljava/lang/Object;");
+        let mut get = CodeBuilder::new(1);
+        if let Some(constant) = target.getter_constant.as_ref() {
+            constant_emission::emit(constant, &mut get, &mut cw);
+        } else {
+            get.aload(0);
+            // kotlinc names the inherited field through the carrier itself.
+            let recv_f = cw.fieldref(&fq, "receiver", "Ljava/lang/Object;");
+            get.getfield(recv_f, 1);
+            target
+                .getter(pr)
+                .emit_get(&mut cw, &mut get, target.getter_ret);
+        }
+        box_property_reference_value(
+            &mut cw,
+            &mut get,
+            pr,
+            realization.boxed_value_class,
+            target.getter_ret,
+        );
+        get.areturn();
+        finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
+        attach_accessor_debug(&mut cw, c, "get", "()Ljava/lang/Object;", &[]);
     }
-    box_property_reference_value(
-        &mut cw,
-        &mut get,
-        pr,
-        realization.boxed_value_class,
-        target.getter_ret,
-    );
-    get.areturn();
-    finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
-    attach_accessor_debug(&mut cw, c, "get", "()Ljava/lang/Object;", &[]);
 
     // `set(Object)V` (a bound `var` reference): `((Owner) this.receiver).setName(v)` after
     // casting/unboxing the argument to the property type.
@@ -649,36 +677,50 @@ fn emit_toplevel_prop_ref_class(
 
     // `get()Object`: a compile-time constant directly, otherwise
     // `invokestatic <facade>.getName()`. Boxed if primitive.
-    seed_method_header(&mut cw, "get", "()Ljava/lang/Object;");
-    let mut get = CodeBuilder::new(1);
-    if let Some(constant) = realization.getter_constant.as_ref() {
-        constant_emission::emit(constant, &mut get, &mut cw);
+    if let Some(get) = pr.get {
+        // A spliced getter's body is the carrier's own `get`.
+        emit_method(
+            ir,
+            get,
+            StaticOwner::Class(c.fq_name),
+            &c.fq_name(),
+            facade,
+            &mut cw,
+            true,
+            env,
+        );
     } else {
-        let gref = if call_owner_is_interface {
-            cw.interface_methodref(&call_owner, &pr.getter_name, &getter_desc)
+        seed_method_header(&mut cw, "get", "()Ljava/lang/Object;");
+        let mut get = CodeBuilder::new(1);
+        if let Some(constant) = realization.getter_constant.as_ref() {
+            constant_emission::emit(constant, &mut get, &mut cw);
         } else {
-            cw.methodref(&call_owner, &pr.getter_name, &getter_desc)
-        };
-        get.invokestatic(gref, 0, slot_words(getter_jvm) as i32);
+            let gref = if call_owner_is_interface {
+                cw.interface_methodref(&call_owner, &pr.getter_name, &getter_desc)
+            } else {
+                cw.methodref(&call_owner, &pr.getter_name, &getter_desc)
+            };
+            get.invokestatic(gref, 0, slot_words(getter_jvm) as i32);
+        }
+        if carrier {
+            box_property_reference_value(
+                &mut cw,
+                &mut get,
+                pr,
+                realization.boxed_value_class,
+                getter_jvm,
+            );
+        } else if prop_jvm.is_jvm_scalar() {
+            box_prim_free(
+                &mut cw,
+                &mut get,
+                semantic_scalar_adapter(pr.prop_ty, prop_jvm),
+            );
+        }
+        get.areturn();
+        finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
+        attach_accessor_debug(&mut cw, c, "get", "()Ljava/lang/Object;", &[]);
     }
-    if carrier {
-        box_property_reference_value(
-            &mut cw,
-            &mut get,
-            pr,
-            realization.boxed_value_class,
-            getter_jvm,
-        );
-    } else if prop_jvm.is_jvm_scalar() {
-        box_prim_free(
-            &mut cw,
-            &mut get,
-            semantic_scalar_adapter(pr.prop_ty, prop_jvm),
-        );
-    }
-    get.areturn();
-    finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
-    attach_accessor_debug(&mut cw, c, "get", "()Ljava/lang/Object;", &[]);
 
     // `set(Object)V` (a `var`): invokestatic <facade>.setName(v) after casting/unboxing the argument.
     if pr.mutable {

@@ -795,7 +795,7 @@ pub(super) fn realize(
     ir: &mut IrFile,
     callables: &crate::backend::CheckedBackendCallables,
     facades: Facades<'_>,
-) -> Result<(), FunctionReferenceRealizationTarget> {
+) -> Result<super::property_references::SplicedGetters, FunctionReferenceRealizationTarget> {
     // Join each dependency inline call with the exact selected declaration while its argument
     // vector is still semantic. This publishes consumption once; carrier planning below does not
     // scan expression parents or infer inline-parameter roles from syntax.
@@ -899,6 +899,7 @@ pub(super) fn realize(
             carrier_adapters.insert(adapter);
         }
     }
+    let mut spliced_getters = super::property_references::SplicedGetters::default();
     for raw in 0..expression_count {
         let IrExpr::CallableReference(reference) = ir.exprs[raw].clone() else {
             continue;
@@ -922,35 +923,24 @@ pub(super) fn realize(
             }
             continue;
         }
-        // A property reference that is not spliced is the property reference value itself, which
-        // the property-reference realization gives kotlinc's carrier. Its adapter is only ever
-        // spliced.
+        // A property reference is the property reference value itself, which the
+        // property-reference realization gives kotlinc's carrier.
         if let crate::ir::IrCallableReferenceTarget::Property(property) = &reference.target {
-            if property.getter_is_spliced() {
-                // An inline getter has no accessor method the carrier could call: kotlinc splices
-                // it into the carrier's `get`. Until the property-reference carrier takes such a
-                // body, the value is a function object over the adapter, which performs the splice.
-                let TyKind::Fun(function_type) = reference.function_type.non_null().kind() else {
-                    return Err(FunctionReferenceRealizationTarget::Adapter(
-                        reference.adapter,
-                    ));
-                };
-                let arity = u8::try_from(function_type.params.len())
-                    .map_err(|_| FunctionReferenceRealizationTarget::Adapter(reference.adapter))?;
-                ir.exprs[raw] = IrExpr::Lambda {
-                    impl_fn: reference.adapter,
-                    arity,
-                    captures: reference.bound_receiver.into_iter().collect(),
-                    sam: None,
-                    inline_body: None,
-                };
-                ir.note_synthesized_lambda(raw as u32);
-                continue;
-            }
             let operation =
                 property.checked_operation(reference.bound_receiver, reference.adaptation.clone());
             ir.exprs[raw] = IrExpr::Checked(Box::new(operation));
-            ir.inline_only_fns.insert(reference.adapter);
+            // An inline getter has no accessor method the carrier could call: kotlinc splices it
+            // into the carrier's own `get`, which takes the body of the adapter performing it.
+            if property.getter_is_spliced() {
+                if !sole {
+                    return Err(FunctionReferenceRealizationTarget::Adapter(
+                        reference.adapter,
+                    ));
+                }
+                spliced_getters.record(raw as u32, reference.adapter);
+            } else {
+                ir.inline_only_fns.insert(reference.adapter);
+            }
             continue;
         }
         let adapter_owner = adapter_owners.get(&reference.adapter).copied();
@@ -965,7 +955,7 @@ pub(super) fn realize(
             *reference,
         )?;
     }
-    Ok(())
+    Ok(spliced_getters)
 }
 
 #[cfg(test)]

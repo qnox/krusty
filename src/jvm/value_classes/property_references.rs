@@ -453,6 +453,7 @@ mod tests {
             static_dispatch: false,
             mutable: false,
             ext_facade: None,
+            get: None,
         });
         ir.add_class(holder);
         let mut realizations = PropertyReferenceRealizations::default();

@@ -119,6 +119,10 @@ pub enum IrGeneratedParameterRole {
     ReferenceInvokeValue {
         ordinal: u32,
     },
+    /// The receiver a property-reference class's own `get` takes, by its position.
+    PropertyReferenceGetReceiver {
+        ordinal: u32,
+    },
     /// A parameter of the `FunctionN.invoke` a generated function class overrides, by its position
     /// in the interface's parameter list. A suspend function type's continuation is one of them:
     /// it is the interface's last parameter, not a declared completion.
