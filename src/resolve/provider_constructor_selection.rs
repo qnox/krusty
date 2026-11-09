@@ -104,8 +104,10 @@ impl Checker<'_> {
         };
         self.contextualize_constructor_arrays(scope, call, internal, args, arg_names);
         for &argument in args {
+            // An empty array factory stays postponed until the selected parameter supplies it.
             if self.expr_types[argument.0 as usize] == Ty::Error
                 && !self.file.is_callable_syntax(argument)
+                && !self.postponed_empty_reference_array_factory(scope, argument)
             {
                 self.expr(scope, argument);
             }

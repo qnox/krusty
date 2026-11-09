@@ -27,7 +27,7 @@ pub struct ModuleClasses {
 
 /// One named class: what its dispatch table is built from.
 #[derive(Debug)]
-pub(crate) struct ModuleClass {
+pub struct ModuleClass {
     /// The declared superclass, or `None` for `kotlin.Any`.
     pub(crate) superclass: Option<TypeName>,
     /// Function types among the declared supertypes, by arity.
@@ -167,7 +167,7 @@ impl ModuleClasses {
         self.classes.get(&classifier)
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (TypeName, &ModuleClass)> {
+    pub fn iter(&self) -> impl Iterator<Item = (TypeName, &ModuleClass)> {
         self.classes.iter().map(|(name, class)| (*name, class))
     }
 
@@ -179,7 +179,7 @@ impl ModuleClasses {
     }
 
     /// Every type a class or interface member carries.
-    pub(crate) fn carried_types(&self) -> impl Iterator<Item = Ty> + '_ {
+    pub fn carried_types(&self) -> impl Iterator<Item = Ty> + '_ {
         self.classes
             .values()
             .flat_map(ModuleClass::carried_types)
