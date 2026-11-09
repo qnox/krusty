@@ -1543,7 +1543,6 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
                 ("it declares type parameters)", 205),
-                ("it uses a block of a compiler-introduced form)", 1),
                 ("it uses a call of a file-private declaration)", 6),
                 ("it uses a call of a member function)", 74),
                 (
@@ -1553,6 +1552,10 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
+                (
+                    "it uses an object literal with a superclass constructor argument)",
+                    1,
+                ),
                 ("its library serializes none)", 100),
             ]
         } else {
@@ -1562,7 +1565,6 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
                 ("it declares type parameters)", 187),
-                ("it uses a block of a compiler-introduced form)", 1),
                 ("it uses a call of a file-private declaration)", 4),
                 ("it uses a call of a member function)", 71),
                 (
@@ -1572,6 +1574,10 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
+                (
+                    "it uses an object literal with a superclass constructor argument)",
+                    1,
+                ),
                 ("its library serializes none)", 100),
             ]
         };
