@@ -63,6 +63,15 @@ fn fixture(bad_initializer: bool) -> Fixture {
 }
 
 fn fixture_with_root(bad_initializer: bool, root: RootCase) -> Fixture {
+    fixture_with_members(bad_initializer, root, |_, _| {})
+}
+
+/// The fixture whose class members `members` rewrites after they are built.
+fn fixture_with_members(
+    bad_initializer: bool,
+    root: RootCase,
+    members_of: impl FnOnce(&mut Vec<KlibIrMember>, &mut KlibIrArena),
+) -> Fixture {
     let prototype = demo(&[("seed", &[T::Int, T::Int], T::Unit)], |_, _| {
         Some(Vec::new())
     });
@@ -237,6 +246,7 @@ fn fixture_with_root(bad_initializer: bool, root: RootCase) -> Fixture {
             statements: vec![KlibIrStatement::Expression(missing)],
         });
     }
+    members_of(&mut members, &mut arena);
     let class = arena.push_class(KlibIrClass {
         base: base(class_symbol),
         name: "Act".into(),

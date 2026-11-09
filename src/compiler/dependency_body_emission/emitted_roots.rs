@@ -119,7 +119,27 @@ pub(super) fn declarations(
         let member = facts
             .target_member(&identity, capabilities.target_represents_classifier)
             .map_err(|reason| format!("an invalid target member declaration: {reason:?}"))?;
+        // A member of a class this unit materializes is installed with its class: the class's
+        // initialization and members are the edges it executes.
+        let class_member = !externals.contains_key(&identity)
+            && !constructor
+            && !member
+            && realization.kind == ExternalCallableKind::Member
+            && !is_value_class_member(selected)
+            // A producer that publishes compiled code without the body realizes the member.
+            && bodies.function_has_body(&identity) == Some(true)
+            && match facts
+                .constructor_initialization_callees(&identity, bodies)
+                .map_err(|reason| format!("an invalid class member declaration: {reason:?}"))?
+            {
+                Some(callees) => {
+                    pending.extend(callees.into_iter().map(|callee| (callee, None)));
+                    true
+                }
+                None => false,
+            };
         let emits_body = !externals.contains_key(&identity)
+            && !class_member
             && !member
             && !constructor
             && primitive.is_none()
@@ -227,10 +247,18 @@ pub(super) fn ordinary_roots<'a>(
             }
             continue;
         }
-        // Instance dispatch/storage is a different emission capability. This category accepts
-        // declaration-owned top-level and extension frames, and the members of a value class,
-        // which are final and read their receiver only through its one value.
-        if !callable.is_top_level() && !is_value_class_member(selected) {
+        // This category accepts declaration-owned top-level and extension frames, the members of
+        // a value class, which are final and read their receiver only through its one value, and
+        // the serialized members of a final class this unit materializes with all of its members.
+        if !callable.is_top_level()
+            && !is_value_class_member(selected)
+            && (callable.kind != ExternalCallableKind::Member
+                || bodies.function_has_body(selected.identity()) != Some(true)
+                || callees
+                    .constructor_initialization_callees(selected.identity(), bodies)
+                    .map_err(|reason| format!("an invalid class member root: {reason:?}"))?
+                    .is_none())
+        {
             continue;
         }
         // A member of a classifier the target represents itself is the target's to realize.

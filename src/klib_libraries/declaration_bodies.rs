@@ -106,6 +106,16 @@ impl KlibBodyLibrary {
         })
     }
 
+    /// Add the platform stdlib `module` as a dependency of this library. Every KLIB is compiled
+    /// and linked against its platform stdlib, which a producer need not record in `depends`:
+    /// kotlinc's Wasm and JS libraries record no `depends` at all.
+    pub(crate) fn depending_on_platform(mut self, module: &str) -> Self {
+        if self.module != module && !self.dependencies.iter().any(|known| known == module) {
+            self.dependencies.push(module.to_owned());
+        }
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn new(
         module: String,
@@ -231,7 +241,7 @@ impl KlibDeclarationBodies {
                     && property.base.symbol.signature
                         == KlibIrSignature::Public(accessor.property().clone()) =>
                 {
-                    [property.getter, None]
+                    [property.getter, property.setter]
                 }
                 _ => [None, None],
             })

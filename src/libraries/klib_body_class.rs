@@ -43,15 +43,6 @@ impl KlibBodyClassContract {
     }
 }
 
-/// A complete declared instance layout. Its field ordinals belong to this exact producer class;
-/// retaining the layout grants no constructor, initializer, singleton or descriptor definition.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct KlibClassStorage {
-    pub(crate) declaration: KlibBodyClassContract,
-    pub(crate) superclass: Ty,
-    pub(crate) fields: Vec<KlibStoredField>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct KlibStoredField {
     pub(crate) name: String,
