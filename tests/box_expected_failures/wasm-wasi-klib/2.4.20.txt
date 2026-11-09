@@ -2034,7 +2034,6 @@ inference/plusAssignInsideLambda.kt
 inference/referenceToCatchParameterFromLambdaExpression.kt
 inference/safeCastWithElvis.kt
 inference/suspendExtensionRecevierFromConstraint.kt
-inference/tryCatchAtAssignmentWithSmartCast.kt
 initializers/correctOrder1.kt
 initializers/correctOrder2.kt
 initializers/files/globalInitedAfterAccessingFile.kt
