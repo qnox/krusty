@@ -501,6 +501,12 @@ mod tests {
                 let mut budget = provider.to_vec();
                 budget.push("symbol_resolver");
                 assert_allowed_crate_modules_in_file(&path, &budget);
+            } else if path == source_path("src/klib_libraries/shared_trees.rs") {
+                // Decoded archive trees stay resident in the count-bounded cache the JVM classpath
+                // also uses for its per-entry facts. `lru` is a leaf container, not a layer.
+                let mut budget = provider.to_vec();
+                budget.push("lru");
+                assert_allowed_crate_modules_in_file(&path, &budget);
             } else {
                 assert_allowed_crate_modules_in_file(&path, &provider);
             }
