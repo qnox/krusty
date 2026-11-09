@@ -105,6 +105,9 @@ impl Body<'_> {
         selected: Option<&[Ty]>,
     ) -> Result<(), Unsupported> {
         let Some(class) = self.classes.and(self.ir.class_id_by_name(internal)) else {
+            if let Some(constructed) = self.scalar_value_construction(internal, args, selected) {
+                return constructed;
+            }
             // Boundary conversion for a diagnostic.
             return Err(format!(
                 "construction of the library class `{}`",
@@ -1125,6 +1128,9 @@ impl Body<'_> {
         if let Some(class) = self.class_of_type(ty) {
             return self.reaches_any_default(class, member);
         }
+        if ty.non_null().obj_internal() == Some(super::super::super::type_objects::ktype()) {
+            return self.ktype_may_reach_any_default(member);
+        }
         if !matches!(carrier(ty.non_null())?, Some(ValType::Ref { .. })) {
             return Ok(false);
         }
@@ -1172,6 +1178,13 @@ impl Body<'_> {
         if self.reaches_any_default(class, AnyMember::ToString)? {
             return Err("`kotlin.Any.toString`'s own rendering".to_string());
         }
+        self.dispatch_to_string();
+        Ok(())
+    }
+
+    /// Replace the object reference on the stack with its `toString()` slot's answer, or
+    /// `"null"`. The caller has proven every object the reference can hold has a `toString`.
+    pub(super) fn dispatch_to_string(&mut self) {
         let value = self.local(REFERENCE);
         self.code.local_set(value);
         let any_table = self.runtime.objects.any_table;
@@ -1192,7 +1205,6 @@ impl Body<'_> {
             .call_ref(to_string)
             .end()
             .ref_as_non_null();
-        Ok(())
     }
 }
 

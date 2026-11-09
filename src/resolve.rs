@@ -101,6 +101,7 @@ mod class_literal_receiver;
 mod class_literal_type_arguments;
 mod class_names_aliases;
 mod expression_finalization;
+mod reference_array_spread;
 mod star_projected_classifier;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
@@ -49493,10 +49494,7 @@ impl<'a> Checker<'a> {
             .is_none_or(|arguments| arguments.is_empty())
         {
             if let Some(signature) = self.expected_type_callable_signature(argument) {
-                return CallArgKind::ExpectedTypeCallable {
-                    provisional: ty,
-                    generic_sig: std::sync::Arc::new(signature),
-                };
+                return self.expected_type_callable_argument(argument, ty, signature);
             }
         }
         let kind = call_arg_kind(self.file, argument, ty);
@@ -56643,9 +56641,9 @@ impl<'a> Checker<'a> {
                 self.resolved_whole_array_vararg_args.insert(argument);
             }
         }
-        // `Array<out Bound>` / `Array<in Bound>` constrains the produced array but does not select its
-        // invariant element type. Infer that type from `arrayOf`'s arguments, then let the enclosing
-        // assignability check validate the concrete `Array<T>` against the projection.
+        // `Array<out Bound>` / `Array<in Bound>` constrains the produced array (and bounds a spread
+        // array) but does not select its invariant element type. Infer that type from the arguments,
+        // then let the enclosing assignability check validate `Array<T>` against the projection.
         let raw_hint = element_hint;
         let element_hint = raw_hint.filter(|element| element.projection_inner().is_none());
         if let SyntheticKind::PrimitiveVararg(elem) = synthetic.kind {
@@ -56677,29 +56675,7 @@ impl<'a> Checker<'a> {
                             None => self.expr(scope, argument),
                         };
                     }
-                    let array_expected =
-                        element_hint.map(|expected| Ty::obj_args("kotlin/Array", &[expected]));
-                    let actual = match array_expected {
-                        Some(expected) => self.expr_expected(scope, argument, expected),
-                        None => self.expr(scope, argument),
-                    };
-                    let Some(contributed) = actual.non_null().array_read_elem() else {
-                        if actual != Ty::Error {
-                            self.diags.error(
-                                self.span(argument),
-                                "spread argument must have an array type".to_string(),
-                            );
-                        }
-                        return Ty::Error;
-                    };
-                    let expected_array = Ty::array(Ty::out_projection(contributed));
-                    self.expect_assignable(
-                        expected_array,
-                        actual,
-                        self.span(argument),
-                        "array spread",
-                    );
-                    contributed
+                    self.reference_array_spread_element(scope, argument, raw_hint)
                 })
                 .collect::<Vec<_>>();
             self.commit_checked_single_vararg_arguments(
