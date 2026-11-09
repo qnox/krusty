@@ -40,7 +40,7 @@ fn constructor_header_fixture(
     let contract = selected.class_contract().unwrap();
     let raw = libraries
         .declaration_bodies()
-        .class_member_header(selected.identity(), &contract.signature)
+        .class_member_header(selected.identity(), &contract.signature, crate::libraries::KlibAccessorRole::Getter)
         .unwrap()
         .unwrap();
     let mut class = raw.class.clone();
