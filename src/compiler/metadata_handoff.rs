@@ -356,8 +356,7 @@ fn attach_function_metadata(
         .iter()
         .any(crate::ir::DeclarationAnnotations::declares_annotations)
     {
-        ir.fn_param_annotations
-            .insert(function_id, parameter_annotations);
+        ir.declared_parameters_mut(function_id).annotations = parameter_annotations;
     }
     if let Some(spelling) = published_declaration_spellings(declaration, info, index) {
         ir.fn_declared_spellings
@@ -410,7 +409,7 @@ pub(super) fn attach_stable_function_inference_metadata(
             );
         }
         if no_infer.iter().any(|flag| *flag) {
-            ir.fn_param_no_infer.insert(function, no_infer);
+            ir.declared_parameters_mut(function).no_infer = no_infer;
         }
     }
 }

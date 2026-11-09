@@ -220,6 +220,8 @@ pub struct FileInput<'a> {
         &'a HashMap<krusty::backend::KlibDependencyCallable, super::DependencyExport>,
     /// The exported instance entry of each preceding source module's object, by its classifier.
     pub dependency_singletons: &'a HashMap<krusty::types::TypeName, String>,
+    /// The exported entry answering each constant of a preceding file's enum.
+    pub dependency_enum_constants: &'a HashMap<krusty::backend::EnumConstant, String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -255,6 +257,7 @@ pub fn lower_file(
         dependency_signatures,
         dependency_symbols,
         dependency_singletons,
+        dependency_enum_constants,
         value_classes,
         slot_plan,
         module_facts,
@@ -346,6 +349,7 @@ pub fn lower_file(
         dependency_symbols,
         dependency_singletons,
         dependency_interface_calls: Vec::new(),
+        dependency_enum_constants,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
     // receivers have a runtime-walkable representation and which shapes still decline; both are read while
@@ -533,6 +537,8 @@ struct FileLowering<'a> {
     dependency_interface_calls: Vec<(u32, Vec<u8>)>,
     /// The exported instance entry of each preceding source module's object, by its classifier.
     dependency_singletons: &'a HashMap<krusty::types::TypeName, String>,
+    /// The exported entry answering each constant of a preceding file's enum.
+    dependency_enum_constants: &'a HashMap<krusty::backend::EnumConstant, String>,
 }
 
 impl<'a> FileLowering<'a> {
@@ -1866,9 +1872,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 value,
             } => self.ref_set(holder, elem, value),
             // The shared enum lowering realized every enum this file declares; what is left names
-            // an enum another file declares, whose constants live there.
-            IrExpr::EnumEntry { classifier, .. }
-            | IrExpr::EnumValues { classifier }
+            // an enum another file declares, whose constants live there. A constant is read
+            // through the entry the declaring file exports.
+            IrExpr::EnumEntry { classifier, name } => {
+                self.dependency_enum_constant(classifier, &name)
+            }
+            IrExpr::EnumValues { classifier }
             | IrExpr::EnumEntries { classifier }
             | IrExpr::EnumValueOf { classifier, .. } => Err(declined!(
                 "an enum another file declares (`{}`)",
@@ -2430,14 +2439,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             Ty::Char => self.builder.ins().uextend(types::I32, operand),
             Ty::Int | Ty::UInt => operand,
             Ty::Long | Ty::ULong => self.fold_to_int(operand),
-            // A floating-point value hashes by its BITS, which is what makes `NaN`'s hash a
+            // A floating-point value hashes by `toBits()`, which is what makes `NaN`'s hash a
             // number at all: `Float` gives its 32 directly, and `Double` folds its 64 exactly as
-            // `Long` does. Reading the bits is a reinterpretation, not a conversion — a
-            // conversion would round `NaN` to something and lose the very distinction the rule
-            // exists for.
-            Ty::Float => self.bits_of(operand, types::I32),
+            // `Long` does. Reading the bits is a reinterpretation, not a conversion, but
+            // `toBits()` answers every `NaN` with the one canonical pattern, so the hash does too.
+            Ty::Float => self.canonical_bits_of(operand, types::I32),
             Ty::Double => {
-                let bits = self.bits_of(operand, types::I64);
+                let bits = self.canonical_bits_of(operand, types::I64);
                 self.fold_to_int(bits)
             }
             other => return Err(declined!("a data-class field of type `{other:?}`")),
@@ -2458,6 +2466,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let flags = cranelift_codegen::ir::MemFlagsData::new()
             .with_endianness(cranelift_codegen::ir::Endianness::Little);
         self.builder.ins().bitcast(clif, flags, value)
+    }
+
+    /// `toBits()`: the value's bits, except that every `NaN` answers the canonical quiet `NaN`
+    /// pattern (`0x7fc00000` for a `Float`, `0x7ff8000000000000` for a `Double`).
+    fn canonical_bits_of(&mut self, value: Value, clif: Type) -> Value {
+        let bits = self.bits_of(value, clif);
+        let canonical = if clif == types::I32 {
+            self.builder.ins().iconst(types::I32, 0x7fc0_0000)
+        } else {
+            self.builder.ins().iconst(types::I64, 0x7ff8_0000_0000_0000)
+        };
+        let is_nan = self.builder.ins().fcmp(FloatCC::Unordered, value, value);
+        self.builder.ins().select(is_nan, canonical, bits)
     }
 
     /// `(value xor (value ushr 32)).toInt()` — how Kotlin folds 64 bits into a hash.
