@@ -8,6 +8,7 @@ import org.gradle.api.Project
 import org.gradle.api.Task
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.FileCollection
 import org.gradle.api.file.FileSystemOperations
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.ListProperty
@@ -491,6 +492,7 @@ abstract class KrustyCompilation : DefaultTask() {
             // kotlinc splits friend paths on `,`, not on the path separator.
             arguments.add("-Xfriend-paths=" + friendPaths.files.joinToString(",", transform = File::getAbsolutePath))
         }
+        arguments.addAll(compilerPluginArguments(compilerPluginClasspath, compilerPluginOptions.get()))
         arguments.addAll(compilerArguments.get())
         if (fragmentNames.get().isNotEmpty()) {
             if ("-Xmulti-platform" !in arguments) arguments.add("-Xmulti-platform")
@@ -510,15 +512,6 @@ abstract class KrustyCompilation : DefaultTask() {
             )
         }
         val pluginVersion = supportedKotlinPluginVersion(kotlinPluginVersion.get())
-        if (!compilerPluginClasspath.isEmpty) {
-            arguments.add(
-                "-Xplugin=" + compilerPluginClasspath.files.joinToString(",", transform = File::getAbsolutePath),
-            )
-        }
-        compilerPluginOptions.get().forEach { option ->
-            arguments.add("-P")
-            arguments.add(option)
-        }
         arguments.add("-Xkotlin-reference-version=$pluginVersion")
         if ("-no-jdk" !in arguments) {
             arguments.add("-jdk-home")
@@ -710,17 +703,9 @@ abstract class KrustySupportCheckTask @Inject constructor(
         }
         val arguments = ArrayList<String>()
         arguments.add("refusals")
+        arguments.addAll(compilerPluginArguments(compilerPluginClasspath, compilerPluginOptions.get()))
         arguments.addAll(compilerArguments.get())
         arguments.add("-Xkotlin-reference-version=${supportedKotlinPluginVersion(kotlinPluginVersion.get())}")
-        if (!compilerPluginClasspath.isEmpty) {
-            arguments.add(
-                "-Xplugin=" + compilerPluginClasspath.files.joinToString(",", transform = File::getAbsolutePath),
-            )
-        }
-        compilerPluginOptions.get().forEach { option ->
-            arguments.add("-P")
-            arguments.add(option)
-        }
         val executable = binary.get().asFile.absolutePath
         val output = ByteArrayOutputStream()
         val errors = ByteArrayOutputStream()
@@ -753,6 +738,24 @@ abstract class KrustySupportCheckTask @Inject constructor(
 }
 
 private fun File.refuses(): Boolean = length() > 0
+
+/**
+ * KGP's compiler-plugin request: the resolved plugin classpath (`-Xplugin`) and the structured
+ * per-plugin options (`-P plugin:<id>:<key>=<value>`). KGP places them before the free arguments,
+ * and kotlinc accumulates every `-P` in command-line order, so a free `-P` that sets the same key
+ * as a structured one replaces it, as in kotlinc.
+ */
+private fun compilerPluginArguments(classpath: FileCollection, options: List<String>): List<String> {
+    val arguments = ArrayList<String>()
+    if (!classpath.isEmpty) {
+        arguments.add("-Xplugin=" + classpath.files.joinToString(",", transform = File::getAbsolutePath))
+    }
+    options.forEach { option ->
+        arguments.add("-P")
+        arguments.add(option)
+    }
+    return arguments
+}
 
 private fun pluginOptionArguments(configs: List<CompilerPluginConfig>): List<String> =
     configs.flatMap { config ->
