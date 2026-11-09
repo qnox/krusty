@@ -5,7 +5,7 @@ class Point(val x: Int) {
         get() = "p$x"
 }
 
-inline val Point.doubled: Int
+val Point.doubled: Int
     get() = x * 2
 
 fun exportedX(): (Point) -> Int = Point::x
@@ -28,8 +28,8 @@ fun box(): String {
     if (importedLabel(point) != "p21") return "custom invoke"
     val importedDoubled = exportedDoubled()
     val localDoubled: (Point) -> Int = Point::doubled
-    if (importedDoubled != localDoubled) return "inline getter"
-    if (importedDoubled(point) != 42 || localDoubled(point) != 42) return "inline invoke"
+    if (importedDoubled != localDoubled) return "extension getter"
+    if (importedDoubled(point) != 42 || localDoubled(point) != 42) return "extension invoke"
     val declaredLater: (Later) -> Int = Later::y
     if (localY() != declaredLater) return "file order"
     if (localY()(later(5)) != 5) return "file order invoke"
