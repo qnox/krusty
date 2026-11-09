@@ -49402,7 +49402,7 @@ impl<'a> Checker<'a> {
             "provider_lambda",
             "call={call:?} name={name} expectations={expectations:?}",
         );
-        return Some(expectations);
+        Some(expectations)
     }
 
     /// The [`CallArgKind`] for an already-checked argument — pure, no checking side effects.
