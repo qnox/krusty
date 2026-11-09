@@ -40446,11 +40446,17 @@ impl<'a> Checker<'a> {
             SourceConstructorSelection::Selected {
                 resolved: selected, ..
             } => *selected,
-            SourceConstructorSelection::NoMatch { .. } => {
-                self.diags.error(
-                    span,
-                    format!("krusty: {label}(...) has no matching target constructor"),
-                );
+            SourceConstructorSelection::NoMatch { rejected, .. } => {
+                if !self.report_single_constructor_argument_mismatches(
+                    arguments,
+                    &candidates,
+                    &rejected,
+                ) {
+                    self.diags.error(
+                        span,
+                        format!("krusty: {label}(...) has no matching target constructor"),
+                    );
+                }
                 return;
             }
             SourceConstructorSelection::Ambiguous => {
@@ -46139,14 +46145,20 @@ impl<'a> Checker<'a> {
                         self.record_whole_array_delegation_arguments(&arguments, &resolved);
                         *resolved
                     }
-                    SourceConstructorSelection::NoMatch { .. } => {
-                        self.diags.error(
+                    SourceConstructorSelection::NoMatch { rejected, .. } => {
+                        if !self.report_single_constructor_argument_mismatches(
+                            &arguments,
+                            &constructor_candidates,
+                            &rejected,
+                        ) {
+                            self.diags.error(
                             entry.span,
                             format!(
                                 "none of the constructors of '{}' can be called with the arguments supplied",
                                 cl.name
                             ),
                         );
+                        }
                         for &argument in &entry.args {
                             self.finish_executable_root(argument);
                         }
