@@ -44,6 +44,11 @@ impl Body<'_> {
                 self.scalar_string_function(ty).expect("checked above")
             }
             ty if self.class_of_type(ty).is_some() => return self.object_to_string(ty),
+            // A builder's table answers its contents, and a `null` one renders as `"null"`.
+            ty if super::string_builders::is_string_builder_type(ty) => {
+                self.dispatch_to_string();
+                return Ok(());
+            }
             ty if ty.non_null().obj_internal()
                 == Some(super::super::super::type_objects::ktype()) =>
             {

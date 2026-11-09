@@ -25,6 +25,7 @@ mod interface_dispatch;
 mod objects;
 mod reference_arrays;
 mod runtime;
+mod string_builders;
 mod target;
 mod type_objects;
 

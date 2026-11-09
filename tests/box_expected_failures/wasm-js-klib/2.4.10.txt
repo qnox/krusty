@@ -554,7 +554,6 @@ classes/kt1018.kt
 classes/kt1535.kt
 classes/kt1538.kt
 classes/kt1980.kt
-classes/kt2391.kt
 classes/kt2417.kt
 classes/kt2566_2.kt
 classes/kt2626.kt
@@ -751,22 +750,16 @@ controlStructures/forInArray/forIntArray.kt
 controlStructures/forInArray/forNullableIntArray.kt
 controlStructures/forInArrayWithIndex/forInArrayOfObjectArrayWithIndex.kt
 controlStructures/forInArrayWithIndex/forInArrayOfPrimArrayWithIndex.kt
-controlStructures/forInArrayWithIndex/forInArrayWithIndexBreakAndContinue.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexContinuesAsUnmodified.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNameBasedDestructuringShortForm.kt
-controlStructures/forInArrayWithIndex/forInArrayWithIndexNoElementVar.kt
-controlStructures/forInArrayWithIndex/forInArrayWithIndexNoIndexVar.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNotDestructured.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexWithExplicitlyTypedIndexVariable.kt
 controlStructures/forInArrayWithIndex/forInByteArrayWithIndex.kt
 controlStructures/forInArrayWithIndex/forInByteArrayWithIndexWithSmartCast.kt
-controlStructures/forInArrayWithIndex/forInEmptyArrayWithIndex.kt
 controlStructures/forInArrayWithIndex/forInGenericArrayOfIntsWithIndex.kt
 controlStructures/forInArrayWithIndex/forInGenericArrayOfIntsWithIndexWithSmartCast.kt
 controlStructures/forInArrayWithIndex/forInGenericArrayWithIndex.kt
-controlStructures/forInArrayWithIndex/forInIntArrayWithIndex.kt
 controlStructures/forInArrayWithIndex/forInIntArrayWithIndexWithSmartCast.kt
-controlStructures/forInArrayWithIndex/forInObjectArrayWithIndex.kt
 controlStructures/forInArrayWithIndex/forInShortArrayWithIndex.kt
 controlStructures/forInArrayWithIndex/forInShortArrayWithIndexWithSmartCast.kt
 controlStructures/forInCharSequence.kt
@@ -779,11 +772,8 @@ controlStructures/forInCharSequenceWithIndex/forInCharSequenceWithIndexCheckSide
 controlStructures/forInCharSequenceWithIndex/forInCharSequenceWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/forInCharSequenceWithIndex/forInCharSequenceWithIndexNoElementVarCheckSideEffects.kt
 controlStructures/forInCharSequenceWithIndex/forInCharSequenceWithIndexNoIndexVarCheckSideEffects.kt
-controlStructures/forInCharSequenceWithIndex/forInStringWithIndex.kt
 controlStructures/forInCharSequenceWithIndex/forInStringWithIndexNameBasedDestructuringFullForm.kt
 controlStructures/forInCharSequenceWithIndex/forInStringWithIndexNameBasedDestructuringShortForm.kt
-controlStructures/forInCharSequenceWithIndex/forInStringWithIndexNoElementVar.kt
-controlStructures/forInCharSequenceWithIndex/forInStringWithIndexNoIndexVar.kt
 controlStructures/forInCharSequenceWithIndex/forInStringWithIndexNotDestructured.kt
 controlStructures/forInCharSequenceWithIndex/forInStringWithIndexWithExplicitlyTypedIndexVariable.kt
 controlStructures/forInIterableWithIndex/forInEmptyListWithIndex.kt
@@ -1556,8 +1546,6 @@ devirtualization/inline_getter.kt
 devirtualization/lateinitInterface.kt
 diagnostics/functions/tailRecursion/labeledThisReferences.kt
 diagnostics/functions/tailRecursion/realIteratorFoldl.kt
-diagnostics/functions/tailRecursion/realStringEscape.kt
-diagnostics/functions/tailRecursion/realStringRepeat.kt
 diagnostics/functions/tailRecursion/recursiveCallInInlineLambda.kt
 diagnostics/functions/tailRecursion/recursiveCallInInlineLambdaWithCapture.kt
 diagnostics/functions/tailRecursion/whenWithIs.kt
@@ -1666,8 +1654,6 @@ extensionFunctions/extensionFunctionInInnerClass.kt
 extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
 extensionFunctions/extensionFunctionWithInlineModifier.kt
-extensionFunctions/kt1953.kt
-extensionFunctions/kt1953_class.kt
 extensionFunctions/kt23675.kt
 extensionFunctions/kt3285.kt
 extensionFunctions/kt475.kt
@@ -1675,7 +1661,6 @@ extensionFunctions/kt865.kt
 extensionFunctions/memberExtensionEqualsHashCodeToStringInInterface.kt
 extensionFunctions/nestedExtensionFunctionAsASupertype.kt
 extensionFunctions/shared.kt
-extensionFunctions/simple.kt
 extensionFunctions/suspendConversionForExtensionFunAsAFunType.kt
 extensionFunctions/suspendConversionForExtensionFunAsAPropertyType.kt
 extensionFunctions/suspendConversionForExtensionFunAsASuperType.kt
@@ -1950,7 +1935,6 @@ initializers/files/globalNotInitedAfterAccessingClassInternals.kt
 initializers/files/simple.kt
 initializers/files/simpleMultiModule.kt
 initializers/initializers0.kt
-initializers/initializers1.kt
 initializers/initializers2.kt
 initializers/initializers3.kt
 initializers/initializers4.kt
@@ -2043,12 +2027,10 @@ inline/kt26787.kt
 inline/kt66017.kt
 inline/kt66017_inlineFromTheSameModule.kt
 inline/kt69041.kt
-inline/lambdaAsAny.kt
 inline/lambdaInLambda.kt
 inline/lambdaReassignment.kt
 inline/lambdaReassignmentWithCapture.kt
 inline/lateinitProperty.kt
-inline/localFunctionInInitializerBlock.kt
 inline/localInlineExtensionFunction.kt
 inline/localInlineFunction.kt
 inline/localInlineFunctionComplex.kt
@@ -2066,7 +2048,6 @@ inline/redundantCoercionsCleaner.kt
 inline/redundantCoercionsCleanerKT48876.kt
 inline/redundantCoercionsCleanerKT49356.kt
 inline/requireNotNull.kt
-inline/returnLocalClassFromBlock.kt
 inline/rootConstructor.kt
 inline/safeCall.kt
 inline/severalClosures.kt
@@ -2955,7 +2936,6 @@ innerNested/superConstructorCall/objectOuterDiffersFromInnerOuter.kt
 interfaceCallsNCasts/conservativeItable.kt
 interfaceCallsNCasts/diamond.kt
 interfaceCallsNCasts/finalMethod.kt
-interfaceCallsNCasts/interface0.kt
 intrinsics/charToInt.kt
 intrinsics/kt10131.kt
 intrinsics/kt10131a.kt
@@ -3021,14 +3001,10 @@ labels/propertyAccessorObject.kt
 labels/siblingLabelsInlined.kt
 labels/siblingLabelsInlinedClashing.kt
 labels/simpleLabelInlined.kt
-lambda/lambda1.kt
 lambda/lambda10.kt
 lambda/lambda11.kt
 lambda/lambda12.kt
-lambda/lambda13.kt
 lambda/lambda14.kt
-lambda/lambda2.kt
-lambda/lambda3.kt
 lambda/lambda4.kt
 lambda/lambda5.kt
 lambda/lambda6.kt
@@ -4346,7 +4322,6 @@ regressions/kt3903.kt
 regressions/kt5056.kt
 regressions/kt57487.kt
 regressions/kt5953.kt
-regressions/kt6153.kt
 regressions/kt6434.kt
 regressions/kt6434_2.kt
 regressions/kt68727.kt
@@ -4511,7 +4486,6 @@ strings/kt13213.kt
 strings/kt13213a.kt
 strings/kt3571.kt
 strings/kt50140.kt
-strings/kt5389_stringBuilderGet.kt
 strings/kt5956.kt
 strings/kt894.kt
 strings/nestedConcat.kt

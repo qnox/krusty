@@ -122,6 +122,13 @@ impl Backend for WasmBackend {
         true
     }
 
+    fn represents_dependency_classifier(
+        &self,
+        classifier: krusty::backend::DependencyClassifier,
+    ) -> bool {
+        lower::is_string_builder(classifier)
+    }
+
     fn realizes_dependency_intrinsic(
         &self,
         operation: krusty::backend::BackendCompilerIntrinsic,
