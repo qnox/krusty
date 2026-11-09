@@ -38,9 +38,12 @@ class KrustyToolchainsTest {
     @Test
     void loadsAsTheBuildToolsApiImplementationForItsKotlinRelease() {
         assertInstanceOf(KrustyToolchains.class, toolchains);
-        // The exact release identity, as the stdlib on the test classpath records it:
-        // KotlinVersion.CURRENT drops a pre-release classifier such as -Beta2.
-        assertEquals(KotlinVersion.class.getPackage().getImplementationVersion(), toolchains.getCompilerVersion());
+        // The exact release identity the build was configured for, pre-release classifier and all.
+        String release = System.getProperty("krusty.kotlinVersion");
+        assertEquals(release, toolchains.getCompilerVersion());
+        // The stdlib resolved for that release agrees; KotlinVersion.CURRENT omits a classifier
+        // such as -Beta2, so it is the release's numeric prefix.
+        assertTrue(release.startsWith(KotlinVersion.CURRENT + "-") || release.equals(KotlinVersion.CURRENT.toString()), release);
     }
 
     @Test
