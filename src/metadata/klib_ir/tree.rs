@@ -1092,6 +1092,7 @@ mod tests {
                             _ => None,
                         },
                         folded_call: |_, _| false,
+                        folded_calls: |_, _| Vec::new(),
                     }
                 )
                 .into_iter()
@@ -1106,6 +1107,7 @@ mod tests {
                     EmittedCallForms {
                         closure: |_, _| None,
                         folded_call: |_, _| false,
+                        folded_calls: |_, _| Vec::new(),
                     }
                 )
                 .into_iter()
