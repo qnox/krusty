@@ -3,7 +3,7 @@
 //! A reference array and a primitive array differ only in their [`ArrayForm`]: the storage type,
 //! the element type that storage holds, and how a packed element is read back. Allocation,
 //! spreads, reads, stores and bounds checks are shared. A generated `hashCode` hashes an array
-//! property by its contents.
+//! property by its contents, and a generated `toString` renders one by its contents.
 
 use crate::array_objects::{ArrayForm, ElementRead, STORAGE_FIELD};
 use krusty::backend::BackendCompilerIntrinsic;
@@ -11,6 +11,7 @@ use krusty::ir::{IrCheckedOperation, IrPropertyDispatch};
 use krusty::libraries::RuntimeExceptionKind;
 
 mod content_hash;
+mod content_rendering;
 #[cfg(test)]
 mod tests;
 

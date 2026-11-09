@@ -17,6 +17,13 @@ impl Body<'_> {
         if ty.is_unsigned() {
             return self.unsigned_string_of(id, ty);
         }
+        self.expression(id)?;
+        self.stacked_string_of(ty)
+    }
+
+    /// Replace the `ty` value on the stack with its non-null `String`, as a string template
+    /// renders it. `Unit` is not one of these values: it may have no carrier to replace.
+    pub(super) fn stacked_string_of(&mut self, ty: Ty) -> Result<(), Unsupported> {
         let nullable_scalar = match ty.kind() {
             TyKind::Nullable(inner) => self
                 .scalar_string_function(inner)
@@ -26,7 +33,6 @@ impl Body<'_> {
         if let Some((inner, function)) = nullable_scalar {
             // A nullable scalar is its box or `null`.
             let value = self.local(REFERENCE);
-            self.expression(id)?;
             self.code
                 .local_tee(value)
                 .ref_is_null()
@@ -39,7 +45,6 @@ impl Body<'_> {
             self.code.call(function).end().ref_as_non_null();
             return Ok(());
         }
-        self.expression(id)?;
         let function = match ty {
             Ty::String | Ty::Null => self.runtime.string_or_null,
             ty if ty == Ty::nullable(Ty::String) => self.runtime.string_or_null,
@@ -93,7 +98,7 @@ impl Body<'_> {
         })
     }
 
-    fn string_constant(&mut self, text: &str) {
+    pub(super) fn string_constant(&mut self, text: &str) {
         let units = text.encode_utf16().collect::<Vec<_>>();
         self.runtime
             .string_constant(self.module, &mut self.code, &units);
