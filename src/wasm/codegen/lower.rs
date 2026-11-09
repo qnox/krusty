@@ -31,6 +31,7 @@ mod generated_members;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
+mod scalar_value_classes;
 mod shared_cells;
 mod string_conversion;
 
@@ -1369,6 +1370,21 @@ impl<'a> Body<'a> {
                     && self.is_array_size_property(*target) =>
             {
                 self.checked_array_size(checked_op)?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && self.is_scalar_value_storage(*target) =>
+            {
+                self.scalar_value_storage_read(*target, *receiver)?;
             }
             // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from
             // the `$Enum` fields its struct leads with.

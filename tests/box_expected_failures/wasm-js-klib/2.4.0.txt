@@ -4835,7 +4835,6 @@ unit/sillyThings.kt
 unsignedTypes/boxConstValOfUnsignedType.kt
 unsignedTypes/boxedUnsignedEqualsZero.kt
 unsignedTypes/checkBasicUnsignedLiterals.kt
-unsignedTypes/defaultArguments.kt
 unsignedTypes/equalsImplForInlineClassWrappingNullableInlineClass.kt
 unsignedTypes/forEachIndexedInListOfUInts.kt
 unsignedTypes/forInUnsignedDownTo.kt
@@ -4868,13 +4867,11 @@ unsignedTypes/unsignedIntDivide.kt
 unsignedTypes/unsignedIntRemainder.kt
 unsignedTypes/unsignedIntToString.kt
 unsignedTypes/unsignedLiteralsForMaxLongValue.kt
-unsignedTypes/unsignedLiteralsWithSignedOverflow.kt
 unsignedTypes/unsignedLongCompare.kt
 unsignedTypes/unsignedLongDivide.kt
 unsignedTypes/unsignedLongRemainder.kt
 unsignedTypes/unsignedLongToString.kt
 unsignedTypes/unsignedRangeIterator.kt
-unsignedTypes/unsignedToSignedConversion.kt
 unsignedTypes/unsignedTypePrefixIncrementDecrementBoxing.kt
 unsignedTypes/unsignedTypeValuesInsideStringTemplates.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
