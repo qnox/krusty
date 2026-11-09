@@ -36,15 +36,19 @@ pub(super) enum SharedTreesError {
 /// inline declarations of an archive unless another input withdraws one, so one usually suffices.
 const RESIDENT_INLINE_SELECTIONS: usize = 2;
 
+/// One decode, shared by every open that asks for it. Concurrent opens of a cold archive wait on
+/// the slot instead of each decoding the archive; a failed decode leaves it empty for the next.
+type DecodeSlot = Arc<Mutex<Option<Arc<KlibIrModuleTrees>>>>;
+
 /// One archive's prepared-inline trees, decoded for exactly `selected`.
 struct InlineSelection {
     selected: HashSet<KlibPublicIdSignature>,
-    trees: Arc<KlibIrModuleTrees>,
+    trees: DecodeSlot,
 }
 
 /// Decoded IR trees by the content fingerprint of the archive they were decoded from.
 pub(super) struct SharedTrees {
-    decoded: Mutex<LruCache<[u8; 32], Arc<KlibIrModuleTrees>>>,
+    decoded: Mutex<LruCache<[u8; 32], DecodeSlot>>,
     inline: Mutex<LruCache<[u8; 32], Vec<InlineSelection>>>,
 }
 
@@ -71,12 +75,18 @@ impl SharedTrees {
         let fingerprint = archive
             .content_fingerprint()
             .map_err(SharedTreesError::Fingerprint)?;
-        if let Some(trees) = self.decoded().get(&fingerprint) {
-            return Ok(Arc::clone(trees));
-        }
-        let trees = Arc::new(read_declaration_trees(archive).map_err(SharedTreesError::Decode)?);
-        self.decoded().insert(fingerprint, Arc::clone(&trees));
-        Ok(trees)
+        let slot = {
+            let mut decoded = lock(&self.decoded);
+            match decoded.get(&fingerprint) {
+                Some(slot) => Arc::clone(slot),
+                None => {
+                    let slot = DecodeSlot::default();
+                    decoded.insert(fingerprint, Arc::clone(&slot));
+                    slot
+                }
+            }
+        };
+        decode_once(&slot, || read_declaration_trees(archive))
     }
 
     /// The prepared-inline trees of `archive` for exactly the `selected` public signatures,
@@ -89,47 +99,58 @@ impl SharedTrees {
         let fingerprint = archive
             .content_fingerprint()
             .map_err(SharedTreesError::Fingerprint)?;
-        if let Some(kept) = self.inline().get(&fingerprint).and_then(|selections| {
-            selections
+        let slot = {
+            let mut inline = lock(&self.inline);
+            let mut selections = inline.remove(&fingerprint).unwrap_or_default();
+            let slot = match selections
                 .iter()
-                .find(|selection| &selection.selected == selected)
-                .map(|selection| Arc::clone(&selection.trees))
-        }) {
-            return Ok(kept);
-        }
-        let trees = Arc::new(
-            read_inlinable_declaration_trees_where(archive, |signature| {
-                matches!(signature, KlibIrSignature::Public(signature) if selected.contains(signature))
-            })
-            .map_err(SharedTreesError::Decode)?,
-        );
-        let mut inline = self.inline();
-        let mut selections = inline.remove(&fingerprint).unwrap_or_default();
-        selections.retain(|selection| &selection.selected != selected);
-        selections.truncate(RESIDENT_INLINE_SELECTIONS - 1);
-        selections.insert(
-            0,
-            InlineSelection {
-                selected: selected.clone(),
-                trees: Arc::clone(&trees),
-            },
-        );
-        inline.insert(fingerprint, selections);
-        Ok(trees)
+                .position(|selection| &selection.selected == selected)
+            {
+                Some(index) => selections.remove(index).trees,
+                None => DecodeSlot::default(),
+            };
+            selections.truncate(RESIDENT_INLINE_SELECTIONS - 1);
+            selections.insert(
+                0,
+                InlineSelection {
+                    selected: selected.clone(),
+                    trees: Arc::clone(&slot),
+                },
+            );
+            inline.insert(fingerprint, selections);
+            slot
+        };
+        let wanted = |signature: &KlibIrSignature| match signature {
+            KlibIrSignature::Public(signature) => selected.contains(signature),
+            _ => false,
+        };
+        decode_once(&slot, || {
+            read_inlinable_declaration_trees_where(archive, wanted)
+        })
     }
+}
 
-    fn inline(&self) -> std::sync::MutexGuard<'_, LruCache<[u8; 32], Vec<InlineSelection>>> {
-        self.inline
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// The slot's trees, decoding them first if no earlier open did. The slot stays locked while
+/// decoding, so an open that arrives meanwhile receives these trees instead of decoding again.
+fn decode_once(
+    slot: &DecodeSlot,
+    decode: impl FnOnce() -> Result<KlibIrModuleTrees, KlibIrDecodeError>,
+) -> Result<Arc<KlibIrModuleTrees>, SharedTreesError> {
+    let mut held = lock(slot);
+    if let Some(trees) = held.as_ref() {
+        return Ok(Arc::clone(trees));
     }
+    let trees = Arc::new(decode().map_err(SharedTreesError::Decode)?);
+    *held = Some(Arc::clone(&trees));
+    Ok(trees)
+}
 
-    fn decoded(&self) -> std::sync::MutexGuard<'_, LruCache<[u8; 32], Arc<KlibIrModuleTrees>>> {
-        // A panic while the lock is held cannot leave a half-written entry: insertion is one call.
-        self.decoded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+/// A panic while one of these locks is held cannot leave a half-written value: each write is one
+/// assignment or insertion.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -198,6 +219,29 @@ mod tests {
             .expect("decode the copy");
         assert!(Arc::ptr_eq(&original, &copied));
         std::fs::remove_file(copy).expect("remove the copy");
+    }
+
+    #[test]
+    fn concurrent_opens_of_a_cold_archive_share_one_decode() {
+        let shared = SharedTrees::new(4);
+        let path = fixture("klib_signatures/signatures.klib");
+        let start = std::sync::Barrier::new(8);
+        let trees: Vec<_> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let archive = KlibArchive::open(&path).expect("open");
+                        start.wait();
+                        shared.main_declaration_trees(&archive).expect("decode")
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("worker"))
+                .collect()
+        });
+        assert!(trees.iter().all(|other| Arc::ptr_eq(&trees[0], other)));
     }
 
     /// Unpack the fixture so a test can rewrite one of its entries in place.
