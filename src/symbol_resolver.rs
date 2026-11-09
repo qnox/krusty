@@ -589,7 +589,7 @@ fn best_callable_member_overload<'a>(
 ) -> Option<&'a LibraryMember> {
     let adapts = |p: &Ty, arg: &CallArgKind, _i: usize| arg.adapts_integer_literal_to(*p);
     let fits = |_position: usize, param: &Ty, arg: &CallArgKind| {
-        if arg.is_omitted_default() {
+        if arg.is_omitted_default() || arg.constructible_as(*param) {
             return true;
         }
         if arg.is_lambda_literal() {

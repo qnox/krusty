@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::Command;
 
 use krusty::conformance::TestTarget;
-use krusty::native::{CraneliftBackend, Entry, NativeTarget};
+use krusty_native::{CraneliftBackend, Entry, NativeTarget};
 
 use super::box_lane::{self, Lane, Libraries, Outcome};
 use super::box_ratchet::Platform;
@@ -28,7 +28,7 @@ const DECLINE_PREFIX: &str = "krusty: the native backend does not support ";
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target) && LIBRARIES.available(TestTarget::Native)).then_some(target)
+    (krusty_native::can_link(target) && LIBRARIES.available(TestTarget::Native)).then_some(target)
 }
 
 /// Why a case is outside this harness before any compilation, or `None` when it applies.
@@ -140,7 +140,7 @@ impl NativeLane {
             );
         }
         let object_refs = objects.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        let image = match krusty::native::link_program_with_libraries(
+        let image = match krusty_native::link_program_with_libraries(
             &object_refs,
             &program.native_imports,
             target,

@@ -114,10 +114,7 @@ impl IrCompanionBlocks {
     }
 
     /// The block property whose physical backing storage is `static_index`.
-    pub(crate) fn property_for_storage(
-        &self,
-        static_index: u32,
-    ) -> Option<&IrCompanionBlockProperty> {
+    pub fn property_for_storage(&self, static_index: u32) -> Option<&IrCompanionBlockProperty> {
         self.properties
             .iter()
             .find(|property| property.storage == Some(static_index))

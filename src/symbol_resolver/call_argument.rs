@@ -26,6 +26,14 @@ pub(crate) enum CallArgKind {
     },
     /// A safely folded integer constant and its ordinary runtime type.
     IntegerLiteral { ty: Ty, constant: IntegerConstant },
+    /// A collection literal whose construction waits for the selected parameter. `provisional` is
+    /// its expectation-free reading (`List<T>`); `factory_classifiers` are the classifiers among
+    /// the candidates' parameters that supply a literal construction (a standard factory or an
+    /// `operator fun of`). Arrays always supply one.
+    CollectionLiteral {
+        provisional: Ty,
+        factory_classifiers: std::sync::Arc<[TypeName]>,
+    },
     /// A legal declaration-default slot produced by the shared argument mapper.
     OmittedDefault,
 }
@@ -54,6 +62,13 @@ impl CallArgKind {
                 ty: map(ty),
                 constant,
             },
+            Self::CollectionLiteral {
+                provisional,
+                factory_classifiers,
+            } => Self::CollectionLiteral {
+                provisional: map(provisional),
+                factory_classifiers,
+            },
             Self::OmittedDefault => Self::OmittedDefault,
         }
     }
@@ -81,7 +96,8 @@ impl CallArgKind {
             | Self::LambdaLiteral(ty)
             | Self::IntegerLiteral { ty, .. } => *ty,
             Self::CallableReference { nominal, .. } => *nominal,
-            Self::ExpectedTypeCallable { provisional, .. } => *provisional,
+            Self::ExpectedTypeCallable { provisional, .. }
+            | Self::CollectionLiteral { provisional, .. } => *provisional,
             // This probe never becomes an expression type. Applicability recognizes the explicit
             // variant and generic inference skips it.
             Self::OmittedDefault => Ty::Error,
@@ -106,7 +122,7 @@ impl CallArgKind {
         src: &dyn SymbolSource,
         parameter: Ty,
     ) -> bool {
-        if self.is_omitted_default() {
+        if self.is_omitted_default() || self.constructible_as(parameter) {
             return true;
         }
         if self.is_lambda_literal() && self.ty() == Ty::Error {
@@ -234,6 +250,24 @@ impl CallArgKind {
 
     pub(crate) fn is_omitted_default(&self) -> bool {
         matches!(self, Self::OmittedDefault)
+    }
+
+    /// Whether a collection literal can be built for `parameter`. Its provisional `List<T>` is
+    /// not applicability evidence against a parameter that supplies its own construction, just
+    /// as an unchecked lambda's placeholder shape is not.
+    pub(crate) fn constructible_as(&self, parameter: Ty) -> bool {
+        let Self::CollectionLiteral {
+            factory_classifiers,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        let parameter = parameter.non_null();
+        parameter.array_elem().is_some()
+            || parameter
+                .kotlin_class_internal()
+                .is_some_and(|classifier| factory_classifiers.contains(&classifier))
     }
 
     /// Whether a nested generic call's RESULT is fixed by its own inputs — a formal in its return
@@ -456,6 +490,20 @@ pub(crate) fn expected_result_keeps_call_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_collection_literal_is_constructible_as_an_array_or_a_factory_classifier_only() {
+        let literal = CallArgKind::CollectionLiteral {
+            provisional: Ty::obj("kotlin/collections/List"),
+            factory_classifiers: vec![crate::types::type_name("Bag")].into(),
+        };
+        assert!(literal.constructible_as(Ty::obj("kotlin/IntArray")));
+        assert!(literal.constructible_as(Ty::nullable(Ty::obj("Bag"))));
+        assert!(!literal.constructible_as(Ty::obj("Box")));
+        assert!(!literal.constructible_as(Ty::String));
+        assert!(!CallArgKind::Typed(Ty::obj("kotlin/collections/List"))
+            .constructible_as(Ty::obj("kotlin/IntArray")));
+    }
 
     fn expected_type_call(provisional: Ty, params: Vec<Ty>) -> CallArgKind {
         let formal = Ty::ty_param("T", Ty::obj("kotlin/Any"));

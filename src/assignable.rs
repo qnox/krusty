@@ -441,10 +441,8 @@ fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
                             .into_iter()
                             .any(|bound| assignable_inner(cx, oracle, bound, expected));
                     }
-                    let mut captured = cx.clone();
-                    capture_projection_parameters(&mut captured, oracle, expected, a);
                     return assignable_inner(
-                        &captured,
+                        cx,
                         oracle,
                         a.projection_inner().unwrap_or(a),
                         expected,
@@ -494,60 +492,6 @@ fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
                 },
             }
         })
-}
-
-/// Bind the declaration variables occurring inside an `out` projection's bound to the corresponding
-/// actual shape. F-bounds such as `S : Entity<D, S>` otherwise leave `S` unbound and reject
-/// `EntityImpl<D> : Entity<D, EntityImpl<D>>` as an argument of `Entity<D, out Entity<D, S>>`.
-fn capture_projection_parameters(
-    cx: &mut TyCtx,
-    oracle: &dyn TypeOracle,
-    template: Ty,
-    actual: Ty,
-) {
-    match template.kind() {
-        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
-            if cx.lookup(name.as_str()).is_none() && actual != template {
-                cx.bind(name.as_str(), actual.projection_inner().unwrap_or(actual));
-            }
-        }
-        TyKind::Obj(_, template_args) => {
-            let Some(applied) = applied_supertype(oracle, actual, template) else {
-                return;
-            };
-            for (&template, &actual) in template_args.iter().zip(applied.type_args()) {
-                capture_projection_parameters(cx, oracle, template, actual);
-            }
-        }
-        TyKind::Fun(template) => {
-            let TyKind::Fun(actual) = actual.projection_inner().unwrap_or(actual).kind() else {
-                return;
-            };
-            for (&template, &actual) in template.params.iter().zip(&actual.params) {
-                capture_projection_parameters(cx, oracle, template, actual);
-            }
-            capture_projection_parameters(cx, oracle, template.ret, actual.ret);
-        }
-        TyKind::DefinitelyNotNull(template)
-        | TyKind::Nullable(template)
-        | TyKind::PlatformNullable(template)
-        | TyKind::MutabilityFlexible(template)
-        | TyKind::InProjection(template)
-        | TyKind::OutProjection(template)
-        | TyKind::StarProjection(template)
-        | TyKind::RawProjection(template) => capture_projection_parameters(
-            cx,
-            oracle,
-            template,
-            actual.projection_inner().unwrap_or(actual).non_null(),
-        ),
-        TyKind::Intersection(parts) => {
-            for &part in parts {
-                capture_projection_parameters(cx, oracle, part, actual);
-            }
-        }
-        TyKind::Unit | TyKind::Pending | TyKind::Nothing | TyKind::Null | TyKind::Error => {}
-    }
 }
 
 fn same_type_argument_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool {

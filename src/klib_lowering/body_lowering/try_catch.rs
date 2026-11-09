@@ -4,7 +4,7 @@
 //! its parameter bound to the next value slot under its source name, and its `finally` block. A
 //! `try` used as a value converts each branch to its type as a conditional's branches are.
 
-use super::{mismatch, semantic_type, BodyLowering, Lowered};
+use super::{mismatch, BodyLowering, Lowered};
 use crate::ir::{ExprId, IrCatch, IrCatchBinding, IrExpr};
 use crate::metadata::klib_ir::tree::{KlibIrCatch, KlibIrExprId};
 use crate::types::Ty;
@@ -36,7 +36,7 @@ impl BodyLowering<'_> {
     /// One `catch` clause: its parameter declared in the next value slot, then its body.
     fn catch_clause(&mut self, catch: &KlibIrCatch, ty: Ty) -> Lowered<IrCatch> {
         let parameter = self.arena.variable(catch.parameter);
-        let caught = semantic_type(self.arena, self.header.type_parameters(), parameter.ty)?;
+        let caught = self.semantic(parameter.ty)?;
         if caught.non_null().obj_internal().is_none() {
             return Err(mismatch("a `catch` parameter is not of a class type"));
         }
