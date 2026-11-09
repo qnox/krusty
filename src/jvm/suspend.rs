@@ -323,7 +323,7 @@ pub(crate) fn lower_suspend(
             }
         }
         let suspension_lines = if let (Some(b), None) = (body, forward.as_ref()) {
-            capture_suspension_lines(ir, b, &suspend_set, ir.fn_close_lines.get(&fid).copied())
+            capture_suspension_lines(ir, b, &suspend_set, ir.function_position(fid).close_line)
         } else {
             crate::fx_hash::HashMap::default()
         };
@@ -1631,8 +1631,8 @@ fn build_state_machine(
             let line = ir
                 .expr_lines
                 .get(&call)
-                .or_else(|| ir.fn_decl_lines.get(&fid))
                 .copied()
+                .or(ir.function_position(fid).decl_line)
                 .unwrap_or_default() as i32;
             (line, line)
         };
