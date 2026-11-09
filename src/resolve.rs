@@ -9236,6 +9236,13 @@ struct FunctionLambdaShape<'a> {
     result_constraint: LambdaResultConstraint,
 }
 
+/// The candidate family a provider member call commits through, with the receiver its selection
+/// sees: a value's members, or a classifier's object/companion/static members.
+struct ProviderMemberFamily {
+    receiver: Ty,
+    members: Vec<crate::libraries::FunctionInfo>,
+}
+
 /// A call's argument expressions with their checked types — parallel slices that must stay the
 /// same length, so they are passed as one value rather than two.
 #[derive(Clone, Copy)]
@@ -9905,10 +9912,11 @@ impl<'a> Checker<'a> {
     /// expectation for this call, and the extension must still get its turn.
     ///
     /// One mismatched lambda discards the expectation for the WHOLE call rather than for its own
-    /// slot. That is deliberate and costs nothing today: a member only reaches here after surviving
-    /// applicability, where Kotlin already demands exact lambda arity, and a slot whose arity krusty
-    /// cannot determine reports `None` — which fits anything — rather than a guess. Per-slot refusal
-    /// is the natural refinement if a call ever needs it.
+    /// slot. That is deliberate: a member reaches here either after surviving applicability, where
+    /// Kotlin already demands exact lambda arity, or as the one candidate an inapplicable call
+    /// reports against, whose misfit lambda is then checked without its shape. A slot whose arity
+    /// krusty cannot determine reports `None` — which fits anything — rather than a guess.
+    /// Per-slot refusal is the natural refinement if a call ever needs it.
     fn member_expectations_fit_written_lambdas(
         &self,
         args: &[ExprId],
@@ -14548,18 +14556,6 @@ impl<'a> Checker<'a> {
 
                     let explicit_type_args = self.explicit_call_type_args(scope, call);
                     let classifier_receiver = Ty::obj_name(classifier);
-                    let arg_tys = self
-                        .provider_member_lambda_arg_kinds(
-                            scope,
-                            call,
-                            crate::symbol_resolver::SymRecv::TypeName(classifier),
-                            &name,
-                            args,
-                            &explicit_type_args,
-                        )
-                        .iter()
-                        .map(CallArgKind::ty)
-                        .collect::<Vec<_>>();
                     let candidates = if value_hidden {
                         self.resolver()
                             .classifier_static_call_candidates(classifier, &name)
@@ -14569,6 +14565,22 @@ impl<'a> Checker<'a> {
                             .map(|(_, candidates)| candidates)
                     }
                     .unwrap_or_default();
+                    // The call's lambdas are shaped by the family it commits through below.
+                    let arg_tys = self
+                        .provider_member_lambda_arg_kinds(
+                            scope,
+                            call,
+                            ProviderMemberFamily {
+                                receiver: classifier_receiver,
+                                members: candidates.clone(),
+                            },
+                            &name,
+                            args,
+                            &explicit_type_args,
+                        )
+                        .iter()
+                        .map(CallArgKind::ty)
+                        .collect::<Vec<_>>();
                     let rejected_candidates = candidates.clone();
                     if let Some(mut selected) = self
                         .select_callable_candidate(
@@ -48804,7 +48816,7 @@ impl<'a> Checker<'a> {
                 .provider_member_lambda_arg_kinds(
                     scope,
                     call,
-                    crate::symbol_resolver::SymRecv::Value(receiver_ty),
+                    self.value_member_family(receiver_ty, CALLABLE_INVOKE_OPERATOR),
                     CALLABLE_INVOKE_OPERATOR,
                     args,
                     &[],
@@ -49231,6 +49243,19 @@ impl<'a> Checker<'a> {
         self.file.expr_uses_name(body, "it") && self.lookup(scope, "it").is_none()
     }
 
+    /// The member family `receiver.name(...)` selects from: the receiver's member overloads, joined
+    /// by the inner-classifier constructors a member level offers beside them.
+    fn value_member_family(&self, receiver: Ty, name: &str) -> ProviderMemberFamily {
+        let mut members = self.resolver().member_overloads(receiver, name);
+        if !members.is_empty() {
+            members.splice(
+                0..0,
+                self.member_level_constructor_candidates(receiver, name),
+            );
+        }
+        ProviderMemberFamily { receiver, members }
+    }
+
     /// A lambda argument's expected shape at one parameter position of a semantic-provider
     /// candidate: the
     /// VALUE parameter types, plus the receiver type when the parameter is a receiver function
@@ -49240,12 +49265,13 @@ impl<'a> Checker<'a> {
         &self,
         scope: &CheckerScope<'_>,
         call: ExprId,
-        receiver: crate::symbol_resolver::SymRecv<'_>,
+        family: ProviderMemberFamily,
         name: &str,
         args_and_partial: (&[ExprId], &[Option<Ty>]),
         type_args: &[Ty],
     ) -> Option<Vec<Option<FunctionalArgumentExpectation>>> {
         let (args, partial) = args_and_partial;
+        let ProviderMemberFamily { receiver, members } = family;
         // This resolver exists only to postpone and shape lambda syntax. Ordinary arguments are
         // already typed in `partial`; re-entering provider overload selection for them is both
         // semantically pointless and quadratic on generated call-heavy sources.
@@ -49264,16 +49290,7 @@ impl<'a> Checker<'a> {
         // Reuse the semantic slot mapper and partial-applicability predicate for every source form;
         // positional calls need the same boundary as named/default/trailing-lambda calls, otherwise
         // a callable reference is checked expectation-free before its provider member is selected.
-        let mut members = self.resolver().member_overloads(receiver, name);
-        if let (crate::symbol_resolver::SymRecv::Value(receiver), false) =
-            (receiver, members.is_empty())
-        {
-            members.splice(
-                0..0,
-                self.member_level_constructor_candidates(receiver, name),
-            );
-        }
-        let mut mapped = members
+        let slot_mapped = members
             .into_iter()
             .filter_map(|candidate| {
                 let parameter_count = candidate.semantic_params().len();
@@ -49284,19 +49301,33 @@ impl<'a> Checker<'a> {
                     trailing_lambda,
                     &candidate.call_sig,
                 )?;
-                let whole_array =
-                    named_whole_array_varargs(&argument_parameters, arg_names, &candidate.call_sig);
-                self.lambda_overload_partially_applicable(
-                    scope,
-                    &candidate,
-                    None,
-                    (args, partial),
-                    (&argument_parameters, &whole_array),
-                    type_args,
-                )
-                .then_some((candidate, argument_parameters))
+                Some((candidate, argument_parameters))
             })
             .collect::<Vec<_>>();
+        let applicable = slot_mapped
+            .iter()
+            .filter(|(candidate, argument_parameters)| {
+                let whole_array =
+                    named_whole_array_varargs(argument_parameters, arg_names, &candidate.call_sig);
+                self.lambda_overload_partially_applicable(
+                    scope,
+                    candidate,
+                    None,
+                    (args, partial),
+                    (argument_parameters, &whole_array),
+                    type_args,
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        // When no candidate accepts the call's functional arguments, kotlinc still reports against
+        // the one candidate that maps every argument, and analyzes those arguments against its
+        // parameters: `take(B::g)` names the misfit reference, not the call.
+        let mut mapped = if applicable.is_empty() && slot_mapped.len() == 1 {
+            slot_mapped
+        } else {
+            applicable
+        };
         // Member precedence is semantic receiver distance, not provider iteration order. Drop
         // inherited candidates when a nearer declaration is applicable before deciding whether
         // the postponed call is genuinely ambiguous.
@@ -49316,15 +49347,6 @@ impl<'a> Checker<'a> {
             [] => return None,
             [_] => 0,
             _ => {
-                let receiver_ty = match receiver {
-                    crate::symbol_resolver::SymRecv::Value(receiver)
-                    | crate::symbol_resolver::SymRecv::ImplicitValue(receiver) => receiver,
-                    crate::symbol_resolver::SymRecv::TypeName(classifier) => {
-                        Ty::obj_name(classifier)
-                    }
-                    crate::symbol_resolver::SymRecv::Type(_)
-                    | crate::symbol_resolver::SymRecv::TopLevel => return None,
-                };
                 let arg_tys = partial
                     .iter()
                     .map(|ty| ty.unwrap_or(Ty::Error))
@@ -49337,7 +49359,7 @@ impl<'a> Checker<'a> {
                         arg_tys: &arg_tys,
                     },
                     type_args,
-                    Some(receiver_ty),
+                    Some(receiver),
                     CallResultConstraint::direct(None),
                     mapped
                         .iter()
@@ -49372,7 +49394,7 @@ impl<'a> Checker<'a> {
             &named_whole_array_varargs(argument_parameters, arg_names, &candidate.call_sig),
             type_args,
         );
-        let expectations = argument_parameters
+        let expectations: Vec<_> = argument_parameters
             .iter()
             .copied()
             .enumerate()
@@ -49402,7 +49424,12 @@ impl<'a> Checker<'a> {
             "provider_lambda",
             "call={call:?} name={name} expectations={expectations:?}",
         );
-        Some(expectations)
+        // An expectation whose parameter count cannot fit the lambda AS WRITTEN is not an
+        // expectation for this call, whichever caller asked. A destructuring parameter is ONE
+        // written parameter: the parser gives it a single synthetic name and destructures it in the
+        // body.
+        self.member_expectations_fit_written_lambdas(args, &expectations)
+            .then_some(expectations)
     }
 
     /// The [`CallArgKind`] for an already-checked argument — pure, no checking side effects.
@@ -49506,7 +49533,7 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         call: ExprId,
-        receiver: crate::symbol_resolver::SymRecv<'_>,
+        family: ProviderMemberFamily,
         name: &str,
         args: &[ExprId],
         type_args: &[Ty],
@@ -49522,7 +49549,7 @@ impl<'a> Checker<'a> {
         let lambda_params = self.provider_member_lambda_expectations(
             scope,
             call,
-            receiver,
+            family,
             name,
             (args, &partial),
             type_args,
@@ -49748,21 +49775,14 @@ impl<'a> Checker<'a> {
                 self.provider_member_lambda_expectations(
                     scope,
                     call,
-                    crate::symbol_resolver::SymRecv::Value(receiver),
+                    self.value_member_family(receiver, name),
                     name,
                     (args, partial),
                     explicit_type_args,
                 )
             })
             .flatten()
-            .filter(|expectations| expectations.iter().any(Option::is_some))
-            // An expectation whose parameter count cannot fit the lambda AS WRITTEN is not an
-            // expectation for this call, whichever source offered it. A destructuring parameter is
-            // ONE written parameter: the parser gives it a single synthetic name and destructures it
-            // in the body.
-            .filter(|expectations| {
-                self.member_expectations_fit_written_lambdas(args, expectations)
-            });
+            .filter(|expectations| expectations.iter().any(Option::is_some));
         let provider_needs_sam = provider
             .as_ref()
             .is_some_and(|expectations| expectations.iter().flatten().any(|it| it.sam_conversion));
