@@ -1477,6 +1477,7 @@ fn stdlib_calls_reach_header_declared_callees() {
     let mut reached = std::collections::BTreeMap::<String, usize>::new();
     let mut lowered_with_callees = Vec::new();
     let mut undeclared = Vec::new();
+    let mut opaque_pointed = Vec::new();
     for (package, record) in stdlib_records(&root, &libraries) {
         let mut unit = DependencyBodyUnit::default();
         let callable = record.klib_body_callable().expect("signed");
@@ -1497,6 +1498,14 @@ fn stdlib_calls_reach_header_declared_callees() {
                 if !std::ptr::eq(innermost, &decline) {
                     let text = innermost.to_string();
                     let (_, reason) = text.split_once(" (").expect("a decline names its reason");
+                    if package == "kotlinx/cinterop"
+                        && matches!(
+                            record.name.as_str(),
+                            "interpretOpaquePointed" | "interpretNullableOpaquePointed"
+                        )
+                    {
+                        opaque_pointed.push(decline.to_string());
+                    }
                     *reached.entry(reason.to_owned()).or_default() += 1;
                 }
             }
@@ -1504,6 +1513,21 @@ fn stdlib_calls_reach_header_declared_callees() {
     }
     assert_eq!(undeclared, Vec::<String>::new());
     assert_eq!(lowered_with_callees, Vec::<String>::new());
+    // Both name the same-library private class `OpaqueNativePointed` and then call
+    // `interpretNullablePointed`, an external identity intrinsic. That declaration serializes
+    // no body, so each call is unserialized.
+    opaque_pointed.sort();
+    assert_eq!(
+        opaque_pointed,
+        [
+            "the KLIB body of `kotlinx.cinterop.interpretNullableOpaquePointed` (it reaches the \
+             KLIB body of `kotlinx.cinterop.interpretNullablePointed` (its library serializes none))"
+                .to_owned(),
+            "the KLIB body of `kotlinx.cinterop.interpretOpaquePointed` (it reaches the KLIB body \
+             of `kotlinx.cinterop.interpretNullablePointed` (its library serializes none))"
+                .to_owned(),
+        ]
+    );
     // Selected generic roots now pass their own declared headers and can reach unselected
     // generic callees. These exact deeper-decline counts are measured on every manifest release;
     // they are not expected-failure allowances for executable conformance tests. Elvis and safe-call
@@ -1526,7 +1550,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
-                ("its library serializes none)", 98),
+                ("its library serializes none)", 100),
             ]
         } else {
             vec![
@@ -1541,7 +1565,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
-                ("its library serializes none)", 98),
+                ("its library serializes none)", 100),
             ]
         };
     assert_eq!(
