@@ -173,13 +173,33 @@ fn reference_identity(
         }
         Target::FunctionValueConversion { ordinal } => format!("conversion_{ordinal}"),
         // A property read as a function value is the property reference, equal to every other
-        // reference to the same property.
+        // reference to the same property. A property another module may name is identified by
+        // its getter's published identity, in its own module as in every other.
         Target::Property(property) => match property.referenced_property() {
             Some(crate::ir::IrReferencedProperty::Module(property)) => {
-                format!("property_m{}", property.raw())
+                match file.dependency_signatures.property_declaration(property) {
+                    Some(identity) => {
+                        return Ok(ReferenceIdentity::Program(
+                            ReferenceDeclaration::dependency(identity)
+                                .marker(reference.bound_receiver.is_some()),
+                        ));
+                    }
+                    None => format!("property_m{}", property.raw()),
+                }
             }
             Some(crate::ir::IrReferencedProperty::External(property)) => {
-                format!("property_e{}", property.raw())
+                let identity = file
+                    .callables
+                    .property(property)
+                    .and_then(|fact| file.callables.callable(fact.getter))
+                    .and_then(|fact| fact.dependency_callable.as_ref())
+                    .ok_or(
+                        "a property reference without its module-qualified dependency identity",
+                    )?;
+                return Ok(ReferenceIdentity::Program(
+                    ReferenceDeclaration::dependency(identity)
+                        .marker(reference.bound_receiver.is_some()),
+                ));
             }
             None => {
                 return Err(

@@ -199,6 +199,10 @@ pub struct DependencyExportSignatures {
     /// identity a dependent module's implementation of the member is recorded under.
     interface_members: HashMap<FunId, KlibDependencyCallable>,
     interface_properties: HashMap<crate::fir::PropertyId, KlibDependencyCallable>,
+    /// Every property of this file another module may name, by its getter's published identity,
+    /// whether or not the getter has code of its own: what a reference to the property is equal
+    /// by in every module.
+    property_declarations: HashMap<crate::fir::PropertyId, KlibDependencyCallable>,
     member_receivers: HashMap<FunId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<FunId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers: HashMap<FunId, SingletonExtensionUnreadReceiver>,
@@ -279,6 +283,23 @@ impl DependencyExportSignatures {
         property: crate::fir::PropertyId,
     ) -> Option<&KlibDependencyCallable> {
         self.interface_properties.get(&property)
+    }
+
+    /// The published identity of `property`, which another module names it by: its getter's.
+    pub fn property_declaration(
+        &self,
+        property: crate::fir::PropertyId,
+    ) -> Option<&KlibDependencyCallable> {
+        self.property_declarations.get(&property)
+    }
+
+    /// Every property identity this file publishes.
+    pub fn property_declarations(
+        &self,
+    ) -> impl Iterator<Item = (crate::fir::PropertyId, &KlibDependencyCallable)> {
+        self.property_declarations
+            .iter()
+            .map(|(&property, identity)| (property, identity))
     }
 
     /// Exact unread extension receiver and its separately authenticated source-evaluation effect.
@@ -370,6 +391,18 @@ impl DependencyExportSignatures {
         assert!(
             previous.is_none(),
             "one interface property cannot publish two KLIB declaration identities"
+        );
+    }
+
+    pub(crate) fn record_property_declaration(
+        &mut self,
+        property: crate::fir::PropertyId,
+        getter: KlibDependencyCallable,
+    ) {
+        let previous = self.property_declarations.insert(property, getter);
+        assert!(
+            previous.is_none(),
+            "one property cannot publish two KLIB declaration identities"
         );
     }
 

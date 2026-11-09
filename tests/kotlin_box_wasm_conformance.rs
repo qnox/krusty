@@ -1265,6 +1265,10 @@ fn wasm_callable_references_share_identity_across_independent_module_analyses() 
             include_str!("box_regressions/constructorReferenceAcrossModules.kt"),
             "wasmConstructorReferenceAcrossModules",
         ),
+        (
+            include_str!("box_regressions/propertyReferenceIdentityAcrossModules.kt"),
+            "wasmPropertyReferenceIdentityAcrossModules",
+        ),
     ] {
         super::box_reference_classes::checked_box(source, stem)
             .expect("the exact Kotlin compiler must run the whole reference-identity fixture");

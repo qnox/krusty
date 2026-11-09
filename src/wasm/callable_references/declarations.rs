@@ -109,6 +109,17 @@ impl Declarations {
             }
             self.aliases(&aliases)?;
         }
+        // Another module names a property by its getter's published identity, the key its
+        // references to the property carry there.
+        for (property, identity) in exports.property_declarations() {
+            self.aliases(&[
+                Declaration::Property {
+                    module: module.to_owned(),
+                    property,
+                },
+                Declaration::Dependency(identity.clone()),
+            ])?;
+        }
         Ok(file)
     }
 }
