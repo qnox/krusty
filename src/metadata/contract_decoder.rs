@@ -131,6 +131,22 @@ fn decode_effect(
             }
             Effect::Returns(ReturnsValue::NotNull)
         }
+        // RETURNS_RESULT_OF and RETURNS_PARAMETER: one parameter reference each, read by kotlinc's
+        // return-value checker.
+        3 | 4 => {
+            if invocation_kind.is_some() {
+                return Err(cursor.error("returns-result effect carries an invocation kind"));
+            }
+            let [argument] = arguments.as_slice() else {
+                return Err(cursor.error("returns-result effect must name exactly one parameter"));
+            };
+            let param = ParamRef::from_wire(decode_parameter_reference(argument)?);
+            if effect_type == Some(3) {
+                Effect::ReturnsResultOf { lambda: param }
+            } else {
+                Effect::ReturnsParameter { param }
+            }
+        }
         value => return Err(cursor.error(format!("unsupported contract effect type {value}"))),
     };
     match conclusion {
@@ -142,7 +158,9 @@ fn decode_effect(
             }),
             Effect::CallsInPlace { .. }
             | Effect::ConditionalReturns { .. }
-            | Effect::HoldsIn { .. } => {
+            | Effect::HoldsIn { .. }
+            | Effect::ReturnsResultOf { .. }
+            | Effect::ReturnsParameter { .. } => {
                 Err(cursor.error("only a returns effect may have a conclusion"))
             }
         },
@@ -389,10 +407,72 @@ mod tests {
     #[test]
     fn an_unsupported_effect_is_an_explicit_metadata_error() {
         let mut effect = Vec::new();
+        int_field(&mut effect, 1, 5);
+        let error = decode_contract(&contract_with(&effect), &mut |_| unreachable!())
+            .expect_err("effect type 5 is not part of the metadata schema");
+        assert_eq!(error.into_parts().1, "unsupported contract effect type 5");
+    }
+
+    /// kotlinc 2.5's `run`: `callsInPlace(block, EXACTLY_ONCE)` and `returnsResultOf(block)`.
+    #[test]
+    fn a_returns_result_of_effect_names_its_lambda() {
+        let mut block = Vec::new();
+        int_field(&mut block, 2, 1);
+        let mut calls = Vec::new();
+        int_field(&mut calls, 1, 1);
+        message_field(&mut calls, 2, &block);
+        int_field(&mut calls, 4, 1);
+        let mut returns = Vec::new();
+        int_field(&mut returns, 1, 3);
+        message_field(&mut returns, 2, &block);
+        let mut contract = contract_with(&calls);
+        message_field(&mut contract, 1, &returns);
+        let contract = decode_contract(&contract, &mut |_| unreachable!())
+            .expect("returnsResultOf is a modeled effect")
+            .expect("the contract has effects");
+        assert_eq!(
+            contract.effects,
+            vec![
+                Effect::CallsInPlace {
+                    param: ParamRef::Param(0),
+                    kind: InvocationKind::ExactlyOnce,
+                },
+                Effect::ReturnsResultOf {
+                    lambda: ParamRef::Param(0),
+                },
+            ]
+        );
+    }
+
+    /// kotlinc 2.5's `apply`: `returnsParameter(this@apply)` names the extension receiver.
+    #[test]
+    fn a_returns_parameter_effect_names_its_parameter() {
+        let mut receiver = Vec::new();
+        int_field(&mut receiver, 2, 0);
+        let mut effect = Vec::new();
+        int_field(&mut effect, 1, 4);
+        message_field(&mut effect, 2, &receiver);
+        let contract = decode_contract(&contract_with(&effect), &mut |_| unreachable!())
+            .expect("returnsParameter is a modeled effect")
+            .expect("the contract has an effect");
+        assert_eq!(
+            contract.effects,
+            vec![Effect::ReturnsParameter {
+                param: ParamRef::Receiver,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_returns_result_of_effect_without_its_lambda_is_rejected() {
+        let mut effect = Vec::new();
         int_field(&mut effect, 1, 3);
         let error = decode_contract(&contract_with(&effect), &mut |_| unreachable!())
-            .expect_err("RETURNS_RESULT_OF is not modeled");
-        assert_eq!(error.into_parts().1, "unsupported contract effect type 3");
+            .expect_err("RETURNS_RESULT_OF names exactly one parameter");
+        assert_eq!(
+            error.into_parts().1,
+            "returns-result effect must name exactly one parameter"
+        );
     }
 
     #[test]

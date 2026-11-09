@@ -8,9 +8,9 @@ use krusty::jvm::classreader::parse_class;
 /// each module's contiguous half-open range into it, in emission order. A single-module topology
 /// holds one range covering every class under [`box_reference_classes::MAIN_MODULE`]; a multi-module
 /// build records one range per module so a class name shared by two modules stays two identities.
-pub(super) struct CompiledClasses {
-    pub(super) flat: Vec<(String, Vec<u8>)>,
-    pub(super) module_ranges: Vec<(String, std::ops::Range<usize>)>,
+pub(in super::super) struct CompiledClasses {
+    pub(in super::super) flat: Vec<(String, Vec<u8>)>,
+    pub(in super::super) module_ranges: Vec<(String, std::ops::Range<usize>)>,
 }
 
 impl CompiledClasses {

@@ -10,10 +10,6 @@ use crate::encode::{CompositeType, SubType};
 use crate::function_values::INVOKE_FIELD;
 use crate::objects::immutable;
 
-/// Why a lambda or callable reference converted to a `fun interface` declines: SAM conversion
-/// has no Wasm representation yet.
-pub(super) const SAM_CONVERSION: &str = "a lambda converted to a `fun interface`";
-
 /// What `==` on a function value compares.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FunctionEquality {
@@ -25,12 +21,14 @@ pub(super) enum FunctionEquality {
 
 impl Body<'_> {
     /// A new function value whose body is `function`, carrying `captures` as its leading
-    /// arguments.
+    /// arguments. With `sam`, the value is also an instance of that `fun interface`, whose member
+    /// it implements.
     pub(super) fn function_value(
         &mut self,
         function: FunId,
         captures: &[u32],
         equality: FunctionEquality,
+        sam: Option<&krusty::ir::IrSamTarget>,
     ) -> Result<(), Unsupported> {
         let declaration = self
             .ir
@@ -126,9 +124,13 @@ impl Body<'_> {
         };
         let to_string = self.runtime.objects.trap(self.module, to_string_ty);
         let objects = &mut self.runtime.objects;
-        let (_, itable) = objects
-            .interfaces
-            .class(self.module, objects.itable, vec![structure]);
+        let (record, itable) =
+            objects
+                .interfaces
+                .class(self.module, objects.itable, vec![structure]);
+        if let Some(target) = sam {
+            self.implement_sam(record, invoke, target)?;
+        }
         let mut init = Code::default();
         for function in [equals, hash_code, to_string] {
             self.module.reference_function(function);
@@ -196,7 +198,77 @@ impl Body<'_> {
                 kind,
                 receiver: reference.bound_receiver.map(|_| reference.captures.len()),
             },
+            None,
         )
+    }
+
+    /// Make the function value of `record`, whose boxed entry is `invoke`, an instance of the
+    /// `fun interface` `target` names: its member forwards to the entry, boxing each argument and
+    /// unboxing the result to the member's own carriers.
+    fn implement_sam(
+        &mut self,
+        record: crate::interface_dispatch::ClassRef,
+        invoke: u32,
+        target: &krusty::ir::IrSamTarget,
+    ) -> Result<(), Unsupported> {
+        if target.suspend {
+            return Err("a suspend functional interface".into());
+        }
+        let krusty::ir::IrSamMethod::Module(method) = target.method_target else {
+            return Err("a functional interface declared outside this module".into());
+        };
+        // The object implements only the abstract member. An interface default it would inherit
+        // has no body this object could stand on yet.
+        let interface = self
+            .ir
+            .class_id_by_name(target.classifier)
+            .ok_or("a functional interface declared outside this module")?;
+        let declares_default = self.ir.classes[interface as usize]
+            .methods
+            .iter()
+            .any(|&function| self.ir.functions[function as usize].body.is_some());
+        if declares_default
+            || self
+                .ir
+                .inherited_defaults
+                .get(&target.classifier)
+                .is_some_and(|defaults| !defaults.is_empty())
+        {
+            return Err("a functional interface with default members".into());
+        }
+        let (member, params, result) = self.sam_member(method)?;
+        let mut code = Code::default();
+        let mut locals = Vec::new();
+        code.local_get(0);
+        for (index, &param) in params.iter().enumerate() {
+            if carrier(param)?.is_none() {
+                return Err("a functional interface member taking a `Unit` value".into());
+            }
+            code.local_get(index as u32 + 1);
+            self.pack_result(&mut code, &mut locals, params.len() as u32 + 1, param)?;
+        }
+        code.call(invoke);
+        if carrier(result)?.is_none() {
+            code.drop_();
+        } else {
+            self.unpack_argument(&mut code, result)?;
+        }
+        let ty = self.runtime.objects.interfaces.ty(member);
+        let thunk = self.module.declare();
+        self.module.define(thunk, Function { ty, locals, code });
+        let interfaces = &mut self.runtime.objects.interfaces;
+        interfaces.implement(record, member, thunk)?;
+        let hierarchy = self
+            .ir
+            .classifier_hierarchies
+            .get(&target.classifier)
+            .into_iter()
+            .flatten()
+            .map(|applied| applied.classifier);
+        for interface in std::iter::once(target.classifier).chain(hierarchy) {
+            interfaces.instance_of(record, interface);
+        }
+        Ok(())
     }
 
     /// `function(args)`, where `function` is a function value taking `params` and answering
