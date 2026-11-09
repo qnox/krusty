@@ -273,15 +273,12 @@ bridges/kt74377.kt
 bridges/methodFromTrait.kt
 bridges/multipleModules1.kt
 bridges/noBridgeOnMutableCollectionInheritance.kt
-bridges/overrideAbstractProperty.kt
 bridges/overridesTwoDeclarations/abstractDeclarationOverridesAbstractAndConcreteDeclarations.kt
-bridges/propertyAccessorsWithoutBody.kt
 bridges/propertyDiamondFakeOverride.kt
 bridges/returnTypeSignature.kt
 bridges/special.kt
 bridges/specialGeneric.kt
 bridges/strListContains.kt
-bridges/substitutionInSuperClass/property.kt
 bridges/test0.kt
 bridges/test1.kt
 bridges/test10.kt
@@ -561,7 +558,6 @@ classes/comanionObjectFieldVsClassField.kt
 classes/delegationGenericArg.kt
 classes/delegationGenericArgUpperBound.kt
 classes/delegationGenericLongArg.kt
-classes/exceptionConstructor.kt
 classes/implementComparableInSubclass.kt
 classes/initializerBlockDImpl.kt
 classes/inner/instantiateInDerived.kt
@@ -576,7 +572,6 @@ classes/kt1721.kt
 classes/kt1980.kt
 classes/kt2391.kt
 classes/kt2417.kt
-classes/kt2480.kt
 classes/kt2566_2.kt
 classes/kt2626.kt
 classes/kt2711.kt
@@ -649,11 +644,9 @@ companion/protectedConstValFromSuperCompanion.kt
 companionBlocksAndExtensions/lateinit.kt
 compileKotlinAgainstKotlin/adaptedSuspendFunctionReference.kt
 compileKotlinAgainstKotlin/clashingFakeOverrideSignatures.kt
-compileKotlinAgainstKotlin/companionObjectInEnum.kt
 compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
-compileKotlinAgainstKotlin/enum.kt
 compileKotlinAgainstKotlin/genericSetter.kt
 compileKotlinAgainstKotlin/inlineClasses/callDeserializedPropertyOnInlineClassType.kt
 compileKotlinAgainstKotlin/inlineClasses/constructorWithInlineClassParametersInBinaryDependencies.kt
@@ -703,7 +696,6 @@ compileKotlinAgainstKotlin/sealedClass.kt
 compileKotlinAgainstKotlin/secondaryConstructors.kt
 compileKotlinAgainstKotlin/simpleValAnonymousObject.kt
 compileKotlinAgainstKotlin/specialBridgesInDependencies.kt
-compileKotlinAgainstKotlin/starImportEnum.kt
 compileKotlinAgainstKotlin/typeAliasesKt13181.kt
 compileKotlinAgainstKotlin/unsignedTypesInAnnotations.kt
 compileKotlinAgainstKotlin/useDeserializedFunInterface.kt
@@ -857,11 +849,9 @@ controlStructures/quicksort.kt
 controlStructures/slowDsl/slowHtmlLikeDsl.kt
 controlStructures/tryCatchInExpressions/differentTypes.kt
 controlStructures/tryCatchInExpressions/kt8608.kt
-controlStructures/tryCatchInExpressions/multipleCatchBlocks.kt
 controlStructures/tryCatchInExpressions/nonLocalReturnInTryFinally.kt
 controlStructures/tryCatchInExpressions/tryCatchAfterWhileTrue.kt
 controlStructures/tryCatchInExpressions/tryFinallyOfTypeUnit.kt
-controlStructures/tryCatchInExpressions/tryInsideTry.kt
 controlflow/break.kt
 controlflow/break1.kt
 controlflow/for_loops.kt
@@ -1644,7 +1634,6 @@ enum/lambdaInDefault.kt
 enum/loop.kt
 enum/multipleModules.kt
 enum/nested.kt
-enum/openMethodNoOverrides.kt
 enum/ordinalsWithEnumEntitiesOverrides.kt
 enum/reorderedArguments.kt
 enum/sortEnumEntries.kt
@@ -1686,7 +1675,6 @@ evaluate/ushortOperations.kt
 exceptions/catch1.kt
 exceptions/catch2.kt
 exceptions/catch7.kt
-exceptions/extend0.kt
 exceptions/kt69534.kt
 exceptions/rethrow.kt
 exceptions/throw0.kt
@@ -2015,7 +2003,6 @@ inference/plusAssignInsideLambda.kt
 inference/referenceToCatchParameterFromLambdaExpression.kt
 inference/safeCastWithElvis.kt
 inference/suspendExtensionRecevierFromConstraint.kt
-inference/tryCatchAtAssignment.kt
 inference/tryCatchAtAssignmentWithSmartCast.kt
 inference/unsafeVarianceCodegen.kt
 inference/whenAtAssignmentWithSmartCast.kt
@@ -3141,7 +3128,6 @@ multiplatform/k2/delegation/delegationToExpectInterface_withNewMembersSameName.k
 multiplatform/k2/delegation/delegationToExpectInterface_withOverrideInDelegated.kt
 multiplatform/k2/delegation/delegationWithIntersection.kt
 multiplatform/k2/enumStaticMethods.kt
-multiplatform/k2/exhaustiveness/commonEnum.kt
 multiplatform/k2/exhaustiveness/commonSealedClass.kt
 multiplatform/k2/expectRefinement.kt
 multiplatform/k2/expectValInInlineClass.kt
@@ -4712,7 +4698,6 @@ wasm-new-exception-handling/catch5.kt
 wasm-new-exception-handling/catch6.kt
 wasm-new-exception-handling/catch7.kt
 wasm-new-exception-handling/catch8.kt
-wasm-new-exception-handling/extend0.kt
 wasm-new-exception-handling/finally1.kt
 wasm-new-exception-handling/finally10.kt
 wasm-new-exception-handling/finally11.kt
@@ -4749,7 +4734,6 @@ wasm-old-exception-handling/catch5.kt
 wasm-old-exception-handling/catch6.kt
 wasm-old-exception-handling/catch7.kt
 wasm-old-exception-handling/catch8.kt
-wasm-old-exception-handling/extend0.kt
 wasm-old-exception-handling/finally1.kt
 wasm-old-exception-handling/finally10.kt
 wasm-old-exception-handling/finally11.kt
