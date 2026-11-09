@@ -73,7 +73,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The commit history only: the build number counts commits and lint reads their
+          # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
+          filter: tree:0
       # Commit messages are checked here so a push does not queue a second workflow for them.
       # The check finishes in seconds; a separate job was still waiting on a runner.
       - name: attribution commits
@@ -166,7 +169,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The commit history only: the build number counts commits and lint reads their
+          # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
+          filter: tree:0
       # Self-hosted runners have no preinstalled rustup.
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
@@ -953,7 +959,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The commit history only: the build number counts commits and lint reads their
+          # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
+          filter: tree:0
       - *just-on-path
       - *install-just
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
@@ -1012,7 +1021,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The commit history only: the build number counts commits and lint reads their
+          # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
+          filter: tree:0
       - *just-on-path
       - *install-just
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
@@ -1060,7 +1072,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The commit history only: the build number counts commits and lint reads their
+          # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
+          filter: tree:0
       - *just-on-path
       - *install-just
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
@@ -1083,9 +1098,22 @@ jobs:
           ANDROID_USER_HOME: ${{ runner.temp }}/krusty-android/${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/user
         with:
           packages: 'platforms;android-36'
+      # Our runners' image holds each Gradle the matrix runs in the tool cache. setup-gradle installs a
+      # gradle-version itself (and asks services.gradle.org first) unless it is the gradle on PATH, and
+      # those downloads failed lanes with 504s and timeouts.
+      - name: look for an installed Gradle
+        id: gradle-on-path
+        shell: bash
+        env:
+          GRADLE_ENTRY: ${{ runner.tool_cache }}/gradle/${{ matrix.gradle }}/${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+        run: |
+          if [ -f "$GRADLE_ENTRY.complete" ] && [ -x "$GRADLE_ENTRY/bin/gradle" ]; then
+            echo "$GRADLE_ENTRY/bin" >> "$GITHUB_PATH"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
-          gradle-version: ${{ matrix.gradle }}
+          gradle-version: ${{ steps.gradle-on-path.outputs.found != 'true' && matrix.gradle || '' }}
           # The integration harness deliberately uses an isolated user home below. Do not restore
           # an unused ~/.gradle cache; the next step owns the exact home the nested builds consume.
           cache-provider: external
@@ -1097,6 +1125,9 @@ jobs:
           # Each matrix lane has a different Gradle/KGP/KSP dependency graph. The generated fixture
           # build scripts live in gradle.rs, while the tested plugin build lives under tools/.
           key: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-${{ hashFiles('Cargo.lock', 'crates/krusty-build/src/gradle.rs', 'tools/krusty-gradle/**') }}
+          # A changed key restores the lane's last cache: most dependencies are unchanged, and a
+          # miss re-downloaded all ~780 MB (75% of lanes missed, 1.5-2.3 min each).
+          restore-keys: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
@@ -1157,7 +1188,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          # The commit history only: the build number counts commits and lint reads their
+          # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
+          filter: tree:0
       - *just-on-path
       - *install-just
       - uses: actions/setup-java@v6.2.0
@@ -1191,7 +1225,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          # The commit history only: the build number counts commits and lint reads their
+          # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
+          filter: tree:0
       - *just-on-path
       - *install-just
       - uses: actions/setup-java@v6.2.0
@@ -1237,7 +1274,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The commit history only: the build number counts commits and lint reads their
+          # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
+          filter: tree:0
       - *just-on-path
       - *install-just
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -1288,7 +1328,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The commit history only: the build number counts commits and lint reads their
+          # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
+          filter: tree:0
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
@@ -1372,7 +1415,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The commit history only: the build number counts commits and lint reads their
+          # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
+          filter: tree:0
       # Every validated master ancestor publishes. Only retries of this exact commit wait on
       # this lock; slow immutable package publication cannot hold the global latest/badge lock.
       - name: take the commit publication lock
