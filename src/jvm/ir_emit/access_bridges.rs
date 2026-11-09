@@ -213,6 +213,9 @@ pub(super) struct ProtectedMemberAccessBridge {
     pub bridge_parameters: Vec<Ty>,
     result: Ty,
     parameter_names: Vec<Option<String>>,
+    /// The instance field a protected `@JvmField` property's bridge reads or writes in place of
+    /// an accessor, which such a property does not have.
+    field: Option<String>,
 }
 
 impl ProtectedMemberAccessBridge {
@@ -231,6 +234,7 @@ impl ProtectedMemberAccessBridge {
             bridge_parameters: target_parameters.clone(),
             target_parameters,
             result: ir_ty_to_jvm(&result),
+            field: None,
         }
     }
 
@@ -557,6 +561,7 @@ pub(super) fn cross_owner_member_calls(
                                 bridge_parameters,
                                 result: jvm_declared_ty(&function.ret),
                                 parameter_names,
+                                field: None,
                             },
                         );
                     }
@@ -642,6 +647,7 @@ pub(super) fn cross_owner_member_calls(
                                         .iter()
                                         .map(|identity| identity.source_name.clone())
                                         .collect(),
+                                    field: None,
                                 },
                             );
                         }
@@ -711,10 +717,19 @@ pub(super) fn cross_owner_member_calls(
                         }
                         let parameter_names =
                             protected_property_parameter_names(property, *write, &name);
+                        // A `@JvmField` property has no accessor: kotlinc's bridge reads or writes
+                        // the field itself and is named after the accessor with a `$p` suffix.
+                        let field = crate::jvm::module_calls::instance_jvm_field_owner(property)
+                            .map(|_| property.name.clone());
+                        let name = match field {
+                            Some(_) => format!("{name}$p"),
+                            None => name,
+                        };
                         protected.insert(
                             expression,
                             ProtectedMemberAccessBridge {
                                 owner: bridge_owner,
+                                field,
                                 name,
                                 target_parameters: target_parameters
                                     .iter()
@@ -770,6 +785,7 @@ pub(super) fn cross_owner_member_calls(
                                         bridge_parameters: parameters,
                                         result: jvm_declared_ty(&dependency.result),
                                         parameter_names: dependency.parameter_names.into_vec(),
+                                        field: None,
                                     },
                                 );
                             }
@@ -825,6 +841,11 @@ pub(super) fn emit_protected_member_access_bridge(
             .map(|parameter| slot_words(*parameter))
             .sum(),
     );
+    if let Some(field) = &bridge.field {
+        emit_protected_field_access(bridge, field, owner, cw, line, code);
+        set_protected_bridge_locals(bridge, owner, &bridge_name, &bridge_descriptor, cw);
+        return;
+    }
     code.aload(0);
     let mut slot = 1;
     for (&bridge_parameter, &target_parameter) in bridge
@@ -871,6 +892,50 @@ pub(super) fn emit_protected_member_access_bridge(
     set_protected_bridge_locals(bridge, owner, &bridge_name, &bridge_descriptor, cw);
 }
 
+/// The body of a protected `@JvmField` property's bridge: `$this`'s field, read or written with
+/// the bridge's one value parameter.
+fn emit_protected_field_access(
+    bridge: &ProtectedMemberAccessBridge,
+    field: &str,
+    owner: &str,
+    cw: &mut ClassWriter,
+    line: u32,
+    mut code: CodeBuilder,
+) {
+    let (name, descriptor) = bridge.signature();
+    if line != 0 {
+        code.mark_line(line);
+    }
+    code.aload(0);
+    let value = match bridge.bridge_parameters.as_slice() {
+        [] => None,
+        [value] => Some(*value),
+        _ => unreachable!("a field bridge takes at most the written value"),
+    };
+    let slot_ty = value.unwrap_or(bridge.result);
+    let field_ref = cw.fieldref(owner, field, &type_descriptor(slot_ty));
+    let slot = match value {
+        Some(value) => {
+            load(value, 1, &mut code);
+            code.putfield(field_ref, slot_words(value) as i32);
+            1 + slot_words(value)
+        }
+        None => {
+            code.getfield(field_ref, slot_words(bridge.result) as i32);
+            1
+        }
+    };
+    emit_return(bridge.result, &mut code);
+    code.ensure_locals(slot);
+    code.link();
+    cw.add_method(
+        0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
+        &name,
+        &descriptor,
+        &code,
+    );
+}
+
 fn set_protected_bridge_locals(
     bridge: &ProtectedMemberAccessBridge,
     owner: &str,
@@ -905,21 +970,26 @@ pub(super) fn protected_property_access(
     else {
         return access;
     };
-    if !matches!(
-        access,
+    // An accessor's bridge calls it; a `@JvmField`'s bridge reads or writes the field itself.
+    let bridged = match &access {
         PropertyAccess::Accessor {
-            is_static: false,
-            ..
-        }
-    ) {
+            is_static: false, ..
+        } => bridge.field.is_none(),
+        PropertyAccess::Field {
+            is_static: false, ..
+        } => bridge.field.is_some(),
+        PropertyAccess::Accessor { .. }
+        | PropertyAccess::Field { .. }
+        | PropertyAccess::AccessBridge { .. } => false,
+    };
+    if !bridged {
         return access;
     }
-    let mut parameters = vec![Ty::obj_name(bridge.owner)];
-    parameters.extend(bridge.bridge_parameters.iter().copied());
+    let (name, descriptor) = bridge.signature();
     PropertyAccess::AccessBridge {
         owner: bridge.owner,
-        name: format!("access${}", bridge.name),
-        descriptor: method_descriptor(&parameters, bridge.result),
+        name,
+        descriptor,
         takes_receiver: true,
         inline_uninitialized_guard: None,
     }
