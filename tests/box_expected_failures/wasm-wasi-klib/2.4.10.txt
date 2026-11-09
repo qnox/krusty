@@ -512,7 +512,6 @@ casts/unitAsSafeAny.kt
 casts/unitNullableCast.kt
 casts/wasmCastMessages.kt
 checkcastOptimization/kt19128.kt
-checkcastOptimization/kt19246.kt
 checkcastOptimization/kt50215.kt
 classDelegation/delegationToInOutTypeParameters.kt
 classDelegation/delegationToOutTypeParameter.kt
