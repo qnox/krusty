@@ -16593,7 +16593,7 @@ impl<'a> Checker<'a> {
                             if functions.is_empty()
                                 && !self.lexical_value_declares(scope, &fname) =>
                         {
-                            (functions, self.scope_constructor_candidates(internal))
+                            (functions, self.scope_constructor_candidates(scope, internal, call))
                         }
                         _ => (functions, Vec::new()),
                     }
