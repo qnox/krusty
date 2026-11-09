@@ -28,7 +28,7 @@ const LAMBDA_MARKER_PREFIX: &str = "$i$a$";
 
 /// The numbering state of the method being generated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct InlineScopes {
+pub struct InlineScopes {
     /// `inlinedScopes`: how many scopes the method has numbered so far.
     pub inlined: i32,
     /// `currentCallSiteLineNumber`: the line of the call whose body is numbered next.

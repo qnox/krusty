@@ -134,7 +134,7 @@ fn run_kotlinc_native(arguments: &[String]) {
         eprintln!("error: {error}");
         std::process::exit(1);
     }
-    match krusty::native::compile_native(&options) {
+    match krusty_native::compile_native(&options) {
         Ok(compiled) => eprint!("{}", compiled.warnings),
         Err(error) => {
             eprint!("{error}");
@@ -148,7 +148,7 @@ fn run_cinterop(arguments: &[String]) {
     match krusty_cli::cinterop::parse(arguments) {
         Ok(krusty_cli::cinterop::Invocation::Help) => println!("{}", krusty_cli::cinterop::HELP),
         Ok(krusty_cli::cinterop::Invocation::Build(options)) => {
-            if let Err(error) = krusty::native::cinterop::build_interop_library(&options) {
+            if let Err(error) = krusty_native::cinterop::build_interop_library(&options) {
                 eprintln!("error: {error}");
                 std::process::exit(1);
             }

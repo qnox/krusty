@@ -60,7 +60,7 @@ const UNSUPPORTED_SUPER_CLASSES: [&str; 13] = [
 
 /// The lambda `extracted` names, read from its class: the body every `invoke` of the parameter
 /// is replaced with. `function` is the inline function's name, without `$default`.
-pub(in crate::jvm) fn load(
+pub fn load(
     class: &ClassNode,
     extracted: &ExtractedDefaultLambda,
     function: &str,
