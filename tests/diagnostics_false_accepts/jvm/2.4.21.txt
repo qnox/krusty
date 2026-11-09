@@ -139,7 +139,6 @@ compiler/testData/diagnostics/tests/callableReference/bound/object.kt
 compiler/testData/diagnostics/tests/callableReference/bound/privateToThis.kt
 compiler/testData/diagnostics/tests/callableReference/bound/reservedExpressionSyntax3.kt
 compiler/testData/diagnostics/tests/callableReference/callableReferenceAsLastExpressionInBlock.kt
-compiler/testData/diagnostics/tests/callableReference/constraintFromLHSWithCorrectDirection.kt
 compiler/testData/diagnostics/tests/callableReference/function/ambiguityTopLevelVsTopLevelGeneric.kt
 compiler/testData/diagnostics/tests/callableReference/function/constructorFromClass.kt
 compiler/testData/diagnostics/tests/callableReference/function/constructorFromExtension.kt
@@ -1437,6 +1436,7 @@ compiler/testData/diagnostics/tests/sourceCompatibility/apiVersion/typealiasesAs
 compiler/testData/diagnostics/tests/sourceCompatibility/apiVersion/typealiasesAsTypes.kt
 compiler/testData/diagnostics/tests/sourceCompatibility/apiVersion/typealiasesOnImport.kt
 compiler/testData/diagnostics/tests/strictEquals/disabled/apiVersionLess25.kt
+compiler/testData/diagnostics/tests/strictEquals/disabled/disabledFeature.kt
 compiler/testData/diagnostics/tests/strictEquals/enabled/simple.kt
 compiler/testData/diagnostics/tests/strictEquals/enabled/wrongElementsAnnotated.kt
 compiler/testData/diagnostics/tests/subtyping/findClosestCorrespondingSupertype.kt
