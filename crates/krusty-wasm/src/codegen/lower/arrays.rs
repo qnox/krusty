@@ -4,10 +4,10 @@
 //! the element type that storage holds, and how a packed element is read back. Allocation,
 //! spreads, reads, stores and bounds checks are shared.
 
+use crate::array_objects::{ArrayForm, ElementRead, STORAGE_FIELD};
 use krusty::backend::BackendCompilerIntrinsic;
 use krusty::ir::{IrCheckedOperation, IrPropertyDispatch};
 use krusty::libraries::RuntimeExceptionKind;
-use crate::array_objects::{ArrayForm, ElementRead, STORAGE_FIELD};
 
 #[cfg(test)]
 mod tests;

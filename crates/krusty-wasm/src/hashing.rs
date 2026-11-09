@@ -32,7 +32,7 @@ const CANONICAL_NAN_F64: i64 = 0x7ff8_0000_0000_0000;
 
 /// The hash of `kotlin.Unit`. `Unit` inherits `Any`'s identity hash, and any fixed number is an
 /// identity hash of a class with exactly one instance.
-const UNIT_HASH: i32 = 0;
+pub(super) const UNIT_HASH: i32 = 0;
 
 /// Function indices of the hashing runtime.
 pub(super) struct Hashing {

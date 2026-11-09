@@ -1489,6 +1489,7 @@ impl SignatureConstraintExtractor {
                                 arguments,
                                 scope,
                                 origin: node_origin,
+                                later: None,
                             })
                         } else {
                             let arguments =
@@ -1596,65 +1597,19 @@ impl SignatureConstraintExtractor {
                         }
                         let arguments =
                             self.call_arguments(file, expression, args, scope, origin)?;
-                        if let Some(callee) = self
+                        let lexical_callee = self
                             .lexical_values
                             .iter()
                             .rev()
-                            .find_map(|values| values.get(spelling.as_str()).copied())
-                        {
-                            if spelling == "this" && !self.local_classifier_stack.is_empty() {
-                                let type_arguments =
-                                    self.call_type_arguments(file, expression, scope, origin);
-                                self.source_member_call(
-                                    callee,
-                                    "invoke",
-                                    arguments,
-                                    type_arguments,
-                                    file.call_has_trailing_lambda.contains(&expression.0),
-                                    scope,
-                                    callee_origin,
-                                )
-                            } else {
-                                self.graph.add_expr(SigExpr::Invoke {
-                                    callee,
-                                    arguments,
-                                    scope,
-                                    origin: node_origin,
-                                })
-                            }
-                        } else if let Some(declaration) = self
-                            .local_classifier_stack
-                            .last()
-                            .copied()
-                            .and_then(|classifier| {
-                                if !file.is_local_declaration(classifier)
-                                    && !file.is_anonymous_object_class(classifier)
-                                {
-                                    return None;
-                                }
-                                let crate::ast::Decl::Class(classifier_decl) =
-                                    file.decl(classifier)
-                                else {
-                                    return None;
-                                };
-                                classifier_decl
-                                    .methods
-                                    .iter()
-                                    .any(|method| method.name == *spelling)
-                                    .then(|| {
-                                        self.source_classifiers.get(&classifier_decl.span).copied()
-                                    })
-                                    .flatten()
-                            })
-                        {
-                            let receiver = self
-                                .graph
-                                .add_expr(SigExpr::ClassifierType { declaration, scope });
+                            .find_map(|values| values.get(spelling.as_str()).copied());
+                        if let Some(callee) = lexical_callee.filter(|_| {
+                            spelling == "this" && !self.local_classifier_stack.is_empty()
+                        }) {
                             let type_arguments =
                                 self.call_type_arguments(file, expression, scope, origin);
                             self.source_member_call(
-                                receiver,
-                                spelling,
+                                callee,
+                                "invoke",
                                 arguments,
                                 type_arguments,
                                 file.call_has_trailing_lambda.contains(&expression.0),
@@ -1662,36 +1617,90 @@ impl SignatureConstraintExtractor {
                                 callee_origin,
                             )
                         } else {
-                            let type_arguments =
-                                self.call_type_arguments(file, expression, scope, origin);
-                            let lexical_classifier =
-                                self.lexical_types.iter().rev().find_map(|types| {
-                                    match types.get(spelling.as_str()) {
-                                        Some(CompactLexicalType::Classifier(declaration)) => {
-                                            Some(*declaration)
-                                        }
-                                        Some(CompactLexicalType::Alias(_)) | None => None,
+                            // A lexical value is the call tower's nearest level. The later levels
+                            // stay in the graph for when that value has no applicable `invoke`.
+                            let later = if let Some(declaration) = self
+                                .local_classifier_stack
+                                .last()
+                                .copied()
+                                .and_then(|classifier| {
+                                    if !file.is_local_declaration(classifier)
+                                        && !file.is_anonymous_object_class(classifier)
+                                    {
+                                        return None;
                                     }
-                                });
-                            let spelling = self.graph.intern_name(spelling);
-                            let target =
-                                self.graph
-                                    .add_callable_selection(DeferredCallableSelection {
-                                        scope,
-                                        spelling,
-                                        lexical_classifier,
-                                        origin: callee_origin,
-                                        expected: None,
-                                        type_arguments,
-                                        trailing_lambda: file
-                                            .call_has_trailing_lambda
-                                            .contains(&expression.0),
+                                    let crate::ast::Decl::Class(classifier_decl) =
+                                        file.decl(classifier)
+                                    else {
+                                        return None;
+                                    };
+                                    classifier_decl
+                                        .methods
+                                        .iter()
+                                        .any(|method| method.name == *spelling)
+                                        .then(|| {
+                                            self.source_classifiers
+                                                .get(&classifier_decl.span)
+                                                .copied()
+                                        })
+                                        .flatten()
+                                }) {
+                                let receiver = self
+                                    .graph
+                                    .add_expr(SigExpr::ClassifierType { declaration, scope });
+                                let type_arguments =
+                                    self.call_type_arguments(file, expression, scope, origin);
+                                self.source_member_call(
+                                    receiver,
+                                    spelling,
+                                    arguments,
+                                    type_arguments,
+                                    file.call_has_trailing_lambda.contains(&expression.0),
+                                    scope,
+                                    callee_origin,
+                                )
+                            } else {
+                                let type_arguments =
+                                    self.call_type_arguments(file, expression, scope, origin);
+                                let lexical_classifier =
+                                    self.lexical_types.iter().rev().find_map(|types| {
+                                        match types.get(spelling.as_str()) {
+                                            Some(CompactLexicalType::Classifier(declaration)) => {
+                                                Some(*declaration)
+                                            }
+                                            Some(CompactLexicalType::Alias(_)) | None => None,
+                                        }
                                     });
-                            self.graph.add_expr(SigExpr::Call {
-                                target,
-                                arguments,
-                                qualified: None,
-                            })
+                                let spelling = self.graph.intern_name(spelling);
+                                let target =
+                                    self.graph
+                                        .add_callable_selection(DeferredCallableSelection {
+                                            scope,
+                                            spelling,
+                                            lexical_classifier,
+                                            origin: callee_origin,
+                                            expected: None,
+                                            type_arguments,
+                                            trailing_lambda: file
+                                                .call_has_trailing_lambda
+                                                .contains(&expression.0),
+                                        });
+                                self.graph.add_expr(SigExpr::Call {
+                                    target,
+                                    arguments,
+                                    qualified: None,
+                                })
+                            };
+                            match lexical_callee {
+                                Some(callee) => self.graph.add_expr(SigExpr::Invoke {
+                                    callee,
+                                    arguments,
+                                    scope,
+                                    origin: node_origin,
+                                    later: Some(later),
+                                }),
+                                None => later,
+                            }
                         }
                     }
                     Expr::Member { receiver, name } => {
@@ -1750,6 +1759,7 @@ impl SignatureConstraintExtractor {
                                 arguments,
                                 scope,
                                 origin: node_origin,
+                                later: None,
                             })
                         } else if let Some(path) =
                             qualified_calls::callable_path(self, file, *callee)
@@ -1863,6 +1873,7 @@ impl SignatureConstraintExtractor {
                             arguments,
                             scope,
                             origin: node_origin,
+                            later: None,
                         })
                     }
                 }
