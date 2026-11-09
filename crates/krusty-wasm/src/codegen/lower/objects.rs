@@ -32,7 +32,7 @@ use super::super::property_registry::{MemberProperty, MemberPropertyDefinition, 
 use super::{carrier, Body, FileContext, Unsupported, STRING};
 
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
-const STRING_HEAP: HeapType = HeapType::Concrete(1);
+pub(super) const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
 mod override_bridges;
 
