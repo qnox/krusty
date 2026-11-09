@@ -274,16 +274,13 @@ bridges/kt74377.kt
 bridges/methodFromTrait.kt
 bridges/multipleModules1.kt
 bridges/noBridgeOnMutableCollectionInheritance.kt
-bridges/overrideAbstractProperty.kt
 bridges/overrideWithValueClassReturn.kt
 bridges/overridesTwoDeclarations/abstractDeclarationOverridesAbstractAndConcreteDeclarations.kt
-bridges/propertyAccessorsWithoutBody.kt
 bridges/propertyDiamondFakeOverride.kt
 bridges/returnTypeSignature.kt
 bridges/special.kt
 bridges/specialGeneric.kt
 bridges/strListContains.kt
-bridges/substitutionInSuperClass/property.kt
 bridges/test0.kt
 bridges/test1.kt
 bridges/test10.kt
@@ -582,7 +579,6 @@ classes/kt1721.kt
 classes/kt1980.kt
 classes/kt2391.kt
 classes/kt2417.kt
-classes/kt2480.kt
 classes/kt2566_2.kt
 classes/kt2626.kt
 classes/kt2711.kt
