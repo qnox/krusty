@@ -6,7 +6,7 @@
 //!
 //! `use` is the declaration whose body the cause-and-`finally` plan decodes; a repository-owned
 //! `try`/`finally` inline function reaches the bytecode inliner instead. The emitter-level boundary
-//! itself is covered with repository-owned IR in `src/jvm/ir_emit.rs`.
+//! itself is covered with repository-owned IR in `crates/krusty-jvm/src/ir_emit.rs`.
 
 use super::common;
 

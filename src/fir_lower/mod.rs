@@ -1244,6 +1244,8 @@ fn consume_trailing_unit_result(ir: &mut IrFile, roots: &mut Vec<ExprId>) {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod single_source_lowering;
 #[cfg(test)]
 pub(crate) mod tests;
 

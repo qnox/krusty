@@ -57,7 +57,7 @@ pub mod metadata;
 pub mod module_symbols;
 pub mod name_tree;
 pub mod names;
-pub mod native;
+pub mod native_target;
 pub mod parser;
 pub mod plugins;
 mod program_entry;
@@ -74,15 +74,10 @@ pub mod toolchain;
 pub mod trace;
 pub mod type_engine;
 pub mod types;
-pub(crate) mod value_classes;
-pub mod wasm;
-mod wide_stack;
+pub mod value_classes;
+pub mod wide_stack;
 
 #[cfg(test)]
 mod architecture;
-#[cfg(test)]
-mod counted_loop_policy_tests;
-#[cfg(test)]
-mod jvm_virtual_target_tests;
 #[cfg(test)]
 mod local_property_accessor_tests;
