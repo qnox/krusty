@@ -121,7 +121,10 @@ impl Emitter<'_> {
             if !lambda_arguments.contains(&argument) {
                 continue;
             }
-            let (mut lambda, captures) = self.lambda_shape(argument)?;
+            let super::lambda_node::LambdaShape {
+                mut lambda,
+                captures,
+            } = self.lambda_shape(argument)?;
             let start = captured.len();
             for (capture, ty) in captures {
                 captured.push(Parameter {

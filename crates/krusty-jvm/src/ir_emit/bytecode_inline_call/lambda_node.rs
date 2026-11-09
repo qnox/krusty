@@ -135,6 +135,14 @@ pub(super) fn callable_reference_template(
     ))
 }
 
+/// A literal lambda as route planning sees it before compiling it: its parameters, captured
+/// values and names, with a body that only returns.
+pub(super) struct LambdaShape {
+    pub(super) lambda: inliner::Lambda,
+    /// The caller values the literal captures, each with its type.
+    pub(super) captures: Vec<(u32, Ty)>,
+}
+
 impl Emitter<'_> {
     /// The literal lambda `argument` and its source arity, every type read from the checked IR. An
     /// error names the checked fact the literal lacks; the implementation method never stands in
@@ -457,12 +465,8 @@ impl Emitter<'_> {
         }
     }
 
-    /// The literal lambda `argument` as route planning sees it before compiling it: its parameters,
-    /// captured values and names, with a body that only returns; and the caller values it captures.
-    pub(super) fn lambda_shape(
-        &self,
-        argument: u32,
-    ) -> Result<(inliner::Lambda, Vec<(u32, Ty)>), &'static str> {
+    /// The literal lambda `argument` as route planning sees it before compiling it.
+    pub(super) fn lambda_shape(&self, argument: u32) -> Result<LambdaShape, &'static str> {
         let (lambda, _) = self.literal_lambda(argument)?;
         let parameter_types: Vec<String> = lambda
             .parameter_types
@@ -510,7 +514,10 @@ impl Emitter<'_> {
             .copied()
             .zip(lambda.capture_types.iter().copied())
             .collect();
-        Ok((shape, captures))
+        Ok(LambdaShape {
+            lambda: shape,
+            captures,
+        })
     }
 
     /// Whether the literal lambda `argument`'s body reaches a declaration only its own class may,
