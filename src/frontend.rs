@@ -82,6 +82,21 @@ impl SourceSetAnalysis {
         Some((anchor.owner?, anchor.sibling))
     }
 
+    /// The finalized Pass-1 signature of the declaration named `name`, for backend tests that
+    /// check what Pass 1 published before Pass 2 runs. `None` when Pass 1 did not finalize or no
+    /// declaration of that name has a signature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finalized_signature(&self, name: &str) -> Option<&crate::fir::ResolvedSignature> {
+        let index = self.streamed.as_ref()?.module.index();
+        (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .find_map(|declaration| {
+                (index.declaration_name(declaration) == Some(name))
+                    .then(|| index.signature(declaration))
+                    .flatten()
+            })
+    }
+
     /// Whether the compiler generated `declaration`, as it does a data class's `copy`.
     pub fn is_compiler_generated(&self, declaration: FrontendDeclarationId) -> bool {
         self.streamed
@@ -316,7 +331,7 @@ fn diagnostic_streamed_state(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl StreamedPassState {
     /// Same-parse adapter for focused FIR unit tests. Production discovers bodies only inside the
     /// bounded Pass-2 callback; tests that intentionally retain a whole AST can enumerate that live

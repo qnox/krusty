@@ -12,7 +12,7 @@ use crate::ir::{ExprId, FunId, IrExpr, IrFile, IrFunction};
 use crate::types::Ty;
 
 /// Build the dispatching entry of every overridable member `exports` publishes from `ir`.
-pub(crate) fn realize(ir: &mut IrFile, exports: &DependencyExportSignatures) {
+pub fn realize(ir: &mut IrFile, exports: &DependencyExportSignatures) {
     let members = exports
         .callables()
         .map(|(function, _)| function)

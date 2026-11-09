@@ -1689,7 +1689,7 @@ fn receiver_argument_fits(
     p: &Ty,
     arg: &CallArgKind,
 ) -> bool {
-    if arg.is_omitted_default() {
+    if arg.is_omitted_default() || arg.constructible_as(*p) {
         return true;
     }
     let sam = p.non_null().fun_arity().is_none()
