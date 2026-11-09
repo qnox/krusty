@@ -29,7 +29,7 @@ enum DeclaringScope {
 impl IrFile {
     /// Whether the type operation `operation` against `tested`, emitted in `scope`, belongs to the
     /// template of the declaration that declares the reified parameter `tested` names.
-    pub(crate) fn is_reified_template_operation(
+    pub fn is_reified_template_operation(
         &self,
         scope: IrEnclosure,
         operation: ExprId,

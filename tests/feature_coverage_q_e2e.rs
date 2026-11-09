@@ -2,7 +2,7 @@
 //! `init` validation, value-class-valued members, value classes inside data classes, generic
 //! boundaries, `is`/`when`, polymorphic interface dispatch, nesting, companions, default params, and
 //! `List` element access. Each test compiles a `fun box(): String` with krusty, runs it on a real JVM
-//! under verification, and asserts `"OK"`. Targets `src/jvm/value_classes.rs`.
+//! under verification, and asserts `"OK"`. Targets `crates/krusty-jvm/src/value_classes.rs`.
 
 use super::common;
 
@@ -63,7 +63,7 @@ fun box(): String {
 // produces a `VerifyError: Type 'Money' ... is not assignable to integer`. Reproduced with several
 // variants (arithmetic-in-ctor, store-to-local, trivial `Money(n)` body) — all fail. A top-level
 // function returning a value class works (see `value_class_return_used_in_arithmetic`); only the
-// member-returning-value-class path is broken. Left out until `src/jvm/value_classes.rs` unboxes the
+// member-returning-value-class path is broken. Left out until `crates/krusty-jvm/src/value_classes.rs` unboxes the
 // result of a mangled member returning a value class.
 
 #[test]

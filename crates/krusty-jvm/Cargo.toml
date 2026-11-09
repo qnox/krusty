@@ -1,0 +1,18 @@
+[package]
+name = "krusty-jvm"
+version = "0.0.1"
+edition = "2021"
+description = "JVM backend for krusty: lowers checked IR to class files"
+license = "Apache-2.0"
+repository = "https://github.com/qnox/krusty"
+
+[dependencies]
+krusty = { path = "../.." }
+unicode-general-category = "1"
+
+[features]
+# Forwards krusty's compiler tracing (`trace_compiler!`) to this crate's trace sites.
+trace = ["krusty/trace"]
+
+[dev-dependencies]
+krusty = { path = "../..", features = ["test-support"] }
