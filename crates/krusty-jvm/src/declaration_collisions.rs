@@ -489,7 +489,7 @@ fn report_platform_declaration_clashes(
             let Some(function) = ir.functions.get(method as usize) else {
                 continue;
             };
-            let declaration = if let Some(&offset) = ir.fn_signature_offsets.get(&method) {
+            let declaration = if let Some(offset) = ir.function_position(method).signature_offset {
                 MemberMethodDeclaration::Source {
                     offset,
                     function: method,
@@ -556,7 +556,7 @@ fn report_platform_declaration_clashes(
                 .push(declaration);
         }
         for function in crate::ir_emit::jvm_static_members::companion_bridge_functions(ir, class) {
-            let Some(&offset) = ir.fn_signature_offsets.get(&function) else {
+            let Some(offset) = ir.function_position(function).signature_offset else {
                 continue;
             };
             let descriptor = crate::ir_emit::function_descriptor(ir, override_results, function);
@@ -584,7 +584,7 @@ fn report_platform_declaration_clashes(
                     continue;
                 };
                 let signature = if let Some(function) = function {
-                    if ir.fn_signature_offsets.contains_key(&function) {
+                    if ir.function_position(function).signature_offset.is_some() {
                         continue;
                     }
                     let declaration = &ir.functions[function as usize];
@@ -626,7 +626,7 @@ fn report_platform_declaration_clashes(
                     (true, property.setter, property.setter_diagnostic_span),
                 ] {
                     let Some(function) = function else { continue };
-                    if ir.fn_signature_offsets.contains_key(&function) {
+                    if ir.function_position(function).signature_offset.is_some() {
                         continue;
                     }
                     let Some(offset) = span.or(property.diagnostic_span).map(|span| span.lo) else {
@@ -656,7 +656,7 @@ fn report_platform_declaration_clashes(
                 let Some(function) = function else {
                     continue;
                 };
-                if ir.fn_signature_offsets.contains_key(&function) {
+                if ir.function_position(function).signature_offset.is_some() {
                     continue;
                 }
                 let Some(offset) = span.or(property.diagnostic_span).map(|span| span.lo) else {
@@ -1330,7 +1330,7 @@ fn member_method_is_inventoried(
     class: &krusty::ir::IrClass,
     function: FunId,
 ) -> bool {
-    ir.fn_signature_offsets.contains_key(&function)
+    ir.function_position(function).signature_offset.is_some()
         || (ir.is_data_class_member(class.fq_name_id(), function)
             && ir.class_diagnostic_span(class_id).is_some())
         || ir.is_jvm_delegate_method(function)
@@ -1667,7 +1667,7 @@ mod tests {
         let owner = krusty::types::type_name("fixtures/Owner");
         let source = ir.add_fun(member_function(owner, "getValue"));
         let generated_accessor = ir.add_fun(member_function(owner, "getValue"));
-        ir.fn_signature_offsets.insert(source, 11);
+        ir.function_position_mut(source).signature_offset = Some(11);
 
         let mut class = krusty::ir::IrClass::synthetic(owner);
         class.methods = vec![source, generated_accessor];
@@ -1703,7 +1703,7 @@ mod tests {
         let mut generated = member_function(owner, "getValue");
         generated.ret = krusty::types::Ty::nullable(krusty::types::Ty::Int);
         let generated_accessor = ir.add_fun(generated);
-        ir.fn_signature_offsets.insert(boxed_override, 11);
+        ir.function_position_mut(boxed_override).signature_offset = Some(11);
 
         let mut class = krusty::ir::IrClass::synthetic(owner);
         class.methods = vec![boxed_override, generated_accessor];
@@ -1811,7 +1811,7 @@ mod tests {
         delegated.params = vec![krusty::types::Ty::Int, continuation];
         delegated.ret = erased_result;
         let delegated = ir.add_fun(delegated);
-        ir.fn_signature_offsets.insert(source, 11);
+        ir.function_position_mut(source).signature_offset = Some(11);
         ir.fn_params.insert(
             source,
             krusty::ir::FnParamInfo::source_names(vec![

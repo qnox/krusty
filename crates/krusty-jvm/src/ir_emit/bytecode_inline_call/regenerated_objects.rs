@@ -127,7 +127,7 @@ impl<'a> RegenerationSite<'a> {
         let declaration = &ir.functions[function as usize];
         let name = &declaration.name;
         // Another file's inline function, compiled here for its callers, is declared there.
-        let declared = (ir.fn_decl_lines.contains_key(&function)
+        let declared = (ir.function_position(function).decl_line.is_some()
             && ir.fn_source_names.get(&function) == Some(name))
             || ir.foreign_inline_templates.contains(&function);
         let suspend_lambda_body = declaration
@@ -202,6 +202,28 @@ impl<'a> RegenerationSite<'a> {
             owner,
             symbols: env.signature_symbols,
         })
+    }
+
+    /// The site of `function`'s `$default` stub `method`. kotlinc numbers the copies its default
+    /// expressions' inline calls make under the stub's own name and encloses them in the stub. A
+    /// constructor's stub is a constructor: [`Self::constructor`].
+    pub(in crate::ir_emit) fn default_stub(
+        ir: &IrFile,
+        function: u32,
+        method: &str,
+        descriptor: &str,
+        symbols: &'a dyn BackendClassifierSource,
+    ) -> RegenerationSite<'a> {
+        RegenerationSite {
+            method: method.to_string(),
+            descriptor: descriptor.to_string(),
+            function: method.to_string(),
+            special: false,
+            public_inline: ir.inline_fns.contains(&function)
+                && !ir.method_visibility(function).is_private(),
+            owner: None,
+            symbols,
+        }
     }
 
     /// The site of a constructor. kotlinc numbers its regenerated objects under `$special` and

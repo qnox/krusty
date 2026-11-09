@@ -167,7 +167,7 @@ pub(super) fn route(
     }
     // kotlinc maps a `Unit` lambda's implicit return to the body's closing `}`.
     let units = ensure_tail_return(ir, body, unit_return);
-    if let Some(&close) = ir.fn_close_lines.get(&fid) {
+    if let Some(close) = ir.function_position(fid).close_line {
         for unit in units {
             ir.set_source_line(unit, close);
         }

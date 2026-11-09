@@ -1721,7 +1721,7 @@ impl<'a> CommonIrBodySink<'a> {
         }
         self.ir.functions[function as usize].body = Some(body);
         if close_line != 0 {
-            self.ir.fn_close_lines.insert(function, close_line);
+            self.ir.function_position_mut(function).close_line = Some(close_line);
         }
 
         self.attach_callable_defaults(

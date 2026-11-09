@@ -291,24 +291,19 @@ pub(super) fn emit_own_member_forward(
                 // The forward spans the declaration it stands for: kotlinc calls on the
                 // declaration's start line, then returns on its end line. A function records its
                 // signature line; an accessor's header line is its declaration line. A property
-                // accessor has no `fn_decl_lines` entry — its line lives on the property
+                // accessor has no declaration line — its line lives on the property
                 // declaration it realizes.
-                start: ir
-                    .fn_sig_lines
-                    .get(&fid)
-                    .or_else(|| ir.fn_decl_lines.get(&fid))
-                    .copied()
-                    .unwrap_or_else(|| {
-                        c.properties
-                            .iter()
-                            .find(|property| {
-                                let (getter, setter) = accessor_jvm_names(ir, c, &property.name);
-                                getter == f.name || setter == f.name
-                            })
-                            .map(|property| property.decl_line)
-                            .unwrap_or(0)
-                    }),
-                end: ir.fn_end_lines.get(&fid).copied().unwrap_or(0),
+                start: ir.function_position(fid).header_line().unwrap_or_else(|| {
+                    c.properties
+                        .iter()
+                        .find(|property| {
+                            let (getter, setter) = accessor_jvm_names(ir, c, &property.name);
+                            getter == f.name || setter == f.name
+                        })
+                        .map(|property| property.decl_line)
+                        .unwrap_or(0)
+                }),
+                end: ir.function_position(fid).end_line.unwrap_or(0),
             },
             varargs: method_access::varargs_access(ir, fid),
             target: JdHolderTarget::AccessBridge,

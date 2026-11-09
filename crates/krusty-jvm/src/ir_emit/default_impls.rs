@@ -36,12 +36,12 @@ pub(super) fn emit_default_stub_forward(ir: &IrFile, fid: u32, owner: &str, cw: 
     code.link();
     cw.add_method(default_stub_access(ir, fid), &name, &desc, &code);
     // kotlinc calls on the declaration's line and returns on its end line.
-    if let Some(&line) = ir.fn_decl_lines.get(&fid) {
+    if let Some(line) = ir.function_position(fid).decl_line {
         let mut lines = vec![(0, line)];
-        if let Some(&end) = ir
-            .fn_end_lines
-            .get(&fid)
-            .filter(|&&end| end != 0 && end != line)
+        if let Some(end) = ir
+            .function_position(fid)
+            .end_line
+            .filter(|&end| end != 0 && end != line)
         {
             lines.push((return_pc, end));
         }

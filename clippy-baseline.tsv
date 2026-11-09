@@ -236,7 +236,6 @@
 3	src/resolve/streaming_signature_bridge/type_parameter_publication.rs	this function has too many arguments (8/7)
 4	src/klib_lowering/body_unit.rs	the borrowed expression implements the required traits: help: change this to: `callee_declined`
 4	src/resolve/delegated_properties.rs	this function has too many arguments (8/7)
-4	tests/classpath_protected_nested_access_e2e.rs	unnecessary use of `clone` to create a slice from a reference: help: try: `std::slice::from_ref(&classes)`
 5	src/resolve.rs	this function has too many arguments (9/7)
 5	src/resolve.rs	very complex type used. Consider factoring parts into `type` definitions
 5	src/resolve/callable_reference_selection.rs	redundant closure: help: replace the closure with the function itself: `&mut is_assignable`

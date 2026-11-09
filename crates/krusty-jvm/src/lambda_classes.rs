@@ -1171,7 +1171,7 @@ fn realize_class(
     }
     if let Some(line) = ir.source_line(site.node) {
         // The bridge maps its whole body to the lambda's line.
-        ir.fn_decl_lines.insert(fid, line);
+        ir.function_position_mut(fid).decl_line = Some(line);
     }
     replace_value(ir, site, fresh_instance);
 }

@@ -179,7 +179,7 @@ fn attach_interface_entry_debug_tables(
     cw.set_method_debug(&bridge.name, descriptor, line, &locals);
     // The return's line is an entry of its own only below the entry line; on that same line the
     // method's one entry at its start already covers it.
-    let end = ir.fn_end_lines.get(&member).copied();
+    let end = ir.function_position(member).end_line;
     if let (Some(line), Some(pc), Some(end)) =
         (line, offsets.ret, end.filter(|&end| Some(end) != entry))
     {

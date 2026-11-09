@@ -130,9 +130,9 @@ fn realize_delegator_of_override(
     if let Some(order) = ir.fn_source_order.get(&custom).copied() {
         ir.fn_source_order.insert(delegator, order);
     }
-    let entry = ir.fn_sig_lines.get(&custom).copied();
+    let entry = ir.function_position(custom).signature_line;
     if let Some(line) = entry {
-        ir.fn_decl_lines.insert(delegator, line);
+        ir.function_position_mut(delegator).decl_line = Some(line);
     }
     let returned = match ir.expr(body) {
         IrExpr::Block { stmts, value: None } => stmts.last().copied(),
@@ -140,7 +140,7 @@ fn realize_delegator_of_override(
     };
     // The return's line is an entry of its own only below the entry line; on that same line the
     // method's one entry at its start already covers it.
-    let end = ir.fn_end_lines.get(&custom).copied();
+    let end = ir.function_position(custom).end_line;
     if let (Some(returned), Some(line)) = (returned, end.filter(|&end| Some(end) != entry)) {
         ir.mark_implicit_return_end_line(returned, line);
     }
@@ -443,7 +443,7 @@ pub(super) fn synth_value_members(
         // constructor's own line, like the rebuilt `<init>` above.
         let constructor_line = ir.classes[class_id as usize].primary_ctor_lines.decl_line;
         if constructor_line != 0 {
-            ir.fn_sig_lines.insert(cfid, constructor_line);
+            ir.function_position_mut(cfid).signature_line = Some(constructor_line);
         }
         crate::method_parameters::record_function(ir, cfid, &[&fname], &[]);
         // Unlike a source value-class member converted to `member-impl`, this generated function's
@@ -866,7 +866,7 @@ pub(super) fn synth_value_members(
             ir.functions[constructor as usize].param_checks = sc.param_checks.clone();
             member_signatures::record(ir, class_id, constructor, Constructor(&sc.params));
             if sc.lines.decl_line != 0 {
-                ir.fn_decl_lines.insert(constructor, sc.lines.decl_line);
+                ir.function_position_mut(constructor).decl_line = Some(sc.lines.decl_line);
             }
             // Like the primary's, its first parameter is a declared parameter, not a receiver, so
             // the default stub counts it in the mask.

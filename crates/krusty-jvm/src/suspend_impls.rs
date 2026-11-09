@@ -40,6 +40,21 @@ fn copy_fact<T: Clone>(facts: &mut HashMap<u32, T>, implementation: u32, declara
     }
 }
 
+/// The implementation's signature and end lines become the declaration's: the declaration is the
+/// method kotlinc places at the source header, the implementation its body carrier.
+fn move_header_and_end_lines(ir: &mut IrFile, implementation: u32, declaration: u32) {
+    let carrier = ir.function_position_mut(implementation);
+    let signature_line = carrier.signature_line.take();
+    let end_line = carrier.end_line.take();
+    let moved = ir.function_position_mut(declaration);
+    if signature_line.is_some() {
+        moved.signature_line = signature_line;
+    }
+    if end_line.is_some() {
+        moved.end_line = end_line;
+    }
+}
+
 fn move_marker(markers: &mut HashSet<u32>, implementation: u32, declaration: u32) {
     if markers.remove(&implementation) {
         markers.insert(declaration);
@@ -93,8 +108,7 @@ fn move_declaration_facts(ir: &mut IrFile, implementation: u32, declaration: u32
         declaration,
     );
     move_fact(&mut ir.fn_varargs, implementation, declaration);
-    move_fact(&mut ir.fn_sig_lines, implementation, declaration);
-    move_fact(&mut ir.fn_end_lines, implementation, declaration);
+    move_header_and_end_lines(ir, implementation, declaration);
 
     move_marker(&mut ir.extension_receiver_fns, implementation, declaration);
     move_marker(&mut ir.inline_fns, implementation, declaration);

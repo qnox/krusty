@@ -146,9 +146,8 @@ pub(super) fn emit_reference_invoke_bridge(
     cw.reserve_method_lvt(&locals);
     finish_code::<0x1041>(cw, "invoke", &erased, &mut code, 1 + u16::from(arity));
     let line = ir
-        .fn_decl_lines
-        .get(&invoke)
-        .copied()
+        .function_position(invoke)
+        .decl_line
         .filter(|&line| line != 0);
     cw.set_method_debug("invoke", &erased, line.map(|line| (0, line)), &locals);
 }

@@ -3995,7 +3995,7 @@ fn emit_placed_method(
     let marked = placement.is_for_inline_copy()
         || crate::suspend_inline_functions::keeps_marked_body(ir, fid);
     // Suspend lowering does not preserve source-local expression IDs.
-    e.record_locals = (ir.fn_decl_lines.contains_key(&fid)
+    e.record_locals = (ir.function_position(fid).decl_line.is_some()
         || ir.fn_debug_locals.contains(&fid)
         || ir
             .generated_function_publication(fid)
@@ -4303,10 +4303,10 @@ fn emit_placed_method(
     // (`fun foo() { throw … }`): an unreachable `return` after `athrow` has no stack-map frame and
     // the verifier rejects it. Skip it exactly when the body can't fall through.
     if ret == Ty::Unit && !e.discarding_diverges(body) {
-        // kotlinc maps the implicit `return` to the body's closing-`}` line. `fn_close_lines` has
+        // kotlinc maps the implicit `return` to the body's closing-`}` line. the close line has
         // entries only for PARSED declarations, so a synthesized body (no entry) keeps its
         // decl-line fallback table.
-        if let Some(&close) = ir.fn_close_lines.get(&fid) {
+        if let Some(close) = ir.function_position(fid).close_line {
             code.mark_line(close);
         }
         code.implicit_ret_void();

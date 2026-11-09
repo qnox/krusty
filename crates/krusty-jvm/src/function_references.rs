@@ -684,7 +684,7 @@ fn realize_own_invoke(
     // ahead of the line.
     if let Some(line) = ir.source_line(expression as u32) {
         // The bridge maps its whole body to the same line.
-        ir.fn_decl_lines.insert(adapter, line);
+        ir.function_position_mut(adapter).decl_line = Some(line);
         let parameter_count = function_type.params.len() as u32;
         for &current in &expressions {
             let marks = match &ir.exprs[current as usize] {
