@@ -637,7 +637,7 @@ mod tests {
             "an underivable required slot publishes an unsupported residual, not a null"
         );
         assert!(
-            !crate::jvm::ir_emit::jvm_can_emit(&ir),
+            !crate::jvm::emission_readiness::jvm_can_emit(&ir),
             "and that residual must make the file undecidable rather than emit a broken cache"
         );
     }

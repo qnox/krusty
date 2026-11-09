@@ -20,8 +20,9 @@ mod capture_order;
 mod capture_parameters;
 pub use capture_parameters::FirCaptureParameter;
 mod class_captures;
+pub use class_captures::ClassCaptureIdentity;
 pub(crate) use class_captures::{
-    ClassBodyContext, ClassCaptureBinding, ClassCaptureIdentity, ClassReceiverCaptureSource,
+    ClassBodyContext, ClassCaptureBinding, ClassReceiverCaptureSource,
 };
 mod lifting_sites;
 mod local_type_parameters;
@@ -1262,12 +1263,6 @@ pub enum FirExprKind {
         end: FirExprId,
         negated: bool,
     },
-    IndexedWrite {
-        receiver: FirExprId,
-        indices: Box<[FirConvertedValue]>,
-        value: FirExprId,
-        conversion: Option<FirConversion>,
-    },
     /// Null-guarded member/extension selection. The nested selector owns the receiver exactly once;
     /// lowering guards that selected receiver and never repeats lookup or overload selection.
     SafeCall {
@@ -1384,9 +1379,6 @@ impl FirExprKind {
             FirExprKind::ClassLiteral { .. } => 0,
             FirExprKind::LocalPropertyReference { name, .. } => name.len(),
             FirExprKind::LocalDelegateAccess { .. } => 0,
-            FirExprKind::IndexedWrite { indices, .. } => {
-                indices.len() * std::mem::size_of::<FirConvertedValue>()
-            }
             FirExprKind::AnnotationArray(expressions)
             | FirExprKind::StringTemplate(expressions) => {
                 expressions.len() * std::mem::size_of::<FirExprId>()

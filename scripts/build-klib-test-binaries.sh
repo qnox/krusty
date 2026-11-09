@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the focused KLIB e2e and library-unit binaries. They are one artifact family consumed by
+# Build the focused KLIB e2e and library-unit binaries (krusty's and the Native backend's). They are one artifact family consumed by
 # the maximum-version Native conformance row. The two targets compile the whole `krusty` crate
 # twice (once as the library behind klib_e2e, once with cfg(test)); separate Cargo invocations keep
 # those two compiles from running at the same time and adding up their peak memory.
@@ -21,9 +21,7 @@ build() {
   local step cargo_status jq_status
   step=$(mktemp)
   set +e
-  cargo test --no-run --profile klib-test -p krusty "$@" \
-    --features focused-klib-tests \
-    --message-format=json >"$step"
+  cargo test --no-run --profile klib-test "$@" --message-format=json >"$step"
   cargo_status=$?
   jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' \
     "$step" >&2
@@ -40,8 +38,9 @@ build() {
   fi
 }
 
-build --test klib_e2e
-build --lib
+build -p krusty --features focused-klib-tests --test klib_e2e
+build -p krusty --features focused-klib-tests --lib
+build -p krusty-native --lib
 
 copy_artifact() {
   local target="$1" kind="$2" destination="$3" executable
@@ -62,3 +61,4 @@ copy_artifact() {
 
 copy_artifact klib_e2e test klib-e2e-tests
 copy_artifact krusty lib klib-unit-tests
+copy_artifact krusty_native lib klib-native-unit-tests

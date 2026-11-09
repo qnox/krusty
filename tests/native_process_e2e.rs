@@ -100,10 +100,10 @@ fn assert_same_transcript(case: &str, reference: &str, native: &[u8], expected: 
 }
 
 fn run(case: &Case) {
-    let Some(target) = krusty::native::NativeTarget::host() else {
+    let Some(target) = krusty_native::NativeTarget::host() else {
         return;
     };
-    if !krusty::native::can_link(target) {
+    if !krusty_native::can_link(target) {
         return;
     }
     let native = transcript(&run_krusty_native(target, case));
@@ -157,7 +157,7 @@ fn arguments(case: &Case) -> Vec<&OsStr> {
         .collect()
 }
 
-fn run_krusty_native(target: krusty::native::NativeTarget, case: &Case) -> Output {
+fn run_krusty_native(target: krusty_native::NativeTarget, case: &Case) -> Output {
     let image = match native_image(&[(case.program, &source(case.program))], target) {
         Ok(image) => image,
         Err(NativeBox::Declined(reason)) => panic!(

@@ -23,7 +23,7 @@ use reified_uses::class_uses_binding;
 use super::specialize_inline_copy;
 
 /// The inline expansion an anonymous-class copy belongs to.
-pub(super) struct CallSite<'a> {
+pub struct CallSite<'a> {
     pub caller_declaration: crate::fir::DeclarationId,
     pub caller: Option<crate::ir::IrEnclosure>,
     pub caller_is_default: bool,
