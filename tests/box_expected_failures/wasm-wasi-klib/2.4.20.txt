@@ -691,7 +691,6 @@ companionBlocksAndExtensions/suspend.kt
 companionBlocksAndExtensions/visibility.kt
 compileKotlinAgainstKotlin/adaptedSuspendFunctionReference.kt
 compileKotlinAgainstKotlin/clashingFakeOverrideSignatures.kt
-compileKotlinAgainstKotlin/companionObjectInEnum.kt
 compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt

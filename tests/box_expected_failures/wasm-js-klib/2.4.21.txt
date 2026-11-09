@@ -1,7 +1,7 @@
 # Kotlin 2.4.21 codegen/box files expected to fail on wasm-js-klib, relative to
+# compiler/testData/codegen/box. Later releases with no file of their own read this one.
 # Owned fixtures use regressions/<path relative to tests/box_regressions>.
 # Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local
-# compiler/testData/codegen/box. Later releases with no file of their own read this one.
 # wasm-js-klib run. The lists only shrink.
 annotations/annotations0.kt
 annotations/instances/AnnotationInstantiationWithArray.kt
@@ -693,7 +693,6 @@ companionBlocksAndExtensions/suspend.kt
 companionBlocksAndExtensions/visibility.kt
 compileKotlinAgainstKotlin/adaptedSuspendFunctionReference.kt
 compileKotlinAgainstKotlin/clashingFakeOverrideSignatures.kt
-compileKotlinAgainstKotlin/companionObjectInEnum.kt
 compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
