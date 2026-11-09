@@ -102,6 +102,16 @@ pub(super) fn emit_default_stub(
         ret,
         defaults.iter().flatten().copied(),
     );
+    // Default expressions are source code: an inline call among them opens the same frame, with
+    // its marker store and variable-table entries, as it does in any other body.
+    emitter.record_locals = true;
+    emitter.regeneration_site = Some(super::bytecode_inline_call::RegenerationSite::default_stub(
+        ir,
+        fid,
+        &stub_name,
+        &stub_desc,
+        env.signature_symbols,
+    ));
     publish_exported_private_access(&mut emitter, fid);
     if singleton.is_none() {
         let receiver = emitter.frame.enter(FrameKey::Receiver, owner_ty);
@@ -564,8 +574,10 @@ pub(super) fn emit_facade_default_stub(
         .len()
         .checked_sub(receiver_prefix)
         .expect("callable receivers are leading physical parameters");
-    cw.seed_utf8(&format!("{method_name}$default"));
-    cw.seed_utf8(&default_stub_descriptor(ir, fid, marker));
+    let stub_name = format!("{method_name}$default");
+    let stub_desc = default_stub_descriptor(ir, fid, marker);
+    cw.seed_utf8(&stub_name);
+    cw.seed_utf8(&stub_desc);
     let mut emitter = Emitter::new(
         ir,
         cw,
@@ -576,6 +588,16 @@ pub(super) fn emit_facade_default_stub(
         ret,
         defaults.iter().flatten().copied(),
     );
+    // Default expressions are source code: an inline call among them opens the same frame, with
+    // its marker store and variable-table entries, as it does in any other body.
+    emitter.record_locals = true;
+    emitter.regeneration_site = Some(super::bytecode_inline_call::RegenerationSite::default_stub(
+        ir,
+        fid,
+        &stub_name,
+        &stub_desc,
+        env.signature_symbols,
+    ));
     publish_exported_private_access(&mut emitter, fid);
     let mut param_slots = Vec::new();
     for (index, ty) in stub_param_tys.iter().enumerate() {
@@ -696,12 +718,9 @@ pub(super) fn emit_facade_default_stub(
     ));
     stub_params.push(marker);
     let descriptor = method_descriptor(&stub_params, ret);
-    emitter.cw.add_method(
-        default_stub_access(ir, fid),
-        &format!("{method_name}$default"),
-        &descriptor,
-        &code,
-    );
+    emitter
+        .cw
+        .add_method(default_stub_access(ir, fid), &stub_name, &descriptor, &code);
     drop(emitter);
     emit_published_default_accessor(
         ir,
@@ -709,7 +728,7 @@ pub(super) fn emit_facade_default_stub(
         cw,
         PublishedDefaultAccessor {
             owner: facade,
-            stub_name: &format!("{method_name}$default"),
+            stub_name: &stub_name,
             parameters: &stub_params,
             result: ret,
             is_interface: static_owner.is_interface(ir),
