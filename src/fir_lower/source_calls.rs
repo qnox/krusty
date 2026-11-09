@@ -1755,10 +1755,23 @@ impl BodyLowering<'_> {
             .and_then(|owner| self.ir.checked_enum_entry_classes.get(&owner).copied());
         let mut statements = Vec::new();
         // kotlinc passes a call's operands in physical order: the context arguments, then the
-        // extension receiver, then the value arguments. A context argument is an implicit value
-        // (a context parameter or an implicit receiver), so passing the receiver after it still
-        // evaluates every operand once, in source order.
-        let direct = argument_boundaries::follow_parameter_order(arguments, None);
+        // extension receiver, then the value arguments. A receiver-ordered context argument
+        // (`receiver().f(context = value())`) is evaluated after the receiver, as it is written,
+        // so one with an effect to order reorders the call unless the receiver itself has none.
+        let context_count = callable.shape.context_parameter_count;
+        let receiver_precedes_contexts = extension_receiver.is_none_or(|receiver| {
+            self.passes_reordered_operand_in_place(receiver)
+                || arguments.iter().all(|argument| match argument {
+                    IrCheckedArgument::Expression { parameter, value } => {
+                        *parameter >= context_count
+                            || !self.receiver_ordered_context_operands.contains(value)
+                            || self.passes_reordered_operand_in_place(*value)
+                    }
+                    IrCheckedArgument::Default { .. } | IrCheckedArgument::Vararg { .. } => true,
+                })
+        });
+        let direct = argument_boundaries::follow_parameter_order(arguments, None)
+            && receiver_precedes_contexts;
         let bindings = substitutions
             .iter()
             .filter_map(|substitution| match substitution.parameter {
@@ -1819,7 +1832,7 @@ impl BodyLowering<'_> {
         let mut slots = normalized.slots;
         let mut inline_lambdas = normalized.inline_lambdas;
 
-        let extension_position = callable.shape.context_parameter_count as usize;
+        let extension_position = context_count as usize;
         if let Some(receiver) = extension_receiver {
             if extension_position > slots.len() {
                 return None;
@@ -2157,7 +2170,9 @@ impl BodyLowering<'_> {
                         let value = if preserve || self.ir.is_delegated_property_operand(value) {
                             value
                         } else if direct
-                            || (passable && self.passes_reordered_operand_in_place(value))
+                            || (passable
+                                && (self.implicit_context_operands.contains(&value)
+                                    || self.passes_reordered_operand_in_place(value)))
                         {
                             self.direct_call_operand(value, parameter_ty)
                         } else {
