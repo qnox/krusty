@@ -206,21 +206,16 @@ fn cannot_be_disabled(
         && feature.behavior_after_since_version == BehaviorAfterSinceVersion::CannotBeDisabled
 }
 
-/// The refusal of `-progressive` when a feature it turns on is one krusty neither models nor
-/// records as unimplemented, named as an `@Enables` argument's refusal names its feature.
-/// `before` is the state the defaults and the `@Enables`/`@Disables` arguments leave; a
-/// progressive feature already on there is no change.
+/// The refusal of `-progressive` when a feature it turns on is one krusty does not model, named as
+/// an `@Enables` argument's refusal names its feature. `before` is the state the defaults and the
+/// `@Enables`/`@Disables` arguments leave; a progressive feature already on there is no change.
 pub(super) fn unmodeled_progressive_error(
     progressive: &[FeatureSetting],
     before: &LangFeatures,
 ) -> Option<String> {
     progressive
         .iter()
-        .find(|setting| {
-            !LangFeatures::models(&setting.feature)
-                && !LangFeatures::unimplemented(&setting.feature)
-                && !before.has(&setting.feature)
-        })
+        .find(|setting| !LangFeatures::models(&setting.feature) && !before.has(&setting.feature))
         .map(|setting| {
             format!(
                 "krusty does not implement the language feature '{}' selected by '-progressive'",

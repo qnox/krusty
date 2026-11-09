@@ -295,15 +295,13 @@ fun interface Local { fun run() }
 /// under `-progressive`, or by name) makes that an error. 2.4.21 has no such check.
 #[test]
 fn a_sam_constructor_missing_a_dependency_supertype_follows_beta2() {
-    let kotlinc = release_kotlinc("2.5.0-Beta2");
-    let stdlib = kotlinc
-        .parent()
-        .and_then(Path::parent)
-        .expect("kotlinc bin directory")
-        .join("lib/kotlin-stdlib.jar");
+    let beta2 = "2.5.0-Beta2";
+    let stdlib = common::kotlinc_lib_for_release(beta2)
+        .expect("kotlinc 2.5.0-Beta2")
+        .join("kotlin-stdlib.jar");
     let work = common::scratch_dir().expect("allocate a scratch directory");
-    let a = kotlinc_library(&kotlinc, &work, "sam-a", SAM_A, None);
-    let b = kotlinc_library(&kotlinc, &work, "sam-b", SAM_B, Some(&a));
+    let a = release_library(beta2, &work, "sam-a", SAM_A, None);
+    let b = release_library(beta2, &work, "sam-b", SAM_B, Some(&a));
     for arguments in [
         &["-language-version", "2.5"][..],
         &[
@@ -312,24 +310,26 @@ fn a_sam_constructor_missing_a_dependency_supertype_follows_beta2() {
             "-XXLanguage:+ForbidSamConstructorCallsWithMissingDependencySupertype",
         ][..],
         &["-language-version", "2.6"][..],
-        &["-language-version", "2.5", "-progressive"][..],
     ] {
-        assert_like_beta2(&work, &kotlinc, &stdlib, &b, arguments);
+        assert_like_release(&work, beta2, &b, Some(&stdlib), arguments);
     }
+    // `-progressive` turns this modeled feature on, and it also turns on features no phase
+    // implements. krusty refuses that command line, so the row checks the refusal. Language 2.6
+    // above is where the feature's own state is the error kotlinc reports.
+    assert_progressive_refuses(&work, beta2, &b, &stdlib);
     let _ = std::fs::remove_dir_all(&work);
 
-    // 2.4.21 reports nothing for the same program. Pin krusty to that release and compare
-    // with its compiler directly: the recorded class-dump archive has no entry for this source.
-    let kotlinc = release_kotlinc("2.4.21");
+    // 2.4.21 reports nothing for the same program.
+    let release = "2.4.21";
     let work = common::scratch_dir().expect("allocate a scratch directory");
-    let a = kotlinc_library(&kotlinc, &work, "sam-a", SAM_A, None);
-    let b = kotlinc_library(&kotlinc, &work, "sam-b", SAM_B, Some(&a));
-    assert_like_pinned_release(&work, "2.4.21", &kotlinc, &b);
+    let a = release_library(release, &work, "sam-a", SAM_A, None);
+    let b = release_library(release, &work, "sam-b", SAM_B, Some(&a));
+    assert_like_release(&work, release, &b, None, &[]);
     let _ = std::fs::remove_dir_all(&work);
 }
 
-fn kotlinc_library(
-    kotlinc: &Path,
+fn release_library(
+    release: &str,
     work: &Path,
     name: &str,
     source: &str,
@@ -338,125 +338,111 @@ fn kotlinc_library(
     let file = work.join(format!("{name}.kt"));
     std::fs::write(&file, source).expect("write a library source");
     let output = work.join(name);
-    let mut command = std::process::Command::new(kotlinc);
-    command.arg(&file).arg("-d").arg(&output).arg("-nowarn");
+    let mut args = vec![text(&file), "-d".into(), text(&output), "-nowarn".into()];
     if let Some(classpath) = classpath {
-        command.arg("-cp").arg(classpath);
+        args.push("-cp".into());
+        args.push(text(classpath));
     }
-    let result = command.output().expect("run kotlinc");
-    assert!(
-        result.status.success(),
-        "kotlinc builds library {name}: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
+    let (code, stderr) = compile_release(release, args);
+    assert_eq!(code, 0, "kotlinc {release} builds library {name}: {stderr}");
     output
 }
 
-fn release_kotlinc(version: &str) -> PathBuf {
-    let output = std::process::Command::new("just")
-        .args(["kotlinc", version])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("provision kotlinc");
-    assert!(
-        output.status.success(),
-        "just kotlinc {version}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    PathBuf::from(
-        String::from_utf8(output.stdout)
-            .expect("kotlinc path")
-            .trim(),
-    )
-}
+/// `-progressive` on this release selects a feature krusty does not model, so the command is
+/// refused before the program's diagnostics. The refused name is the first such feature in the
+/// release table, not a recorded exception.
+fn assert_progressive_refuses(work: &Path, release: &str, library: &Path, stdlib: &Path) {
+    use krusty::features::LangFeatures;
+    use krusty::kotlin_version::KotlinVersion;
+    use krusty::language_version::LanguageVersion;
 
-/// Compile the consumer with one release's kotlinc and with krusty pinned to that release.
-/// Each compiler keeps its own standard library.
-fn assert_like_pinned_release(work: &Path, version: &str, kotlinc: &Path, library: &Path) {
+    let version = KotlinVersion::parse(release).expect("a supported release");
+    let language = LanguageVersion::default_for(version);
+    let before = LangFeatures::for_release(version, language, language);
+    let feature = before
+        .table()
+        .progressive()
+        .find(|feature| !before.has(&feature.name) && !LangFeatures::models(&feature.name))
+        .expect("progressive selects a feature krusty does not model");
+    let expected = format!(
+        "krusty does not implement the language feature '{}' selected by '-progressive'",
+        feature.name
+    );
     let consumer = work.join("SamUse.kt");
     std::fs::write(&consumer, SAM_USE).expect("write the consumer");
-    let compile = |output: &Path, reference: bool| -> (Option<i32>, String) {
-        let mut args = vec![
-            text(&consumer),
-            "-cp".into(),
-            text(library),
-            "-d".into(),
-            text(output),
-        ];
-        if reference {
-            args.insert(0, format!("-Xkotlin-reference-version={version}"));
-        }
-        let result = if reference {
-            std::process::Command::new(common::krusty_binary())
-                .args(&args)
-                .output()
-                .expect("run krusty")
-        } else {
-            std::process::Command::new(kotlinc)
-                .args(&args)
-                .output()
-                .expect("run kotlinc")
-        };
-        (
-            result.status.code(),
-            String::from_utf8_lossy(&result.stderr).into_owned(),
-        )
-    };
-    let (kotlinc_code, kotlinc_stderr) = compile(&work.join("kotlinc-pinned"), false);
-    let (krusty_code, krusty_stderr) = compile(&work.join("krusty-pinned"), true);
-    let located = |stderr: &str| {
-        (
-            common::compiler_errors(stderr),
-            common::compiler_warnings(stderr),
-        )
-    };
-    assert_eq!(
-        (krusty_code, located(&krusty_stderr)),
-        (kotlinc_code, located(&kotlinc_stderr)),
-        "{version}\nkrusty: {krusty_stderr}\nkotlinc: {kotlinc_stderr}"
-    );
+    let classpath = std::env::join_paths([stdlib, library]).expect("join the classpath");
+    let args = [
+        format!("-Xkotlin-reference-version={release}"),
+        text(&consumer),
+        "-no-stdlib".into(),
+        "-cp".into(),
+        classpath.to_string_lossy().into_owned(),
+        "-d".into(),
+        text(&work.join("krusty-progressive")),
+        "-language-version".into(),
+        language.to_string(),
+        "-progressive".into(),
+    ];
+    let result = std::process::Command::new(common::krusty_binary())
+        .args(args)
+        .output()
+        .expect("run krusty");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_ne!(result.status.code(), Some(0), "{stderr}");
+    assert_eq!(stderr.trim(), format!("krusty: error: {expected}"));
 }
 
-/// Compile the consumer with kotlinc 2.5.0-Beta2 and with krusty pinned to that release.
-fn assert_like_beta2(
+fn compile_release(release: &str, args: Vec<String>) -> (i32, String) {
+    common::kotlinc_compile_for_release(release, &args)
+        .unwrap_or_else(|| panic!("kotlinc {release} is not available"))
+}
+
+/// Compile the consumer with `release`'s kotlinc and with krusty pinned to that release.
+/// `stdlib` puts that distribution's standard library on both classpaths (`-no-stdlib`); without
+/// it each compiler keeps its own.
+fn assert_like_release(
     work: &Path,
-    kotlinc: &Path,
-    stdlib: &Path,
+    release: &str,
     library: &Path,
+    stdlib: Option<&Path>,
     arguments: &[&str],
 ) {
     let consumer = work.join("SamUse.kt");
     std::fs::write(&consumer, SAM_USE).expect("write the consumer");
-    let classpath = std::env::join_paths([stdlib, library]).expect("join the Beta2 classpath");
-    let label = arguments.join("-");
-    let compile = |output: &Path, reference: bool| -> (Option<i32>, String) {
+    let classpath = match stdlib {
+        Some(stdlib) => std::env::join_paths([stdlib, library]).expect("join the classpath"),
+        None => library.as_os_str().to_owned(),
+    };
+    let compile = |output: &Path, reference: bool| -> (i32, String) {
         let mut args = vec![
             text(&consumer),
-            "-no-stdlib".into(),
             "-cp".into(),
             classpath.to_string_lossy().into_owned(),
-            "-d".into(),
-            text(output),
         ];
-        if reference {
-            args.insert(0, "-Xkotlin-reference-version=2.5.0-Beta2".to_string());
+        if stdlib.is_some() {
+            args.insert(1, "-no-stdlib".into());
         }
+        args.push("-d".into());
+        args.push(text(output));
         args.extend(arguments.iter().map(|argument| argument.to_string()));
-        let result = if reference {
-            std::process::Command::new(common::krusty_binary())
+        if reference {
+            args.insert(0, format!("-Xkotlin-reference-version={release}"));
+            let result = std::process::Command::new(common::krusty_binary())
                 .args(&args)
                 .output()
-                .expect("run krusty")
+                .expect("run krusty");
+            (
+                result.status.code().unwrap_or(1),
+                String::from_utf8_lossy(&result.stderr).into_owned(),
+            )
         } else {
-            std::process::Command::new(kotlinc)
-                .args(&args)
-                .output()
-                .expect("run kotlinc 2.5.0-Beta2")
-        };
-        (
-            result.status.code(),
-            String::from_utf8_lossy(&result.stderr).into_owned(),
-        )
+            compile_release(release, args)
+        }
+    };
+    let label = if arguments.is_empty() {
+        "default".to_string()
+    } else {
+        arguments.join("-")
     };
     let (kotlinc_code, kotlinc_stderr) = compile(&work.join(format!("kotlinc-{label}")), false);
     let (krusty_code, krusty_stderr) = compile(&work.join(format!("krusty-{label}")), true);
@@ -469,6 +455,6 @@ fn assert_like_beta2(
     assert_eq!(
         (krusty_code, located(&krusty_stderr)),
         (kotlinc_code, located(&kotlinc_stderr)),
-        "{arguments:?}\nkrusty: {krusty_stderr}\nkotlinc: {kotlinc_stderr}"
+        "{release} {arguments:?}\nkrusty: {krusty_stderr}\nkotlinc: {kotlinc_stderr}"
     );
 }

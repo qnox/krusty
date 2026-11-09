@@ -792,23 +792,54 @@ mod tests {
         parse(args.iter().map(|s| s.to_string()))
     }
 
-    /// `-progressive` accepts a release whose progressive features are all modeled, and turns
-    /// them on; every supported release's are.
+    /// `-progressive` turns on every progressive feature krusty models. A feature it would turn
+    /// on that no phase implements refuses the command line, the same way `-XXLanguage:+…` and
+    /// an `@Enables` argument refuse that name. There is no list of features that are accepted
+    /// unimplemented.
     #[test]
     fn progressive_turns_on_every_modeled_progressive_feature() {
+        use krusty::features::LangFeatures;
+
         for release in KotlinVersion::supported() {
-            let release = release.to_string();
+            let label = release.to_string();
             let o = parse_args(&[
-                &format!("-Xkotlin-reference-version={release}"),
+                &format!("-Xkotlin-reference-version={label}"),
                 "-progressive",
                 "f.kt",
             ]);
-            assert_eq!(o.errors, Vec::<String>::new(), "kotlinc {release}");
+            let language = LanguageVersion::default_for(release);
+            let before = LangFeatures::for_release(release, language, language);
+            let mut refusal = None;
+            for feature in before.table().progressive() {
+                if before.has(&feature.name) {
+                    continue;
+                }
+                if LangFeatures::models(&feature.name) {
+                    assert!(
+                        o.language_settings.features.has(&feature.name),
+                        "kotlinc {label} {}",
+                        feature.name
+                    );
+                } else if refusal.is_none() {
+                    refusal = Some(feature.name.as_str());
+                }
+            }
+            match refusal {
+                None => assert_eq!(o.errors, Vec::<String>::new(), "kotlinc {label}"),
+                Some(feature) => assert_eq!(
+                    o.errors,
+                    [format!(
+                        "krusty does not implement the language feature '{feature}' selected by \
+                         '-progressive'"
+                    )],
+                    "kotlinc {label}"
+                ),
+            }
             assert!(
                 o.language_settings
                     .features
                     .has("ReportTypeVarianceConflictsInDnnAndFlexible"),
-                "kotlinc {release}"
+                "kotlinc {label}"
             );
         }
         let o = parse_args(&["-Xkotlin-reference-version=2.4.20", "-progressive", "f.kt"]);

@@ -106,8 +106,10 @@ pub const UNSUPPORTED: &[&str] = &[
     "-Xallow-contracts-on-more-functions",
     "-Xallow-holdsin-contract",
     "-Xallow-no-source-files",
-    // kotlinc 2.5.0-Beta2 errors when its own JVM is older than 17 unless this flag is set.
-    // krusty has no host-JDK gate, so the flag is not a behavior it can apply.
+    // This flag only lifts kotlinc's check that its own JVM is at least 17. krusty does not
+    // run that check, so the flag is inert. It stays refused: the inert-argument harness needs
+    // kotlinc to reject a compilation that omits the flag, and a JDK that is already 17 or newer
+    // does not.
     "-Xallow-pre-17-runtime-jdk",
     "-Xallow-reified-type-in-catch",
     "-Xallow-returns-result-of",

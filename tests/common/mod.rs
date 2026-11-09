@@ -13,6 +13,9 @@ pub(crate) mod producing_jdk;
 pub(crate) mod server_pool;
 pub use kotlinc_lib::kotlinc_lib_out;
 pub use kotlinc_server::{kotlin_compiler_jar, kotlinc_compile};
+// The product e2e crate compiles a chosen release through these. The conformance binary does not.
+#[allow(unused_imports)]
+pub use kotlinc_server::{kotlinc_compile_for_release, kotlinc_lib_for_release};
 #[allow(unused_imports)] // conformance never calls these; the e2e crate does.
 pub use metadata_diff::{
     metadata_diff_against_kotlinc_cp, metadata_diff_against_kotlinc_lib,
