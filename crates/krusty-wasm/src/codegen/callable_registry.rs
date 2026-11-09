@@ -93,7 +93,22 @@ impl CallableRegistry {
         wasm: &mut Module,
     ) -> Result<Vec<Option<u32>>, Unsupported> {
         let mut identities = vec![Vec::new(); ir.functions.len()];
+        // A member of a local or anonymous class is reachable from no other file, and every file
+        // that expands an inline function declaring the class realizes the class again. Such a
+        // member is this file's own function and binds no module identity.
+        let local_members: HashSet<krusty::ir::FunId> = ir
+            .classes
+            .iter()
+            .enumerate()
+            .filter(|(id, _)| {
+                krusty::ir::ClassId::try_from(*id).is_ok_and(|id| ir.is_local_class(id))
+            })
+            .flat_map(|(_, class)| class.methods.iter().copied())
+            .collect();
         for (&callable, &function) in &ir.checked_callable_functions {
+            if local_members.contains(&function) {
+                continue;
+            }
             let Some(targets) = identities.get_mut(function as usize) else {
                 return Err("an invalid source callable identity".to_string());
             };
@@ -143,8 +158,8 @@ impl CallableRegistry {
                             .to_string(),
                     );
                 }
-                // An inline template's local class is cloned into each file it is spliced into,
-                // and every clone realizes the template's callables again.
+                // A module identity names one function. A local class's members, which every
+                // file expanding its inline function realizes again, bind none (see above).
                 if wasm.function_is_defined(index) || !declared.insert(index) {
                     return Err("a callable realized by two functions".to_string());
                 }

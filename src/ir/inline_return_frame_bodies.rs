@@ -9,7 +9,7 @@ use super::{ExprId, IrExpr, IrFile};
 
 impl IrFile {
     /// The body the inline-return frame `template` wraps, when `template` is such a frame.
-    pub(crate) fn inline_return_frame_body(&self, template: ExprId) -> Option<ExprId> {
+    pub fn inline_return_frame_body(&self, template: ExprId) -> Option<ExprId> {
         let IrExpr::Block { stmts, .. } = self.expr(template) else {
             return None;
         };

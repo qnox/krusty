@@ -86,6 +86,7 @@ mod sam_wrappers;
 mod shared_captures;
 mod singleton_storage;
 pub mod suspend;
+mod suspend_coroutine_blocks;
 pub(crate) mod suspend_impls;
 mod suspend_inline_functions;
 mod type_parameter_carriers;

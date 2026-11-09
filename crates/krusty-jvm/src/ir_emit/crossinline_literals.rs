@@ -6,13 +6,13 @@
 //! (`SyntheticAccessorLowering`), whichever class the body ends up in. Everything written inside
 //! such a body, nested lambdas included, is in that position too.
 
-use crate::fx_hash::HashSet;
-use crate::ir::{ExprId, IrExpr, IrFile};
-use crate::types::InlineParameterModifier;
+use krusty::fx_hash::HashSet;
+use krusty::ir::{ExprId, IrExpr, IrFile};
+use krusty::types::InlineParameterModifier;
 
 /// The inline body of each literal an inline call passes to a `crossinline` parameter, whichever
 /// module declares the callee: every realized inline call publishes its operands' modifiers, as
-/// the JVM inliner treats them ([`crate::jvm::suspend_coroutine_blocks`]).
+/// the JVM inliner treats them ([`crate::suspend_coroutine_blocks`]).
 pub(super) fn crossinline_literal_bodies(ir: &IrFile) -> HashSet<ExprId> {
     let mut bodies = HashSet::default();
     for (&call, modifiers) in &ir.call_inline_modifiers {

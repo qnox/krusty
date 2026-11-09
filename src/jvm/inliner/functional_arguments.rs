@@ -298,7 +298,7 @@ fn analyze(
 /// materialized by `invokedynamic`, directly or in a method of an anonymous object the lambda is
 /// passed to, whose copy inlines it in turn. The call's route is decided from this fact before
 /// anything is inlined.
-pub(crate) fn keeps_lambda_as_value(
+pub fn keeps_lambda_as_value(
     callee: &MethodNode,
     parameters: &Parameters,
     classes: &dyn ClassRoles,

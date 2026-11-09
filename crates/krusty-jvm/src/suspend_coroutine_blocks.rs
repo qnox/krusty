@@ -8,8 +8,8 @@
 //! selected declaration's identity, and published with the operands' inline roles, which every
 //! later copy or relocation of the call carries.
 
-use crate::backend::BackendCallableFact;
-use crate::types::{type_name, InlineParameterModifier, SemanticCallableOwner};
+use krusty::backend::BackendCallableFact;
+use krusty::types::{type_name, InlineParameterModifier, SemanticCallableOwner};
 
 /// The inline roles the JVM inliner gives the operands of a call to `callable`, whose declaration
 /// publishes `declared`: the declared roles, except that the block of the builtin

@@ -274,6 +274,10 @@ pub(super) struct Symbols {
     /// Per IR function index, whether its symbol is the module symbol another file of the module
     /// calls it by.
     pub cross_file: Vec<bool>,
+    /// Per IR function index, whether no other file names it: a member of a local or anonymous
+    /// class, or a local or compiler-generated function. Every file that expands an inline function
+    /// declaring one realizes it again under the same name, so the symbol stays inside its object.
+    pub file_local: Vec<bool>,
 }
 
 fn class_symbol_family(base: &str) -> [String; 6] {
@@ -308,6 +312,7 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
     // and a member, which another file calls directly when dispatch cannot select a different body.
     let mut functions = vec![String::new(); ir.functions.len()];
     let mut cross_file = vec![false; ir.functions.len()];
+    let mut file_local = vec![false; ir.functions.len()];
     for (callable, function) in &ir.checked_callable_functions {
         let index = *function as usize;
         let Some(declared) = ir.functions.get(index) else {
@@ -319,7 +324,7 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
         if let Some(owner) = declared.dispatch_receiver {
             let named = ir
                 .class_id_by_name(owner)
-                .is_some_and(|class| !ir.local_class_name_provenance.contains_key(&class));
+                .is_some_and(|class| !ir.is_local_class(class));
             if !named {
                 continue;
             }
@@ -400,8 +405,10 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
         .filter(|package| !package.is_empty());
     // Methods are named by their class, then everything else by the package. A slot filled above
     // is a cross-file symbol and stays.
-    for (class, base) in ir.classes.iter().zip(&classes) {
+    for (id, (class, base)) in ir.classes.iter().zip(&classes).enumerate() {
+        let id = krusty::ir::ClassId::try_from(id).expect("class identity fits ClassId");
         for &fid in &class.methods {
+            file_local[fid as usize] = ir.is_local_class(id);
             if !functions[fid as usize].is_empty() {
                 continue;
             }
@@ -424,6 +431,7 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
         }
         // An entry constructing a class, or answering its object, is named after that class.
         if let Some(&class) = ir.construction_entries().get(&(index as krusty::ir::FunId)) {
+            file_local[index] = ir.is_local_class(class);
             let base = format!(
                 "kt_{}_{}",
                 classes[class as usize],
@@ -444,6 +452,7 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
             .dispatch_receiver
             .and_then(|owner| ir.class_id_by_name(owner))
         {
+            file_local[index] = ir.is_local_class(class);
             let base = format!(
                 "kt_{}_{}",
                 classes[class as usize],
@@ -454,7 +463,10 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
         }
         // Local and compiler-generated functions have no checked callable identity. They still
         // belong to one source module: independently analyzed dependencies restart their local
-        // function ids and may otherwise export identical strong symbols at the final link.
+        // function ids and may otherwise export identical strong symbols at the final link. No
+        // other file names one, and two files that expand one inline function each generate it
+        // again under the same name, so it stays inside its object.
+        file_local[index] = true;
         let base = match &package {
             Some(package) => format!(
                 "kt_modlocal_{namespace}_{package}_{}",
@@ -468,6 +480,7 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
         classes,
         functions,
         cross_file,
+        file_local,
     }
 }
 
@@ -516,6 +529,21 @@ mod tests {
         first_file.functions.push(first_file.functions[0].clone());
         let repeated = symbols(&first_file, "shared-module", HashSet::default());
         assert_ne!(repeated.functions[0], repeated.functions[1]);
+    }
+
+    #[test]
+    fn a_function_no_other_file_names_stays_inside_its_object() {
+        // Two files that expand one inline function each generate its local functions again.
+        let local = symbols(&fallback_function("local"), "module", HashSet::default());
+        assert_eq!(local.file_local, [true]);
+        // A named class's member is reachable from another file of the module.
+        let mut named = fallback_function("member");
+        let owner = krusty::types::type_name("sample/Named");
+        named.classes.push(krusty::ir::IrClass::synthetic(owner));
+        named.functions[0].is_static = false;
+        named.functions[0].dispatch_receiver = Some(owner);
+        let member = symbols(&named, "module", HashSet::default());
+        assert_eq!(member.file_local, [false]);
     }
 
     #[test]

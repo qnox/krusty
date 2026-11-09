@@ -632,6 +632,9 @@ impl<'a> FileLowering<'a> {
                 {
                     Linkage::Hidden
                 }
+                krusty::backend::CheckedIrUnitKind::Source if self.symbols.file_local[index] => {
+                    Linkage::Local
+                }
                 krusty::backend::CheckedIrUnitKind::Source => Linkage::Export,
             };
             let id = self
