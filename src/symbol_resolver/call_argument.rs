@@ -19,6 +19,10 @@ pub(crate) enum CallArgKind {
     ExpectedTypeCallable {
         provisional: Ty,
         generic_sig: std::sync::Arc<GenericSig>,
+        /// Whether `provisional` still mentions a formal the nested call's own inputs left
+        /// unsolved. A type parameter lexically in scope at the call is the enclosing
+        /// declaration's fixed type, not an open one.
+        provisional_open: bool,
     },
     /// A safely folded integer constant and its ordinary runtime type.
     IntegerLiteral { ty: Ty, constant: IntegerConstant },
@@ -40,9 +44,11 @@ impl CallArgKind {
             Self::ExpectedTypeCallable {
                 provisional,
                 generic_sig,
+                provisional_open,
             } => Self::ExpectedTypeCallable {
                 provisional: map(provisional),
                 generic_sig,
+                provisional_open,
             },
             Self::IntegerLiteral { ty, constant } => Self::IntegerLiteral {
                 ty: map(ty),
@@ -241,13 +247,14 @@ impl CallArgKind {
     /// as evidence discards the element type the expectation would have supplied.
     pub(crate) fn result_is_input_constrained(&self) -> bool {
         let Self::ExpectedTypeCallable {
-            provisional,
             generic_sig,
+            provisional_open,
+            ..
         } = self
         else {
             return false;
         };
-        nested_result_is_input_constrained(*provisional, generic_sig)
+        nested_result_is_input_constrained(*provisional_open, generic_sig)
     }
 
     /// Whether this argument has a final semantic type that may constrain a call's declaration
@@ -300,6 +307,7 @@ impl CallArgKind {
         let Self::ExpectedTypeCallable {
             provisional,
             generic_sig,
+            provisional_open,
         } = self
         else {
             return false;
@@ -313,7 +321,15 @@ impl CallArgKind {
         };
         let infer = |signature: &GenericSig| {
             infer_generic_return_bindings(signature, parameter, admits).is_some_and(|bindings| {
-                expected_result_keeps_call_evidence(*provisional, generic_sig, parameter, &bindings)
+                expected_result_keeps_call_evidence(
+                    ProvisionalResult {
+                        ty: *provisional,
+                        open: *provisional_open,
+                    },
+                    generic_sig,
+                    parameter,
+                    &bindings,
+                )
             })
         };
         if infer(generic_sig) {
@@ -371,14 +387,15 @@ impl CallArgKind {
 /// reads as the declared bound (`ArrayList<Any>`) or stays free (`Set<T>`), and treating either
 /// as evidence discards the element type the expectation would have supplied.
 pub(crate) fn nested_result_is_input_constrained(
-    provisional: Ty,
+    provisional_open: bool,
     generic_sig: &GenericSig,
 ) -> bool {
-    // A provisional that still mentions a type parameter is not determined: `"OK" to
+    // A provisional that still mentions an open formal is not determined: `"OK" to
     // emptySet()` reads as `Pair<String, B>` because its own argument supplied nothing for
     // `B`. Only the enclosing expectation can finish it, so it is not evidence about this
-    // call — which is what letting it through regressed.
-    if provisional.mentions_ty_param() {
+    // call — which is what letting it through regressed. `Box(listOf(r))` with `r: R` of the
+    // enclosing `fun <R>` is determined: `R` is that declaration's own type.
+    if provisional_open {
         return false;
     }
     generic_sig
@@ -406,8 +423,15 @@ pub(crate) fn nested_result_is_input_constrained(
 /// `String` parameter does not accept it. Only nullability is read back. A provisional's classifier
 /// may still be a placeholder when the call's own inputs are contextual (`forward(produce())`),
 /// and the expectation may widen a binding anyway (`mutableListOf(1)` as `MutableList<Number>`).
+/// A nested call's expectation-free result type, and whether it still mentions an open formal.
+#[derive(Clone, Copy)]
+pub(crate) struct ProvisionalResult {
+    pub(crate) ty: Ty,
+    pub(crate) open: bool,
+}
+
 pub(crate) fn expected_result_keeps_call_evidence(
-    provisional: Ty,
+    provisional: ProvisionalResult,
     generic_sig: &GenericSig,
     expected: Ty,
     expected_bindings: &super::GSigBinds,
@@ -416,11 +440,11 @@ pub(crate) fn expected_result_keeps_call_evidence(
     if generic_sig.ret.is_nullable() && !admits_null(expected) {
         return false;
     }
-    if !nested_result_is_input_constrained(provisional, generic_sig) {
+    if !nested_result_is_input_constrained(provisional.open, generic_sig) {
         return true;
     }
     let mut input_bindings = super::GSigBinds::default();
-    super::unify_inferred_ty(generic_sig.ret, provisional, &mut input_bindings);
+    super::unify_inferred_ty(generic_sig.ret, provisional.ty, &mut input_bindings);
     input_bindings.iter().all(|(formal, input)| {
         !input.admits_null()
             || expected_bindings
@@ -437,6 +461,7 @@ mod tests {
         let formal = Ty::ty_param("T", Ty::obj("kotlin/Any"));
         CallArgKind::ExpectedTypeCallable {
             provisional,
+            provisional_open: provisional.mentions_ty_param(),
             generic_sig: std::sync::Arc::new(GenericSig {
                 formals: vec![crate::types::TyParamName::new("T")],
                 formal_bounds: vec![Vec::new()],

@@ -29,9 +29,11 @@ impl ProductionSignatureSemantics<'_> {
             }
             None => nested_result_template(argument.ty.get()).map_or(
                 crate::symbol_resolver::CallArgKind::Typed(argument.ty.get()),
+                // The template exists only because the provisional names open variables.
                 |generic_sig| crate::symbol_resolver::CallArgKind::ExpectedTypeCallable {
                     provisional: argument.ty.get(),
                     generic_sig: std::sync::Arc::new(generic_sig),
+                    provisional_open: true,
                 },
             ),
         }
