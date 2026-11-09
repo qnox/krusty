@@ -105,6 +105,9 @@ impl Body<'_> {
         selected: Option<&[Ty]>,
     ) -> Result<(), Unsupported> {
         let Some(class) = self.classes.and(self.ir.class_id_by_name(internal)) else {
+            if let Some(constructed) = self.scalar_value_construction(internal, args, selected) {
+                return constructed;
+            }
             // Boundary conversion for a diagnostic.
             return Err(format!(
                 "construction of the library class `{}`",
