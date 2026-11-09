@@ -7,6 +7,8 @@
 //! language/API levels use the typed channel which Kotlin's own test runner uses.
 
 use super::{case_directive_region, directive, UnitCodegenModes};
+use crate::features::LanguageVersionPolicy;
+use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
 
 /// Compiler configuration selected by a box test for one compilation unit.
@@ -57,13 +59,22 @@ fn unit_codegen_modes<'a>(case: &str, unit: impl IntoIterator<Item = &'a str>) -
 }
 
 fn case_compiler_configuration(src: &str) -> Result<UnitCompilerConfiguration, String> {
-    let mut arguments = case_cli_arguments(src)?;
-    let language_version = exact_version(src, "LANGUAGE_VERSION")?;
-    let api_version = exact_version(src, "API_VERSION")?;
-    if let Some(version) = last_value(src, "LANGUAGE_VERSION") {
-        if !predates_kotlin_2(version) {
-            arguments.extend(["-language-version".to_string(), version.to_string()]);
-        }
+    case_compiler_configuration_for_release(src, crate::kotlin_version::target())
+}
+
+fn case_compiler_configuration_for_release(
+    src: &str,
+    compiler: KotlinVersion,
+) -> Result<UnitCompilerConfiguration, String> {
+    let mut arguments = case_cli_arguments(src, compiler)?;
+    let api_version = exact_version(src, "API_VERSION", compiler)?;
+    let language_version = exact_version(src, "LANGUAGE_VERSION", compiler)?.or_else(|| {
+        // Kotlin's test settings raise the implicit language level when the requested API is newer
+        // than LATEST_STABLE. In particular, `API_VERSION: LATEST` includes experimental levels.
+        api_version.filter(|version| *version > LanguageVersion::default_for(compiler))
+    });
+    if let Some(version) = language_version.filter(|version| version.major >= 2) {
+        arguments.extend(["-language-version".to_string(), version.to_string()]);
     }
     Ok(UnitCompilerConfiguration {
         arguments,
@@ -121,7 +132,7 @@ pub fn case_kotlinc_arguments(src: &str) -> Result<Vec<String>, String> {
     Ok(configuration.arguments)
 }
 
-fn case_cli_arguments(src: &str) -> Result<Vec<String>, String> {
+fn case_cli_arguments(src: &str, compiler: KotlinVersion) -> Result<Vec<String>, String> {
     if let Some(directive) = super::unsupported_codegen_mode_directive(src) {
         return Err(format!(
             "box directive `{directive}` names no code-generation mode"
@@ -132,10 +143,8 @@ fn case_cli_arguments(src: &str) -> Result<Vec<String>, String> {
         .filter(|token| !token.is_empty())
         .map(|token| format!("-XXLanguage:{token}"))
         .collect();
-    if let Some(version) = last_value(src, "API_VERSION") {
-        if !predates_kotlin_2(version) {
-            arguments.extend(["-api-version".to_string(), version.to_string()]);
-        }
+    if let Some(version) = exact_version(src, "API_VERSION", compiler)?.filter(|v| v.major >= 2) {
+        arguments.extend(["-api-version".to_string(), version.to_string()]);
     }
     arguments.extend(
         values(src, "OPT_IN")
@@ -235,21 +244,32 @@ fn last_value<'a>(src: &'a str, name: &'a str) -> Option<&'a str> {
         .last()
 }
 
-/// Whether a `major.minor` version names a Kotlin 1.x release.
-fn predates_kotlin_2(version: &str) -> bool {
-    version
-        .split_once('.')
-        .and_then(|(major, _)| major.parse::<u32>().ok())
-        .is_some_and(|major| major < 2)
-}
-
-fn exact_version(src: &str, directive: &str) -> Result<Option<LanguageVersion>, String> {
+/// Resolve the official test directive's levels, including the symbolic `LATEST_STABLE` and
+/// (for `API_VERSION` only) `LATEST`, against the selected compiler's recorded policy.
+fn exact_version(
+    src: &str,
+    directive: &str,
+    compiler: KotlinVersion,
+) -> Result<Option<LanguageVersion>, String> {
     let Some(version) = last_value(src, directive) else {
         return Ok(None);
     };
-    LanguageVersion::from_major_minor_text(version)
-        .map(Some)
-        .ok_or_else(|| format!("box directive `// {directive}: {version}` names no language level"))
+    let policy = || {
+        LanguageVersionPolicy::for_release(compiler)
+            .ok_or_else(|| format!("kotlinc {compiler} has no recorded language version policy"))
+    };
+    let level = match version {
+        "LATEST" if directive == "API_VERSION" => policy()?.latest(),
+        "LATEST_STABLE" => policy()?.latest_stable(),
+        _ => {
+            return LanguageVersion::from_major_minor_text(version)
+                .map(Some)
+                .ok_or_else(|| {
+                    format!("box directive `// {directive}: {version}` names no language level")
+                });
+        }
+    };
+    Ok(Some(level))
 }
 
 /// Whether any source file declares the top-level package `kotlin` or a `kotlin.*` subpackage,
@@ -269,6 +289,55 @@ mod tests {
 
     fn arguments(src: &str) -> Vec<String> {
         case_kotlinc_arguments(src).expect("the directives map to arguments")
+    }
+
+    #[test]
+    fn symbolic_api_levels_use_the_selected_release_and_raise_the_implicit_language_level() {
+        for (compiler, latest) in [
+            (KotlinVersion::V2_4_10, LanguageVersion::V2_5),
+            (KotlinVersion::V2_4_20, LanguageVersion::V2_6),
+        ] {
+            let configure = |src: &str| case_compiler_configuration_for_release(src, compiler);
+            let levels = |api: LanguageVersion, language: LanguageVersion| {
+                vec![
+                    "-api-version".to_owned(),
+                    api.to_string(),
+                    "-language-version".to_owned(),
+                    language.to_string(),
+                ]
+            };
+            let symbolic = configure("// API_VERSION: LATEST\nfun box() = \"OK\"\n").unwrap();
+            assert_eq!(symbolic.api_version, Some(latest));
+            assert_eq!(symbolic.language_version, Some(latest));
+            assert_eq!(symbolic.arguments, levels(latest, latest));
+            let numeric = configure(&format!("// API_VERSION: {latest}\nfun box() = \"OK\"\n"));
+            assert_eq!(numeric.unwrap(), symbolic);
+
+            let stable = LanguageVersion::default_for(compiler);
+            let explicit = configure(&format!(
+                "// API_VERSION: {latest}\n// LANGUAGE_VERSION: {stable}\nfun box() = \"OK\"\n"
+            ))
+            .unwrap();
+            assert_eq!(explicit.api_version, Some(latest));
+            assert_eq!(explicit.language_version, Some(stable));
+            assert_eq!(explicit.arguments, levels(latest, stable));
+
+            let stable_levels = configure(
+                "// API_VERSION: LATEST_STABLE\n// LANGUAGE_VERSION: LATEST_STABLE\nfun box() = \"OK\"\n",
+            )
+            .unwrap();
+            assert_eq!(stable_levels.api_version, Some(stable));
+            assert_eq!(stable_levels.language_version, Some(stable));
+            assert_eq!(stable_levels.arguments, levels(stable, stable));
+
+            assert_eq!(
+                configure("// LANGUAGE_VERSION: LATEST\n"),
+                Err(
+                    "box directive `// LANGUAGE_VERSION: LATEST` names no language level"
+                        .to_owned()
+                )
+            );
+        }
     }
 
     #[test]
