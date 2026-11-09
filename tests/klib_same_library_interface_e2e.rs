@@ -70,9 +70,9 @@ fn interface_typed_receiver_dispatches_the_private_implementation() {
         &krusty::features::LangFeatures::new(),
         &mut diags,
     );
-    let target = krusty::native::NativeTarget::host().expect("host Native target");
-    let backend = krusty::native::CraneliftBackend::new(target)
-        .with_entry(krusty::native::Entry::Box)
+    let target = krusty_native::NativeTarget::host().expect("host Native target");
+    let backend = krusty_native::CraneliftBackend::new(target)
+        .with_entry(krusty_native::Entry::Box)
         .verified();
     let artifacts = krusty::compiler::emit_analyzed(
         analysis,
@@ -94,7 +94,7 @@ fn interface_typed_receiver_dispatches_the_private_implementation() {
         .filter_map(|(name, bytes)| name.ends_with(".o").then_some(bytes))
         .collect::<Vec<_>>();
     assert!(!objects.is_empty());
-    let image = krusty::native::link_program(
+    let image = krusty_native::link_program(
         &objects.iter().map(Vec::as_slice).collect::<Vec<_>>(),
         target,
     )
