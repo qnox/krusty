@@ -92,6 +92,13 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         Ty::Unit,
         defaults.iter().flatten().copied(),
     );
+    // Default expressions are source code: an inline call among them opens the same frame, with
+    // its marker store and variable-table entries, as it does in any other body.
+    e.record_locals = true;
+    e.regeneration_site = Some(super::bytecode_inline_call::RegenerationSite::constructor(
+        &desc,
+        env.signature_symbols,
+    ));
     e.this_uninitialized = true;
     // `this` at slot 0 = value-index 0; real params at value-index 1..=n.
     let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(owner));
@@ -228,14 +235,10 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         access
     };
     e.cw.add_method(access, "<init>", &desc, &code);
-    // Default expressions can retain source positions even when the generated owner has no
-    // declaration line. Publish exactly the stub's curated marks, including an empty table.
-    let lines = code
-        .line_marks()
-        .iter()
-        .map(|&(pc, line)| (pc, u32::from(line)))
-        .collect::<Vec<_>>();
-    e.cw.set_method_lines("<init>", &desc, &lines);
+    // `add_method` curates an `<init>`'s tables from its class's declarations. The stub's are its
+    // own: the marks its default expressions recorded (an empty table when the generated owner has
+    // no declaration line), and the frames their inline calls opened.
+    e.cw.keep_method_debug("<init>", &desc, &code);
     if deprecated {
         e.cw.mark_method_deprecated("<init>", &desc);
     }

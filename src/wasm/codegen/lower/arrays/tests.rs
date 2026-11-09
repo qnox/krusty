@@ -13,22 +13,35 @@ fn getter(source: Ty) -> IrCheckedOperation {
 }
 
 #[test]
-fn size_frames_keep_generic_and_projected_reference_array_storage() {
+fn size_frames_keep_reference_arrays_and_int_array_storage() {
     let formal = Ty::ty_param(
         "array-element",
         Ty::nullable(Ty::obj_name(crate::types::wk::any())),
     );
+    let mut admitted = Vec::new();
     for element in [Ty::String, Ty::Int, formal, Ty::out_projection(formal)] {
-        let array = Ty::obj_args_name(crate::types::wk::array(), &[element]);
-        assert_eq!(array_size_receiver(&getter(array)), Ok(23));
+        admitted.push(Ty::obj_args_name(crate::types::wk::array(), &[element]));
+    }
+    admitted.push(Ty::array(Ty::Int));
+    admitted.push(Ty::nullable(Ty::array(Ty::Int)));
+    for array in admitted {
+        assert_eq!(
+            array_size_receiver(&getter(array)),
+            Ok((23, array.non_null()))
+        );
     }
 }
 
 #[test]
-fn size_frames_reject_missing_or_extra_operands_and_primitive_storage() {
+fn size_frames_reject_missing_or_extra_operands_and_other_primitive_storage() {
     let valid = getter(Ty::array(Ty::String));
     let mut malformed = Vec::new();
-    for replacement in [None, Some(Ty::Int), Some(Ty::array(Ty::Int))] {
+    for replacement in [
+        None,
+        Some(Ty::Int),
+        Some(Ty::array(Ty::Long)),
+        Some(Ty::array(Ty::Byte)),
+    ] {
         let mut operation = valid.clone();
         let IrCheckedOperation::ExternalPropertyRead {
             source_receiver, ..
