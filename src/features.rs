@@ -192,6 +192,7 @@ const MODELED_FEATURES: &[&str] = &[
     "ForbidValueClassRecursionViaTypeParameters",
     "FullValueClasses",
     "ImplicitSignedToUnsignedIntegerConversion",
+    "JvmInlineScopesNumbers",
     "JvmSupportRecursiveTypeOf",
     "MultiDollarInterpolation",
     "MultiPlatformProjects",

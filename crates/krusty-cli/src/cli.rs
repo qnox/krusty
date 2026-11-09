@@ -635,9 +635,23 @@ impl Options {
         for marker in &self.opt_in {
             settings.features.opt_in(marker);
         }
+        // From 2.5 kotlinc models `-Xuse-inline-scopes-numbers` as the `JvmInlineScopesNumbers`
+        // language feature, which its JVM backend configuration reads; the feature's state, set by
+        // the argument or `-XXLanguage`, is then the setting. Earlier releases keep the argument.
+        if settings
+            .features
+            .table()
+            .get(INLINE_SCOPES_NUMBERS_FEATURE)
+            .is_some()
+        {
+            self.inline_scopes_numbers = settings.features.has(INLINE_SCOPES_NUMBERS_FEATURE);
+        }
         self.language_settings = settings;
     }
 }
+
+/// kotlinc's language feature for inline scope numbering, where its release has one.
+const INLINE_SCOPES_NUMBERS_FEATURE: &str = "JvmInlineScopesNumbers";
 
 /// Something wrong with a user-supplied `-cp` entry, found before analysis opens it.
 ///
@@ -874,6 +888,25 @@ mod tests {
         assert!(parsed.inline_scopes_numbers);
         assert_eq!(parsed.ignored, Vec::<String>::new());
         assert!(!parse_args(&["x.kt"]).inline_scopes_numbers);
+    }
+
+    /// kotlinc 2.5 reads inline scope numbering from the `JvmInlineScopesNumbers` feature that
+    /// `-Xuse-inline-scopes-numbers` enables, so either spelling selects it and neither is refused.
+    #[test]
+    fn inline_scopes_numbers_follow_the_language_feature_where_the_release_has_one() {
+        for arguments in [
+            &["-Xuse-inline-scopes-numbers"][..],
+            &["-XXLanguage:+JvmInlineScopesNumbers"][..],
+        ] {
+            let mut command = vec!["-Xkotlin-reference-version=2.5.0-Beta2"];
+            command.extend_from_slice(arguments);
+            command.push("x.kt");
+            let parsed = parse_args(&command);
+            assert_eq!(parsed.refusals, Vec::<String>::new(), "{arguments:?}");
+            assert!(parsed.inline_scopes_numbers, "{arguments:?}");
+        }
+        let parsed = parse_args(&["-Xkotlin-reference-version=2.5.0-Beta2", "x.kt"]);
+        assert!(!parsed.inline_scopes_numbers);
     }
 
     /// Every assertion flag must reach `Options`, not fall through to `ignored`: a missing match arm
