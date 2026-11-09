@@ -67,8 +67,9 @@ pub(super) fn compile(
 /// how its entries are stored changes. Everything a compile reads already rides the key: the
 /// target, architecture, source, module plan, derived compiler configuration and properties, and
 /// the toolchain identity. The harness's own sources are deliberately not hashed: an unrelated
-/// edit to one of them would turn every Native and Wasm row cold.
-const REFERENCE_FORMAT: &str = "klib-reference-v1";
+/// edit to one of them would turn every Native and Wasm row cold. CI hashes the same file into
+/// its cache key, so a bump starts a fresh cache instead of saving new archives beside the old.
+const REFERENCE_FORMAT: &str = include_str!("reference-format");
 
 pub(super) fn key(target: TestTarget, source: &str, units: &[ModuleUnit], identity: &str) -> u128 {
     // ModuleUnit's full topology includes folded fragments, friend policy, source names and bytes.

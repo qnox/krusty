@@ -731,9 +731,9 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/klib-references
-          key: box-klib-references-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-${{ steps.base.outputs.sha }}
+          key: box-klib-references-${{ hashFiles('tests/box_klib_bytes/reference-format') }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-${{ steps.base.outputs.sha }}
           restore-keys: |
-            box-klib-references-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-
+            box-klib-references-${{ hashFiles('tests/box_klib_bytes/reference-format') }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-
       # A restore through `restore-keys` never reports a hit, so whether a master push saves is
       # decided by the entries it added: one archive per exact-input fingerprint, never rewritten.
       - name: list restored KLIB box reference bytes
@@ -929,7 +929,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/klib-references
-          key: box-klib-references-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-${{ github.sha }}
+          key: box-klib-references-${{ hashFiles('tests/box_klib_bytes/reference-format') }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-${{ github.sha }}
       - name: upload KLIB byte equality
         if: always() && matrix.target != 'jvm'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

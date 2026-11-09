@@ -667,11 +667,13 @@ cache's hit and miss counts. The reference compile is timed as the `target oracl
 Reference entries are cached in `KRUSTY_KLIB_REFERENCE_CACHE` (default
 `target/cache/klib-references/`), one archive per exact-input fingerprint. The fingerprint covers
 the target, the host architecture, the case source, its module plan, the derived compiler
-configuration and properties, the toolchain identity, and the `REFERENCE_FORMAT` salt in
-`tests/box_klib_bytes/reference.rs`. The harness's own sources are not hashed, so bump that salt
+configuration and properties, the toolchain identity, and the format salt in
+`tests/box_klib_bytes/reference-format`. The harness's own sources are not hashed, so bump that salt
 whenever the way the reference is produced or stored changes. In CI each row restores the newest
-`box-klib-references-v1-<os>-<arch>-<target>-<version>-…` entry from its base, and a master push
-saves a new entry only when the run added reference archives (`scripts/cache-entries.sh`).
+`box-klib-references-<salt hash>-<os>-<arch>-<target>-<version>-…` entry from its base, and master
+saves a new entry only when the run added reference archives (`scripts/cache-entries.sh`). The CI
+key hashes the same salt file, so a bump starts every row from an empty cache rather than saving
+the new archives beside the old ones.
 
 Reference failures fail the row closed. A case whose reference cannot be compiled, even after the
 server pool's one retry, withholds the byte report rather than scoring fewer cases, and fails the
