@@ -22,7 +22,7 @@ pub(super) type LocalEntry = (u16, Option<u16>, u16, String, String);
 
 /// One inline frame the method's body expands.
 #[derive(Clone, Debug)]
-pub(crate) struct InlineScopeFrame {
+pub struct InlineScopeFrame {
     pub id: u64,
     pub kind: InlineScopeFrameKind,
     /// The frame that was innermost where this one opened.
@@ -39,7 +39,7 @@ pub(crate) struct InlineScopeFrame {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum InlineScopeFrameKind {
+pub enum InlineScopeFrameKind {
     Function,
     /// A lambda body. `depth` counts the expansions it was cloned into; a lambda the inlining
     /// places (`placed`) is the caller's own code at its unit's depth, any other is the callee's.
@@ -50,28 +50,28 @@ pub(crate) enum InlineScopeFrameKind {
 }
 
 impl InlineScopeFrame {
-    pub(crate) fn is_placed(&self) -> bool {
+    pub fn is_placed(&self) -> bool {
         matches!(self.kind, InlineScopeFrameKind::Lambda { placed: true, .. })
     }
 }
 
 impl CodeBuilder {
-    pub(crate) fn inline_scope_frames(&self) -> &[InlineScopeFrame] {
+    pub fn inline_scope_frames(&self) -> &[InlineScopeFrame] {
         &self.inline_scope_frames
     }
 
-    pub(crate) fn register_inline_scope_frame(&mut self, frame: InlineScopeFrame) {
+    pub fn register_inline_scope_frame(&mut self, frame: InlineScopeFrame) {
         self.inline_scope_frames.push(frame);
     }
 
-    pub(crate) fn inline_scope_frame_mut(&mut self, id: u64) -> Option<&mut InlineScopeFrame> {
+    pub fn inline_scope_frame_mut(&mut self, id: u64) -> Option<&mut InlineScopeFrame> {
         self.inline_scope_frames
             .iter_mut()
             .find(|frame| frame.id == id)
     }
 
     /// Where the marker of `frame` starts, once it is recorded.
-    pub(crate) fn inline_frame_start(&self, frame: u64) -> Option<u16> {
+    pub fn inline_frame_start(&self, frame: u64) -> Option<u16> {
         self.local_entries
             .iter()
             .zip(&self.local_entry_placements)
