@@ -1,9 +1,15 @@
 // A member written with a definitely-non-null `T & Any` keeps that `& Any` when it is read
 // through a projected receiver: through `Holder<*>` the value is `Any` and `Box<T & Any>` is
-// `Box<out Any>`, through `Holder<out CharSequence?>` they are `CharSequence` and
-// `Box<out CharSequence>`, and through `Holder<in String?>` the box is `Box<in String>`.
+// `Box<out Any>`, through `Holder<out Named?>` they are `Named` and `Box<out Named>`, and
+// through `Holder<in String?>` the box is `Box<in String>`.
 
 class Box<T>(val item: T)
+
+interface Named {
+    val name: String
+}
+
+class Label(override val name: String) : Named
 
 abstract class Node<T>
 
@@ -12,20 +18,20 @@ abstract class Holder<T> : Node<T>() {
     abstract val box: Box<T & Any>
 }
 
-class Text(override val value: String) : Holder<String?>() {
-    override val box: Box<String> = Box(value)
+class Text<T>(override val value: T & Any) : Holder<T>() {
+    override val box: Box<T & Any> = Box(value)
 }
 
-fun star(holder: Holder<*>): String {
+fun star(holder: Holder<*>): Boolean {
     val value: Any = holder.value
     val box: Box<out Any> = holder.box
-    return value.toString() + box.item
+    return value == "O" && box.item == "O"
 }
 
-fun covariant(holder: Holder<out CharSequence?>): String {
-    val value: CharSequence = holder.value
-    val box: Box<out CharSequence> = holder.box
-    return value.toString() + box.item.length
+fun covariant(holder: Holder<out Named?>): String {
+    val value: Named = holder.value
+    val box: Box<out Named> = holder.box
+    return value.name + box.item.name
 }
 
 fun contravariant(holder: Holder<in String?>): Box<in String> = holder.box
@@ -34,9 +40,10 @@ fun contravariant(holder: Holder<in String?>): Box<in String> = holder.box
 fun cast(node: Node<*>): Box<out Any>? = (node as? Holder)?.box
 
 fun box(): String {
-    val text = Text("O")
-    if (star(text) != "OO") return "star: ${star(text)}"
-    if (covariant(text) != "O1") return "covariant: ${covariant(text)}"
+    val text = Text<String?>("O")
+    if (!star(text)) return "star"
+    val covariant = covariant(Text<Label?>(Label("K")))
+    if (covariant != "KK") return "covariant: $covariant"
     if (contravariant(text).item != "O") return "contravariant"
     if (cast(text)?.item != "O") return "cast"
     return "OK"
