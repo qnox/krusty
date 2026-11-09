@@ -1,5 +1,7 @@
 // A value class implementing the interface of its own underlying value is boxed where the program
-// reads it as that interface, so the value keeps its class identity.
+// passes or returns it as that interface, so the value keeps its class identity. A call on a
+// value held as the class itself, or as a local it initializes, calls the class's static
+// implementation of the delegated member without boxing.
 interface I {
     fun ok(): String
 }
@@ -20,5 +22,6 @@ fun box(): String {
     if (!isValue(IC(i))) return "fail argument"
     if (asInterface(IC(i)) !is IC) return "fail return"
     if (isValue(i)) return "fail underlying"
+    if (IC(i).ok() != "OK") return "fail direct"
     return local.ok()
 }
