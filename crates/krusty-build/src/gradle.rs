@@ -2498,9 +2498,16 @@ include(":core:util.runtime")
 include(":compiler:util")
 "#,
         );
+        // The Kotlin Gradle plugin is requested once, at the root: Kotlin 2.5 fails a build that
+        // loads it in several subprojects' classloaders.
         write(
             "build.gradle.kts",
             r#"
+plugins {
+    kotlin("jvm") version "KGP_VERSION" apply false
+    kotlin("plugin.assignment") version "KGP_VERSION" apply false
+}
+
 subprojects {
     repositories {
         mavenCentral()
@@ -2518,7 +2525,7 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 import org.gradle.api.tasks.compile.JavaCompile
 
 plugins {
-    kotlin("jvm") version "KGP_VERSION"
+    kotlin("jvm")
     id("dev.krustythecompiler") version "PLUGIN_VERSION"
     `java-library`
 }
@@ -2602,9 +2609,8 @@ import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.compile.JavaCompile
 
 plugins {
-    kotlin("jvm") version "KGP_VERSION"
+    kotlin("jvm")
     id("dev.krustythecompiler") version "PLUGIN_VERSION"
-    kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
 }
 
