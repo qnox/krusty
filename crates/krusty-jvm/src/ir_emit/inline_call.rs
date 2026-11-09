@@ -1,0 +1,40 @@
+//! Small boundary types and adapters shared by JVM inline-call emission paths.
+
+use krusty::jvm::classfile::CodeBuilder;
+use krusty::types::Ty;
+
+#[derive(Clone, Copy)]
+pub(super) struct InlineStaticTarget<'a> {
+    pub(super) owner: &'a str,
+    pub(super) name: &'a str,
+    pub(super) descriptor: &'a str,
+    pub(super) splice_desc: &'a str,
+    /// An `@InlineOnly` callee contributes no debug information to the caller.
+    pub(super) inline_only: bool,
+    /// Whether the fetched body may belong to another class than `owner` (a bridge to it).
+    pub(super) allow_owner_bridge: bool,
+    /// Whether the checked call selected a callable `suspend` inline declaration. kotlinc compiles
+    /// its `name` as the callee's own state machine and keeps the body to inline, suspension markers
+    /// and all, in a private `name$$forInline` copy. A must-inline one (`@InlineOnly`, reified) is
+    /// never called, so its only body stays untransformed.
+    pub(super) for_inline_copy: bool,
+}
+
+pub(super) fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {
+    krusty::jvm::physical_type::method_operand_tys(desc).map(|(parameters, _)| parameters)
+}
+
+/// Attach already-relocated inline exception-table entries to their caller labels.
+pub(super) fn bind_inline_handlers(
+    code: &mut CodeBuilder,
+    handlers: &[(usize, usize, usize, u16)],
+) {
+    for &(start, end, handler, catch_type) in handlers {
+        let (start_label, end_label, handler_label) =
+            (code.new_label(), code.new_label(), code.new_label());
+        code.bind_at(start_label, start);
+        code.bind_at(end_label, end);
+        code.bind_at(handler_label, handler);
+        code.add_exception(start_label, end_label, handler_label, catch_type);
+    }
+}
