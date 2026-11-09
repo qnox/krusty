@@ -164,10 +164,13 @@ accessor default are recorded the same way.
 
 An object the runtime makes records nothing, so no stub reaches it. Where a class the runtime makes
 implements the interface declaring a dependency member (the runtime's `StringBuilder` implements
-`Appendable`, which the stdlib's `joinTo` appends through), the call site tests the receiver for
-each such class before it reaches the stub, or the classes of its file that implement the member,
-and hands an instance to the runtime function realizing the class's own member. A member such a
-class implements with no runtime function declines.
+`Appendable`, which the stdlib's `joinTo` appends through), the call site hands an instance of it
+to the runtime function realizing the class's own member. A call site that dispatches among the
+classes of its file implementing the member tests those first, then each such runtime class, and
+only a receiver of none of them reaches the abstract-method failure. A call site that calls the stub
+tests each such runtime class first and hands every other receiver to the stub. A member such a
+class implements with no runtime function declines; the builder's `Appendable` members all have
+one, its range `append` included.
 
 The interface tables are the link's as well. Only a member whose stub looks a table up needs an
 entry, so the link numbers just those members, program-wide, each at the lowest index that no

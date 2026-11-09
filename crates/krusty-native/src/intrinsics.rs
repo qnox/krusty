@@ -2041,6 +2041,9 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
             // The builder's override of `Any.toString`: the text it holds.
             ("toString", []) => Some("kt_to_string"),
             ("append", [_]) => Some("kt_string_builder_append"),
+            // The range form, `append(value: CharSequence?, startIndex, endIndex)`, the builder's one
+            // three-operand `append`: its bounds cross boxed like every operand here.
+            ("append", [_, Ty::Int, Ty::Int]) => Some("kt_string_builder_append_range"),
             ("appendLine", [_]) => Some("kt_string_builder_append_line"),
             ("appendLine", []) => Some("kt_string_builder_append_new_line"),
             _ => None,
@@ -2693,7 +2696,7 @@ mod tests {
     }
 
     #[test]
-    fn the_builder_realizes_the_appendable_members_its_runtime_function_answers() {
+    fn the_builder_realizes_each_appendable_member_with_a_runtime_function() {
         let builder = krusty::types::type_name("kotlin/text/StringBuilder");
         let appendable = || member("kotlin/text/Appendable");
         let answer = Ty::obj("kotlin/text/Appendable");
@@ -2709,13 +2712,12 @@ mod tests {
             runtime_implementation(builder, function(appendable(), "append", &[text], answer)),
             Some("kt_string_builder_append")
         );
-        // The range form has no runtime function, so a call through it is not handed one.
         assert_eq!(
             runtime_implementation(
                 builder,
                 function(appendable(), "append", &[text, Ty::Int, Ty::Int], answer)
             ),
-            None
+            Some("kt_string_builder_append_range")
         );
     }
 

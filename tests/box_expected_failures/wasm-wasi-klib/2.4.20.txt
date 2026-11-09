@@ -4461,8 +4461,6 @@ reflection/typeOf/typeOfCapturedStar.kt
 regressions/Kt1149.kt
 regressions/Kt1619Test.kt
 regressions/Kt2495Test.kt
-regressions/appendableRuntimeBuilder.kt
-regressions/appendableRuntimeBuilderBesideImplementor.kt
 regressions/arrayLengthNPE.kt
 regressions/collectionSizeInInlineBody.kt
 regressions/collectionSizeOrDefault.kt
