@@ -243,7 +243,8 @@ impl Backend for CraneliftBackend {
         );
         // After default arguments, so a `$default` entry's call of the declaration is the one
         // that gains the continuation, and before dispatch entries, which copy the signature.
-        if let Err(declined) = krusty::backend::coroutines::add_continuation_parameters(&mut file.ir)
+        if let Err(declined) =
+            krusty::backend::coroutines::add_continuation_parameters(&mut file.ir)
         {
             diags.error(
                 krusty::diag::Span::new(0, 0),
