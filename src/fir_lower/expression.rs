@@ -244,7 +244,9 @@ impl BodyLowering<'_> {
                 let declared = match target {
                     crate::fir::FirPropertyTarget::Module { property, .. } => self
                         .index
-                        .property_declaration(*property)
+                        .property_declaration(super::expect_realization::realized_property(
+                            self.index, *property,
+                        ))
                         .and_then(|declaration| self.index.signature(declaration))
                         .map(|signature| signature.result.get()),
                     crate::fir::FirPropertyTarget::External { result, .. } => Some(result.get()),
@@ -338,7 +340,9 @@ impl BodyLowering<'_> {
                 let declared_result = match call.target {
                     crate::fir::FirCallTarget::Module(target) => self
                         .index
-                        .callable(target)
+                        .callable(super::expect_realization::realized_callable(
+                            self.index, target,
+                        ))
                         .and_then(|callable| self.index.signature(callable.declaration))
                         .map(|signature| signature.result.get()),
                     crate::fir::FirCallTarget::External { result, .. }

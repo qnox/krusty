@@ -1885,14 +1885,9 @@ impl ResolvedModuleIndex {
         self.source_fragments = fragments;
     }
 
-    /// Whether source `from` types the `expect` classifier `identity` as the target of the
-    /// `actual typealias` actualizing it.
-    pub(crate) fn actualizes_expect(
-        &self,
-        from: Option<u32>,
-        identity: crate::types::TypeName,
-    ) -> bool {
-        self.source_fragments.actualizes_expect(from, identity)
+    /// Each source's fragment and the multiplatform actualization facts keyed by source.
+    pub(crate) fn source_fragments(&self) -> &crate::source::SourceFragments {
+        &self.source_fragments
     }
 
     /// Whether a reference in source `from` sees a declaration of source `declared_in`: a refined
