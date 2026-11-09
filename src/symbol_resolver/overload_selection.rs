@@ -449,7 +449,7 @@ pub(super) fn integer_literal_overload_with_ties<T>(
 pub(super) struct ExtCtx<'a> {
     pub(super) fn_scope: Option<FunctionScopeRef<'a>>,
     pub(super) source: &'a dyn SymbolSource,
-    pub(super) type_variables: &'a [String],
+    pub(super) type_variables: &'a [crate::types::TyParamName],
     /// `+EagerLambdaAnalysis`: a lambda's checked result decides applicability.
     pub(super) eager_lambda_results: bool,
     /// The use site's member visibility, when the caller has a site. Selection ranks a
@@ -1471,7 +1471,7 @@ pub(super) fn semantic_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &
     if param == arg {
         return true;
     }
-    if let TyKind::TyParam(_, bound) = param.non_null().kind() {
+    if let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = param.non_null().kind() {
         if *arg == Ty::Null {
             return param.admits_null();
         }
@@ -1689,7 +1689,7 @@ fn receiver_argument_fits(
     p: &Ty,
     arg: &CallArgKind,
 ) -> bool {
-    if arg.is_omitted_default() {
+    if arg.is_omitted_default() || arg.constructible_as(*p) {
         return true;
     }
     let sam = p.non_null().fun_arity().is_none()

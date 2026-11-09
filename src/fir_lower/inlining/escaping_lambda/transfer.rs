@@ -597,14 +597,10 @@ fn outer_parameter_sidecars_are_valid(
             return false;
         }
     }
-    if [
-        ir.fn_param_declared_nullable.get(&function).map(Vec::len),
-        ir.fn_param_annotations.get(&function).map(Vec::len),
-        ir.fn_param_no_infer.get(&function).map(Vec::len),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|len| !optional_len(len))
+    if ir
+        .declared_parameters(function)
+        .recorded_lengths()
+        .any(|len| !optional_len(len))
     {
         return false;
     }
@@ -613,8 +609,8 @@ fn outer_parameter_sidecars_are_valid(
         .get(&function)
         .is_some_and(|own_from| *own_from as usize > arity)
         || ir
-            .fn_varargs
-            .get(&function)
+            .declared_parameters(function)
+            .vararg
             .is_some_and(|vararg| vararg.index >= arity)
         || ir
             .shared_capture_parameters
@@ -647,14 +643,9 @@ fn parameter_sidecars_cover(
     function: crate::ir::FunId,
     count: usize,
 ) -> bool {
-    [
-        ir.fn_param_declared_nullable.get(&function).map(Vec::len),
-        ir.fn_param_annotations.get(&function).map(Vec::len),
-        ir.fn_param_no_infer.get(&function).map(Vec::len),
-    ]
-    .into_iter()
-    .flatten()
-    .all(|len| len >= count)
+    ir.declared_parameters(function)
+        .recorded_lengths()
+        .all(|len| len >= count)
 }
 
 fn captured_invocation_is_valid(
@@ -1345,9 +1336,15 @@ fn transfer_inlined_capture_facts(
             (transfer.parameter, receivers)
         })
         .collect::<Vec<_>>();
-    let declared_nullable = source_parameter_values(&ir.fn_param_declared_nullable, &transfers);
-    let annotations = source_parameter_values(&ir.fn_param_annotations, &transfers);
-    let no_infer = source_parameter_values(&ir.fn_param_no_infer, &transfers);
+    let declared_facts = transfers
+        .iter()
+        .map(|transfer| {
+            let facts = ir
+                .declared_parameters(transfer.source)
+                .parameter_range(0, transfer.count);
+            (transfer.parameter, facts)
+        })
+        .collect::<Vec<_>>();
     let transferred_shared = transfers
         .iter()
         .flat_map(|transfer| {
@@ -1449,27 +1446,17 @@ fn transfer_inlined_capture_facts(
         }
         info.captured_receivers = rebuilt_receivers;
     }
-    replace_parallel_map(
-        &mut ir.fn_param_declared_nullable,
-        function,
-        &declared_nullable,
-        old_arity,
-    );
-    replace_parallel_map(
-        &mut ir.fn_param_annotations,
-        function,
-        &annotations,
-        old_arity,
-    );
-    replace_parallel_map(&mut ir.fn_param_no_infer, function, &no_infer, old_arity);
+    ir.declared_parameters_mut(function)
+        .splice_parameters(&declared_facts, old_arity);
     if let Some(&own_from) = ir.lambda_own_params_from.get(&function) {
         assert!(own_from as usize <= old_arity);
     }
     for transfer in transfers.iter().rev() {
         ir.resize_lambda_capture_prefix(function, transfer.parameter, 1, transfer.count);
     }
+    let declared = ir.declared_parameters_mut(function);
     let mut remove_vararg = false;
-    if let Some(vararg) = ir.fn_varargs.get_mut(&function) {
+    if let Some(vararg) = &mut declared.vararg {
         assert!(vararg.index < old_arity);
         for transfer in &transfers {
             if vararg.index == transfer.parameter {
@@ -1483,7 +1470,7 @@ fn transfer_inlined_capture_facts(
         }
     }
     if remove_vararg {
-        ir.fn_varargs.remove(&function);
+        declared.vararg = None;
     }
 
     let old_shared = ir
@@ -1531,36 +1518,6 @@ fn shifted_parameter(parameter: usize, transfers: &[ParameterTransfer]) -> usize
         });
     usize::try_from(parameter as isize + shift)
         .expect("transferred captures keep parameter ordinals non-negative")
-}
-
-fn source_parameter_values<T: Clone + Default>(
-    facts: &HashMap<u32, Vec<T>>,
-    transfers: &[ParameterTransfer],
-) -> Vec<(usize, Vec<T>)> {
-    transfers
-        .iter()
-        .map(|transfer| {
-            let values = facts
-                .get(&transfer.source)
-                .map(|values| values[..transfer.count].to_vec())
-                .unwrap_or_else(|| vec![T::default(); transfer.count]);
-            (transfer.parameter, values)
-        })
-        .collect()
-}
-
-fn replace_parallel_map<T: Clone>(
-    facts: &mut HashMap<u32, Vec<T>>,
-    function: u32,
-    replacements: &[(usize, Vec<T>)],
-    old_arity: usize,
-) {
-    if let Some(values) = facts.get_mut(&function) {
-        if values.is_empty() {
-            return;
-        }
-        replace_parameter_values(values, replacements, old_arity, "parameter fact sidecar");
-    }
 }
 
 fn replace_parameter_values<T: Clone>(
@@ -1625,7 +1582,12 @@ fn type_mentions_anonymous_class(ir: &crate::ir::IrFile, ty: Ty) -> bool {
         TyKind::Intersection(parts) => parts
             .iter()
             .any(|part| type_mentions_anonymous_class(ir, *part)),
-        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => false,
+        TyKind::Unit
+        | TyKind::Null
+        | TyKind::Nothing
+        | TyKind::Error
+        | TyKind::Pending
+        | TyKind::Var(..) => false,
     }
 }
 

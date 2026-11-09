@@ -81,7 +81,7 @@ fn stored_projection_ptr(ty: Ty) -> Option<*const Ty> {
 pub(crate) fn member_scope_receiver(receiver: Ty) -> Ty {
     match receiver.kind() {
         TyKind::Nothing => Ty::obj_name(crate::types::wk::any()),
-        TyKind::TyParam(_, bound) => member_scope_receiver(bound),
+        TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => member_scope_receiver(bound),
         TyKind::BYTE => Ty::obj("kotlin/Byte"),
         TyKind::SHORT => Ty::obj("kotlin/Short"),
         TyKind::INT => Ty::obj("kotlin/Int"),
@@ -101,13 +101,16 @@ pub(crate) fn member_scope_receiver(receiver: Ty) -> Ty {
 
 /// Whether a non-null semantic type owns a classifier/function/intersection member scope. This is
 /// the shared structural gate for member inventory; it does not perform lookup or reinterpret a
-/// failed receiver through another origin.
+/// failed receiver through another origin. `Unit` is the semantic spelling of the `kotlin.Unit`
+/// object type, so it owns that classifier's member scope like any other object type.
 pub(crate) fn supports_member_lookup(receiver: Ty) -> bool {
     matches!(
         receiver.non_null().kind(),
-        TyKind::STRING
+        TyKind::Unit
+            | TyKind::STRING
             | TyKind::Obj(..)
             | TyKind::TyParam(..)
+            | TyKind::Var(..)
             | TyKind::Fun(..)
             | TyKind::Intersection(_)
     )
@@ -256,7 +259,7 @@ pub(crate) fn apply_subtype_arguments_from_supertype(
         .map(|argument| ty_subst_keep_unbound(*argument, &bindings))
         .collect::<Vec<_>>();
     if arguments.iter().zip(&classifier.type_params).all(
-        |(argument, formal)| !matches!(argument.kind(), TyKind::TyParam(identity, _) if identity == formal),
+        |(argument, formal)| !matches!(argument.kind(), TyKind::TyParam(identity, _) | TyKind::Var(identity, _) if identity == formal),
     ) {
         Ty::obj_args_name(subtype_name, &arguments)
     } else {
@@ -279,7 +282,7 @@ pub(super) fn projected_supertypes(
     let formals = classifier.type_params();
     let arguments = ty.non_null().type_args();
     let raw_argument = |argument: Ty| match argument.kind() {
-        TyKind::TyParam(name, _) => formals
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => formals
             .iter()
             .position(|formal| *formal == *name)
             .and_then(|index| arguments.get(index).copied()),
@@ -497,7 +500,7 @@ pub(super) fn receiver_hierarchy(source: &dyn SymbolSource, receiver: Ty) -> Vec
 pub(crate) fn classifier_bindings(
     classifier: &crate::libraries::LibraryType,
     receiver: Ty,
-) -> crate::fx_hash::HashMap<String, Ty> {
+) -> crate::types::TyParamBindings {
     let raw_bindings = classifier
         .type_params
         .iter()
@@ -508,7 +511,7 @@ pub(crate) fn classifier_bindings(
     classifier
         .type_params
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .zip(
             receiver
                 .type_args()
@@ -567,7 +570,7 @@ pub(crate) fn classifier_bindings(
 /// non-null occurrence bound.
 pub(super) fn classifier_type_parameter_bounds(
     classifier: &crate::libraries::LibraryType,
-) -> crate::fx_hash::HashMap<String, Ty> {
+) -> crate::types::TyParamBindings {
     classifier
         .type_params
         .iter()
@@ -579,7 +582,7 @@ pub(super) fn classifier_type_parameter_bounds(
                 .and_then(|bounds| bounds.first())
                 .copied()
                 .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            (formal.clone(), bound)
+            (crate::types::TyParamName::from(formal), bound)
         })
         .collect()
 }

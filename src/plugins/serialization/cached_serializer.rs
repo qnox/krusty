@@ -70,8 +70,8 @@ pub(super) fn add_cached_serializer_delegate(
     // would attach no debug tables without a line of its own. kotlinc maps it to the annotated
     // owner's declaration line, which the class already carries by now.
     if owner_line != 0 {
-        ir.fn_decl_lines.insert(anonymous, owner_line);
-        ir.fn_sig_lines.insert(anonymous, owner_line);
+        ir.function_position_mut(anonymous).decl_line = Some(owner_line);
+        ir.function_position_mut(anonymous).signature_line = Some(owner_line);
     }
     let block = ir.add_expr(IrExpr::Lambda {
         impl_fn: anonymous,
@@ -106,8 +106,6 @@ pub(super) fn add_cached_serializer_delegate(
         is_lateinit: false,
         owner: Some(class_name),
         visibility: crate::types::Visibility::Private,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
         erased_declared_ty: None,
         accessors: crate::ir::IrStaticAccessors::ABSENT,
         line: owner_line,
@@ -157,8 +155,8 @@ pub(super) fn add_companion_cached_serializer(
     ir.synthetic_methods.insert(acc);
     ir.classes[class_id as usize].methods.push(acc);
     if owner_line != 0 {
-        ir.fn_decl_lines.insert(acc, owner_line);
-        ir.fn_sig_lines.insert(acc, owner_line);
+        ir.function_position_mut(acc).decl_line = Some(owner_line);
+        ir.function_position_mut(acc).signature_line = Some(owner_line);
     }
     // `Companion.serializer()` returns `(KSerializer) access$…$cp().getValue()` (the cached instance).
     let acc_call = ir.add_expr(IrExpr::Call {
@@ -230,8 +228,8 @@ pub(super) fn add_companion_cached_serializer(
     // the line kotlinc maps every one of its generated members to.
     let companion_line = ir.classes[comp_id].decl_line;
     if companion_line != 0 {
-        ir.fn_decl_lines.insert(cached, companion_line);
-        ir.fn_sig_lines.insert(cached, companion_line);
+        ir.function_position_mut(cached).decl_line = Some(companion_line);
+        ir.function_position_mut(cached).signature_line = Some(companion_line);
     }
     let this = ir.add_expr(IrExpr::GetValue(0));
     let delegate = ir.add_expr(IrExpr::MethodCall {
@@ -521,8 +519,8 @@ pub(super) fn add_object_serializer(
     ir.set_method_visibility(cached, crate::types::Visibility::Private);
     ir.synthetic_methods.insert(cached);
     if owner_line != 0 {
-        ir.fn_decl_lines.insert(cached, owner_line);
-        ir.fn_sig_lines.insert(cached, owner_line);
+        ir.function_position_mut(cached).decl_line = Some(owner_line);
+        ir.function_position_mut(cached).signature_line = Some(owner_line);
     }
 
     // `serializer()` delegates to the helper. The frontend already declared it on the object;
@@ -533,8 +531,8 @@ pub(super) fn add_object_serializer(
     // Generated past the frontend's declaration-line transfer: kotlinc maps the accessor to the
     // annotated declaration's first line, like every other member it generates for the object.
     if owner_line != 0 {
-        ir.fn_decl_lines.insert(accessor, owner_line);
-        ir.fn_sig_lines.insert(accessor, owner_line);
+        ir.function_position_mut(accessor).decl_line = Some(owner_line);
+        ir.function_position_mut(accessor).signature_line = Some(owner_line);
     }
     let cached_index = ir.classes[class_id as usize].methods.len() as u32;
     ir.classes[class_id as usize].methods.push(cached);

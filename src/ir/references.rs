@@ -18,6 +18,7 @@ pub enum IrCallableReferenceTarget {
     Module(crate::fir::CallableId),
     Constructor {
         classifier: TypeName,
+        declaration: IrConstructorReferenceDeclaration,
     },
     /// A local function, lifted to `function`, which a reflective carrier names physically.
     Local {
@@ -49,6 +50,15 @@ pub enum IrCallableReferenceTarget {
         classifier: TypeName,
         operation: IrClassifierCallable,
     },
+}
+
+/// The selected constructor declaration, retained independently of its invocation adapter.
+#[derive(Clone, Copy, Debug)]
+pub enum IrConstructorReferenceDeclaration {
+    /// A declaration in the checked source module, shared by that module's files and clones.
+    Module(crate::fir::DeclarationId),
+    /// A dependency declaration, including one referenced from an imported inline body.
+    External(crate::fir::ExternalCallableId),
 }
 
 /// A language-defined classifier callable a reference reflects. The physical name and descriptor
@@ -93,7 +103,7 @@ impl IrFile {
     /// The arity is a literal lambda's: the function type's parameters, and for a suspend function
     /// type the `Continuation` its adapter takes after them once a backend gives the adapter its
     /// CPS signature, as a suspend literal's arity counts its implementation's continuation.
-    pub(crate) fn callable_reference_inline_template(
+    pub fn callable_reference_inline_template(
         &self,
         expression: ExprId,
     ) -> Option<(FunId, Vec<ExprId>, ExprId, usize)> {

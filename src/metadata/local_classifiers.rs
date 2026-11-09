@@ -12,7 +12,7 @@ use crate::types::TypeName;
 /// anonymous object too, so what it nests is local, although the body itself keeps an ordinary
 /// member's nullability annotations. kotlinc's lambda and callable-reference classes are local
 /// too; their writers here annotate nothing to begin with.
-pub(crate) fn is_local(ir: &IrFile, class: &IrClass) -> bool {
+pub fn is_local(ir: &IrFile, class: &IrClass) -> bool {
     is_local_in(ir, class, &|owner| ir.class_id_by_name(owner))
 }
 
@@ -56,7 +56,7 @@ pub(crate) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<Str
 /// classes rather than a scan of them per lookup. Locality starts at a local class, an anonymous
 /// object or an enum entry body: a file declaring none of them has no local class id, and its
 /// classes' owners need no lookup at all.
-pub(crate) fn names(ir: &IrFile) -> HashSet<TypeName> {
+pub fn names(ir: &IrFile) -> HashSet<TypeName> {
     if !ir
         .classes
         .iter()
@@ -79,12 +79,66 @@ pub(crate) fn names(ir: &IrFile) -> HashSet<TypeName> {
         .collect()
 }
 
-/// The enum entry bodies of the file. Their local class ids keep the entry's `Enum.ENTRY` name
-/// rather than the raw internal name a local class's id takes, and so do the ids nested in them.
-pub(crate) fn enum_entry_bodies(ir: &IrFile) -> HashSet<TypeName> {
+/// Anonymous declarations use their raw class ID even inside an enum entry's namespace.
+/// Enum-entry bodies have a distinct declaration role and keep their member class IDs.
+pub fn is_anonymous(class: &IrClass) -> bool {
+    class.is_anonymous_object && !class.is_enum_entry
+}
+
+pub fn anonymous_names(ir: &IrFile) -> HashSet<TypeName> {
     ir.classes
         .iter()
-        .filter(|class| class.is_enum_entry)
+        .filter(|class| is_anonymous(class))
         .map(|class| class.fq_name_id())
         .collect()
 }
+
+/// Classifiers in an enum entry body's declaration namespace. Members and class-initializer
+/// objects keep that namespace; a class declared in an executable body starts a raw local ID.
+/// Follow the retained declaration context, since generated naming segments need not be classes.
+pub fn enum_entry_bodies(ir: &IrFile) -> HashSet<TypeName> {
+    let mut namespaces: HashSet<_> = ir
+        .classes
+        .iter()
+        .filter(|class| class.is_enum_entry)
+        .map(|class| class.fq_name_id())
+        .collect();
+    let mut children: HashMap<TypeName, Vec<TypeName>> = HashMap::default();
+    for (class_id, class) in ir.classes.iter().enumerate() {
+        let owner = match (class.declaration_context, &class.declaration_name) {
+            (Some(crate::ir::IrClassDeclarationContext::ClassInitializer { owner }), _) => {
+                Some(owner)
+            }
+            (
+                Some(crate::ir::IrClassDeclarationContext::Member),
+                Some(crate::types::ClassifierDeclarationName::Nested { owner, .. }),
+            ) => Some(*owner),
+            (Some(crate::ir::IrClassDeclarationContext::Member), None) => ir
+                .local_class_name_provenance
+                .get(&(class_id as crate::ir::ClassId))
+                .and_then(|provenance| match provenance.lexical_owner {
+                    Some(crate::ir::IrLocalClassOwner::Class(owner)) => {
+                        Some(ir.classes[owner as usize].fq_name_id())
+                    }
+                    Some(crate::ir::IrLocalClassOwner::External(owner)) => Some(owner),
+                    None => None,
+                }),
+            _ => None,
+        };
+        if let Some(owner) = owner {
+            children.entry(owner).or_default().push(class.fq_name_id());
+        }
+    }
+    let mut pending: Vec<_> = namespaces.iter().copied().collect();
+    while let Some(owner) = pending.pop() {
+        for &child in children.get(&owner).into_iter().flatten() {
+            if namespaces.insert(child) {
+                pending.push(child);
+            }
+        }
+    }
+    namespaces
+}
+
+#[cfg(test)]
+mod tests;

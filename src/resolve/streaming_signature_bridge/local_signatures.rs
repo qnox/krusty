@@ -1,8 +1,9 @@
 //! Active-file publication of checked local declaration signatures and captures.
 
 use super::*;
+use crate::fir::ResolvedTypeParameterFlags;
 use crate::resolve::TypeInfo;
-use crate::types::TyKind;
+use crate::types::{TyKind, TypeVariance};
 
 #[cfg(test)]
 mod tests;
@@ -131,7 +132,7 @@ pub(crate) fn publish_checked_local_signatures_in_pass_two_root(
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn publish_checked_local_signatures(
     file: &File,
     source: crate::fir::SourceFileId,
@@ -263,6 +264,33 @@ fn selected_checked_failure(
     exact_declarations.is_none_or(|exact| {
         exact.contains(&declaration) || selected_local_declarations.contains(&declaration)
     })
+}
+
+/// A body-local member function's or extension property's written generic contract, with the
+/// semantic identities its checked header bound; `None` until every formal and bound is known.
+fn written_type_parameters(
+    info: &TypeInfo,
+    (names, bounds, reified): (&[String], &[(String, TypeRef)], &HashSet<String>),
+    start: u32,
+) -> Option<Vec<crate::fir::WrittenTypeParameter>> {
+    let semantic = info.resolved_declaration_type_parameters(start);
+    let pairs = (semantic.len() == names.len()).then(|| names.iter().zip(semantic).enumerate())?;
+    pairs
+        .map(|(ordinal, (name, semantic))| {
+            let written = bounds.iter().filter(|(formal, _)| formal == name);
+            let bounds = written.map(|(_, bound)| info.resolved_type_bound(bound));
+            let reified = reified.contains(name);
+            let flags = ResolvedTypeParameterFlags::new(TypeVariance::Invariant, false, reified);
+            let bounds = bounds.collect::<Option<_>>()?;
+            Some((
+                ordinal as u32,
+                name.clone(),
+                semantic.clone(),
+                flags,
+                bounds,
+            ))
+        })
+        .collect()
 }
 
 fn publish_checked_local_signatures_selected(
@@ -521,7 +549,9 @@ fn publish_checked_local_signatures_selected(
         let semantic_own = info.resolved_declaration_type_parameters(class.span.lo);
         let mut parameters = Vec::with_capacity(arguments.len());
         for (ordinal, argument) in arguments.iter().copied().enumerate() {
-            let TyKind::TyParam(semantic_name, bound) = argument.kind() else {
+            let (TyKind::TyParam(semantic_name, bound) | TyKind::Var(semantic_name, bound)) =
+                argument.kind()
+            else {
                 return false;
             };
             if ordinal < own_count {
@@ -1173,55 +1203,15 @@ fn publish_checked_local_signatures_selected(
                         failed.push(declaration);
                         continue;
                     }
-                    let semantic_names =
-                        info.resolved_declaration_type_parameters(method.signature_span.lo);
-                    let prepared_type_parameters = (semantic_names.len()
-                        == method.type_params.len())
-                    .then(|| {
-                        method
-                            .type_params
-                            .iter()
-                            .zip(semantic_names)
-                            .enumerate()
-                            .map(|(ordinal, (source_name, semantic_name))| {
-                                let bounds = method
-                                    .type_param_bounds
-                                    .iter()
-                                    .filter(|(formal, _)| formal == source_name)
-                                    .map(|(_, bound)| info.resolved_type_bound(bound))
-                                    .collect::<Option<Vec<_>>>()?;
-                                Some((
-                                    ordinal as u32,
-                                    source_name.clone(),
-                                    semantic_name.clone(),
-                                    ResolvedTypeParameterFlags::new(
-                                        crate::types::TypeVariance::Invariant,
-                                        false,
-                                        method.reified_type_params.contains(source_name),
-                                    ),
-                                    bounds,
-                                ))
-                            })
-                            .collect::<Option<Vec<_>>>()
-                    })
-                    .flatten();
-                    let existing_type_parameters = (0..method.type_params.len())
-                        .filter(|&ordinal| {
-                            index.type_parameter(declaration, ordinal as u32).is_some()
-                        })
-                        .count();
-                    assert!(
-                        existing_type_parameters == 0
-                            || existing_type_parameters == method.type_params.len(),
-                        "a declaration generic contract is published atomically"
+                    let written = (
+                        &method.type_params[..],
+                        &method.type_param_bounds[..],
+                        &method.reified_type_params,
                     );
-                    let type_parameters_failed = match prepared_type_parameters {
-                        Some(parameters) if existing_type_parameters == 0 => index
-                            .publish_type_parameters_atomically(declaration, parameters)
-                            .is_err(),
-                        Some(_) => false,
-                        None => true,
-                    };
+                    let start = method.signature_span.lo;
+                    let prepare = || written_type_parameters(info, written, start);
+                    let type_parameters_failed =
+                        !index.publish_type_parameters_once(declaration, written.0.len(), prepare);
                     if type_parameters_failed
                         || (!signature_published
                             && index
@@ -1348,6 +1338,18 @@ fn publish_checked_local_signatures_selected(
                         failed.push(declaration);
                         continue;
                     };
+                    // An extension property declares its own formals (`val <T> T.x`), and its
+                    // semantic header is complete only once they are published.
+                    let written = (
+                        &property.type_params[..],
+                        &property.type_param_bounds[..],
+                        &property.reified_type_params,
+                    );
+                    let prepare = || written_type_parameters(info, written, property.span.lo);
+                    if !index.publish_type_parameters_once(declaration, written.0.len(), prepare) {
+                        failed.push(declaration);
+                        continue;
+                    }
                     let context_parameters = property
                         .context_params
                         .iter()
@@ -1715,7 +1717,12 @@ fn publish_checked_local_signatures_selected(
                     }
                     let Some(semantic_name) = semantic_type_parameters
                         .and_then(|parameters| parameters.get(ordinal))
-                        .or_else(|| generic.and_then(|generic| generic.formals.get(ordinal)))
+                        .map(String::as_str)
+                        .or_else(|| {
+                            generic
+                                .and_then(|generic| generic.formals.get(ordinal))
+                                .map(|formal| formal.as_str())
+                        })
                     else {
                         type_parameters_failed = true;
                         break;

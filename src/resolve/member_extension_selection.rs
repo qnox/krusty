@@ -146,7 +146,7 @@ pub(super) fn solved_member_extension_type_argument(
     let solution = bindings.get(formal).copied()?;
     (solution != Ty::Error
         && !solution.mentions_pending()
-        && !matches!(solution.non_null().kind(), TyKind::TyParam(identity, _) if identity == formal))
+        && !matches!(solution.non_null().kind(), TyKind::TyParam(identity, _) | TyKind::Var(identity, _) if identity == formal))
     .then_some(solution)
 }
 
@@ -266,22 +266,22 @@ pub(super) fn concrete_receiver_is_more_specific(left_generic: bool, right_gener
 /// retain the applied dispatch bindings supplied by the caller.
 pub(super) fn receiver_domain(
     receiver: Ty,
-    type_params: &[String],
+    type_params: &[crate::types::TyParamName],
     type_param_bounds: &[Ty],
-    class_bindings: &HashMap<String, Ty>,
+    class_bindings: &crate::types::TyParamBindings,
 ) -> Ty {
     let mut bindings = class_bindings.clone();
     for parameter in type_params {
-        bindings.remove(parameter);
+        bindings.remove(parameter.as_str());
     }
     for (parameter, bound) in type_params.iter().zip(type_param_bounds) {
-        bindings.insert(parameter.clone(), *bound);
+        bindings.insert(crate::types::TyParamName::new(parameter), *bound);
     }
     for _ in 0..type_params.len() {
         let previous = bindings.clone();
         for (parameter, bound) in type_params.iter().zip(type_param_bounds) {
             bindings.insert(
-                parameter.clone(),
+                crate::types::TyParamName::new(parameter),
                 crate::symbol_resolver::ty_subst(*bound, &previous),
             );
         }
@@ -504,7 +504,7 @@ impl Checker<'_> {
         candidate.type_arguments = signature
             .formals
             .iter()
-            .map(|formal| candidate.bindings.get(formal).copied())
+            .map(|formal| candidate.bindings.get(formal.as_str()).copied())
             .collect();
         result
     }
@@ -573,8 +573,11 @@ impl Checker<'_> {
                 args,
                 arg_tys,
             },
-            &validation_params,
-            &validation_params,
+            SelectedParameters {
+                applied: &validation_params,
+                declared: &validation_params,
+                call_site: None,
+            },
             &candidate.call_sig,
             None,
         ) {

@@ -128,7 +128,7 @@ fn prepared_function(
     if ir.suspend_funs.contains(&function) {
         return None;
     }
-    if ir.fn_varargs.contains_key(&function)
+    if ir.declared_parameters(function).vararg.is_some()
         || ir
             .declared_inline_modifiers(function)
             .iter()
@@ -203,7 +203,7 @@ fn prepared_function(
     if dispatch_receiver.is_some_and(|ty| !supported_type(ty, &generic.type_params)) {
         return None;
     }
-    let context_count = ir.fn_context_counts.get(&function).copied().unwrap_or(0);
+    let context_count = ir.declared_parameters(function).context_count;
     let extension_parameter = ir
         .extension_receiver_fns
         .contains(&function)
@@ -338,6 +338,7 @@ fn supported_type(ty: Ty, parameters: &[IrTypeParameter]) -> bool {
         TyKind::Null
         | TyKind::Error
         | TyKind::Pending
+        | TyKind::Var(..)
         | TyKind::Fun(_)
         | TyKind::DefinitelyNotNull(_)
         | TyKind::PlatformNullable(_)

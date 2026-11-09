@@ -63,11 +63,11 @@ pub struct IrLambdaClass {
     /// Where the lambda was lifted from, which `invoke` no longer records: a target that realizes
     /// that declaration differently (a value-class member as a static) names a captured receiver
     /// after that realization.
-    pub(crate) lifting_root: Option<IrLiftingRoot>,
+    pub lifting_root: Option<IrLiftingRoot>,
     /// The exact lambda step whose declaration scope this class realizes. Lifted local
     /// declarations use it to move with `invoke` and take their names from that scope; unlike
     /// [`Self::lifting_root`], this is the innermost lambda rather than the outermost lifting step.
-    pub(crate) lifting_scope: Option<IrLiftingRoot>,
+    pub lifting_scope: Option<IrLiftingRoot>,
     /// What the erased `FunctionN.invoke` bridge adapts, once `invoke` has its physical signature.
     pub bridge: IrInvokeBridge,
     /// The class is a `-Xlambdas=class` Kotlin lambda: it extends `kotlin.jvm.internal.Lambda`
@@ -75,6 +75,10 @@ pub struct IrLambdaClass {
     /// forces (it extends `Object`). The source form is kept here because realization moves the
     /// implementation out of the lambda-origin table.
     pub kotlin_lambda: Option<IrLambdaOrigin>,
+    /// The functional interface the class implements in place of `FunctionN`, for a SAM-converted
+    /// lambda: `invoke` is then that interface's method, under the method's name, and the bridge
+    /// adapts the method's declared shape rather than `FunctionN.invoke`.
+    pub sam: Option<Box<IrSamTarget>>,
 }
 
 /// One captured value a lambda class stores in a field.
@@ -88,6 +92,12 @@ pub enum IrLambdaCapture {
     },
     /// A captured implicit receiver, by its position among [`IrLambdaClass::captured_receivers`].
     Receiver(u32),
+    /// A receiver captured through a source constructor's logical prefix, before `this` exists.
+    /// Keep the original declaration identity when copies change their own constructor transport.
+    ConstructorReceiver {
+        owner: crate::fir::DeclarationId,
+        parameter: u32,
+    },
 }
 
 /// How an erased `FunctionN.invoke(Object…)Object` reaches a class's own specialized `invoke`.

@@ -42,29 +42,31 @@ impl Parser<'_> {
     fn lookahead_is_postfix_type_arguments(&self) -> bool {
         self.lookahead_type_argument_list_end().is_some_and(|j| {
             let continuation = self.t.get(j).map(|token| token.kind);
-            matches!(
-                continuation,
-                None | Some(TokenKind::LParen)
-                    | Some(TokenKind::LBrace)
-                    | Some(TokenKind::Dot)
-                    | Some(TokenKind::ColonColon)
-                    | Some(TokenKind::Newline)
-                    | Some(TokenKind::RParen)
-                    | Some(TokenKind::RBrace)
-                    | Some(TokenKind::RBracket)
-                    | Some(TokenKind::Comma)
-                    | Some(TokenKind::Eof)
-                    | Some(TokenKind::EqEq)
-                    | Some(TokenKind::NotEq)
-                    | Some(TokenKind::RefEq)
-                    | Some(TokenKind::RefNe)
-                    | Some(TokenKind::AndAnd)
-                    | Some(TokenKind::OrOr)
-            ) || continuation == Some(TokenKind::Question)
-                && self
-                    .t
-                    .get(j + 1)
-                    .is_some_and(|token| token.kind == TokenKind::Colon)
+            self.newline_before_at(j)
+                || matches!(
+                    continuation,
+                    None | Some(TokenKind::LParen)
+                        | Some(TokenKind::LBrace)
+                        | Some(TokenKind::Dot)
+                        | Some(TokenKind::ColonColon)
+                        | Some(TokenKind::Semicolon)
+                        | Some(TokenKind::RParen)
+                        | Some(TokenKind::RBrace)
+                        | Some(TokenKind::RBracket)
+                        | Some(TokenKind::Comma)
+                        | Some(TokenKind::Eof)
+                        | Some(TokenKind::EqEq)
+                        | Some(TokenKind::NotEq)
+                        | Some(TokenKind::RefEq)
+                        | Some(TokenKind::RefNe)
+                        | Some(TokenKind::AndAnd)
+                        | Some(TokenKind::OrOr)
+                )
+                || continuation == Some(TokenKind::Question)
+                    && self
+                        .t
+                        .get(j + 1)
+                        .is_some_and(|token| token.kind == TokenKind::Colon)
         })
     }
 
@@ -108,7 +110,7 @@ impl Parser<'_> {
                 | Some(TokenKind::Amp)
                 | Some(TokenKind::LParen)
                 | Some(TokenKind::RParen)
-                | Some(TokenKind::Newline)
+                | Some(TokenKind::Semicolon)
                 // `in` is the variance keyword in an argument projection (`Foo<in T>`); `out` is an
                 // ordinary ident and already covered above.
                 | Some(TokenKind::KwIn)
@@ -172,7 +174,7 @@ impl Parser<'_> {
         while self
             .t
             .get(j)
-            .is_some_and(|token| token.kind == TokenKind::Newline)
+            .is_some_and(|token| token.kind == TokenKind::Semicolon)
         {
             j += 1;
         }
@@ -209,9 +211,9 @@ impl Parser<'_> {
         let label_mark = self.lambda_label_mark();
         let mut lhs = self.parse_prefix();
         loop {
-            // A newline before `||`/`&&`/`?:` is a line continuation, not a terminator — consume it so
-            // the operator below (or the enclosing elvis loop, for `?:`) sees it on this logical line.
-            self.skip_newlines_before_continuation_op();
+            if self.interrupted_with_newline() {
+                break;
+            }
             // Elvis binds more tightly than equality/comparison/named checks and more loosely than
             // infix/range/additive expressions. Keeping it in the Pratt loop is essential:
             // `a ?: fail() != b` is `(a ?: fail()) != b`, not `a ?: (fail() != b)`.
@@ -227,7 +229,7 @@ impl Parser<'_> {
                 let lspan = self.file.expr_spans[lhs.0 as usize];
                 self.bump(); // '?'
                 self.bump(); // ':'
-                self.skip_newlines();
+                self.skip_semicolons();
                 self.relabel_left_operand(label_mark, None);
                 let rhs = self.with_lambda_label(None, |parser| parser.parse_bp(8));
                 let rspan = self.file.expr_spans[rhs.0 as usize];
@@ -239,7 +241,7 @@ impl Parser<'_> {
             // Prefix operators bind more tightly than casts. The grammar's `NL* asOperator NL*
             // type` continues the expression across line breaks on either side of `as`/`as?`; an
             // explicit `;` still ends it.
-            let cast_at = self.after_plain_newlines(self.i);
+            let cast_at = self.i;
             if min_bp <= BP_CAST
                 && self
                     .t
@@ -250,7 +252,6 @@ impl Parser<'_> {
                 let lspan = self.file.expr_spans[lhs.0 as usize];
                 self.bump(); // 'as'
                 let nullable = self.eat_type_nullable();
-                self.skip_plain_newlines();
                 let ty = self.parse_type();
                 let end = self.t[self.i.saturating_sub(1)].span;
                 lhs = self.file.add_expr(
@@ -283,7 +284,6 @@ impl Parser<'_> {
                         self.bump(); // '!'
                     }
                     self.bump(); // 'is'
-                    self.skip_plain_newlines();
                     let ty = self.parse_type();
                     let end = self.t[self.i.saturating_sub(1)].span;
                     lhs = self.file.add_expr(
@@ -321,7 +321,7 @@ impl Parser<'_> {
                     }
                     let membership = Span::new(membership_start, self.tok().span.hi);
                     self.bump(); // 'in'
-                    self.skip_newlines();
+                    self.skip_semicolons();
                     self.relabel_left_operand(label_mark, None);
                     // the range start binds tighter than `in` (and `..`)
                     let rstart = self.with_lambda_label(None, |parser| parser.parse_bp(9));
@@ -341,7 +341,6 @@ impl Parser<'_> {
                     };
                     match kind {
                         Some(kind) => {
-                            self.skip_plain_newlines();
                             let rend = self.with_lambda_label(None, |parser| parser.parse_bp(9));
                             let end = self.file.expr_spans[rend.0 as usize];
                             lhs = self.file.add_expr(
@@ -411,7 +410,7 @@ impl Parser<'_> {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let operator = self.tok().span;
                     self.bump(); // '..' / '..<'
-                    self.skip_newlines();
+                    self.skip_semicolons();
                     self.relabel_left_operand(label_mark, None);
                     let hi = self.with_lambda_label(None, |parser| parser.parse_bp(9));
                     let rspan = self.file.expr_spans[hi.0 as usize];
@@ -438,7 +437,7 @@ impl Parser<'_> {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let name_span = self.tok().span;
                     self.bump(); // infix function name
-                    self.skip_newlines();
+                    self.skip_semicolons();
                     self.relabel_left_operand(label_mark, Some(&name));
                     // operand binds at additive precedence or tighter
                     let label = Some(name.clone());
@@ -475,7 +474,7 @@ impl Parser<'_> {
             }
             let op_span = self.tok().span;
             self.bump();
-            self.skip_newlines();
+            self.skip_semicolons();
             self.relabel_left_operand(label_mark, None);
             let rhs = self.with_lambda_label(None, |parser| parser.parse_bp(rbp));
             let lspan = self.file.expr_spans[lhs.0 as usize];
@@ -509,7 +508,7 @@ impl Parser<'_> {
                 while self
                     .t
                     .get(after)
-                    .is_some_and(|token| token.kind == TokenKind::Newline)
+                    .is_some_and(|token| token.kind == TokenKind::Semicolon)
                 {
                     after += 1;
                 }
@@ -520,7 +519,7 @@ impl Parser<'_> {
                 {
                     self.bump(); // `context`
                     let context_params = self.parse_param_list();
-                    self.skip_newlines();
+                    self.skip_semicolons();
                     return self.parse_anon_fun(context_params);
                 }
             }
@@ -539,7 +538,7 @@ impl Parser<'_> {
                         arguments,
                     });
                 }
-                self.skip_newlines();
+                self.skip_semicolons();
             }
             let expression = self.parse_prefix();
             if !annotations.is_empty() {
@@ -569,7 +568,7 @@ impl Parser<'_> {
             let is_break = self.keyword_text("break");
             let mut end = self.tok().span; // the `break`/`continue` token
             self.bump(); // 'break' / 'continue'
-            let label = if self.at(TokenKind::At) {
+            let label = if self.at_label_reference() {
                 self.bump();
                 if self.at(TokenKind::Ident) {
                     let l = self.text().to_string();
@@ -602,24 +601,13 @@ impl Parser<'_> {
         // (recurse so stacked labels `a@ b@ e` and a following unary/primary all flow through normally).
         // `this`/`super` are also `Ident`s but `this@Outer`/`super@Base` is a labeled RECEIVER, not a
         // labeled expression — leave those for `parse_primary` to bind the `@label` to the receiver.
-        if self.at(TokenKind::Ident)
-            && !self.keyword_text_any(&["this", "super"])
-            && self
-                .t
-                .get(self.i + 1)
-                .is_some_and(|t| t.kind == TokenKind::At)
-        {
+        if self.at_label_definition_at(self.i) && !self.keyword_text_any(&["this", "super"]) {
             // Consume the WHOLE label chain (`a@ b@ e`) iteratively before the single re-entry:
             // per-label self-recursion here would be an unguarded, un-grown stack path — a long
             // machine-generated label chain must degrade like any other deep nesting, and after
             // this loop the re-entry cannot reach this branch again (the next token is no label).
             let mut labels = Vec::new();
-            while self.at(TokenKind::Ident)
-                && !self.keyword_text_any(&["this", "super"])
-                && self
-                    .t
-                    .get(self.i + 1)
-                    .is_some_and(|t| t.kind == TokenKind::At)
+            while self.at_label_definition_at(self.i) && !self.keyword_text_any(&["this", "super"])
             {
                 labels.push(self.text().to_string());
                 self.bump(); // label name
@@ -689,8 +677,7 @@ impl Parser<'_> {
     fn at_labelled_trailing_lambda(&self) -> bool {
         let mut i = self.i;
         let mut seen = false;
-        while self.t.get(i).is_some_and(|t| t.kind == TokenKind::Ident)
-            && self.t.get(i + 1).is_some_and(|t| t.kind == TokenKind::At)
+        while self.at_label_definition_at(i)
             && !matches!(self.t[i].text(self.src), "this" | "super")
         {
             seen = true;
@@ -720,27 +707,8 @@ impl Parser<'_> {
         // once it is parsed so a `return@outer` inside it finds its target.
         let mut pending_lambda_labels: Vec<String> = Vec::new();
         loop {
-            // A postfix chain may continue on a following line: Kotlin treats a newline before `.` or
-            // `?.` as part of the selector chain, not a statement terminator (`x\n  .foo()\n  .bar()`).
-            // Peek past the newline(s); if a member access follows, consume them and continue —
-            // otherwise stop (the expression ended). `::`/`{` deliberately do NOT continue across a
-            // newline (callable-ref / trailing-lambda are same-line only).
-            if self.at(TokenKind::Newline) {
-                let mut j = self.i;
-                while self.t.get(j).is_some_and(|t| t.kind == TokenKind::Newline) {
-                    j += 1;
-                }
-                let continues = match self.t.get(j).map(|t| t.kind) {
-                    Some(TokenKind::Dot) => true,
-                    Some(TokenKind::Question) => {
-                        self.t.get(j + 1).is_some_and(|t| t.kind == TokenKind::Dot)
-                    }
-                    _ => false,
-                };
-                if !continues {
-                    break;
-                }
-                self.skip_newlines();
+            if self.interrupted_with_newline() {
+                break;
             }
             match self.kind() {
                 // Postfix `target++` / `target--` as a value (the old value). In statement position
@@ -795,10 +763,13 @@ impl Parser<'_> {
                     let name_span = self.syntactic_ident_span(name_token);
                     let name = self.ident_or_error("member name");
                     let lspan = self.file.expr_spans[lhs.0 as usize];
-                    let type_args = self.parse_call_type_args();
+                    // kotlinc's `parseSelectorCallExpression`: a call suffix belongs to the selector
+                    // only on its line; `(…)` on the next line starts a new statement.
+                    let call_suffix = !self.newline_before();
+                    let type_args = call_suffix.then(|| self.parse_call_type_args()).flatten();
                     let mut safe_names: Vec<Option<String>> = Vec::new();
                     let mut safe_name_spans: Vec<Option<Span>> = Vec::new();
-                    let args = if self.at(TokenKind::LParen) {
+                    let args = if call_suffix && self.at(TokenKind::LParen) {
                         self.bump();
                         let label = Some(name.clone());
                         let (args, names, name_spans) =
@@ -990,12 +961,7 @@ impl Parser<'_> {
                 TokenKind::Ident
                     if !self.no_trailing_lambda && self.at_labelled_trailing_lambda() =>
                 {
-                    while self.at(TokenKind::Ident)
-                        && self
-                            .t
-                            .get(self.i + 1)
-                            .is_some_and(|t| t.kind == TokenKind::At)
-                    {
+                    while self.at_label_definition_at(self.i) {
                         pending_lambda_labels.push(self.text().to_string());
                         self.bump(); // label name
                         self.bump(); // '@'
@@ -1325,7 +1291,7 @@ impl Parser<'_> {
                 // enclosing receiver / supertype it denotes. Capture it on the name (`this@Outer`) so the
                 // checker/lowerer can resolve the label; a bare `this`/`super` stays unchanged.
                 if (n == "this" || n == "super" || n.starts_with("super<"))
-                    && self.at(TokenKind::At)
+                    && self.at_label_reference()
                     && self
                         .t
                         .get(self.i + 1)
@@ -1415,23 +1381,27 @@ impl Parser<'_> {
         let start = self.tok().span;
         self.bump(); // 'if'
         let cond = self.parse_parenthesized_condition();
-        self.skip_newlines();
+        self.skip_semicolons();
         let then_branch = self.parse_branch(true);
         // optional else (may be on the next line)
         let save = self.i;
-        self.skip_newlines();
+        self.skip_semicolons();
         // An `if` used as a `when`-branch body without its own else (`when { x -> if (c) a; else -> b }`)
         // must NOT swallow the `when`'s `else` entry: an `else` immediately followed by `->` is a when
         // entry, not this `if`'s else (a real if-else branch never begins with `->`).
         let else_is_when_entry = self.at(TokenKind::KwElse) && {
             let mut j = self.i + 1;
-            while self.t.get(j).is_some_and(|t| t.kind == TokenKind::Newline) {
+            while self
+                .t
+                .get(j)
+                .is_some_and(|t| t.kind == TokenKind::Semicolon)
+            {
                 j += 1;
             }
             self.t.get(j).is_some_and(|t| t.kind == TokenKind::Arrow)
         };
         let else_branch = if !else_is_when_entry && self.eat(TokenKind::KwElse) {
-            self.skip_newlines();
+            self.skip_semicolons();
             Some(self.parse_branch(true))
         } else {
             self.i = save;
@@ -1480,9 +1450,7 @@ impl Parser<'_> {
                         // interpolated expression (a multiline lambda inside a raw template is
                         // the common shape). Plain newlines only: an explicit `;` still ends the
                         // expression and errors at the expected `}`.
-                        self.skip_plain_newlines();
                         let e = self.parse_expr();
-                        self.skip_plain_newlines();
                         self.expect(TokenKind::RBrace, "'}'");
                         parts.push(TemplatePart::Expr(e));
                     } else if self.at(TokenKind::Ident) {
@@ -1513,39 +1481,39 @@ impl Parser<'_> {
     fn parse_try(&mut self) -> ExprId {
         let start = self.tok().span;
         self.bump(); // 'try'
-        self.skip_newlines();
+        self.skip_semicolons();
         let body = self.parse_block_expr(true);
         let mut catches = Vec::new();
         let mut finally = None;
         loop {
             let save = self.i;
-            self.skip_newlines();
+            self.skip_semicolons();
             if self.at(TokenKind::Ident) && self.keyword_text("catch") {
                 let keyword_span = self.tok().span;
                 self.bump(); // 'catch'
                 self.expect(TokenKind::LParen, "'('");
                 // The parameter may sit on its own line(s) inside the parens (`catch (\n e: E\n)`),
                 // so skip newlines around each part exactly as an ordinary parameter list allows.
-                self.skip_newlines();
+                self.skip_semicolons();
                 // Annotations on the catch parameter (`catch (@Marker e: E)`): consume and discard —
                 // a catch parameter is never referenced by annotation, so its markers carry no codegen.
                 let param_start = self.tok().span;
                 while self.at(TokenKind::At) {
                     self.parse_annotation();
-                    self.skip_newlines();
+                    self.skip_semicolons();
                 }
                 let name = self.ident_or_error("catch parameter name");
-                self.skip_newlines();
+                self.skip_semicolons();
                 self.expect(TokenKind::Colon, "':'");
-                self.skip_newlines();
+                self.skip_semicolons();
                 let ty = self.parse_type();
-                self.skip_newlines();
+                self.skip_semicolons();
                 // A trailing comma is allowed (`catch (e: E,)`), matching Kotlin's parameter lists.
                 if self.eat(TokenKind::Comma) {
-                    self.skip_newlines();
+                    self.skip_semicolons();
                 }
                 self.expect(TokenKind::RParen, "')'");
-                self.skip_newlines();
+                self.skip_semicolons();
                 let cbody = self.parse_block_expr(true);
                 let param_span = Span::new(param_start.lo, ty.span.hi);
                 catches.push(CatchClause {
@@ -1558,7 +1526,7 @@ impl Parser<'_> {
                 });
             } else if self.at(TokenKind::Ident) && self.keyword_text("finally") {
                 self.bump(); // 'finally'
-                self.skip_newlines();
+                self.skip_semicolons();
                 finally = Some(self.parse_block_expr(false));
                 break; // `finally` is always last
             } else {
@@ -1590,19 +1558,17 @@ impl Parser<'_> {
         let mut subject_var: Option<(StmtId, ExprId)> = None;
         let subject = if self.eat(TokenKind::LParen) {
             // The subject (or subject-variable binding) may start on a fresh line: `when(\n  val v = e\n)`.
-            self.skip_newlines();
+            self.skip_semicolons();
             if self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar) {
                 let vstart = self.tok().span;
                 let is_var = self.at(TokenKind::KwVar);
                 self.bump(); // 'val' / 'var'
                 let name = self.ident_or_error("variable name");
                 let ty = if self.eat(TokenKind::Colon) {
-                    self.skip_plain_newlines();
                     Some(self.parse_type())
                 } else {
                     None
                 };
-                self.skip_plain_newlines_before(TokenKind::Eq);
                 // Record the `=` the same way a statement-level local does. An explicit type
                 // without that span is a deferred declaration (`val x: T` assigned later); a
                 // subject binding always has an initializer.
@@ -1632,7 +1598,7 @@ impl Parser<'_> {
         } else {
             None
         };
-        self.skip_newlines();
+        self.skip_semicolons();
         self.expect(TokenKind::LBrace, "'{'");
         // Only the `{…}` body restores statement-terminating line breaks; the `when` keyword and its
         // subject stay in the enclosing mode, so `f(when\n(x) { … })` reads its subject.
@@ -1658,7 +1624,7 @@ impl Parser<'_> {
     fn parse_when_arms(&mut self, subject: Option<ExprId>) -> (Vec<WhenArm>, Span) {
         let mut arms = Vec::new();
         loop {
-            self.skip_newlines();
+            self.skip_semicolons();
             if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
                 break;
             }
@@ -1668,7 +1634,7 @@ impl Parser<'_> {
             } else {
                 conditions.push(self.parse_when_condition(subject));
                 while self.eat(TokenKind::Comma) {
-                    self.skip_newlines();
+                    self.skip_semicolons();
                     if subject.is_some() && self.at(TokenKind::Arrow) {
                         break;
                     }
@@ -1692,7 +1658,7 @@ impl Parser<'_> {
                 None
             };
             self.expect(TokenKind::Arrow, "'->'");
-            self.skip_newlines();
+            self.skip_semicolons();
             let body = self.parse_branch(true);
             arms.push(WhenArm {
                 conditions,
@@ -1764,7 +1730,7 @@ impl Parser<'_> {
             }
             let membership = Span::new(start.lo, self.tok().span.hi);
             self.bump(); // 'in'
-            self.skip_newlines();
+            self.skip_semicolons();
             let rstart = self.parse_bp(9);
             let range_token = self.tok().span;
             let kind = if self.eat(TokenKind::DotDot) {
@@ -1861,6 +1827,15 @@ impl Parser<'_> {
         let mut j = self.i;
         let mut depth = 0i32;
         loop {
+            // A bodyless declaration is complete at a line break that starts another declaration.
+            // Do not scan into it, where its own function type or lambda may contain `->`.
+            if depth == 0
+                && j > self.i
+                && self.newline_before_at(j)
+                && self.token_starts_declaration_at(j)
+            {
+                return false;
+            }
             match self.t.get(j).map(|t| t.kind) {
                 None => return false,
                 Some(TokenKind::Arrow) if depth == 0 => return true,
@@ -1871,17 +1846,7 @@ impl Parser<'_> {
                 // lambda) would be misread as this supertype's function-type arrow.
                 Some(TokenKind::RBrace) if depth == 0 => return false,
                 Some(TokenKind::Comma) if depth == 0 => return false, // next supertype
-                Some(TokenKind::Newline) if depth == 0 => {
-                    if self.t[j].text(self.src) == ";" {
-                        return false;
-                    }
-                    let next = self.after_plain_newlines(j);
-                    if self.token_starts_declaration_at(next) {
-                        // A bodyless declaration is complete here. Do not scan into a following
-                        // declaration whose own function type or lambda happens to contain `->`.
-                        return false;
-                    }
-                }
+                Some(TokenKind::Semicolon) if depth == 0 => return false,
                 // Track generic-argument brackets too (`<` is a single `Lt`, `>` a single `Gt`), so a
                 // function type used as a type ARGUMENT — `Base<() -> R>` — keeps its `->` at depth > 0
                 // and is NOT mistaken for a function-type supertype.
@@ -1989,12 +1954,7 @@ impl Parser<'_> {
         // The branch then had a declaration's `Unit` value, so `if (c) "s" else value` typed as
         // `Any` and the enclosing function reported a return-type mismatch pointing at a span that
         // covered the following declaration.
-        if self.at_modifier()
-            && self
-                .t
-                .get(self.i + 1)
-                .is_some_and(|token| token.kind == TokenKind::Newline)
-        {
+        if self.at_modifier() && self.newline_before_at(self.i + 1) {
             return self.parse_expr();
         }
         let start = self.tok().span;

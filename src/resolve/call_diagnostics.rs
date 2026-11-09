@@ -3,6 +3,14 @@
 use super::*;
 
 mod argument_completion;
+mod rejection_plan;
+mod top_level_rejections;
+
+pub(super) use top_level_rejections::report_inapplicable_callable_candidates;
+
+use rejection_plan::{
+    MappedRejectionCandidate, MappedRejectionPlan, RejectedArgumentInput, RejectedArgumentSite,
+};
 
 #[derive(Clone, Copy)]
 enum ReceiverAdmissionPhase {
@@ -88,7 +96,166 @@ fn rejected_candidate_argument_shape(
         .collect()
 }
 
+fn type_mentions_formal(ty: Ty, formal: &str) -> bool {
+    match ty.kind() {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => name.as_str() == formal,
+        TyKind::Obj(_, arguments) => arguments
+            .iter()
+            .any(|argument| type_mentions_formal(*argument, formal)),
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner)
+        | TyKind::DefinitelyNotNull(inner) => type_mentions_formal(inner, formal),
+        TyKind::Fun(signature) => signature
+            .params
+            .iter()
+            .chain(std::iter::once(&signature.ret))
+            .any(|part| type_mentions_formal(*part, formal)),
+        TyKind::Intersection(parts) => parts.iter().any(|part| type_mentions_formal(*part, formal)),
+        _ => false,
+    }
+}
+
 impl Checker<'_> {
+    pub(super) fn assignability_error_message(
+        &self,
+        expected: Ty,
+        actual: Ty,
+        ctx: &str,
+    ) -> Option<String> {
+        // Neither side is a TYPE when it still carries the not-determined marker: the declaration it
+        // came from has not been resolved yet, and the message would name `<not determined>` — a
+        // placeholder the source never wrote — for a program that may well be correct. Whatever
+        // could not be determined is reported at its own declaration.
+        if expected.mentions_pending() || actual.mentions_pending() {
+            return None;
+        }
+        let context = [expected, actual];
+        let expected = self.diagnostic_type_name(expected, &context);
+        let actual = self.diagnostic_type_name(actual, &context);
+        if actual == "Null" {
+            return Some(format!(
+                "null cannot be a value of a non-null type '{expected}'."
+            ));
+        }
+        let msg = match ctx {
+            "function body" | "getter body" | "local function body" | "return" => {
+                format!("return type mismatch: expected '{expected}', actual '{actual}'.")
+            }
+            "initializer" | "property initializer" | "default argument" => {
+                format!("initializer type mismatch: expected '{expected}', actual '{actual}'.")
+            }
+            "assignment" => {
+                format!(
+                    "assignment type mismatch: actual type is '{actual}', but '{expected}' was expected."
+                )
+            }
+            argument if argument.ends_with("argument") => {
+                format!(
+                    "argument type mismatch: actual type is '{actual}', but '{expected}' was expected."
+                )
+            }
+            condition if condition.ends_with("condition") => {
+                format!(
+                    "condition type mismatch: inferred type is '{actual}' but '{expected}' was expected."
+                )
+            }
+            _ => {
+                format!("type mismatch: inferred type is {actual} but {expected} was expected")
+            }
+        };
+        Some(msg)
+    }
+
+    /// Remember the dependency candidate these diagnostics select, so a missing class in its
+    /// declared signature is still reported. A none-applicable family selects nobody: the missing
+    /// class check inspects only a resolved callee. Bounds stay out: `bounded(Any())` is an
+    /// inference failure, not a missing class, even when the bound names a class that is absent.
+    fn note_selected_dependency_signature(
+        &mut self,
+        call: ExprId,
+        candidate: &crate::libraries::FunctionInfo,
+    ) {
+        if candidate.callable.external_identity.is_none() {
+            return;
+        }
+        let (ret, params) = if let Some(signature) = candidate.generic_sig.as_ref() {
+            (signature.ret, signature.params.as_slice())
+        } else {
+            (candidate.callable.ret, candidate.callable.params.as_slice())
+        };
+        let mut types = vec![ret];
+        types.extend(params.iter().copied());
+        self.rejected_dependency_signatures.insert(call, types);
+    }
+
+    /// A single static candidate that has more source arguments than value parameters. The extra
+    /// argument does not map, so the mapped-candidate path reports nothing; the candidate still
+    /// owns the unbound type parameter and the arity error.
+    pub(super) fn report_single_candidate_excess_arguments(
+        &mut self,
+        call: ExprId,
+        type_args: &[Ty],
+        candidates: &[crate::libraries::FunctionInfo],
+        args: &[ExprId],
+    ) -> bool {
+        let [candidate] = candidates else {
+            return false;
+        };
+        if candidate.call_sig.vararg_index.is_some() {
+            return false;
+        }
+        let value_count = candidate
+            .callable
+            .params
+            .len()
+            .saturating_sub(candidate.context_count);
+        if args.len() <= value_count {
+            return false;
+        }
+        if let Some(signature) = candidate.generic_sig.as_ref() {
+            for formal in signature.formals.iter().skip(type_args.len()) {
+                let constrained = signature
+                    .params
+                    .iter()
+                    .take(value_count)
+                    .any(|parameter| type_mentions_formal(*parameter, formal.as_str()));
+                if constrained {
+                    continue;
+                }
+                self.diags.error(
+                    self.call_callee_name_span(call),
+                    format!(
+                        "cannot infer type for type parameter '{}'. Specify it explicitly.",
+                        crate::types::type_parameter_source_name(formal)
+                    ),
+                );
+            }
+        }
+        let display =
+            super::declaration_rendering::declared_static_function(&self.fed_source(), candidate);
+        self.report_function_arity(
+            call,
+            super::DiagnosticFunction {
+                name: &candidate.callable.name,
+                params: &candidate.callable.params,
+                param_names: &candidate.call_sig.param_names,
+                param_defaults: &candidate.call_sig.param_defaults,
+                required: candidate.callable.params.len(),
+                vararg: false,
+                context_count: candidate.context_count,
+                ret: candidate.callable.ret,
+                source_display: Some(display),
+            },
+            args,
+        );
+        true
+    }
+
     /// When overload selection rejects a family by type but exactly one declaration has a valid
     /// source-argument mapping, report that declaration's mapped argument errors. This diagnostic
     /// step is origin-neutral: top-level and extension candidates carry the same semantic shape and
@@ -108,207 +275,13 @@ impl Checker<'_> {
         let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let checkpoint = self.diags.diags.len();
-        let mut mapped = candidates
-            .iter()
-            .filter_map(|candidate| {
-                let signature = candidate.semantic_signature();
-                let type_arity_matches =
-                    type_args.is_empty() || signature.formals.len() == type_args.len();
-                let mut bindings = constraints.bindings(&self.fed_source(), &signature);
-                let initial_params = signature
-                    .params
-                    .iter()
-                    .map(|&parameter| {
-                        crate::types::ty_subst_formals(parameter, &signature.formals, &bindings)
-                    })
-                    .collect::<Vec<_>>();
-                let (mut shape, missing_context) = match self.contextual_call_shape_result(
-                    scope,
-                    &initial_params,
-                    &candidate.call_sig,
-                    candidate.context_count,
-                    argument_names,
-                ) {
-                    Ok(shape) => (shape, None),
-                    Err(missing) => {
-                        let context_count = candidate.context_count.min(initial_params.len());
-                        let explicitly_named = |parameter: usize| {
-                            self.file.explicit_context_arguments
-                                && candidate.call_sig.param_names.get(parameter).is_some_and(
-                                    |parameter| {
-                                        argument_names.is_some_and(|names| {
-                                            names
-                                                .iter()
-                                                .flatten()
-                                                .any(|argument| argument == parameter)
-                                        })
-                                    },
-                                )
-                        };
-                        let parameter_indices = (context_count..initial_params.len())
-                            .chain(
-                                (0..context_count).filter(|&parameter| explicitly_named(parameter)),
-                            )
-                            .collect::<Vec<_>>();
-                        let selected_context_indices = (0..context_count)
-                            .filter(|&parameter| !explicitly_named(parameter))
-                            .collect::<Vec<_>>();
-                        let mut context_sources = vec![None; context_count];
-                        let mut context_actual_types = vec![None; context_count];
-                        for parameter in selected_context_indices {
-                            let Ok(selected) = self.select_context_arguments_with_types(
-                                scope,
-                                std::slice::from_ref(&initial_params[parameter]),
-                            ) else {
-                                continue;
-                            };
-                            let Some((source, actual)) = selected.into_iter().next() else {
-                                continue;
-                            };
-                            context_sources[parameter] = Some(source);
-                            context_actual_types[parameter] = Some(actual);
-                        }
-                        let shape = ContextualCallShape {
-                            params: parameter_indices
-                                .iter()
-                                .map(|&parameter| initial_params[parameter])
-                                .collect(),
-                            call_sig: candidate.call_sig.select_parameters(&parameter_indices),
-                            parameter_indices,
-                            context_sources,
-                            context_actual_types,
-                        };
-                        // Context lookup consumes the applied shape, but kotlinc names an
-                        // unavailable parameter with its declaration type (`x: T`, not `x: String`).
-                        let diagnostic_missing = MissingContextParameter {
-                            index: missing.index,
-                            ty: signature.params[missing.index],
-                        };
-                        (shape, Some(diagnostic_missing))
-                    }
-                };
-                for (parameter, actual) in shape.context_actual_types.iter().enumerate() {
-                    let Some(actual) = actual else { continue };
-                    let declared = *signature.params.get(parameter)?;
-                    unify_member_extension_slot(declared, *actual, &[], &mut bindings);
-                }
-                let params = signature
-                    .params
-                    .iter()
-                    .map(|&parameter| {
-                        crate::types::ty_subst_formals(parameter, &signature.formals, &bindings)
-                    })
-                    .collect::<Vec<_>>();
-                shape.params = shape
-                    .parameter_indices
-                    .iter()
-                    .map(|&parameter| params[parameter])
-                    .collect();
-                let parameters = call_argument_parameter_indices(
-                    args.len(),
-                    shape.params.len(),
-                    argument_names,
-                    trailing_lambda,
-                    &shape.call_sig,
-                )?;
-                let omitted_defaults = map_call_sig_args_with_trailing(
-                    args,
-                    argument_names,
-                    shape.params.len(),
-                    &shape.call_sig,
-                    trailing_lambda,
-                )
-                .ok()?
-                .iter()
-                .filter(|argument| argument.is_none())
-                .count();
-                let specificity = parameters
-                    .iter()
-                    .enumerate()
-                    .map(|(source, &parameter)| {
-                        let declared = shape.params[parameter];
-                        if shape.call_sig.vararg_index == Some(parameter)
-                            && !self.file.is_spread_arg(args[source])
-                        {
-                            declared.array_read_elem().unwrap_or(declared)
-                        } else {
-                            declared
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let generic = candidate
-                    .generic_sig
-                    .as_ref()
-                    .is_some_and(|signature| !signature.formals.is_empty());
-                Some((
-                    candidate,
-                    shape,
-                    parameters,
-                    specificity,
-                    omitted_defaults,
-                    generic,
-                    missing_context,
-                    type_arity_matches,
-                ))
-            })
-            .collect::<Vec<_>>();
-        // Scope-tower priority chooses the nearest APPLICABLE level. A nearer declaration whose
-        // source arguments do not even map does not hide a mapped declaration on an outer level
-        // (`with(outer) { with(inner) { receiver.extension(null) } }`). Selection already follows
-        // that rule; rejected-call recovery must project the same tower before deciding which one
-        // candidate owns the argument-type diagnostic.
-        if let Some(nearest_scope_rank) = mapped
-            .iter()
-            .map(|(candidate, ..)| (candidate.scope_rung.selection_rank(), candidate.scope_rank))
-            .min()
-        {
-            mapped.retain(|(candidate, ..)| {
-                (candidate.scope_rung.selection_rank(), candidate.scope_rank) == nearest_scope_rank
-            });
-        }
-        let any_type_arity_matches = mapped
-            .iter()
-            .any(|(_, _, _, _, _, _, _, type_arity_matches)| *type_arity_matches);
-        if any_type_arity_matches {
-            mapped.retain(|(_, _, _, _, _, _, _, type_arity_matches)| *type_arity_matches);
-        }
-        if mapped.len() > 1 {
-            let dominated = mapped
-                .iter()
-                .enumerate()
-                .filter_map(|(index, (_, _, _, specificity, omitted, ..))| {
-                    mapped
-                        .iter()
-                        .any(|(_, _, _, other_specificity, other_omitted, ..)| {
-                            other_specificity == specificity && other_omitted < omitted
-                        })
-                        .then_some(index)
-                })
-                .collect::<crate::fx_hash::HashSet<_>>();
-            mapped = mapped
-                .into_iter()
-                .enumerate()
-                .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
-                .collect();
-        }
-        crate::symbol_resolver::retain_most_specific_declarations(
-            &self.fed_source(),
-            Some(constraints.receiver),
-            &mut mapped,
-            |(candidate, _, _, specificity, _, generic, _, _)| {
-                (
-                    candidate
-                        .is_extension()
-                        .then(|| candidate.semantic_receiver())
-                        .flatten(),
-                    specificity.as_slice(),
-                    *generic,
-                    Some(candidate.callable.owner),
-                )
-            },
-        );
+        let MappedRejectionPlan {
+            constraints,
+            candidates: mapped,
+            any_type_arity_matches,
+        } = self.mapped_rejection_candidates(scope, call, args, constraints, candidates);
         if !any_type_arity_matches {
-            if let [(candidate, ..)] = mapped.as_slice() {
+            if let [MappedRejectionCandidate { candidate, .. }] = mapped.as_slice() {
                 if let Some(formal) = candidate
                     .generic_sig
                     .as_ref()
@@ -329,14 +302,21 @@ impl Checker<'_> {
         } else {
             let candidates = mapped
                 .iter()
-                .map(|(candidate, ..)| (*candidate).clone())
+                .map(|mapped| mapped.candidate.clone())
                 .collect::<Vec<_>>();
             self.report_callable_type_argument_arity(call, name, type_args.len(), &candidates)
         };
-        let [(candidate, shape, parameters, _, _, _, missing_context, _)] = mapped.as_slice()
-        else {
+        let [mapped_candidate] = mapped.as_slice() else {
             return reported_type_arity.then_some(Ty::Error);
         };
+        self.note_selected_dependency_signature(call, mapped_candidate.candidate);
+        let MappedRejectionCandidate {
+            candidate,
+            shape,
+            parameters,
+            missing_context,
+            ..
+        } = mapped_candidate;
         if let Some(missing) = missing_context {
             self.report_missing_context_parameter(call, *missing, &candidate.call_sig.param_names);
         }
@@ -406,7 +386,7 @@ impl Checker<'_> {
                 if !inferred_from_callable_reference {
                     continue;
                 }
-                let satisfies_bounds = bindings.get(formal).is_some_and(|&actual| {
+                let satisfies_bounds = bindings.get(formal.as_str()).is_some_and(|&actual| {
                     signature
                         .formal_bounds
                         .get(formal_index)
@@ -438,48 +418,27 @@ impl Checker<'_> {
                 declaration
                     .receiver_bindings
                     .iter()
-                    .map(|(formal, &actual)| (formal.clone(), actual)),
+                    .map(|(formal, &actual)| (*formal, actual)),
             );
         }
         let whole_arrays = named_whole_array_varargs(parameters, argument_names, &shape.call_sig);
+        let argument_site = RejectedArgumentSite {
+            args,
+            arg_tys,
+            whole_arrays: &whole_arrays,
+            signature: &signature,
+            receiver_bindings: &receiver_bindings,
+        };
         for (source, &parameter) in parameters.iter().enumerate() {
-            let Some((&declared, &actual)) = shape.params.get(parameter).zip(arg_tys.get(source))
+            let Some(RejectedArgumentInput {
+                expected,
+                actual,
+                input,
+                projection,
+            }) = mapped_candidate.argument_input(self, source, argument_site)
             else {
                 continue;
             };
-            let expected = if shape.call_sig.vararg_index == Some(parameter)
-                && !self.file.is_spread_arg(args[source])
-                && !whole_arrays[source]
-            {
-                declared.array_read_elem().unwrap_or(declared)
-            } else {
-                declared
-            };
-            let declaration_parameter = shape.parameter_indices[parameter];
-            let raw_input = candidate
-                .source_inputs
-                .as_deref()
-                .map(|declaration| {
-                    declaration
-                        .declared_input(declaration_parameter)
-                        .expect("retained declaration inputs preserve the mapped parameter layout")
-                })
-                .unwrap_or(signature.params[declaration_parameter]);
-            let raw_input = if shape.call_sig.vararg_index == Some(parameter)
-                && !self.file.is_spread_arg(args[source])
-                && !whole_arrays[source]
-            {
-                raw_input.array_read_elem().unwrap_or(raw_input)
-            } else {
-                raw_input
-            };
-            let (input, projection) = crate::symbol_resolver::instantiate_input_slot(
-                &self.fed_source(),
-                Some(&signature),
-                raw_input,
-                &receiver_bindings,
-                crate::symbol_resolver::UnboundSpecialization::Preserve,
-            );
             if let Some(projection) =
                 projection.filter(|_| !self.receiver_is_assignable(actual, input))
             {
@@ -562,6 +521,7 @@ impl Checker<'_> {
             self.diags.sort_source_order_from(checkpoint);
             return Some(Ty::Error);
         }
+        self.rejected_dependency_signatures.remove(&call);
         None
     }
 
@@ -658,7 +618,7 @@ impl Checker<'_> {
             let Some(formal) = signature.formals.get(formal_index) else {
                 continue;
             };
-            let Some(&actual) = bindings.get(formal) else {
+            let Some(&actual) = bindings.get(formal.as_str()) else {
                 continue;
             };
             for &bound in signature
@@ -1175,7 +1135,7 @@ impl Checker<'_> {
                             || ty_mentions_param(receiver, std::slice::from_ref(*formal))
                     })
                     .any(|(index, formal)| {
-                        let Some(&actual) = bindings.get(formal) else {
+                        let Some(&actual) = bindings.get(formal.as_str()) else {
                             return false;
                         };
                         signature
@@ -1207,7 +1167,7 @@ impl Checker<'_> {
             }
             .bindings(&self.fed_source(), &signature);
             for formal in &signature.formals {
-                if !receiver_bindings.contains_key(formal) {
+                if !receiver_bindings.contains_key(formal.as_str()) {
                     self.diags.error(
                         self.call_callee_name_span(call),
                         format!(

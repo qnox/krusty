@@ -20,6 +20,9 @@ pub(in super::super) struct DependencyInlineCall<'a> {
     pub(in super::super) template: DependencyInlineTemplate,
     pub(in super::super) parameter_types: &'a [Ty],
     pub(in super::super) dispatch_receiver: Option<ExprId>,
+    /// The checked dispatch receiver applied as the member's declaring class, whose arguments
+    /// bind a generic class's parameters in the template.
+    pub(in super::super) dispatch_type: Option<Ty>,
     pub(in super::super) extension_receiver: Option<ExprId>,
     /// The slot a member extension's checked call gives its extension receiver among
     /// `parameter_types`; its arguments are numbered around that slot.
@@ -38,6 +41,7 @@ impl BodyLowering<'_> {
             template,
             parameter_types,
             dispatch_receiver,
+            dispatch_type,
             extension_receiver,
             extension_receiver_parameter,
             arguments,
@@ -77,12 +81,7 @@ impl BodyLowering<'_> {
         let (parameter_types, arguments) = (parameter_types.as_slice(), arguments.as_slice());
         let function = template.function;
         let declared = self.ir.functions.get(function as usize)?.params.clone();
-        let context_count = self
-            .ir
-            .fn_context_counts
-            .get(&function)
-            .copied()
-            .unwrap_or(0);
+        let context_count = self.ir.declared_parameters(function).context_count;
         let receiver_position = self
             .ir
             .extension_receiver_fns
@@ -102,7 +101,21 @@ impl BodyLowering<'_> {
         if declared_values.len() != parameter_types.len() {
             return None;
         }
-        let callee = InlineCallee::Dependency { target, template };
+        let class_arguments = match (dispatch_class, template.class_type_parameters.is_empty()) {
+            (_, true) => Vec::new(),
+            (Some(classifier), false) => match dispatch_type?.kind() {
+                crate::types::TyKind::Obj(owner, arguments) if owner == classifier => {
+                    arguments.to_vec()
+                }
+                _ => return None,
+            },
+            (None, false) => return None,
+        };
+        let callee = InlineCallee::Dependency {
+            target,
+            template,
+            class_arguments,
+        };
         let (bindings, _) = callee.substitution_bindings(substitutions, |_| None)?;
         let direct = argument_boundaries::follow_parameter_order(arguments, None);
         let mut statements = Vec::new();

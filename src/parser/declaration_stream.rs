@@ -94,7 +94,7 @@ pub(crate) fn visit_declaration_units_with_features(
             visit(unit, parser.diags);
         });
     });
-    parser.skip_newlines();
+    parser.skip_semicolons();
     if !parser.at(TokenKind::Eof) || parser.i + 1 != parser.t.len() {
         parser.diags.error(
             parser.tok().span,

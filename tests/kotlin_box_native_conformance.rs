@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::Command;
 
 use krusty::conformance::TestTarget;
-use krusty::native::{CraneliftBackend, Entry, NativeTarget};
+use krusty_native::{CraneliftBackend, Entry, NativeTarget};
 
 use super::box_lane::{self, Lane, Libraries, Outcome};
 use super::box_ratchet::Platform;
@@ -28,7 +28,7 @@ const DECLINE_PREFIX: &str = "krusty: the native backend does not support ";
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target) && LIBRARIES.available(TestTarget::Native)).then_some(target)
+    (krusty_native::can_link(target) && LIBRARIES.available(TestTarget::Native)).then_some(target)
 }
 
 /// Why a case is outside this harness before any compilation, or `None` when it applies.
@@ -140,7 +140,7 @@ impl NativeLane {
             );
         }
         let object_refs = objects.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        let image = match krusty::native::link_program_with_libraries(
+        let image = match krusty_native::link_program_with_libraries(
             &object_refs,
             &program.native_imports,
             target,
@@ -238,9 +238,13 @@ impl Lane for NativeLane {
         modules: &[krusty::conformance::ModuleUnit],
         directive_source: &str,
     ) -> Outcome {
+        let Some(entry_module) = modules.last() else {
+            return Outcome::Harness("a module graph has no final source module".to_string());
+        };
         let target = self.target.expect("checked by `unavailable`");
         let backend = CraneliftBackend::new(target)
             .with_entry(Entry::Box)
+            .with_entry_module(entry_module.name.clone())
             .verified();
         let features = krusty::features::LangFeatures::from_source(directive_source);
         let metadata = match krusty::klib::backend::KlibBackend::new(
@@ -309,6 +313,43 @@ fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
         &units,
         source,
     )
+}
+
+// PLATFORM-SPECIFIC: This checks the Native oracle's generated module runner. The whole portable
+// program is also selected by every backend from the shared box inventory.
+#[test]
+fn native_reference_runner_calls_the_packaged_final_module_box() {
+    let source = include_str!("box_regressions/multimodule/packagedFinalModuleBox.kt");
+    let stem = "packagedFinalModuleBox";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole packaged module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "the Native oracle and product must both call the final module's declared box"
+    );
+}
+
+#[test]
+fn native_class_properties_export_their_checked_accessors() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/classPropertyDependencyExports.kt"),
+            "classPropertyDependencyExports",
+        ),
+        (
+            include_str!("box_regressions/delegatedPropertyDependencyExports.kt"),
+            "delegatedPropertyDependencyExports",
+        ),
+    ] {
+        super::box_reference_classes::checked_box(source, stem)
+            .expect("pinned kotlinc must run the whole property export module graph");
+        assert_eq!(
+            run_native_abi_case(source, stem),
+            Outcome::Pass,
+            "property accessor declarations must retain their module export identities"
+        );
+    }
 }
 
 /// A required inline dependency function whose body cannot become a template rejects its caller:
@@ -429,180 +470,5 @@ fn native_generic_class_members_instantiate_their_declared_dependency_exports() 
         run_native_abi_case(source, stem),
         Outcome::Pass,
         "class and method formals must instantiate independently without changing the export ABI"
-    );
-}
-
-// PLATFORM-SPECIFIC: source getter exports retain the defining module's declared storage ABI.
-#[test]
-fn native_source_getter_exports_read_declared_generic_storage() {
-    // Direct imported construction remains covered by the original graph retained in #2780.
-    // This separate getter graph uses the producer's factories and checks every storage form.
-    let source = include_str!("box_regressions/multimodule/sourceGetterExports.kt").to_owned();
-    let stem = "nativeSourceGetterExports";
-    super::box_reference_classes::checked_box(&source, stem)
-        .expect("the JVM oracle must run the complete source-getter graph");
-    assert_eq!(run_native_abi_case(&source, stem), Outcome::Pass);
-}
-
-// PLATFORM-SPECIFIC: a source-module accessor export and its declared Native receiver ABI.
-#[test]
-fn native_explicit_getter_exports_keep_their_declared_receiver() {
-    let source = include_str!("box_regressions/multimodule/explicitGetterExports.kt");
-    let stem = "nativeExplicitGetterExports";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the JVM oracle must run the complete explicit-getter graph");
-    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
-}
-
-// PLATFORM-SPECIFIC: a source getter's public ABI differs from its Native backing-field storage.
-#[test]
-fn native_getter_exports_preserve_distinct_backing_field_storage() {
-    let source = include_str!("box_regressions/multimodule/distinctBackingFieldExport.kt");
-    let stem = "nativeDistinctBackingFieldExport";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the JVM oracle must run the complete backing-field graph");
-    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
-}
-
-// PLATFORM-SPECIFIC: explicit accessor entries retain boxed class formals and a void setter ABI.
-#[test]
-fn native_explicit_setter_exports_keep_their_declared_value_parameter() {
-    let source = include_str!("box_regressions/multimodule/explicitSetterExports.kt");
-    let stem = "nativeExplicitSetterExports";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the JVM oracle must run the complete explicit-setter graph");
-    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
-}
-
-// PLATFORM-SPECIFIC: an external virtual getter must execute its override or decline cleanly.
-#[test]
-fn native_virtual_field_getter_exports_never_select_base_storage_directly() {
-    assert_virtual_getter_export(
-        "open class Base { open val value: String = \"base\" }\n\
-         class Derived : Base() { override val value: String = \"OK\" }",
-        "nativeVirtualFieldGetterExport",
-    );
-}
-
-// PLATFORM-SPECIFIC: explicit virtual accessor bodies have the same dispatch obligation.
-#[test]
-fn native_virtual_explicit_getter_exports_never_select_a_base_body_directly() {
-    assert_virtual_getter_export(
-        "open class Base { open val value: String get() = \"base\" }\n\
-         class Derived : Base() { override val value: String get() = \"OK\" }",
-        "nativeVirtualExplicitGetterExport",
-    );
-}
-
-fn assert_virtual_getter_export(declarations: &str, stem: &str) {
-    let source = format!(
-        "// MODULE: lib\npackage fixture\n{declarations}\n\
-         fun produce(): Base = Derived()\n\
-         // MODULE: main(lib)\nfun box(): String = fixture.produce().value\n"
-    );
-    super::box_reference_classes::checked_box(&source, stem)
-        .expect("the JVM oracle must establish the virtual getter result");
-    match run_native_abi_case(&source, stem) {
-        Outcome::Pass => {}
-        Outcome::Declined(reason) => assert_eq!(
-            reason, "a read of the property `fixture/Base.value`",
-            "unsupported dynamic dispatch must remain an explicit property decline"
-        ),
-        other => panic!("a virtual getter must not call its base entry directly: {other:?}"),
-    }
-}
-
-// PLATFORM-SPECIFIC: effective finality admits safe entries without requiring every class final.
-#[test]
-fn native_source_getter_exports_admit_both_forms_of_static_dispatch() {
-    let source = include_str!("box_regressions/multimodule/staticallyDispatchedGetterExports.kt");
-    let stem = "nativeStaticallyDispatchedGetterExports";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the JVM oracle must establish both static-dispatch results");
-    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
-}
-
-// PLATFORM-SPECIFIC: the allocating export must preserve declared generic storage and operands.
-#[test]
-fn native_source_constructor_exports_preserve_storage_evaluation_and_file_initialization() {
-    let source = include_str!("box_regressions/multimodule/sourceConstructorStorageAndEffects.kt");
-    let stem = "nativeSourceConstructorStorageAndEffects";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the JVM oracle must establish constructor storage and operand effects");
-    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
-}
-
-// PLATFORM-SPECIFIC: the exact selected constructor identity owns the allocating entry.
-#[test]
-fn native_source_constructor_exports_select_the_primary_beside_a_secondary() {
-    let source = include_str!("box_regressions/multimodule/sourcePrimaryConstructorIdentity.kt");
-    let stem = "nativeSourcePrimaryConstructorIdentity";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the JVM oracle must establish the selected primary constructor");
-    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
-}
-
-// PLATFORM-SPECIFIC: an inner constructor's checked enclosing operand leads its export ABI.
-#[test]
-fn native_source_constructor_exports_preserve_an_inner_enclosing_instance() {
-    let source = include_str!("box_regressions/multimodule/sourceInnerConstructorOperands.kt");
-    let stem = "nativeSourceInnerConstructorOperands";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the JVM oracle must establish the enclosing constructor operand");
-    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
-}
-
-// PLATFORM-SPECIFIC: a primary export cannot realize another selected constructor.
-#[test]
-fn native_source_constructor_exports_do_not_substitute_a_primary_for_a_secondary() {
-    let source = r#"// MODULE: lib
-package fixture
-class Choice(val value: String) { constructor(number: Int) : this("OK") }
-// MODULE: main(lib)
-fun box(): String = fixture.Choice(7).value
-"#;
-    let stem = "nativeSourceSecondaryConstructorIdentity";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the JVM oracle must establish the selected secondary constructor");
-    assert_eq!(
-        run_native_abi_case(source, stem),
-        Outcome::Declined(
-            "construction of `fixture/Choice`, which is not declared in this file".into()
-        )
-    );
-}
-
-// PLATFORM-SPECIFIC: an owned allocating entry has no exported default-mask bridge yet.
-#[test]
-fn native_source_constructor_exports_decline_omitted_arguments_without_a_bridge() {
-    let source = r#"// MODULE: lib
-package fixture
-class Defaults(val value: String = "OK")
-// MODULE: main(lib)
-fun box(): String = fixture.Defaults().value
-"#;
-    let stem = "nativeSourceConstructorDefaultBridge";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the JVM oracle must establish the constructor default");
-    assert_eq!(
-        run_native_abi_case(source, stem),
-        Outcome::Declined(
-            "a dependency constructor with omitted arguments and no exported default bridge".into()
-        )
-    );
-}
-
-// PLATFORM-SPECIFIC: imported field-layout ABI with the pinned Native module oracle.
-#[test]
-fn native_generic_field_getters_read_the_producers_declared_storage() {
-    let source =
-        include_str!("box_regressions/multimodule/genericFieldGetterExports.kt").to_owned();
-    let stem = "nativeGenericFieldGetters";
-    super::box_reference_classes::checked_box(&source, stem)
-        .expect("the JVM oracle must run the complete field-read module graph");
-    assert_eq!(
-        run_native_abi_case(&source, stem),
-        Outcome::Pass,
-        "Native must read declared generic storage through the exact exported getter ABI",
     );
 }

@@ -27,7 +27,7 @@ use super::{
 
 /// The classifier that lexically owns a local classifier's executable context.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IrLocalClassOwner {
+pub enum IrLocalClassOwner {
     /// A classifier realized in this IR file.
     Class(ClassId),
     /// A classifier declared outside executable code in another source, reached when this file
@@ -38,7 +38,7 @@ pub(crate) enum IrLocalClassOwner {
 /// A source classifier's original declaration context, retained when an inline copy changes its
 /// current executable enclosure. Targets decide how these source roles affect representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IrClassDeclarationContext {
+pub enum IrClassDeclarationContext {
     TopLevel,
     Member,
     Executable,
@@ -46,7 +46,7 @@ pub(crate) enum IrClassDeclarationContext {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct IrLocalClassNameProvenance {
+pub struct IrLocalClassNameProvenance {
     /// Source file whose facade roots the name when there is no lexical owner. An inline payload
     /// classifier keeps its declaring source's facade, not the file that realizes the payload.
     pub source: super::IrModuleSource,
@@ -117,7 +117,7 @@ fn name(name: &mut TypeName, names: &IdentityRemap<'_>) {
 /// A captured enclosing instance names its class by identity, which follows the class's rename.
 fn captured_receiver(receiver: &mut super::IrCapturedReceiver, names: &IdentityRemap<'_>) {
     match receiver {
-        super::IrCapturedReceiver::Enclosing { classifier } => name(classifier, names),
+        super::IrCapturedReceiver::Enclosing { classifier, .. } => name(classifier, names),
         super::IrCapturedReceiver::Context { types, .. } => tys(types, names),
         super::IrCapturedReceiver::Callable { .. } | super::IrCapturedReceiver::Lambda(_) => {}
     }
@@ -165,7 +165,12 @@ fn ty(value: Ty, names: &IdentityRemap<'_>) -> Ty {
                 .map(|part| ty(*part, names))
                 .collect::<Vec<_>>(),
         ),
-        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => value,
+        TyKind::Unit
+        | TyKind::Null
+        | TyKind::Nothing
+        | TyKind::Error
+        | TyKind::Pending
+        | TyKind::Var(..) => value,
     }
 }
 
@@ -332,6 +337,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
         IrCheckedOperation::ConstructorDelegation {
             target,
             outer_parameter,
+            capture_arguments,
             arguments,
             substitutions,
             ..
@@ -349,6 +355,9 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             }
             if let Some(outer) = outer_parameter {
                 *outer = ty(*outer, names);
+            }
+            for (_, capture) in capture_arguments.iter_mut().flatten() {
+                *capture = ty(*capture, names);
             }
             checked_arguments(arguments, names);
             substitutions
@@ -473,7 +482,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
                 | super::IrIntrinsic::ArraySize
                 | super::IrIntrinsic::StringGet
                 | super::IrIntrinsic::StringLength
-                | super::IrIntrinsic::EnumName
+                | super::IrIntrinsic::EnumOrdinal
                 | super::IrIntrinsic::NullableAnyToString
                 | super::IrIntrinsic::CoroutineContext => {}
             }
@@ -543,12 +552,27 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
     }
 }
 
+/// The exact classifier remap, applied to a SAM conversion's checked target.
+fn sam_target(sam: &mut crate::ir::IrSamTarget, names: &IdentityRemap<'_>) {
+    name(&mut sam.classifier, names);
+    tys(&mut sam.parameters, names);
+    sam.result = ty(sam.result, names);
+    tys(&mut sam.declared_parameters, names);
+    sam.declared_result = ty(sam.declared_result, names);
+    tys(&mut sam.overridden_results, names);
+    for parameter in &mut sam.type_parameters {
+        for (bound, _) in &mut parameter.bounds {
+            *bound = ty(*bound, names);
+        }
+    }
+}
+
 fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
     match expression {
         IrExpr::Checked(operation) => checked_operation(operation, names),
         IrExpr::CallableReference(reference) => {
             match &mut reference.target {
-                IrCallableReferenceTarget::Constructor { classifier }
+                IrCallableReferenceTarget::Constructor { classifier, .. }
                 | IrCallableReferenceTarget::Classifier { classifier, .. } => {
                     name(classifier, names)
                 }
@@ -583,7 +607,17 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
         | IrExpr::EnumValues { classifier }
         | IrExpr::EnumValueOf { classifier, .. }
         | IrExpr::EnumEntries { classifier }
+        | IrExpr::EnumConstant { classifier, .. }
+        | IrExpr::EnumEntriesList { classifier, .. }
+        | IrExpr::NoSuchEnumConstant { classifier, .. }
         | IrExpr::EnumSwitchKey { classifier, .. } => name(classifier, names),
+        IrExpr::EnumAllocation {
+            classifier,
+            instance,
+        } => {
+            name(classifier, names);
+            name(instance, names);
+        }
         IrExpr::EnumSwitchOrdinal {
             classifier,
             registrations,
@@ -651,10 +685,14 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
         IrExpr::New {
             internal,
             ctor_params,
+            declared_params,
             ..
         } => {
             name(internal, names);
             if let Some(parameters) = ctor_params {
+                tys(parameters, names);
+            }
+            if let Some(parameters) = declared_params {
                 tys(parameters, names);
             }
         }
@@ -669,14 +707,7 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
             tys(params, names);
             *ret = ty(*ret, names);
         }
-        IrExpr::Lambda { sam: Some(sam), .. } => {
-            name(&mut sam.classifier, names);
-            tys(&mut sam.parameters, names);
-            sam.result = ty(sam.result, names);
-            tys(&mut sam.declared_parameters, names);
-            sam.declared_result = ty(sam.declared_result, names);
-            tys(&mut sam.overridden_results, names);
-        }
+        IrExpr::Lambda { sam: Some(sam), .. } => sam_target(sam, names),
         IrExpr::Try {
             catches, result, ..
         } => {
@@ -978,6 +1009,11 @@ fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
     for argument in &mut class.ctor_args {
         argument.ty = ty(argument.ty, names);
         argument.declared_ty = argument.declared_ty.map(|value| ty(value, names));
+        if let super::IrCtorParameterProvenance::InterfaceDelegate { interface, .. } =
+            &mut argument.provenance
+        {
+            *interface = ty(*interface, names);
+        }
         if let Some(receiver) = argument
             .capture
             .as_mut()
@@ -1099,6 +1135,9 @@ fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
             .iter_mut()
             .for_each(|(_, holder)| name(holder, names));
         lambda.function_type = ty(lambda.function_type, names);
+        if let Some(sam) = &mut lambda.sam {
+            sam_target(sam, names);
+        }
         tys(&mut lambda.bridge.param_tys, names);
         lambda.bridge.ret_ty = ty(lambda.bridge.ret_ty, names);
         lambda
@@ -1150,14 +1189,14 @@ impl crate::metadata::class_declarations::ClassifierRenaming for RecordRenaming<
 impl super::IrFile {
     /// Replace semantic classifier identities with target physical identities at a backend boundary.
     /// The map is exact and declaration-produced; this operation performs no spelling lookup.
-    pub(crate) fn remap_classifier_identities(&mut self, names: &HashMap<TypeName, TypeName>) {
+    pub fn remap_classifier_identities(&mut self, names: &HashMap<TypeName, TypeName>) {
         self.remap_identities(&IdentityRemap::classifiers(names));
     }
 
     /// Give every occurrence of each type parameter in `carriers` the bound a target selected for
     /// its physical representation. The occurrence keeps its semantic identity, so generic
     /// signatures and metadata still name the parameter.
-    pub(crate) fn rebind_type_parameter_carriers(&mut self, carriers: &HashMap<String, Ty>) {
+    pub fn rebind_type_parameter_carriers(&mut self, carriers: &HashMap<String, Ty>) {
         self.remap_identities(&IdentityRemap::carriers(carriers));
     }
 
@@ -1211,8 +1250,8 @@ impl super::IrFile {
         for annotations_by_function in self.function_annotations.values_mut() {
             annotations(annotations_by_function, names);
         }
-        for annotations_by_parameter in self.fn_param_annotations.values_mut() {
-            for parameter_annotations in annotations_by_parameter {
+        for parameters in self.all_declared_parameters_mut() {
+            for parameter_annotations in &mut parameters.annotations {
                 annotations(parameter_annotations, names);
             }
         }
@@ -1300,6 +1339,11 @@ impl super::IrFile {
                 default.result = ty(default.result, names);
                 tys(&mut default.applied_parameters, names);
                 default.applied_result = ty(default.applied_result, names);
+                for parameter in default.type_parameters.iter_mut() {
+                    for bound in parameter.bounds.iter_mut() {
+                        resolved_ty(&mut bound.ty, names);
+                    }
+                }
             }
         }
         for overrides in self.function_overrides.values_mut() {
@@ -1531,9 +1575,6 @@ impl super::IrFile {
         for values in self.call_declared_params.values_mut() {
             tys(values, names);
         }
-        for values in self.construction_declared_params.values_mut() {
-            tys(values, names);
-        }
         for (_, value) in self.property_selected_accessors.values_mut() {
             *value = ty(*value, names);
         }
@@ -1607,6 +1648,7 @@ impl super::IrFile {
         remap_first_key(&mut self.generated_secondary_constructors, names);
         remap_first_key(&mut self.jvm_companion_property_statics, names);
         remap_first_key(&mut self.jvm_companion_delegate_statics, names);
+        remap_first_key(&mut self.jvm_property_accessor_names, names);
         remap_first_key(&mut self.property_annotation_markers, names);
         remap_first_key(&mut self.external_secondary_super_constructors, names);
         remap_first_key(&mut self.prop_declared_spellings, names);
@@ -1648,9 +1690,6 @@ fn remap_expression_facts(ir: &mut super::IrFile, expression: ExprId, names: &Id
         *value = ty(*value, names);
     }
     if let Some(parameters) = ir.call_declared_params.get_mut(&expression) {
-        tys(parameters, names);
-    }
-    if let Some(parameters) = ir.construction_declared_params.get_mut(&expression) {
         tys(parameters, names);
     }
     if let Some(parameters) = ir.physical_call_parameters.get_mut(&expression) {
@@ -1773,7 +1812,7 @@ impl super::IrFile {
     /// [`Self::realize_local_class_names`] for a target without facade classes: a local
     /// classifier that no classifier owns starts in its declaring source's package, so the one
     /// local to a top-level `box` is `box$Local` and its first anonymous object `box$1`.
-    pub(crate) fn realize_local_class_names_in_packages(&mut self) {
+    pub fn realize_local_class_names_in_packages(&mut self) {
         self.realize_local_class_names(|source, first| {
             crate::types::type_name_child(source.package, first)
         });
@@ -1948,6 +1987,7 @@ mod tests {
                 nullable: false,
                 kotlin_interface: true,
                 parameter_identities: Vec::new(),
+                type_parameters: Vec::new(),
             })),
             inline_body: None,
         };

@@ -199,7 +199,7 @@ fn project_local_alias_spelling(
     let bindings = projection
         .formals
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .zip(projection.arguments.iter().copied())
         .collect::<crate::symbol_resolver::GSigBinds>();
     let (_, mut spelling) = projected(

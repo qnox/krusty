@@ -7,13 +7,17 @@
 use crate::libraries::LibraryMember;
 use crate::types::{type_name, TypeName};
 
+mod predefined_enhancements;
+
+pub use predefined_enhancements::enhance_jdk_signature;
+
 const SPECIAL_REALIZATIONS_2_4: &str =
     include_str!("mapped_builtin_declarations/special_realizations_2_4.tsv");
 
 /// Declaration kind is part of a mapped member's identity. A zero-argument function and a property
 /// getter can share a descriptor without occupying the same Kotlin namespace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) enum MappedBuiltinMemberKind {
+pub enum MappedBuiltinMemberKind {
     Property,
     Function,
 }
@@ -23,7 +27,7 @@ pub(super) enum MappedBuiltinMemberKind {
 /// ABI policy, not source lookup: callers first bind a decoded `.kotlin_builtins` declaration and
 /// then ask for the policy by its full declaration identity and erased signature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CollectionBridgeFailure {
+pub enum CollectionBridgeFailure {
     False,
     Null,
     NotFound,
@@ -31,9 +35,9 @@ pub(super) enum CollectionBridgeFailure {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct CollectionBridgePolicy {
-    pub(super) checked_parameters: &'static [u16],
-    pub(super) failure: CollectionBridgeFailure,
+pub struct CollectionBridgePolicy {
+    pub checked_parameters: &'static [u16],
+    pub failure: CollectionBridgeFailure,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,7 +149,7 @@ fn collection_bridge_policies() -> &'static [CollectionBridgePolicyRow] {
     })
 }
 
-pub(super) fn collection_bridge_policy_for_declaration(
+pub fn collection_bridge_policy_for_declaration(
     declaration_owner: TypeName,
     source_name: &str,
     descriptor: &str,
@@ -167,12 +171,12 @@ pub(super) fn collection_bridge_policy_for_declaration(
 
 /// The complete declared signature of one overridden declaration, before any substitution.
 #[derive(Clone, Copy)]
-pub(super) struct OverriddenSignature<'a> {
-    pub(super) owner: TypeName,
-    pub(super) name: &'a str,
-    pub(super) receiver: Option<crate::types::Ty>,
-    pub(super) parameters: &'a [crate::types::Ty],
-    pub(super) result: crate::types::Ty,
+pub struct OverriddenSignature<'a> {
+    pub owner: TypeName,
+    pub name: &'a str,
+    pub receiver: Option<crate::types::Ty>,
+    pub parameters: &'a [crate::types::Ty],
+    pub result: crate::types::Ty,
 }
 
 /// The call-site realization kotlinc gives an override of one type-safe collection declaration.
@@ -182,7 +186,7 @@ pub(super) struct OverriddenSignature<'a> {
 /// override through its special bridge. The overridden declaration is authenticated by its
 /// complete declared signature, erased, against the same policy rows its bridge uses.
 /// A member extension (`receiver`) never names a collection declaration.
-pub(super) fn type_safe_override_realization(
+pub fn type_safe_override_realization(
     declaration: OverriddenSignature<'_>,
 ) -> Option<crate::libraries::OverriddenCallRealization> {
     if declaration.receiver.is_some() {
@@ -191,11 +195,11 @@ pub(super) fn type_safe_override_realization(
     let parameters = declaration
         .parameters
         .iter()
-        .map(|parameter| crate::jvm::bridges::bridge_erasure(*parameter))
+        .map(|parameter| crate::jvm::bridge_erasure::bridge_erasure(*parameter))
         .collect::<Vec<_>>();
     let descriptor = crate::jvm::names::method_descriptor(
         &parameters,
-        crate::jvm::bridges::bridge_erasure(declaration.result),
+        crate::jvm::bridge_erasure::bridge_erasure(declaration.result),
     );
     collection_bridge_policy_for_declaration(
         declaration.owner,
@@ -215,7 +219,7 @@ pub(super) fn type_safe_override_realization(
 /// realization, where it departs from the declaration's own types. Like the type-safe policy, this
 /// is behavior `.kotlin_builtins` does not encode, keyed by full declaration identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CollectionSignaturePolicy {
+pub enum CollectionSignaturePolicy {
     /// kotlinc's `METHODS_WITH_DECLARATION_SITE_WILDCARDS`: every declaration-site variance of the
     /// parameters is written, so `addAll(Collection<E>)` is `Collection<? extends E>`.
     DeclarationSiteWildcards,
@@ -224,7 +228,7 @@ pub(super) enum CollectionSignaturePolicy {
     ErasedCollectionParameter(u16),
 }
 
-pub(super) fn collection_signature_policy_for_declaration(
+pub fn collection_signature_policy_for_declaration(
     declaration_owner: TypeName,
     source_name: &str,
     descriptor: &str,
@@ -377,7 +381,7 @@ fn special_realizations() -> &'static [SpecialRealization] {
 }
 
 /// The JVM realization policy for one exact declaration decoded from `.kotlin_builtins`.
-pub(super) fn realization_for_declaration(
+pub fn realization_for_declaration(
     declaration_owner: TypeName,
     source_name: &str,
     descriptor: &str,

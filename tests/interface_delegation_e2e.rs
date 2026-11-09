@@ -801,34 +801,7 @@ class Forwarding(named: Named) : Named by named
 /// instance, and through a body that captures locals it does not call.
 #[test]
 fn anonymous_object_delegates_to_a_parameter() {
-    const SRC: &str = "interface A { fun foo(): Int }\n\
-class B1 : A { override fun foo() = 10 }\n\
-class B2(val z: Int) : A { override fun foo() = z }\n\
-fun f1(b: B1): Int {\n\
-    val o = object : A by b { }\n\
-    return o.foo()\n\
-}\n\
-fun f2(b: B2): Int {\n\
-    val o = object : A by B2(b.z) { }\n\
-    return o.foo()\n\
-}\n\
-fun f3(b: B2, mult: Int): Int {\n\
-    val o = object : A by B2(mult * b.z) { }\n\
-    return o.foo()\n\
-}\n\
-fun f4(b: B1, x: Int, y: Int, z: Int): Int {\n\
-    val o = object : A by b {\n\
-        fun bar() = x + y + z\n\
-    }\n\
-    return o.foo()\n\
-}\n\
-fun box(): String {\n\
-    if (f1(B1()) != 10) return \"fail #1\"\n\
-    if (f2(B2(239)) != 239) return \"fail #2\"\n\
-    if (f3(B2(239), 2) != 478) return \"fail #3\"\n\
-    if (f4(B1(), 1, 2, 3) != 10) return \"fail #4\"\n\
-    return \"OK\"\n\
-}\n";
+    const SRC: &str = include_str!("box_regressions/anonymousInterfaceDelegateOperands.kt");
     common::expect_box_ok_with_stdlib(SRC, "kt2224");
 }
 
@@ -965,4 +938,39 @@ class Deleg private constructor(private val p: Impl) : Iface by p {\n\
 }\n\
 fun box(): String = Deleg().f()\n";
     common::expect_box_same_as_kotlinc(SRC, "RetainedDefaultClassHeaders");
+}
+
+const JAVA_MEMBER_OVERRIDE: &str = "import java.util.function.Consumer
+
+class Recording<T>(private val delegate: Consumer<T>) : Consumer<T> by delegate {
+    var seen: T? = null
+    override fun accept(t: T) {
+        seen = t
+        delegate.accept(t)
+    }
+}
+
+class Reversed(private val order: Comparator<String>) : Comparator<String> by order {
+    override fun compare(a: String, b: String): Int = -order.compare(a, b)
+}
+
+fun box(): String {
+    val recording = Recording<String>(Consumer { })
+    recording.accept(\"a\")
+    val reversed = Reversed(naturalOrder())
+    return if (recording.seen == \"a\" && reversed.compare(\"a\", \"b\") > 0) \"OK\" else \"fail\"
+}
+";
+
+/// A class's own override of a delegated Java member (`accept(p0: T!)`, `compare(p0: String!, …)`)
+/// takes its slot under the shared override rule, which reads `T` and `String` as overriding the
+/// flexible Java parameters. Delegation therefore writes no forwarder beside it, as kotlinc does.
+#[test]
+fn an_explicit_override_of_a_delegated_java_member_replaces_its_forwarder() {
+    common::expect_box_same_as_kotlinc(JAVA_MEMBER_OVERRIDE, "JavaMemberDelegationOverride");
+    common::assert_classes_identical_to_kotlinc(
+        "JavaMemberDelegationOverride",
+        JAVA_MEMBER_OVERRIDE,
+        &["Recording", "Reversed"],
+    );
 }

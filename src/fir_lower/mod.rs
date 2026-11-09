@@ -987,9 +987,10 @@ fn lower_captured_receiver(
     receiver: &crate::fir::FirCapturedReceiver,
 ) -> crate::ir::IrCapturedReceiver {
     match receiver {
-        crate::fir::FirCapturedReceiver::Enclosing { classifier } => {
+        crate::fir::FirCapturedReceiver::Enclosing { classifier, owner } => {
             crate::ir::IrCapturedReceiver::Enclosing {
                 classifier: *classifier,
+                owner: *owner,
             }
         }
         crate::fir::FirCapturedReceiver::Callable { label, owner } => {
@@ -1243,6 +1244,8 @@ fn consume_trailing_unit_result(ir: &mut IrFile, roots: &mut Vec<ExprId>) {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod single_source_lowering;
 #[cfg(test)]
 pub(crate) mod tests;
 

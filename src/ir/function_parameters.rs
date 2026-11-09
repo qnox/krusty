@@ -68,6 +68,13 @@ pub enum IrCapturedDeclaration {
     Variable,
     /// A value parameter of an enclosing callable, or a constructor's capture-prefix value.
     Parameter,
+    /// A receiver transported by the ORIGINAL source class's constructor prefix. The stable
+    /// declaration key is never rebound to a specialized class copy, whose transport may shrink.
+    /// `parameter` is a logical prefix identity, independent of stored fields and emitted order.
+    ConstructorReceiver {
+        owner: crate::fir::DeclarationId,
+        parameter: u32,
+    },
     /// A script's implicit receiver `ordinal`, which a script statement reads from its
     /// constructor parameter.
     ScriptReceiver { ordinal: u32 },
@@ -112,6 +119,9 @@ pub enum IrGeneratedParameterRole {
     ReferenceInvokeValue {
         ordinal: u32,
     },
+    /// The explicitly bound receiver stored by a callable-reference adapter, ahead of its own
+    /// invocation inputs. It carries no lexical-capture or source-parameter-name provenance.
+    ReferenceBoundReceiver,
     /// A parameter of the `FunctionN.invoke` a generated function class overrides, by its position
     /// in the interface's parameter list. A suspend function type's continuation is one of them:
     /// it is the interface's last parameter, not a declared completion.
@@ -169,6 +179,21 @@ pub struct IrParameterIdentity {
 }
 
 impl IrParameterIdentity {
+    /// Exact original constructor receiver transported as this callable's captured value.
+    pub fn constructor_receiver(&self) -> Option<(crate::fir::DeclarationId, u32)> {
+        match self.role {
+            IrParameterRole::CapturedValue {
+                capture:
+                    IrValueCapture {
+                        declaration: IrCapturedDeclaration::ConstructorReceiver { owner, parameter },
+                        ..
+                    },
+                ..
+            } => Some((owner, parameter)),
+            _ => None,
+        }
+    }
+
     /// Convert a frontend-published semantic identity without adding a target spelling.
     pub fn resolved(identity: &crate::fir::ResolvedParameterIdentity) -> Self {
         use crate::fir::ResolvedParameterIdentity as Resolved;
@@ -346,7 +371,7 @@ impl FnParamInfo {
         info
     }
 
-    pub(crate) fn prepend_generated(&mut self, identity: IrParameterIdentity) {
+    pub fn prepend_generated(&mut self, identity: IrParameterIdentity) {
         assert_eq!(
             identity.provenance,
             IrParameterProvenance::CompilerGenerated,
@@ -389,7 +414,7 @@ impl IrFile {
     }
 
     /// The exact checked declaration that supplied inherited defaults for `fid`.
-    pub(crate) fn inherited_param_default_provider(
+    pub fn inherited_param_default_provider(
         &self,
         fid: u32,
     ) -> Option<crate::fir::ResolvedFunctionOverrideTarget> {
@@ -428,10 +453,7 @@ impl IrFile {
     /// but consumers must not branch on that origin. Presence is optional for functions that have
     /// no source/debug parameter surface; when present, the identities are complete and exactly
     /// parallel to the current semantic parameter list.
-    pub(crate) fn function_parameter_identities(
-        &self,
-        function: FunId,
-    ) -> Option<&[IrParameterIdentity]> {
+    pub fn function_parameter_identities(&self, function: FunId) -> Option<&[IrParameterIdentity]> {
         let source = self
             .fn_params
             .get(&function)
@@ -468,8 +490,8 @@ impl IrFile {
     /// lead with a capture or an extension receiver. [`IrVarargParameter::index`] counts the
     /// declared context and value parameters, so the position is the declared parameter at that
     /// ordinal.
-    pub(crate) fn vararg_parameter_position(&self, function: FunId) -> Option<usize> {
-        let vararg = self.fn_varargs.get(&function)?;
+    pub fn vararg_parameter_position(&self, function: FunId) -> Option<usize> {
+        let vararg = self.declared_parameters(function).vararg?;
         self.function_parameter_identities(function)?
             .iter()
             .enumerate()

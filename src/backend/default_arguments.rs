@@ -9,6 +9,11 @@
 //! with placeholders and constant masks ([`call_sites`]). A top-level entry is published to the
 //! other files of the module under the identity of the declaration that provides its defaults.
 //!
+//! A constructor's entry is one more constructor of its class, taking the same frame and masks
+//! after the class's compiler-supplied prefix and delegating `this(…)` to the constructor
+//! ([`constructor_entries`]); constructions, delegations and enum constants that omit arguments
+//! select it by its exact place among the class's constructors ([`constructor_calls`]).
+//!
 //! Common lowering has already selected every callee and mapped every argument; this pass only
 //! changes how an omission is carried. A target runs it after its other common realizations, and
 //! realizes the [`crate::ir::IrExpr::AbsentArgument`] placeholders and the
@@ -16,59 +21,45 @@
 //! methods and does not run it.
 
 mod call_sites;
+mod constructor_calls;
+mod constructor_entries;
 mod entries;
 mod masks;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use entries::{published_entry, published_identities};
-pub(crate) use masks::{mask_words, omission_masks};
+pub use entries::{published_entry, published_identities};
+pub use masks::{mask_words, omission_masks};
 
 use super::CheckedBackendCallables;
 use crate::fx_hash::HashSet;
-use crate::ir::{ExprId, IrFile};
+use crate::ir::{FunId, IrFile};
 
 /// Build the default-argument entries of `ir`'s declarations and rewrite every emitted call that
 /// leaves arguments out to call one. `callables` are the facts frozen for `ir` before this
 /// lowering; each expression an entry copies from a default gets the facts of its original.
-pub(crate) fn realize(ir: &mut IrFile, callables: &mut CheckedBackendCallables) {
+/// `exported` says which declarations a later module calls by their dependency export; each of
+/// those publishes its entry too.
+pub fn realize(
+    ir: &mut IrFile,
+    callables: &mut CheckedBackendCallables,
+    exported: impl Fn(FunId) -> bool,
+) {
     let mut entries = entries::Entries::default();
-    entries.publish(ir);
+    entries.publish(ir, exported);
+    constructor_calls::rewrite_delegations(ir, &mut entries);
     entries.take_new_bodies();
     // Every emitted body, the entries' own included: a default may itself call with omissions.
     let mut pending = crate::ir::emitted_body_roots(ir);
-    pending.extend(constructor_defaults(ir));
     let mut seen = HashSet::default();
     while let Some(root) = pending.pop() {
         for expression in crate::ir::value_namespace_expressions(ir, root) {
             if seen.insert(expression) {
                 call_sites::rewrite(ir, &mut entries, expression);
+                constructor_calls::rewrite(ir, &mut entries, expression);
             }
         }
         pending.extend(entries.take_new_bodies());
     }
     callables.extend_to_clones(entries.clones());
-}
-
-/// The defaults of every constructor `ir` emits. This lowering gives a constructor no entry: the
-/// target fills a construction's, a `super(…)` delegation's or an enum constant's omitted
-/// arguments by evaluating these in the constructor's frame, so a call one of them makes is a call
-/// site of this file like any in a body.
-fn constructor_defaults(ir: &IrFile) -> Vec<ExprId> {
-    ir.classes
-        .iter()
-        .flat_map(|class| {
-            let primary = class
-                .has_primary_ctor
-                .then(|| ir.class_ctor_defaults_name(class.fq_name_id()))
-                .flatten()
-                .into_iter()
-                .flatten();
-            let secondaries = class
-                .secondary_ctors
-                .iter()
-                .flat_map(|constructor| &constructor.defaults);
-            primary.chain(secondaries).flatten().copied()
-        })
-        .collect()
 }
