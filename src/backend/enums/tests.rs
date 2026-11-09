@@ -506,6 +506,55 @@ fn an_enum_another_file_declares_keeps_its_use_nodes() {
     assert!(matches!(ir.expr(elsewhere), IrExpr::EnumEntry { .. }));
 }
 
+/// Another file reads a published enum's constant through an entry of this file, which reads the
+/// one constant this file holds.
+#[test]
+fn a_published_enum_exports_an_entry_answering_each_constant() {
+    let mut ir = IrFile::default();
+    let class = shade(&mut ir);
+    ir.record_declared_class_self_type(type_name("Shade"), Ty::obj("Shade"));
+    let mut exports = super::super::DependencyExportSignatures::default();
+    exports.record_enum(class);
+    super::publish_constants(&mut ir, &mut exports);
+    let ir = lowered(ir);
+
+    let published = exports
+        .enum_constant_entries()
+        .iter()
+        .map(|(constant, entry)| (constant.classifier, &*constant.name, *entry))
+        .collect::<Vec<_>>();
+    let [(light_owner, "LIGHT", light), (dark_owner, "DARK", dark)] = published.as_slice() else {
+        panic!("one entry per constant, in declaration order: {published:?}");
+    };
+    assert_eq!([*light_owner, *dark_owner], [type_name("Shade"); 2]);
+    assert_eq!(ir.construction_entries.get(dark), Some(&class));
+    let (build, ..) = initializer_parts(&ir, function(&ir, "Shade$initEntries"));
+    let slots = constructed(&ir, &build);
+    for (entry, name) in [(*light, "LIGHT"), (*dark, "DARK")] {
+        let function = &ir.functions[entry as usize];
+        assert!(function.is_static && function.params.is_empty());
+        assert_eq!(function.ret, Ty::obj("Shade"));
+        let statements = statements(&ir, body(&ir, entry));
+        let [returned] = statements.as_slice() else {
+            panic!("an entry only returns the constant");
+        };
+        let IrExpr::Return(Some(value)) = ir.expr(*returned) else {
+            panic!("an entry returns the constant");
+        };
+        let IrExpr::Block {
+            value: Some(read), ..
+        } = ir.expr(*value)
+        else {
+            panic!("the entry's read is realized: {:?}", ir.expr(*value));
+        };
+        let slot = slots
+            .iter()
+            .find_map(|(slot, constant, ..)| (constant == name).then_some(*slot))
+            .expect("the constant has a slot");
+        assert!(matches!(ir.expr(*read), IrExpr::GetStatic(read) if *read == slot));
+    }
+}
+
 /// `enumEntries<E>()`, once inline specialization has named the enum, reads the same slot as
 /// `E.entries`.
 #[test]

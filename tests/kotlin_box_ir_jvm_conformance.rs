@@ -34,8 +34,8 @@ use rayon::prelude::*;
 
 use super::box_byte_score;
 use super::box_jvm_compile::{
-    compile_blocks, compile_box_case, compile_module_test, compile_multifile, find_box_class,
-    unit_options, CompileFailure, CompiledClasses, COROUTINE_HELPERS, T_EMIT,
+    compile_blocks, compile_module_test, compile_multifile, find_box_class, unit_options,
+    COROUTINE_HELPERS, T_EMIT,
 };
 use super::box_ratchet::{self, Outcome, Platform};
 use super::box_reference_classes;
@@ -43,6 +43,7 @@ use super::common;
 
 #[path = "kotlin_box_ir_jvm_conformance/entry.rs"]
 mod entry;
+pub(super) use super::box_jvm_compile::{compile_box_case, CompileFailure, CompiledClasses};
 
 // BoxRunner.java source embedded at compile time; compiled once at test start.
 const BOX_RUNNER_SRC: &str = r#"
@@ -498,62 +499,6 @@ fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
         );
     }
     runner_dir
-}
-
-/// The scored run's reference-compile profile: inventory cache hits and misses, then the live
-/// compiler server's lifecycle. Durations are summed over worker threads, like the `timing` line.
-fn reference_profile(
-    reference: box_reference_classes::ReferenceStats,
-    server: common::kotlinc_server::KotlincServerStats,
-) -> String {
-    let secs = |duration: Duration| duration.as_secs_f64();
-    format!(
-        "reference profile (thread-sum): cache hit {} | cached rejection {} | miss {} | \
-         read {:.1}s | compile {:.1}s | cleanup {:.1}s | store {:.1}s\n\
-         kotlinc server (thread-sum): requests {} | starts {} | restarts {} | pool wait {:.1}s | \
-         start {:.1}s | compile {:.1}s",
-        reference.hits,
-        reference.cached_rejections,
-        reference.misses,
-        secs(reference.cache_read),
-        secs(reference.compile),
-        secs(reference.cleanup),
-        secs(reference.store),
-        server.requests,
-        server.starts,
-        server.restarts,
-        secs(server.pool_wait),
-        secs(server.start_time),
-        secs(server.compile_time),
-    )
-}
-
-#[test]
-fn reference_profile_reports_cache_and_server_counts() {
-    let reference = box_reference_classes::ReferenceStats {
-        hits: 3,
-        cached_rejections: 1,
-        misses: 596,
-        cache_read: Duration::from_millis(240),
-        compile: Duration::from_millis(140_049),
-        cleanup: Duration::from_millis(1_960),
-        store: Duration::from_millis(1_040),
-    };
-    let server = common::kotlinc_server::KotlincServerStats {
-        requests: 636,
-        starts: 2,
-        restarts: 0,
-        pool_wait: Duration::from_millis(40),
-        start_time: Duration::from_millis(9),
-        compile_time: Duration::from_millis(125_056),
-    };
-    assert_eq!(
-        reference_profile(reference, server),
-        "reference profile (thread-sum): cache hit 3 | cached rejection 1 | miss 596 | read 0.2s | \
-         compile 140.0s | cleanup 2.0s | store 1.0s\n\
-         kotlinc server (thread-sum): requests 636 | starts 2 | restarts 0 | pool wait 0.0s | \
-         start 0.0s | compile 125.1s"
-    );
 }
 
 #[test]
@@ -1555,7 +1500,7 @@ fn kotlin_codegen_box_conformance() {
     if score_on {
         eprintln!(
             "{}",
-            reference_profile(
+            box_reference_classes::reference_profile(
                 box_reference_classes::reference_stats(),
                 common::kotlinc_server::kotlinc_server_stats()
             )
