@@ -664,9 +664,8 @@ impl<'a> CommonIrBodySink<'a> {
             self.ir.extension_receiver_fns.insert(function);
         }
         if callable.shape.context_parameter_count != 0 {
-            self.ir
-                .fn_context_counts
-                .insert(function, callable.shape.context_parameter_count as usize);
+            self.ir.declared_parameters_mut(function).context_count =
+                callable.shape.context_parameter_count as usize;
         }
         if flags.has(crate::fir::DeclarationFlags::SUSPEND) {
             self.ir.suspend_funs.push(function);
@@ -1392,9 +1391,8 @@ impl<'a> CommonIrBodySink<'a> {
                 self.ir.extension_receiver_fns.insert(function);
             }
             if callable.shape.context_parameter_count != 0 {
-                self.ir
-                    .fn_context_counts
-                    .insert(function, callable.shape.context_parameter_count as usize);
+                self.ir.declared_parameters_mut(function).context_count =
+                    callable.shape.context_parameter_count as usize;
             }
             if declaration_header
                 .flags
@@ -1479,13 +1477,11 @@ impl<'a> CommonIrBodySink<'a> {
                     .callable_parameter(callable.id, *ordinal as u32)
                     .is_some_and(|parameter| parameter.flags().is_vararg())
             }) {
-                self.ir.fn_varargs.insert(
-                    function,
-                    crate::ir::IrVarargParameter {
+                self.ir.declared_parameters_mut(function).vararg =
+                    Some(crate::ir::IrVarargParameter {
                         index: vararg,
                         is_last: vararg + 1 == signature.parameters.len(),
-                    },
-                );
+                    });
             }
             attach_callable_generic_facts(index, declaration, function, self.ir);
             assert!(
