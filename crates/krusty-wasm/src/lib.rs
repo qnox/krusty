@@ -26,6 +26,7 @@ mod interface_dispatch;
 mod objects;
 mod runtime;
 mod target;
+mod type_objects;
 
 pub use codegen::WasmBackend;
 pub use target::WasmTarget;

@@ -10,6 +10,7 @@ mod diagnostic_rendering;
 mod intersection;
 pub use intersection::declaration_approximation;
 mod overridden_declaration;
+mod qualified_name;
 mod semantic_call_role;
 mod semantic_callable_owner;
 pub use classifier_declarations::{
@@ -1226,6 +1227,36 @@ impl Ty {
             TyKind::Fun(signature) => {
                 signature.ret.mentions_ty_param()
                     || signature.params.iter().any(|p| p.mentions_ty_param())
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether this type mentions a call variable, or a type parameter for which `fixed` does not
+    /// hold. A type parameter lexically in scope names the enclosing declaration's own type and is
+    /// as determined as any classifier; any other one is still open.
+    pub fn mentions_open_ty_param(self, fixed: &dyn Fn(&str) -> bool) -> bool {
+        match self.kind() {
+            TyKind::TyParam(name, _) => !fixed(name.as_str()),
+            TyKind::Var(..) => true,
+            TyKind::DefinitelyNotNull(inner)
+            | TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner)
+            | TyKind::StarProjection(inner)
+            | TyKind::RawProjection(inner) => inner.mentions_open_ty_param(fixed),
+            TyKind::Intersection(parts) => {
+                parts.iter().any(|part| part.mentions_open_ty_param(fixed))
+            }
+            TyKind::Obj(_, args) => args.iter().any(|a| a.mentions_open_ty_param(fixed)),
+            TyKind::Fun(signature) => {
+                signature.ret.mentions_open_ty_param(fixed)
+                    || signature
+                        .params
+                        .iter()
+                        .any(|p| p.mentions_open_ty_param(fixed))
             }
             _ => false,
         }

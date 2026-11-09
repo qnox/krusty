@@ -348,12 +348,25 @@ impl BodyLowering<'_, '_, '_> {
             // A conversion is the widening the carrier already describes: unsigned widens by
             // zero-extension, and narrowing keeps the low bits whatever the signedness.
             (
-                "hashCode" | "toByte" | "toShort" | "toInt" | "toLong" | "toUByte" | "toUShort"
-                | "toUInt" | "toULong",
+                "toByte" | "toShort" | "toInt" | "toLong" | "toUByte" | "toUShort" | "toUInt"
+                | "toULong",
                 [],
             ) => {
-                let target = if name == "hashCode" { Ty::Int } else { ret };
-                return self.convert(left, Some(width), target);
+                return self.convert(left, Some(width), ret);
+            }
+            // Kotlin defines an unsigned `hashCode` as its wrapped signed value's: `UByte` and
+            // `UShort` sign-extend, and `ULong` folds its halves as `Long.hashCode` does.
+            ("hashCode", []) => {
+                let Some(signed) = width.scalar_value_repr() else {
+                    return Err(declined!("an unsigned `hashCode` with no signed value"));
+                };
+                let hashed = if signed == Ty::Long {
+                    let high = self.builder.ins().ushr_imm_u(left, 32);
+                    self.builder.ins().bxor(left, high)
+                } else {
+                    left
+                };
+                return self.convert(hashed, Some(signed), Ty::Int);
             }
             _ => {
                 return Err(declined!(
