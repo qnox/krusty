@@ -75,6 +75,33 @@ impl BodyLowering<'_, '_, '_> {
         }))
     }
 
+    /// A builtin scalar's own `hashCode()`, by the rule Kotlin fixes for the receiver's type.
+    fn primitive_hash_code(&mut self, operand: u32) -> Result<Option<Value>, Unsupported> {
+        let Some(ty) = self.checked_type(operand) else {
+            return Err("a primitive `hashCode` without a checked receiver type".into());
+        };
+        if !matches!(
+            ty,
+            Ty::Boolean
+                | Ty::Char
+                | Ty::Byte
+                | Ty::Short
+                | Ty::Int
+                | Ty::Long
+                | Ty::Float
+                | Ty::Double
+        ) {
+            return Err(declined!("a primitive `hashCode` on `{ty:?}`"));
+        }
+        let Some(value) = self.coerce(operand, ty)? else {
+            return Err("a primitive `hashCode` on `Unit`".into());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        self.value_hash(value, ty).map(Some)
+    }
+
     /// Realize an exact provider intrinsic reached through an ordinary member call.
     ///
     /// Returns `None` only when the selected declaration has no operation handled here, allowing
@@ -113,6 +140,16 @@ impl BodyLowering<'_, '_, '_> {
                         return Some(Err("a `String.plus` with a non-String result".into()));
                     }
                     self.string_plus(left, right, ret)
+                }
+                DependencyOperation::PrimitiveHashCode => {
+                    let (Some(operand), [], None) = (receiver, args, extension_receiver_parameter)
+                    else {
+                        return Some(Err("a malformed primitive `hashCode`".into()));
+                    };
+                    if ret != Ty::Int {
+                        return Some(Err("a primitive `hashCode` with a non-Int result".into()));
+                    }
+                    self.primitive_hash_code(operand)
                 }
             });
         }

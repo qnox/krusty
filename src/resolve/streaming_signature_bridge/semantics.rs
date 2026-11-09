@@ -12,6 +12,7 @@ mod result_approximation;
 mod result_constraints;
 pub(super) mod scoped_constraint_frames;
 mod value_flow_constraints;
+mod value_invoke;
 
 pub(super) use constructor_expectations::ReceiverLevelCall;
 use result_constraints::signature_call_result_constraint;
@@ -1085,11 +1086,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             self.demanded_enclosing_constructor_parameter(scope, spelling, demand)?
         {
             let callee = crate::fir::ResolvedTy::new(parameter).map_err(|_| Self::failure())?;
-            return self.select_invoke(scope, origin, callee, arguments, demand);
+            return self.invoke_result(scope, origin, callee, arguments, demand);
         }
         if let Some(capture) = self.enclosing_capture_type(scope, spelling) {
             let callee = crate::fir::ResolvedTy::new(capture).map_err(|_| Self::failure())?;
-            return self.select_invoke(scope, origin, callee, arguments, demand);
+            return self.invoke_result(scope, origin, callee, arguments, demand);
         }
         let (argument_kinds, argument_types) = Self::mapped_call_arguments(&[], arguments, false)
             .unwrap_or_else(|| {
@@ -1213,7 +1214,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 // inferred source-signature demand for local and dependency declarations alike.
                 if let Some(value) = self.classifier_value_type(internal) {
                     let callee = crate::fir::ResolvedTy::new(value).map_err(|_| Self::failure())?;
-                    if let Ok(result) = self.select_invoke(scope, origin, callee, arguments, demand)
+                    if let Ok(result) = self.invoke_result(scope, origin, callee, arguments, demand)
                     {
                         return Ok(result);
                     }
@@ -1518,7 +1519,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if let Some(callee) =
                 self.selected_member_property_type(scope, receiver, spelling, None, demand)?
             {
-                if let Ok(result) = self.select_invoke(scope, origin, callee, arguments, demand) {
+                if let Ok(result) = self.invoke_result(scope, origin, callee, arguments, demand) {
                     return Ok(result);
                 }
                 if let Ok(result) = self.select_member_call(
@@ -1958,7 +1959,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         crate::fir::ResolvedTy::new(property.ty).map_err(|_| Self::failure())?
                     }
                 };
-                self.select_invoke(scope, origin, callee, arguments, demand)
+                self.invoke_result(scope, origin, callee, arguments, demand)
             }
             SelectedTopLevelCall::ClassifierInvoke(classifier, value) => {
                 if let super::classifier_associated::AssociatedSignatureCall::Selected(result) =
@@ -1979,7 +1980,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 }
                 let callee = value.ok_or_else(Self::failure)?;
                 let callee = crate::fir::ResolvedTy::new(callee).map_err(|_| Self::failure())?;
-                self.select_invoke(scope, origin, callee, arguments, demand)
+                self.invoke_result(scope, origin, callee, arguments, demand)
             }
             SelectedTopLevelCall::SamConstructor(internal, alias) => {
                 let actual = selected_argument_types
@@ -3667,7 +3668,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             .map(|argument| argument.get())
             .collect::<Vec<_>>();
         if spelling == "invoke" && type_arguments.is_empty() {
-            if let Ok(result) = self.select_invoke(scope, origin, receiver, arguments, demand) {
+            if let Ok(result) = self.invoke_result(scope, origin, receiver, arguments, demand) {
                 return Ok(crate::fir::ResolvedMemberCall {
                     ty: Some(result),
                     declaration: None,
@@ -3881,7 +3882,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     None,
                     demand,
                 )? {
-                    if let Ok(result) = self.select_invoke(scope, origin, callee, arguments, demand)
+                    if let Ok(result) = self.invoke_result(scope, origin, callee, arguments, demand)
                     {
                         return Ok(crate::fir::ResolvedMemberCall {
                             ty: Some(result),
@@ -4173,155 +4174,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
-    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        crate::trace_compiler!(
-            "signature",
-            "select invoke callee={:?} arguments={:?}",
-            callee.get(),
-            arguments
-                .iter()
-                .map(|argument| argument.ty.get())
-                .collect::<Vec<_>>(),
-        );
-        let callable = crate::symbol_resolver::classifier_callable_signature(
-            &*self.table.libraries,
-            callee.get().non_null(),
-        );
-        if let Some(TyKind::Fun(signature)) = callable.map(|ty| ty.kind()) {
-            let implicit_prefix = signature
-                .context_count
-                .saturating_add(usize::from(signature.has_receiver))
-                .min(signature.params.len());
-            let accepts_explicit_shape = signature.params.len() == arguments.len();
-            let accepts_implicit_shape =
-                signature.params.len() - implicit_prefix == arguments.len();
-            if (!accepts_explicit_shape && !accepts_implicit_shape)
-                || arguments
-                    .iter()
-                    .any(|argument| argument.name.is_some() || argument.spread)
-            {
-                return Err(Self::failure());
-            }
-            self.record_function_value_invoke_constraints(
-                scope,
-                signature,
-                implicit_prefix,
-                accepts_explicit_shape,
-                arguments,
-            );
-            return crate::fir::ResolvedTy::new(signature.ret).map_err(|_| Self::failure());
-        }
-
-        let selected = self.with_resolver(scope, |resolver| {
-            let (mut functions, properties) = resolver
-                .receiver_callables(callee.get(), "invoke")
-                .into_parts();
-            functions
-                .overloads
-                .retain(|candidate| candidate.flags.operator);
-            functions.overloads = self.implicit_context_candidates(scope, functions.overloads);
-            let callables = crate::libraries::Callables::from_parts(functions, properties);
-            let (argument_kinds, argument_types) =
-                Self::mapped_call_arguments(callables.functions(), arguments, false)?;
-            let crate::symbol_resolver::CandidateSelection::Selected((
-                selected,
-                parameters,
-                result,
-            )) = resolver.select_receiver_function_with_params_tracking(
-                callee.get(),
-                "invoke",
-                crate::symbol_resolver::FamilyArguments::Shared(&argument_kinds),
-                &[],
-                &callables,
-                None,
-            )
-            else {
-                return None;
-            };
-            Some((selected, parameters, result, argument_types))
-        });
-        if let Ok((selected, parameters, result, argument_types)) = selected {
-            if selected.kind == crate::libraries::FnKind::Member {
-                let mut member = selected.member_with_return(result);
-                member.params = parameters;
-                if let Some(signature) =
-                    self.demanded_member_signature(member.stable_declaration, demand)?
-                {
-                    return self.apply_demanded_member(
-                        callee.get(),
-                        &member,
-                        &signature,
-                        &argument_types,
-                        &[],
-                    );
-                }
-            }
-            if let Some(source) = selected.source_key {
-                if let Some(signature) =
-                    self.demanded_source_signature(None, selected.stable_declaration, demand)?
-                {
-                    return self.apply_demanded_source_callable(
-                        source,
-                        Some(callee.get()),
-                        &signature,
-                        &argument_types,
-                        None,
-                        &[],
-                        None,
-                    );
-                }
-            }
-            return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
-        }
-
-        let argument_names = arguments
-            .iter()
-            .map(|argument| argument.name.map(str::to_owned))
-            .collect::<Vec<_>>();
-        let argument_names = argument_names
-            .iter()
-            .any(Option::is_some)
-            .then_some(argument_names.as_slice());
-        let argument_kinds = arguments
-            .iter()
-            .map(Self::call_argument_kind)
-            .collect::<Vec<_>>();
-        for dispatch in self.signature_dispatch_receivers(scope) {
-            let selected = self.signature_member_extension_call(
-                scope,
-                callee.get(),
-                dispatch,
-                "invoke",
-                super::lookups::SignatureMemberExtensionArguments {
-                    arguments: &argument_kinds,
-                    names: argument_names,
-                    ..Default::default()
-                },
-                super::super::CallResultConstraint::None,
-                super::super::MemberExtensionSelection::Operators,
-            );
-            let (result, declaration) = match selected {
-                super::lookups::SignatureMemberExtensionCallSelection::Selected {
-                    result,
-                    declaration,
-                } => (result, declaration),
-                super::lookups::SignatureMemberExtensionCallSelection::None(_) => continue,
-                super::lookups::SignatureMemberExtensionCallSelection::Ambiguous(_) => {
-                    return Err(self.record_ambiguous_member(scope.owner, origin, "invoke"));
-                }
-            };
-            if let Some(declaration) = declaration {
-                if self
-                    .headers
-                    .stub(declaration)
-                    .is_some_and(|stub| stub.signature_inference.is_some())
-                {
-                    return demand(declaration).map(|signature| signature.result);
-                }
-            }
-            return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
-        }
-        Err(Self::failure())
+    ) -> Result<crate::fir::InvokeSelection, crate::fir::DiagnosticId> {
+        self.select_value_invoke(scope, origin, callee, arguments, demand)
     }
 
     fn invoke_argument_expectations(

@@ -403,13 +403,8 @@ fn realize_local_default_arguments(
         .cloned()
         .unwrap_or_default();
     let extension_receiver_parameter = ir.extension_receiver_fns.contains(&function).then(|| {
-        u32::try_from(
-            ir.fn_context_counts
-                .get(&function)
-                .copied()
-                .unwrap_or_default(),
-        )
-        .expect("too many context parameters")
+        u32::try_from(ir.declared_parameters(function).context_count)
+            .expect("too many context parameters")
     });
     realize_default_arguments(
         ir,

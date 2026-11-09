@@ -939,3 +939,38 @@ class Deleg private constructor(private val p: Impl) : Iface by p {\n\
 fun box(): String = Deleg().f()\n";
     common::expect_box_same_as_kotlinc(SRC, "RetainedDefaultClassHeaders");
 }
+
+const JAVA_MEMBER_OVERRIDE: &str = "import java.util.function.Consumer
+
+class Recording<T>(private val delegate: Consumer<T>) : Consumer<T> by delegate {
+    var seen: T? = null
+    override fun accept(t: T) {
+        seen = t
+        delegate.accept(t)
+    }
+}
+
+class Reversed(private val order: Comparator<String>) : Comparator<String> by order {
+    override fun compare(a: String, b: String): Int = -order.compare(a, b)
+}
+
+fun box(): String {
+    val recording = Recording<String>(Consumer { })
+    recording.accept(\"a\")
+    val reversed = Reversed(naturalOrder())
+    return if (recording.seen == \"a\" && reversed.compare(\"a\", \"b\") > 0) \"OK\" else \"fail\"
+}
+";
+
+/// A class's own override of a delegated Java member (`accept(p0: T!)`, `compare(p0: String!, …)`)
+/// takes its slot under the shared override rule, which reads `T` and `String` as overriding the
+/// flexible Java parameters. Delegation therefore writes no forwarder beside it, as kotlinc does.
+#[test]
+fn an_explicit_override_of_a_delegated_java_member_replaces_its_forwarder() {
+    common::expect_box_same_as_kotlinc(JAVA_MEMBER_OVERRIDE, "JavaMemberDelegationOverride");
+    common::assert_classes_identical_to_kotlinc(
+        "JavaMemberDelegationOverride",
+        JAVA_MEMBER_OVERRIDE,
+        &["Recording", "Reversed"],
+    );
+}

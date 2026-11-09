@@ -3,6 +3,7 @@ package krusty.buildtools;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.File;
@@ -37,7 +38,28 @@ class KrustyToolchainsTest {
     @Test
     void loadsAsTheBuildToolsApiImplementationForItsKotlinRelease() {
         assertInstanceOf(KrustyToolchains.class, toolchains);
-        assertEquals(KotlinVersion.CURRENT.toString(), toolchains.getCompilerVersion());
+        // The exact release identity the build was configured for, pre-release classifier and all.
+        String release = System.getProperty("krusty.kotlinVersion");
+        assertEquals(release, toolchains.getCompilerVersion());
+        // The stdlib resolved for that release agrees; KotlinVersion.CURRENT omits a classifier
+        // such as -Beta2, so it is the release's numeric prefix.
+        assertTrue(release.startsWith(KotlinVersion.CURRENT + "-") || release.equals(KotlinVersion.CURRENT.toString()), release);
+    }
+
+    @Test
+    void forwardsOneCommandLineApplicationAndRefusesToReplaceArgumentsWithinIt() {
+        CompilerArguments.Builder arguments = new CompilerArguments.Builder();
+        arguments.applyCommandLineArguments(List.of("-no-stdlib", "-module-name=box"));
+        assertEquals(List.of("-no-stdlib", "-module-name=box"), arguments.build().toArgumentStrings());
+
+        UnsupportedOperationException refusal = assertThrows(
+            UnsupportedOperationException.class,
+            () -> arguments.applyCommandLineArguments(List.of("-module-name=other")));
+        assertEquals(
+            "krusty forwards compiler arguments as one command line and cannot replace individual"
+                + " arguments applied earlier; apply every argument in one applyCommandLineArguments call",
+            refusal.getMessage());
+        assertEquals(List.of("-no-stdlib", "-module-name=box"), arguments.build().toArgumentStrings());
     }
 
     @Test

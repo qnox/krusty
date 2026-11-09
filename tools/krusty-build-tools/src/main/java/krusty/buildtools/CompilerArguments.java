@@ -67,6 +67,23 @@ final class CompilerArguments implements JvmCompilerArguments {
             strings.addAll(arguments);
         }
 
+        /**
+         * The Build Tools API's replacement for {@link #applyArgumentStrings} from Kotlin 2.5 on. It
+         * replaces the value of each argument it names while keeping the others, which takes an
+         * argument model to tell which strings an earlier application contributed to the same
+         * argument. krusty keeps no such model here, so a builder that already holds arguments
+         * refuses rather than guessing; the first application is forwarded verbatim. It is not an
+         * {@code @Override} because the API of the Kotlin releases before 2.5 does not declare it.
+         */
+        public void applyCommandLineArguments(List<String> arguments) {
+            if (!strings.isEmpty()) {
+                throw new UnsupportedOperationException(
+                    "krusty forwards compiler arguments as one command line and cannot replace individual"
+                        + " arguments applied earlier; apply every argument in one applyCommandLineArguments call");
+            }
+            strings.addAll(arguments);
+        }
+
         @Override
         public JvmCompilerArguments build() {
             return new CompilerArguments(strings);
