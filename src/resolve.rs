@@ -9243,9 +9243,15 @@ struct FunctionLambdaShape<'a> {
 struct ProviderMemberFamily {
     receiver: Ty,
     members: Vec<crate::libraries::FunctionInfo>,
-    /// Whether every other source of the call has already failed, so that a sole candidate that
-    /// maps the arguments but does not accept them is the one the call is reported against.
-    reports_against_sole_candidate: bool,
+}
+
+/// The shape a provider member family gives a call's functional arguments.
+struct ProviderLambdaShape {
+    expectations: Vec<Option<FunctionalArgumentExpectation>>,
+    /// Whether a candidate accepts the arguments. Otherwise this is the shape of the one candidate
+    /// an inapplicable call is reported against, which counts only once every other source of the
+    /// call has declined.
+    accepted: bool,
 }
 
 /// A call's argument expressions with their checked types — parallel slices that must stay the
@@ -14552,7 +14558,6 @@ impl<'a> Checker<'a> {
                             ProviderMemberFamily {
                                 receiver: classifier_receiver,
                                 members: candidates.clone(),
-                                reports_against_sole_candidate: false,
                             },
                             &name,
                             args,
@@ -49254,11 +49259,7 @@ impl<'a> Checker<'a> {
                 self.member_level_constructor_candidates(receiver, name),
             );
         }
-        ProviderMemberFamily {
-            receiver,
-            members,
-            reports_against_sole_candidate: false,
-        }
+        ProviderMemberFamily { receiver, members }
     }
 
     /// A lambda argument's expected shape at one parameter position of a semantic-provider
@@ -49274,13 +49275,9 @@ impl<'a> Checker<'a> {
         name: &str,
         args_and_partial: (&[ExprId], &[Option<Ty>]),
         type_args: &[Ty],
-    ) -> Option<Vec<Option<FunctionalArgumentExpectation>>> {
+    ) -> Option<ProviderLambdaShape> {
         let (args, partial) = args_and_partial;
-        let ProviderMemberFamily {
-            receiver,
-            members,
-            reports_against_sole_candidate,
-        } = family;
+        let ProviderMemberFamily { receiver, members } = family;
         // This resolver exists only to postpone and shape lambda syntax. Ordinary arguments are
         // already typed in `partial`; re-entering provider overload selection for them is both
         // semantically pointless and quadratic on generated call-heavy sources.
@@ -49329,15 +49326,16 @@ impl<'a> Checker<'a> {
             })
             .cloned()
             .collect::<Vec<_>>();
-        // When no candidate of any source accepts the call's functional arguments, kotlinc still
-        // reports against the one candidate that maps every argument, and analyzes those
-        // arguments against its parameters: `take(B::g)` names the misfit reference, not the call.
-        let mut mapped =
-            if reports_against_sole_candidate && applicable.is_empty() && slot_mapped.len() == 1 {
-                slot_mapped
-            } else {
-                applicable
-            };
+        // When no candidate accepts the call's functional arguments, kotlinc still reports against
+        // the one candidate that maps every argument, and analyzes those arguments against its
+        // parameters: `take(B::g)` names the misfit reference, not the call. That shape is offered
+        // as not accepted; only the caller knows whether another source accepts the call first.
+        let accepted = !applicable.is_empty();
+        let mut mapped = match (accepted, slot_mapped.len()) {
+            (true, _) => applicable,
+            (false, 1) => slot_mapped,
+            (false, _) => return None,
+        };
         // Member precedence is semantic receiver distance, not provider iteration order. Drop
         // inherited candidates when a nearer declaration is applicable before deciding whether
         // the postponed call is genuinely ambiguous.
@@ -49439,7 +49437,10 @@ impl<'a> Checker<'a> {
         // written parameter: the parser gives it a single synthetic name and destructures it in the
         // body.
         self.member_expectations_fit_written_lambdas(args, &expectations)
-            .then_some(expectations)
+            .then_some(ProviderLambdaShape {
+                expectations,
+                accepted,
+            })
     }
 
     /// The [`CallArgKind`] for an already-checked argument — pure, no checking side effects.
@@ -49556,14 +49557,17 @@ impl<'a> Checker<'a> {
                 .then(|| self.expr(scope, arg))
             })
             .collect();
-        let lambda_params = self.provider_member_lambda_expectations(
-            scope,
-            call,
-            family,
-            name,
-            (args, &partial),
-            type_args,
-        );
+        let lambda_params = self
+            .provider_member_lambda_expectations(
+                scope,
+                call,
+                family,
+                name,
+                (args, &partial),
+                type_args,
+            )
+            .filter(|shape| shape.accepted)
+            .map(|shape| shape.expectations);
         args.iter()
             .enumerate()
             .map(|(index, &arg)| {
@@ -49779,7 +49783,7 @@ impl<'a> Checker<'a> {
         // A member normally supplies the call's lambda shape. A member that needs lambda-to-SAM
         // conversion does not suppress a conversion-free extension, because the overload selector
         // applies that same preference before member precedence.
-        let provider = method_sig
+        let provider_shape = method_sig
             .is_none()
             .then(|| {
                 self.provider_member_lambda_expectations(
@@ -49792,7 +49796,12 @@ impl<'a> Checker<'a> {
                 )
             })
             .flatten()
-            .filter(|expectations| expectations.iter().any(Option::is_some));
+            .filter(|shape| shape.expectations.iter().any(Option::is_some));
+        let (provider, reported_against) = match provider_shape {
+            Some(shape) if shape.accepted => (Some(shape.expectations), None),
+            Some(shape) => (None, Some(shape.expectations)),
+            None => (None, None),
+        };
         let provider_needs_sam = provider
             .as_ref()
             .is_some_and(|expectations| expectations.iter().flatten().any(|it| it.sam_conversion));
@@ -49861,25 +49870,12 @@ impl<'a> Checker<'a> {
             .then_some(provider)
             .flatten();
         // No source accepts the call: kotlinc analyzes its functional arguments against the one
-        // member the call is then reported against, as an inapplicable member must not block an
-        // extension that does accept them.
+        // member the call is then reported against. An inapplicable member must not block an
+        // extension that does accept them, so that shape counts only after every source declined.
         let provider = provider.or_else(|| {
-            (method_sig.is_none() && extension.is_none() && !extension_claimed)
-                .then(|| {
-                    self.provider_member_lambda_expectations(
-                        scope,
-                        call,
-                        ProviderMemberFamily {
-                            reports_against_sole_candidate: true,
-                            ..self.value_member_family(receiver, name)
-                        },
-                        name,
-                        (args, partial),
-                        explicit_type_args,
-                    )
-                })
+            (extension.is_none() && !extension_claimed)
+                .then_some(reported_against)
                 .flatten()
-                .filter(|expectations| expectations.iter().any(Option::is_some))
         });
         CallLambdaShaping {
             module,
