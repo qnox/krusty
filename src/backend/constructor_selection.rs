@@ -10,7 +10,7 @@ use crate::types::Ty;
 /// identity: a default-argument entry takes its constructor's parameters and then mask words, a
 /// list a declared constructor may also have. Only a construction a compiler pass built without a
 /// selection is matched by the list it names, `selected`, and one naming none runs the primary.
-pub(crate) fn selected_constructor(
+pub fn selected_constructor(
     ir: &IrFile,
     site: ExprId,
     class: ClassId,
