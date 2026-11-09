@@ -10,7 +10,7 @@ impl CodeBuilder {
         self.op(0x00, 0);
     }
 
-    pub(crate) fn is_dead(&self) -> bool {
+    pub fn is_dead(&self) -> bool {
         self.dead
     }
 
@@ -123,7 +123,7 @@ impl CodeBuilder {
 
     /// A jump an inlined body names by opcode (`goto` or any conditional), moving the stack by
     /// `delta` words. After a `goto` nothing is reachable until an arrival is bound.
-    pub(crate) fn jump(&mut self, opcode: u8, l: Label, delta: i32) {
+    pub fn jump(&mut self, opcode: u8, l: Label, delta: i32) {
         self.branch(opcode, l, delta);
         if opcode == 0xa7 {
             self.dead = true;
@@ -133,7 +133,7 @@ impl CodeBuilder {
     /// One instruction of an inlined body, already encoded: no branch operand and no padding that
     /// depends on its offset. It moves the stack by `delta` words; after a `terminal` one (`athrow`,
     /// a return) nothing is reachable until an arrival is bound.
-    pub(crate) fn instruction(&mut self, bytes: &[u8], delta: i32, terminal: bool) {
+    pub fn instruction(&mut self, bytes: &[u8], delta: i32, terminal: bool) {
         if !self.dead {
             self.bytes.extend_from_slice(bytes);
         }

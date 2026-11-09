@@ -149,6 +149,49 @@ fn dependency_class_storage_is_independent_of_constructor_parameters() {
     );
 }
 
+// PLATFORM-SPECIFIC: the official producer's generic constructor and callback ABI.
+#[test]
+fn dependency_generic_class_initializers_preserve_declared_carriers() {
+    assert_official_dependency_closures(
+        r#"
+package fixture
+class Generic<T>(seed: T, effect: (T) -> T) {
+    private val stored = effect(seed)
+    init { effect(seed) }
+}
+fun <T> construct(seed: T, effect: (T) -> T): Generic<T> = Generic(seed, effect)
+"#,
+        r#"
+fun box(): String {
+    var intCalls = 0
+    construct(Int.MIN_VALUE) {
+        if (it != Int.MIN_VALUE) throw IllegalStateException("Int carrier")
+        intCalls++
+        it
+    }
+    var longCalls = 0
+    construct(Long.MIN_VALUE) {
+        if (it != Long.MIN_VALUE) throw IllegalStateException("Long carrier")
+        longCalls++
+        it
+    }
+    var text = ""
+    construct("OK") { text += it; it }
+    var nullCalls = 0
+    construct<String?>(null) {
+        if (it != null) throw IllegalStateException("nullable carrier")
+        nullCalls++
+        it
+    }
+    return if (intCalls == 2 && longCalls == 2 && text == "OKOK" && nullCalls == 2)
+        "OK" else "constructor effects"
+}
+"#,
+        "ImportedGenericClassInitialization",
+        DependencyConsumer::Native,
+    );
+}
+
 #[test]
 fn dependency_class_cannot_consume_same_name_source_classifier_facts() {
     let consumer = format!(
@@ -300,7 +343,7 @@ enum DependencyConsumer {
 /// Observe the same common preparation Native requests without claiming its imported-class
 /// storage implementation can execute the construction. Every capability is delegated to Native.
 struct ConstructorIdentityProbe {
-    native: krusty::native::CraneliftBackend,
+    native: krusty_native::CraneliftBackend,
     producer_module: String,
     initialization_layout: bool,
 }
@@ -443,19 +486,22 @@ fn assert_official_dependency_closures(
         &purpose,
         || {
             // Establish the portable source behavior before executing a Native dependency consumer.
-            if matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
-                // These are different modules with equal classifier names, not a source redeclaration.
-                let dependency = common::kotlinc_lib_out(&[("Library.kt", library_source)])
-                    .expect("reference compiler required for dependency identity oracle");
-                assert_eq!(
-                    common::kotlinc_box_files_result_with_classpath(
-                        &[("Consumer.kt", &consumer_text)],
-                        "fixture.ConsumerKt",
-                        &[dependency],
-                    ),
-                    "OK"
-                );
-            } else {
+            // kotlinc compiles the dependency and its consumer as separate modules: the runtime
+            // answer every krusty lane must reproduce.
+            let dependency = common::kotlinc_lib_out(&[("Library.kt", library_source)])
+                .expect("reference compiler required for the dependency consumer oracle");
+            assert_eq!(
+                common::kotlinc_box_files_result_with_classpath(
+                    &[("Consumer.kt", &consumer_text)],
+                    "fixture.ConsumerKt",
+                    &[dependency],
+                ),
+                "OK",
+                "{fixture_name}: unexpected kotlinc result"
+            );
+            // Different modules with equal classifier names are not a source redeclaration, so
+            // only the other consumers also run as one krusty source module.
+            if !matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
                 common::expect_box_ok_with_stdlib(
                     &format!("{library_source}\n{consumer}"),
                     &format!("{fixture_name}Oracle"),
@@ -539,9 +585,9 @@ fn assert_official_dependency_sources(
         &krusty::features::LangFeatures::new(),
         &mut diags,
     );
-    let target = krusty::native::NativeTarget::host().expect("host Native target");
-    let backend = krusty::native::CraneliftBackend::new(target)
-        .with_entry(krusty::native::Entry::Box)
+    let target = krusty_native::NativeTarget::host().expect("host Native target");
+    let backend = krusty_native::CraneliftBackend::new(target)
+        .with_entry(krusty_native::Entry::Box)
         .verified();
     let stems = consumers
         .iter()
@@ -605,7 +651,7 @@ fn assert_official_dependency_sources(
         .filter_map(|(name, bytes)| name.ends_with(".o").then_some(bytes))
         .collect::<Vec<_>>();
     assert!(!objects.is_empty());
-    let image = krusty::native::link_program(
+    let image = krusty_native::link_program(
         &objects.iter().map(Vec::as_slice).collect::<Vec<_>>(),
         target,
     )

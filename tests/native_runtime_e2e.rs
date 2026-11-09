@@ -1,7 +1,7 @@
 //! The native runtime, run on the host.
 //!
-//! The runtime under `src/native/runtime/` is freestanding C that `build.rs` compiles for every
-//! target and krusty links into a user's program. Compiling it proves only that it compiles; this
+//! The runtime under `crates/krusty-native/runtime/` is freestanding C that its `build.rs`
+//! compiles for every target and krusty links into a user's program. Compiling it proves only that it compiles; this
 //! harness RUNS it. Each driver under `tests/native_runtime/` is a small freestanding program that
 //! supplies `kt_program_entry`, calls into the runtime, and prints `OK` when what it checked held.
 //! The harness links the driver with every runtime source on the branch — with the host's clang,
@@ -51,7 +51,11 @@ const INCOMPLETE_RUNTIME_WARNINGS: &[&str] = &[
 ];
 
 fn runtime_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native/runtime")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/krusty-native/runtime")
+}
+
+fn native_crate_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/krusty-native")
 }
 
 fn driver_dir() -> PathBuf {
@@ -2245,7 +2249,7 @@ fn compiled_build_script() -> PathBuf {
             let output = Command::new(rustc)
                 .args(["--edition=2021", "build.rs", "-o"])
                 .arg(&executable)
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .current_dir(native_crate_dir())
                 .output()
                 .expect("compile build.rs");
             assert_eq!(
@@ -2262,7 +2266,7 @@ fn run_build_script(compiler: &Path, out_dir: &Path) -> Output {
     Command::new(compiled_build_script())
         .env("OUT_DIR", out_dir)
         .env("KRUSTY_RUNTIME_CC", compiler)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(native_crate_dir())
         .output()
         .expect("run build.rs")
 }
@@ -2280,27 +2284,26 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
-            "cargo:rerun-if-changed=src/diag/releases\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_collections.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_maps.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_classes.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_thread.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_io.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_net.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_process.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_string.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_internal.h\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix.h\n\
+            "cargo:rerun-if-changed=runtime/krusty_rt.c\n\
+             cargo:rerun-if-changed=runtime/krusty_collections.c\n\
+             cargo:rerun-if-changed=runtime/krusty_maps.c\n\
+             cargo:rerun-if-changed=runtime/krusty_classes.c\n\
+             cargo:rerun-if-changed=runtime/krusty_lang.c\n\
+             cargo:rerun-if-changed=runtime/krusty_fp.c\n\
+             cargo:rerun-if-changed=runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=runtime/krusty_threads.c\n\
+             cargo:rerun-if-changed=runtime/krusty_start.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_thread.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_io.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_net.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_process.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_string.c\n\
+             cargo:rerun-if-changed=runtime/krusty_sys.h\n\
+             cargo:rerun-if-changed=runtime/krusty_rt.h\n\
+             cargo:rerun-if-changed=runtime/krusty_internal.h\n\
+             cargo:rerun-if-changed=runtime/krusty_posix.h\n\
              cargo:rerun-if-changed=build.rs\n\
-             cargo:rerun-if-changed=src/native/target_contract.rs\n\
+             cargo:rerun-if-changed=../../src/native_target/contract.rs\n\
              cargo:rerun-if-env-changed=KRUSTY_BUILD_CHECKOUT\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
              cargo:rustc-env=KRUSTY_RUNTIME_COMPILER={0}\n\
@@ -2313,7 +2316,7 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
         fs::read_to_string(out_dir.join("prebuilt_runtime.rs"))
             .expect("read generated runtime table"),
         "// Generated by build.rs: the native runtime, prebuilt per target.\n\
-         pub const PREBUILT: &[(crate::native::NativeTarget, &[RuntimeObject])] = &[\n\
+         pub const PREBUILT: &[(crate::NativeTarget, &[RuntimeObject])] = &[\n\
          ];\n\
          /// Whether any target's runtime was prebuilt (a C compiler was available when krusty was built).\n\
          pub const AVAILABLE: bool = false;\n\
@@ -2350,27 +2353,26 @@ fn a_failing_runtime_compiler_fails_the_build() {
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
-            "cargo:rerun-if-changed=src/diag/releases\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_collections.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_maps.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_classes.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_thread.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_io.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_net.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_process.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_string.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_internal.h\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix.h\n\
+            "cargo:rerun-if-changed=runtime/krusty_rt.c\n\
+             cargo:rerun-if-changed=runtime/krusty_collections.c\n\
+             cargo:rerun-if-changed=runtime/krusty_maps.c\n\
+             cargo:rerun-if-changed=runtime/krusty_classes.c\n\
+             cargo:rerun-if-changed=runtime/krusty_lang.c\n\
+             cargo:rerun-if-changed=runtime/krusty_fp.c\n\
+             cargo:rerun-if-changed=runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=runtime/krusty_threads.c\n\
+             cargo:rerun-if-changed=runtime/krusty_start.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_thread.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_io.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_net.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_process.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_string.c\n\
+             cargo:rerun-if-changed=runtime/krusty_sys.h\n\
+             cargo:rerun-if-changed=runtime/krusty_rt.h\n\
+             cargo:rerun-if-changed=runtime/krusty_internal.h\n\
+             cargo:rerun-if-changed=runtime/krusty_posix.h\n\
              cargo:rerun-if-changed=build.rs\n\
-             cargo:rerun-if-changed=src/native/target_contract.rs\n\
+             cargo:rerun-if-changed=../../src/native_target/contract.rs\n\
              cargo:rerun-if-env-changed=KRUSTY_BUILD_CHECKOUT\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
              cargo:rustc-env=KRUSTY_RUNTIME_COMPILER={}\n",
@@ -2420,27 +2422,26 @@ fn a_runtime_compiler_that_emits_another_machines_code_fails_the_build() {
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
-            "cargo:rerun-if-changed=src/diag/releases\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_collections.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_maps.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_classes.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_thread.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_io.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_net.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_process.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_string.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_internal.h\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix.h\n\
+            "cargo:rerun-if-changed=runtime/krusty_rt.c\n\
+             cargo:rerun-if-changed=runtime/krusty_collections.c\n\
+             cargo:rerun-if-changed=runtime/krusty_maps.c\n\
+             cargo:rerun-if-changed=runtime/krusty_classes.c\n\
+             cargo:rerun-if-changed=runtime/krusty_lang.c\n\
+             cargo:rerun-if-changed=runtime/krusty_fp.c\n\
+             cargo:rerun-if-changed=runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=runtime/krusty_threads.c\n\
+             cargo:rerun-if-changed=runtime/krusty_start.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_thread.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_io.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_net.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_process.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_string.c\n\
+             cargo:rerun-if-changed=runtime/krusty_sys.h\n\
+             cargo:rerun-if-changed=runtime/krusty_rt.h\n\
+             cargo:rerun-if-changed=runtime/krusty_internal.h\n\
+             cargo:rerun-if-changed=runtime/krusty_posix.h\n\
              cargo:rerun-if-changed=build.rs\n\
-             cargo:rerun-if-changed=src/native/target_contract.rs\n\
+             cargo:rerun-if-changed=../../src/native_target/contract.rs\n\
              cargo:rerun-if-env-changed=KRUSTY_BUILD_CHECKOUT\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
              cargo:rustc-env=KRUSTY_RUNTIME_COMPILER={}\n",
@@ -2503,27 +2504,26 @@ fn a_runtime_object_aligned_past_the_targets_page_fails_the_build() {
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
-            "cargo:rerun-if-changed=src/diag/releases\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_collections.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_maps.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_classes.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_thread.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_io.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_net.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_process.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix_string.c\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_internal.h\n\
-             cargo:rerun-if-changed=src/native/runtime/krusty_posix.h\n\
+            "cargo:rerun-if-changed=runtime/krusty_rt.c\n\
+             cargo:rerun-if-changed=runtime/krusty_collections.c\n\
+             cargo:rerun-if-changed=runtime/krusty_maps.c\n\
+             cargo:rerun-if-changed=runtime/krusty_classes.c\n\
+             cargo:rerun-if-changed=runtime/krusty_lang.c\n\
+             cargo:rerun-if-changed=runtime/krusty_fp.c\n\
+             cargo:rerun-if-changed=runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=runtime/krusty_threads.c\n\
+             cargo:rerun-if-changed=runtime/krusty_start.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_thread.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_io.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_net.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_process.c\n\
+             cargo:rerun-if-changed=runtime/krusty_posix_string.c\n\
+             cargo:rerun-if-changed=runtime/krusty_sys.h\n\
+             cargo:rerun-if-changed=runtime/krusty_rt.h\n\
+             cargo:rerun-if-changed=runtime/krusty_internal.h\n\
+             cargo:rerun-if-changed=runtime/krusty_posix.h\n\
              cargo:rerun-if-changed=build.rs\n\
-             cargo:rerun-if-changed=src/native/target_contract.rs\n\
+             cargo:rerun-if-changed=../../src/native_target/contract.rs\n\
              cargo:rerun-if-env-changed=KRUSTY_BUILD_CHECKOUT\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
              cargo:rustc-env=KRUSTY_RUNTIME_COMPILER={}\n",

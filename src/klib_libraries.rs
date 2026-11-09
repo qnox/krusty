@@ -24,6 +24,7 @@ pub(crate) mod parameter_defaults;
 mod platform;
 mod runtime_exception_layouts;
 mod serialized_references;
+mod shared_trees;
 mod target_intrinsics;
 #[cfg(test)]
 mod tests;
@@ -32,10 +33,12 @@ use crate::metadata::semantic::KotlinPackage;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::TypeName;
 
-pub(crate) use archives::OpenedKlibLibraries;
+pub use archives::OpenedKlibLibraries;
 pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics};
 pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
-pub(crate) use declaration_bodies::{KlibCalleeOrigin, LocatedClass, LocatedMember};
+pub(crate) use declaration_bodies::{
+    KlibCalleeOrigin, KlibEnumEntryClass, LocatedClass, LocatedMember,
+};
 pub use declaration_signatures::KlibLibraryError;
 pub use serialized_references::{
     KlibReferenceBinding, KlibReferenceBindings, KlibReferenceDispatch, KlibReferenceOrigin,
@@ -166,9 +169,7 @@ impl KlibLibraries {
         &self.references
     }
 
-    pub(crate) fn dependency_body_snapshot(
-        &self,
-    ) -> Option<&crate::libraries::DependencyBodySnapshot> {
+    pub fn dependency_body_snapshot(&self) -> Option<&crate::libraries::DependencyBodySnapshot> {
         self.body_snapshot.as_ref()
     }
 }

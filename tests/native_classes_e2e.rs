@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
-use krusty::native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
+use krusty_native::{CraneliftBackend, NativeTarget};
 
 use super::common;
 
@@ -71,7 +71,7 @@ fn concurrent_native_class_scratch_directories_are_unique() {
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target)
+    (krusty_native::can_link(target)
         && krusty::toolchain::stdlib_jar().is_some()
         && krusty::toolchain::jdk_modules().is_some())
     .then_some(target)
@@ -129,7 +129,7 @@ fn execute(source: &str) -> std::process::Output {
         .filter(|(name, _)| name.ends_with(".o"))
         .map(|(_, bytes)| bytes.as_slice())
         .collect::<Vec<_>>();
-    let image = krusty::native::link_program(&objects, target)
+    let image = krusty_native::link_program(&objects, target)
         .unwrap_or_else(|error| panic!("krusty's linker must link the program: {error}"));
     let scratch = Scratch::new("run");
     let executable = scratch.path().join("program");

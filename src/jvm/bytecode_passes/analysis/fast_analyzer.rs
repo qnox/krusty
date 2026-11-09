@@ -17,7 +17,7 @@ use crate::jvm::method_node::{Insn, MethodNode, Node};
 
 /// Why an analysis could not complete: the node it stopped at and what was wrong there.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AnalyzerError {
+pub struct AnalyzerError {
     pub index: usize,
     pub message: String,
 }

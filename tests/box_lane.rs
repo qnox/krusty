@@ -31,6 +31,7 @@ use krusty::diag::{DiagSink, Severity};
 use krusty::jvm::classpath::Classpath;
 use krusty::source::SourceInput;
 
+use super::box_lane_profile::{timed, Stage};
 use super::box_ratchet::{self, Platform};
 
 /// How long one case may run. The programs are tiny; anything near this is a miscompiled loop.
@@ -189,13 +190,13 @@ pub enum Libraries {
 
 struct PlatformLibraries {
     semantics: Box<dyn krusty::libraries::SemanticPlatform>,
-    native_imports: Vec<krusty::native::ImportLibrary>,
+    native_imports: Vec<krusty_native::ImportLibrary>,
 }
 
 /// Target artifacts and the frozen Native library facts selected by the same compilation inputs.
 pub struct CompiledProgram {
     pub artifacts: Vec<Artifact>,
-    pub native_imports: Vec<krusty::native::ImportLibrary>,
+    pub native_imports: Vec<krusty_native::ImportLibrary>,
 }
 
 impl Libraries {
@@ -330,15 +331,15 @@ fn open_klib_inputs(
 ) -> Result<
     (
         krusty::klib_libraries::KlibLibraries,
-        Vec<krusty::native::ImportLibrary>,
+        Vec<krusty_native::ImportLibrary>,
     ),
     String,
 > {
     if target == krusty::compilation_target::CompilationTarget::Native {
-        let native_target = krusty::native::NativeTarget::host()
+        let native_target = krusty_native::NativeTarget::host()
             .ok_or_else(|| "the host has no Native target".to_string())?;
-        return krusty::native::NativeKlibInputs::open(inputs, native_target)
-            .map(krusty::native::NativeKlibInputs::into_parts)
+        return krusty_native::NativeKlibInputs::open(inputs, native_target)
+            .map(krusty_native::NativeKlibInputs::into_parts)
             .map_err(|error| error.to_string());
     }
     krusty::klib_libraries::KlibLibraries::open(inputs)
@@ -368,7 +369,7 @@ thread_local! {
         Vec<(
             krusty::compilation_target::CompilationTarget,
             krusty::klib_libraries::KlibLibraries,
-            Vec<krusty::native::ImportLibrary>,
+            Vec<krusty_native::ImportLibrary>,
         )>,
     > = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -464,7 +465,7 @@ pub fn analyze_module(
     (
         krusty::frontend::StreamingSourceSetAnalysis,
         Vec<String>,
-        Vec<krusty::native::ImportLibrary>,
+        Vec<krusty_native::ImportLibrary>,
     ),
     Outcome,
 > {
@@ -666,7 +667,7 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
 
 /// Run a program with the lane's deadline; its framed verdict.
 pub fn run_program(command: &mut Command) -> Outcome {
-    match run_with_timeout(command, RUN_TIMEOUT) {
+    match timed(Stage::Run, || run_with_timeout(command, RUN_TIMEOUT)) {
         // The entry prints what `box()` returned after `BOX_RESULT_FRAME`, and nothing after it:
         // the answer is every byte past the one frame. Anything before it is the PROGRAM's own
         // output — `controlStructures/kt513.kt` builds a list and `println`s it before returning
@@ -1012,7 +1013,9 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
         .and_then(|stem| stem.to_str())
         .unwrap_or("Case");
     if super::box_inventory::owned(file) {
-        if let Err(error) = super::box_reference_classes::checked_box(&source, stem) {
+        if let Err(error) = timed(Stage::JvmOracle, || {
+            super::box_reference_classes::checked_box(&source, stem)
+        }) {
             return Outcome::Harness(format!("required JVM oracle: {error}"));
         }
     }
@@ -1024,8 +1027,9 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
         && lane.platform() == box_ratchet::Platform::Native
         && source.contains("// MODULE:")
     {
-        let answer =
-            super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source);
+        let answer = timed(Stage::TargetOracle, || {
+            super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source)
+        });
         if answer.as_deref() != Some("OK") {
             return Outcome::Harness(format!(
                 "required Native oracle must return OK, got {answer:?}"
@@ -1063,13 +1067,17 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
             }
             emitted.insert(unit.name.clone());
         }
-        return lane.compile_modules_and_run(scratch, stem, &units, &source);
+        return timed(Stage::Lane, || {
+            lane.compile_modules_and_run(scratch, stem, &units, &source)
+        });
     }
     let sources = match prepare_sources(&source, stem, lane.test_target()) {
         Ok(sources) => sources,
         Err(outcome) => return outcome,
     };
-    lane.compile_and_run(scratch, stem, &sources, &source)
+    timed(Stage::Lane, || {
+        lane.compile_and_run(scratch, stem, &sources, &source)
+    })
 }
 
 /// The report line, in a stable machine-readable shape:
@@ -1184,10 +1192,11 @@ pub fn run(lane: &dyn Lane) {
     let pool = pool.build().expect("build the worker pool");
 
     let started = Instant::now();
-    let outcomes: Vec<(&PathBuf, Outcome)> = pool.install(|| {
+    let timed_outcomes: Vec<((&PathBuf, Outcome), Duration)> = pool.install(|| {
         files
             .par_iter()
             .map(|file| {
+                let case_started = Instant::now();
                 // A panic inside the compiler is a failure of THAT case, recorded like any other
                 // so one bug does not hide the picture for the rest of the corpus; the test still
                 // fails.
@@ -1206,10 +1215,25 @@ pub fn run(lane: &dyn Lane) {
                         None => message,
                     })
                 });
-                (file, result)
+                ((file, result), case_started.elapsed())
             })
             .collect()
     });
+    let wall = started.elapsed();
+    let case_times = timed_outcomes
+        .iter()
+        .map(|((file, _), time)| (relative(file), *time))
+        .collect::<Vec<_>>();
+    let timing = super::box_lane_profile::timing_report(
+        wall,
+        pool.current_num_threads(),
+        &case_times,
+        super::box_lane_profile::stage_times(),
+    );
+    let outcomes = timed_outcomes
+        .into_iter()
+        .map(|(outcome, _)| outcome)
+        .collect::<Vec<_>>();
     // Compilation is finished. Restore ordinary panic reporting before validating outcomes:
     // an owned fatal outcome or a broken inventory must remain visible, not fail silently under
     // the compiler-only hook.
@@ -1312,7 +1336,15 @@ pub fn run(lane: &dyn Lane) {
             ("outside-lane", outside),
         ],
     );
-    eprintln!("{report} ({:.1}s)", started.elapsed().as_secs_f64());
+    eprintln!("{report} ({:.1}s)", wall.as_secs_f64());
+    eprint!("{timing}");
+    eprintln!(
+        "{}",
+        super::box_reference_classes::reference_profile(
+            super::box_reference_classes::reference_stats(),
+            super::common::kotlinc_server::kotlinc_server_stats(),
+        )
+    );
     eprint!(
         "{}",
         unexpected_failure_reason_report(&traced, &unexpected_failure_keys, relative)
