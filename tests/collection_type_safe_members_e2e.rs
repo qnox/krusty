@@ -6,6 +6,11 @@
 //! (`contains(element: T)` with `T : CharSequence`) keeps its own generic signature, and its final
 //! special bridge does the type check.
 //!
+//! A special bridge checks every checked parameter the declaration names, so `MutableMap.remove(key,
+//! value)` tests both: `instanceof` for a narrower type, through a `null` shortcut when it admits
+//! `null`, and a presence test for one that erases to `Object`. An override without a bridge guards
+//! each checked non-null parameter that erases to `Object` at its entry instead.
+//!
 //! Each comparison checks the listed members' declarations and complete bytes against kotlinc.
 
 use super::common;
@@ -161,5 +166,101 @@ abstract class Named<V> : Map<String, V> {
             "public V get(java.lang.String);",
             "public final V get(java.lang.Object);",
         ],
+    );
+}
+
+const CHECKED_REMOVES: &str = "abstract class Keyed<V> : MutableMap<String, V> {
+    override fun remove(key: String, value: V): Boolean = false
+}
+abstract class Counts : MutableMap<String, Int> {
+    override fun remove(key: String, value: Int): Boolean = false
+}
+abstract class Valued<K> : MutableMap<K, String> {
+    override fun remove(key: K, value: String): Boolean = false
+}
+abstract class Present<V : Any> : MutableMap<String, V> {
+    override fun remove(key: String, value: V): Boolean = false
+}
+abstract class Optional : MutableMap<String, String?> {
+    override fun remove(key: String, value: String?): Boolean = false
+}
+abstract class Texts<V : CharSequence?> : MutableMap<Long, V> {
+    override fun remove(key: Long, value: V): Boolean = false
+}
+abstract class Anything : MutableMap<Any, String> {
+    override fun remove(key: Any, value: String): Boolean = false
+}
+";
+
+#[test]
+fn a_two_parameter_special_bridge_checks_each_parameter_like_kotlinc() {
+    let bridge = "public final boolean remove(java.lang.Object, java.lang.Object);";
+    for class in [
+        "Keyed", "Counts", "Valued", "Present", "Optional", "Texts", "Anything",
+    ] {
+        assert_members_like_kotlinc(CHECKED_REMOVES, class, &[bridge]);
+    }
+}
+
+#[test]
+fn a_nullable_narrower_parameter_passes_null_to_its_check_like_kotlinc() {
+    let source = "abstract class Names<V> : Map<String?, V> {
+    override fun get(key: String?): V? = null
+}
+abstract class Labels : MutableCollection<String?> {
+    override fun contains(element: String?) = false
+}
+";
+    assert_members_like_kotlinc(source, "Names", &["public final V get(java.lang.Object);"]);
+    assert_members_like_kotlinc(
+        source,
+        "Labels",
+        &["public final boolean contains(java.lang.Object);"],
+    );
+}
+
+#[test]
+fn an_unbridged_override_guards_each_non_null_checked_parameter_like_kotlinc() {
+    let source = "abstract class Pairs : MutableMap<Any, Any> {
+    override fun remove(key: Any, value: Any): Boolean = false
+}
+abstract class Keys<V> : MutableMap<Any, V> {
+    override fun remove(key: Any, value: V): Boolean = false
+}
+abstract class Elements<T : Any> : Collection<T> {
+    override fun contains(element: T) = false
+}
+";
+    let remove = "public boolean remove(java.lang.Object, java.lang.Object);";
+    assert_members_like_kotlinc(source, "Pairs", &[remove]);
+    assert_members_like_kotlinc(source, "Keys", &[remove]);
+    assert_members_like_kotlinc(
+        source,
+        "Elements",
+        &["public boolean contains(java.lang.Object);"],
+    );
+}
+
+#[test]
+fn checked_removes_answer_like_kotlinc() {
+    common::expect_box_same_as_kotlinc(
+        "class Store : java.util.HashMap<String, Int>() {
+    override fun remove(key: String, value: Int): Boolean = super.remove(key, value)
+}
+
+fun box(): String {
+    val store = Store()
+    store[\"a\"] = 1
+    val map: MutableMap<Any?, Any?> = store as MutableMap<Any?, Any?>
+    val results = listOf(
+        map.remove(1, 1),
+        map.remove(\"a\", \"1\"),
+        map.remove(null, 1),
+        map.remove(\"a\", 1),
+    )
+    return if (results == listOf(false, false, false, true) && store.isEmpty()) \"OK\" else results.toString()
+}
+",
+        "collection_type_safe_members_checked_removes",
     );
 }

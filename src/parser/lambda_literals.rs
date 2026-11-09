@@ -108,7 +108,7 @@ impl Parser<'_> {
     fn parse_lambda_literal(&mut self) -> ExprId {
         let start = self.tok().span;
         self.expect(TokenKind::LBrace, "'{'");
-        self.skip_newlines();
+        self.skip_semicolons();
         // Optional parameter list ending in `->`: `it ->`, `x: T ->`, `a, b ->` (types discarded; the
         // parameter types come from the declared function type via `check_lambda_with_types`). Detect
         // by scanning for a top-level `->` before the lambda's closing `}`.
@@ -134,7 +134,7 @@ impl Parser<'_> {
         let params = if has_params {
             let mut ps = Vec::new();
             loop {
-                self.skip_newlines();
+                self.skip_semicolons();
                 if self.at(TokenKind::LParen) {
                     let sp = self.tok().span;
                     self.bump();
@@ -258,7 +258,7 @@ impl Parser<'_> {
         let saved_block_value = self.block_trailing_is_value;
         self.block_trailing_is_value = true;
         loop {
-            self.skip_newlines();
+            self.skip_semicolons();
             if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
                 break;
             }

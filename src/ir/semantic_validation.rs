@@ -1,9 +1,10 @@
 //! Common-IR semantic boundary validation.
 //!
-//! `Ty::Pending` and `Ty::Error` are frontend/checker states, not Kotlin types. This module walks
-//! every common-IR type carrier before the IR crosses into a backend. The matches over semantic
-//! operation enums are deliberately exhaustive: adding a new IR node requires deciding where its
-//! types live instead of silently creating an unchecked backend path.
+//! `Ty::Pending`, `Ty::Error` and a call's inference variables are frontend/checker states, not
+//! Kotlin types. This module walks every common-IR type carrier before the IR crosses into a
+//! backend. The matches over semantic operation enums are deliberately exhaustive: adding a new IR
+//! node requires deciding where its types live instead of silently creating an unchecked backend
+//! path.
 
 use crate::types::Ty;
 
@@ -46,7 +47,7 @@ pub enum NullableSamContractViolation {
 }
 
 fn reject(location: &'static str, ty: Ty) -> Result<(), UndeterminedIrType> {
-    if ty.mentions_pending() || ty.mentions_error() {
+    if ty.mentions_pending() || ty.mentions_error() || ty.mentions_type_variable() {
         Err(UndeterminedIrType { location, ty })
     } else {
         Ok(())
@@ -82,7 +83,7 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         | IrIntrinsic::ArraySize
         | IrIntrinsic::StringGet
         | IrIntrinsic::StringLength
-        | IrIntrinsic::EnumName
+        | IrIntrinsic::EnumOrdinal
         | IrIntrinsic::NullableAnyToString
         | IrIntrinsic::CoroutineContext => Ok(()),
     }
@@ -221,6 +222,7 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
         IrCheckedOperation::ConstructorDelegation {
             target,
             outer_parameter,
+            capture_arguments,
             arguments,
             substitutions,
             ..
@@ -228,6 +230,9 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
             validate_constructor_target(target)?;
             if let Some(outer) = outer_parameter {
                 reject("constructor outer parameter", *outer)?;
+            }
+            for (_, ty) in capture_arguments.iter().flatten() {
+                reject("constructor capture parameter", *ty)?;
             }
             for argument in arguments {
                 validate_argument(argument)?;
@@ -372,6 +377,10 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumValueOf { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumConstant { .. }
+        | IrExpr::EnumAllocation { .. }
+        | IrExpr::EnumEntriesList { .. }
+        | IrExpr::NoSuchEnumConstant { .. }
         | IrExpr::EnumSwitchOrdinal { .. }
         | IrExpr::EnumSwitchKey { .. }
         | IrExpr::ReifiedClassMarker { .. }
@@ -769,8 +778,14 @@ impl IrFile {
         )?;
         reject_all(
             "declared construction parameter",
-            self.construction_declared_params
-                .values()
+            self.exprs
+                .iter()
+                .filter_map(|expression| match expression {
+                    IrExpr::New {
+                        declared_params, ..
+                    } => declared_params.as_deref(),
+                    _ => None,
+                })
                 .flatten()
                 .copied(),
         )?;
@@ -945,6 +960,73 @@ mod tests {
         );
     }
 
+    fn function_with_parameter(parameter: Ty) -> IrFile {
+        let mut ir = IrFile::default();
+        ir.functions.push(IrFunction {
+            name: "generic".to_owned(),
+            params: vec![parameter],
+            ret: Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        ir
+    }
+
+    fn inference_variable() -> Ty {
+        Ty::type_variable(
+            crate::types::TyParamName::new("\0call:T"),
+            Ty::nullable(Ty::obj("kotlin/Any")),
+        )
+    }
+
+    #[test]
+    fn rejects_an_inference_variable_at_the_root_and_nested() {
+        for parameter in [
+            inference_variable(),
+            Ty::fun(vec![Ty::Int], inference_variable()),
+            Ty::obj_args("kotlin/collections/List", &[inference_variable()]),
+            Ty::type_variable(crate::types::TyParamName::new("\0call:R"), Ty::String),
+            Ty::ty_param("OuterT", inference_variable()),
+            Ty::obj_args(
+                "kotlin/collections/List",
+                &[Ty::ty_param("OuterT", inference_variable())],
+            ),
+        ] {
+            assert_eq!(
+                function_with_parameter(parameter).validate_determined_types(),
+                Err(UndeterminedIrType {
+                    location: "function parameter",
+                    ty: parameter,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_declaration_type_parameters_and_solved_call_types() {
+        let declared = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let solved = crate::types::ty_subst(
+            Ty::obj_args("kotlin/collections/List", &[inference_variable()]),
+            &crate::fx_hash::HashMap::from_iter([(
+                crate::types::TyParamName::new("\0call:T"),
+                Ty::String,
+            )]),
+        );
+        for parameter in [
+            declared,
+            Ty::obj_args("kotlin/collections/List", &[declared]),
+            Ty::ty_param("R", Ty::obj_args("kotlin/Comparable", &[declared])),
+            solved,
+        ] {
+            assert_eq!(
+                function_with_parameter(parameter).validate_determined_types(),
+                Ok(())
+            );
+        }
+    }
+
     #[test]
     fn rejects_a_nullable_sam_without_its_single_capture() {
         let mut ir = IrFile::default();
@@ -1037,6 +1119,7 @@ mod tests {
                 default_masks: Vec::new(),
             },
             synthetic: false,
+            platform_visible: false,
             vc_params: false,
             param_checks: Vec::new(),
         });

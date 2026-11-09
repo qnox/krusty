@@ -293,7 +293,7 @@ impl BodyLowering<'_> {
         malformed_anonymous: &mut Option<super::FirLoweringFailure>,
     ) -> Option<ExprId> {
         let template = self.ir.functions.get(function as usize)?.body?;
-        let close_line = self.ir.fn_close_lines.get(&function).copied();
+        let close_line = self.ir.function_position(function).close_line;
         let frame = inline_callee.frame(self.index)?;
         // The name its inline frames are opened under.
         let callee = frame.name.clone();
@@ -1707,6 +1707,10 @@ pub(super) fn specialize_typed_expression(
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumValueOf { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumConstant { .. }
+        | IrExpr::EnumAllocation { .. }
+        | IrExpr::EnumEntriesList { .. }
+        | IrExpr::NoSuchEnumConstant { .. }
         | IrExpr::EnumSwitchOrdinal { .. }
         | IrExpr::EnumSwitchKey { .. }
         | IrExpr::ReifiedClassMarker { .. }
@@ -1761,7 +1765,11 @@ pub(super) fn specialize_recorded_facts(
         };
         specialize_tys(parameters, bindings);
     }
-    if let Some(parameters) = ir.construction_declared_params.get_mut(&expression) {
+    if let IrExpr::New {
+        declared_params: Some(parameters),
+        ..
+    } = &mut ir.exprs[expression as usize]
+    {
         specialize_tys(parameters, bindings);
     }
     if let Some(substitutions) = ir.reified_call_subst.get_mut(&expression) {
@@ -1852,7 +1860,7 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::ArraySize
         | IrIntrinsic::StringGet
         | IrIntrinsic::StringLength
-        | IrIntrinsic::EnumName
+        | IrIntrinsic::EnumOrdinal
         | IrIntrinsic::NullableAnyToString
         | IrIntrinsic::CoroutineContext => {}
     }
@@ -2030,6 +2038,7 @@ fn specialize_checked_operation(
         IrCheckedOperation::ConstructorDelegation {
             target,
             outer_parameter,
+            capture_arguments,
             arguments,
             substitutions,
             ..
@@ -2040,6 +2049,9 @@ fn specialize_checked_operation(
                 specialize_tys(parameters, bindings);
             }
             specialize_optional_ty(outer_parameter, bindings);
+            for (_, ty) in capture_arguments.iter_mut().flatten() {
+                specialize_ty(ty, bindings);
+            }
             for argument in arguments {
                 specialize_checked_argument(argument, bindings);
             }

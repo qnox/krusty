@@ -259,8 +259,6 @@ pub(super) fn add_child_serializer_cache(
                 is_lateinit: false,
                 owner: Some(serialized),
                 visibility: crate::types::Visibility::Private,
-                getter_jvm_name: None,
-                setter_jvm_name: None,
                 erased_declared_ty: None,
                 accessors: crate::ir::IrStaticAccessors::ABSENT,
                 line: 0,
@@ -375,8 +373,6 @@ pub(super) fn add_child_serializer_cache(
             is_lateinit: false,
             owner: Some(serialized),
             visibility: crate::types::Visibility::Private,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
             erased_declared_ty: None,
             accessors: crate::ir::IrStaticAccessors::ABSENT,
             // kotlinc declares the cache on the companion, at the companion's offsets, so the
@@ -641,7 +637,7 @@ mod tests {
             "an underivable required slot publishes an unsupported residual, not a null"
         );
         assert!(
-            !crate::jvm::ir_emit::jvm_can_emit(&ir),
+            !crate::jvm::emission_readiness::jvm_can_emit(&ir),
             "and that residual must make the file undecidable rather than emit a broken cache"
         );
     }

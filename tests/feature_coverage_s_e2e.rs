@@ -1,4 +1,4 @@
-//! End-to-end `box()` coverage for `suspend`/coroutine lowering (`src/jvm/suspend.rs`,
+//! End-to-end `box()` coverage for `suspend`/coroutine lowering (`crates/krusty-jvm/src/suspend.rs`,
 //! `src/resolve.rs`), complementary to `tests/feature_coverage_j_e2e.rs`.
 //!
 //! Each test compiles a self-contained Kotlin program whose `fun box(): String` drives one or more
@@ -68,7 +68,7 @@ fun box(): String {
 // point. krusty miscompiles the spill of the nullable-boxed local across the suspension: the state
 // machine's stackmap frame types the reloaded slot as `java/lang/Integer` while the resume path
 // pushes `java/lang/Object`, yielding a `VerifyError` (inconsistent stackmap at the elvis branch
-// target). This is a compiler bug in `src/jvm/suspend.rs`; per task rules the scenario is dropped
+// target). This is a compiler bug in `crates/krusty-jvm/src/suspend.rs`; per task rules the scenario is dropped
 // rather than worked around, and the compiler is left unmodified.
 
 #[test]

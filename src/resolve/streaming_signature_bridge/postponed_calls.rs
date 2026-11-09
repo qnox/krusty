@@ -95,7 +95,7 @@ pub(super) fn collect_type_parameters(
     parameters: &mut crate::fx_hash::HashSet<&'static str>,
 ) {
     match ty.kind() {
-        TyKind::TyParam(name, _) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
             parameters.insert(name.as_str());
         }
         TyKind::Nullable(inner)
@@ -439,7 +439,8 @@ impl ProductionSignatureSemantics<'_> {
         let constraint_frame = self.active_scoped_constraint_frame(scope.owner);
         let mut active = crate::fx_hash::HashSet::default();
         if let Some(inputs) = constraint_frame.and_then(|(owner, index)| {
-            self.scoped_constraint_inputs
+            self.scoped_frames
+                .inputs
                 .borrow()
                 .get(&owner)
                 .and_then(|stack| stack.get(index))
@@ -458,7 +459,8 @@ impl ProductionSignatureSemantics<'_> {
         }
         let known = constraint_frame
             .and_then(|(owner, index)| {
-                self.scoped_constraints
+                self.scoped_frames
+                    .active
                     .borrow()
                     .get(&owner)
                     .and_then(|stack| stack.get(index))
@@ -692,7 +694,7 @@ impl ProductionSignatureSemantics<'_> {
         if !crate::types::ty_mentions_param(receiver, &variables) {
             return;
         }
-        let active = variables.iter().map(String::as_str).collect();
+        let active = variables.iter().map(|variable| variable.as_str()).collect();
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
         let source = crate::symbol_source::CompositeSource::new(vec![
             &module as &dyn crate::symbol_source::SymbolSource,
@@ -710,12 +712,13 @@ impl ProductionSignatureSemantics<'_> {
     pub(super) fn active_postponed_type_variables(
         &self,
         scope: crate::fir::SignatureScope,
-    ) -> Vec<String> {
+    ) -> Vec<crate::types::TyParamName> {
         let mut active = crate::fx_hash::HashSet::default();
         if let Some(inputs) =
             self.active_scoped_constraint_frame(scope.owner)
                 .and_then(|(owner, index)| {
-                    self.scoped_constraint_inputs
+                    self.scoped_frames
+                        .inputs
                         .borrow()
                         .get(&owner)
                         .and_then(|stack| stack.get(index))
@@ -726,7 +729,10 @@ impl ProductionSignatureSemantics<'_> {
                 collect_type_parameters(input, &mut active);
             }
         }
-        active.into_iter().map(str::to_owned).collect()
+        active
+            .into_iter()
+            .map(crate::types::TyParamName::new)
+            .collect()
     }
 
     pub(super) fn commit_postponed_bindings(
@@ -742,7 +748,7 @@ impl ProductionSignatureSemantics<'_> {
         else {
             return;
         };
-        let mut constraints = self.scoped_constraints.borrow_mut();
+        let mut constraints = self.scoped_frames.active.borrow_mut();
         let Some(active) = constraints
             .get_mut(&constraint_owner)
             .and_then(|stack| stack.get_mut(constraint_index))

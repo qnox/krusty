@@ -59,13 +59,27 @@ pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, S
         BoxJdk::Full { root: Some(&jdk) },
         krusty::conformance::COROUTINE_HELPERS,
     )?;
-    // Keep the qualified inventory for comparisons; execution uses the runner's classpath names.
-    let classes = reference
+    let units = plan_units(src, stem, krusty::conformance::COROUTINE_HELPERS)?;
+    let entry = units
+        .last()
+        .ok_or_else(|| format!("{stem}: reference graph has no final module"))?;
+    let entry_classes = reference
+        .module(&entry.module)
+        .ok_or_else(|| format!("{stem}: reference final module emitted no classes"))?;
+    let entry_classes = entry_classes
+        .iter()
+        .map(|(name, bytes)| (name.clone(), bytes.clone()))
+        .collect::<Vec<_>>();
+    let box_class = common::find_box_class(&entry_classes)
+        .ok_or_else(|| format!("{stem}: reference final module emitted no box()"))?;
+    // Keep every module-qualified artifact for comparisons. Execution gives the final module's
+    // own classes precedence over a same-named dependency class, including its selected box owner.
+    let mut runtime = reference
         .qualified()
         .map(|((_, name), bytes)| (name.to_owned(), bytes.to_vec()))
-        .collect::<Vec<_>>();
-    let box_class = common::find_box_class(&classes)
-        .ok_or_else(|| format!("{stem}: reference compiler emitted no box()"))?;
+        .collect::<BTreeMap<_, _>>();
+    runtime.extend(entry_classes);
+    let classes = runtime.into_iter().collect::<Vec<_>>();
     let answer = common::run_box(&classes, &box_class, &classpath);
     if answer.as_deref() != Some("OK") {
         return Err(format!(
@@ -403,6 +417,62 @@ pub fn reference_stats() -> ReferenceStats {
         cleanup: STATS.cleanup.duration(),
         store: STATS.store.duration(),
     }
+}
+
+/// A run's reference-compile profile: inventory cache hits and misses, then the live compiler
+/// server's lifecycle. Durations are summed over worker threads, like each lane's `timing` line.
+pub fn reference_profile(
+    reference: ReferenceStats,
+    server: common::kotlinc_server::KotlincServerStats,
+) -> String {
+    let secs = |duration: Duration| duration.as_secs_f64();
+    format!(
+        "reference profile (thread-sum): cache hit {} | cached rejection {} | miss {} | \
+         read {:.1}s | compile {:.1}s | cleanup {:.1}s | store {:.1}s\n\
+         kotlinc server (thread-sum): requests {} | starts {} | restarts {} | pool wait {:.1}s | \
+         start {:.1}s | compile {:.1}s",
+        reference.hits,
+        reference.cached_rejections,
+        reference.misses,
+        secs(reference.cache_read),
+        secs(reference.compile),
+        secs(reference.cleanup),
+        secs(reference.store),
+        server.requests,
+        server.starts,
+        server.restarts,
+        secs(server.pool_wait),
+        secs(server.start_time),
+        secs(server.compile_time),
+    )
+}
+
+#[test]
+fn reference_profile_reports_cache_and_server_counts() {
+    let reference = ReferenceStats {
+        hits: 3,
+        cached_rejections: 1,
+        misses: 596,
+        cache_read: Duration::from_millis(240),
+        compile: Duration::from_millis(140_049),
+        cleanup: Duration::from_millis(1_960),
+        store: Duration::from_millis(1_040),
+    };
+    let server = common::kotlinc_server::KotlincServerStats {
+        requests: 636,
+        starts: 2,
+        restarts: 0,
+        pool_wait: Duration::from_millis(40),
+        start_time: Duration::from_millis(9),
+        compile_time: Duration::from_millis(125_056),
+    };
+    assert_eq!(
+        reference_profile(reference, server),
+        "reference profile (thread-sum): cache hit 3 | cached rejection 1 | miss 596 | read 0.2s | \
+         compile 140.0s | cleanup 2.0s | store 1.0s\n\
+         kotlinc server (thread-sum): requests 636 | starts 2 | restarts 0 | pool wait 0.0s | \
+         start 0.0s | compile 125.1s"
+    );
 }
 
 /// Read every `.class` under `dir` into an internal-name → bytes map (package `/` separators, no
@@ -1000,6 +1070,21 @@ mod tests {
 
     fn kotlinc_available() -> bool {
         krusty::toolchain::kotlinc_path().is_some()
+    }
+
+    #[test]
+    fn the_owned_jvm_oracle_runs_the_final_module_box_instead_of_a_library_box() {
+        let source = include_str!("box_regressions/multimodule/packagedFinalModuleBox.kt");
+        let reference = checked_box(source, "PackagedFinalModuleOracle")
+            .expect("the complete module graph must run its final box as OK");
+        assert!(reference
+            .module("library")
+            .expect("retain the library's complete class inventory")
+            .contains_key("packageentry/library/LibraryKt"));
+        assert!(reference
+            .module("main")
+            .expect("retain the final module's complete class inventory")
+            .contains_key("packageentry/when/MainKt"));
     }
 
     #[test]

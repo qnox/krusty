@@ -4,7 +4,7 @@ mod annotation_application;
 mod annotation_argument_provenance;
 mod array_factories;
 pub(crate) mod builtin_declaration;
-pub(crate) mod builtin_member_realization;
+pub mod builtin_member_realization;
 pub(crate) mod builtin_top_level_realization;
 mod call_arg_mapping_failure;
 mod call_realization;
@@ -24,7 +24,7 @@ mod dependency_access_policy;
 mod dependency_body_contract;
 mod dependency_body_modifiers;
 mod enhanced_nullability;
-pub(crate) mod function_classifiers;
+pub mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod inline_kind;
@@ -35,7 +35,7 @@ mod member_flags;
 mod member_records;
 mod metadata_normalization;
 mod param_flags;
-pub(crate) mod physical_parameter_plan;
+pub mod physical_parameter_plan;
 mod platform_abi;
 mod platform_contract;
 mod property_producer;
@@ -52,13 +52,14 @@ pub use annotation_application::{
 };
 pub use annotation_argument_provenance::AnnotationArgumentProvenance;
 pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
+pub(crate) use call_realization::KlibBodyCallableShape;
+pub use call_realization::KlibBodyCompanionReceiver;
 pub use call_realization::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
     ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
     KlibDependencyCallable, NonvirtualCallRealization, OverriddenCallKind,
     OverriddenCallRealization,
 };
-pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::{
@@ -221,6 +222,15 @@ pub enum CollectionBarrierOutcome {
     False,
     NotFound,
     Null,
+}
+
+/// The JVM type-safe collection protocol of one exact declaration: the parameters a call through
+/// the erased declaration checks against the override's types, in declaration order, and the
+/// neutral result when one of them is not. `MutableMap.remove(key, value)` checks both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollectionBarrier {
+    pub checked_parameters: &'static [u16],
+    pub outcome: CollectionBarrierOutcome,
 }
 
 /// One member (constructor, member function/property accessor, or companion member) of a library
@@ -947,7 +957,7 @@ pub struct LibraryCallable {
     /// nothing or was not reached through a hierarchy walk.
     pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
     /// JVM collection barrier role of this exact decoded builtin declaration.
-    pub collection_barrier: Option<CollectionBarrierOutcome>,
+    pub collection_barrier: Option<CollectionBarrier>,
     pub plugin_expression: Option<PluginExpressionDeclaration>,
     /// Structural expansion decoded from this exact declaration's inline body.
     pub inline_body_plan: Option<Box<InlineBodyPlan>>,
@@ -1524,11 +1534,13 @@ impl FunctionInfo {
     /// Parameters after overload selection has applied receiver, argument, and expected-result
     /// constraints. Raw declaration parameters remain available through [`Self::semantic_params`].
     pub fn applied_params(&self) -> Cow<'_, [Ty]> {
-        drop_extension_receiver(
-            &self.callable.params,
-            self.is_extension(),
-            self.context_count,
-        )
+        self.applied_layout(&self.callable.params)
+    }
+
+    /// `params`, laid out like this callable's physical parameters, in the layout of
+    /// [`Self::applied_params`].
+    pub fn applied_layout<'p>(&self, params: &'p [Ty]) -> Cow<'p, [Ty]> {
+        drop_extension_receiver(params, self.is_extension(), self.context_count)
     }
 
     /// The selected Kotlin parameter shape after combining receiver/class specialization from the
@@ -1546,10 +1558,14 @@ impl FunctionInfo {
             return declared.into_owned();
         }
 
-        fn merge_method_arguments(declared: Ty, selected: Ty, formals: &[String]) -> Ty {
+        fn merge_method_arguments(
+            declared: Ty,
+            selected: Ty,
+            formals: &[crate::types::TyParamName],
+        ) -> Ty {
             match (declared.kind(), selected.kind()) {
-                (TyKind::TyParam(formal, _), _)
-                    if formals.iter().any(|candidate| candidate == formal) =>
+                (TyKind::TyParam(formal, _) | TyKind::Var(formal, _), _)
+                    if formals.contains(&formal) =>
                 {
                     selected
                 }
@@ -1937,7 +1953,7 @@ pub struct PropertyInfo {
     /// static storage of a companion `@JvmField`, published in the same namespace, is not.
     pub companion_associated: bool,
     /// The property's own formal type parameters (`val <T> List<T>.foo`); empty for a plain property.
-    pub formals: Vec<String>,
+    pub formals: Vec<crate::types::TyParamName>,
     /// The property's declared type.
     pub ty: Ty,
     /// Number of leading context parameters in each accessor's parameter list.

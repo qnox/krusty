@@ -114,7 +114,7 @@ impl Parser<'_> {
         if target == "file" && self.at(TokenKind::LBracket) {
             self.bump(); // '['
             loop {
-                self.skip_newlines();
+                self.skip_semicolons();
                 if self.at(TokenKind::RBracket) || self.at(TokenKind::Eof) {
                     break;
                 }
@@ -191,7 +191,7 @@ impl Parser<'_> {
         self.pending_annotations.clear();
         self.pending_annotation_args.clear();
         loop {
-            self.skip_newlines();
+            self.skip_semicolons();
             if self.at(TokenKind::At) {
                 let (name, args) = self.parse_annotation();
                 if let Some(name) = name {
@@ -317,7 +317,7 @@ impl Parser<'_> {
             } else {
                 break;
             }
-            self.skip_newlines();
+            self.skip_semicolons();
         }
         self.file
             .external_modifier_uses
@@ -342,7 +342,7 @@ impl Parser<'_> {
         if !(self.at(TokenKind::Ident) && self.keyword_text("external")) {
             return false;
         }
-        let next = self.after_plain_newlines(self.i + 1);
+        let next = self.i + 1;
         let Some(next_token) = self.t.get(next).copied() else {
             return false;
         };
@@ -351,17 +351,20 @@ impl Parser<'_> {
         }
         match next_token.kind {
             TokenKind::At => true,
-            TokenKind::Ident => matches!(
-                self.t.get(next + 1).map(|token| token.kind),
-                None | Some(
-                    TokenKind::LParen
-                        | TokenKind::LBrace
-                        | TokenKind::Comma
-                        | TokenKind::Newline
-                        | TokenKind::RBrace
-                        | TokenKind::Eof
-                )
-            ),
+            TokenKind::Ident => {
+                self.newline_before_at(next + 1)
+                    || matches!(
+                        self.t.get(next + 1).map(|token| token.kind),
+                        None | Some(
+                            TokenKind::LParen
+                                | TokenKind::LBrace
+                                | TokenKind::Comma
+                                | TokenKind::Semicolon
+                                | TokenKind::RBrace
+                                | TokenKind::Eof
+                        )
+                    )
+            }
             _ => false,
         }
     }

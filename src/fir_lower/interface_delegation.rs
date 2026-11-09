@@ -297,7 +297,7 @@ fn materialize_delegation(
                 }
                 if let Some(receiver) = member.call.extension_receiver_parameter {
                     ir.extension_receiver_fns.insert(function);
-                    ir.fn_context_counts.insert(function, receiver as usize);
+                    ir.declared_parameters_mut(function).context_count = receiver as usize;
                 }
                 let implementation_owner = ir.classes[class as usize].fq_name;
                 let implementation = member
@@ -528,6 +528,7 @@ fn materialize_delegation(
                     continue;
                 }
                 ir.classes[class as usize].properties.push(IrProperty {
+                    origin: crate::ir::IrPropertyOrigin::Declaration,
                     name,
                     diagnostic_span: None,
                     getter_diagnostic_span: None,
@@ -553,8 +554,6 @@ fn materialize_delegation(
                     setter_visibility: crate::types::Visibility::Public,
                     getter: Some(getter),
                     setter,
-                    getter_jvm_name: None,
-                    setter_jvm_name: None,
                     needs_access_bridge: false,
                     accessor_annotations: Default::default(),
                 });
@@ -614,7 +613,10 @@ fn delegate_member_call(
     Ok(match &call.result_check {
         Some(name) => ir.add_expr(IrExpr::NotNullAssert {
             operand: result,
-            check: crate::ir::NullCheck::Named(name.to_string()),
+            check: crate::ir::NullCheck::Named {
+                message: name.to_string(),
+                site: crate::ir::NullCheckSite::Value,
+            },
         }),
         None => result,
     })

@@ -371,6 +371,7 @@ impl<'a> Checker<'a> {
                 member.params = params;
                 ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
                     receiver,
+                    declaring_receiver: None,
                     physical_params: selected.callable.physical_params.clone(),
                     context_args: context_args.into_iter().map(Some).collect(),
                     ret,
@@ -666,6 +667,8 @@ impl<'a> Checker<'a> {
                 && (candidate.kind != crate::libraries::FnKind::Member
                     || candidate.context_count == 0)
         });
+        let argument_kinds =
+            self.postponed_collection_literal_kinds(args, argument_kinds, &functions.overloads);
         let callables = crate::libraries::Callables::Functions(functions);
         if name == "set" {
             match resolver.select_receiver_indexed_set_function_with_params(
@@ -1050,6 +1053,7 @@ fn selected_member_call(
     member.params = params;
     ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
         receiver,
+        declaring_receiver: None,
         physical_params: selected.callable.physical_params.clone(),
         context_args: Vec::new(),
         ret,

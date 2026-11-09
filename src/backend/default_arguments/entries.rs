@@ -71,11 +71,15 @@ impl Entries {
             })
             .collect::<Vec<_>>();
         for function in published {
-            let form = match ir.companion_blocks.declaring_class(function) {
-                Some(class) => StaticForm::ClassStatic(ir.classes[class as usize].fq_name_id()),
-                None => StaticForm::Local,
-            };
-            self.entry(ir, function, Some(form));
+            // A member is reached through its receiver, so its entry has no static form.
+            let form = ir.functions[function as usize]
+                .dispatch_receiver
+                .is_none()
+                .then(|| match ir.companion_blocks.declaring_class(function) {
+                    Some(class) => StaticForm::ClassStatic(ir.classes[class as usize].fq_name_id()),
+                    None => StaticForm::Local,
+                });
+            self.entry(ir, function, form);
         }
     }
 
@@ -134,15 +138,19 @@ impl Entries {
     }
 }
 
-/// Whether `function` is a top-level declaration with defaults whose entry callers this file
-/// cannot see may reach: by its checked identity from another file of the module, or by its
-/// dependency export from a later module.
+/// Whether `function` is a declaration with defaults whose entry callers this file cannot see may
+/// reach: a top-level function, or a member of a class another module can name, called by its
+/// checked identity from another file of the module or by its dependency export from a later
+/// module.
 fn is_publishable(ir: &IrFile, function: FunId) -> bool {
     let declaration = &ir.functions[function as usize];
-    declaration.body.is_some()
-        && declaration.dispatch_receiver.is_none()
-        && !ir.inline_only_fns.contains(&function)
-        && declares_defaults(ir, function)
+    let reachable = match declaration.dispatch_receiver {
+        None => declaration.body.is_some(),
+        Some(owner) => ir
+            .class_id_by_name(owner)
+            .is_some_and(|class| !ir.local_class_name_provenance.contains_key(&class)),
+    };
+    reachable && !ir.inline_only_fns.contains(&function) && declares_defaults(ir, function)
 }
 
 fn is_checked_callable(ir: &IrFile, function: FunId) -> bool {
@@ -157,8 +165,9 @@ fn declares_defaults(ir: &IrFile, function: FunId) -> bool {
 }
 
 /// The entry of `declaration` that callers this file cannot see reach, when it publishes one: the
-/// entry of a top-level declaration with defaults, built whether or not this file calls it.
-pub(crate) fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> {
+/// entry of a top-level or member declaration with defaults, built whether or not this file
+/// calls it.
+pub fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> {
     is_publishable(ir, declaration)
         .then(|| ir.default_entries.get(&declaration).copied())
         .flatten()
@@ -167,7 +176,7 @@ pub(crate) fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> 
 /// The identities other files of the module call `declaration`'s entry by: the declaration whose
 /// defaults it evaluates. An `actual` declaration's entry is keyed by its `expect`, which is what
 /// the callers selected; one whose defaults come from a dependency has no module identity.
-pub(crate) fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> {
+pub fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> {
     if ir.functions[declaration as usize]
         .dispatch_receiver
         .is_some()

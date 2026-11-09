@@ -870,6 +870,22 @@ pub trait CheckedSourceFacts {
     ) -> Option<crate::diag::Span>;
     /// The checked annotations of the dependency function a call selected by `callable`.
     fn dependency_annotations(&self, callable: crate::ir::ExternalCallableId) -> &[TypeName];
+    /// The declaration shape of the dependency function a call selected by `callable`.
+    fn dependency_shape(
+        &self,
+        callable: crate::ir::ExternalCallableId,
+    ) -> Option<DependencyCallableShape>;
+}
+
+/// What a plugin reads of a dependency function's declaration besides its parameter types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DependencyCallableShape {
+    /// An `inline` function, whose body a call splices.
+    pub inline: bool,
+    /// An extension or a function with context parameters, which takes a receiver value.
+    pub receiver: bool,
+    /// A source parameter declares a default value.
+    pub defaults: bool,
 }
 
 /// A construct a native plugin does not implement, reported as an error at `span`.
@@ -1476,8 +1492,8 @@ impl PluginHost {
 }
 
 /// Fill all `IrClass` fields with empty defaults for a synthesized class named by its spelling.
-#[cfg(test)]
-pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass {
+#[cfg(any(test, feature = "test-support"))]
+pub fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass {
     synthetic_class_name(crate::types::type_name(&fq_name.into()))
 }
 

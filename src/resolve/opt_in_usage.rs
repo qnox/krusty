@@ -569,10 +569,13 @@ impl Checker<'_> {
     pub(super) fn report_unresolved_command_line_opt_ins(&mut self) {
         let (bound, unresolved) = self.bind_command_line_opt_ins();
         for spelling in unresolved {
-            self.diags.module_warning(format!(
-                "opt-in requirement marker '{spelling}' is unresolved. Make sure it's present in \
+            self.diags.module_warning(
+                crate::diag::names::OPT_IN_REQUIREMENT_MARKER_IS_UNRESOLVED,
+                format!(
+                "Opt-in requirement marker '{spelling}' is unresolved. Make sure it's present in \
                  the module dependencies."
-            ));
+            ),
+            );
         }
         let _ = self.command_line_opt_ins.set(bound);
     }
@@ -593,62 +596,36 @@ impl Checker<'_> {
     fn report_opt_in_requirements(&mut self, span: Span, requirements: &[OptInRequirement]) {
         for requirement in requirements {
             // kotlinc's factories: `OPT_IN_USAGE` warns and `OPT_IN_USAGE_ERROR` rejects.
-            let diagnostic = if requirement.warning {
-                "OPT_IN_USAGE"
+            let name = if requirement.warning {
+                crate::diag::names::OPT_IN_USAGE
             } else {
-                "OPT_IN_USAGE_ERROR"
+                crate::diag::names::OPT_IN_USAGE_ERROR
             };
             if self.lexically_opted_in(requirement.marker)
                 || self.command_line_opt_ins().contains(&requirement.marker)
-                || self.suppresses_diagnostic(diagnostic)
+                || self.suppresses_diagnostic(name.as_str())
             {
                 continue;
             }
-            let marker = kotlin_qualified_name(requirement.marker);
+            let marker = requirement.marker.kotlin_qualified_name();
             let message =
                 match requirement
                     .message
                     .as_deref()
                     .filter(|message| !message.trim().is_empty())
                 {
-                    Some(message) => lowercase_first(message),
+                    Some(message) => message.to_string(),
                     None => format!(
-                    "this declaration needs opt-in. Its usage {} be marked with '@{marker}' or \
+                    "This declaration needs opt-in. Its usage {} be marked with '@{marker}' or \
                      '@OptIn({marker}::class)'",
                     if requirement.warning { "should" } else { "must" },
                 ),
                 };
             if requirement.warning {
-                self.diags.warning(span, message);
+                self.diags.warning_named(span, name, message);
             } else {
-                self.diags.error(span, message);
+                self.diags.error_named(span, name, message);
             }
         }
-    }
-}
-
-/// The dotted Kotlin qualified name kotlinc prints for a classifier (`ClassId.asFqNameString`),
-/// which is also the spelling `-opt-in` takes.
-fn kotlin_qualified_name(classifier: TypeName) -> String {
-    let mut nested = Vec::new();
-    let mut top_level = classifier;
-    while let Some(owner) = top_level.nested_owner() {
-        nested.push(top_level.nested_segment_ref());
-        top_level = owner;
-    }
-    let mut name = top_level.render().replace('/', ".");
-    for segment in nested.iter().rev() {
-        name.push('.');
-        name.push_str(segment);
-    }
-    name
-}
-
-/// kotlinc's renderer starts every diagnostic message in lower case, a custom one included.
-fn lowercase_first(message: &str) -> String {
-    let mut characters = message.chars();
-    match characters.next() {
-        Some(first) => first.to_lowercase().chain(characters).collect(),
-        None => String::new(),
     }
 }

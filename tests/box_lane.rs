@@ -31,6 +31,7 @@ use krusty::diag::{DiagSink, Severity};
 use krusty::jvm::classpath::Classpath;
 use krusty::source::SourceInput;
 
+use super::box_lane_profile::{timed, Stage};
 use super::box_ratchet::{self, Platform};
 
 /// How long one case may run. The programs are tiny; anything near this is a miscompiled loop.
@@ -189,13 +190,13 @@ pub enum Libraries {
 
 struct PlatformLibraries {
     semantics: Box<dyn krusty::libraries::SemanticPlatform>,
-    native_imports: Vec<krusty::native::ImportLibrary>,
+    native_imports: Vec<krusty_native::ImportLibrary>,
 }
 
 /// Target artifacts and the frozen Native library facts selected by the same compilation inputs.
 pub struct CompiledProgram {
     pub artifacts: Vec<Artifact>,
-    pub native_imports: Vec<krusty::native::ImportLibrary>,
+    pub native_imports: Vec<krusty_native::ImportLibrary>,
 }
 
 impl Libraries {
@@ -330,15 +331,15 @@ fn open_klib_inputs(
 ) -> Result<
     (
         krusty::klib_libraries::KlibLibraries,
-        Vec<krusty::native::ImportLibrary>,
+        Vec<krusty_native::ImportLibrary>,
     ),
     String,
 > {
     if target == krusty::compilation_target::CompilationTarget::Native {
-        let native_target = krusty::native::NativeTarget::host()
+        let native_target = krusty_native::NativeTarget::host()
             .ok_or_else(|| "the host has no Native target".to_string())?;
-        return krusty::native::NativeKlibInputs::open(inputs, native_target)
-            .map(krusty::native::NativeKlibInputs::into_parts)
+        return krusty_native::NativeKlibInputs::open(inputs, native_target)
+            .map(krusty_native::NativeKlibInputs::into_parts)
             .map_err(|error| error.to_string());
     }
     krusty::klib_libraries::KlibLibraries::open(inputs)
@@ -368,7 +369,7 @@ thread_local! {
         Vec<(
             krusty::compilation_target::CompilationTarget,
             krusty::klib_libraries::KlibLibraries,
-            Vec<krusty::native::ImportLibrary>,
+            Vec<krusty_native::ImportLibrary>,
         )>,
     > = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -464,7 +465,7 @@ pub fn analyze_module(
     (
         krusty::frontend::StreamingSourceSetAnalysis,
         Vec<String>,
-        Vec<krusty::native::ImportLibrary>,
+        Vec<krusty_native::ImportLibrary>,
     ),
     Outcome,
 > {
@@ -666,7 +667,7 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
 
 /// Run a program with the lane's deadline; its framed verdict.
 pub fn run_program(command: &mut Command) -> Outcome {
-    match run_with_timeout(command, RUN_TIMEOUT) {
+    match timed(Stage::Run, || run_with_timeout(command, RUN_TIMEOUT)) {
         // The entry prints what `box()` returned after `BOX_RESULT_FRAME`, and nothing after it:
         // the answer is every byte past the one frame. Anything before it is the PROGRAM's own
         // output — `controlStructures/kt513.kt` builds a list and `println`s it before returning
@@ -1012,7 +1013,9 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
         .and_then(|stem| stem.to_str())
         .unwrap_or("Case");
     if super::box_inventory::owned(file) {
-        if let Err(error) = super::box_reference_classes::checked_box(&source, stem) {
+        if let Err(error) = timed(Stage::JvmOracle, || {
+            super::box_reference_classes::checked_box(&source, stem)
+        }) {
             return Outcome::Harness(format!("required JVM oracle: {error}"));
         }
     }
@@ -1024,8 +1027,9 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
         && lane.platform() == box_ratchet::Platform::Native
         && source.contains("// MODULE:")
     {
-        let answer =
-            super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source);
+        let answer = timed(Stage::TargetOracle, || {
+            super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source)
+        });
         if answer.as_deref() != Some("OK") {
             return Outcome::Harness(format!(
                 "required Native oracle must return OK, got {answer:?}"
@@ -1063,13 +1067,17 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
             }
             emitted.insert(unit.name.clone());
         }
-        return lane.compile_modules_and_run(scratch, stem, &units, &source);
+        return timed(Stage::Lane, || {
+            lane.compile_modules_and_run(scratch, stem, &units, &source)
+        });
     }
     let sources = match prepare_sources(&source, stem, lane.test_target()) {
         Ok(sources) => sources,
         Err(outcome) => return outcome,
     };
-    lane.compile_and_run(scratch, stem, &sources, &source)
+    timed(Stage::Lane, || {
+        lane.compile_and_run(scratch, stem, &sources, &source)
+    })
 }
 
 /// The report line, in a stable machine-readable shape:
@@ -1105,6 +1113,20 @@ fn record_program_failure(
     } else {
         failed.push((file.to_path_buf(), reason));
     }
+}
+
+/// Surface complete hidden rejection reasons for exactly the ratchet's unexpected failure keys.
+/// Trace order is the compiler's case order; neither keys nor diagnostic text are reconstructed.
+fn unexpected_failure_reason_report(
+    traced: &[(PathBuf, String)],
+    unexpected: &BTreeSet<String>,
+    relative: impl Fn(&Path) -> String,
+) -> String {
+    traced
+        .iter()
+        .filter(|(file, _)| unexpected.contains(&relative(file)))
+        .map(|(file, reason)| format!("  unexpected {}: {reason}\n", file.display()))
+        .collect()
 }
 
 /// Run the whole corpus through `lane` and hold it to the lane's committed ratchet.
@@ -1170,10 +1192,11 @@ pub fn run(lane: &dyn Lane) {
     let pool = pool.build().expect("build the worker pool");
 
     let started = Instant::now();
-    let outcomes: Vec<(&PathBuf, Outcome)> = pool.install(|| {
+    let timed_outcomes: Vec<((&PathBuf, Outcome), Duration)> = pool.install(|| {
         files
             .par_iter()
             .map(|file| {
+                let case_started = Instant::now();
                 // A panic inside the compiler is a failure of THAT case, recorded like any other
                 // so one bug does not hide the picture for the rest of the corpus; the test still
                 // fails.
@@ -1192,10 +1215,25 @@ pub fn run(lane: &dyn Lane) {
                         None => message,
                     })
                 });
-                (file, result)
+                ((file, result), case_started.elapsed())
             })
             .collect()
     });
+    let wall = started.elapsed();
+    let case_times = timed_outcomes
+        .iter()
+        .map(|((file, _), time)| (relative(file), *time))
+        .collect::<Vec<_>>();
+    let timing = super::box_lane_profile::timing_report(
+        wall,
+        pool.current_num_threads(),
+        &case_times,
+        super::box_lane_profile::stage_times(),
+    );
+    let outcomes = timed_outcomes
+        .into_iter()
+        .map(|(outcome, _)| outcome)
+        .collect::<Vec<_>>();
     // Compilation is finished. Restore ordinary panic reporting before validating outcomes:
     // an owned fatal outcome or a broken inventory must remain visible, not fail silently under
     // the compiler-only hook.
@@ -1240,7 +1278,10 @@ pub fn run(lane: &dyn Lane) {
                 traced.push((file.clone(), reason.clone()));
                 *declined.entry(reason).or_default() += 1;
             }
-            Outcome::Harness(reason) => *harness_reasons.entry(reason).or_default() += 1,
+            Outcome::Harness(reason) => {
+                traced.push((file.clone(), reason.clone()));
+                *harness_reasons.entry(reason).or_default() += 1;
+            }
             Outcome::NotApplicable(reason) => *not_applicable.entry(reason).or_default() += 1,
             Outcome::Failed(reason) => {
                 let expected = baseline
@@ -1260,9 +1301,11 @@ pub fn run(lane: &dyn Lane) {
         box_ratchet::write(platform, version, &current)
             .unwrap_or_else(|error| panic!("failed to write {label} box expectations: {error}"));
     }
+    let mut unexpected_failure_keys = BTreeSet::new();
     if !bless {
         if let Some(baseline) = &baseline {
             let mismatches = box_ratchet::compare(baseline, &current, &corpus_cases);
+            unexpected_failure_keys.extend(mismatches.unexpected_failures.iter().cloned());
             if !mismatches.is_empty() {
                 failed.push((
                     PathBuf::from(format!("<{} box expectations>", platform.name())),
@@ -1293,7 +1336,19 @@ pub fn run(lane: &dyn Lane) {
             ("outside-lane", outside),
         ],
     );
-    eprintln!("{report} ({:.1}s)", started.elapsed().as_secs_f64());
+    eprintln!("{report} ({:.1}s)", wall.as_secs_f64());
+    eprint!("{timing}");
+    eprintln!(
+        "{}",
+        super::box_reference_classes::reference_profile(
+            super::box_reference_classes::reference_stats(),
+            super::common::kotlinc_server::kotlinc_server_stats(),
+        )
+    );
+    eprint!(
+        "{}",
+        unexpected_failure_reason_report(&traced, &unexpected_failure_keys, relative)
+    );
 
     // Triage: name the cases behind one decline reason, so a line in the table below can be
     // followed back to the source that produced it.
@@ -1301,6 +1356,16 @@ pub fn run(lane: &dyn Lane) {
         for (file, reason) in &traced {
             if reason.contains(&pattern) {
                 eprintln!("  traced {}: {reason}", file.display());
+            }
+        }
+    }
+
+    // A changed non-pass needs its case-specific cause, not only the ranked totals. Keep this
+    // separate from `failed`: the ratchet already records the mismatch and owns its accounting.
+    if let Some(baseline) = baseline.as_ref().filter(|_| !bless) {
+        for (file, reason) in &traced {
+            if !baseline.failures.contains(&relative(file)) {
+                eprintln!("  unexpected non-pass {}: {reason}", file.display());
             }
         }
     }
@@ -1430,6 +1495,47 @@ fn an_unexpected_program_failure_preserves_its_case_and_complete_reason() {
     record_program_failure(file, reason.to_string(), true, &mut known, &mut failed);
     assert_eq!(known, [(file.to_path_buf(), reason.to_string())]);
     assert_eq!(failed, Vec::new());
+}
+
+#[test]
+fn unexpected_rejection_reporting_uses_exact_ratchet_keys_and_preserves_diagnostic_order() {
+    let known = "regressions/a.kt.extra".to_string();
+    let first = "regressions/z.kt".to_string();
+    let second = "regressions/a.kt".to_string();
+    let expected = box_ratchet::Baseline {
+        failures: BTreeSet::from([known.clone()]),
+        not_applicable: BTreeSet::new(),
+    };
+    let current = BTreeMap::from([
+        (known.clone(), box_ratchet::Outcome::Fail),
+        (first.clone(), box_ratchet::Outcome::Fail),
+        (second.clone(), box_ratchet::Outcome::Fail),
+    ]);
+    let cases = current.keys().cloned().collect();
+    let mismatches = box_ratchet::compare(&expected, &current, &cases);
+    assert_eq!(
+        mismatches.unexpected_failures,
+        BTreeSet::from([first, second])
+    );
+    let traced = [
+        (
+            PathBuf::from("/corpus/regressions/a.kt.extra"),
+            "known rejection".to_string(),
+        ),
+        (
+            PathBuf::from("/corpus/regressions/z.kt"),
+            "z.kt:2:3: unresolved reference\nz.kt:4:5: second diagnostic".to_string(),
+        ),
+        (
+            PathBuf::from("/corpus/regressions/a.kt"),
+            "the checked operation `SelectedCall`".to_string(),
+        ),
+    ];
+    assert_eq!(
+        unexpected_failure_reason_report(&traced, &mismatches.unexpected_failures, |file|
+            file.strip_prefix("/corpus").unwrap().to_string_lossy().into_owned()),
+        "  unexpected /corpus/regressions/z.kt: z.kt:2:3: unresolved reference\nz.kt:4:5: second diagnostic\n  unexpected /corpus/regressions/a.kt: the checked operation `SelectedCall`\n",
+    );
 }
 
 #[test]

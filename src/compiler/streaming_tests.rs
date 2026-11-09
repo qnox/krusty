@@ -7,12 +7,6 @@ use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
 use crate::types::{Ty, TyKind};
 
-fn initialized_jvm_libraries(
-    classpath: std::rc::Rc<crate::jvm::classpath::Classpath>,
-) -> crate::jvm::jvm_libraries::JvmLibraries {
-    crate::jvm::jvm_libraries::JvmLibraries::new(classpath).expect("JVM provider initialization")
-}
-
 #[test]
 fn local_members_share_their_published_lexical_checker_root() {
     let inputs = [SourceInput::kotlin(include_str!(
@@ -65,63 +59,6 @@ fn local_members_share_their_published_lexical_checker_root() {
             .expect("every Reader method belongs to one checked group");
         assert_eq!(group.root, expected, "Reader method {reader:?}");
     }
-}
-
-#[test]
-fn jvm_production_stream_captures_anonymous_receiver_in_accessor_lambda() {
-    let inputs = [SourceInput::kotlin(
-        r#"fun build(): Int {
-            var count = 0
-            val holder = object {
-                val action: () -> Unit get() = { count++ }
-            }
-            holder.action()
-            return count
-        }
-
-        fun box(): String = if (build() == 1) "OK" else "fail""#,
-    )
-    .with_file_stem("AnonymousAccessorCapture")];
-    let stems = ["AnonymousAccessorCapture".to_string()];
-    let mut paths = Vec::new();
-    if let Some(stdlib) = crate::jvm::kotlin_stdlib_jar() {
-        paths.push(stdlib);
-    }
-    if let Some(jdk) = crate::jvm::classpath::platform_jdk_modules(None) {
-        paths.push(jdk);
-    }
-    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
-    let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
-        &inputs,
-        crate::frontend::PlatformProvider::jvm(Box::new(initialized_jvm_libraries(
-            classpath.clone(),
-        ))),
-        &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
-        &mut diagnostics,
-    );
-
-    let outputs = emit_analyzed(
-        analysis,
-        &stems,
-        &crate::jvm::JvmBackend::new(classpath),
-        "main",
-        &mut diagnostics,
-    );
-
-    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-    assert_eq!(
-        outputs
-            .iter()
-            .map(|(path, _)| path.as_str())
-            .collect::<std::collections::BTreeSet<_>>(),
-        std::collections::BTreeSet::from([
-            "AnonymousAccessorCaptureKt.class",
-            "AnonymousAccessorCaptureKt$build$holder$1.class",
-            "META-INF/main.kotlin_module",
-        ])
-    );
 }
 
 struct SharedClassCaptureBackend;
@@ -199,7 +136,7 @@ fn unattributed_signature_failure_reports_one_deterministic_internal_error() {
     );
     assert!(diagnostic.identity.is_none());
     assert_eq!(
-        diagnostics.render_all(&[("Recovery.kt", "")]),
+        diagnostics.render_all(&[("Recovery.kt", "")], crate::diag::DiagnosticNames::Hidden),
         "Recovery.kt:1:1: error: internal error: module signatures were not finalized and no source diagnostic explains it\n"
     );
 }

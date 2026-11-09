@@ -51,6 +51,9 @@ pub enum FirPropertyTarget {
         /// Reading the selected declaration is a constant-value expression for Kotlin metadata.
         /// The provider computes this semantic fact; later phases do not inspect its origin.
         metadata_constant_read: bool,
+        /// The language role the provider attached to the selected getter. Constant evaluation
+        /// folds a read of an `@IntrinsicConstEvaluation` declaration by it.
+        semantic_role: Option<crate::types::SemanticCallRole>,
         dispatch: FirPropertyDispatch,
     },
 }

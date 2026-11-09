@@ -26,10 +26,7 @@ impl IrFile {
     /// A nested lambda's captures still read this namespace, but its inline body has the lambda
     /// function's own slots. [`value_namespace_expressions`] observes that boundary, so two
     /// unrelated slot zeroes never enter the same inventory.
-    pub(crate) fn declared_value_slot_types(
-        &self,
-        root: ExprId,
-    ) -> crate::fx_hash::HashMap<u32, Ty> {
+    pub fn declared_value_slot_types(&self, root: ExprId) -> crate::fx_hash::HashMap<u32, Ty> {
         let mut declarations = crate::fx_hash::HashMap::default();
         let mut declare = |slot, ty| {
             let previous = declarations.insert(slot, ty);
@@ -104,13 +101,15 @@ impl IrFile {
             IrExpr::New { internal, .. } => Ty::obj_name(*internal),
             IrExpr::SingletonValue { classifier }
             | IrExpr::EnumEntry { classifier, .. }
-            | IrExpr::EnumValueOf { classifier, .. } => Ty::obj_name(*classifier),
+            | IrExpr::EnumValueOf { classifier, .. }
+            | IrExpr::EnumConstant { classifier, .. } => Ty::obj_name(*classifier),
+            IrExpr::EnumAllocation { instance, .. } => Ty::obj_name(*instance),
             // An enclosing-instance edge names the outer classifier it reaches.
             IrExpr::EnclosingInstance { outer, .. } => Ty::obj_name(*outer),
             IrExpr::EnumValues { classifier } => {
                 Ty::obj_args("kotlin/Array", &[Ty::obj_name(*classifier)])
             }
-            IrExpr::EnumEntries { classifier } => {
+            IrExpr::EnumEntries { classifier } | IrExpr::EnumEntriesList { classifier, .. } => {
                 Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::obj_name(*classifier)])
             }
             IrExpr::EnumSwitchOrdinal { .. } | IrExpr::EnumSwitchKey { .. } => Ty::Int,

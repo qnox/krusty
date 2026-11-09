@@ -30,8 +30,6 @@ pub(in super::super) enum InlineCallRoute {
 pub(in super::super) enum ExpansionReason {
     /// The backend expands every same-module inline call in IR.
     BackendExpandsInIr,
-    /// The call is in a default-argument expression.
-    DefaultArgument,
     /// The call is in an inline function and a literal lambda argument reads one of that
     /// function's inline parameters. A caller that expands the function's template splices its
     /// own literal for that parameter, which reaches the literal only through an expanded body.
@@ -85,9 +83,6 @@ impl BodyLowering<'_> {
     ) -> Option<ExpansionReason> {
         if self.ir.same_module_inlining() != SameModuleInlining::CompiledBodies {
             return Some(ExpansionReason::BackendExpandsInIr);
-        }
-        if self.in_default_argument {
-            return Some(ExpansionReason::DefaultArgument);
         }
         let suspend = |declaration| {
             self.index

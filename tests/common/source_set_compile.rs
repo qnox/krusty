@@ -144,7 +144,7 @@ pub(crate) fn compile_inputs(
         |files, symbols| krusty::jvm::prepare_module_symbols(files, stems, symbols),
         &mut diags,
     );
-    let backend = krusty::jvm::JvmBackend::new(cp)
+    let backend = krusty_jvm::JvmBackend::new(cp)
         .with_class_major(class_major)
         .with_annotations_in_metadata(language_settings.features.has("AnnotationsInMetadata"))
         .with_pre_release_metadata(language_settings.features.is_pre_release())
@@ -204,7 +204,10 @@ pub fn source_set_diagnostics(sources: &[(&str, &str)], common: usize) -> Vec<St
                 krusty::diag::Severity::Error => "error",
                 krusty::diag::Severity::Warning => "warning",
             };
-            format!("{name}:{line}:{column}: {severity}: {}", diagnostic.msg)
+            format!(
+                "{name}:{line}:{column}: {severity}: {}",
+                diagnostic.message(krusty::diag::DiagnosticNames::Hidden)
+            )
         })
         .collect()
 }
