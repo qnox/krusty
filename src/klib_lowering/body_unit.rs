@@ -1034,6 +1034,64 @@ impl CallLinker for Linker<'_, '_> {
         (sub.kotlin_class_internal() == Some(owner)).then_some(sub)
     }
 
+    fn dependency_override(
+        &self,
+        symbol: &KlibIrSymbol,
+        supertypes: &[Ty],
+        property: bool,
+    ) -> Result<Option<super::same_library_class::MemberOverride>, KlibBodyDeclineReason> {
+        let signature = match &symbol.signature {
+            KlibIrSignature::Public(public) => KlibDeclarationSignature::Public(public.clone()),
+            KlibIrSignature::Accessor(accessor) => {
+                KlibDeclarationSignature::Accessor(accessor.clone())
+            }
+            KlibIrSignature::FileLocal { .. } => return Ok(None),
+        };
+        // The overridden symbol is the declaration itself, which this body's producer graph
+        // resolves exactly as it resolves a call of it.
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => return Ok(None),
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "two libraries serialize one overridden declaration".to_owned(),
+                ))
+            }
+        };
+        super::same_library_class::declared_override(
+            identity,
+            self.sources.declarations,
+            supertypes,
+            property,
+            &|sub, owner| self.applied_supertype(sub, owner),
+        )
+    }
+
+    fn external_override(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<ExternalCallableId, KlibBodyDeclineReason> {
+        local_class::registered_override_handle(
+            identity,
+            self.sources.externals,
+            self.sources.declarations,
+        )
+        .map(|handle| handle.target())
+    }
+
+    fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
+        match self.sources.declarations.classifier(name) {
+            Some(record) => Ok(record.is_interface()),
+            None => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "an object literal's supertype {name:?} is not a selected classifier"
+            ))),
+        }
+    }
+
     fn link_accessor(
         &mut self,
         ir: &mut IrFile,

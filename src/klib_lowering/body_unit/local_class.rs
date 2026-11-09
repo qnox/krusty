@@ -286,7 +286,7 @@ fn publish_overrides(
 
 /// The provider handle of an authenticated override. The call closure may already carry the same
 /// handle when a body calls the member; a body that only constructs the class still publishes it.
-fn registered_override_handle(
+pub(super) fn registered_override_handle(
     identity: &KlibDependencyCallable,
     externals: &HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
     declarations: &dyn crate::symbol_source::SymbolSource,
