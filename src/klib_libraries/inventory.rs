@@ -112,13 +112,13 @@ impl InlineBodySelection {
             .insert(signature.clone());
     }
 
-    pub(super) fn contains(&self, module: &str, signature: &KlibIrSignature) -> bool {
-        let KlibIrSignature::Public(signature) = signature else {
-            return false;
-        };
+    /// The prepared-inline declarations selected from `module`, empty when it has none.
+    pub(super) fn of_module(&self, module: &str) -> &HashSet<KlibPublicIdSignature> {
+        static NONE: std::sync::OnceLock<HashSet<KlibPublicIdSignature>> =
+            std::sync::OnceLock::new();
         self.by_module
             .get(module)
-            .is_some_and(|selected| selected.contains(signature))
+            .unwrap_or_else(|| NONE.get_or_init(HashSet::default))
     }
 }
 
