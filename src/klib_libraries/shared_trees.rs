@@ -4,14 +4,20 @@
 //! whatever else that compilation reads, so the decode is kept per archive content, as the JVM
 //! classpath keeps each entry's own facts. The key is the content fingerprint of the bytes the open
 //! froze, never a path or a file stamp: a replaced archive has another fingerprint and decodes
-//! afresh. Facts that depend on the whole input set (stdlib authority, defaults, the inline
-//! selection) are still built by each open.
+//! afresh. Facts that depend on the whole input set (stdlib authority, defaults) are still built
+//! by each open. Prepared-inline trees are decoded only for the inline declarations the input set
+//! selects, so they are kept per generation and exact selection.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::fx_hash::HashSet;
 use crate::klib::{KlibArchive, KlibError};
 use crate::lru::LruCache;
-use crate::metadata::klib_ir::{read_declaration_trees, KlibIrDecodeError, KlibIrModuleTrees};
+use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::metadata::klib_ir::{
+    read_declaration_trees, read_inlinable_declaration_trees_where, KlibIrDecodeError,
+    KlibIrModuleTrees, KlibIrSignature,
+};
 
 /// Archives whose trees stay resident: the platform stdlib and the dependencies of recent
 /// compilations. Each entry is one archive's whole ordinary IR, so the bound is a count.
@@ -26,15 +32,27 @@ pub(super) enum SharedTreesError {
     Decode(KlibIrDecodeError),
 }
 
-/// Decoded ordinary IR trees by the content fingerprint of the archive they were decoded from.
+/// Selections of one archive's prepared-inline trees kept at once. An input set selects the same
+/// inline declarations of an archive unless another input withdraws one, so one usually suffices.
+const RESIDENT_INLINE_SELECTIONS: usize = 2;
+
+/// One archive's prepared-inline trees, decoded for exactly `selected`.
+struct InlineSelection {
+    selected: HashSet<KlibPublicIdSignature>,
+    trees: Arc<KlibIrModuleTrees>,
+}
+
+/// Decoded IR trees by the content fingerprint of the archive they were decoded from.
 pub(super) struct SharedTrees {
     decoded: Mutex<LruCache<[u8; 32], Arc<KlibIrModuleTrees>>>,
+    inline: Mutex<LruCache<[u8; 32], Vec<InlineSelection>>>,
 }
 
 impl SharedTrees {
-    fn new(resident: usize) -> Self {
+    pub(super) fn new(resident: usize) -> Self {
         Self {
             decoded: Mutex::new(LruCache::new_fixed(resident)),
+            inline: Mutex::new(LruCache::new_fixed(resident)),
         }
     }
 
@@ -59,6 +77,51 @@ impl SharedTrees {
         let trees = Arc::new(read_declaration_trees(archive).map_err(SharedTreesError::Decode)?);
         self.decoded().insert(fingerprint, Arc::clone(&trees));
         Ok(trees)
+    }
+
+    /// The prepared-inline trees of `archive` for exactly the `selected` public signatures,
+    /// decoded once per content generation and selection. A failed decode is not kept.
+    pub(super) fn inline_declaration_trees(
+        &self,
+        archive: &KlibArchive,
+        selected: &HashSet<KlibPublicIdSignature>,
+    ) -> Result<Arc<KlibIrModuleTrees>, SharedTreesError> {
+        let fingerprint = archive
+            .content_fingerprint()
+            .map_err(SharedTreesError::Fingerprint)?;
+        if let Some(kept) = self.inline().get(&fingerprint).and_then(|selections| {
+            selections
+                .iter()
+                .find(|selection| &selection.selected == selected)
+                .map(|selection| Arc::clone(&selection.trees))
+        }) {
+            return Ok(kept);
+        }
+        let trees = Arc::new(
+            read_inlinable_declaration_trees_where(archive, |signature| {
+                matches!(signature, KlibIrSignature::Public(signature) if selected.contains(signature))
+            })
+            .map_err(SharedTreesError::Decode)?,
+        );
+        let mut inline = self.inline();
+        let mut selections = inline.remove(&fingerprint).unwrap_or_default();
+        selections.retain(|selection| &selection.selected != selected);
+        selections.truncate(RESIDENT_INLINE_SELECTIONS - 1);
+        selections.insert(
+            0,
+            InlineSelection {
+                selected: selected.clone(),
+                trees: Arc::clone(&trees),
+            },
+        );
+        inline.insert(fingerprint, selections);
+        Ok(trees)
+    }
+
+    fn inline(&self) -> std::sync::MutexGuard<'_, LruCache<[u8; 32], Vec<InlineSelection>>> {
+        self.inline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn decoded(&self) -> std::sync::MutexGuard<'_, LruCache<[u8; 32], Arc<KlibIrModuleTrees>>> {

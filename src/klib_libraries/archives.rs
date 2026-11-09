@@ -15,7 +15,7 @@ use super::{
     KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError, KlibLibraries,
     KlibLibraryError,
 };
-use crate::metadata::klib_ir::{read_inlinable_declaration_trees_where, KlibIrDecodeError};
+use crate::metadata::klib_ir::KlibIrDecodeError;
 
 /// One compiler input KLIB and the authority the compilation assigned to it.
 pub struct KlibLibraryInput {
@@ -354,17 +354,7 @@ impl<'a> OpenedKlibLibraries<'a> {
                 Some(
                     super::shared_trees::SharedTrees::process()
                         .main_declaration_trees(&record.archive)
-                        .map_err(|error| match error {
-                            super::shared_trees::SharedTreesError::Fingerprint(error) => {
-                                KlibLibrariesOpenError::Archive(error)
-                            }
-                            super::shared_trees::SharedTreesError::Decode(error) => {
-                                KlibLibrariesOpenError::Declarations {
-                                    library: library.to_path_buf(),
-                                    error,
-                                }
-                            }
-                        })?,
+                        .map_err(|error| shared_trees_error(library, error))?,
                 )
             } else {
                 None
@@ -397,17 +387,16 @@ impl<'a> OpenedKlibLibraries<'a> {
             // IR remains the complete module body/default channel above; absence of a prepared
             // component means this library publishes no cross-module inline plan.
             let inline_trees = if record.archive.has_inlinable_ir() {
-                read_inlinable_declaration_trees_where(&record.archive, |signature| {
-                    inline_wanted.contains(&record.module, signature)
-                })
-                .map_err(|error| KlibLibrariesOpenError::Declarations {
-                    library: library.to_path_buf(),
-                    error,
-                })?
+                super::shared_trees::SharedTrees::process()
+                    .inline_declaration_trees(
+                        &record.archive,
+                        inline_wanted.of_module(&record.module),
+                    )
+                    .map_err(|error| shared_trees_error(library, error))?
             } else {
-                crate::metadata::klib_ir::KlibIrModuleTrees::default()
+                std::sync::Arc::default()
             };
-            let inline_library = KlibBodyLibrary::from_manifest(&manifest, inline_trees)
+            let inline_library = KlibBodyLibrary::from_manifest_shared(&manifest, inline_trees)
                 .ok_or_else(|| KlibLibrariesOpenError::MissingUniqueName {
                     library: library.to_path_buf(),
                 })?;
@@ -445,6 +434,23 @@ impl<'a> OpenedKlibLibraries<'a> {
             validate_current_generation(record)?;
         }
         Ok(libraries)
+    }
+}
+
+fn shared_trees_error(
+    library: &Path,
+    error: super::shared_trees::SharedTreesError,
+) -> KlibLibrariesOpenError {
+    match error {
+        super::shared_trees::SharedTreesError::Fingerprint(error) => {
+            KlibLibrariesOpenError::Archive(error)
+        }
+        super::shared_trees::SharedTreesError::Decode(error) => {
+            KlibLibrariesOpenError::Declarations {
+                library: library.to_path_buf(),
+                error,
+            }
+        }
     }
 }
 
