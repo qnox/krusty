@@ -25,7 +25,6 @@ pub(super) fn builtin_call(body: &FirBody, expression: &FirExpr) -> Option<IrBui
         {
             (IrBuiltinCallKind::NumericConversion, vec![ty(*value)?])
         }
-        FirExprKind::IndexedRead { .. } => (IrBuiltinCallKind::IndexedRead, Vec::new()),
         FirExprKind::Call(call) if matches!(call.target, FirCallTarget::Intrinsic { .. }) => {
             (IrBuiltinCallKind::Intrinsic, Vec::new())
         }

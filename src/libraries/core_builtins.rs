@@ -7,6 +7,14 @@
 
 use super::*;
 
+/// How a core member function may be written at a call site besides `receiver.name(…)`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Notation {
+    Plain,
+    Infix,
+    Operator,
+}
+
 /// Publish the compiler-owned realization attached to each exact core declaration. These names
 /// define declarations in this provider; consumers receive the selected callable identity and its
 /// typed intrinsic and never classify a later source or JVM spelling.
@@ -16,28 +24,43 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         owner: TypeName,
         receiver: Ty,
         name: &str,
-        parameter: Option<Ty>,
+        params: &[Ty],
         result: Ty,
-        semantics: (CompilerIntrinsic, bool),
+        semantics: (CompilerIntrinsic, Notation),
     ) {
-        let (intrinsic, infix) = semantics;
-        let params = parameter.into_iter().collect::<Vec<_>>();
+        let (intrinsic, notation) = semantics;
+        let infix = notation == Notation::Infix;
+        let operator = notation == Notation::Operator;
+        let params = params.to_vec();
         let mut callable =
             LibraryCallable::library(owner, name, params.clone(), result, result, "");
         callable.compiler_intrinsic = Some(intrinsic);
         let mut declaration = FunctionInfo::plain(FnKind::Member, Some(receiver), callable);
         declaration.call_sig = CallSig::metadata_plain(params.len());
         declaration.flags.infix = infix;
+        declaration.flags.operator = operator;
 
+        // A class cannot declare two members with one name and one parameter list, so a decoded
+        // declaration with this name and these parameters is the core declaration itself. A core
+        // member mentions no type parameter but its owner's, which each provider spells its own
+        // way (`Array<T>.set(Int, T)`), so a type parameter matches the provider's type parameter.
+        let same_parameter = |declared: &Ty, core: &Ty| {
+            declared == core || declared.is_ty_param() && core.is_ty_param()
+        };
         if let Some(callables) = classifier.declared_callables.get_mut(name) {
             let (mut functions, properties) = std::mem::take(callables).into_parts();
             if let Some(existing) = functions.overloads.iter_mut().find(|candidate| {
+                let declared = candidate.semantic_params();
                 candidate.kind == FnKind::Member
-                    && candidate.semantic_params().as_ref() == params.as_slice()
-                    && candidate.callable.ret.canonical_semantic() == result
+                    && declared.len() == params.len()
+                    && declared
+                        .iter()
+                        .zip(&params)
+                        .all(|(declared, core)| same_parameter(declared, core))
             }) {
                 existing.callable.compiler_intrinsic = Some(intrinsic);
                 existing.flags.infix |= infix;
+                existing.flags.operator |= operator;
             } else {
                 functions.overloads.push(declaration);
             }
@@ -169,6 +192,46 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             Ty::Int,
             CompilerIntrinsic::ArraySize,
         );
+        // `operator fun get(index: Int): E` and `operator fun set(index: Int, value: E)`, where `E`
+        // is `Array<T>`'s formal or the primitive array's element.
+        let (receiver, element) = match crate::types::prim_array_element(owner) {
+            Some(element) => (Ty::obj_name(owner), element),
+            None => {
+                let element =
+                    Ty::ty_param("T", Ty::nullable(Ty::obj_name(crate::types::wk::any())));
+                (Ty::obj_args_name(owner, &[element]), element)
+            }
+        };
+        member_function(
+            classifier,
+            owner,
+            receiver,
+            "get",
+            &[Ty::Int],
+            element,
+            (CompilerIntrinsic::ArrayGet, Notation::Operator),
+        );
+        // `operator fun set(index: Int, value: E)`.
+        member_function(
+            classifier,
+            owner,
+            receiver,
+            "set",
+            &[Ty::Int, element],
+            Ty::Unit,
+            (CompilerIntrinsic::ArraySet, Notation::Operator),
+        );
+    }
+    if owner == crate::types::wk::string() {
+        member_function(
+            classifier,
+            owner,
+            Ty::String,
+            "get",
+            &[Ty::Int],
+            Ty::Char,
+            (CompilerIntrinsic::StringGet, Notation::Operator),
+        );
     }
     let bit_receiver = if owner.matches("kotlin/Int") {
         Some(Ty::Int)
@@ -190,9 +253,9 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
                 owner,
                 receiver,
                 name,
-                Some(receiver),
+                &[receiver],
                 receiver,
-                (intrinsic, true),
+                (intrinsic, Notation::Infix),
             );
         }
         member_function(
@@ -200,9 +263,9 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             owner,
             receiver,
             "inv",
-            None,
+            &[],
             receiver,
-            (CompilerIntrinsic::PrimitiveBitNot, false),
+            (CompilerIntrinsic::PrimitiveBitNot, Notation::Plain),
         );
         if matches!(receiver, Ty::Int | Ty::Long) {
             for (name, intrinsic) in [
@@ -215,9 +278,9 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
                     owner,
                     receiver,
                     name,
-                    Some(Ty::Int),
+                    &[Ty::Int],
                     receiver,
-                    (intrinsic, true),
+                    (intrinsic, Notation::Infix),
                 );
             }
         }

@@ -131,6 +131,7 @@ fn lower(
     let mut calls = TemplateCalls {
         module: &callable.identity().module,
         callees,
+        bodies,
     };
     if declaration.suspend {
         return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
@@ -260,6 +261,8 @@ struct TemplateCalls<'a> {
     /// The template's declaring module, whose producer graph resolves its calls.
     module: &'a str,
     callees: TemplateCallees<'a>,
+    /// The prepared bodies of the template's library, which name its file-local classes.
+    bodies: &'a KlibDeclarationBodies,
 }
 
 impl TemplateCalls<'_> {
@@ -300,6 +303,28 @@ impl TemplateCalls<'_> {
 }
 
 impl CallLinker for TemplateCalls<'_> {
+    /// A template is expanded into a source file, whose read of the constant reaches the enum
+    /// through the entry its declaring file exports. The selected library record proves the
+    /// enum and its constant.
+    fn enum_entry(
+        &mut self,
+        _ir: &mut IrFile,
+        entry: &KlibPublicIdSignature,
+    ) -> Result<(crate::types::TypeName, String), KlibBodyDeclineReason> {
+        let classifier = member_owner(entry)?;
+        let name = entry.declaration().segments().last().ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch("an enum entry has no name".to_owned())
+        })?;
+        match self.callees.source.classifier(classifier) {
+            Some(record) if record.is_enum() && record.is_enum_entry(name) => {
+                Ok((classifier, name.clone()))
+            }
+            _ => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "the serialized enum entry {name} of {classifier:?} is selected as no enum entry"
+            ))),
+        }
+    }
+
     fn singleton(&self, classifier: crate::types::TypeName) -> Result<(), KlibBodyDeclineReason> {
         match self.callees.source.classifier(classifier) {
             Some(record) if record.is_object() => Ok(()),
@@ -375,6 +400,132 @@ impl CallLinker for TemplateCalls<'_> {
             target,
             declaration,
         })
+    }
+
+    fn local_class(
+        &self,
+        signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Result<Option<crate::types::TypeName>, KlibBodyDeclineReason> {
+        super::same_library_class::classifier(self.bodies, self.module, signature)
+    }
+
+    fn external_override(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<ExternalCallableId, KlibBodyDeclineReason> {
+        self.callees
+            .source
+            .external_callable_by_dependency(identity)
+            .map(|(target, _)| target)
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "an override whose declaration handle was not registered".to_owned(),
+                )
+            })
+    }
+
+    fn dependency_override(
+        &self,
+        symbol: &crate::metadata::klib_ir::KlibIrSymbol,
+        supertypes: &[crate::types::Ty],
+        property: bool,
+    ) -> Result<Option<super::same_library_class::MemberOverride>, KlibBodyDeclineReason> {
+        use crate::metadata::id_signature::KlibDeclarationSignature;
+        use crate::metadata::klib_ir::KlibIrSignature;
+        let signature = match &symbol.signature {
+            KlibIrSignature::Public(public) => KlibDeclarationSignature::Public(public.clone()),
+            KlibIrSignature::Accessor(accessor) => {
+                KlibDeclarationSignature::Accessor(accessor.clone())
+            }
+            KlibIrSignature::FileLocal { .. } => return Ok(None),
+        };
+        let binding = match self.callees.references.get(self.module, &signature) {
+            KlibReferenceOrigin::Exact(binding) => binding,
+            KlibReferenceOrigin::Ambiguous => {
+                let KlibDeclarationSignature::Public(callee) = &signature else {
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "an object literal overrides an ambiguous accessor".to_owned(),
+                    ));
+                };
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.clone(),
+                )));
+            }
+            KlibReferenceOrigin::Missing => {
+                // An override symbol is the declaration itself, not a call. The prepared
+                // reference index only records calls, so a member that this body does not call
+                // is still the declaration the producer published under that signature.
+                match self
+                    .callees
+                    .declarations
+                    .callee_origin(self.module, &signature)
+                {
+                    crate::klib_libraries::KlibCalleeOrigin::Exact(declaration) => {
+                        KlibReferenceBinding {
+                            declaration,
+                            dispatch: None,
+                        }
+                    }
+                    crate::klib_libraries::KlibCalleeOrigin::Missing => return Ok(None),
+                    crate::klib_libraries::KlibCalleeOrigin::Ambiguous => {
+                        let KlibDeclarationSignature::Public(callee) = &signature else {
+                            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                                "an object literal overrides an ambiguous accessor".to_owned(),
+                            ));
+                        };
+                        return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                            callee.clone(),
+                        )));
+                    }
+                }
+            }
+        };
+        let Some((_, realization)) = self
+            .callees
+            .source
+            .external_callable_by_dependency(&binding.declaration)
+        else {
+            return Ok(None);
+        };
+        let accessor = realization
+            .klib_body_accessor
+            .as_ref()
+            .map(|accessor| matches!(accessor.role, crate::libraries::KlibAccessorRole::Getter));
+        match accessor {
+            Some(false) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an object literal overrides a property setter".to_owned(),
+                ))
+            }
+            Some(true) if !property => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a function overrides a property".to_owned(),
+                ))
+            }
+            None if property => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a property overrides a function".to_owned(),
+                ))
+            }
+            Some(true) | None => {}
+        }
+        super::same_library_class::realized_member_override(
+            binding.declaration,
+            &realization,
+            property,
+            supertypes,
+            &|sub, owner| self.applied_supertype(sub, owner),
+        )
+        .map(Some)
+    }
+
+    fn is_interface(&self, name: crate::types::TypeName) -> Result<bool, KlibBodyDeclineReason> {
+        match self.callees.source.classifier(name) {
+            Some(record) => Ok(record.is_interface()),
+            None => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "an object literal's supertype {name:?} is not a selected classifier"
+            ))),
+        }
     }
 
     fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool {
@@ -559,11 +710,10 @@ impl CallLinker for TemplateCalls<'_> {
                 "a callable reference changed its provider handle while linking".to_owned(),
             ));
         }
-        Ok(LinkedCallableReference {
-            declaration,
-            kind: realization.kind,
-            call,
-        })
+        let callable = realization
+            .klib_body_callable()
+            .ok_or(KlibBodyDeclineReason::Unjoined)?;
+        Ok(LinkedCallableReference::new(declaration, callable, call))
     }
 }
 

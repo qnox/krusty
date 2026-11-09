@@ -69,7 +69,9 @@ use argument_compatibility::{arg_fits_platform, arg_fits_source, untyped_lambda_
 pub(crate) use argument_compatibility::{
     function_input_types, resolution_subtype, sam_arg_matches, sam_return_matches,
 };
-pub(crate) use call_argument::{expected_result_keeps_call_evidence, CallArgKind};
+pub(crate) use call_argument::{
+    expected_result_keeps_call_evidence, CallArgKind, ProvisionalResult,
+};
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
 };
@@ -587,7 +589,7 @@ fn best_callable_member_overload<'a>(
 ) -> Option<&'a LibraryMember> {
     let adapts = |p: &Ty, arg: &CallArgKind, _i: usize| arg.adapts_integer_literal_to(*p);
     let fits = |_position: usize, param: &Ty, arg: &CallArgKind| {
-        if arg.is_omitted_default() {
+        if arg.is_omitted_default() || arg.constructible_as(*param) {
             return true;
         }
         if arg.is_lambda_literal() {

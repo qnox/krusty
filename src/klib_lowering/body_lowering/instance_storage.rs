@@ -10,6 +10,8 @@ mod tests;
 #[derive(Clone, Copy)]
 enum Access {
     Initializer,
+    /// A member of a same-library file-local class, which reads and writes the class's fields.
+    Member,
     ValueReadOnly,
 }
 
@@ -58,6 +60,44 @@ impl<'a> InstanceStorageFrame<'a> {
         }
     }
 
+    pub(super) fn local_initializer(
+        class: ClassId,
+        receiver: Ty,
+        fields: &[super::super::same_library_class::LocalStoredField<'a>],
+    ) -> Self {
+        Self::local(class, receiver, fields, Access::Initializer)
+    }
+
+    pub(super) fn local_member(
+        class: ClassId,
+        receiver: Ty,
+        fields: &[super::super::same_library_class::LocalStoredField<'a>],
+    ) -> Self {
+        Self::local(class, receiver, fields, Access::Member)
+    }
+
+    fn local(
+        class: ClassId,
+        receiver: Ty,
+        fields: &[super::super::same_library_class::LocalStoredField<'a>],
+        access: Access,
+    ) -> Self {
+        Self {
+            class,
+            receiver: Some(receiver),
+            fields: fields
+                .iter()
+                .enumerate()
+                .map(|(index, field)| Field {
+                    symbol: field.symbol,
+                    index: u32::try_from(index).expect("a field list fits u32"),
+                    ty: field.ty,
+                })
+                .collect(),
+            access,
+        }
+    }
+
     pub(super) fn value_member(
         class: ClassId,
         field: &'a KlibIrField,
@@ -83,6 +123,7 @@ impl<'a> InstanceStorageFrame<'a> {
                 Access::Initializer => {
                     "an initializer accesses a field outside its exact declaring class"
                 }
+                Access::Member => "a member accesses a field outside its exact declaring class",
                 Access::ValueReadOnly => {
                     "a value class member reads a field outside its declaring class"
                 }

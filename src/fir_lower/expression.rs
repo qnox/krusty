@@ -1,7 +1,6 @@
 use crate::fir::{
     FirBinaryOperation, FirConstant, FirConversion, FirConversionKind, FirExprId, FirExprKind,
-    FirIndexedAccessKind, FirJumpKind, FirReceiver, FirTypeOperation, FirUnaryOperation,
-    ResolvedTy,
+    FirJumpKind, FirReceiver, FirTypeOperation, FirUnaryOperation, ResolvedTy,
 };
 use crate::ir::{Callee, ExprId, IrBinOp, IrCatch, IrConst, IrExpr, IrIntrinsic, IrTypeOp};
 use crate::types::Ty;
@@ -1021,50 +1020,6 @@ impl BodyLowering<'_> {
                     self.record_generated_class_provenance(expression_id, lowered as usize);
                 }
                 lowered
-            }
-            FirExprKind::IndexedRead {
-                kind,
-                receiver,
-                indices,
-            } => {
-                let receiver = self.expression(*receiver)?;
-                let arguments = indices
-                    .iter()
-                    .map(|index| self.expression_with_conversion(index.value, index.conversion))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let operation = match kind {
-                    FirIndexedAccessKind::Array => IrIntrinsic::ArrayGet,
-                    FirIndexedAccessKind::String => IrIntrinsic::StringGet,
-                };
-                self.ir.add_expr(IrExpr::Call {
-                    callee: Box::new(Callee::Intrinsic {
-                        operation,
-                        ret: expression.ty.get(),
-                    }),
-                    dispatch_receiver: Some(receiver),
-                    args: arguments,
-                })
-            }
-            FirExprKind::IndexedWrite {
-                receiver,
-                indices,
-                value,
-                conversion,
-            } => {
-                let receiver = self.expression(*receiver)?;
-                let mut arguments = indices
-                    .iter()
-                    .map(|index| self.expression_with_conversion(index.value, index.conversion))
-                    .collect::<Result<Vec<_>, _>>()?;
-                arguments.push(self.expression_with_conversion(*value, *conversion)?);
-                self.ir.add_expr(IrExpr::Call {
-                    callee: Box::new(Callee::Intrinsic {
-                        operation: IrIntrinsic::ArraySet,
-                        ret: expression.ty.get(),
-                    }),
-                    dispatch_receiver: Some(receiver),
-                    args: arguments,
-                })
             }
             FirExprKind::SafeCall { receiver, selector } => {
                 self.safe_call_expression(expression_id, receiver, *selector, expression.ty.get())?

@@ -30,13 +30,8 @@ impl Parser<'_> {
         let bare_branch_value = std::mem::take(&mut self.bare_branch_value);
         // Labels may prefix declarations as well as loops/lambdas. Keep the declaration as its real
         // statement node and retain the label in the file's sparse source metadata.
-        if self.at(TokenKind::Ident)
-            && self
-                .t
-                .get(self.i + 1)
-                .is_some_and(|token| token.kind == TokenKind::At)
-        {
-            let after = self.after_plain_newlines(self.i + 2);
+        if self.at_label_definition_at(self.i) {
+            let after = self.i + 2;
             let declaration_follows = self.t.get(after).is_some_and(|token| {
                 matches!(
                     token.kind,
@@ -48,7 +43,6 @@ impl Parser<'_> {
                 let label_span = self.tok().span;
                 self.bump(); // label
                 self.bump(); // '@'
-                self.skip_plain_newlines();
                 let statement = self.parse_stmt();
                 self.file
                     .statement_labels
@@ -65,11 +59,12 @@ impl Parser<'_> {
             while self
                 .t
                 .get(loop_token)
-                .is_some_and(|token| token.kind == TokenKind::Newline)
+                .is_some_and(|token| token.kind == TokenKind::Semicolon)
             {
                 loop_token += 1;
             }
             let is_label = next1.is_some_and(|t| t.kind == TokenKind::At)
+                && self.at_label_definition_at(self.i)
                 && self.t.get(loop_token).is_some_and(|t| {
                     matches!(
                         t.kind,
@@ -80,7 +75,7 @@ impl Parser<'_> {
                 loop_label = Some(self.text().to_string());
                 self.bump(); // label name
                 self.bump(); // '@'
-                self.skip_newlines();
+                self.skip_semicolons();
             }
         }
         // A modifier-prefixed LOCAL function (`tailrec fun f(…)`, `suspend fun g(…)`) is a
@@ -106,7 +101,7 @@ impl Parser<'_> {
                         arguments,
                     });
                 }
-                self.skip_newlines();
+                self.skip_semicolons();
             }
             // The annotated statement is the one a bare branch body holds.
             self.bare_branch_value = bare_branch_value;
@@ -175,7 +170,7 @@ impl Parser<'_> {
                 // `while` keyword, so there is no body statement. (A non-do loop body may itself be a
                 // `while` loop, so this empty-body shortcut is do-while-specific.)
                 let body_span = self.tok().span;
-                self.skip_newlines();
+                self.skip_semicolons();
                 let body = if self.at(TokenKind::KwWhile) {
                     self.file.add_expr(
                         Expr::Block {
@@ -187,7 +182,7 @@ impl Parser<'_> {
                 } else {
                     self.parse_loop_body()
                 };
-                self.skip_newlines();
+                self.skip_semicolons();
                 self.expect(TokenKind::KwWhile, "'while'");
                 let cond = self.parse_parenthesized_condition();
                 self.finish_stmt(
@@ -266,7 +261,7 @@ impl Parser<'_> {
                 // Peek WITHOUT consuming: only a `}` (after newlines) makes this the body's last
                 // statement — consuming the newlines here would shift the statement's spans.
                 let after_nl = (self.i..self.t.len())
-                    .find(|&i| self.t[i].kind != TokenKind::Newline)
+                    .find(|&i| self.t[i].kind != TokenKind::Semicolon)
                     .map(|i| self.t[i].kind);
                 // A script's last statement is its result, a value as well.
                 let keeps_value = bare_branch_value
@@ -292,7 +287,7 @@ impl Parser<'_> {
                     match self.file.expr(e).clone() {
                         Expr::Name(n) => {
                             let operator = self.bump().span; // '='
-                            self.skip_newlines();
+                            self.skip_semicolons();
                             let value = self.parse_unlabelled_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
                             let statement = self.finish_assignment_stmt(
@@ -305,7 +300,7 @@ impl Parser<'_> {
                         }
                         Expr::Member { receiver, name } => {
                             let operator = self.bump().span; // '='
-                            self.skip_newlines();
+                            self.skip_semicolons();
                             let value = self.parse_unlabelled_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
                             let statement = self.finish_assignment_stmt(
@@ -323,7 +318,7 @@ impl Parser<'_> {
                         }
                         Expr::Index { array, indices } => {
                             let operator = self.bump().span; // '='
-                            self.skip_newlines();
+                            self.skip_semicolons();
                             let value = self.parse_unlabelled_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
                             return self.finish_assignment_stmt(
@@ -342,7 +337,7 @@ impl Parser<'_> {
                             args: None,
                         } if !self.parenthesized_expressions.contains(&e.0) => {
                             let operator = self.bump().span; // '='
-                            self.skip_newlines();
+                            self.skip_semicolons();
                             let value = self.parse_unlabelled_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
                             return self.finish_assignment_stmt(
@@ -371,7 +366,7 @@ impl Parser<'_> {
                     match self.file.expr(e).clone() {
                         Expr::Name(n) => {
                             self.bump();
-                            self.skip_newlines();
+                            self.skip_semicolons();
                             let rhs = self.parse_unlabelled_expr();
                             let lhs = self.file.add_compound_assignment_read(e, op_span);
                             let value = self.file.add_expr(
@@ -391,7 +386,7 @@ impl Parser<'_> {
                         }
                         Expr::Member { receiver, name } => {
                             self.bump();
-                            self.skip_newlines();
+                            self.skip_semicolons();
                             let rhs = self.parse_unlabelled_expr();
                             let lhs = self.file.add_compound_assignment_read(e, op_span);
                             let value = self.file.add_expr(
@@ -420,7 +415,7 @@ impl Parser<'_> {
                             args: None,
                         } if !self.parenthesized_expressions.contains(&e.0) => {
                             self.bump();
-                            self.skip_newlines();
+                            self.skip_semicolons();
                             let rhs = self.parse_unlabelled_expr();
                             // The compound operator applies to the non-null member, inside the
                             // safe-call guard. A safe-call lhs would select the nullable extension.
@@ -466,7 +461,7 @@ impl Parser<'_> {
                         }
                         Expr::Index { array, indices } => {
                             self.bump();
-                            self.skip_newlines();
+                            self.skip_semicolons();
                             let rhs = self.parse_unlabelled_expr();
                             let lhs = self.file.add_expr(
                                 Expr::Index {
@@ -501,7 +496,7 @@ impl Parser<'_> {
                         // declaring file from a real project's test source set.
                         _ => {
                             self.bump();
-                            self.skip_newlines();
+                            self.skip_semicolons();
                             let value = self.parse_unlabelled_expr();
                             return self.finish_assignment_stmt(
                                 Stmt::CompoundAssign {
@@ -534,7 +529,7 @@ impl Parser<'_> {
         self.block_trailing_is_value = trailing_is_value;
         let mut stmts = Vec::new();
         loop {
-            self.skip_newlines();
+            self.skip_semicolons();
             if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
                 break;
             }

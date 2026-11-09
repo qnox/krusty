@@ -9,7 +9,7 @@ impl Parser<'_> {
     pub(super) fn parse_enum_primary_constructor_parameters(&mut self) -> (Vec<PropParam>, u32) {
         self.bump(); // '('
         let mut props = Vec::new();
-        self.skip_newlines();
+        self.skip_semicolons();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             let declaration_start = self.tok().span.lo;
             self.begin_declaration_prefix();
@@ -25,12 +25,12 @@ impl Parser<'_> {
             let pspan = self.tok().span;
             let pname = self.ident_or_error("parameter name");
             self.expect(TokenKind::Colon, "':'");
-            self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
+            self.skip_semicolons(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
             let ty = self.parse_vararg_aware_type(is_vararg);
             // A default value (`enum class C(val x: Int = 1)`) — same as a regular class ctor param;
             // each enum entry that omits the argument gets it at its construction site.
             let default = if self.eat(TokenKind::Eq) {
-                self.skip_newlines();
+                self.skip_semicolons();
                 Some(self.parse_expr())
             } else {
                 None
@@ -61,11 +61,11 @@ impl Parser<'_> {
                 annotations: Vec::new(),
                 annotation_args: Vec::new(),
             });
-            self.skip_newlines();
+            self.skip_semicolons();
             if !self.eat(TokenKind::Comma) {
                 break;
             }
-            self.skip_newlines();
+            self.skip_semicolons();
         }
         // As for a class, kotlinc maps the primary constructor `$default`'s `return` to `)`.
         let close = self.tok().span.lo;

@@ -34,6 +34,11 @@
 //! for a target whose companion getter runs before the companion is built, calling the enum's
 //! initializer there ([`IrFile::enum_initializers`]).
 //!
+//! Another file reads a constant of an enum this file declares through an entry: an ordinary
+//! function of this file answering the constant ([`publish_constants`]), which a target exports by
+//! the enum and constant name, as it exports an object's instance entry. Only the declaring file
+//! holds the constants' storage, so every read of a constant, in any file, finds the one object.
+//!
 //! A target runs this before the shared default-argument lowering, which then realizes a
 //! constant that leaves constructor arguments out like any other construction. The JVM keeps
 //! kotlinc's `<clinit>`, `$VALUES` and `$ENTRIES` and does not run it. An enum that another file
@@ -67,7 +72,7 @@ struct Realized {
 /// a constructor that reaches back into its own enum observes, and the two differ there; once the
 /// enum is built they agree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Contract {
+pub enum Contract {
     /// kotlinc-native's `EnumClassLowering`: every constant is allocated and published before the
     /// first is constructed, each is then constructed in place; `values()` stores each constant
     /// at its current ordinal in name order (`valuesForEnum`); `entries` is built after the
@@ -80,8 +85,41 @@ pub(crate) enum Contract {
     KotlinWasm,
 }
 
+/// Build the entry answering each constant of every enum `exports` publishes from `ir`, before
+/// [`realize`] rewrites the entries' reads into reads of the constants' storage.
+pub fn publish_constants(ir: &mut IrFile, exports: &mut super::DependencyExportSignatures) {
+    let enums = exports.enums().to_vec();
+    for class in enums {
+        let classifier = ir.classes[class as usize].fq_name_id();
+        let Some(result) = ir.declared_class_self_type(classifier) else {
+            continue;
+        };
+        let names: Vec<Box<str>> = ir.classes[class as usize]
+            .enum_entries
+            .iter()
+            .map(|entry| entry.name.as_str().into())
+            .collect();
+        for name in names {
+            let value = ir.add_expr(crate::ir::IrExpr::EnumEntry {
+                classifier,
+                name: name.clone(),
+            });
+            ir.set_logical_type(value, result);
+            let entry = super::construction_entries::entry(
+                ir,
+                &format!("<enum constant {name}>$get"),
+                Vec::new(),
+                result,
+                value,
+            );
+            ir.construction_entries.insert(entry, class);
+            exports.record_enum_constant_entry(super::EnumConstant { classifier, name }, entry);
+        }
+    }
+}
+
 /// Realize every enum class `ir` declares and rewrite every emitted use of one.
-pub(crate) fn realize(ir: &mut IrFile, contract: Contract) {
+pub fn realize(ir: &mut IrFile, contract: Contract) {
     let enums: Vec<ClassId> = (0..ir.classes.len())
         .map(|class| ClassId::try_from(class).expect("too many classes"))
         .filter(|&class| is_enum(&ir.classes[class as usize]))
@@ -102,14 +140,14 @@ pub(crate) fn realize(ir: &mut IrFile, contract: Contract) {
 /// One of `kotlin.Enum`'s two properties, which a target answers from the storage its enum base
 /// contributes to every constant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BaseMember {
+pub enum BaseMember {
     Name,
     Ordinal,
 }
 
 /// The `kotlin.Enum` property an external property read names: the getter frozen at the
 /// frontend/backend boundary is declared by `kotlin.Enum`, under the name its provider decoded.
-pub(crate) fn base_member(
+pub fn base_member(
     callables: &super::CheckedBackendCallables,
     target: crate::fir::ExternalPropertyId,
 ) -> Option<BaseMember> {

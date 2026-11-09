@@ -267,6 +267,31 @@ mod tests {
     }
 
     #[test]
+    fn illegal_argument_constructors_keep_their_declaring_class_authority() {
+        let owner = type_name("kotlin/IllegalArgumentException");
+        let layout = Some(RuntimeExceptionLayout {
+            kind: RuntimeExceptionKind::IllegalArgument,
+            parent: Some(RuntimeExceptionKind::RuntimeException.classifier()),
+        });
+        for (params, message) in [(Vec::new(), false), (vec![Ty::nullable(Ty::String)], true)] {
+            let mut trusted = constructor(params.clone());
+            trusted.owner = Some(owner);
+            realize_constructor(owner, true, layout, &mut trusted);
+            assert!(matches!(
+                trusted.realization,
+                MemberRealization::Intrinsic(CompilerIntrinsic::ThrowableConstructor {
+                    kind: RuntimeExceptionKind::IllegalArgument,
+                    message: actual,
+                }) if actual == message
+            ));
+            let mut untrusted = constructor(params);
+            untrusted.owner = Some(owner);
+            realize_constructor(owner, false, layout, &mut untrusted);
+            assert_eq!(untrusted.realization, MemberRealization::Dispatch);
+        }
+    }
+
+    #[test]
     fn constructor_authority_requires_the_selected_storage_role_and_overload() {
         let owner = RuntimeExceptionKind::IllegalState.classifier();
         let valid = RuntimeExceptionLayout {

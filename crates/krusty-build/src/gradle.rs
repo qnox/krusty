@@ -233,6 +233,7 @@ mod recording_tests;
 mod tests {
     use super::*;
 
+    mod body_only_dependents;
     mod compiler_options;
     use krusty::plugins::registry::PluginDiagnostic;
 
@@ -383,6 +384,7 @@ mod tests {
                 "$ROOT/core/util.runtime/src/org/jetbrains/kotlin/util/RuntimeJava.java",
                 "-classpath",
                 runtime_classpath.as_str(),
+                "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 "-language-version",
                 "2.4",
                 "-api-version",
@@ -395,7 +397,6 @@ mod tests {
                 "no-compatibility",
                 "-java-parameters",
                 "-Xconsistent-data-class-copy-visibility",
-                "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 reference_version.as_str(),
                 "-jdk-home",
                 "$JDK_HOME",
@@ -417,6 +418,7 @@ mod tests {
                 "$ROOT/compiler/util/src/org/jetbrains/kotlin/util/Util.kt",
                 "-classpath",
                 util_classpath.as_str(),
+                "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 "-language-version",
                 "2.4",
                 "-api-version",
@@ -432,7 +434,6 @@ mod tests {
                 "-java-parameters",
                 "-Xconsistent-data-class-copy-visibility",
                 "-Xskip-prerelease-check",
-                "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 reference_version.as_str(),
                 "-jdk-home",
                 "$JDK_HOME",
@@ -449,6 +450,7 @@ mod tests {
                 "-classpath",
                 friend_classpath.as_str(),
                 friend_argument.as_str(),
+                "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 "-language-version",
                 "2.4",
                 "-api-version",
@@ -464,7 +466,6 @@ mod tests {
                 "-java-parameters",
                 "-Xconsistent-data-class-copy-visibility",
                 "-Xskip-prerelease-check",
-                "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 reference_version.as_str(),
                 "-jdk-home",
                 "$JDK_HOME",
@@ -1178,6 +1179,39 @@ tasks.register<JavaExec>("runJvm") {
             assert!(root.join(class).is_file(), "missing {class}");
         }
 
+        // A free `-P` configures a plugin the task already loads. It reaches krusty after the
+        // structured options, as KGP passes it to kotlinc, and the compile stays krusty's: the
+        // lambda of `Count` reads `length` only because the free annotation makes `text` its
+        // receiver.
+        clear_invocation_log(log);
+        clear_invocation_log(&fixture.probes);
+        fixture
+            .build()
+            .property("krusty.negative", "free-plugin-option")
+            .tasks([":model:compileKotlin"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("a free plugin option: {error}"));
+        let text = read_invocation_log(log).expect("invocation log");
+        let runs = invocations(&text);
+        assert_eq!(runs.len(), 1, "{text}");
+        assert_eq!(source_names(&runs[0]), ["Count.kt", "Point.kt"], "{text}");
+        let options = runs[0]
+            .windows(2)
+            .filter(|pair| pair[0] == "-P")
+            .map(|pair| pair[1].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            options,
+            [
+                "plugin:org.jetbrains.kotlin.samWithReceiver:annotation=model.WithReceiver",
+                "plugin:org.jetbrains.kotlin.samWithReceiver:annotation=model.FreeReceiver",
+            ],
+            "{text}"
+        );
+        assert!(root
+            .join("model/build/classes/kotlin/main/model/Count.class")
+            .is_file());
+
         // Through the `krustyCompile` aggregate too: it reaches the refused compile's kotlinc task,
         // so `:model` is compiled (by kotlinc) rather than skipped with its replacement.
         clear_invocation_log(log);
@@ -1277,6 +1311,14 @@ samWithReceiver {
 if (providers.gradleProperty("krusty.negative").orNull == "compiler-plugin-before-krusty") {
     pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
+// A free plugin option for a plugin the task loads, as Compose Hot Reload adds one to every compile.
+if (providers.gradleProperty("krusty.negative").orNull == "free-plugin-option") {
+    kotlin.sourceSets.named("main") { kotlin.srcDir("src/freeOption/kotlin") }
+    kotlin.compilerOptions.freeCompilerArgs.addAll(
+        "-P",
+        "plugin:org.jetbrains.kotlin.samWithReceiver:annotation=model.FreeReceiver",
+    )
+}
 pluginManager.apply("dev.krustythecompiler")
 
 dependencies {
@@ -1287,6 +1329,10 @@ dependencies {
         write(
             "model/src/main/kotlin/model/Point.kt",
             "package model\n\nimport kotlinx.serialization.Serializable\n\n@Serializable\ndata class Point(val x: Int, val label: String)\n\n@Target(AnnotationTarget.CLASS)\nannotation class WithReceiver\n\n@WithReceiver\nfun interface Measure { fun measure(text: String): Int }\n\nfun measured() = Measure { length }.measure(\"four\")\n",
+        );
+        write(
+            "model/src/freeOption/kotlin/model/Count.kt",
+            "package model\n\n@Target(AnnotationTarget.CLASS)\nannotation class FreeReceiver\n\n@FreeReceiver\nfun interface Count { fun count(text: String): Int }\n\nfun counted() = Count { length }.count(\"three\")\n",
         );
         // ...and follows krusty here.
         write(
@@ -1788,6 +1834,8 @@ fun main() {
         pub(super) log: PathBuf,
         /// The recording proxy's log of support checks, apart from the compiles in `log`.
         probes: PathBuf,
+        /// The recording proxy's log of classpath fingerprints, the compile tasks' input key.
+        pub(super) fingerprints: PathBuf,
         proxy: PathBuf,
         plugin_project: PathBuf,
         plugin_version: String,
@@ -1820,12 +1868,22 @@ fun main() {
             let root = root.canonicalize().expect("canonicalize fixture root");
             let log = root.join("krusty-invocations.txt");
             let probes = root.join("krusty-plugin-checks.txt");
+            let fingerprints = root.join("krusty-classpath-fingerprints.txt");
             let diagnostics = root.join("krusty-diagnostics.txt");
             let proxy = root.join("recording-krusty");
             let actual = std::env::var_os("KRUSTY_GRADLE_TEST_BIN")
                 .map(PathBuf::from)
                 .expect("KRUSTY_GRADLE_TEST_BIN must name the built krusty CLI");
-            write_krusty_proxy(&proxy, &log, &probes, &diagnostics, &actual);
+            write_krusty_proxy(
+                &proxy,
+                ProxyRecords {
+                    compiles: &log,
+                    probes: &probes,
+                    fingerprints: &fingerprints,
+                },
+                &diagnostics,
+                &actual,
+            );
             let wrapper = root.join("gradlew");
             std::fs::write(
                 &wrapper,
@@ -1861,6 +1919,7 @@ fun main() {
                 root,
                 log,
                 probes,
+                fingerprints,
                 proxy,
                 plugin_project,
                 plugin_version,
@@ -2146,24 +2205,31 @@ fun main() {
         out
     }
 
+    /// Where the recording proxy logs each kind of call: the compiles, the support checks, and
+    /// the classpath fingerprints that key the compile tasks.
+    pub(super) struct ProxyRecords<'a> {
+        pub(super) compiles: &'a Path,
+        pub(super) probes: &'a Path,
+        pub(super) fingerprints: &'a Path,
+    }
+
     pub(super) fn write_krusty_proxy(
         path: &Path,
-        log: &Path,
-        probes: &Path,
+        records: ProxyRecords<'_>,
         diagnostics: &Path,
         actual: &Path,
     ) {
         let quote = |value: &Path| value.display().to_string().replace('\'', "'\\''");
         let script = r#"#!/bin/sh
 WRITE_INVOCATION
-if [ "$1" = refusals ]; then
-  KRUSTY_RECORD='PROBESPATH'
-else
-  KRUSTY_RECORD='LOGPATH'
-fi
+case "$1" in
+  refusals) KRUSTY_RECORD='PROBESPATH' ;;
+  classpath-fingerprint) KRUSTY_RECORD='FINGERPRINTSPATH' ;;
+  *) KRUSTY_RECORD='LOGPATH' ;;
+esac
 if ! mkdir -p "$KRUSTY_RECORD"; then exit 7; fi
 record_invocation "$@"
-if [ "$1" = refusals ]; then
+if [ "$1" = refusals ] || [ "$1" = classpath-fingerprint ]; then
   exec 'ACTUAL' "$@"
 fi
 diagnostics="DIAGNOSTICSPATH.$$"
@@ -2174,8 +2240,9 @@ mv "$diagnostics" "DIAGNOSTICSPATH"
 exit "$status"
 "#
         .replace("WRITE_INVOCATION", krusty_test_support::WRITE_INVOCATION)
-        .replace("LOGPATH", &quote(log))
-        .replace("PROBESPATH", &quote(probes))
+        .replace("LOGPATH", &quote(records.compiles))
+        .replace("PROBESPATH", &quote(records.probes))
+        .replace("FINGERPRINTSPATH", &quote(records.fingerprints))
         .replace("DIAGNOSTICSPATH", &quote(diagnostics))
         .replace("ACTUAL", &quote(actual));
         std::fs::write(path, script).expect("write recording krusty");
@@ -2453,9 +2520,16 @@ include(":core:util.runtime")
 include(":compiler:util")
 "#,
         );
+        // The Kotlin Gradle plugin is requested once, at the root: Kotlin 2.5 fails a build that
+        // loads it in several subprojects' classloaders.
         write(
             "build.gradle.kts",
             r#"
+plugins {
+    kotlin("jvm") version "KGP_VERSION" apply false
+    kotlin("plugin.assignment") version "KGP_VERSION" apply false
+}
+
 subprojects {
     repositories {
         mavenCentral()
@@ -2473,7 +2547,7 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 import org.gradle.api.tasks.compile.JavaCompile
 
 plugins {
-    kotlin("jvm") version "KGP_VERSION"
+    kotlin("jvm")
     id("dev.krustythecompiler") version "PLUGIN_VERSION"
     `java-library`
 }
@@ -2557,9 +2631,8 @@ import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.compile.JavaCompile
 
 plugins {
-    kotlin("jvm") version "KGP_VERSION"
+    kotlin("jvm")
     id("dev.krustythecompiler") version "PLUGIN_VERSION"
-    kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
 }
 
@@ -2656,7 +2729,6 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "classpath-alias" -> freeCompilerArgs.addAll("-cp", "elsewhere.jar")
             "progressive-alias" -> freeCompilerArgs.add("-Xprogressive")
             "compiler-plugin-alias" -> freeCompilerArgs.add("-Xcompiler-plugin=forbidden.jar")
-            "plugin-option-free-argument" -> freeCompilerArgs.addAll("-P", "plugin:org.example.widget:annotation=probe.Open")
             "reference-version-free-argument" -> freeCompilerArgs.add("-Xkotlin-reference-version=2.4.0")
             "dependency-policy-free-argument" -> freeCompilerArgs.add("-no-stdlib=false")
             "release-specific-argument-boundary" -> freeCompilerArgs.addAll(
