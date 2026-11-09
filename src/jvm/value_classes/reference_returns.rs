@@ -8,7 +8,7 @@
 use super::{record_value_boundary, BoxOp, CarrierUnboxes, FieldGetters, ReprInputs, Under};
 use crate::backend::BackendClassifierSource;
 use crate::fx_hash::{HashMap, HashSet};
-use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
+use crate::ir::{for_each_child, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::types::{Ty, TypeName};
 
 /// The declarations whose returns cross this boundary, with the pre-erasure facts the
@@ -51,6 +51,43 @@ pub(super) fn value_class_reference_supertypes(
         }
     }
     supertypes
+}
+
+/// Whether a cast of a boxed `value_class` is an upcast: an `as` to `Any` or to one of the class's
+/// transitive semantic supertypes, the same identity traversal over the frozen class model as
+/// [`value_class_reference_supertypes`]. kotlinc emits no `checkcast` for it; `as?`, `is` and a
+/// downcast keep their instruction.
+pub(super) fn is_upcast(
+    classifiers: &dyn BackendClassifierSource,
+    op: IrTypeOp,
+    type_operand: &Ty,
+    value_class: TypeName,
+) -> bool {
+    let Some(target) = type_operand.non_null().obj_internal() else {
+        return false;
+    };
+    if !matches!(op, IrTypeOp::Cast | IrTypeOp::CastNonNull) {
+        return false;
+    }
+    if target == crate::types::wk::any() {
+        return true;
+    }
+    let mut pending = classifiers
+        .classifier(value_class)
+        .map(|facts| facts.supertypes.to_vec())
+        .unwrap_or_default();
+    let mut seen = HashSet::default();
+    while let Some(classifier) = pending.pop() {
+        if classifier == target {
+            return true;
+        }
+        if seen.insert(classifier) {
+            if let Some(facts) = classifiers.classifier(classifier) {
+                pending.extend(facts.supertypes.iter().copied());
+            }
+        }
+    }
+    false
 }
 
 /// Record, for every function declared to return `Any` or a value-class interface, the boundary
