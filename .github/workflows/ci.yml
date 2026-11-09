@@ -15,7 +15,15 @@ name: ci
 on:
   push:
     branches: ['mq/**']
+  # The queue dispatches a master run after each batch it lands, which saves the caches. Starting
+  # one by hand with `release` on also builds the release on every platform and publishes it, once
+  # the whole suite passed on that commit.
   workflow_dispatch:
+    inputs:
+      release:
+        description: Build and publish a release of this master commit after the test suite passes
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -1337,13 +1345,12 @@ jobs:
             "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$kotlin/kotlin-stdlib-$kotlin.jar"
           scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
 
-  # Every covered master commit builds its own immutable release artifacts, even after master
-  # advances. All six platforms can build concurrently on their hosted runners. Release builds
-  # are paused unless the KRUSTY_RELEASE_BUILDS repository variable is 'true': they hold six
-  # hosted runners per master commit, and the release job below is skipped with them.
+  # A release is started by hand (`release` input) on a master commit and builds its own immutable
+  # artifacts there, even after master advances. All six platforms build concurrently on their
+  # hosted runners; the queue's own master runs leave them out.
   build-release:
     needs: [ci-and-conformance]
-    if: github.ref == 'refs/heads/master' && vars.KRUSTY_RELEASE_BUILDS == 'true'
+    if: github.ref == 'refs/heads/master' && inputs.release
     strategy:
       fail-fast: false
       matrix:
