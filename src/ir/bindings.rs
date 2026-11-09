@@ -11,6 +11,24 @@ pub enum IrBindingStability {
 }
 
 impl super::IrFile {
+    /// The value slot `lowered` reads when it is a plain read of a binding published as stable
+    /// (see [`super::IrFile::binding_read_stability`]). Such a read is already its own snapshot:
+    /// kotlinc's `irLetS` binds an immutable `IrGetValue` without a temporary, and
+    /// `JvmOptimizationLowering` removes an `IR_TEMPORARY_VARIABLE` initialized from one.
+    /// Authenticated receiver parameters, including lifted receiver captures, are immutable bindings
+    /// too. Mutable bindings, shared cells, conversions and unauthenticated reads need a snapshot.
+    pub fn stable_value_read(&self, lowered: super::ExprId) -> Option<u32> {
+        match self.expr(lowered) {
+            super::IrExpr::GetValue(slot)
+                if self.binding_read_stability.get(&lowered)
+                    == Some(&IrBindingStability::Stable) =>
+            {
+                Some(*slot)
+            }
+            _ => None,
+        }
+    }
+
     /// The first value slot no function parameter, declaration, read, write, catch parameter or
     /// checked loop variable in this file uses. A backend pass that introduces a temporary takes
     /// its slot from here, so it never aliases a source binding.

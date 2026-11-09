@@ -660,6 +660,15 @@ struct BodyScopes {
         HashMap<crate::fir::BodyLocalCallableDeclarationId, LocalCallableRealization>,
 }
 
+/// Take the next temporary slot from a body's temporary counter.
+fn next_temporary(counter: &mut u32) -> u32 {
+    let temporary = *counter;
+    *counter = counter
+        .checked_add(1)
+        .expect("too many FIR lowering temporaries");
+    temporary
+}
+
 impl<'a> BodyLowering<'a> {
     fn new(
         body: &'a FirBody,
@@ -803,12 +812,7 @@ impl<'a> BodyLowering<'a> {
     }
 
     fn allocate_temporary(&mut self) -> u32 {
-        let temporary = self.next_temporary;
-        self.next_temporary = self
-            .next_temporary
-            .checked_add(1)
-            .expect("too many FIR lowering temporaries");
-        temporary
+        next_temporary(&mut self.next_temporary)
     }
 
     /// Attach a generated static helper to the class that lexically owns this checked FIR body.

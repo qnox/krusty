@@ -1,87 +1,24 @@
 //! Lower checked type operations whose semantics require control flow.
 
 use crate::fir::FirExprId;
-use crate::ir::{ExprId, IrBinOp, IrConst, IrExpr, IrTypeOp};
+use crate::ir::{
+    admits_null_at_runtime, settled_instance_answer, ExprId, IrBinOp, IrConst, IrExpr, IrTypeOp,
+};
 use crate::types::{stored_value_ty, Ty, TyKind};
 
-use super::{BodyLowering, FirLoweringFailure};
-
-/// The language-defined answer for an instance check which does not depend on the operand.
-fn settled_instance_answer(target: Ty) -> Option<bool> {
-    (target.non_null().canonical_semantic() == Ty::Nothing).then_some(false)
-}
-
-/// kotlin IR's `IrType.isNullable()`: a nullable or flexible occurrence, or a type parameter whose
-/// bound admits `null`. A definitely-non-null `T & Any` does not.
-fn admits_null_at_runtime(ty: Ty) -> bool {
-    ty.admits_null() || (ty.is_ty_param() && ty.upper_bound_admits_null())
-}
+use super::{next_temporary, BodyLowering, FirLoweringFailure};
 
 impl BodyLowering<'_> {
-    /// `operand is target` (or `!is`), with the one case the LANGUAGE settles folded.
-    ///
-    /// `Nothing` has no instances, so no value is one and the answer does not depend on the
-    /// operand. There is also no class to test against — `kotlin.Nothing` is uninstantiable by
-    /// construction — so a backend asking the question has nothing to ask about, and the JVM
-    /// emitter answered it by erasing the target to `java/lang/Object`, which every non-null value
-    /// passes. The rule is Kotlin's rather than a target's, so it is settled here, once.
-    ///
-    /// The operand is still EVALUATED. A settled check folds the answer, not the expression, and an
-    /// operand may have effects.
-    ///
-    /// The target is normalized first. `Nothing` reaches here both as `Ty::Nothing` and as
-    /// `Obj("kotlin/Nothing")` depending on where it was written, and matching one spelling would
-    /// answer the rule for some programs and not others — so `canonical_semantic` decides it once
-    /// rather than this becoming another site that lists both.
-    ///
-    /// `x is Nothing?` reaches this through the null-or-instance expansion in [`Self::type_test`],
-    /// so it becomes `x == null || false` — which is what `Nothing?`, the type of `null` and of
-    /// nothing else, means. Safe casts consume the same settled answer before constructing their generic
-    /// guard and directly yield `null`, which is the same fact seen from the other side.
-    pub(super) fn instance_check(
-        &mut self,
-        negated: bool,
-        operand: crate::ir::ExprId,
-        target: crate::types::Ty,
-    ) -> crate::ir::ExprId {
-        if let Some(answer) = settled_instance_answer(target) {
-            let answer = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(if negated {
-                !answer
-            } else {
-                answer
-            })));
-            let block = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![operand],
-                value: Some(answer),
-            });
-            // This synthesized value-bearing block has no source FIR node whose finalization can
-            // attach the result of the settled semantic check.
-            self.ir.set_logical_type(block, Ty::Boolean);
-            return block;
-        }
-        let op = if negated {
-            IrTypeOp::NotInstanceOf
-        } else {
-            IrTypeOp::InstanceOf
-        };
-        self.ir.add_expr(IrExpr::TypeOp {
-            op,
-            arg: operand,
-            type_operand: target,
-        })
-    }
-
     /// `operand is target` (or `!is`) as kotlinc's `TypeOperatorLowering.lowerInstanceOf` shapes
     /// it, from the operand's checked type and the target:
     ///
     /// - a reified type-parameter target is tested as written, nullability included, so its
     ///   inline-site marker names `T?`;
-    /// - a nullable operand tested against a nullable target is bound once (`irLetS`) and becomes
-    ///   `tmp == null || tmp is T`;
+    /// - a target that admits `null` is the common null-or-instance test
+    ///   ([`crate::ir::IrFile::add_nullable_target_type_test`]);
     /// - a nullable operand tested against a non-null target with the same erased upper bound
     ///   (`x is T` for `x: T?`, `s is String` for `s: String?`) is the null check `x != null`;
-    /// - anything else tests the non-null target, so `x is String?` for a non-null `x` is
-    ///   `x is String`.
+    /// - anything else tests the target.
     ///
     /// `!is` is the negation of the same test: `!(tmp == null || tmp is T)`, `x == null`, or
     /// `x !is T`.
@@ -94,15 +31,17 @@ impl BodyLowering<'_> {
         same_erased_upper_bound: bool,
     ) -> ExprId {
         if self.is_reified_type_parameter(target) {
-            return self.instance_check(negated, operand, target);
+            return self.ir.add_instance_check(negated, operand, target);
         }
-        if admits_null_at_runtime(operand_type) && admits_null_at_runtime(target) {
-            let test = self.null_or_instance(operand, target.non_null());
-            return if negated {
-                self.ir.add_negation(test)
-            } else {
-                test
-            };
+        if admits_null_at_runtime(target) {
+            let temporaries = &mut self.next_temporary;
+            return self.ir.add_nullable_target_type_test(
+                negated,
+                operand,
+                operand_type,
+                target,
+                || next_temporary(temporaries),
+            );
         }
         if admits_null_at_runtime(operand_type) && same_erased_upper_bound {
             let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
@@ -116,53 +55,8 @@ impl BodyLowering<'_> {
                 rhs: null,
             });
         }
-        self.instance_check(negated, operand, target.non_null())
-    }
-
-    /// `irLetS(operand) { tmp -> tmp == null || tmp is target }`: a stable read is tested in place,
-    /// any other operand is evaluated once into an `Any?` temporary.
-    fn null_or_instance(&mut self, operand: ExprId, target: Ty) -> ExprId {
-        let (declaration, slot) = match self.stable_value_read(operand) {
-            Some(slot) => (None, slot),
-            None => {
-                let temporary = self.allocate_temporary();
-                let declaration = self.ir.add_expr(IrExpr::Variable {
-                    index: temporary,
-                    ty: Ty::nullable(Ty::obj("kotlin/Any")),
-                    init: Some(operand),
-                    named: false,
-                });
-                self.ir.safe_cast_temporaries.insert(declaration);
-                (Some(declaration), temporary)
-            }
-        };
-        let nullable_read = self.ir.add_expr(IrExpr::GetValue(slot));
-        let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-        let null_test = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::RefEq,
-            lhs: nullable_read,
-            rhs: null,
-        });
-        let instance_read = self.ir.add_expr(IrExpr::GetValue(slot));
-        let instance_test = self.instance_check(false, instance_read, target);
-        // `JvmBackendContext.oror` is a plain `when`, not a source `||`: its true branch is a
-        // constant and its else branch the instance test's value.
-        let true_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-        let test = self.ir.add_expr(IrExpr::When {
-            branches: vec![(Some(null_test), true_value), (None, instance_test)],
-        });
-        self.ir.set_logical_type(test, Ty::Boolean);
-        match declaration {
-            Some(declaration) => {
-                let block = self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![declaration],
-                    value: Some(test),
-                });
-                self.ir.set_logical_type(block, Ty::Boolean);
-                block
-            }
-            None => test,
-        }
+        self.ir
+            .add_instance_check(negated, operand, target.non_null())
     }
 
     /// Whether `target` (or `target?`) is a reified type parameter, whose test an inline call site
@@ -233,7 +127,7 @@ impl BodyLowering<'_> {
         };
         // kotlinc's `irLetS`: a read of an immutable binding is tested and cast in place; any other
         // operand is evaluated once into a temporary.
-        let (declaration, operand_slot) = match self.stable_value_read(value) {
+        let (declaration, operand_slot) = match self.ir.stable_value_read(value) {
             Some(slot) => (None, slot),
             None => {
                 let temporary = self.allocate_temporary();
@@ -248,7 +142,7 @@ impl BodyLowering<'_> {
             }
         };
         let read = self.ir.add_expr(IrExpr::GetValue(operand_slot));
-        let matches = self.instance_check(false, read, runtime_target);
+        let matches = self.ir.add_instance_check(false, read, runtime_target);
         let read = self.ir.add_expr(IrExpr::GetValue(operand_slot));
         // `as? T` yields `T?`. A concrete primitive already names its boxed wrapper (`Int?`).
         // A type parameter does not: an inline call later substitutes `T` with `Int`, and a
@@ -289,19 +183,9 @@ mod tests {
     use crate::types::Ty;
 
     use super::super::lower_body;
-    use super::settled_instance_answer;
 
     fn resolved(ty: Ty) -> ResolvedTy {
         ResolvedTy::new(ty).unwrap()
-    }
-
-    #[test]
-    fn the_settled_answer_normalizes_both_nothing_representations() {
-        assert_eq!(settled_instance_answer(Ty::Nothing), Some(false));
-        assert_eq!(
-            settled_instance_answer(Ty::obj("kotlin/Nothing")),
-            Some(false)
-        );
     }
 
     /// Lower `<a literal> is/!is Nothing` as the only root of a body, and answer the `IrExpr` the

@@ -76,7 +76,7 @@ impl BodyLowering<'_> {
                 // binding again instead (kotlinc drops the `<destruct>` temporary initialized from
                 // one in `JvmOptimizationLowering`). Any other container is evaluated once here.
                 let mut statements = Vec::new();
-                if self.stable_value_read(initializer_value).is_none() {
+                if self.ir.stable_value_read(initializer_value).is_none() {
                     let temporary = self.allocate_temporary();
                     let initializer_ty = self
                         .body

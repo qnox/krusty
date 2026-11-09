@@ -109,6 +109,8 @@ mod source_debug;
 pub(crate) use source_debug::SourceDebug;
 mod static_properties;
 mod type_check_role;
+mod type_tests;
+pub(crate) use type_tests::{admits_null_at_runtime, settled_instance_answer};
 mod type_parameter_declarations;
 pub mod type_reflection;
 mod value_class_constructors;

@@ -227,7 +227,7 @@ impl BodyLowering<'_> {
         ty: crate::types::Ty,
         statements: &mut Vec<crate::ir::ExprId>,
     ) -> ReusableOperand {
-        if let Some(slot) = self.stable_value_read(value) {
+        if let Some(slot) = self.ir.stable_value_read(value) {
             return ReusableOperand::Value(slot);
         }
         if let Some(constant) = integral_constant(self.ir, value) {

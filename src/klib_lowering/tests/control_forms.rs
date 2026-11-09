@@ -967,12 +967,6 @@ fn type_operators_checked_fir_expands_decline_by_name() {
             "a safe cast",
         ),
         (
-            KlibIrTypeOperator::InstanceOf,
-            T::NullableString,
-            T::Boolean,
-            "an `is` check of a nullable type",
-        ),
-        (
             KlibIrTypeOperator::ImplicitNotNull,
             T::String,
             T::String,

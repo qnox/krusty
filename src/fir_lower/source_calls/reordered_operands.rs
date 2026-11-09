@@ -33,7 +33,7 @@ impl BodyLowering<'_> {
                 true
             }
             IrExpr::GetValue(slot) => {
-                self.stable_value_read(value).is_some()
+                self.ir.stable_value_read(value).is_some()
                     || self.receiver_slots().any(|receiver| receiver == *slot)
             }
             _ => false,

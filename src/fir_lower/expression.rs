@@ -1892,7 +1892,7 @@ impl BodyLowering<'_> {
         target: Ty,
         site: crate::ir::NullCheckSite,
     ) -> ExprId {
-        let reused = self.stable_value_read(value);
+        let reused = self.ir.stable_value_read(value);
         let (stored, temporary) = match reused {
             Some(slot) => (None, slot),
             None => {

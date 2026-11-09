@@ -106,22 +106,4 @@ impl BodyLowering<'_> {
     pub(super) fn local_value_is_mutable(&self, value: crate::fir::LocalValueId) -> bool {
         self.binding_stability.get(&value) == Some(&IrBindingStability::Mutable)
     }
-
-    /// The value slot `lowered` reads when it is a plain read of a binding published as stable
-    /// (see [`crate::ir::IrFile::binding_read_stability`]). Such a read is already its own snapshot:
-    /// kotlinc's `irLetS` binds an immutable `IrGetValue` without a temporary, and
-    /// `JvmOptimizationLowering` removes an `IR_TEMPORARY_VARIABLE` initialized from one.
-    /// Authenticated receiver parameters, including lifted receiver captures, are immutable bindings
-    /// too. Mutable bindings, shared cells, conversions and unauthenticated reads need a snapshot.
-    pub(super) fn stable_value_read(&self, lowered: crate::ir::ExprId) -> Option<u32> {
-        match self.ir.expr(lowered) {
-            crate::ir::IrExpr::GetValue(slot)
-                if self.ir.binding_read_stability.get(&lowered)
-                    == Some(&IrBindingStability::Stable) =>
-            {
-                Some(*slot)
-            }
-            _ => None,
-        }
-    }
 }

@@ -29,6 +29,7 @@ mod safe_calls;
 mod same_library_class;
 mod target_calls;
 mod target_members;
+mod type_tests;
 mod value_class_members;
 mod varargs;
 
