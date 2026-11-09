@@ -188,20 +188,29 @@ fn reference_identity(
                 ));
             }
             // A dependency property is named by its getter's own provider identity, which every
-            // file's reference to it shares, as a dependency function's reference is.
+            // file's reference to it shares, under the same rule as a dependency function's
+            // reference: a getter its provider gives no such identity is identified per file.
             Some(krusty::ir::IrReferencedProperty::External(property)) => {
-                let identity = file
+                let getter = file
                     .callables
                     .property(property)
-                    .and_then(|fact| file.callables.callable(fact.getter))
-                    .and_then(|fact| fact.dependency_callable.as_ref())
-                    .ok_or(
-                        "a property reference without its module-qualified dependency identity",
-                    )?;
-                return Ok(ReferenceIdentity::Program(
-                    ReferenceDeclaration::dependency(identity)
-                        .marker(reference.bound_receiver.is_some()),
-                ));
+                    .ok_or("a property reference without frozen declaration facts")?
+                    .getter;
+                // An exported property's module names it by its getter's published identity, so an
+                // importer names it by that same identity rather than a source export's marker.
+                let identity = file
+                    .callables
+                    .callable(getter)
+                    .ok_or("a property reference without frozen getter facts")?
+                    .dependency_callable
+                    .as_ref();
+                if let Some(identity) = identity {
+                    return Ok(ReferenceIdentity::Program(
+                        ReferenceDeclaration::dependency(identity)
+                            .marker(reference.bound_receiver.is_some()),
+                    ));
+                }
+                format!("property_e{}", property.raw())
             }
             None => {
                 return Err(
