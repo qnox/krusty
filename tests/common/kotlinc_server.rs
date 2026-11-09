@@ -416,7 +416,7 @@ fn compile_jar(compiler_jar: &Path, args: &[String]) -> Option<(i32, String)> {
         }
         return Some((replayed.code, replayed.stderr));
     }
-    let result = kotlinc_compile_with_jar(&compiler_jar, args, None, None)?;
+    let result = kotlinc_compile_with_jar(compiler_jar, args, None, None)?;
     if process_compiler {
         byte_dump::report_live_kotlinc(args);
         byte_dump::remember_class_dump(args, result.0, &result.1);
