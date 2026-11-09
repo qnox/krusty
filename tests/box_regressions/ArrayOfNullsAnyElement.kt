@@ -1,4 +1,5 @@
-@JvmInline value class Meter(val v: Int)
+OPTIONAL_JVM_INLINE_ANNOTATION
+value class Meter(val v: Int)
 fun box(): String {
 val u = arrayOfNulls<UInt>(2)
 u[0] = 5u
