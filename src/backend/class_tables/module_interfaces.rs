@@ -42,14 +42,14 @@ pub(crate) struct MemberDeclaration {
 
 /// One interface's place in the numbering.
 #[derive(Clone, Debug)]
-pub(crate) struct NumberedInterface {
+pub struct NumberedInterface {
     /// The module interfaces it extends, transitively, itself first.
     pub(crate) closure: Vec<TypeName>,
 }
 
 /// The module's interface member numbers.
 #[derive(Debug, Default)]
-pub(crate) struct ModuleInterfaces {
+pub struct ModuleInterfaces {
     numbers: HashMap<PlanKey, u32>,
     members: Vec<NumberedMember>,
     interfaces: HashMap<TypeName, Result<NumberedInterface, Unsupported>>,
@@ -144,18 +144,18 @@ impl ModuleInterfaces {
 
     /// How many interface members this module numbered. A call through a dependency interface
     /// takes the next numbers, so it does not reuse one of these.
-    pub(crate) fn count(&self) -> u32 {
+    pub fn count(&self) -> u32 {
         u32::try_from(self.members.len()).expect("an interface member count fits u32")
     }
 
     /// The number of one interface member spelling, the same in every file of the module.
-    pub(crate) fn number(&self, key: PlanKey) -> Option<u32> {
+    pub fn number(&self, key: PlanKey) -> Option<u32> {
         self.numbers.get(&key).copied()
     }
 
     /// The `kotlin.Any` slot an interface member redeclaring `equals`, `hashCode` or `toString`
     /// stands in: every object's table holds it there, so it has no interface number.
-    pub(crate) fn fixed_slot(&self, callable: CallableId) -> Option<u32> {
+    pub fn fixed_slot(&self, callable: CallableId) -> Option<u32> {
         self.fixed.get(&callable).copied()
     }
 
@@ -164,17 +164,14 @@ impl ModuleInterfaces {
     }
 
     /// The numbered interface `interface`, `None` when the module declares no such interface.
-    pub(crate) fn interface(
-        &self,
-        interface: TypeName,
-    ) -> Option<Result<&NumberedInterface, &str>> {
+    pub fn interface(&self, interface: TypeName) -> Option<Result<&NumberedInterface, &str>> {
         self.interfaces
             .get(&interface)
             .map(|numbered| numbered.as_ref().map_err(String::as_str))
     }
 
     /// The parameters and result a numbered function member declares.
-    pub(crate) fn function_carriers(&self, key: PlanKey) -> Option<(&[Ty], Ty)> {
+    pub fn function_carriers(&self, key: PlanKey) -> Option<(&[Ty], Ty)> {
         match self.carriers.get(&key)? {
             Carriers::Function { parameters, result } => Some((parameters, *result)),
             Carriers::Property => None,
@@ -182,7 +179,7 @@ impl ModuleInterfaces {
     }
 
     /// Every number `interfaces` (each with its closure) declares, ascending.
-    pub(crate) fn numbers_of(&self, interfaces: &HashSet<TypeName>) -> Vec<u32> {
+    pub fn numbers_of(&self, interfaces: &HashSet<TypeName>) -> Vec<u32> {
         let mut numbers = self
             .members
             .iter()

@@ -15,10 +15,10 @@ use crate::jvm::method_node::MethodNode;
 use crate::jvm::source_map::DependencyMap;
 
 /// The one method a writer holds, with its body.
-pub(crate) struct EmittedMethod {
-    pub(crate) name: String,
-    pub(crate) descriptor: String,
-    pub(crate) body: MethodCode,
+pub struct EmittedMethod {
+    pub name: String,
+    pub descriptor: String,
+    pub body: MethodCode,
 }
 
 impl ClassWriter {
@@ -103,7 +103,7 @@ impl ClassWriter {
     /// emission reserves one (a diverging `try`'s result) that only the class writer's last pass
     /// closes. The inliner hands slots out in the order the body names them, so a gap would place
     /// the body's later locals differently.
-    pub(crate) fn sole_emitted_method_for_inlining(&mut self) -> Option<EmittedMethod> {
+    pub fn sole_emitted_method_for_inlining(&mut self) -> Option<EmittedMethod> {
         let emitted = self.sole_emitted_method()?;
         let access = self.methods.first()?.access;
         let mut node =

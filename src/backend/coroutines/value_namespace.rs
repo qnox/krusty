@@ -10,7 +10,7 @@ use super::CoroutineRepresentation;
 
 /// The maximum value-index referenced anywhere in the arena (params, locals). New state-machine locals
 /// are allocated above this so they never collide with an existing index in any function.
-pub(crate) fn max_value_index(ir: &IrFile) -> u32 {
+pub fn max_value_index(ir: &IrFile) -> u32 {
     let mut m = 0u32;
     for e in &ir.exprs {
         match e {
@@ -27,7 +27,7 @@ pub(crate) fn max_value_index(ir: &IrFile) -> u32 {
     m
 }
 
-pub(crate) fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty> {
+pub fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty> {
     function_value_types_with(ir, fid, &ir.functions[fid as usize].params, body)
 }
 
@@ -90,7 +90,7 @@ pub(super) fn function_value_types_with(
 
 /// The default a fresh temporary of `ty` starts from. Every such temporary is assigned before it is
 /// read; the target decides how the placeholder is represented.
-pub(crate) fn zero_value(
+pub fn zero_value(
     ir: &mut IrFile,
     representation: &dyn CoroutineRepresentation,
     ty: &Ty,
@@ -102,6 +102,6 @@ pub(crate) fn zero_value(
 /// the state machine gives it no continuation field and rematerializes it in every resume arm, as
 /// kotlinc does. Keeping it out of the spill layout also keeps its type `Nothing?` rather than a
 /// wider spill type.
-pub(crate) fn is_rematerialized_null(ty: &Ty) -> bool {
+pub fn is_rematerialized_null(ty: &Ty) -> bool {
     matches!(ty.non_null(), Ty::Null)
 }
