@@ -12,6 +12,7 @@ use super::member_names::{accessor_type_is_value_class, vc_mangle};
 use super::Under;
 use crate::ir::{
     BridgeAccessorRole, BridgeKind, Callee, ExprId, IrExpr, IrFile, IrLocalPropertyLayout,
+    JvmAccessorSide,
 };
 use crate::jvm::names::property_getter_name;
 use crate::names::property_setter_name;
@@ -34,6 +35,7 @@ struct DefaultAccessors {
 
 pub(super) fn stamp_synthesized(ir: &mut IrFile, under: &Under) {
     for class_index in 0..ir.classes.len() {
+        let class = ir.classes[class_index].fq_name;
         let properties: Vec<DefaultAccessors> = ir.classes[class_index]
             .properties
             .iter()
@@ -44,8 +46,12 @@ pub(super) fn stamp_synthesized(ir: &mut IrFile, under: &Under) {
                 name: property.name.clone(),
                 ty: property.ty,
                 // Module realization already gave a default accessor its written `@JvmName`.
-                written_getter: property.getter_jvm_name.clone(),
-                written_setter: property.setter_jvm_name.clone(),
+                written_getter: ir
+                    .jvm_property_accessor_name(class, index as u32, JvmAccessorSide::Getter)
+                    .map(str::to_owned),
+                written_setter: ir
+                    .jvm_property_accessor_name(class, index as u32, JvmAccessorSide::Setter)
+                    .map(str::to_owned),
             })
             .collect();
         for DefaultAccessors {
@@ -79,9 +85,10 @@ pub(super) fn stamp_synthesized(ir: &mut IrFile, under: &Under) {
             });
             rename_bound_calls(ir, class_index as u32, index as u32, &getter);
             retarget_property_bridges(ir, class_index, index as u32, &getter, &setter);
-            let property = &mut ir.classes[class_index].properties[index];
-            property.getter_jvm_name = Some(getter);
-            property.setter_jvm_name = Some(setter);
+            let class = ir.classes[class_index].fq_name;
+            let index = index as u32;
+            ir.set_jvm_property_accessor_name(class, index, JvmAccessorSide::Getter, getter);
+            ir.set_jvm_property_accessor_name(class, index, JvmAccessorSide::Setter, setter);
         }
     }
 }
@@ -145,6 +152,28 @@ fn retarget_property_bridges(
         };
         bridge.target_name = Some(mangled.to_string());
     }
+}
+
+/// A facade-owned value-class `var`'s default setter name. The SETTER's name is decided by its
+/// parameter, not by the storage: a value-class parameter always contributes to the hash, whether
+/// the field behind it holds the carrier or the box. `var nullableScalar: Crate?` keeps a boxed
+/// field AND takes `setNullableScalar-<hash>(Crate)`, which tying the two decisions together left
+/// unmangled. (The getter keeps its plain name: a value-class RESULT alone contributes no hash
+/// inside a file class.)
+pub(super) fn stamp_facade_setter(ir: &mut IrFile, storage: u32, declared: Ty, under: &Under) {
+    let property = &ir.statics[storage as usize];
+    if !property.is_var || !property.is_facade_owned() || property.accessors.any_declared() {
+        return;
+    }
+    let setter = vc_mangle(
+        &property_setter_name(&property.name),
+        std::slice::from_ref(&declared),
+        &Ty::Unit,
+        under,
+        false,
+        false,
+    );
+    ir.set_jvm_static_accessor_name(storage, JvmAccessorSide::Setter, setter);
 }
 
 #[cfg(test)]
