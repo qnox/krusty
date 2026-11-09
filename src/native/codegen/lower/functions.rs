@@ -177,15 +177,15 @@ fn reference_identity(
         // its getter's published identity, in its own module as in every other.
         Target::Property(property) => match property.referenced_property() {
             Some(crate::ir::IrReferencedProperty::Module(property)) => {
-                match file.dependency_signatures.property_declaration(property) {
-                    Some(identity) => {
-                        return Ok(ReferenceIdentity::Program(
-                            ReferenceDeclaration::dependency(identity)
-                                .marker(reference.bound_receiver.is_some()),
-                        ));
-                    }
-                    None => format!("property_m{}", property.raw()),
-                }
+                // A property this module exports is named by its published identity, which its
+                // importers' references share; any other module property by its declaration.
+                let declaration = match file.dependency_signatures.property_declaration(property) {
+                    Some(identity) => ReferenceDeclaration::dependency(identity),
+                    None => ReferenceDeclaration::property(file.module_name, property),
+                };
+                return Ok(ReferenceIdentity::Program(
+                    declaration.marker(reference.bound_receiver.is_some()),
+                ));
             }
             Some(crate::ir::IrReferencedProperty::External(property)) => {
                 let identity = file
