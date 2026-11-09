@@ -2,6 +2,8 @@
 // A dependency's context-parameter function type keeps its context count, so the lambda binds
 // both context arguments and its extension receiver. A trailing lambda after an omitted defaulted
 // fun-interface parameter converts to its own function type, not to that interface (kotlinc 2.4.21).
+// The library builds its own `Route` and `Scheme`, so the consumer constructs no class of another
+// module.
 // MODULE: lib
 // FILE: Library.kt
 package fixture
@@ -13,6 +15,10 @@ class Route {
 class PrincipalContext<P>(val principal: P)
 
 class Scheme<P, C>(val principal: P, val context: C)
+
+fun route(): Route = Route()
+
+fun <P, C> scheme(principal: P, context: C): Scheme<P, C> = Scheme(principal, context)
 
 fun interface Handler {
     fun Route.onFail(cause: String)
@@ -49,9 +55,9 @@ val repeated: String
     get() = if (count == 1) "K" else "?"
 
 fun box(): String {
-    val plain = Route().plainWith(Scheme("O", 1)) { out = name + repeated }
+    val plain = route().plainWith(scheme("O", 1)) { out = name + repeated }
     if (plain.out != "OK") return "FAIL plain: " + plain.out
-    val defaulted = Route().authWith(Scheme("O", 1)) { out = name + repeated }
+    val defaulted = route().authWith(scheme("O", 1)) { out = name + repeated }
     if (defaulted.out != "OK") return "FAIL defaulted: " + defaulted.out
     return "OK"
 }
