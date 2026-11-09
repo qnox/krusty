@@ -233,7 +233,7 @@ fn add_composer_parameters(ir: &mut IrFile, facts: &RestartableFunction) {
         // The group assigns the defaults itself, so the function has no `$default` synthetic.
         parameters.defaults = None;
     }
-    let nullable = ir.fn_param_declared_nullable.entry(function).or_default();
+    let nullable = &mut ir.declared_parameters_mut(function).nullable;
     nullable.resize(source_parameters, false);
     for (index, parameter) in facts.parameters.iter().enumerate() {
         if parameter.default.is_some() && placeholder(parameter.ty) == IrConst::Null {

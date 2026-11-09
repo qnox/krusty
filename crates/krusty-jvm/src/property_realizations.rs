@@ -28,7 +28,10 @@ pub(crate) fn jvm_field_eligible(
     annotations
         .iter()
         .any(|annotation| annotation.matches("kotlin/jvm/JvmField"))
-        && matches!(visibility, Visibility::Public | Visibility::Internal)
+        && matches!(
+            visibility,
+            Visibility::Public | Visibility::Internal | Visibility::Protected
+        )
         && !flags.has(krusty::fir::DeclarationFlags::CUSTOM_GETTER)
         && !flags.has(krusty::fir::DeclarationFlags::CUSTOM_SETTER)
         && !flags.has(krusty::fir::DeclarationFlags::DELEGATED)
