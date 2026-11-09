@@ -2053,9 +2053,8 @@ pub(crate) fn lower_value_classes(
                     _ => None,
                 }
             }
-            // A selected member of this file's or a sibling file's value class becomes its static
-            // `-impl` (a computed accessor's `getX-impl(U)` too), the dispatch receiver moving to
-            // parameter zero. A dependency's value-class member falls through to the arms below.
+            // A selected member of this or a sibling file's value class becomes its static `-impl`
+            // (`getX-impl(U)` too) over the receiver. A dependency's member reaches the next arms.
             IrExpr::Call {
                 callee: call_callee,
                 dispatch_receiver: Some(receiver),
@@ -2115,10 +2114,9 @@ pub(crate) fn lower_value_classes(
                     }),
                 }
             }
-            // A selected semantic `Any` operation on a non-null UNBOXED receiver calls the value
-            // class's static `-impl` rather than boxing the receiver, a dependency's class's too.
-            // The provider attached the role to the exact declaration and the external call kept
-            // it, so this pass does not rediscover the declaration from an owner or a spelling.
+            // A semantic `Any` operation on a non-null UNBOXED receiver calls the value class's
+            // static `-impl`, a dependency's too. The role recorded on the call selects it, so this
+            // pass does not rediscover the declaration from an owner or a spelling.
             IrExpr::Call {
                 dispatch_receiver: Some(receiver),
                 args,
@@ -2632,9 +2630,8 @@ pub(crate) fn lower_value_classes(
             // A type op (`as`/`is`) on an unboxed value class is a REFERENCE-position boundary:
             //   * to the value class ITSELF (`as X`) — identity; strip the `checkcast X` (the value is
             //     the underlying, not a box; the cast would `ClassCastException`).
-            //   * to a SUPERTYPE (`as Any`, `as Interface`, `is Comparable`) — box the value first (the
-            //     box, not the raw underlying, is what carries that type), then the `checkcast`/
-            //     `instanceof` runs on the box.
+            //   * to a SUPERTYPE (`as Any`, `is Comparable`) — box the value first (the box carries
+            //     that type); `instanceof` and a downcast run on the box; an upcast needs no cast.
             if let IrExpr::TypeOp {
                 op:
                     op @ (crate::ir::IrTypeOp::Cast
@@ -2672,6 +2669,9 @@ pub(crate) fn lower_value_classes(
                             ))
                     {
                         ops.push((*arg, repr_ctx.box_op(*arg, x)));
+                        if reference_returns::is_upcast(classifiers, *op, type_operand, x) {
+                            strip.push((id, *arg));
+                        }
                     }
                 }
                 if to_self
