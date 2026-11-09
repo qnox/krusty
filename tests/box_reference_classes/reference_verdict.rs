@@ -192,7 +192,10 @@ mod tests {
 
     #[test]
     fn exit_one_without_a_source_position_is_no_verdict() {
-        let diagnostics = "error: module java.base cannot be found in the module graph\n";
+        // A case whose own `// API_VERSION:` exceeds its language version: kotlinc refuses the
+        // command line the case selects before it reads a source.
+        let diagnostics =
+            "error: -api-version (2.5) cannot be greater than -language-version (2.4).\n";
         assert_eq!(
             kotlinc_outcome("main", Some((1, diagnostics.to_string()))),
             Err(ReferenceFailure::KotlincNoVerdict {
