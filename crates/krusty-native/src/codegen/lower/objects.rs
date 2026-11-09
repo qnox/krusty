@@ -2075,11 +2075,21 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if declaration.is_abstract || declaration.is_sealed {
             return Err(declined!("construction of the abstract class `{name}`"));
         }
-        let Some(ordinal) =
-            krusty::backend::selected_constructor(self.file.ir, site, class, selected)
-        else {
-            return Err(declined!("a call to an unknown constructor (`{name}`)"));
-        };
+        // A recorded selection wins, including a default-argument entry whose list is the
+        // constructor's parameters plus mask words. A construction with no selection and no
+        // secondary — a KLIB class, whose parameter list is not an identity once a type parameter
+        // is carried — runs the primary. A class that declares secondaries and names none is not
+        // guessed.
+        let ordinal =
+            match krusty::backend::selected_constructor(self.file.ir, site, class, selected) {
+                Some(ordinal) => ordinal,
+                None if declaration.secondary_ctors.is_empty()
+                    && self.file.ir.construction_target(site).is_none() =>
+                {
+                    0
+                }
+                None => return Err(declined!("a call to an unknown constructor (`{name}`)")),
+            };
         let (constructor, params) = match ordinal.checked_sub(1) {
             // The primary's frame reads each parameter's PHYSICAL type, which a captured `var`'s
             // holder differs from.

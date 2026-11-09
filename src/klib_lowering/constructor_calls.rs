@@ -248,6 +248,10 @@ pub(super) fn authenticate_root_header(
 }
 
 impl ConstructorDeclaration {
+    pub(super) fn declared_parameters(&self) -> &[Ty] {
+        &self.params
+    }
+
     /// A constructor this library materializes for a file-local class, with no provider record.
     pub(super) fn local(
         classifier: TypeName,

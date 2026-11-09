@@ -168,6 +168,14 @@ impl Backend for WasmBackend {
             &mut file.callables,
             |function| file.dependency_exports.callable(function).is_some(),
         );
+        // After default arguments, so a `$default` entry's call of the declaration is the one
+        // that gains the continuation, and before dispatch entries, which copy the signature.
+        if let Err(declined) =
+            krusty::backend::coroutines::add_continuation_parameters(&mut file.ir)
+        {
+            decline(state, declined.construct().to_string());
+            return Vec::new();
+        }
         krusty::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
         if let Err(error) =
             krusty::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)
