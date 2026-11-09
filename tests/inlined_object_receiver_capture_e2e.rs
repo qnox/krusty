@@ -5,6 +5,9 @@
 //! `$this_<function>$inlined`. The lambda reads the caller's properties through their accessors,
 //! since its code runs in the object, not in the caller's class.
 //!
+//! Two lambdas passed to one call that both capture the enclosing instance share one `this$0`
+//! field: the copy's constructor takes the instance once per lambda and stores the first.
+//!
 //! The kotlinx `Flow.map { it + property }` shape inside a class reached the inliner with the
 //! captured instance unnamed and was rejected after route planning gave it the call.
 
@@ -26,6 +29,15 @@ inline fun <T> source(crossinline produce: () -> T): Source<T> =
         override fun next(): T = produce()
     }
 
+interface Keyed {
+    fun key(v: Int): Int
+}
+
+inline fun pair(crossinline a: (Int) -> Int, crossinline b: (Int) -> Int): Keyed =
+    object : Keyed {
+        override fun key(v: Int) = a(v) + b(v)
+    }
+
 inline fun <T> pending(crossinline produce: suspend () -> T): Pending<T> =
     object : Pending<T> {
         override suspend fun next(): T = produce()
@@ -45,6 +57,8 @@ class Counter(val start: Int) {
     fun shiftedTen() = 10.shifted()
 
     fun later(s: Pending<Int>) = pending { s.next() + start }
+
+    fun both() = pair({ it + start }, { it * step })
 }
 "#;
 

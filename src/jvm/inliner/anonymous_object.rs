@@ -716,8 +716,8 @@ fn remap_declaration(
 /// `$inlined` added, numbered when that name is taken (`getNewFieldName`, `addUniqueField`): every
 /// field the original declares is taken first, as kotlinc's `visitField` records each one it
 /// copies before the constructor is patched. The call site's enclosing instance, `this$0`, keeps
-/// its name unnumbered: kotlinc renames the original's own `this$0` to `this$0$i` instead, which
-/// the port does not do yet.
+/// its name unnumbered, and lambdas that all capture it share that one field: kotlinc renames the
+/// original's own `this$0` to `this$0$i` instead, which the port does not do yet.
 fn plan_lambdas<'a>(
     plan: &mut constructor::Constructor,
     regeneration: &Regeneration<'a>,
