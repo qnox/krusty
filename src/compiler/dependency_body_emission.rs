@@ -405,7 +405,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             published.push((identity.clone(), PublishedDependency::AllocatingConstructor));
         }
-        let callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
+        let mut callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
             Ok(callables) => callables,
             Err(error) => {
                 diags.error(
@@ -417,6 +417,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
+        super::primitive_implementations::record(&mut callables, platform);
         let ordinal = support_state.emitted.len();
         let support_module = format!(
             "{}$klib_body${}${ordinal}",

@@ -591,26 +591,6 @@ pub struct PrimitiveOverrideDeclaration {
     pub ret: Ty,
 }
 
-impl PrimitiveImplementation {
-    fn freeze(implementation: crate::symbol_resolver::PrimitiveOverride) -> Self {
-        let declaration = implementation.declaration.map(|function| {
-            let identity = crate::symbol_resolver::function_declaration_identity(&function);
-            PrimitiveOverrideDeclaration {
-                operation: function
-                    .callable
-                    .compiler_intrinsic
-                    .or(function.callable.member_realization.compiler_intrinsic()),
-                params: identity.params,
-                ret: identity.ret,
-            }
-        });
-        Self {
-            receiver: implementation.receiver,
-            declaration,
-        }
-    }
-}
-
 /// What the provider normalized for one selected dependency property.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BackendPropertyFact {
@@ -790,19 +770,29 @@ impl CheckedBackendCallables {
                 fact.overridden_declarations = overridden.clone();
             }
         }
-        for (&identity, fact) in &mut facts.callables {
+        Ok(facts)
+    }
+
+    /// Record what each builtin primitive runs for every member of a library classifier this
+    /// file calls, as `implementations` answers it for the member's owner, name and identity.
+    /// The frontend answers it from the member hierarchy at the handoff; every other callable
+    /// keeps none.
+    pub fn record_primitive_implementations(
+        &mut self,
+        mut implementations: impl FnMut(
+            TypeName,
+            &str,
+            ExternalCallableId,
+        ) -> Box<[PrimitiveImplementation]>,
+    ) {
+        for (&identity, fact) in &mut self.callables {
             let (ExternalCallableKind::Member, Some(SemanticCallableOwner::Classifier(owner))) =
                 (fact.kind, fact.declaration_owner)
             else {
                 continue;
             };
-            fact.primitive_implementations =
-                crate::symbol_resolver::primitive_overrides(provider, owner, &fact.name, identity)
-                    .into_iter()
-                    .map(PrimitiveImplementation::freeze)
-                    .collect();
+            fact.primitive_implementations = implementations(owner, &fact.name, identity);
         }
-        Ok(facts)
     }
 
     /// Freeze dependency identities on `super` calls introduced after the initial handoff.
