@@ -24,6 +24,30 @@ pub(super) enum InitializationStep<'a> {
     Block(&'a [KlibIrStatement]),
 }
 
+/// One member's contribution to initialization, in member order. A field store is the field's own
+/// initializer expression; an anonymous initializer is its statement list. Constructor parameter
+/// names never create a store.
+pub(super) fn record_initializer<'a>(
+    member: &'a KlibIrMember,
+    field: Option<(u32, &'a KlibIrField)>,
+    steps: &mut Vec<InitializationStep<'a>>,
+) -> Result<(), KlibBodyDeclineReason> {
+    if let KlibIrMember::AnonymousInitializer { base, statements } = member {
+        if base.flags != 0 {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a static or flagged class initializer",
+            ));
+        }
+        steps.push(InitializationStep::Block(statements));
+    }
+    if let Some((index, field)) = field {
+        if let Some(value) = field.initializer {
+            steps.push(InitializationStep::Field { index, value });
+        }
+    }
+    Ok(())
+}
+
 pub(super) struct ClassInitialization<'a, 'b> {
     pub(super) header: ClassMemberHeader<'a, 'b>,
     pub(super) field_declarations: Vec<&'b KlibIrField>,
@@ -145,20 +169,7 @@ pub(super) fn plan<'a, 'b>(
     let mut steps = Vec::new();
     let storage =
         super::class_storage::authenticate(&header, declared_superclass, |member, field| {
-            if let KlibIrMember::AnonymousInitializer { base, statements } = member {
-                if base.flags != 0 {
-                    return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                        "a static or flagged class initializer",
-                    ));
-                }
-                steps.push(InitializationStep::Block(statements));
-            }
-            if let Some((index, field)) = field {
-                if let Some(value) = field.initializer {
-                    steps.push(InitializationStep::Field { index, value });
-                }
-            }
-            Ok(())
+            record_initializer(member, field, &mut steps)
         })?;
     Ok(Some(ClassInitialization {
         header,

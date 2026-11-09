@@ -334,6 +334,13 @@ impl BodyLowering<'_, '_, '_> {
                 let mut arguments = match dispatch_receiver {
                     None => Vec::new(),
                     Some(receiver) => {
+                        if let Some(owner) =
+                            self.file.ir.functions[*function as usize].dispatch_receiver
+                        {
+                            if !self.file.values.is_value_class(owner) {
+                                return self.own_class_member(*function, owner, receiver, args);
+                            }
+                        }
                         match self.value_class_member_receiver(*function, receiver)? {
                             Some(value) => vec![value],
                             None => return Ok(None),
@@ -591,6 +598,11 @@ impl BodyLowering<'_, '_, '_> {
                                     ) {
                                         return realized;
                                     }
+                                }
+                                if let Some(realized) = self.dependency_interface_member(
+                                    internal, *target, signature, receiver, args, *ret,
+                                ) {
+                                    return realized;
                                 }
                                 return Err(declined!(
                                     "the member `{}.{name}` of a type this file implements itself",
@@ -895,6 +907,13 @@ impl BodyLowering<'_, '_, '_> {
                         let Some(symbol) =
                             super::super::super::intrinsics::runtime_member(signature)
                         else {
+                            if realization.owner_is_interface {
+                                if let Some(identity) = realization.dependency_callable.as_ref() {
+                                    return self.dependency_interface_stub(
+                                        identity, receiver, args, params, *ret,
+                                    );
+                                }
+                            }
                             return Err(declined!(
                                 "the member `{}.{name}`",
                                 realization.physical_owner.render().replace('/', ".")

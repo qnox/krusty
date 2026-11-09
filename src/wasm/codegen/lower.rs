@@ -626,6 +626,8 @@ struct Body<'a> {
     /// How many structured instructions enclose the current position.
     depth: u32,
     loops: Vec<Loop>,
+    /// The `finally` regions whose protected code encloses the current position, innermost last.
+    cleanups: Vec<exceptions::CleanupFrame>,
     /// The executable scope whose code this body emits: the function, the class's constructor or
     /// singleton, or the file's static initializer. Only the template ownership of a reified
     /// type operation reads it.
@@ -684,6 +686,7 @@ impl<'a> Body<'a> {
             result,
             depth: 0,
             loops: Vec::new(),
+            cleanups: Vec::new(),
             scope: crate::ir::IrEnclosure::File,
             enum_base: None,
         }
@@ -793,6 +796,13 @@ impl<'a> Body<'a> {
         };
         // A `Byte`, `Short` or `Char` result narrows the `Int` it came through.
         self.coerce_emitted_value(carried, target_ty)
+    }
+
+    /// Whether a cast of `arg` to `target` reads a scalar out of a reference: the operand is
+    /// carried as a reference and the target as a scalar.
+    fn is_unboxing_cast(&self, arg: u32, target: Ty) -> bool {
+        matches!(self.carrier_of(arg), Ok(Some(ValType::Ref { .. })))
+            && matches!(carrier(target), Ok(Some(target)) if !matches!(target, ValType::Ref { .. }))
     }
 
     fn carrier_of(&self, id: u32) -> Result<Option<ValType>, Unsupported> {
@@ -1002,7 +1012,7 @@ impl<'a> Body<'a> {
                     }
                     (None, None) => {}
                 }
-                self.code.return_();
+                self.control_transfer(exceptions::Transfer::Return, None)?;
             }
             IrExpr::When { branches } => self.when(id, &branches)?,
             IrExpr::While {
@@ -1014,13 +1024,11 @@ impl<'a> Body<'a> {
             } => self.while_(cond, body, update, post_test, label)?,
             IrExpr::Break { label } => {
                 let target = self.find_loop(label.as_deref())?.exit;
-                let depth = self.relative(target);
-                self.code.br(depth);
+                self.control_transfer(exceptions::Transfer::Branch(target), None)?;
             }
             IrExpr::Continue { label } => {
                 let target = self.find_loop(label.as_deref())?.next;
-                let depth = self.relative(target);
-                self.code.br(depth);
+                self.control_transfer(exceptions::Transfer::Branch(target), None)?;
             }
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(id, op, lhs, rhs)?,
             IrExpr::Equality { op, mode, lhs, rhs } => self.equality(op, mode, lhs, rhs)?,
@@ -1191,6 +1199,14 @@ impl<'a> Body<'a> {
                 || self.interface_of_type(type_operand).is_some() =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
+            }
+            // `as Int` on a reference reads the value out of its box once the cast has checked it.
+            IrExpr::TypeOp {
+                op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
+                arg,
+                type_operand,
+            } if self.is_unboxing_cast(arg, type_operand) => {
+                self.checked_unbox_cast(arg, type_operand)?
             }
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast),

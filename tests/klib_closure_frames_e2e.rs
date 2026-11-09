@@ -12,6 +12,48 @@ const LIBRARY: &str = include_str!("fixtures/klib_closure_frames/Library.kt");
 
 const CONSUMER: &str = include_str!("fixtures/klib_closure_frames/Consumer.kt");
 
+#[test]
+fn serialized_bound_extension_references_preserve_receivers_and_once_only_operands() {
+    let source = include_str!("box_regressions/multimodule/boundExtensionReferences.kt");
+    let modules = krusty::conformance::split_modules(source).expect("the complete module graph");
+    let [library, consumer] = modules.as_slice() else {
+        panic!("the bound-reference graph must retain both modules");
+    };
+    assert_eq!(library.name, "lib");
+    assert!(library.deps.is_empty());
+    assert_eq!(consumer.name, "main");
+    assert_eq!(consumer.deps, ["lib"]);
+    assert!(modules.iter().all(|module| module.friends.is_empty()
+        && module.depends_on.is_empty()
+        && module.java_files.is_empty()));
+    let [(library_file, library_source)] = library.files.as_slice() else {
+        panic!("the complete library source must be retained");
+    };
+    let [(consumer_file, consumer_text)] = consumer.files.as_slice() else {
+        panic!("the complete consumer source must be retained");
+    };
+    assert_eq!(library_file, "Library");
+    assert_eq!(consumer_file, "Consumer");
+    assert_official_dependency_closures_with_oracle(
+        library_source,
+        consumer_text,
+        "SerializedBoundExtensionReference",
+        &DependencyConsumer::Native,
+        || {
+            let dependency = common::kotlinc_lib_out(&[("Library.kt", library_source.as_str())])
+                .expect("reference compiler required for the complete bound-reference library");
+            assert_eq!(
+                common::kotlinc_box_files_result_with_classpath(
+                    &[("Consumer.kt", consumer_text.as_str())],
+                    "fixture.ConsumerKt",
+                    &[dependency],
+                ),
+                "OK"
+            );
+        },
+    );
+}
+
 const CONSTRUCTOR_CONSUMER: &str = r#"
 fun box(): String {
     val f = makeWithConstructor(40)
@@ -153,7 +195,7 @@ fn dependency_generic_class_initializers_preserve_declared_carriers() {
         library_source,
         &[("Consumer", consumer_text.as_str())],
         "ImportedGenericClassInitialization",
-        DependencyConsumer::Native,
+        &DependencyConsumer::Native,
     );
 }
 
@@ -294,7 +336,7 @@ fn official_dependency_constructor_roots_allocate_and_rebind_between_consumer_fi
         library,
         &consumers,
         "DependencyConstructorAllocationExports",
-        DependencyConsumer::Native,
+        &DependencyConsumer::Native,
     );
 }
 
@@ -443,6 +485,43 @@ fn assert_official_dependency_closures(
     fixture_name: &str,
     purpose: DependencyConsumer,
 ) {
+    let consumer_text = format!("package fixture\n{consumer}");
+    assert_official_dependency_closures_with_oracle(
+        library_source,
+        &consumer_text,
+        fixture_name,
+        &purpose,
+        || {
+            // Establish the portable source behavior before executing a Native dependency consumer.
+            if matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
+                // These are different modules with equal classifier names, not a source redeclaration.
+                let dependency = common::kotlinc_lib_out(&[("Library.kt", library_source)])
+                    .expect("reference compiler required for dependency identity oracle");
+                assert_eq!(
+                    common::kotlinc_box_files_result_with_classpath(
+                        &[("Consumer.kt", &consumer_text)],
+                        "fixture.ConsumerKt",
+                        &[dependency],
+                    ),
+                    "OK"
+                );
+            } else {
+                common::expect_box_ok_with_stdlib(
+                    &format!("{library_source}\n{consumer}"),
+                    &format!("{fixture_name}Oracle"),
+                );
+            }
+        },
+    );
+}
+
+fn assert_official_dependency_closures_with_oracle(
+    library_source: &str,
+    consumer_text: &str,
+    fixture_name: &str,
+    purpose: &DependencyConsumer,
+    oracle: impl FnOnce(),
+) {
     let Some(_) = std::env::var_os("KRUSTY_KOTLIN_NATIVE") else {
         assert!(
             std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
@@ -450,29 +529,10 @@ fn assert_official_dependency_closures(
         );
         return;
     };
-    // Establish the portable source behavior before executing a Native dependency consumer.
-    let consumer_text = format!("package fixture\n{consumer}");
-    if matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
-        // These are different modules with equal classifier names, not a source redeclaration.
-        let dependency = common::kotlinc_lib_out(&[("Library.kt", library_source)])
-            .expect("reference compiler required for dependency identity oracle");
-        assert_eq!(
-            common::kotlinc_box_files_result_with_classpath(
-                &[("Consumer.kt", &consumer_text)],
-                "fixture.ConsumerKt",
-                &[dependency],
-            ),
-            "OK"
-        );
-    } else {
-        common::expect_box_ok_with_stdlib(
-            &format!("{library_source}\n{consumer}"),
-            &format!("{fixture_name}Oracle"),
-        );
-    }
+    oracle();
     assert_official_dependency_sources(
         library_source,
-        &[("Consumer", consumer_text.as_str())],
+        &[("Consumer", consumer_text)],
         fixture_name,
         purpose,
     );
@@ -483,7 +543,7 @@ fn assert_official_dependency_sources(
     library_source: &str,
     consumers: &[(&str, &str)],
     fixture_name: &str,
-    purpose: DependencyConsumer,
+    purpose: &DependencyConsumer,
 ) {
     let root = std::env::var_os("KRUSTY_KOTLIN_NATIVE")
         .map(std::path::PathBuf::from)

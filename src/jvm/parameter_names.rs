@@ -75,6 +75,7 @@ pub(super) fn local_variable(
             IrGeneratedParameterRole::ReferenceInvokeValue { ordinal } => {
                 Some(format!("p{ordinal}"))
             }
+            IrGeneratedParameterRole::ReferenceBoundReceiver => None,
             // kotlinc's built-in `FunctionN.invoke` numbers its parameters from one.
             IrGeneratedParameterRole::FunctionInvokeValue { ordinal } => {
                 Some(format!("p{}", ordinal + 1))
