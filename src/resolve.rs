@@ -269,6 +269,7 @@ mod plugin_expression_planning;
 mod plugin_noarg;
 mod plugin_status;
 mod postponed_applicability;
+mod postponed_array_factories;
 mod postponed_constraints;
 mod postponed_diagnostics;
 mod property_declaration_check;
@@ -441,6 +442,8 @@ use qualifiers::*;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
 pub(crate) use serialization_generated_members::resolve as resolve_serialization_generated_member_statuses;
 use stable_path::StablePathRead;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use streaming_signature_bridge::publish_checked_local_signatures;
 use streaming_signature_bridge::*;
 pub(crate) use streaming_signature_bridge::{
     extract_source_contract_candidates, finalize_streamed_top_level_conflicts,
@@ -450,8 +453,7 @@ pub(crate) use streaming_signature_bridge::{
 };
 #[cfg(test)]
 pub(crate) use streaming_signature_bridge::{
-    publish_checked_local_signatures, publish_checked_local_signatures_in_active_root,
-    publish_discovered_local_capture_declarations,
+    publish_checked_local_signatures_in_active_root, publish_discovered_local_capture_declarations,
 };
 use type_join::join_type_projection;
 
@@ -13451,32 +13453,6 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    /// Whether a selected parameter can supply a language-defined construction strategy for a
-    /// collection literal. This is intentionally a target-availability query, not a second call
-    /// resolver: overload applicability for the factory itself is checked exactly once when the
-    /// enclosing callable has won and `check_collection_literal` commits the expression.
-    fn collection_literal_target_available(&self, expected: Ty) -> bool {
-        let expected = expected.non_null();
-        if expected.array_elem().is_some() {
-            return true;
-        }
-        let Some(classifier) = expected.kotlin_class_internal() else {
-            return false;
-        };
-        if standard_factory(classifier).is_some() {
-            return true;
-        }
-        self.resolver()
-            .classifier_call_candidates(classifier, "of")
-            .into_iter()
-            .flat_map(|(_, candidates)| candidates)
-            .chain(
-                self.resolver()
-                    .classifier_associated_callables(classifier, "of"),
-            )
-            .any(|candidate| candidate.flags.operator)
-    }
-
     fn check_call(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -14724,6 +14700,19 @@ impl<'a> Checker<'a> {
                         self.diags.sort_source_order_from(call_diagnostics);
                         self.set(receiver, classifier_receiver);
                         return rejected;
+                    }
+                    // One static whose arguments do not map (`bounded(Any())` against a method
+                    // with no value parameter) still owns the failure: the unbound type parameter
+                    // and the extra argument, not an unresolved static.
+                    if self.report_single_candidate_excess_arguments(
+                        call,
+                        &explicit_type_args,
+                        &rejected_candidates,
+                        args,
+                    ) {
+                        self.diags.sort_source_order_from(call_diagnostics);
+                        self.set(receiver, classifier_receiver);
+                        return Ty::Error;
                     }
                     if self.resolved_type_name(classifier).is_some() {
                         if self.libraries.inherits_classifier_callables(classifier) {
@@ -30354,6 +30343,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         narrowed_this_member: HashMap::default(),
         script_receiver_members: HashSet::default(),
         resolved_calls: HashMap::default(),
+        rejected_dependency_signatures: HashMap::default(),
         unbound_value_lambda_call_formals: HashMap::default(),
         open_lambda_result_call_formals: HashMap::default(),
         postponed_diagnostics: PostponedDiagnostics::default(),
@@ -32867,6 +32857,9 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Declared return and value-parameter types of a dependency candidate a call rejected.
+    /// Missing classes in that signature are still reported; type-parameter bounds are not stored.
+    rejected_dependency_signatures: HashMap<ExprId, Vec<Ty>>,
     /// Unsolved callee-owned formals used as ordinary lambda inputs, or whose provisional lambda
     /// result solution still depends on another call's open variable. Receiver-lambda builder
     /// inference has separate body-constraint semantics and is deliberately absent here.
@@ -36679,12 +36672,7 @@ impl<'a> Checker<'a> {
             if candidate.is_extension() && candidate.callable.annotations.contains(&hides_members) {
                 (0_u8, (0_u8, 0_u32), candidate.receiver_rank)
             } else if candidate.kind == crate::libraries::FnKind::Member {
-                let hidden = self.member_hidden_from_site(candidate, extension_receiver);
-                (
-                    if hidden { 3 } else { 1 },
-                    (0_u8, 0_u32),
-                    candidate.receiver_rank,
-                )
+                (1_u8, (0_u8, 0_u32), candidate.receiver_rank)
             } else {
                 (
                     2_u8,
@@ -40513,7 +40501,8 @@ impl<'a> Checker<'a> {
             if matches!(
                 self.file.expr(argument),
                 Expr::Lambda { .. } | Expr::CallableRef { .. }
-            ) {
+            ) || self.postponed_empty_reference_array_factory(scope, argument)
+            {
                 let has_receiver = selected
                     .argument_lambda_receivers
                     .get(index)
@@ -40561,6 +40550,7 @@ impl<'a> Checker<'a> {
                 None,
             );
         }
+        self.record_whole_array_delegation_arguments(arguments, &selected);
         self.resolved_ctor_delegations
             .insert((class, secondary), selected);
     }
@@ -45080,7 +45070,12 @@ impl<'a> Checker<'a> {
                             // A delegation lambda is contextual: leave its initial `Error`
                             // placeholder until the shared constructor selector maps it to a
                             // parameter slot, just like a primary class-header base argument.
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
+                            if !matches!(c.file.expr(argument), Expr::Lambda { .. })
+                                && !c.postponed_empty_reference_array_factory(
+                                    delegation_scope,
+                                    argument,
+                                )
+                            {
                                 c.expr(delegation_scope, argument);
                             }
                         }
@@ -45122,7 +45117,12 @@ impl<'a> Checker<'a> {
                     }
                     CtorDelegation::Super(delegation) => {
                         for &argument in &delegation.args {
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
+                            if !matches!(c.file.expr(argument), Expr::Lambda { .. })
+                                && !c.postponed_empty_reference_array_factory(
+                                    delegation_scope,
+                                    argument,
+                                )
+                            {
                                 c.expr(delegation_scope, argument);
                             }
                         }
@@ -46138,7 +46138,8 @@ impl<'a> Checker<'a> {
                     if !matches!(
                         self.file.expr(argument),
                         Expr::Lambda { .. } | Expr::CallableRef { .. }
-                    ) {
+                    ) && !self.postponed_empty_reference_array_factory(scope, argument)
+                    {
                         self.expr(scope, argument);
                     }
                 }
@@ -46152,7 +46153,10 @@ impl<'a> Checker<'a> {
                     &arguments,
                     &constructor_candidates,
                 ) {
-                    SourceConstructorSelection::Selected { resolved, .. } => *resolved,
+                    SourceConstructorSelection::Selected { resolved, .. } => {
+                        self.record_whole_array_delegation_arguments(&arguments, &resolved);
+                        *resolved
+                    }
                     SourceConstructorSelection::NoMatch { .. } => {
                         self.diags.error(
                             entry.span,
@@ -46189,7 +46193,16 @@ impl<'a> Checker<'a> {
                         .copied()
                         .unwrap_or(false);
                     let actual =
-                        self.check_argument_expected(scope, argument, expected, has_receiver, None);
+                        match self.commit_postponed_array_factory(scope, argument, expected) {
+                            Some(actual) => actual,
+                            None => self.check_argument_expected(
+                                scope,
+                                argument,
+                                expected,
+                                has_receiver,
+                                None,
+                            ),
+                        };
                     if !self.commit_implicit_integer_coercion(
                         argument,
                         expected,
@@ -47131,6 +47144,11 @@ impl<'a> Checker<'a> {
             self.contextual_annotation_array_argument(scope, argument, actual, expected)
         {
             committed
+        } else if let Some(actual) = self.commit_postponed_array_factory(scope, argument, expected)
+        {
+            // A postponed empty array factory is still uncommitted: its `Error` placeholder is
+            // not a checked result. Check it under the selected parameter now.
+            actual
         } else if matches!(self.file.expr(argument), Expr::Call { .. })
             && self.expr_types[argument.0 as usize] == actual
             && (actual == expected
@@ -47154,11 +47172,7 @@ impl<'a> Checker<'a> {
             // produced inside the reference was retained by that completed check. Re-entering the
             // reference here would duplicate either outcome.
             actual
-        } else if self.file.collection_literal_calls.contains(&argument.0)
-            || (self.postponed_empty_reference_array_factory(scope, argument)
-                && expected.non_null().is_reference_array()
-                && expected.non_null().array_elem().is_some())
-        {
+        } else if self.file.collection_literal_calls.contains(&argument.0) {
             self.expr_expected(scope, argument, expected)
         } else if matches!(self.file.expr(argument), Expr::CallableRef { .. })
             && expected.non_null().is_fun()
@@ -52413,47 +52427,6 @@ impl<'a> Checker<'a> {
         Some(name)
     }
 
-    /// A zero-element reference-array factory has no element evidence until an enclosing selected
-    /// parameter supplies `Array<T>`. Keep that call uncommitted during overload probing, exactly as
-    /// an unshaped lambda is kept uncommitted; the selected-argument seam re-enters the ordinary
-    /// synthetic call checker with the concrete array expectation. This predicate identifies the
-    /// compiler declaration after normal lexical/module/classifier shadowing, rather than reserving
-    /// the source spelling.
-    fn postponed_empty_reference_array_factory(
-        &self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-    ) -> bool {
-        let Expr::Call { callee, args } = self.file.expr(expression) else {
-            return false;
-        };
-        if !args.is_empty()
-            || self
-                .file
-                .call_type_args
-                .get(&expression.0)
-                .is_some_and(|arguments| !arguments.is_empty())
-        {
-            return false;
-        }
-        let Expr::Name(name) = self.file.expr(*callee) else {
-            return false;
-        };
-        let Some(synthetic) = crate::synthetics::lookup(name) else {
-            return false;
-        };
-        if synthetic.kind != crate::synthetics::SyntheticKind::ReferenceVararg
-            || self.lexical_value_claims_call_with_arguments(scope, name, args)
-            || self.module_declares(name)
-        {
-            return false;
-        }
-        !matches!(
-            self.select_classifier(scope, name),
-            InheritedNestedClassifier::Found(internal) if !internal.matches(synthetic.fqn)
-        )
-    }
-
     fn context_sensitive_name_matches(&self, name: &str, expected: Ty) -> bool {
         let Some(owner) = expected.non_null().obj_internal() else {
             return false;
@@ -56744,10 +56717,7 @@ impl<'a> Checker<'a> {
                 // exclusively a backend decision and cannot make a source element inapplicable.
                 Some(e) => return Some(Ty::obj_args("kotlin/Array", &[e])),
                 None => {
-                    self.diags.error(
-                        span,
-                        "krusty: empty arrayOf() needs an explicit type (unsupported)".to_string(),
-                    );
+                    self.report_uninferred_array_factory(call, synthetic);
                     return Some(Ty::Error);
                 }
             }

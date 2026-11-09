@@ -150,7 +150,11 @@ pub(super) fn emit_dependencies<B: Backend>(
         let Some(mut externals) = rebound_externals(platform, &support_state.emitted, diags) else {
             return Vec::new();
         };
-        let mut unit = DependencyBodyUnit::default();
+        // An enum an earlier unit materialized keeps its one set of constants there; this unit
+        // reads them through that unit's exports.
+        let mut unit = DependencyBodyUnit::reading_realized_enums(
+            support_state.materialized_classes.keys().copied(),
+        );
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
@@ -207,8 +211,8 @@ pub(super) fn emit_dependencies<B: Backend>(
             return Vec::new();
         }
         for callable in roots {
-            if let Err(decline) = unit.lower_root_with_intrinsics_and_externals(
-                callable, bodies, &callees, intrinsics, &externals,
+            if let Err(decline) = unit.lower_root_with_declarations(
+                callable, bodies, &callees, intrinsics, &externals, platform,
             ) {
                 if requires_intrinsic_link && !decline.is_internal_inconsistency() {
                     // A wrapper whose body uses a form lowering does not model yet is not support: the
@@ -278,6 +282,9 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
         }
         let mut exports = DependencyExportSignatures::default();
+        for class in unit.materialized_enums() {
+            exports.record_enum(class);
+        }
         let closed = unit
             .callable_functions()
             // A reachable bodyless declaration remains an exact provider edge which the target may

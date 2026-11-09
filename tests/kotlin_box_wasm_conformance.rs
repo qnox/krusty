@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 
 use krusty::backend::Entry;
 use krusty::conformance::TestTarget;
-use krusty::wasm::{WasmBackend, WasmTarget};
+use krusty_wasm::{WasmBackend, WasmTarget};
 
 use super::box_lane::{self, Lane, Libraries, Outcome};
 use super::box_ratchet::Platform;
@@ -1280,5 +1280,13 @@ fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
     expect_wasm_box(
         include_str!("box_regressions/finallyValueAndKotlinThrow.kt"),
         "wasmFinallyValueAndKotlinThrow",
+    );
+}
+
+#[test]
+fn wasm_data_class_unit_property_uses_units_fixed_hash() {
+    expect_wasm_box(
+        include_str!("box_regressions/knownPrimaryConstructorRoles.kt"),
+        "wasmKnownPrimaryConstructorRoles",
     );
 }
