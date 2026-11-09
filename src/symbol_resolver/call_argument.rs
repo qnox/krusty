@@ -89,6 +89,16 @@ impl CallArgKind {
         Self::IntegerLiteral { ty, constant }
     }
 
+    /// A nested call whose `provisional` result names variables its own inputs left open, which
+    /// is why it carries the template `generic_sig` for the enclosing expected type to solve.
+    pub(crate) fn open_nested_result(provisional: Ty, generic_sig: GenericSig) -> Self {
+        Self::ExpectedTypeCallable {
+            provisional,
+            generic_sig: std::sync::Arc::new(generic_sig),
+            provisional_open: true,
+        }
+    }
+
     pub(crate) fn ty(&self) -> Ty {
         match self {
             Self::Typed(ty)
