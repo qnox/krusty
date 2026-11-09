@@ -675,20 +675,18 @@ fn klib_target_primitive_hash_codes_are_target_dependency_leaves() {
     }
 }
 
-/// Each primitive iterator's own `next()` is the provider's primitive-iterator operation, and
-/// Native realizes that operation itself. A stdlib body that walks a primitive array
-/// (`IntArray.contentHashCode` iterates its receiver) therefore reaches a target leaf rather than
-/// the iterator's ordinary member body, which a dependency support unit has no contract to emit.
+/// Each primitive iterator's own `next()` is the provider's primitive-iterator operation. A target
+/// that realizes that operation itself (Native does; `krusty-native` asserts the capability)
+/// therefore reaches a target leaf when a stdlib body walks a primitive array
+/// (`IntArray.contentHashCode` iterates its receiver), rather than the iterator's ordinary member
+/// body, which a dependency support unit has no contract to emit.
 #[test]
-fn klib_target_primitive_iterator_nexts_are_native_dependency_leaves() {
-    use crate::backend::Backend;
-    use crate::native::{CraneliftBackend, NativeTarget};
+fn klib_target_primitive_iterator_nexts_are_target_dependency_leaves() {
     let Some(root) = distribution_root() else {
         return;
     };
     let libraries = stdlib(&root);
-    let backend = CraneliftBackend::new(NativeTarget::ALL[0]);
-    let capability = |operation| backend.realizes_dependency_intrinsic(operation);
+    let capability = |operation| operation == CompilerIntrinsic::PrimitiveIteratorNext;
     for iterator in [
         "kotlin/collections/BooleanIterator",
         "kotlin/collections/CharIterator",
