@@ -947,12 +947,34 @@ jobs:
           java-version: '17'
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
-          cache-provider: basic
+          # The wrapper's distribution and the dependencies live in ~/.gradle, restored below.
+          # Basic caching shares one key across jobs and saves only the first job's home.
+          cache-provider: external
+      - &restore-gradle-home
+        name: restore Gradle user home
+        id: gradle-home
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-home-${{ github.job }}-${{ matrix.kotlin || 'plugin' }}-${{ hashFiles('tools/**/*.gradle*', 'tools/**/gradle-wrapper.properties', 'tools/**/*.versions.toml') }}
+          restore-keys: |
+            gradle-home-${{ github.job }}-${{ matrix.kotlin || 'plugin' }}-
       - name: build portable local-Maven distribution
         run: |
           set -euo pipefail
           version=$(just version)
           scripts/package-gradle-plugin.sh "$version" "$PWD/dist-gradle"
+      - &save-gradle-home
+        name: save Gradle user home
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.gradle-home.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-home-${{ github.job }}-${{ matrix.kotlin || 'plugin' }}-${{ hashFiles('tools/**/*.gradle*', 'tools/**/gradle-wrapper.properties', 'tools/**/*.versions.toml') }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: krusty-gradle-plugin
@@ -984,7 +1006,8 @@ jobs:
           java-version: '17'
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
-          cache-provider: basic
+          cache-provider: external
+      - *restore-gradle-home
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
@@ -993,6 +1016,7 @@ jobs:
           set -euo pipefail
           chmod +x krusty
           scripts/package-build-tools.sh "$(just version)" "${{ matrix.kotlin }}" "$PWD/krusty" "$PWD/dist-build-tools"
+      - *save-gradle-home
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: krusty-build-tools-kotlin-${{ matrix.kotlin }}
