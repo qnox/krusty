@@ -151,6 +151,14 @@ impl LanguageVersionPolicy {
         &self.supported
     }
 
+    /// kotlinc's `ApiVersion.LATEST`: the last declared level, including experimental levels.
+    pub fn latest(&self) -> LanguageVersion {
+        self.levels
+            .last()
+            .expect("a release declares a language version")
+            .version
+    }
+
     /// kotlinc's `LanguageVersion.LATEST_STABLE`: the newest stable level, which is also the level
     /// a compilation without `-language-version` uses.
     pub fn latest_stable(&self) -> LanguageVersion {

@@ -97,8 +97,8 @@ pub struct KlibWriter {
 impl KlibWriter {
     /// A current Native metadata-library container for cross-module tests that only care about
     /// archive structure or manifest authority, not version stamping itself.
-    #[cfg(test)]
-    pub(crate) fn native_test_fixture(unique_name: &str) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn native_test_fixture(unique_name: &str) -> Self {
         Self::new(
             unique_name,
             KlibStamp::new(KotlinVersion::V2_4_20, LanguageVersion::V2_4),
