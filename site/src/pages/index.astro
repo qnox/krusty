@@ -10,7 +10,7 @@ const release = `${repo}/releases/latest`;
 const blob = (path: string) => `${repo}/blob/master/${path}`;
 const title = "krusty: a Kotlin compiler written in Rust";
 const description =
-  "krusty is a Kotlin compiler written in Rust. Built as a drop-in replacement for kotlinc on the JVM: for the supported Kotlin subset, kotlinc-compatible flags and .class files that aim to be byte-for-byte identical to kotlinc's.";
+  "krusty is a Kotlin compiler written in Rust that aims to match kotlinc on the JVM: kotlinc-compatible flags and, for the supported Kotlin subset, .class files that aim to be byte-for-byte identical to kotlinc's.";
 const jsonLd = {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
@@ -171,7 +171,7 @@ const plugins: { name: string; level: Level; html: string }[] = [
         {figures.map((figure, i) => {
           const value = values[i];
           return (
-            <article class="tile figure" data-file={figure.file} data-unit={figure.unit}>
+            <article class="tile figure" data-file={figure.file} data-unit={figure.unit} data-missing={value ? undefined : ""}>
               <h3 class="tile-label">{figure.label}{figure.experimental && <span class="tag">Experimental</span>}</h3>
               <p class="tile-value" data-part="value">{value ? `${value.pct}%` : "–"}</p>
               <div class="meter" role="img" aria-label={value ? `${value.pct}%` : "not available"} style={`--value: ${value ? value.pct : 0}%`}>
@@ -242,7 +242,8 @@ krusty -help</code></pre>
         </p>
         <p class="fine">
           The report has a button that opens a prefilled GitHub issue with totals and difference kinds, with
-          compilation, class and member names masked. Sending it tells us what to fix next.
+          compilation, class and member names masked. Masking follows rules and cannot promise to catch every name,
+          so review the issue before you submit it. Sending it tells us what to fix next.
         </p>
       </div>
       <div class="prose code-col">
@@ -381,14 +382,15 @@ plugins {'{'}
 
 <script define:vars={{ gist }}>
   // Re-read the figures from the source the README badges read, so a page built days ago shows
-  // what the badges show. On failure the build-time figures stay.
+  // what the badges show. On failure the build-time figures stay; a tile the build could not fill
+  // either says so instead of loading forever.
   const pattern = /^(\d+(?:\.\d+)?)% \((\d+)\/(\d+)(?: bytes)?\)$/;
   for (const tile of document.querySelectorAll(".figure")) {
     fetch(gist + tile.dataset.file, { cache: "no-cache" })
       .then((response) => (response.ok ? response.json() : null))
       .then((body) => {
-        const match = body && pattern.exec(body.message);
-        if (!match) return;
+        const match = body && typeof body.message === "string" ? pattern.exec(body.message) : null;
+        if (!match) throw new Error("no figure");
         const [, pct, count, of] = match;
         const fmt = (n) => Number(n).toLocaleString("en-US");
         tile.querySelector('[data-part="value"]').textContent = `${pct}%`;
@@ -397,7 +399,9 @@ plugins {'{'}
         meter.style.setProperty("--value", `${pct}%`);
         meter.setAttribute("aria-label", `${pct}%`);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (tile.hasAttribute("data-missing")) tile.querySelector('[data-part="meta"]').textContent = "Figure unavailable";
+      });
   }
 </script>
 
