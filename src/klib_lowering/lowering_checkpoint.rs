@@ -45,8 +45,16 @@ impl LoweringCheckpoint {
         ir.external_singleton_dispatches
             .retain(|expression, _| *expression < first);
         let first = FunId::try_from(self.functions).expect("a function id fits u32");
+        let removed = ir.classes[self.classes..]
+            .iter()
+            .map(|class| class.fq_name_id())
+            .collect::<Vec<_>>();
         ir.functions.truncate(self.functions);
         ir.classes.truncate(self.classes);
+        for class in removed {
+            ir.function_overrides.remove(&class);
+            ir.property_overrides.remove(&class);
+        }
         ir.restore_declared_class_self_type_owners(&self.class_self_types);
         ir.class_method_owners
             .retain(|function, _| *function < first);

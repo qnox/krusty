@@ -36,6 +36,11 @@ impl KlibBodyClassContract {
     pub(crate) fn is_builtin_type(&self) -> bool {
         crate::types::builtin_semantic(self.classifier).is_some()
     }
+
+    /// This class applied to its declared formals. A non-generic class is the bare classifier.
+    pub(crate) fn self_type(&self) -> Ty {
+        Ty::obj_args_name(self.classifier, &self.parameters.formals)
+    }
 }
 
 /// A complete declared instance layout. Its field ordinals belong to this exact producer class;
