@@ -16,7 +16,7 @@ use crate::types::Ty;
 
 /// Build the entry of every constructor `exports` publishes from `ir` and export it as an ordinary
 /// callable under that constructor's identity.
-pub(crate) fn realize(ir: &mut IrFile, exports: &mut DependencyExportSignatures) {
+pub fn realize(ir: &mut IrFile, exports: &mut DependencyExportSignatures) {
     let constructors = exports.constructors().to_vec();
     for (constructor, identity) in constructors {
         if let Some(entry) = build(ir, constructor) {
@@ -32,6 +32,24 @@ pub(crate) fn realize(ir: &mut IrFile, exports: &mut DependencyExportSignatures)
             exports.record_singleton_entry(classifier, entry);
         }
     }
+}
+
+/// Exercise the production export realization with an exact primary-constructor identity.
+#[cfg(any(test, feature = "test-support"))]
+pub fn realize_primary_constructor_for_test(
+    ir: &mut IrFile,
+    class: crate::ir::ClassId,
+    identity: super::KlibDependencyCallable,
+) {
+    let mut exports = DependencyExportSignatures::default();
+    exports.record_constructor(
+        super::ExportedConstructor {
+            class,
+            secondary: None,
+        },
+        identity,
+    );
+    realize(ir, &mut exports);
 }
 
 /// The entry answering the instance of the object `classifier`.

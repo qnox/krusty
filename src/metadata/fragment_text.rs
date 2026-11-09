@@ -194,7 +194,7 @@ struct Printer<'a> {
 }
 
 /// The fragment `bytes` as text.
-pub(crate) fn render_fragment(bytes: &[u8]) -> String {
+pub fn render_fragment(bytes: &[u8]) -> String {
     let top = fields(bytes);
     let mut printer = Printer {
         strings: Vec::new(),
