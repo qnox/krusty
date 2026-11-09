@@ -1322,10 +1322,12 @@ jobs:
           scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
 
   # Every covered master commit builds its own immutable release artifacts, even after master
-  # advances. All six platforms can build concurrently on their hosted runners.
+  # advances. All six platforms can build concurrently on their hosted runners. Release builds
+  # are paused unless the KRUSTY_RELEASE_BUILDS repository variable is 'true': they hold six
+  # hosted runners per master commit, and the release job below is skipped with them.
   build-release:
     needs: [ci-and-conformance]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.KRUSTY_RELEASE_BUILDS == 'true'
     strategy:
       fail-fast: false
       matrix:
