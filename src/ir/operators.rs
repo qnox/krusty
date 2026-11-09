@@ -86,3 +86,15 @@ pub enum IrTypeOp {
     /// is visible and testable, not hidden in codegen.
     ImplicitCoercion,
 }
+
+impl IrTypeOp {
+    /// The operation that uses a value through a smart cast to `to`, a type the frontend proved the
+    /// value has: a reference target is cast, any other target is a representation coercion.
+    pub fn smart_cast_to(to: crate::types::Ty) -> Self {
+        if to.is_reference() {
+            Self::Cast
+        } else {
+            Self::ImplicitCoercion
+        }
+    }
+}

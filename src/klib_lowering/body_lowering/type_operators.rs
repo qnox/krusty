@@ -11,7 +11,7 @@
 use super::{mismatch, unsupported, BodyLowering, Lowered};
 use crate::ir::{admits_null_at_runtime, ExprId, IrExpr, IrTypeOp};
 use crate::metadata::klib_ir::tree::{KlibIrExprId, KlibIrTypeId, KlibIrTypeOperator};
-use crate::types::{Ty, TyKind};
+use crate::types::{value_conversion, Ty, TyKind, ValueConversion};
 
 use super::super::decline::KlibBodyDeclineReason;
 
@@ -118,10 +118,11 @@ impl BodyLowering<'_> {
     /// node, and neither does one of `null` to a nullable type. One to the value's nullable type
     /// is a widening checked FIR lowering marks as a coercion, and one to another supertype (by
     /// the calling compilation's subtyping) is the value itself, as in the source. An implicit
-    /// cast of a reference to a subtype, or to another parameterization of its classifier, is a
-    /// smart cast the declaring compilation proved, which checked FIR lowering lowers as a cast.
-    /// One of a primitive value from its nullable type is a coercion. Any other implicit cast
-    /// declines.
+    /// cast to its non-null type, to a subtype, or to another parameterization of its classifier
+    /// is a smart cast the declaring compilation proved. It converts as the checker converts the
+    /// same pair of types ([`value_conversion`]): a narrowing to a non-null reference type is a
+    /// cast, and one to a nullable or scalar type a coercion (`element: T` used as
+    /// `CharSequence?` or `Char`). Any other implicit cast declines.
     fn implicit_cast(&mut self, target: Ty, argument: KlibIrExprId, ty: Ty) -> Lowered<ExprId> {
         if target != ty {
             return Err(mismatch("an implicit cast is typed apart from its target"));
@@ -141,15 +142,19 @@ impl BodyLowering<'_> {
             return Ok(upcast);
         }
         let to_non_null = !target.is_nullable() && Ty::nullable(target) == actual;
-        let op = if target.is_reference()
-            && actual.is_reference()
-            && (to_non_null || self.narrows(actual, target))
-        {
-            IrTypeOp::Cast
-        } else if to_non_null {
-            IrTypeOp::ImplicitCoercion
-        } else {
+        if !to_non_null && !self.narrows(actual, target) {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
+        }
+        // The checker's decision for the same pair of types: a use as a nullable type is a
+        // widening coercion, one as a scalar type a coercion, and a reference narrowing a cast.
+        let op = match value_conversion(actual, target) {
+            Some(ValueConversion::NullabilityWidening) => IrTypeOp::ImplicitCoercion,
+            Some(ValueConversion::SmartCast | ValueConversion::ConstituentView) | None => {
+                IrTypeOp::smart_cast_to(target)
+            }
+            Some(ValueConversion::CoerceToUnit | ValueConversion::NumericWidening) => {
+                return Err(KlibBodyDeclineReason::ImplicitConversion);
+            }
         };
         let cast = self.ir.add_expr(IrExpr::TypeOp {
             op,
@@ -164,7 +169,8 @@ impl BodyLowering<'_> {
     /// Whether a smart cast of a value of `actual` to `target` narrows it: `target` is a subtype
     /// of `actual`, of `actual`'s classifier at any type arguments (`Collection<*>` after
     /// `this is Collection<*>` on an `Iterable<T>`), or names the same classifier at other type
-    /// arguments.
+    /// arguments. A value of a type parameter is narrowed by whatever narrows its upper bound
+    /// (`element: T` after `element is CharSequence?` or `element is Char`).
     fn narrows(&self, actual: Ty, target: Ty) -> bool {
         let classifier = |ty: Ty| match ty.non_null().kind() {
             TyKind::Obj(name, _) => Some(name),
@@ -172,6 +178,10 @@ impl BodyLowering<'_> {
         };
         let parameters = self.header.type_parameters();
         self.linker.is_subtype(parameters, target, actual)
+            || actual
+                .non_null()
+                .ty_param_bound()
+                .is_some_and(|bound| self.narrows(bound, target))
             || classifier(actual).is_some_and(|name| {
                 classifier(target) == Some(name)
                     || self

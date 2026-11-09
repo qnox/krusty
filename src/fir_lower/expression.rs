@@ -1735,11 +1735,7 @@ impl BodyLowering<'_> {
                 type_operand: to.get(),
             }),
             FirConversionKind::SmartCast { to } => self.ir.add_expr(IrExpr::TypeOp {
-                op: if to.get().is_reference() {
-                    IrTypeOp::Cast
-                } else {
-                    IrTypeOp::ImplicitCoercion
-                },
+                op: IrTypeOp::smart_cast_to(to.get()),
                 arg: expression,
                 type_operand: to.get(),
             }),

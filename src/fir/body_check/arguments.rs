@@ -1,7 +1,6 @@
 //! Final source-argument mapping for already selected calls.
 
 use super::*;
-use crate::types::TyKind;
 
 #[cfg(test)]
 #[path = "vararg_default_tests.rs"]
@@ -1330,32 +1329,19 @@ impl BodyFirChecker<'_> {
         target: ResolvedTy,
         cause: OriginId,
     ) -> Option<FirConversion> {
-        let actual_ty = actual.get().canonical_semantic();
-        let target_ty = target.get().canonical_semantic();
-        if actual_ty == target_ty || matches!(actual_ty, Ty::Nothing | Ty::Null) {
-            return None;
-        }
-        let kind = if target_ty == Ty::Unit {
-            FirConversionKind::CoerceToUnit
-        } else if target_ty.accepts_numeric(actual_ty) {
-            FirConversionKind::NumericWidening { to: target }
-        } else if matches!(
-            actual_ty.non_null().kind(),
-            TyKind::Intersection(parts) if parts
-                .iter()
-                .any(|part| part.non_null() == target_ty.non_null())
-        ) {
+        use crate::types::ValueConversion;
+        let kind = match crate::types::value_conversion(actual.get(), target.get())? {
+            ValueConversion::CoerceToUnit => FirConversionKind::CoerceToUnit,
+            ValueConversion::NumericWidening => FirConversionKind::NumericWidening { to: target },
             // Resolution has selected the declaration on one exact constituent of a semantic
             // intersection. Preserve the source value and publish the selected dispatch view as
             // an explicit checked conversion; lowering must not rediscover the member owner.
-            FirConversionKind::SmartCast { to: target }
-        } else if target_ty.is_nullable() || (!actual_ty.is_reference() && target_ty.is_reference())
-        {
-            FirConversionKind::NullabilityWidening { to: target }
-        } else if actual_ty.is_reference() && !target_ty.is_reference() {
-            FirConversionKind::SmartCast { to: target }
-        } else {
-            return None;
+            ValueConversion::ConstituentView | ValueConversion::SmartCast => {
+                FirConversionKind::SmartCast { to: target }
+            }
+            ValueConversion::NullabilityWidening => {
+                FirConversionKind::NullabilityWidening { to: target }
+            }
         };
         Some(FirConversion {
             origin: cause,
