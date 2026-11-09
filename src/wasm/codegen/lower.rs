@@ -19,6 +19,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 mod absent_arguments;
+pub(super) mod any_members;
 mod arrays;
 mod boxing;
 mod callable_reference_identity;
@@ -32,7 +33,6 @@ mod objects;
 mod scalar_instructions;
 mod shared_cells;
 mod string_conversion;
-pub(super) mod value_hash;
 
 #[cfg(test)]
 use tests::lower_alone;
@@ -827,6 +827,11 @@ impl<'a> Body<'a> {
             return Ok(());
         }
         let Some(source) = source_ty else {
+            // Restore stack polymorphism after structured control only when completion proves
+            // divergence: an inlined generic result may retain Nothing but complete normally.
+            if self.ir.expr_diverges_by(id, &|_, _| false) {
+                self.code.unreachable();
+            }
             return Ok(());
         };
         if source == Ty::Unit && carrier(target)?.is_some() {
@@ -1147,8 +1152,12 @@ impl<'a> Body<'a> {
             {
                 self.throwable_message(dispatch_receiver, &args, *ret)?;
             }
-            IrExpr::Call { .. } if value_hash::call_kind(self.ir, self.callables, id).is_some() => {
-                self.value_hash_call(id)?;
+            IrExpr::Call {
+                dispatch_receiver: Some(receiver),
+                args,
+                ..
+            } if let Some(member) = any_members::call_member(self.ir, self.callables, id) => {
+                self.dependency_any_member_call(member, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1338,6 +1347,13 @@ impl<'a> Body<'a> {
             {
                 self.property_read(*target, *dispatch_receiver)?
             }
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } =
+                    &**checked_op
+                    && self.is_array_size_property(*target) =>
+            {
+                self.checked_array_size(checked_op)?;
+            }
             // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from
             // the `$Enum` fields its struct leads with.
             IrExpr::Checked(ref checked_op)
@@ -1377,9 +1393,9 @@ impl<'a> Body<'a> {
                 } = &**checked_op
                     && parameters.is_empty()
                     && arguments.is_empty()
-                    && let Some(operation) = self.intrinsic_property(*target) =>
+                    && self.is_string_length_property(*target) =>
             {
-                self.intrinsic(operation, Some(*receiver), &[])?;
+                self.intrinsic(IrIntrinsic::StringLength, Some(*receiver), &[])?;
             }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::PropertyWrite {

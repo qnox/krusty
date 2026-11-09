@@ -560,6 +560,8 @@ pub(crate) fn generic_binding_bound_violation(
     bindings: &GSigBinds,
     mut admits: impl FnMut(Ty, Ty) -> bool,
 ) -> Option<(Ty, Ty)> {
+    // A bound may also name a caller-owned parameter. Only this declaration's formals may
+    // erase to their bounds; an enclosing parameter remains the exact call-site type.
     // A bound can constrain another formal: `<T : X, X : Comparable<UInt>>`. When an argument binds
     // `T` but no argument mentions `X`, Kotlin infers the most specific `X` from that subtype
     // constraint. Complete those relationships before substituting/checking the bound graph; leaving
@@ -576,7 +578,9 @@ pub(crate) fn generic_binding_bound_violation(
             let actual = actual.projection_inner().unwrap_or(actual);
             bounds
                 .iter()
-                .map(|bound| ty_subst(*bound, &bindings))
+                .map(|bound| {
+                    crate::types::ty_subst_formals(*bound, &generic_sig.formals, &bindings)
+                })
                 .find_map(|bound| (!admits(actual, bound)).then_some((bound, actual)))
         })
 }
@@ -602,7 +606,8 @@ pub(crate) fn generic_bindings_admit_expected_return_intersection(
             let actual = actual.projection_inner().unwrap_or(actual);
             bounds.iter().all(|bound| {
                 let declared_bound = *bound;
-                let bound = ty_subst(declared_bound, bindings);
+                let bound =
+                    crate::types::ty_subst_formals(declared_bound, &generic_sig.formals, bindings);
                 if admits(actual, bound) {
                     return true;
                 }
@@ -642,3 +647,6 @@ pub(crate) fn generic_bindings_admit_expected_return_intersection(
             })
         })
 }
+
+#[cfg(test)]
+mod tests;

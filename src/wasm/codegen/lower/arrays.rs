@@ -4,15 +4,57 @@
 //! the element type that storage holds, and how a packed element is read back. Allocation,
 //! spreads, reads, stores and bounds checks are shared.
 
+use crate::backend::BackendCompilerIntrinsic;
+use crate::ir::{IrCheckedOperation, IrPropertyDispatch};
 use crate::libraries::RuntimeExceptionKind;
 use crate::wasm::array_objects::{ArrayForm, ElementRead, STORAGE_FIELD};
+
+#[cfg(test)]
+mod tests;
 
 use super::*;
 
 const I32_ADD: u8 = 0x6a;
 const I32_GE_U: u8 = 0x4f;
 
+/// The complete selected getter frame, before any receiver is evaluated.
+fn array_size_receiver(operation: &IrCheckedOperation) -> Result<u32, Unsupported> {
+    let IrCheckedOperation::ExternalPropertyRead {
+        dispatch: IrPropertyDispatch::Ordinary,
+        receiver: Some(receiver),
+        arguments,
+        parameters,
+        result: Ty::Int,
+        source_receiver: Some(source),
+        ..
+    } = operation
+    else {
+        return Err("an authenticated array size read with a mismatched getter frame".into());
+    };
+    if !arguments.is_empty() || !parameters.is_empty() || !source.non_null().is_array() {
+        return Err("an authenticated array size read with a mismatched getter frame".into());
+    }
+    Ok(*receiver)
+}
+
 impl Body<'_> {
+    pub(super) fn is_array_size_property(&self, target: crate::fir::ExternalPropertyId) -> bool {
+        self.callables.property(target).is_some_and(|property| {
+            self.callables
+                .callable(property.getter)
+                .is_some_and(|getter| {
+                    getter.compiler_operation() == Some(BackendCompilerIntrinsic::ArraySize)
+                })
+        })
+    }
+
+    pub(super) fn checked_array_size(
+        &mut self,
+        operation: &IrCheckedOperation,
+    ) -> Result<(), Unsupported> {
+        self.array_size(array_size_receiver(operation)?)
+    }
+
     /// The form of `array`'s values and the element type its storage holds.
     fn array_form(&mut self, array: Ty) -> Result<(ArrayForm, Ty), Unsupported> {
         self.runtime
