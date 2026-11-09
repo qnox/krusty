@@ -49494,10 +49494,7 @@ impl<'a> Checker<'a> {
             .is_none_or(|arguments| arguments.is_empty())
         {
             if let Some(signature) = self.expected_type_callable_signature(argument) {
-                return CallArgKind::ExpectedTypeCallable {
-                    provisional: ty,
-                    generic_sig: std::sync::Arc::new(signature),
-                };
+                return self.expected_type_callable_argument(argument, ty, signature);
             }
         }
         let kind = call_arg_kind(self.file, argument, ty);
