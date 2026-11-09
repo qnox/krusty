@@ -144,7 +144,10 @@ pub(crate) fn is_reifiable(ir: &IrFile, fid: u32) -> bool {
 /// `vararg`, so Java may call it in element form. Captured values and receivers lead the physical
 /// list and do not move it; a suspend function's trailing continuation does.
 pub(super) fn varargs_access(ir: &IrFile, fid: u32) -> u16 {
-    let trailing = ir.fn_varargs.get(&fid).is_some_and(|vararg| vararg.is_last);
+    let trailing = ir
+        .declared_parameters(fid)
+        .vararg
+        .is_some_and(|vararg| vararg.is_last);
     if trailing && !ir.suspend_funs.contains(&fid) {
         ACC_VARARGS
     } else {
