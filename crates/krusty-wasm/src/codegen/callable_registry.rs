@@ -381,7 +381,7 @@ impl CallableRegistry {
                             callable.ret,
                             callable.overridden_declarations,
                         );
-                        format!("a dependency callable whose target code was not emitted: {identity:?}")
+                        "a dependency callable whose target code was not emitted".to_string()
                     })?;
                     targets.external.insert(*target, index);
                     if let Some(entry) = default_entry {
