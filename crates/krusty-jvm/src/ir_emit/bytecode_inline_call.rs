@@ -731,7 +731,18 @@ impl Emitter<'_> {
             )? {
                 continue;
             }
-            let argument = self.inline_lambda_node(argument, target.name, callee_suspends)?;
+            let crossinline = index
+                .checked_sub(leading_non_argument_operands)
+                .and_then(|parameter| {
+                    crate::inline_parameters::is_crossinline_parameter(
+                        self.ir,
+                        call_expression,
+                        parameter,
+                    )
+                })
+                .ok_or("an inlined lambda's parameter published no modifier")?;
+            let argument =
+                self.inline_lambda_node(argument, target.name, callee_suspends, crossinline)?;
             let start = captured.len();
             for &(capture, ty) in &argument.captures {
                 captured.push(Parameter {
@@ -2044,4 +2055,36 @@ mod tests {
             krusty::libraries::InlineKind::CanInline,
         ));
     }
+}
+
+/// The owner of the `Methodref` named `name` and `descriptor` in an inline body's constant pool.
+fn methodref_owner<'a>(body: &'a MethodCode, name: &str, descriptor: &str) -> Option<&'a str> {
+    fn utf8(cp: &[C], idx: u16) -> Option<&str> {
+        match cp.get(idx as usize)? {
+            C::Utf8(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+    fn class_name(cp: &[C], idx: u16) -> Option<&str> {
+        match cp.get(idx as usize)? {
+            C::Class(name_idx) => utf8(cp, *name_idx),
+            _ => None,
+        }
+    }
+    fn name_and_desc(cp: &[C], idx: u16) -> Option<(&str, &str)> {
+        match cp.get(idx as usize)? {
+            C::NameAndType(name_idx, desc_idx) => {
+                Some((utf8(cp, *name_idx)?, utf8(cp, *desc_idx)?))
+            }
+            _ => None,
+        }
+    }
+
+    body.source_cp.iter().find_map(|entry| {
+        let C::Methodref(class_idx, nt_idx) = entry else {
+            return None;
+        };
+        let (n, d) = name_and_desc(&body.source_cp, *nt_idx)?;
+        (n == name && d == descriptor).then(|| class_name(&body.source_cp, *class_idx))?
+    })
 }
