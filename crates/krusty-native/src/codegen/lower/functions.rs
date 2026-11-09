@@ -181,8 +181,20 @@ fn reference_identity(
                     declaration.marker(reference.bound_receiver.is_some()),
                 ));
             }
+            // A dependency property is named by its getter's own provider identity, which every
+            // file's reference to it shares, as a dependency function's reference is.
             Some(krusty::ir::IrReferencedProperty::External(property)) => {
-                format!("property_e{}", property.raw())
+                let getter = file
+                    .callables
+                    .property(property)
+                    .ok_or("a property reference without frozen declaration facts")?
+                    .getter;
+                let declaration = dependency_reference_declaration(file, getter)?.ok_or(
+                    "a property reference without its module-qualified dependency identity",
+                )?;
+                return Ok(ReferenceIdentity::Program(
+                    declaration.marker(reference.bound_receiver.is_some()),
+                ));
             }
             None => {
                 return Err(
