@@ -2049,7 +2049,6 @@ inference/pcla/propagateInferenceSessionIntoDeclarationAnalyzers.kt
 inference/pcla/specialCallsWithCallableReferencesDontRewriteAtSlice.kt
 inference/pcla/specialCallsWithLambdas.kt
 inference/pcla/substituteStubTypeIntoCR.kt
-inference/pcla/substituteStubTypeIntolambdaParameterDescriptor.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt
 inference/pcla/topDownCompletionBreakedByNonBuilderInferenceSession.kt
 inference/pcla/withoutAnnotation.kt
