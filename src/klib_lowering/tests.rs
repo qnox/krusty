@@ -16,13 +16,17 @@ mod constructor_exports;
 mod control_forms;
 mod demo_package;
 mod elvis_blocks;
+mod enum_entries;
 mod for_loop_bindings;
 mod inline_templates;
+mod object_literal_overrides;
+mod object_literals;
 mod parameter_defaults;
 mod primitive_calls;
 mod range_membership_producers;
 mod returnable_blocks;
 mod safe_calls;
+mod same_library_class;
 mod target_calls;
 mod target_members;
 mod value_class_members;
@@ -585,9 +589,6 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
         } => format!("{completion:?}({})", render(ir, *producer)),
         IrExpr::UnitInstance => "Unit".to_owned(),
         IrExpr::SingletonValue { classifier } => format!("object {}", classifier.render()),
-        IrExpr::EnumEntry { classifier, name } => {
-            format!("enum {}.{}", classifier.render(), name)
-        }
         IrExpr::Checked(checked) => match checked.as_ref() {
             // A dependency property read, with its dispatch and operands in full. Its identity is
             // its provider's numbering, so a test comparing two providers' lowerings asserts the

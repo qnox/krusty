@@ -32,13 +32,6 @@ impl CallLinker for NoCalls {
     fn singleton(&self, _: TypeName) -> Lowered<()> {
         panic!("no singleton")
     }
-    fn enum_entry(
-        &mut self,
-        _: &mut crate::ir::IrFile,
-        _: &crate::metadata::klib_ir::KlibIrSymbol,
-    ) -> Lowered<(TypeName, String)> {
-        panic!("no enum entry")
-    }
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
         (sub.kotlin_class_internal() == Some(owner)).then_some(sub)
     }

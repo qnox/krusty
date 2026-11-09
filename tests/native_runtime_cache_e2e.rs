@@ -5,18 +5,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The probe crate sits where the native crate does, so its build script finds the shared target
+/// contract at the same relative path.
+const NATIVE_CRATE: &str = "crates/krusty-native";
+
 fn runtime_checkout(root: &Path, marker: &str) {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"));
-    fs::create_dir_all(root.join("src/native/runtime")).unwrap();
+    let probe = root.join(NATIVE_CRATE);
+    fs::create_dir_all(probe.join("src")).unwrap();
+    fs::create_dir_all(root.join("src/native_target")).unwrap();
     fs::create_dir(root.join(".cargo")).unwrap();
     for name in [
-        "build.rs",
+        "crates/krusty-native/build.rs",
         ".cargo/config.toml",
-        "src/native/target_contract.rs",
+        "src/native_target/contract.rs",
     ] {
         fs::copy(source.join(name), root.join(name)).unwrap();
     }
-    for directory in ["src/native/runtime", "src/diag/releases"] {
+    for directory in ["crates/krusty-native/runtime"] {
         fs::create_dir_all(root.join(directory)).unwrap();
         for entry in fs::read_dir(source.join(directory)).unwrap() {
             let entry = entry.unwrap();
@@ -25,29 +31,27 @@ fn runtime_checkout(root: &Path, marker: &str) {
             }
         }
     }
-    let runtime = root.join("src/native/runtime/krusty_rt.c");
+    let runtime = probe.join("runtime/krusty_rt.c");
     let mut text = fs::read_to_string(&runtime).unwrap();
     text.push_str(&format!(
         "\nconst char runtime_checkout_marker[] = \"{marker}\";\n"
     ));
     fs::write(runtime, text).unwrap();
     fs::write(
-        root.join("Cargo.toml"),
+        probe.join("Cargo.toml"),
         "[package]\nname = \"runtime-cache-probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
     )
     .unwrap();
     fs::write(
-        root.join("src/lib.rs"),
+        probe.join("src/lib.rs"),
         r#"
-#[path = "native/target_contract.rs"]
+#[path = "../../../src/native_target/contract.rs"]
 mod target_contract;
-mod native {
-    pub use crate::target_contract::{Arch, Os};
-    #[derive(Clone, Copy)]
-    pub struct NativeTarget;
-    impl NativeTarget {
-        pub const fn new(_: Arch, _: Os) -> Self { Self }
-    }
+pub use crate::target_contract::{Arch, Os};
+#[derive(Clone, Copy)]
+pub struct NativeTarget;
+impl NativeTarget {
+    pub const fn new(_: Arch, _: Os) -> Self { Self }
 }
 type RuntimeObject = (&'static str, &'static [u8]);
 include!(concat!(env!("OUT_DIR"), "/prebuilt_runtime.rs"));
@@ -106,10 +110,10 @@ fn build_runtime_checkout(root: &Path, target: &Path, marker: &str) {
         .arg(target)
         .args(["--", "--test-threads=1"])
         .env("EXPECTED_RUNTIME_MARKER", marker)
-        .env("KRUSTY_RUNTIME_CC", env!("KRUSTY_RUNTIME_COMPILER"))
+        .env("KRUSTY_RUNTIME_CC", krusty_native::RUNTIME_COMPILER)
         .env("CARGO_INCREMENTAL", "0")
         .env("CARGO_BUILD_JOBS", "1")
-        .current_dir(root)
+        .current_dir(root.join(NATIVE_CRATE))
         .output()
         .expect("run Cargo over the runtime cache fixture");
     assert!(
@@ -132,7 +136,7 @@ fn generated_runtime(target: &Path) -> PathBuf {
 
 #[test]
 fn shared_runtime_builds_follow_the_checkout_and_reuse_unchanged_inputs() {
-    if !krusty::native::prebuilt_available() {
+    if !krusty_native::prebuilt_available() {
         assert!(
             std::env::var_os("CI").is_none(),
             "CI must run the shared runtime cache contract with a C cross-compiler"

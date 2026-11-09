@@ -42,8 +42,8 @@ fn attach_generated_declaration_lines(
     ir.classes[class as usize].decl_start_line = line;
     ir.classes[class as usize].decl_end_line = line;
     for &function in functions {
-        ir.fn_decl_lines.insert(function, line);
-        ir.fn_sig_lines.insert(function, line);
+        ir.function_position_mut(function).decl_line = Some(line);
+        ir.function_position_mut(function).signature_line = Some(line);
     }
 }
 
@@ -114,8 +114,8 @@ fn attach_plugin_callable_lines(
         else {
             continue;
         };
-        ir.fn_decl_lines.insert(function, start_line);
-        ir.fn_sig_lines.insert(function, start_line);
+        ir.function_position_mut(function).decl_line = Some(start_line);
+        ir.function_position_mut(function).signature_line = Some(start_line);
     }
 }
 
@@ -176,12 +176,11 @@ pub(super) fn accept_active_debug_metadata(
                 .callable_for_declaration(declaration)
                 .and_then(|callable| ir.checked_callable_functions.get(&callable.id).copied())
             {
-                ir.fn_decl_lines.insert(ir_function, function.decl_line);
-                ir.fn_sig_lines.insert(ir_function, function.sig_line);
-                ir.fn_signature_offsets
-                    .insert(ir_function, function.span.lo);
+                ir.function_position_mut(ir_function).decl_line = Some(function.decl_line);
+                ir.function_position_mut(ir_function).signature_line = Some(function.sig_line);
+                ir.function_position_mut(ir_function).signature_offset = Some(function.span.lo);
                 if function.body_lines.end != 0 {
-                    ir.fn_end_lines.insert(ir_function, function.body_lines.end);
+                    ir.function_position_mut(ir_function).end_line = Some(function.body_lines.end);
                 }
             }
         }
@@ -296,18 +295,18 @@ fn attach_specialized_copy_lines(ir: &mut IrFile) {
         .collect::<Vec<_>>();
     copies.sort_unstable_by_key(|(class, _)| *class);
     for (source, copy) in copies.into_iter().flat_map(|(_, methods)| methods) {
-        for lines in [
-            &mut ir.fn_decl_lines,
-            &mut ir.fn_sig_lines,
-            &mut ir.fn_close_lines,
-            &mut ir.fn_end_lines,
+        let original = ir.function_position(source);
+        let taken = ir.function_position_mut(copy);
+        for (copied, line) in [
+            (&mut taken.decl_line, original.decl_line),
+            (&mut taken.signature_line, original.signature_line),
+            (&mut taken.close_line, original.close_line),
+            (&mut taken.end_line, original.end_line),
+            (&mut taken.signature_offset, original.signature_offset),
         ] {
-            if let Some(line) = lines.get(&source).copied() {
-                lines.entry(copy).or_insert(line);
+            if copied.is_none() {
+                *copied = line;
             }
-        }
-        if let Some(offset) = ir.fn_signature_offsets.get(&source).copied() {
-            ir.fn_signature_offsets.entry(copy).or_insert(offset);
         }
     }
 }
@@ -357,8 +356,7 @@ fn attach_function_metadata(
         .iter()
         .any(crate::ir::DeclarationAnnotations::declares_annotations)
     {
-        ir.fn_param_annotations
-            .insert(function_id, parameter_annotations);
+        ir.declared_parameters_mut(function_id).annotations = parameter_annotations;
     }
     if let Some(spelling) = published_declaration_spellings(declaration, info, index) {
         ir.fn_declared_spellings
@@ -411,7 +409,7 @@ pub(super) fn attach_stable_function_inference_metadata(
             );
         }
         if no_infer.iter().any(|flag| *flag) {
-            ir.fn_param_no_infer.insert(function, no_infer);
+            ir.declared_parameters_mut(function).no_infer = no_infer;
         }
     }
 }
@@ -709,9 +707,15 @@ mod tests {
         assert_eq!(ir.classes[selected_class as usize].decl_start_line, 7);
         assert_eq!(ir.classes[untouched_class as usize].decl_line, 0);
         assert_eq!(ir.classes[untouched_class as usize].decl_start_line, 0);
-        assert_eq!(ir.fn_decl_lines.get(&selected_function), Some(&7));
-        assert_eq!(ir.fn_sig_lines.get(&selected_function), Some(&7));
-        assert!(!ir.fn_decl_lines.contains_key(&untouched_function));
-        assert!(!ir.fn_sig_lines.contains_key(&untouched_function));
+        assert_eq!(ir.function_position(selected_function).decl_line, Some(7));
+        assert_eq!(
+            ir.function_position(selected_function).signature_line,
+            Some(7)
+        );
+        assert_eq!(ir.function_position(untouched_function).decl_line, None);
+        assert_eq!(
+            ir.function_position(untouched_function).signature_line,
+            None
+        );
     }
 }

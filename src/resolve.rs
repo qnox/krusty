@@ -101,6 +101,7 @@ mod class_literal_receiver;
 mod class_literal_type_arguments;
 mod class_names_aliases;
 mod expression_finalization;
+mod reference_array_spread;
 mod star_projected_classifier;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
@@ -268,6 +269,7 @@ mod plugin_expression_planning;
 mod plugin_noarg;
 mod plugin_status;
 mod postponed_applicability;
+mod postponed_array_factories;
 mod postponed_constraints;
 mod postponed_diagnostics;
 mod property_declaration_check;
@@ -440,6 +442,8 @@ use qualifiers::*;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
 pub(crate) use serialization_generated_members::resolve as resolve_serialization_generated_member_statuses;
 use stable_path::StablePathRead;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use streaming_signature_bridge::publish_checked_local_signatures;
 use streaming_signature_bridge::*;
 pub(crate) use streaming_signature_bridge::{
     extract_source_contract_candidates, finalize_streamed_top_level_conflicts,
@@ -449,8 +453,7 @@ pub(crate) use streaming_signature_bridge::{
 };
 #[cfg(test)]
 pub(crate) use streaming_signature_bridge::{
-    publish_checked_local_signatures, publish_checked_local_signatures_in_active_root,
-    publish_discovered_local_capture_declarations,
+    publish_checked_local_signatures_in_active_root, publish_discovered_local_capture_declarations,
 };
 use type_join::join_type_projection;
 
@@ -9236,6 +9239,22 @@ struct FunctionLambdaShape<'a> {
     result_constraint: LambdaResultConstraint,
 }
 
+/// The candidate family a provider member call commits through, with the receiver its selection
+/// sees: a value's members, or a classifier's object/companion/static members.
+struct ProviderMemberFamily {
+    receiver: Ty,
+    members: Vec<crate::libraries::FunctionInfo>,
+}
+
+/// The shape a provider member family gives a call's functional arguments.
+struct ProviderLambdaShape {
+    expectations: Vec<Option<FunctionalArgumentExpectation>>,
+    /// Whether a candidate accepts the arguments. Otherwise this is the shape of the one candidate
+    /// an inapplicable call is reported against, which counts only once every other source of the
+    /// call has declined.
+    accepted: bool,
+}
+
 /// A call's argument expressions with their checked types — parallel slices that must stay the
 /// same length, so they are passed as one value rather than two.
 #[derive(Clone, Copy)]
@@ -9905,10 +9924,11 @@ impl<'a> Checker<'a> {
     /// expectation for this call, and the extension must still get its turn.
     ///
     /// One mismatched lambda discards the expectation for the WHOLE call rather than for its own
-    /// slot. That is deliberate and costs nothing today: a member only reaches here after surviving
-    /// applicability, where Kotlin already demands exact lambda arity, and a slot whose arity krusty
-    /// cannot determine reports `None` — which fits anything — rather than a guess. Per-slot refusal
-    /// is the natural refinement if a call ever needs it.
+    /// slot. That is deliberate: a member reaches here either after surviving applicability, where
+    /// Kotlin already demands exact lambda arity, or as the one candidate an inapplicable call
+    /// reports against, whose misfit lambda is then checked without its shape. A slot whose arity
+    /// krusty cannot determine reports `None` — which fits anything — rather than a guess.
+    /// Per-slot refusal is the natural refinement if a call ever needs it.
     fn member_expectations_fit_written_lambdas(
         &self,
         args: &[ExprId],
@@ -13450,32 +13470,6 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    /// Whether a selected parameter can supply a language-defined construction strategy for a
-    /// collection literal. This is intentionally a target-availability query, not a second call
-    /// resolver: overload applicability for the factory itself is checked exactly once when the
-    /// enclosing callable has won and `check_collection_literal` commits the expression.
-    fn collection_literal_target_available(&self, expected: Ty) -> bool {
-        let expected = expected.non_null();
-        if expected.array_elem().is_some() {
-            return true;
-        }
-        let Some(classifier) = expected.kotlin_class_internal() else {
-            return false;
-        };
-        if standard_factory(classifier).is_some() {
-            return true;
-        }
-        self.resolver()
-            .classifier_call_candidates(classifier, "of")
-            .into_iter()
-            .flat_map(|(_, candidates)| candidates)
-            .chain(
-                self.resolver()
-                    .classifier_associated_callables(classifier, "of"),
-            )
-            .any(|candidate| candidate.flags.operator)
-    }
-
     fn check_call(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -14548,18 +14542,6 @@ impl<'a> Checker<'a> {
 
                     let explicit_type_args = self.explicit_call_type_args(scope, call);
                     let classifier_receiver = Ty::obj_name(classifier);
-                    let arg_tys = self
-                        .provider_member_lambda_arg_kinds(
-                            scope,
-                            call,
-                            crate::symbol_resolver::SymRecv::TypeName(classifier),
-                            &name,
-                            args,
-                            &explicit_type_args,
-                        )
-                        .iter()
-                        .map(CallArgKind::ty)
-                        .collect::<Vec<_>>();
                     let candidates = if value_hidden {
                         self.resolver()
                             .classifier_static_call_candidates(classifier, &name)
@@ -14569,6 +14551,22 @@ impl<'a> Checker<'a> {
                             .map(|(_, candidates)| candidates)
                     }
                     .unwrap_or_default();
+                    // The call's lambdas are shaped by the family it commits through below.
+                    let arg_tys = self
+                        .provider_member_lambda_arg_kinds(
+                            scope,
+                            call,
+                            ProviderMemberFamily {
+                                receiver: classifier_receiver,
+                                members: candidates.clone(),
+                            },
+                            &name,
+                            args,
+                            &explicit_type_args,
+                        )
+                        .iter()
+                        .map(CallArgKind::ty)
+                        .collect::<Vec<_>>();
                     let rejected_candidates = candidates.clone();
                     if let Some(mut selected) = self
                         .select_callable_candidate(
@@ -14723,6 +14721,19 @@ impl<'a> Checker<'a> {
                         self.diags.sort_source_order_from(call_diagnostics);
                         self.set(receiver, classifier_receiver);
                         return rejected;
+                    }
+                    // One static whose arguments do not map (`bounded(Any())` against a method
+                    // with no value parameter) still owns the failure: the unbound type parameter
+                    // and the extra argument, not an unresolved static.
+                    if self.report_single_candidate_excess_arguments(
+                        call,
+                        &explicit_type_args,
+                        &rejected_candidates,
+                        args,
+                    ) {
+                        self.diags.sort_source_order_from(call_diagnostics);
+                        self.set(receiver, classifier_receiver);
+                        return Ty::Error;
                     }
                     if self.resolved_type_name(classifier).is_some() {
                         if self.libraries.inherits_classifier_callables(classifier) {
@@ -30353,6 +30364,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         narrowed_this_member: HashMap::default(),
         script_receiver_members: HashSet::default(),
         resolved_calls: HashMap::default(),
+        rejected_dependency_signatures: HashMap::default(),
         unbound_value_lambda_call_formals: HashMap::default(),
         open_lambda_result_call_formals: HashMap::default(),
         postponed_diagnostics: PostponedDiagnostics::default(),
@@ -32866,6 +32878,9 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Declared return and value-parameter types of a dependency candidate a call rejected.
+    /// Missing classes in that signature are still reported; type-parameter bounds are not stored.
+    rejected_dependency_signatures: HashMap<ExprId, Vec<Ty>>,
     /// Unsolved callee-owned formals used as ordinary lambda inputs, or whose provisional lambda
     /// result solution still depends on another call's open variable. Receiver-lambda builder
     /// inference has separate body-constraint semantics and is deliberately absent here.
@@ -36678,12 +36693,7 @@ impl<'a> Checker<'a> {
             if candidate.is_extension() && candidate.callable.annotations.contains(&hides_members) {
                 (0_u8, (0_u8, 0_u32), candidate.receiver_rank)
             } else if candidate.kind == crate::libraries::FnKind::Member {
-                let hidden = self.member_hidden_from_site(candidate, extension_receiver);
-                (
-                    if hidden { 3 } else { 1 },
-                    (0_u8, 0_u32),
-                    candidate.receiver_rank,
-                )
+                (1_u8, (0_u8, 0_u32), candidate.receiver_rank)
             } else {
                 (
                     2_u8,
@@ -40512,7 +40522,8 @@ impl<'a> Checker<'a> {
             if matches!(
                 self.file.expr(argument),
                 Expr::Lambda { .. } | Expr::CallableRef { .. }
-            ) {
+            ) || self.postponed_empty_reference_array_factory(scope, argument)
+            {
                 let has_receiver = selected
                     .argument_lambda_receivers
                     .get(index)
@@ -40560,6 +40571,7 @@ impl<'a> Checker<'a> {
                 None,
             );
         }
+        self.record_whole_array_delegation_arguments(arguments, &selected);
         self.resolved_ctor_delegations
             .insert((class, secondary), selected);
     }
@@ -45079,7 +45091,12 @@ impl<'a> Checker<'a> {
                             // A delegation lambda is contextual: leave its initial `Error`
                             // placeholder until the shared constructor selector maps it to a
                             // parameter slot, just like a primary class-header base argument.
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
+                            if !matches!(c.file.expr(argument), Expr::Lambda { .. })
+                                && !c.postponed_empty_reference_array_factory(
+                                    delegation_scope,
+                                    argument,
+                                )
+                            {
                                 c.expr(delegation_scope, argument);
                             }
                         }
@@ -45121,7 +45138,12 @@ impl<'a> Checker<'a> {
                     }
                     CtorDelegation::Super(delegation) => {
                         for &argument in &delegation.args {
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
+                            if !matches!(c.file.expr(argument), Expr::Lambda { .. })
+                                && !c.postponed_empty_reference_array_factory(
+                                    delegation_scope,
+                                    argument,
+                                )
+                            {
                                 c.expr(delegation_scope, argument);
                             }
                         }
@@ -46137,7 +46159,8 @@ impl<'a> Checker<'a> {
                     if !matches!(
                         self.file.expr(argument),
                         Expr::Lambda { .. } | Expr::CallableRef { .. }
-                    ) {
+                    ) && !self.postponed_empty_reference_array_factory(scope, argument)
+                    {
                         self.expr(scope, argument);
                     }
                 }
@@ -46151,7 +46174,10 @@ impl<'a> Checker<'a> {
                     &arguments,
                     &constructor_candidates,
                 ) {
-                    SourceConstructorSelection::Selected { resolved, .. } => *resolved,
+                    SourceConstructorSelection::Selected { resolved, .. } => {
+                        self.record_whole_array_delegation_arguments(&arguments, &resolved);
+                        *resolved
+                    }
                     SourceConstructorSelection::NoMatch { .. } => {
                         self.diags.error(
                             entry.span,
@@ -46188,7 +46214,16 @@ impl<'a> Checker<'a> {
                         .copied()
                         .unwrap_or(false);
                     let actual =
-                        self.check_argument_expected(scope, argument, expected, has_receiver, None);
+                        match self.commit_postponed_array_factory(scope, argument, expected) {
+                            Some(actual) => actual,
+                            None => self.check_argument_expected(
+                                scope,
+                                argument,
+                                expected,
+                                has_receiver,
+                                None,
+                            ),
+                        };
                     if !self.commit_implicit_integer_coercion(
                         argument,
                         expected,
@@ -47130,6 +47165,11 @@ impl<'a> Checker<'a> {
             self.contextual_annotation_array_argument(scope, argument, actual, expected)
         {
             committed
+        } else if let Some(actual) = self.commit_postponed_array_factory(scope, argument, expected)
+        {
+            // A postponed empty array factory is still uncommitted: its `Error` placeholder is
+            // not a checked result. Check it under the selected parameter now.
+            actual
         } else if matches!(self.file.expr(argument), Expr::Call { .. })
             && self.expr_types[argument.0 as usize] == actual
             && (actual == expected
@@ -47153,11 +47193,7 @@ impl<'a> Checker<'a> {
             // produced inside the reference was retained by that completed check. Re-entering the
             // reference here would duplicate either outcome.
             actual
-        } else if self.file.collection_literal_calls.contains(&argument.0)
-            || (self.postponed_empty_reference_array_factory(scope, argument)
-                && expected.non_null().is_reference_array()
-                && expected.non_null().array_elem().is_some())
-        {
+        } else if self.file.collection_literal_calls.contains(&argument.0) {
             self.expr_expected(scope, argument, expected)
         } else if matches!(self.file.expr(argument), Expr::CallableRef { .. })
             && expected.non_null().is_fun()
@@ -48804,7 +48840,7 @@ impl<'a> Checker<'a> {
                 .provider_member_lambda_arg_kinds(
                     scope,
                     call,
-                    crate::symbol_resolver::SymRecv::Value(receiver_ty),
+                    self.value_member_family(receiver_ty, CALLABLE_INVOKE_OPERATOR),
                     CALLABLE_INVOKE_OPERATOR,
                     args,
                     &[],
@@ -49231,6 +49267,19 @@ impl<'a> Checker<'a> {
         self.file.expr_uses_name(body, "it") && self.lookup(scope, "it").is_none()
     }
 
+    /// The member family `receiver.name(...)` selects from: the receiver's member overloads, joined
+    /// by the inner-classifier constructors a member level offers beside them.
+    fn value_member_family(&self, receiver: Ty, name: &str) -> ProviderMemberFamily {
+        let mut members = self.resolver().member_overloads(receiver, name);
+        if !members.is_empty() {
+            members.splice(
+                0..0,
+                self.member_level_constructor_candidates(receiver, name),
+            );
+        }
+        ProviderMemberFamily { receiver, members }
+    }
+
     /// A lambda argument's expected shape at one parameter position of a semantic-provider
     /// candidate: the
     /// VALUE parameter types, plus the receiver type when the parameter is a receiver function
@@ -49240,12 +49289,13 @@ impl<'a> Checker<'a> {
         &self,
         scope: &CheckerScope<'_>,
         call: ExprId,
-        receiver: crate::symbol_resolver::SymRecv<'_>,
+        family: ProviderMemberFamily,
         name: &str,
         args_and_partial: (&[ExprId], &[Option<Ty>]),
         type_args: &[Ty],
-    ) -> Option<Vec<Option<FunctionalArgumentExpectation>>> {
+    ) -> Option<ProviderLambdaShape> {
         let (args, partial) = args_and_partial;
+        let ProviderMemberFamily { receiver, members } = family;
         // This resolver exists only to postpone and shape lambda syntax. Ordinary arguments are
         // already typed in `partial`; re-entering provider overload selection for them is both
         // semantically pointless and quadratic on generated call-heavy sources.
@@ -49264,16 +49314,7 @@ impl<'a> Checker<'a> {
         // Reuse the semantic slot mapper and partial-applicability predicate for every source form;
         // positional calls need the same boundary as named/default/trailing-lambda calls, otherwise
         // a callable reference is checked expectation-free before its provider member is selected.
-        let mut members = self.resolver().member_overloads(receiver, name);
-        if let (crate::symbol_resolver::SymRecv::Value(receiver), false) =
-            (receiver, members.is_empty())
-        {
-            members.splice(
-                0..0,
-                self.member_level_constructor_candidates(receiver, name),
-            );
-        }
-        let mut mapped = members
+        let slot_mapped = members
             .into_iter()
             .filter_map(|candidate| {
                 let parameter_count = candidate.semantic_params().len();
@@ -49284,19 +49325,35 @@ impl<'a> Checker<'a> {
                     trailing_lambda,
                     &candidate.call_sig,
                 )?;
-                let whole_array =
-                    named_whole_array_varargs(&argument_parameters, arg_names, &candidate.call_sig);
-                self.lambda_overload_partially_applicable(
-                    scope,
-                    &candidate,
-                    None,
-                    (args, partial),
-                    (&argument_parameters, &whole_array),
-                    type_args,
-                )
-                .then_some((candidate, argument_parameters))
+                Some((candidate, argument_parameters))
             })
             .collect::<Vec<_>>();
+        let applicable = slot_mapped
+            .iter()
+            .filter(|(candidate, argument_parameters)| {
+                let whole_array =
+                    named_whole_array_varargs(argument_parameters, arg_names, &candidate.call_sig);
+                self.lambda_overload_partially_applicable(
+                    scope,
+                    candidate,
+                    None,
+                    (args, partial),
+                    (argument_parameters, &whole_array),
+                    type_args,
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        // When no candidate accepts the call's functional arguments, kotlinc still reports against
+        // the one candidate that maps every argument, and analyzes those arguments against its
+        // parameters: `take(B::g)` names the misfit reference, not the call. That shape is offered
+        // as not accepted; only the caller knows whether another source accepts the call first.
+        let accepted = !applicable.is_empty();
+        let mut mapped = match (accepted, slot_mapped.len()) {
+            (true, _) => applicable,
+            (false, 1) => slot_mapped,
+            (false, _) => return None,
+        };
         // Member precedence is semantic receiver distance, not provider iteration order. Drop
         // inherited candidates when a nearer declaration is applicable before deciding whether
         // the postponed call is genuinely ambiguous.
@@ -49307,162 +49364,101 @@ impl<'a> Checker<'a> {
         {
             mapped.retain(|(candidate, _)| candidate.receiver_rank == nearest);
         }
-        // Until lambda bodies are typed, two mapped candidates can legitimately remain
-        // indistinguishable. The exact-one pattern declines an expectation in that case;
-        // choosing the first would leak provider iteration order into overload resolution.
-        if let [(candidate, argument_parameters)] = mapped.as_slice() {
-            crate::trace_compiler!(
-                    "provider_lambda",
-                    "call={call:?} name={name} candidate={} params={:?} map={argument_parameters:?} marks={:?}",
-                    candidate.callable.name,
-                    candidate.semantic_params(),
-                    candidate.call_sig.lambda_receiver_params,
+        // Several candidates can still map the call while its lambdas are untyped. Choose among
+        // them with the selector the call finally commits through, its lambdas postponed, so a
+        // lambda is shaped by exactly the overload that resolution selects: kotlinc's postponed
+        // argument selection, including its preference for a candidate that needs no SAM
+        // conversion. A tie declines the expectation rather than leaking provider order.
+        let selected = match mapped.as_slice() {
+            [] => return None,
+            [_] => 0,
+            _ => {
+                let arg_tys = partial
+                    .iter()
+                    .map(|ty| ty.unwrap_or(Ty::Error))
+                    .collect::<Vec<_>>();
+                let selection = self.select_callable_candidate(
+                    scope,
+                    CallArgs {
+                        call,
+                        args,
+                        arg_tys: &arg_tys,
+                    },
+                    type_args,
+                    Some(receiver),
+                    CallResultConstraint::direct(None),
+                    mapped
+                        .iter()
+                        .map(|(candidate, _)| candidate.clone())
+                        .collect(),
                 );
-            let semantic = candidate.semantic_signature();
-            let binds = self.mapped_generic_call_bindings(
-                candidate,
-                None,
-                (args, partial),
-                argument_parameters,
-                &named_whole_array_varargs(argument_parameters, arg_names, &candidate.call_sig),
-                type_args,
-            );
-            let expectations = argument_parameters
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(source_index, parameter_index)| {
-                    if !matches!(
-                        self.file.expr(args[source_index]),
-                        Expr::Lambda { .. } | Expr::CallableRef { .. }
-                    ) {
-                        return None;
-                    }
-                    let param = semantic.params.get(parameter_index).copied().map(|param| {
-                        crate::symbol_resolver::ty_subst_keep_unbound(param, &binds)
-                    })?;
-                    functional_argument_expectation(
-                        self.libraries,
-                        &self.fed_source(),
-                        &candidate.call_sig,
-                        candidate.flags.inline.can_inline(),
-                        parameter_index,
-                        param,
-                        Some(&semantic),
-                    )
-                })
-                .collect();
-            crate::trace_compiler!(
-                "provider_lambda",
-                "call={call:?} name={name} expectations={expectations:?}",
-            );
-            return Some(expectations);
-        }
-        crate::trace_compiler!(
-            "provider_lambda",
-            "call={call:?} name={name} mapped_candidates={}",
-            mapped.len(),
-        );
-
-        let provisional: Vec<Ty> = args
-            .iter()
-            .enumerate()
-            .map(|(index, &arg)| {
-                self.lambda_probe_ty(scope, arg)
-                    .or_else(|| partial.get(index).copied().flatten())
-                    .unwrap_or(Ty::Error)
-            })
-            .collect();
-        let arg_kinds: Vec<CallArgKind> = args
-            .iter()
-            .zip(provisional)
-            .map(|(&arg, ty)| call_arg_kind(self.file, arg, ty))
-            .collect();
-        // The probe is MEMBER-only by construction: `selected_member` reads the instance-call,
-        // object-instance, or companion facet, never the extension facet — so the specialized
-        // params are value-param based and align with the argument positions below.
-        // A member level that joined an inner classifier's constructors to these functions is a
-        // family the symbol query cannot rebuild; select over exactly that family.
-        let joined_constructors = mapped
-            .iter()
-            .any(|(candidate, _)| candidate.constructor.is_some());
-        let candidate = match receiver {
-            crate::symbol_resolver::SymRecv::Value(receiver) if joined_constructors => {
-                let family =
-                    crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
-                        overloads: mapped.into_iter().map(|(candidate, _)| candidate).collect(),
-                    });
-                let (selected, _) = self.resolver().select_receiver_function_with_params(
-                    receiver, name, &arg_kinds, type_args, &family,
-                )?;
-                selected.member_with_return(selected.callable.ret)
+                let selected = selection
+                    .and_then(CallableCandidateSelection::available)
+                    .and_then(|selected| selected.candidate_index);
+                crate::trace_compiler!(
+                    "provider_lambda",
+                    "call={call:?} name={name} mapped_candidates={} selected={selected:?}",
+                    mapped.len(),
+                );
+                selected?
             }
-            _ => self
-                .resolver()
-                .select_symbol(receiver, name, &arg_kinds, type_args)
-                .and_then(crate::symbol_resolver::Symbol::selected_member)?,
         };
-
-        // Expectations are consumed in SOURCE-ARGUMENT order, but the selected callable's types
-        // and receiver marks live in SEMANTIC-PARAMETER order. Named/default/trailing-lambda calls
-        // can make those orders differ (`two(b = { this }, a = { ... })`), so route through the
-        // same CallSig slot mapper used by call recording instead of adding a provider-specific
-        // positional assumption. A metadata-less Java member has no names/defaults to reorder, so
-        // its only valid shape is the positional identity map.
-        let argument_parameters = if candidate.call_sig.has_param_names() {
-            call_argument_parameter_indices(
-                args.len(),
-                candidate.params.len(),
-                arg_names,
-                trailing_lambda,
-                &candidate.call_sig,
-            )?
-        } else if arg_names.is_none() && args.len() <= candidate.params.len() {
-            (0..args.len()).collect()
-        } else {
-            return None;
-        };
-
-        // Generic specialization expects arguments in parameter order. Use a lambda/error sentinel
-        // for omitted default slots: specialization deliberately skips lambda slots while inferring
-        // bindings from concrete non-lambda arguments, which is exactly the behavior an absent
-        // argument needs. Multiple source vararg elements may map to one slot; receiver-function
-        // varargs are not a meaningful Kotlin call shape, so the last mapped kind is sufficient.
-        let mut parameter_arg_kinds =
-            vec![CallArgKind::LambdaLiteral(Ty::Error); candidate.params.len()];
-        for (source_index, &parameter_index) in argument_parameters.iter().enumerate() {
-            let target = parameter_arg_kinds.get_mut(parameter_index)?;
-            *target = arg_kinds.get(source_index)?.clone();
-        }
-        let specialized_params = crate::symbol_resolver::specialized_member_params(
-            &candidate,
-            &parameter_arg_kinds,
+        let (candidate, argument_parameters) = mapped.get(selected)?;
+        crate::trace_compiler!(
+                "provider_lambda",
+                "call={call:?} name={name} candidate={} params={:?} map={argument_parameters:?} marks={:?}",
+                candidate.callable.name,
+                candidate.semantic_params(),
+                candidate.call_sig.lambda_receiver_params,
+            );
+        let semantic = candidate.semantic_signature();
+        let binds = self.mapped_generic_call_bindings(
+            candidate,
+            None,
+            (args, partial),
+            argument_parameters,
+            &named_whole_array_varargs(argument_parameters, arg_names, &candidate.call_sig),
             type_args,
         );
-        Some(
-            argument_parameters
-                .into_iter()
-                .enumerate()
-                .map(|(source_index, parameter_index)| {
-                    if !matches!(
-                        self.file.expr(args[source_index]),
-                        Expr::Lambda { .. } | Expr::CallableRef { .. }
-                    ) {
-                        return None;
-                    }
-                    let param = specialized_params.get(parameter_index).copied()?;
-                    functional_argument_expectation(
-                        self.libraries,
-                        &self.fed_source(),
-                        &candidate.call_sig,
-                        candidate.inline.can_inline(),
-                        parameter_index,
-                        param,
-                        candidate.generic_sig.as_ref(),
-                    )
-                })
-                .collect(),
-        )
+        let expectations: Vec<_> = argument_parameters
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(source_index, parameter_index)| {
+                if !matches!(
+                    self.file.expr(args[source_index]),
+                    Expr::Lambda { .. } | Expr::CallableRef { .. }
+                ) {
+                    return None;
+                }
+                let param =
+                    semantic.params.get(parameter_index).copied().map(|param| {
+                        crate::symbol_resolver::ty_subst_keep_unbound(param, &binds)
+                    })?;
+                functional_argument_expectation(
+                    self.libraries,
+                    &self.fed_source(),
+                    &candidate.call_sig,
+                    candidate.flags.inline.can_inline(),
+                    parameter_index,
+                    param,
+                    Some(&semantic),
+                )
+            })
+            .collect();
+        crate::trace_compiler!(
+            "provider_lambda",
+            "call={call:?} name={name} expectations={expectations:?}",
+        );
+        // An expectation whose parameter count cannot fit the lambda AS WRITTEN is not an
+        // expectation for this call, whichever caller asked. A destructuring parameter is ONE
+        // written parameter: the parser gives it a single synthetic name and destructures it in the
+        // body.
+        self.member_expectations_fit_written_lambdas(args, &expectations)
+            .then_some(ProviderLambdaShape {
+                expectations,
+                accepted,
+            })
     }
 
     /// The [`CallArgKind`] for an already-checked argument — pure, no checking side effects.
@@ -49498,10 +49494,7 @@ impl<'a> Checker<'a> {
             .is_none_or(|arguments| arguments.is_empty())
         {
             if let Some(signature) = self.expected_type_callable_signature(argument) {
-                return CallArgKind::ExpectedTypeCallable {
-                    provisional: ty,
-                    generic_sig: std::sync::Arc::new(signature),
-                };
+                return self.expected_type_callable_argument(argument, ty, signature);
             }
         }
         let kind = call_arg_kind(self.file, argument, ty);
@@ -49566,7 +49559,7 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         call: ExprId,
-        receiver: crate::symbol_resolver::SymRecv<'_>,
+        family: ProviderMemberFamily,
         name: &str,
         args: &[ExprId],
         type_args: &[Ty],
@@ -49579,14 +49572,17 @@ impl<'a> Checker<'a> {
                 .then(|| self.expr(scope, arg))
             })
             .collect();
-        let lambda_params = self.provider_member_lambda_expectations(
-            scope,
-            call,
-            receiver,
-            name,
-            (args, &partial),
-            type_args,
-        );
+        let lambda_params = self
+            .provider_member_lambda_expectations(
+                scope,
+                call,
+                family,
+                name,
+                (args, &partial),
+                type_args,
+            )
+            .filter(|shape| shape.accepted)
+            .map(|shape| shape.expectations);
         args.iter()
             .enumerate()
             .map(|(index, &arg)| {
@@ -49802,27 +49798,25 @@ impl<'a> Checker<'a> {
         // A member normally supplies the call's lambda shape. A member that needs lambda-to-SAM
         // conversion does not suppress a conversion-free extension, because the overload selector
         // applies that same preference before member precedence.
-        let provider = method_sig
+        let provider_shape = method_sig
             .is_none()
             .then(|| {
                 self.provider_member_lambda_expectations(
                     scope,
                     call,
-                    crate::symbol_resolver::SymRecv::Value(receiver),
+                    self.value_member_family(receiver, name),
                     name,
                     (args, partial),
                     explicit_type_args,
                 )
             })
             .flatten()
-            .filter(|expectations| expectations.iter().any(Option::is_some))
-            // An expectation whose parameter count cannot fit the lambda AS WRITTEN is not an
-            // expectation for this call, whichever source offered it. A destructuring parameter is
-            // ONE written parameter: the parser gives it a single synthetic name and destructures it
-            // in the body.
-            .filter(|expectations| {
-                self.member_expectations_fit_written_lambdas(args, expectations)
-            });
+            .filter(|shape| shape.expectations.iter().any(Option::is_some));
+        let (provider, reported_against) = match provider_shape {
+            Some(shape) if shape.accepted => (Some(shape.expectations), None),
+            Some(shape) => (None, Some(shape.expectations)),
+            None => (None, None),
+        };
         let provider_needs_sam = provider
             .as_ref()
             .is_some_and(|expectations| expectations.iter().flatten().any(|it| it.sam_conversion));
@@ -49890,6 +49884,14 @@ impl<'a> Checker<'a> {
         let provider = (!member_extension_claimed && (extension.is_none() || !provider_needs_sam))
             .then_some(provider)
             .flatten();
+        // No source accepts the call: kotlinc analyzes its functional arguments against the one
+        // member the call is then reported against. An inapplicable member must not block an
+        // extension that does accept them, so that shape counts only after every source declined.
+        let provider = provider.or_else(|| {
+            (extension.is_none() && !extension_claimed)
+                .then_some(reported_against)
+                .flatten()
+        });
         CallLambdaShaping {
             module,
             extension,
@@ -52410,47 +52412,6 @@ impl<'a> Checker<'a> {
             return None;
         }
         Some(name)
-    }
-
-    /// A zero-element reference-array factory has no element evidence until an enclosing selected
-    /// parameter supplies `Array<T>`. Keep that call uncommitted during overload probing, exactly as
-    /// an unshaped lambda is kept uncommitted; the selected-argument seam re-enters the ordinary
-    /// synthetic call checker with the concrete array expectation. This predicate identifies the
-    /// compiler declaration after normal lexical/module/classifier shadowing, rather than reserving
-    /// the source spelling.
-    fn postponed_empty_reference_array_factory(
-        &self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-    ) -> bool {
-        let Expr::Call { callee, args } = self.file.expr(expression) else {
-            return false;
-        };
-        if !args.is_empty()
-            || self
-                .file
-                .call_type_args
-                .get(&expression.0)
-                .is_some_and(|arguments| !arguments.is_empty())
-        {
-            return false;
-        }
-        let Expr::Name(name) = self.file.expr(*callee) else {
-            return false;
-        };
-        let Some(synthetic) = crate::synthetics::lookup(name) else {
-            return false;
-        };
-        if synthetic.kind != crate::synthetics::SyntheticKind::ReferenceVararg
-            || self.lexical_value_claims_call_with_arguments(scope, name, args)
-            || self.module_declares(name)
-        {
-            return false;
-        }
-        !matches!(
-            self.select_classifier(scope, name),
-            InheritedNestedClassifier::Found(internal) if !internal.matches(synthetic.fqn)
-        )
     }
 
     fn context_sensitive_name_matches(&self, name: &str, expected: Ty) -> bool {
@@ -56680,9 +56641,9 @@ impl<'a> Checker<'a> {
                 self.resolved_whole_array_vararg_args.insert(argument);
             }
         }
-        // `Array<out Bound>` / `Array<in Bound>` constrains the produced array but does not select its
-        // invariant element type. Infer that type from `arrayOf`'s arguments, then let the enclosing
-        // assignability check validate the concrete `Array<T>` against the projection.
+        // `Array<out Bound>` / `Array<in Bound>` constrains the produced array (and bounds a spread
+        // array) but does not select its invariant element type. Infer that type from the arguments,
+        // then let the enclosing assignability check validate `Array<T>` against the projection.
         let raw_hint = element_hint;
         let element_hint = raw_hint.filter(|element| element.projection_inner().is_none());
         if let SyntheticKind::PrimitiveVararg(elem) = synthetic.kind {
@@ -56714,29 +56675,7 @@ impl<'a> Checker<'a> {
                             None => self.expr(scope, argument),
                         };
                     }
-                    let array_expected =
-                        element_hint.map(|expected| Ty::obj_args("kotlin/Array", &[expected]));
-                    let actual = match array_expected {
-                        Some(expected) => self.expr_expected(scope, argument, expected),
-                        None => self.expr(scope, argument),
-                    };
-                    let Some(contributed) = actual.non_null().array_read_elem() else {
-                        if actual != Ty::Error {
-                            self.diags.error(
-                                self.span(argument),
-                                "spread argument must have an array type".to_string(),
-                            );
-                        }
-                        return Ty::Error;
-                    };
-                    let expected_array = Ty::array(Ty::out_projection(contributed));
-                    self.expect_assignable(
-                        expected_array,
-                        actual,
-                        self.span(argument),
-                        "array spread",
-                    );
-                    contributed
+                    self.reference_array_spread_element(scope, argument, raw_hint)
                 })
                 .collect::<Vec<_>>();
             self.commit_checked_single_vararg_arguments(
@@ -56765,10 +56704,7 @@ impl<'a> Checker<'a> {
                 // exclusively a backend decision and cannot make a source element inapplicable.
                 Some(e) => return Some(Ty::obj_args("kotlin/Array", &[e])),
                 None => {
-                    self.diags.error(
-                        span,
-                        "krusty: empty arrayOf() needs an explicit type (unsupported)".to_string(),
-                    );
+                    self.report_uninferred_array_factory(call, synthetic);
                     return Some(Ty::Error);
                 }
             }

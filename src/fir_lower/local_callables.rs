@@ -1018,13 +1018,10 @@ impl BodyLowering<'_> {
         self.ir
             .set_method_visibility(function, crate::types::Visibility::Private);
         if let Some(vararg) = body.vararg_parameter() {
-            self.ir.fn_varargs.insert(
-                function,
-                crate::ir::IrVarargParameter {
-                    index: vararg.index as usize,
-                    is_last: vararg.is_last,
-                },
-            );
+            self.ir.declared_parameters_mut(function).vararg = Some(crate::ir::IrVarargParameter {
+                index: vararg.index as usize,
+                is_last: vararg.is_last,
+            });
         }
         if let Some((sequence, site)) = lifting_sequence(body, self.index).zip(body.lifting_site())
         {
@@ -1097,12 +1094,12 @@ impl BodyLowering<'_> {
             .or_insert_with(|| crate::ir::FnParamInfo::identities(parameter_identities))
             .captured_receivers = captured_receivers;
         if let Some(line) = local_function_debug_line(body) {
-            self.ir.fn_decl_lines.insert(function, line);
+            self.ir.function_position_mut(function).decl_line = Some(line);
         }
         // A block-bodied local function falls off its closing brace, where kotlinc marks the
         // implicit `return` as it does for a declared one.
         if !body.has_implicit_return() && body.close_line() != 0 {
-            self.ir.fn_close_lines.insert(function, body.close_line());
+            self.ir.function_position_mut(function).close_line = Some(body.close_line());
         }
         if let Some(source_lambda) = body.source_lambda() {
             // An empty enclosing segment is the semantic class-initialization context. Do not put

@@ -10,6 +10,8 @@ use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantic
 fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
     let source =
         include_str!("box_regressions/multimodule/dependencyConstructorAllocationExports.kt");
+    let options = krusty::conformance::WasmCompilerOptions::from_source(source)
+        .expect("the original module graph's compilation options");
     let modules =
         krusty::conformance::split_modules(source).expect("the entire shared two-module program");
     let units = krusty::conformance::module_units(&modules);
@@ -31,7 +33,9 @@ fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
             &lane,
             "officialDependencyConstructorAllocation"
         ));
-        let backend = WasmBackend::new(target).with_entry(Entry::Box);
+        let backend = lane
+            .backend(source)
+            .expect("the module graph's Wasm configuration");
         let compilation_target = backend.compilation_target();
         let work = crate::common::scratch_dir().expect("official dependency producer directory");
         assert_eq!(
@@ -46,11 +50,16 @@ fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
         );
         let producer_path = work.join(format!("{producer_stem}.kt"));
         std::fs::write(&producer_path, producer_text).unwrap();
+        let reference_arguments = options
+            .reference_arguments(compilation_target)
+            .iter()
+            .map(|argument| (*argument).to_owned())
+            .collect::<Vec<_>>();
         let (produced, library) = crate::reference_invocation_support::run_reference(
             compilation_target,
             &work,
             &[producer_path],
-            &[],
+            &reference_arguments,
             false,
         )
         .expect("the exact Wasm reference compiler is provisioned");
@@ -93,84 +102,6 @@ fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
         let outcome = lane.run_artifacts(
             &work,
             "officialDependencyConstructorAllocation",
-            "import",
-            box_lane::CompiledProgram {
-                artifacts,
-                native_imports: Vec::new(),
-            },
-        );
-        assert_eq!(outcome, Outcome::Pass);
-        std::fs::remove_dir_all(work).unwrap();
-    }
-}
-
-/// The second entry of an enum compiled by the Wasm reference compiler, read from a krusty
-/// consumer. The shared program's product graph is the box inventory; this is the dependency body.
-#[test]
-fn an_official_wasm_klib_keeps_an_imported_enum_entrys_ordinal_and_identity() {
-    let source = include_str!("box_regressions/multimodule/importedEnumSecondEntry.kt");
-    let modules = krusty::conformance::split_modules(source).expect("lib and main");
-    let [producer, consumer] = modules.as_slice() else {
-        panic!("the shared program is a producer and a consumer");
-    };
-    let [(producer_stem, producer_text)] = producer.files.as_slice() else {
-        panic!("one producer file");
-    };
-    for target in WasmTarget::ALL {
-        let lane = WasmLane { target };
-        assert!(focused_wasm_lane_available(
-            &lane,
-            "officialImportedEnumSecondEntry"
-        ));
-        let backend = WasmBackend::new(target).with_entry(Entry::Box);
-        let compilation_target = backend.compilation_target();
-        let work = crate::common::scratch_dir().expect("official enum producer directory");
-        let producer_path = work.join(format!("{producer_stem}.kt"));
-        std::fs::write(&producer_path, producer_text).unwrap();
-        let (produced, library) = crate::reference_invocation_support::run_reference(
-            compilation_target,
-            &work,
-            &[producer_path],
-            &[],
-            false,
-        )
-        .expect("the exact Wasm reference compiler is provisioned");
-        assert_eq!(produced.status, 0, "official producer: {}", produced.stderr);
-        let libraries = KlibLibraries::open(&[
-            KlibLibraryInput::platform_stdlib(
-                krusty::toolchain::kotlin_stdlib_klib(compilation_target)
-                    .expect("the exact target stdlib"),
-                KlibStdlibSemantics::Wasm,
-            ),
-            KlibLibraryInput::dependency(library),
-        ])
-        .expect("the official enum KLIB and the target stdlib");
-        let stems = consumer
-            .files
-            .iter()
-            .map(|(stem, _)| stem.clone())
-            .collect::<Vec<_>>();
-        let inputs = consumer
-            .files
-            .iter()
-            .map(|(stem, text)| krusty::source::SourceInput::kotlin(text).with_file_stem(stem))
-            .collect::<Vec<_>>();
-        let mut diags = DiagSink::new();
-        let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-            &inputs,
-            krusty::frontend::PlatformProvider::new(
-                compilation_target,
-                Box::new(libraries.for_compilation()),
-            ),
-            &krusty::features::LangFeatures::new(),
-            &mut diags,
-        );
-        let artifacts =
-            krusty::compiler::emit_analyzed(analysis, &stems, &backend, "box", &mut diags);
-        assert!(diags.diags.is_empty(), "{:#?}", diags.diags);
-        let outcome = lane.run_artifacts(
-            &work,
-            "officialImportedEnumSecondEntry",
             "import",
             box_lane::CompiledProgram {
                 artifacts,

@@ -27,7 +27,7 @@ use super::{
 
 /// The classifier that lexically owns a local classifier's executable context.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IrLocalClassOwner {
+pub enum IrLocalClassOwner {
     /// A classifier realized in this IR file.
     Class(ClassId),
     /// A classifier declared outside executable code in another source, reached when this file
@@ -38,7 +38,7 @@ pub(crate) enum IrLocalClassOwner {
 /// A source classifier's original declaration context, retained when an inline copy changes its
 /// current executable enclosure. Targets decide how these source roles affect representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IrClassDeclarationContext {
+pub enum IrClassDeclarationContext {
     TopLevel,
     Member,
     Executable,
@@ -46,7 +46,7 @@ pub(crate) enum IrClassDeclarationContext {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct IrLocalClassNameProvenance {
+pub struct IrLocalClassNameProvenance {
     /// Source file whose facade roots the name when there is no lexical owner. An inline payload
     /// classifier keeps its declaring source's facade, not the file that realizes the payload.
     pub source: super::IrModuleSource,
@@ -1189,14 +1189,14 @@ impl crate::metadata::class_declarations::ClassifierRenaming for RecordRenaming<
 impl super::IrFile {
     /// Replace semantic classifier identities with target physical identities at a backend boundary.
     /// The map is exact and declaration-produced; this operation performs no spelling lookup.
-    pub(crate) fn remap_classifier_identities(&mut self, names: &HashMap<TypeName, TypeName>) {
+    pub fn remap_classifier_identities(&mut self, names: &HashMap<TypeName, TypeName>) {
         self.remap_identities(&IdentityRemap::classifiers(names));
     }
 
     /// Give every occurrence of each type parameter in `carriers` the bound a target selected for
     /// its physical representation. The occurrence keeps its semantic identity, so generic
     /// signatures and metadata still name the parameter.
-    pub(crate) fn rebind_type_parameter_carriers(&mut self, carriers: &HashMap<String, Ty>) {
+    pub fn rebind_type_parameter_carriers(&mut self, carriers: &HashMap<String, Ty>) {
         self.remap_identities(&IdentityRemap::carriers(carriers));
     }
 
@@ -1250,8 +1250,8 @@ impl super::IrFile {
         for annotations_by_function in self.function_annotations.values_mut() {
             annotations(annotations_by_function, names);
         }
-        for annotations_by_parameter in self.fn_param_annotations.values_mut() {
-            for parameter_annotations in annotations_by_parameter {
+        for parameters in self.all_declared_parameters_mut() {
+            for parameter_annotations in &mut parameters.annotations {
                 annotations(parameter_annotations, names);
             }
         }
@@ -1812,7 +1812,7 @@ impl super::IrFile {
     /// [`Self::realize_local_class_names`] for a target without facade classes: a local
     /// classifier that no classifier owns starts in its declaring source's package, so the one
     /// local to a top-level `box` is `box$Local` and its first anonymous object `box$1`.
-    pub(crate) fn realize_local_class_names_in_packages(&mut self) {
+    pub fn realize_local_class_names_in_packages(&mut self) {
         self.realize_local_class_names(|source, first| {
             crate::types::type_name_child(source.package, first)
         });

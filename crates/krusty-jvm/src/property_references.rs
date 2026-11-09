@@ -1,0 +1,1321 @@
+//! JVM realization of checked property-reference declarations.
+
+pub(crate) mod delegated_arrays;
+pub(crate) mod local_delegated_properties;
+mod realization;
+
+pub(crate) use delegated_arrays::DelegatedPropertyArrays;
+
+pub(crate) use realization::{
+    PropertyAccessorRole, PropertyFieldAccess, PropertyReferenceRealization,
+    PropertyReferenceRealizations, ProtectedReferenceBridgeMethod,
+};
+
+use krusty::fir::{
+    FirCallableReferenceBinding, FirPropertyReferenceTarget, FirPropertyTarget, PropertyId,
+};
+use krusty::ir::{
+    FunId, IrCheckedOperation, IrClass, IrClassifierKind, IrExpr, IrFile, IrLocalPropertyLayout,
+    IrModuleProperty, PropRef,
+};
+use krusty::jvm::classpath::ExternalCallableKind;
+use krusty::types::{type_name, Ty, TypeName};
+
+/// What this file materialized for a property it declares itself: the exact accessor functions,
+/// and whether the property is the sole storage of a value class.
+///
+/// Both are read from the checked layout the property's own stable identity keys, never from a
+/// name: an accessor is identified by the function it IS, and a value class's underlying property
+/// by the storage slot it occupies. A property declared in another file of the module — or by a
+/// dependency — has no layout here, and every field stays empty.
+#[derive(Clone, Copy, Debug, Default)]
+struct DeclaredAccessors {
+    getter: Option<FunId>,
+    setter: Option<FunId>,
+    /// The property's private static storage, when other classes reach its getter or setter
+    /// through its owner's accessors.
+    bridged_getter: Option<crate::private_static_access::BridgedStorage>,
+    bridged_setter: Option<crate::private_static_access::BridgedStorage>,
+    value_class_storage: bool,
+}
+
+fn declared_accessors(ir: &IrFile, target: PropertyId) -> DeclaredAccessors {
+    let Some(layout) = ir.local_property_layouts.get(&target) else {
+        return DeclaredAccessors::default();
+    };
+    match layout {
+        IrLocalPropertyLayout::TopLevelStorage {
+            storage,
+            getter,
+            setter,
+            ..
+        } => DeclaredAccessors {
+            getter: *getter,
+            setter: *setter,
+            bridged_getter: crate::private_static_access::bridged_getter(ir, *storage),
+            bridged_setter: crate::private_static_access::bridged_setter(ir, *storage),
+            value_class_storage: false,
+        },
+        IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } => DeclaredAccessors {
+            getter: Some(*getter),
+            setter: *setter,
+            bridged_getter: None,
+            bridged_setter: None,
+            value_class_storage: false,
+        },
+        IrLocalPropertyLayout::Member {
+            class,
+            backing_field,
+            getter,
+            setter,
+            ..
+        } => DeclaredAccessors {
+            getter: *getter,
+            setter: *setter,
+            bridged_getter: None,
+            bridged_setter: None,
+            // A value class has exactly one field, and the property that owns it is its underlying
+            // one. The storage slot is the identity; the two share no distinguishing spelling.
+            value_class_storage: *backing_field == Some(0)
+                && ir
+                    .classes
+                    .get(*class as usize)
+                    .is_some_and(|owner| owner.is_value),
+        },
+        IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => DeclaredAccessors {
+            getter: Some(*getter),
+            setter: *setter,
+            bridged_getter: None,
+            bridged_setter: None,
+            value_class_storage: false,
+        },
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PropertyReferenceRealizationTarget {
+    Module(PropertyId),
+    External(krusty::fir::ExternalCallableId),
+    ExternalProperty(krusty::fir::ExternalPropertyId),
+    Invalid,
+}
+
+pub(super) fn realize(
+    ir: &mut IrFile,
+    file_classes: &super::file_facades::FileClasses,
+    callables: &krusty::backend::CheckedBackendCallables,
+    current_facade: &str,
+    delegate_helpers: &super::local_delegate_accessors::HelperAccess,
+) -> Result<PropertyReferenceRealizations, PropertyReferenceRealizationTarget> {
+    let facades = &file_classes.containers[..];
+    let mut realizations = PropertyReferenceRealizations::default();
+    realizations.local_delegated =
+        local_delegated_properties::LocalDelegatedProperties::collect(ir, facades)
+            .ok_or(PropertyReferenceRealizationTarget::Invalid)?;
+    let mut delegated_operands = Vec::new();
+    let expression_count = ir.exprs.len();
+    for raw in 0..expression_count {
+        if let IrExpr::LocalPropertyReference(reference) = &ir.exprs[raw] {
+            let reference = reference.clone();
+            let (declaration, element) = local_property_reference(ir, facades, &reference)?;
+            let owner = match delegate_helpers.closure_property_owner(raw as u32) {
+                Some(closure) => closure,
+                None => declaration,
+            };
+            delegated_operands.push(delegated_arrays::DelegatedOperand {
+                operand: raw as u32,
+                owner,
+                property: delegated_arrays::DelegatedProperty::Local(reference.declaration),
+                source_order: (reference.member_order, reference.ordinal + 1),
+                element,
+            });
+            continue;
+        }
+        let IrExpr::Checked(checked_op) = ir.exprs[raw].clone() else {
+            continue;
+        };
+        let IrCheckedOperation::PropertyReference {
+            target,
+            delegated,
+            binding,
+            dispatch_receiver,
+            extension_receiver,
+            mutable,
+            ..
+        } = *checked_op
+        else {
+            continue;
+        };
+        if dispatch_receiver.is_some() && extension_receiver.is_some() {
+            return Err(PropertyReferenceRealizationTarget::Invalid);
+        }
+        let receiver = dispatch_receiver.or(extension_receiver);
+        let reference_owner = u32::try_from(raw)
+            .ok()
+            .and_then(|expression| ir.expression_owners.get(&expression))
+            .copied();
+        let delegated_target = if delegated {
+            match &target {
+                FirPropertyReferenceTarget::Module(target) => Some(*target),
+                FirPropertyReferenceTarget::SpecializedModule { .. }
+                | FirPropertyReferenceTarget::Classifier { .. }
+                | FirPropertyReferenceTarget::External { .. } => {
+                    return Err(PropertyReferenceRealizationTarget::Invalid);
+                }
+            }
+        } else {
+            None
+        };
+        let (property, realization) = match target {
+            FirPropertyReferenceTarget::Module(target) => {
+                // Only lowering-generated delegate metadata uses this unspecialized form. It has
+                // no provider-selected callable candidate, so the JVM boundary materializes its
+                // default accessor convention once. Source-written references always take the
+                // `SpecializedModule` arm below and carry the selected declaration spellings.
+                let declaration = ir
+                    .referenced_module_properties
+                    .get(&target)
+                    .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
+                let declared = declared_accessors(ir, target);
+                let getter = declared
+                    .getter
+                    .and_then(|getter| ir.functions.get(getter as usize))
+                    .map(|getter| getter.name.clone())
+                    .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
+                let setter = if mutable {
+                    Some(
+                        declared
+                            .setter
+                            .and_then(|setter| ir.functions.get(setter as usize))
+                            .map(|setter| setter.name.clone())
+                            .ok_or(PropertyReferenceRealizationTarget::Module(target))?,
+                    )
+                } else {
+                    None
+                };
+                module_property(
+                    declaration,
+                    file_classes,
+                    target,
+                    mutable,
+                    declared,
+                    (&getter, setter.as_deref()),
+                    ModulePropertySite {
+                        caller: reference_owner,
+                        dispatch: None,
+                    },
+                )?
+            }
+            FirPropertyReferenceTarget::SpecializedModule {
+                property,
+                getter_name,
+                setter_name,
+                reflection_owner,
+                ..
+            } => {
+                let failure = PropertyReferenceRealizationTarget::Module(property);
+                let declaration = ir
+                    .referenced_module_properties
+                    .get(&property)
+                    .ok_or(failure)?;
+                // A written name is the accessor's whole JVM name: no module suffix follows it.
+                let written_getter =
+                    super::module_calls::module_property_written_accessor_name(declaration, false)
+                        .map_err(|()| failure)?;
+                let written_setter =
+                    super::module_calls::module_property_written_accessor_name(declaration, true)
+                        .map_err(|()| failure)?;
+                let getter_name = written_getter.unwrap_or(getter_name.as_ref()).to_owned();
+                let setter_name = written_setter.or(setter_name.as_deref()).map(str::to_owned);
+                let (written_getter, written_setter) =
+                    (written_getter.is_some(), written_setter.is_some());
+                let (property_ref, mut realization) = module_property(
+                    declaration,
+                    file_classes,
+                    property,
+                    mutable,
+                    declared_accessors(ir, property),
+                    (&getter_name, setter_name.as_deref()),
+                    ModulePropertySite {
+                        caller: reference_owner,
+                        dispatch: referenced_member_dispatch(
+                            ir,
+                            reflection_owner,
+                            ir.referenced_module_properties
+                                .get(&property)
+                                .and_then(|property| property.owner),
+                        )
+                        .map_err(|()| PropertyReferenceRealizationTarget::Module(property))?,
+                    },
+                )?;
+                realization.module_suffix_getter &= !written_getter;
+                realization.module_suffix_setter &= !written_setter;
+                (property_ref, realization)
+            }
+            FirPropertyReferenceTarget::Classifier {
+                owner,
+                property,
+                property_type,
+            } => classifier_property(owner, property, property_type.get()),
+            FirPropertyReferenceTarget::External {
+                reflection_owner,
+                getter,
+                setter,
+                extension_receiver,
+                property_type,
+            } => external_property(
+                callables,
+                reflection_owner.map(krusty::fir::ResolvedTy::get),
+                getter.as_ref(),
+                setter.as_deref(),
+                extension_receiver,
+                property_type.get(),
+            )?,
+        };
+        if mutable != property.mutable || mutable != property.setter_name.is_some() {
+            return Err(PropertyReferenceRealizationTarget::Invalid);
+        }
+        let semantic_receiver = property
+            .ext_facade
+            .as_ref()
+            .map(|_| property.owner_internal)
+            .or_else(|| (!property.static_dispatch).then_some(property.owner_internal))
+            .flatten();
+        match binding {
+            FirCallableReferenceBinding::Bound
+                if receiver.is_none() && semantic_receiver.is_some() =>
+            {
+                return Err(PropertyReferenceRealizationTarget::Invalid);
+            }
+            FirCallableReferenceBinding::Unbound
+                if receiver.is_some() || semantic_receiver.is_none() =>
+            {
+                return Err(PropertyReferenceRealizationTarget::Invalid);
+            }
+            FirCallableReferenceBinding::Static
+                if receiver.is_some()
+                    || semantic_receiver.is_some_and(|owner| !is_script_class(ir, owner)) =>
+            {
+                return Err(PropertyReferenceRealizationTarget::Invalid);
+            }
+            FirCallableReferenceBinding::Bound
+            | FirCallableReferenceBinding::Unbound
+            | FirCallableReferenceBinding::Static => {}
+        }
+        if let Some(target) = delegated_target {
+            let declaration = ir
+                .referenced_module_properties
+                .get(&target)
+                .cloned()
+                .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
+            let source_order = ir
+                .checked_properties
+                .get(&target)
+                .map(|checked| checked.source_order)
+                .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
+            let getter = declared_accessors(ir, target)
+                .getter
+                .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
+            let (owner, element, signature) =
+                synthesize_delegated(ir, facades, target, &declaration, property, mutable)?;
+            realizations.record_delegated_getter_signature(signature, getter);
+            delegated_operands.push(delegated_arrays::DelegatedOperand {
+                operand: raw as u32,
+                owner,
+                property: delegated_arrays::DelegatedProperty::Declared(target),
+                source_order: (source_order, 0),
+                element,
+            });
+            continue;
+        }
+        ir.exprs[raw] = synthesize(
+            ir,
+            current_facade,
+            raw,
+            property,
+            realization,
+            receiver,
+            &mut realizations,
+        );
+    }
+    realizations.pending_delegated = delegated_operands;
+    Ok(realizations)
+}
+
+/// Whether `owner` is a script's class, whose properties kotlinc reflects without a dispatch
+/// receiver.
+fn is_script_class(ir: &IrFile, owner: TypeName) -> bool {
+    ir.classes
+        .iter()
+        .any(|class| class.is_script && class.fq_name == owner)
+}
+
+/// Choose each class's `$$delegatedProperties` for the delegated operands [`realize`] found, once
+/// dependency calls and companion storage are realized: an operand an inline operator never reads
+/// is `null` instead and takes no slot. Waiting for companion storage makes the owner's complete
+/// static-field namespace available before the generated array receives its physical name.
+pub(crate) fn place_delegated_arrays(
+    ir: &mut IrFile,
+    realizations: &mut PropertyReferenceRealizations,
+    bodies: &dyn krusty::jvm::inline::MethodBodies,
+) {
+    delegated_arrays::elide_unread(ir, bodies);
+    let pending = std::mem::take(&mut realizations.pending_delegated);
+    realizations.delegated_arrays = delegated_arrays::place(ir, pending);
+}
+
+/// Realize the compiler-generated metadata value passed to a delegate convention. Unlike a
+/// source-written `::property`, this value needs no generated implementation class: Kotlin's JVM
+/// runtime provides concrete `PropertyReferenceNImpl` classes for precisely this declaration-only
+/// shape. The selected property, receiver arity, name, and signature all come from checked common
+/// IR; this function chooses only their JVM representation.
+fn synthesize_delegated(
+    ir: &mut IrFile,
+    facades: &[String],
+    target: PropertyId,
+    declaration: &IrModuleProperty,
+    property: PropRef,
+    mutable: bool,
+) -> Result<(TypeName, IrExpr, krusty::ir::ExprId), PropertyReferenceRealizationTarget> {
+    let failure = PropertyReferenceRealizationTarget::Module(target);
+    if !declaration.context_parameters.is_empty() {
+        return Err(failure);
+    }
+    // A script's property is reflected without the script instance holding it.
+    let receiver_arity = if declaration.companion_associated {
+        0
+    } else if declaration
+        .owner
+        .is_some_and(|owner| is_script_class(ir, owner))
+    {
+        usize::from(declaration.extension_receiver.is_some())
+    } else {
+        usize::from(declaration.owner.is_some())
+            + usize::from(declaration.extension_receiver.is_some())
+    };
+    if receiver_arity > 2 {
+        return Err(failure);
+    }
+    // The class declaring the property, whose array holds it and which it names as its owner: a
+    // top-level declaration's is its file facade, an extension's too, never the receiver's class.
+    let container = match declaration.owner {
+        Some(owner) => owner,
+        None => super::module_calls::facade_for(declaration.source, facades).ok_or(failure)?,
+    };
+    let owner = ir.add_expr(IrExpr::ClassConst {
+        internal: Some(container),
+    });
+    let name = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::String(
+        declaration.name.clone().into(),
+    )));
+    let mut parameters = declaration.context_parameters.clone();
+    if !declaration.companion_associated {
+        parameters.extend(declaration.extension_receiver);
+    }
+    let descriptor = property
+        .getter_descriptor
+        .clone()
+        .unwrap_or_else(|| krusty::jvm::names::method_descriptor(&parameters, declaration.ty));
+    let signature = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::String(
+        format!("{}{descriptor}", property.getter_name).into(),
+    )));
+    let flags = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Int(i32::from(
+        declaration.owner.is_none(),
+    ))));
+    let mutability = if mutable { "Mutable" } else { "" };
+    let internal = type_name(&format!(
+        "kotlin/jvm/internal/{mutability}PropertyReference{receiver_arity}Impl"
+    ));
+    Ok((
+        container,
+        IrExpr::New {
+            internal,
+            args: vec![owner, name, signature, flags],
+            ctor_params: None,
+            declared_params: None,
+            ctor_desc: Some("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".into()),
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        },
+        signature,
+    ))
+}
+
+/// The reflected local delegated property kotlinc builds in its class's `$$delegatedProperties`:
+/// named `<v#N>` by its ordinal, owned by the class lexically declaring it (a top-level
+/// declaration's file facade, flagged as such), and receiver-less.
+fn local_property_reference(
+    ir: &mut IrFile,
+    facades: &[String],
+    reference: &krusty::ir::IrLocalPropertyReference,
+) -> Result<(TypeName, IrExpr), PropertyReferenceRealizationTarget> {
+    let container = match reference.class {
+        Some(class) => class,
+        None => super::module_calls::facade_for(reference.source, facades)
+            .ok_or(PropertyReferenceRealizationTarget::Invalid)?,
+    };
+    let owner = ir.add_expr(IrExpr::ClassConst {
+        internal: Some(container),
+    });
+    let name = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::String(
+        reference.name.to_string().into(),
+    )));
+    let signature = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::String(
+        format!("<v#{}>", reference.ordinal).into(),
+    )));
+    let flags = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Int(i32::from(
+        reference.class.is_none(),
+    ))));
+    let mutability = if reference.mutable { "Mutable" } else { "" };
+    let element = IrExpr::New {
+        internal: type_name(&format!(
+            "kotlin/jvm/internal/{mutability}PropertyReference0Impl"
+        )),
+        args: vec![owner, name, signature, flags],
+        ctor_params: None,
+        declared_params: None,
+        ctor_desc: Some("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".into()),
+        external_target: None,
+        defaults: Box::new([]),
+        default_prefix_count: 0,
+    };
+    Ok((container, element))
+}
+
+fn classifier_property(
+    owner: TypeName,
+    property: krusty::fir::FirClassifierProperty,
+    property_type: Ty,
+) -> (PropRef, PropertyReferenceRealization) {
+    let (name, getter) = match property {
+        krusty::fir::FirClassifierProperty::EnumEntries => ("entries", "getEntries"),
+    };
+    (
+        PropRef {
+            owner_internal: Some(owner),
+            call_owner_internal: Some(owner),
+            prop_name: name.to_string(),
+            getter_name: getter.to_string(),
+            getter_descriptor: None,
+            setter_name: None,
+            setter_descriptor: None,
+            owner_is_interface: false,
+            prop_ty: property_type,
+            bound: false,
+            static_dispatch: true,
+            mutable: false,
+            ext_facade: None,
+        },
+        PropertyReferenceRealization {
+            declared_getter_name: getter.to_string(),
+            declared_setter_name: None,
+            facade_storage: false,
+            // A synthesized classifier property (`EnumEntries`) is an ordinary static member
+            // accessor, generated by the backend rather than declared by any module function.
+            accessor_role: PropertyAccessorRole::Member,
+            bridged_getter: None,
+            bridged_setter: None,
+            package_owner: true,
+            getter_function: None,
+            setter_function: None,
+            module_suffix_getter: false,
+            module_suffix_setter: false,
+            physical_getter_ret: None,
+            physical_setter_value: None,
+            getter_constant: None,
+            getter_field: None,
+            setter_field: None,
+            declares_value_class_storage: false,
+            accessor_names_are_physical: false,
+            boxed_value_class: None,
+            unboxed_receiver_value_class: None,
+            getter_bridge_owner: None,
+            setter_bridge_owner: None,
+            reflection_getter: None,
+            protected_bridge: None,
+            protected_getter_bridge: None,
+            protected_setter_bridge: None,
+            member_access_bridge: None,
+            hoisted_companion_getter: None,
+            hoisted_companion_setter: None,
+        },
+    )
+}
+
+fn external_property(
+    callables: &krusty::backend::CheckedBackendCallables,
+    reflection_owner: Option<Ty>,
+    getter: &FirPropertyTarget,
+    setter: Option<&FirPropertyTarget>,
+    extension_receiver: bool,
+    property_type: Ty,
+) -> Result<(PropRef, PropertyReferenceRealization), PropertyReferenceRealizationTarget> {
+    // The frontend/backend handoff froze the PROPERTY declaration and each selected accessor by
+    // opaque identity. An accessor's physical name may be renamed or value-class-mangled, so no
+    // classpath/name lookup is permitted while realizing the reference.
+    let (property_identity, property_declaration) = external_property_fact(callables, getter)?;
+    let name = property_declaration.name.clone();
+    let getter_constant = property_declaration.compile_time_constant.clone();
+    let getter = external_accessor(callables, getter, false)?;
+    let setter = setter
+        .map(|setter| {
+            let (setter_property, _) = external_property_fact(callables, setter)?;
+            if setter_property != property_identity {
+                return Err(PropertyReferenceRealizationTarget::Invalid);
+            }
+            external_accessor(callables, setter, true)
+        })
+        .transpose()?;
+    let failure = PropertyReferenceRealizationTarget::External(getter.0);
+    let field_realization = matches!(
+        getter.1.kind,
+        ExternalCallableKind::InstanceFieldRead | ExternalCallableKind::StaticFieldRead
+    );
+    let setter_matches = setter.as_ref().is_none_or(|(_, setter)| {
+        if getter.1.kind == ExternalCallableKind::InstanceFieldRead {
+            setter.kind == ExternalCallableKind::InstanceFieldWrite
+        } else if getter.1.kind == ExternalCallableKind::StaticFieldRead {
+            setter.kind == ExternalCallableKind::StaticFieldWrite
+        } else {
+            setter.kind == getter.1.kind
+        }
+    });
+    if !setter_matches {
+        return Err(failure);
+    }
+    let callable = getter.1;
+    let descriptor = if field_realization {
+        krusty::jvm::names::method_descriptor(&[], callable.physical_ret)
+    } else {
+        callable_descriptor(callable)
+    };
+    let owner = reflection_owner
+        .and_then(Ty::kotlin_class_internal)
+        .or_else(|| {
+            matches!(
+                getter.1.kind,
+                ExternalCallableKind::TopLevel | ExternalCallableKind::StaticFieldRead
+            )
+            .then_some(property_declaration.owner)
+        })
+        .ok_or(failure)?;
+    let (static_dispatch, ext_facade) = match getter.1.kind {
+        ExternalCallableKind::TopLevel => (true, None),
+        ExternalCallableKind::Extension => (false, Some(Some(property_declaration.owner))),
+        ExternalCallableKind::Member | ExternalCallableKind::InstanceFieldRead => (
+            false,
+            extension_receiver.then_some(Some(property_declaration.owner)),
+        ),
+        ExternalCallableKind::StaticFieldRead => (true, None),
+        ExternalCallableKind::Constructor
+        | ExternalCallableKind::InstanceFieldWrite
+        | ExternalCallableKind::StaticFieldWrite => {
+            return Err(failure);
+        }
+    };
+    // kotlinc calls a member through the class the reference names it on, where it is that
+    // class's own (possibly inherited) member: `Sub::level` calls `Sub.getLevel()`, not the
+    // declaring `Tank`'s. An interface member keeps its declaring owner, whose kind the selection
+    // recorded; the referenced class's kind is not.
+    let call_owner = if ext_facade.is_none() && !static_dispatch && !callable.owner_is_interface {
+        owner
+    } else {
+        property_declaration.owner
+    };
+    // A field-backed declaration is read and written as the field its accessors ARE, from the
+    // same selected realization: the field an owner and spelling would find may belong to another
+    // declaration.
+    let field_access = |realization: &krusty::backend::BackendCallableFact, ty: Ty| {
+        let is_static = match realization.kind {
+            ExternalCallableKind::InstanceFieldRead | ExternalCallableKind::InstanceFieldWrite => {
+                false
+            }
+            ExternalCallableKind::StaticFieldRead | ExternalCallableKind::StaticFieldWrite => true,
+            ExternalCallableKind::TopLevel
+            | ExternalCallableKind::Extension
+            | ExternalCallableKind::Member
+            | ExternalCallableKind::Constructor => return None,
+        };
+        Some(PropertyFieldAccess {
+            owner: if is_static {
+                realization.physical_owner
+            } else {
+                call_owner
+            },
+            name: realization.physical_name().to_string(),
+            ty,
+            is_static,
+        })
+    };
+    let physical_setter_value = setter
+        .as_ref()
+        .map(|(_, setter)| setter.physical_params.last().copied().ok_or(failure))
+        .transpose()?;
+    let getter_field = getter_constant
+        .is_none()
+        .then(|| field_access(getter.1, callable.physical_ret))
+        .flatten();
+    let setter_field = setter
+        .as_ref()
+        .zip(physical_setter_value)
+        .and_then(|((_, setter), value)| field_access(setter, value));
+    // A field has no accessor to name, so the reflected signature names the getter the property
+    // would have: `getStamp()`, never the field's own spelling.
+    let getter_name = if field_realization {
+        krusty::names::property_getter_name(&name)
+    } else {
+        callable.physical_name().to_string()
+    };
+    // The provider decoded this declaration edge from the metadata's stable string-table
+    // identities and attached it to the exact external property selected by FIR. Do not compare
+    // either the source spelling or the accessor spelling here.
+    let declares_value_class_storage = property_declaration.declares_value_class_storage;
+    Ok((
+        PropRef {
+            owner_internal: Some(owner),
+            call_owner_internal: Some(call_owner),
+            prop_name: name.to_string(),
+            getter_name: getter_name.clone(),
+            getter_descriptor: Some(descriptor),
+            setter_name: setter
+                .as_ref()
+                .map(|(_, setter)| setter.physical_name().to_string()),
+            setter_descriptor: setter.as_ref().map(|(_, setter)| {
+                if field_realization {
+                    krusty::jvm::names::method_descriptor(&setter.physical_params, Ty::Unit)
+                } else {
+                    callable_descriptor(setter)
+                }
+            }),
+            owner_is_interface: callable.owner_is_interface,
+            prop_ty: property_type,
+            bound: false,
+            static_dispatch,
+            mutable: setter.is_some(),
+            ext_facade,
+        },
+        PropertyReferenceRealization {
+            declared_getter_name: getter_name,
+            declared_setter_name: setter.as_ref().map(|(_, setter)| setter.name.clone()),
+            // A dependency's storage was realized by whoever compiled it, and its accessors are
+            // read from that artifact's metadata rather than realized again here.
+            facade_storage: false,
+            // A dependency's accessor arrives with its selected callable kind; an extension is the
+            // one that takes its receiver as the first argument.
+            accessor_role: if matches!(getter.1.kind, ExternalCallableKind::Extension) {
+                PropertyAccessorRole::Extension
+            } else {
+                PropertyAccessorRole::Member
+            },
+            bridged_getter: None,
+            bridged_setter: None,
+            package_owner: true,
+            // A dependency declares no function of this module.
+            getter_function: None,
+            setter_function: None,
+            module_suffix_getter: false,
+            module_suffix_setter: false,
+            physical_getter_ret: Some(callable.physical_ret),
+            physical_setter_value,
+            getter_constant,
+            getter_field,
+            setter_field,
+            declares_value_class_storage,
+            accessor_names_are_physical: true,
+            boxed_value_class: None,
+            unboxed_receiver_value_class: None,
+            getter_bridge_owner: None,
+            setter_bridge_owner: None,
+            reflection_getter: None,
+            protected_bridge: None,
+            protected_getter_bridge: None,
+            protected_setter_bridge: None,
+            member_access_bridge: None,
+            hoisted_companion_getter: None,
+            hoisted_companion_setter: None,
+        },
+    ))
+}
+
+/// The Kotlin name of the property an accessor target belongs to, as its declaration published it.
+fn external_property_fact<'a>(
+    callables: &'a krusty::backend::CheckedBackendCallables,
+    target: &FirPropertyTarget,
+) -> Result<
+    (
+        krusty::fir::ExternalPropertyId,
+        &'a krusty::backend::BackendPropertyFact,
+    ),
+    PropertyReferenceRealizationTarget,
+> {
+    let FirPropertyTarget::External { property, .. } = target else {
+        return Err(PropertyReferenceRealizationTarget::Invalid);
+    };
+    callables
+        .property(*property)
+        .map(|fact| (*property, fact))
+        .ok_or(PropertyReferenceRealizationTarget::ExternalProperty(
+            *property,
+        ))
+}
+
+fn external_accessor<'a>(
+    callables: &'a krusty::backend::CheckedBackendCallables,
+    target: &FirPropertyTarget,
+    write: bool,
+) -> Result<
+    (
+        krusty::fir::ExternalCallableId,
+        &'a krusty::backend::BackendCallableFact,
+    ),
+    PropertyReferenceRealizationTarget,
+> {
+    let (_, realization) = external_property_fact(callables, target)?;
+    let accessor = if write {
+        realization
+            .setter
+            .ok_or(PropertyReferenceRealizationTarget::Invalid)?
+    } else {
+        realization.getter
+    };
+    callables
+        .callable(accessor)
+        .map(|fact| (accessor, fact))
+        .ok_or(PropertyReferenceRealizationTarget::External(accessor))
+}
+
+fn callable_descriptor(callable: &krusty::backend::BackendCallableFact) -> String {
+    if callable.descriptor.is_empty() {
+        krusty::jvm::names::method_descriptor(&callable.physical_params, callable.physical_ret)
+    } else {
+        callable.descriptor.clone()
+    }
+}
+
+/// Where a source property reference sits, beyond the declaration it selected.
+struct ModulePropertySite {
+    /// Lexical class containing the reference. A protected member uses it as the bridge owner.
+    caller: Option<TypeName>,
+    /// Instance member written on a classifier (`A::parent` while `parent` is declared on a
+    /// supertype). `None` for a delegated metadata reference, which names the declaration.
+    dispatch: Option<ReferencedMemberDispatch>,
+}
+
+/// The classifier an instance property reference was written on, and whether calls through it
+/// are interface calls.
+struct ReferencedMemberDispatch {
+    class: TypeName,
+    is_interface: bool,
+}
+
+fn referenced_member_dispatch(
+    ir: &IrFile,
+    reflection_owner: Option<TypeName>,
+    declaration_owner: Option<TypeName>,
+) -> Result<Option<ReferencedMemberDispatch>, ()> {
+    let Some(class) = reflection_owner else {
+        return Ok(None);
+    };
+    // A reference written on the declaring classifier needs no retargeting. In particular, a
+    // function-local classifier has no module classifier record to query here; its declaration
+    // owner already carries the exact physical and reflective identity. Only an inherited
+    // reference crosses owners and needs the written classifier's kind for dispatch.
+    if Some(class) == declaration_owner {
+        return Ok(None);
+    }
+    let is_interface = matches!(
+        ir.source_classifier_kind(class).ok_or(())?,
+        IrClassifierKind::Interface | IrClassifierKind::Annotation
+    );
+    Ok(Some(ReferencedMemberDispatch {
+        class,
+        is_interface,
+    }))
+}
+
+fn module_property(
+    property: &IrModuleProperty,
+    file_classes: &super::file_facades::FileClasses,
+    target: PropertyId,
+    reference_mutable: bool,
+    declared: DeclaredAccessors,
+    selected_accessor_names: (&str, Option<&str>),
+    site: ModulePropertySite,
+) -> Result<(PropRef, PropertyReferenceRealization), PropertyReferenceRealizationTarget> {
+    let failure = PropertyReferenceRealizationTarget::Module(target);
+    if !property.context_parameters.is_empty() || reference_mutable && !property.mutable {
+        return Err(failure);
+    }
+    let name = &property.name;
+    let declared_getter_name = selected_accessor_names.0.to_owned();
+    let declared_setter_name = if reference_mutable {
+        Some(selected_accessor_names.1.ok_or(failure)?.to_owned())
+    } else {
+        None
+    };
+    let facades = &file_classes.containers[..];
+    let static_owner =
+        super::module_calls::static_owner(property.placement, property.source, facades)
+            .ok_or(failure)?;
+    // A multifile part's declared accessors are invoked through its facade.
+    let static_call_owner =
+        super::module_calls::call_owner(property.placement, property.source, file_classes)
+            .ok_or(failure)?;
+    let enclosing = property.owner;
+    let companion_associated = property.companion_associated;
+    let getter_constant = if property.flags.has(krusty::fir::DeclarationFlags::CONST) {
+        Some(property.compile_time_constant.clone().ok_or(failure)?)
+    } else {
+        None
+    };
+    let access_bridge = getter_constant.is_none()
+        && enclosing.is_some()
+        && (property.visibility.is_private()
+            || reference_mutable && property.setter_visibility.is_private());
+    let protected_bridge = getter_constant
+        .is_none()
+        .then_some(enclosing)
+        .flatten()
+        .zip(site.caller)
+        .filter(|(declaring, caller)| declaring.namespace() != caller.namespace())
+        .filter(|_| property.extension_receiver.is_none() && !companion_associated)
+        .and_then(|(target_owner, bridge_owner)| {
+            let getter = property.visibility == krusty::types::Visibility::Protected;
+            let setter = reference_mutable
+                && property.setter_visibility == krusty::types::Visibility::Protected;
+            (getter || setter).then_some(realization::ProtectedReferenceBridgeIntent {
+                bridge_owner,
+                target_owner,
+                target_owner_is_interface: super::module_calls::owner_is_jvm_interface(property),
+                getter,
+                setter,
+                setter_value_name: property.setter_parameter.as_ref().and_then(|identity| {
+                    super::parameter_names::resolved_local_variable(
+                        identity,
+                        selected_accessor_names.1?,
+                    )
+                }),
+            })
+        });
+    // A PRIVATE static property's field has no public accessor, and the reference is a class of
+    // its own: kotlinc reads and writes it through its static owner's `access$get<X>$p` /
+    // `access$set<X>$p`, whatever the owner is.
+    let bridged_getter = declared.bridged_getter;
+    let bridged_setter = declared.bridged_setter;
+    let bridged_name = |declared: &str, bridged: bool, source_declared: bool| {
+        if access_bridge {
+            super::private_static_access::member_property_accessor_name(declared, source_declared)
+        } else if bridged {
+            format!("access${declared}$p")
+        } else {
+            declared.to_owned()
+        }
+    };
+    let instance_member =
+        property.extension_receiver.is_none() && !companion_associated && enclosing.is_some();
+    // `A::parent` and `a::parent` name A, even when the declaration is a supertype member.
+    // kotlin-reflect substitutes the property type from that owner, and the getter is A's too.
+    let referenced = instance_member.then_some(site.dispatch).flatten();
+    let owner = referenced
+        .as_ref()
+        .map(|dispatch| dispatch.class)
+        .or_else(|| {
+            property
+                .extension_receiver
+                .and_then(Ty::kotlin_class_internal)
+        })
+        .or(enclosing)
+        .unwrap_or(static_owner);
+    // A protected bridge targets the declaration owner and is later rewritten to the bridge
+    // owner. Keep that physical identity separate from the classifier used for reflection.
+    let call_dispatch = protected_bridge
+        .is_none()
+        .then_some(referenced.as_ref())
+        .flatten();
+    let bridged = bridged_getter.is_some() || bridged_setter.is_some();
+    let call_owner = call_dispatch
+        .map(|dispatch| dispatch.class)
+        .or(enclosing)
+        .unwrap_or(if bridged {
+            static_owner
+        } else {
+            static_call_owner
+        });
+    let owner_is_interface = call_dispatch
+        .map(|dispatch| dispatch.is_interface)
+        .unwrap_or_else(|| super::module_calls::owner_is_jvm_interface(property));
+    // A companion-block receiver names the reflected classifier but is not passed to the accessor.
+    // Keep the semantic owner (`C`) separate from the physical static call owner.
+    let static_dispatch =
+        companion_associated || (property.extension_receiver.is_none() && enclosing.is_none());
+    let ext_facade = if access_bridge {
+        Some(owner)
+    } else if companion_associated {
+        None
+    } else {
+        property.extension_receiver.map(|_| {
+            if bridged {
+                static_owner
+            } else {
+                static_call_owner
+            }
+        })
+    }
+    .map(Some);
+    let getter_descriptor = if access_bridge {
+        Some(krusty::jvm::names::method_descriptor(
+            &[Ty::obj_name(owner)],
+            property.ty,
+        ))
+    } else {
+        property.extension_receiver.map(|receiver| {
+            krusty::jvm::names::method_descriptor(std::slice::from_ref(&receiver), property.ty)
+        })
+    };
+    let reflection_getter = access_bridge.then(|| {
+        let params = property.extension_receiver.into_iter().collect::<Vec<_>>();
+        (
+            declared_getter_name.clone(),
+            krusty::jvm::names::method_descriptor(&params, property.ty),
+        )
+    });
+    // `@JvmField` makes the declaration's storage its JVM surface. A compile-time constant instead
+    // returns its semantic payload directly, matching kotlinc without choosing a field owner.
+    let field = (getter_constant.is_none() && !access_bridge)
+        .then(|| super::module_calls::jvm_field_storage(property, facades))
+        .flatten()
+        .map(|(owner, is_static)| PropertyFieldAccess {
+            owner,
+            name: name.to_string(),
+            ty: krusty::jvm::physical_type::ir_ty_to_jvm(&property.ty),
+            is_static,
+        });
+    let getter_field = field.clone();
+    let setter_field = reference_mutable.then_some(field).flatten();
+    let setter_descriptor = if access_bridge && reference_mutable {
+        Some(krusty::jvm::names::method_descriptor(
+            &[Ty::obj_name(owner), property.ty],
+            Ty::Unit,
+        ))
+    } else if reference_mutable {
+        property.extension_receiver.map(|receiver| {
+            krusty::jvm::names::method_descriptor(&[receiver, property.ty], Ty::Unit)
+        })
+    } else {
+        None
+    };
+    let physical_setter_value = setter_descriptor.is_some().then_some(property.ty);
+    Ok((
+        PropRef {
+            owner_internal: Some(owner),
+            call_owner_internal: Some(call_owner),
+            prop_name: name.to_string(),
+            getter_name: bridged_name(
+                &declared_getter_name,
+                bridged_getter.is_some(),
+                declared.getter.is_some(),
+            ),
+            getter_descriptor: getter_descriptor.clone(),
+            setter_name: declared_setter_name.as_deref().map(|name| {
+                bridged_name(name, bridged_setter.is_some(), declared.setter.is_some())
+            }),
+            setter_descriptor,
+            owner_is_interface,
+            prop_ty: property.ty,
+            bound: false,
+            static_dispatch,
+            mutable: reference_mutable,
+            ext_facade,
+        },
+        PropertyReferenceRealization {
+            declared_getter_name,
+            declared_setter_name,
+            // The facade's own storage: no owner, no extension receiver, no companion association,
+            // and no accessor the source wrote. Every one of those is a fact of THIS declaration,
+            // so the answer travels with the reference instead of being looked up in the declaring
+            // file.
+            facade_storage: enclosing.is_none()
+                && property.extension_receiver.is_none()
+                && !companion_associated
+                && !property
+                    .flags
+                    .has(krusty::fir::DeclarationFlags::CUSTOM_GETTER)
+                && !property
+                    .flags
+                    .has(krusty::fir::DeclarationFlags::CUSTOM_SETTER)
+                && !property.flags.has(krusty::fir::DeclarationFlags::DELEGATED)
+                && !property.flags.has(krusty::fir::DeclarationFlags::CONST),
+            accessor_role: if access_bridge {
+                PropertyAccessorRole::AccessBridge
+            } else if !companion_associated && property.extension_receiver.is_some() {
+                PropertyAccessorRole::Extension
+            } else {
+                PropertyAccessorRole::Member
+            },
+            bridged_getter,
+            bridged_setter,
+            package_owner: property.placement == krusty::ir::IrStaticPlacement::Package,
+            getter_function: declared.getter,
+            setter_function: reference_mutable.then_some(declared.setter).flatten(),
+            module_suffix_getter: super::internal_names::module_getter_is_mangled(property),
+            module_suffix_setter: reference_mutable
+                && super::internal_names::module_setter_is_mangled(property),
+            // The accessor's physical return is the property's own type: this module writes no
+            // descriptor of its own for one, and the synthesized ones above are built from it.
+            physical_getter_ret: getter_descriptor.is_some().then_some(property.ty),
+            physical_setter_value,
+            getter_constant,
+            getter_field,
+            setter_field,
+            declares_value_class_storage: declared.value_class_storage,
+            accessor_names_are_physical: false,
+            boxed_value_class: None,
+            unboxed_receiver_value_class: None,
+            getter_bridge_owner: None,
+            setter_bridge_owner: None,
+            reflection_getter,
+            protected_bridge,
+            protected_getter_bridge: None,
+            protected_setter_bridge: None,
+            member_access_bridge: access_bridge.then_some(target),
+            hoisted_companion_getter: None,
+            hoisted_companion_setter: None,
+        },
+    ))
+}
+
+fn synthesize(
+    ir: &mut IrFile,
+    current_facade: &str,
+    expression: usize,
+    mut property: PropRef,
+    realization: PropertyReferenceRealization,
+    receiver: Option<krusty::ir::ExprId>,
+    realizations: &mut PropertyReferenceRealizations,
+) -> IrExpr {
+    let bound = receiver.is_some();
+    property.bound = bound;
+    let arity = usize::from(!bound && !property.static_dispatch);
+    let superclass = match (arity, property.mutable) {
+        (0, false) => "kotlin/jvm/internal/PropertyReference0Impl",
+        (0, true) => "kotlin/jvm/internal/MutablePropertyReference0Impl",
+        (1, false) => "kotlin/jvm/internal/PropertyReference1Impl",
+        (1, true) => "kotlin/jvm/internal/MutablePropertyReference1Impl",
+        _ => unreachable!("property references have at most one receiver"),
+    };
+    let internal = super::function_references::reference_class_name(
+        ir,
+        current_facade,
+        expression,
+        "property",
+    );
+    let mut class = IrClass::synthetic(internal);
+    class.enclosure = super::function_references::reference_enclosure(ir, expression);
+    // The carrier's `get`/`set` bodies are attributed to the reference's line.
+    class.decl_line = ir.source_line(expression as u32).unwrap_or(0);
+    class.superclass = type_name(superclass);
+    class.prop_ref = Some(property);
+    realizations.record(internal, realization);
+    let class = ir.add_class(class);
+    match receiver {
+        Some(receiver) => IrExpr::New {
+            internal,
+            args: vec![receiver],
+            ctor_params: Some(vec![Ty::obj("kotlin/Any")]),
+            declared_params: None,
+            ctor_desc: None,
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        },
+        None => IrExpr::StaticInstance {
+            owner: class,
+            ty: class,
+            field: "INSTANCE",
+        },
+    }
+}
+
+/// A private companion property is realized before its field moves to the outer class. Once that
+/// hoist (and any value-class carrier erasure) has happened, each compiler-supplied accessor calls
+/// the outer field's `access$get<X>$cp` or `access$set<X>$cp` with the same physical value. A
+/// source-declared accessor remains a call through the companion's member bridge, so its body is
+/// not bypassed. Reflection still reports `get<X>` of the field type, including a nullable
+/// primitive carrier that stayed boxed.
+pub(crate) fn retarget_hoisted_companion_references(
+    ir: &mut IrFile,
+    realizations: &mut PropertyReferenceRealizations,
+) {
+    struct Retarget {
+        class_index: usize,
+        static_index: u32,
+        outer: TypeName,
+        getter_call: String,
+        getter_descriptor: String,
+        declared_getter: String,
+        setter_call: Option<String>,
+        source_declared_getter: bool,
+        source_declared_setter: bool,
+        physical: Ty,
+        value_class: Option<TypeName>,
+    }
+
+    let mut pending = Vec::new();
+    for (class_index, class) in ir.classes.iter().enumerate() {
+        if class.prop_ref.is_none() {
+            continue;
+        }
+        let Some(realization) = realizations.get(class.fq_name) else {
+            continue;
+        };
+        let Some(property) = realization.member_access_bridge else {
+            continue;
+        };
+        if ir
+            .checked_properties
+            .get(&property)
+            .is_some_and(|checked| checked.delegate.is_some())
+        {
+            continue;
+        }
+        let Some(IrLocalPropertyLayout::Member {
+            class: companion,
+            property: property_index,
+            ..
+        }) = ir.local_property_layouts.get(&property)
+        else {
+            continue;
+        };
+        let Some(companion_class) = ir.classes.get(*companion as usize) else {
+            continue;
+        };
+        if !companion_class.is_companion {
+            continue;
+        }
+        let Some(static_index) =
+            ir.jvm_companion_property_static(companion_class.fq_name, *property_index)
+        else {
+            continue;
+        };
+        let Some(property_declaration) = companion_class.properties.get(*property_index as usize)
+        else {
+            continue;
+        };
+        if !ir.is_jvm_companion_hoisted_static(static_index) || ir.is_jvm_field_static(static_index)
+        {
+            continue;
+        }
+        let storage = &ir.statics[static_index as usize];
+        let Some(outer) = storage.owner else {
+            continue;
+        };
+        let physical = storage.ty;
+        let declared_getter = realization.declared_getter_name.clone();
+        let getter_descriptor = format!("(){}", krusty::jvm::names::type_descriptor(physical));
+        let setter_call = realization
+            .declared_setter_name
+            .clone()
+            .map(|name| format!("access${name}$cp"));
+        pending.push(Retarget {
+            class_index,
+            static_index,
+            outer,
+            getter_call: format!("access${declared_getter}$cp"),
+            getter_descriptor,
+            declared_getter,
+            setter_call,
+            source_declared_getter: property_declaration.modifiers.declared_getter,
+            source_declared_setter: property_declaration.modifiers.declared_setter,
+            physical,
+            // A field that is already the value class is the boxed nullable carrier (`I?`).
+            // Recording it as a carrier would unbox the bridge argument to the underlying primitive.
+            value_class: storage
+                .erased_declared_ty
+                .and_then(|original| original.non_null().obj_internal())
+                .filter(|value_class| physical.non_null().obj_internal() != Some(*value_class)),
+        });
+    }
+
+    for update in pending {
+        let reference_name = ir.classes[update.class_index].fq_name;
+        let Some(realization) = realizations.get_mut(reference_name) else {
+            continue;
+        };
+        let setter_descriptor = update.setter_call.as_ref().map(|_| {
+            format!(
+                "({})V",
+                krusty::jvm::names::type_descriptor(update.physical)
+            )
+        });
+        let retarget_getter = !update.source_declared_getter;
+        let retarget_setter = update.setter_call.is_some() && !update.source_declared_setter;
+        if retarget_getter {
+            realization.physical_getter_ret = Some(update.physical);
+            realization.getter_bridge_owner = Some(update.outer);
+            realization.reflection_getter = Some((
+                update.declared_getter.clone(),
+                update.getter_descriptor.clone(),
+            ));
+            realization.getter_field = None;
+            realization.hoisted_companion_getter = Some(update.static_index);
+        }
+        if retarget_setter {
+            realization.physical_setter_value = Some(update.physical);
+            realization.setter_bridge_owner = Some(update.outer);
+            realization.setter_field = None;
+            realization.hoisted_companion_setter = Some(update.static_index);
+        }
+        if !update.source_declared_getter
+            && !(update.setter_call.is_some() && update.source_declared_setter)
+        {
+            realization.member_access_bridge = None;
+        }
+        realization.accessor_names_are_physical = true;
+        // The value-class pass may already have marked this reference for unboxing. A nullable
+        // primitive carrier is stored as the box, so that mark has to be cleared with the retarget.
+        if retarget_getter {
+            realization.boxed_value_class = update.value_class;
+        }
+        let reference = ir.classes[update.class_index]
+            .prop_ref
+            .as_mut()
+            .expect("the scan only queued classes that have a property reference");
+        if retarget_getter {
+            reference.getter_name = update.getter_call;
+            reference.getter_descriptor = Some(update.getter_descriptor);
+        }
+        if retarget_setter {
+            let setter_call = update
+                .setter_call
+                .expect("a retargeted setter has a selected setter");
+            reference.setter_name = Some(setter_call);
+            reference.setter_descriptor = setter_descriptor;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_written_owner_without_a_published_kind_is_not_a_declaration_owner_fallback() {
+        let ir = IrFile::default();
+        let missing = type_name("sample/Missing");
+        assert!(referenced_member_dispatch(&ir, None, None)
+            .unwrap()
+            .is_none());
+        assert!(
+            referenced_member_dispatch(&ir, Some(missing), Some(missing))
+                .unwrap()
+                .is_none()
+        );
+        assert!(referenced_member_dispatch(
+            &ir,
+            Some(missing),
+            Some(type_name("sample/Declaration"))
+        )
+        .is_err());
+    }
+}

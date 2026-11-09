@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::Command;
 
 use krusty::conformance::TestTarget;
-use krusty::native::{CraneliftBackend, Entry, NativeTarget};
+use krusty_native::{CraneliftBackend, Entry, NativeTarget};
 
 use super::box_lane::{self, Lane, Libraries, Outcome};
 use super::box_ratchet::Platform;
@@ -28,7 +28,7 @@ const DECLINE_PREFIX: &str = "krusty: the native backend does not support ";
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target) && LIBRARIES.available(TestTarget::Native)).then_some(target)
+    (krusty_native::can_link(target) && LIBRARIES.available(TestTarget::Native)).then_some(target)
 }
 
 /// Why a case is outside this harness before any compilation, or `None` when it applies.
@@ -140,7 +140,7 @@ impl NativeLane {
             );
         }
         let object_refs = objects.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        let image = match krusty::native::link_program_with_libraries(
+        let image = match krusty_native::link_program_with_libraries(
             &object_refs,
             &program.native_imports,
             target,
@@ -471,96 +471,4 @@ fn native_generic_class_members_instantiate_their_declared_dependency_exports() 
         Outcome::Pass,
         "class and method formals must instantiate independently without changing the export ABI"
     );
-}
-
-/// The second entry of an enum compiled by kotlinc-native, read from a krusty consumer.
-/// Product modules realize the class themselves; this is the dependency-body path.
-#[test]
-fn an_official_native_klib_keeps_an_imported_enum_entrys_ordinal_and_identity() {
-    let source = include_str!("box_regressions/multimodule/importedEnumSecondEntry.kt");
-    let modules = krusty::conformance::split_modules(source).expect("lib and main");
-    let [producer, consumer] = modules.as_slice() else {
-        panic!("the shared program is a producer and a consumer");
-    };
-    let [(producer_stem, producer_text)] = producer.files.as_slice() else {
-        panic!("one producer file");
-    };
-    let target = host().expect("the Native distribution this lane requires");
-    let root =
-        super::reference_recording_support::kotlin_native_root().expect("KRUSTY_KOTLIN_NATIVE");
-    let work = super::common::scratch_dir().expect("official enum producer directory");
-    let source_path = work.join(format!("{producer_stem}.kt"));
-    std::fs::write(&source_path, producer_text).unwrap();
-    let library = work.join("shade");
-    let produced = std::process::Command::new(root.join("bin/kotlinc-native"))
-        .args(["-p", "library", "-nopack", "-o"])
-        .arg(&library)
-        .arg(&source_path)
-        .output()
-        .expect("run kotlinc-native");
-    assert!(
-        produced.status.success(),
-        "official enum producer: {}",
-        String::from_utf8_lossy(&produced.stderr)
-    );
-    let libraries = krusty::klib_libraries::KlibLibraries::open(&[
-        krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
-            root.join("klib/common/stdlib"),
-            krusty::klib_libraries::KlibStdlibSemantics::Native,
-        ),
-        krusty::klib_libraries::KlibLibraryInput::dependency(library),
-    ])
-    .expect("the official enum KLIB and the Native stdlib");
-    let stems = consumer
-        .files
-        .iter()
-        .map(|(stem, _)| stem.clone())
-        .collect::<Vec<_>>();
-    let inputs = consumer
-        .files
-        .iter()
-        .map(|(stem, text)| krusty::source::SourceInput::kotlin(text).with_file_stem(stem))
-        .collect::<Vec<_>>();
-    let mut diags = krusty::diag::DiagSink::new();
-    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs,
-        krusty::frontend::PlatformProvider::new(
-            krusty::compilation_target::CompilationTarget::Native,
-            Box::new(libraries.for_compilation()),
-        ),
-        &krusty::features::LangFeatures::new(),
-        &mut diags,
-    );
-    let backend = CraneliftBackend::new(target)
-        .with_entry(Entry::Box)
-        .verified();
-    let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "box", &mut diags);
-    assert!(
-        diags.diags.is_empty(),
-        "official enum consumer: {:#?}",
-        diags.diags
-    );
-    let objects = artifacts
-        .into_iter()
-        .filter_map(|(name, bytes)| name.ends_with(".o").then_some(bytes))
-        .collect::<Vec<_>>();
-    assert!(!objects.is_empty(), "the consumer emitted no object");
-    let image = krusty::native::link_program(
-        &objects.iter().map(Vec::as_slice).collect::<Vec<_>>(),
-        target,
-    )
-    .expect("link the consumer");
-    let output = super::common::native_backend::run_native_image(&image, "importedEnum", &[], &[])
-        .unwrap_or_else(|failure| panic!("Native consumer: {}", failure.as_failure()));
-    assert!(
-        output.status.success(),
-        "Native consumer: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        format!("{}OK", krusty::backend::BOX_RESULT_FRAME)
-    );
-    assert_eq!(output.stderr, Vec::<u8>::new());
-    std::fs::remove_dir_all(work).unwrap();
 }

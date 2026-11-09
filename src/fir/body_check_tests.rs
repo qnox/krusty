@@ -1196,7 +1196,7 @@ fn indexed_reads_select_the_get_operator_of_arrays_and_classes_alike() {
 }
 
 #[test]
-fn builtin_index_assignment_is_an_explicit_checked_fir_write() {
+fn array_index_assignment_selects_the_set_operator() {
     let analysis = checked_analysis(
         "fun write(values: IntArray, index: Int, value: Int) { values[index] = value }\n",
     );
@@ -1248,13 +1248,58 @@ fn builtin_index_assignment_is_an_explicit_checked_fir_write() {
     let FirStatementKind::Expression(write) = body.statement(statements[0]).unwrap().kind else {
         panic!("body must contain the indexed write")
     };
+    // An array store selects the array's `operator fun set` like any other class's.
+    let Some(FirExprKind::Call(call)) = body.expr(write).map(|expression| &expression.kind) else {
+        panic!("an array store must be its selected `set` call")
+    };
+    assert!(call.dispatch_receiver.is_some());
     assert!(matches!(
-        body.expr(write).map(|expression| &expression.kind),
-        Some(FirExprKind::IndexedWrite {
-            indices,
-            ..
-        }) if indices.len() == 1
+        call.arguments.as_ref(),
+        [
+            FirCallArgument::Expression { parameter: 0, .. },
+            FirCallArgument::Expression { parameter: 1, .. }
+        ]
     ));
+    let FirCallTarget::External {
+        declaration,
+        receiver,
+        parameters,
+        result,
+        ..
+    } = &call.target
+    else {
+        panic!("an array store must select the provider's `set`")
+    };
+    assert_eq!(
+        (
+            receiver.map(ResolvedTy::get),
+            parameters
+                .iter()
+                .map(|parameter| parameter.get())
+                .collect::<Vec<_>>(),
+            result.get(),
+        ),
+        (
+            Some(Ty::obj("kotlin/IntArray")),
+            vec![Ty::Int, Ty::Int],
+            Ty::Unit
+        )
+    );
+    let selected =
+        crate::symbol_source::SymbolSource::external_callable(&EmptySymbolSource, *declaration)
+            .expect("the selected `set` is a core declaration");
+    assert_eq!(
+        (
+            selected.callable.owner,
+            selected.callable.name.as_str(),
+            selected.callable.compiler_intrinsic,
+        ),
+        (
+            crate::types::type_name("kotlin/IntArray"),
+            "set",
+            Some(crate::libraries::CompilerIntrinsic::ArraySet),
+        )
+    );
 }
 
 #[test]
