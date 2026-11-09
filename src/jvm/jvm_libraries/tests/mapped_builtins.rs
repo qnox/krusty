@@ -29,6 +29,50 @@ fn mapped_number_members_publish_only_their_kotlin_names() {
 }
 
 #[test]
+fn atomics_map_onto_the_jdk_one_way() {
+    let (Some(stdlib), Some(jdk)) = (
+        crate::toolchain::stdlib_jar(),
+        crate::toolchain::jdk_modules(),
+    ) else {
+        return;
+    };
+    let libraries = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        vec![stdlib, jdk],
+    )));
+    let kotlin = libraries
+        .classifier_record(type_name("kotlin/concurrent/atomics/AtomicInt"))
+        .expect("AtomicInt classifier");
+    for (source, physical) in [
+        ("load", "get"),
+        ("store", "set"),
+        ("fetchAndAdd", "getAndAdd"),
+    ] {
+        assert!(
+            kotlin.members.iter().any(|member| {
+                member.name == source && member.physical_name.as_deref() == Some(physical)
+            }),
+            "missing {source} realized by {physical}"
+        );
+    }
+    assert!(kotlin.members.iter().all(|member| member.name != "get"));
+
+    let java = libraries
+        .classifier_record(type_name("java/util/concurrent/atomic/AtomicInteger"))
+        .expect("AtomicInteger classifier");
+    assert!(java.members.iter().any(|member| member.name == "get"));
+    assert!(
+        java.members.iter().all(|member| member.name != "load"),
+        "a Java AtomicInteger keeps its Java names"
+    );
+    assert!(
+        !java
+            .supertypes
+            .contains_name(type_name("kotlin/concurrent/atomics/AtomicInt")),
+        "a Java AtomicInteger is not a Kotlin AtomicInt"
+    );
+}
+
+#[test]
 fn mapped_kotlin_number_publishes_jdk_realizations_without_stdlib() {
     let Some(jdk) = crate::toolchain::jdk_modules() else {
         return;
