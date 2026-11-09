@@ -486,6 +486,7 @@ fn lexical_context_receiver(file: &File, parameter: &Param, ty: Ty) -> ContextRe
     let kind = match parameter.context_kind {
         crate::types::ContextParameterKind::Named => {
             return ContextReceiver::named(ty, parameter.name.clone())
+                .with_declaration(parameter.ty.span)
         }
         crate::types::ContextParameterKind::Anonymous => ContextReceiverKind::Anonymous,
         crate::types::ContextParameterKind::LegacyReceiver => ContextReceiverKind::LegacyReceiver,
