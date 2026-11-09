@@ -417,12 +417,10 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
         TyKind::Intersection(..) if is_reference_intersection(ty) => REFERENCE,
         TyKind::DefinitelyNotNull(inner) if inner.is_ty_param() => REFERENCE,
-        // A function value is an object (see `super::super::function_values`).
-        TyKind::Fun(signature) if !signature.suspend => REFERENCE,
-        TyKind::Fun(_) => return Err("a suspend function value".into()),
-        TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Fun(signature) if !signature.suspend) => {
-            REFERENCE
-        }
+        // A function value is an object (see `super::super::function_values`); a suspend one is
+        // invoked with its caller's continuation as one more argument.
+        TyKind::Fun(_) => REFERENCE,
+        TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Fun(_)) => REFERENCE,
         TyKind::Nullable(inner)
             if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..))
                 || is_reference_intersection(inner) =>
@@ -1254,6 +1252,13 @@ impl<'a> Body<'a> {
                 type_operand,
             } if self.is_unboxing_cast(arg, type_operand) => {
                 self.checked_unbox_cast(arg, type_operand)?
+            }
+            IrExpr::TypeOp {
+                op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
+                arg,
+                type_operand,
+            } if matches!(type_operand.non_null().kind(), TyKind::Fun(_)) => {
+                self.function_cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast),
