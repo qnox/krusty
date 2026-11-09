@@ -50,10 +50,11 @@ impl Runtime {
                 immutable(ValType::reference(invoke)),
             ])
             .collect();
+        // Open: the table of a class implementing a function type of this arity extends it.
         let table = module.subtype(SubType {
             composite: CompositeType::Struct(fields),
             supertype: Some(objects.any_table),
-            open: false,
+            open: true,
         });
         let shape = FunctionShape { table, invoke };
         self.functions.by_arity.insert(arity, shape);

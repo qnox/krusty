@@ -531,8 +531,6 @@ closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
 closures/closureCapturingGenericParam.kt
 closures/closureInsideClosure/propertyAndFunctionNameClash.kt
 closures/closureInsideConstrucor.kt
-closures/closureOnTopLevel1.kt
-closures/closureOnTopLevel2.kt
 closures/closuresAsSingleton.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt11634_4.kt
@@ -677,7 +675,6 @@ contextParameters/substitutedContextReceivers.kt
 contextParameters/suspendContextParemetersWithExtension.kt
 contextParameters/suspendContextualWithExtension.kt
 contextParameters/useFromAnotherModuleSuspending.kt
-contextParameters/withExtensionReceiverInSupertype.kt
 contracts/contractForCast.kt
 contracts/destructuredVariable.kt
 contracts/exception.kt
@@ -1626,8 +1623,6 @@ extensionFunctions/classMethodCallExtensionSuper.kt
 extensionFunctions/defaultMethodInterfaceCallExtensionSuper.kt
 extensionFunctions/delegatedPropertyWithExtensionType.kt
 extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
-extensionFunctions/extensionFunctionAsATypeLocal.kt
-extensionFunctions/extensionFunctionAsSupertype.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionFakeOverride.kt
 extensionFunctions/extensionFunctionInValueClass.kt
@@ -1639,7 +1634,6 @@ extensionFunctions/kt3285.kt
 extensionFunctions/kt475.kt
 extensionFunctions/kt865.kt
 extensionFunctions/memberExtensionEqualsHashCodeToStringInInterface.kt
-extensionFunctions/nestedExtensionFunctionAsASupertype.kt
 extensionFunctions/shared.kt
 extensionFunctions/simple.kt
 extensionFunctions/suspendConversionForExtensionFunAsAFunType.kt
@@ -1727,8 +1721,6 @@ funInterface/kt77685.kt
 funInterface/kt79092-sam.kt
 funInterface/kt79092.kt
 funInterface/multimodule.kt
-funInterface/noConversionForSubtype.kt
-funInterface/noConversionForSubtypeGeneric.kt
 funInterface/nonAbstractMethod.kt
 funInterface/nonTrivialProjectionInSuperType.kt
 funInterface/nullableSam.kt
@@ -2979,8 +2971,6 @@ multiplatform/k2/basic/expectAndCommonFunctionOverloads.kt
 multiplatform/k2/basic/expectInterfaceInSupertypes.kt
 multiplatform/k2/basic/expectInterfaceInSupertypes2.kt
 multiplatform/k2/basic/extensionAndFakeOverride.kt
-multiplatform/k2/basic/extensionFunctionAsASupertype.kt
-multiplatform/k2/basic/extensionFunctionAsASupertypeConversion.kt
 multiplatform/k2/basic/extensionFunctionInDelegatedSam.kt
 multiplatform/k2/basic/interfaceMethodFromSuperTypeIsImplementedInOtherExpectSuperClass.kt
 multiplatform/k2/basic/intersectionOverrideWithDefaultParameterInCommonModule.kt

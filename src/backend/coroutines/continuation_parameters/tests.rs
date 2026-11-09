@@ -257,6 +257,7 @@ fn a_non_unit_loop_completes_through_the_return_it_already_has() {
         update: None,
         post_test: true,
         label: None,
+        inline_return_frame: false,
     });
     let body = ir.add_expr(IrExpr::Block {
         stmts: vec![loop_expression],

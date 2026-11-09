@@ -282,8 +282,8 @@ inventory diagnostics visible without allowing them into the failure ratchet.
 
 The existing Wasm failure inventories include the newly covered
 `regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt`: its former
-Native-only directive hid portable function-instance behavior that Wasm declines as a class
-implementing a function type. Full runs on every supported release measured this sole new gap;
+Native-only directive hid portable function-instance behavior that Wasm declines as a type test
+against `kotlin.Function`. Full runs on every supported release measured this sole new gap;
 all 19 previously exercised owned Wasm cases remain strict positives. Native adds no failure entry.
 The normal `KRUSTY_BLESS_BOX_EXPECTATIONS=1` full-local-only policy applies; a failure-to-pass change
 fails until its entry is removed. A genuinely platform-specific Native ABI fixture instead remains

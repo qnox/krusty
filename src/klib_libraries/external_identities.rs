@@ -92,6 +92,28 @@ impl ExternalIdentities {
         );
     }
 
+    /// Give a member of a classifier the language declares, which no KLIB serializes, the identity
+    /// of its public `signature`. It belongs to no module and has no serialized body.
+    pub(super) fn assign_language_member(
+        &self,
+        signature: KlibPublicIdSignature,
+        function: &mut FunctionInfo,
+    ) {
+        self.assign_callable(
+            KlibDeclarationSignature::Public(signature),
+            ExternalCallableKind::Member,
+            &function.call_sig.parameter_identities,
+            false,
+            None,
+            BodyContract {
+                parameter_defaults: Some(function.call_sig.param_defaults),
+                ..Default::default()
+            },
+            None,
+            &mut function.callable,
+        );
+    }
+
     /// Give a normalized property and each of its accessors the identity of its declaration. Each
     /// accessor realizes its own accessor signature, as a function of shape `kind`; the property
     /// realization joins the two accessor identities.

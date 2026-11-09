@@ -197,7 +197,6 @@ callableReference/equality/conversionCombinations.kt
 callableReference/equality/suspendFunctionEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorIsKFunction.kt
-callableReference/function/extensionFunctionAsASuperTypePassToSAMInterface.kt
 callableReference/function/genericCallableReferenceArgumentsNonJVM.kt
 callableReference/function/genericCallableReferenceWithReifiedTypeParam.kt
 callableReference/function/genericCallableReferencesWithNullableTypes.kt
@@ -1009,7 +1008,6 @@ exceptions/catch1.kt
 exceptions/catch2.kt
 exceptions/rethrow.kt
 exceptions/throw_from_catch.kt
-extensionFunctions/extensionFunctionAsSupertype.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/suspendConversionForExtensionFunAsAFunType.kt
 extensionFunctions/suspendConversionForExtensionFunAsAPropertyType.kt
@@ -1054,7 +1052,6 @@ funInterface/kt79092-sam.kt
 funInterface/kt79092.kt
 funInterface/multimodule.kt
 funInterface/nonTrivialProjectionInSuperType.kt
-funInterface/subtypeOfFunctionalTypeToFunInterfaceConversion.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
 function/defaults10.kt
@@ -2561,8 +2558,6 @@ typealias/deserializedAbbreviationWithRedundantArgument.kt
 typealias/localTypeAliases.kt
 typealias/privateInKlib.kt
 typealias/typeAliasAsBareType.kt
-unitConversion/unitConversionForSubtype.kt
-unitConversion/unitConversionWithSamSubtype.kt
 unitConversion/unitConversionWithSuspend.kt
 unsignedTypes/forInUnsignedProgression.kt
 unsignedTypes/forInUnsignedRangeWithCoercion.kt

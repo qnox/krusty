@@ -65,8 +65,8 @@ pub trait Representation {
     /// Whether a value of type `a` and one of type `b` are carried alike, so a member declared
     /// with one can be implemented with the other and called through the same slot.
     fn same(&self, a: Ty, b: Ty) -> bool;
-    /// Whether `ty` is carried as a reference: what every operand of a function value's `invoke`
-    /// is, so an `invoke` override carrying only references can stand in [`FUNCTION_SLOT`].
+    /// Whether `ty` is carried exactly as every operand of a function value's `invoke` is, so an
+    /// `invoke` override carrying only such values can stand in [`FUNCTION_SLOT`].
     fn is_reference(&self, ty: Ty) -> bool;
     /// Whether a class may extend `superclass` although no class of the file declares it: a base
     /// whose storage and `kotlin.Any` members the target's runtime owns.

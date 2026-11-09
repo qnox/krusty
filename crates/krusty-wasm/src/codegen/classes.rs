@@ -10,7 +10,10 @@
 //! **Tables.** A class's table is a struct with one immutable field per slot of its shared table,
 //! each a typed function reference, and the interface table after `kotlin.Any`'s three
 //! (`super::super::objects::slot_field`). It is declared a subtype of its superclass's table, or of
-//! `$AnyTable` for a root class. A slot a table does not type is `funcref` and null.
+//! `$AnyTable` for a root class. A slot a table does not type is `funcref` and null. A class
+//! implementing a function type extends the function value table of its `invoke`'s arity instead,
+//! and its function slot holds that arity's `invoke`, so a call through the function type reaches
+//! it as it reaches a lambda.
 //!
 //! **Interfaces.** Interface members are numbered once for the module, from the declaration
 //! headers (`class_tables::module_interfaces`), and kept out of the class tables: a call through
@@ -26,14 +29,16 @@
 //! base's slot through a bridge: a function of the base's signature that converts each operand
 //! and dispatches through the override's own slot (see `Slot::Bridge`). A property accessor is
 //! bridged the same way (`Slot::AccessorBridge`): `override val value: String` stands in for
-//! `Holder<String?>.value: T & Any`, whose getter answers a reference.
+//! `Holder<String?>.value: T & Any`, whose getter answers a reference. An `invoke` not carried as
+//! a function value's references stands in the function slot through the same kind of bridge
+//! (`Slot::FunctionBridge`).
 
 use krusty::fx_hash::HashMap;
 
 use krusty::backend::class_tables::module_classes::ModuleClasses;
 use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
 use krusty::backend::class_tables::{
-    self, AnyMember, NumberedClassTables, Representation, Slot, SlotKey, ANY_SLOTS,
+    self, AnyMember, NumberedClassTables, Representation, Slot, SlotKey, ANY_SLOTS, FUNCTION_SLOT,
 };
 use krusty::backend::local_properties::RealizedLocalPropertyAccess;
 use krusty::backend::BackendClassifierSource;
@@ -45,6 +50,7 @@ use super::super::encode::{
     Code, CompositeType, FieldType, HeapType, Module, StorageType, SubType, ValType,
 };
 use super::super::exception_transport::ExceptionTransport;
+use super::super::function_values::FunctionShape;
 use super::super::interface_dispatch::ClassRef;
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
 use super::super::runtime::Runtime;
@@ -73,8 +79,11 @@ impl Representation for WasmRepresentation<'_> {
             }
     }
 
+    /// A function value's operands and result are `REFERENCE`s (`crate::function_values`). A
+    /// `String` is a reference too, but carried as the runtime's string, which a caller through a
+    /// function type does not hand over.
     fn is_reference(&self, ty: Ty) -> bool {
-        matches!(carrier(ty), Ok(Some(ValType::Ref { .. })))
+        carrier(ty) == Ok(Some(REFERENCE))
     }
 
     /// `kotlin.Enum` is a base no file declares: its `name` and `ordinal` are the `$Enum` struct's
@@ -116,9 +125,9 @@ pub(super) struct Accessor {
     pub(super) setter: bool,
 }
 
-/// A representation bridge a table slot holds (see [`Slot::Bridge`] and [`Slot::AccessorBridge`]):
-/// `class` is the class that introduced it, whose table type every receiver reaching the bridge
-/// has.
+/// A representation bridge a table slot holds (see [`Slot::Bridge`], [`Slot::AccessorBridge`] and
+/// [`Slot::FunctionBridge`]): `class` is the class that introduced it, whose table type every
+/// receiver reaching the bridge has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct OverrideBridge {
     pub(super) class: ClassId,
@@ -142,6 +151,14 @@ pub(super) enum BridgedMember {
         implemented: Ty,
         setter: bool,
         target_slot: u32,
+    },
+    /// A function value's `invoke` of `arity`, which no file declares: its operands and result
+    /// are references (`crate::function_values`), forwarded through `target_slot` (see
+    /// [`Slot::FunctionBridge`]) to `target`.
+    Function {
+        arity: usize,
+        target_slot: u32,
+        target: FunId,
     },
 }
 
@@ -169,6 +186,15 @@ impl BridgedMember {
                 implemented,
                 setter,
                 target_slot,
+            }),
+            Slot::FunctionBridge {
+                arity,
+                target_slot,
+                target,
+            } => Some(Self::Function {
+                arity,
+                target_slot,
+                target,
             }),
             _ => None,
         }
@@ -341,12 +367,6 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     // Stored by-value captures use the same checked pre-super field transport.
     } else if !constructor_prefix::supported(ir, id) {
         "a class capturing its surroundings"
-    } else if class
-        .supertypes
-        .iter()
-        .any(|supertype| supertype.non_null().is_fun())
-    {
-        "a class implementing a function type"
     } else {
         return Ok(());
     };
@@ -405,7 +425,8 @@ pub(super) fn declare(
         check_exception_storage(ir, classifiers, class as ClassId)?;
     }
     let tables = class_tables::build_numbered(&WasmRepresentation { classifiers }, ir, plan)?;
-    let slot_types = slot_types(ir, module, &runtime.objects, &tables)?;
+    let shapes = function_shapes(ir, module, runtime, &tables)?;
+    let slot_types = slot_types(ir, module, &runtime.objects, &tables, &shapes)?;
 
     let mut bases = Vec::with_capacity(ir.classes.len());
     for class in 0..ir.classes.len() {
@@ -457,11 +478,16 @@ pub(super) fn declare(
             })),
             open: true,
         });
+        // A function class's table is a function value's table of its arity, which a call
+        // through the function type casts to; a subclass's is its superclass's.
+        let table_parent = match (parent, shapes[id as usize]) {
+            (Some(parent), _) => parent.table_type.expect("a superclass has a table type"),
+            (None, Some(shape)) => shape.table,
+            (None, None) => objects.any_table,
+        };
         let table_type = module.subtype(SubType {
             composite: table_struct(&slot_types[id as usize], objects.itable),
-            supertype: Some(parent.map_or(objects.any_table, |parent| {
-                parent.table_type.expect("a superclass has a table type")
-            })),
+            supertype: Some(table_parent),
             open: true,
         });
         let form = &mut forms[id as usize];
@@ -669,6 +695,42 @@ fn inherited_fields(
     Ok(fields)
 }
 
+/// The function value shape each class's table extends: that of the arity of the `invoke` in its
+/// function slot, for a class implementing a function type; `None` for any other class.
+///
+/// A call through a function type casts the receiver's table to its arity's table and calls the
+/// `invoke` there (`super::lower::function_values`), so a function class's table must be one. A
+/// WasmGC type has one declared supertype: a class whose superclass in this file is not a function
+/// class of the same arity cannot extend both, and declines by name.
+fn function_shapes(
+    ir: &IrFile,
+    module: &mut Module,
+    runtime: &mut Runtime,
+    tables: &NumberedClassTables,
+) -> Result<Vec<Option<FunctionShape>>, Unsupported> {
+    let mut shapes: Vec<Option<FunctionShape>> = vec![None; ir.classes.len()];
+    let mut arities: Vec<Option<usize>> = vec![None; ir.classes.len()];
+    for &id in &tables.order {
+        let table = tables.table(id);
+        let arity = match table.vtable.get(FUNCTION_SLOT as usize) {
+            Some(Slot::Function(function)) => Some(ir.functions[*function as usize].params.len()),
+            Some(Slot::FunctionBridge { arity, .. }) => Some(*arity),
+            _ => None,
+        };
+        if let Some(parent) = table.superclass {
+            if arity.is_some() && arities[parent as usize] != arity {
+                return Err(format!(
+                    "a class implementing a function type its superclass does not (`{}`)",
+                    ir.classes[id as usize].fq_name()
+                ));
+            }
+        }
+        arities[id as usize] = arity;
+        shapes[id as usize] = arity.map(|arity| runtime.function_shape(module, arity));
+    }
+    Ok(shapes)
+}
+
 /// The function type of every typed slot of every class's table.
 ///
 /// A slot is typed by what introduced it: `kotlin.Any`'s member, the method or synthesized
@@ -680,6 +742,7 @@ fn slot_types(
     module: &mut Module,
     objects: &ObjectRoot,
     tables: &NumberedClassTables,
+    shapes: &[Option<FunctionShape>],
 ) -> Result<Vec<Vec<Option<u32>>>, Unsupported> {
     let mut types: Vec<Vec<Option<u32>>> = vec![Vec::new(); ir.classes.len()];
     for &id in &tables.order {
@@ -718,6 +781,20 @@ fn slot_types(
                 Slot::FunctionBridge { .. } => None,
             };
             own[slot] = ty;
+        }
+        // The function slot of a function class is its arity's `invoke`, whether the class's own
+        // method stands there (one carrying `REFERENCE`s throughout has exactly that type) or a
+        // bridge does.
+        if let Some(shape) = shapes[id as usize] {
+            let slot = FUNCTION_SLOT as usize;
+            if own[slot].is_some_and(|ty| ty != shape.invoke) {
+                return Err(format!(
+                    "a function class whose `invoke` stands in the function slot with another \
+                     signature (`{}`)",
+                    ir.classes[id as usize].fq_name()
+                ));
+            }
+            own[slot] = Some(shape.invoke);
         }
         if let Some(parent) = table.superclass {
             for (slot, inherited) in types[parent as usize].iter().enumerate() {
