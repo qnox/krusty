@@ -8,7 +8,7 @@ use crate::types::{type_name, Ty, TypeName};
 
 fn lowered(source: &str) -> IrFile {
     let mut ir = super::lower_single_source_with_jvm_stdlib(source, "Enums");
-    crate::backend::enums::realize(&mut ir);
+    crate::backend::enums::realize(&mut ir, crate::backend::enums::Contract::KotlinNative);
     ir
 }
 
@@ -457,7 +457,7 @@ fn an_enum_another_file_declares_keeps_its_use_nodes() {
         panic!("box has a block body");
     };
     stmts.push(elsewhere);
-    crate::backend::enums::realize(&mut ir);
+    crate::backend::enums::realize(&mut ir, crate::backend::enums::Contract::KotlinNative);
     assert!(matches!(ir.expr(elsewhere), IrExpr::EnumEntry { .. }));
 }
 
@@ -485,7 +485,7 @@ fn the_enum_entries_intrinsic_reads_the_entries_slot() {
         panic!("box has a block body");
     };
     stmts.push(intrinsic);
-    crate::backend::enums::realize(&mut ir);
+    crate::backend::enums::realize(&mut ir, crate::backend::enums::Contract::KotlinNative);
 
     let initializer = function(&ir, "Shade$initEntries");
     let (build, ..) = initializer_parts(&ir, initializer);

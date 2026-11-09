@@ -240,11 +240,7 @@ pub enum FirIntrinsic {
     ArrayGet,
     ArraySet,
     StringGet,
-    StringLength,
     StringPlus,
-    /// `kotlin.Enum.name` on a receiver. Constant evaluation replaces a direct enum entry with
-    /// that entry's declaration name; every other receiver lowers to the property's call.
-    EnumName,
     NullableAnyToString,
     PrimitiveCompare {
         operand: ResolvedTy,
@@ -708,12 +704,6 @@ pub enum FirBinaryOperation {
     ShiftLeft,
     ShiftRight,
     UnsignedShiftRight,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirIndexedAccessKind {
-    Array,
-    String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1272,11 +1262,6 @@ pub enum FirExprKind {
         end: FirExprId,
         negated: bool,
     },
-    IndexedRead {
-        kind: FirIndexedAccessKind,
-        receiver: FirExprId,
-        indices: Box<[FirConvertedValue]>,
-    },
     IndexedWrite {
         receiver: FirExprId,
         indices: Box<[FirConvertedValue]>,
@@ -1399,8 +1384,7 @@ impl FirExprKind {
             FirExprKind::ClassLiteral { .. } => 0,
             FirExprKind::LocalPropertyReference { name, .. } => name.len(),
             FirExprKind::LocalDelegateAccess { .. } => 0,
-            FirExprKind::IndexedRead { indices, .. }
-            | FirExprKind::IndexedWrite { indices, .. } => {
+            FirExprKind::IndexedWrite { indices, .. } => {
                 indices.len() * std::mem::size_of::<FirConvertedValue>()
             }
             FirExprKind::AnnotationArray(expressions)

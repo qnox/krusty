@@ -19,10 +19,12 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 mod absent_arguments;
+pub(super) mod any_members;
 mod arrays;
 mod boxing;
 mod callable_reference_identity;
 mod dependency_exports;
+mod enums;
 mod exceptions;
 mod function_values;
 mod generated_members;
@@ -31,7 +33,6 @@ mod objects;
 mod scalar_instructions;
 mod shared_cells;
 mod string_conversion;
-pub(super) mod value_hash;
 
 #[cfg(test)]
 use tests::lower_alone;
@@ -625,10 +626,15 @@ struct Body<'a> {
     /// How many structured instructions enclose the current position.
     depth: u32,
     loops: Vec<Loop>,
+    /// The `finally` regions whose protected code encloses the current position, innermost last.
+    cleanups: Vec<exceptions::CleanupFrame>,
     /// The executable scope whose code this body emits: the function, the class's constructor or
     /// singleton, or the file's static initializer. Only the template ownership of a reified
     /// type operation reads it.
     scope: crate::ir::IrEnclosure,
+    /// `kotlin.Enum`'s `name` and `ordinal` for the enum constant whose construction is being
+    /// lowered, taken by that construction's allocation.
+    enum_base: Option<(Box<str>, u32)>,
 }
 
 impl<'a> Body<'a> {
@@ -680,7 +686,9 @@ impl<'a> Body<'a> {
             result,
             depth: 0,
             loops: Vec::new(),
+            cleanups: Vec::new(),
             scope: crate::ir::IrEnclosure::File,
+            enum_base: None,
         }
     }
 
@@ -790,6 +798,13 @@ impl<'a> Body<'a> {
         self.coerce_emitted_value(carried, target_ty)
     }
 
+    /// Whether a cast of `arg` to `target` reads a scalar out of a reference: the operand is
+    /// carried as a reference and the target as a scalar.
+    fn is_unboxing_cast(&self, arg: u32, target: Ty) -> bool {
+        matches!(self.carrier_of(arg), Ok(Some(ValType::Ref { .. })))
+            && matches!(carrier(target), Ok(Some(target)) if !matches!(target, ValType::Ref { .. }))
+    }
+
     fn carrier_of(&self, id: u32) -> Result<Option<ValType>, Unsupported> {
         match self.type_of(id)? {
             Some(ty) => carrier(ty),
@@ -822,6 +837,11 @@ impl<'a> Body<'a> {
             return Ok(());
         }
         let Some(source) = source_ty else {
+            // Restore stack polymorphism after structured control only when completion proves
+            // divergence: an inlined generic result may retain Nothing but complete normally.
+            if self.ir.expr_diverges_by(id, &|_, _| false) {
+                self.code.unreachable();
+            }
             return Ok(());
         };
         if source == Ty::Unit && carrier(target)?.is_some() {
@@ -992,7 +1012,7 @@ impl<'a> Body<'a> {
                     }
                     (None, None) => {}
                 }
-                self.code.return_();
+                self.control_transfer(exceptions::Transfer::Return, None)?;
             }
             IrExpr::When { branches } => self.when(id, &branches)?,
             IrExpr::While {
@@ -1004,13 +1024,11 @@ impl<'a> Body<'a> {
             } => self.while_(cond, body, update, post_test, label)?,
             IrExpr::Break { label } => {
                 let target = self.find_loop(label.as_deref())?.exit;
-                let depth = self.relative(target);
-                self.code.br(depth);
+                self.control_transfer(exceptions::Transfer::Branch(target), None)?;
             }
             IrExpr::Continue { label } => {
                 let target = self.find_loop(label.as_deref())?.next;
-                let depth = self.relative(target);
-                self.code.br(depth);
+                self.control_transfer(exceptions::Transfer::Branch(target), None)?;
             }
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(id, op, lhs, rhs)?,
             IrExpr::Equality { op, mode, lhs, rhs } => self.equality(op, mode, lhs, rhs)?,
@@ -1142,8 +1160,12 @@ impl<'a> Body<'a> {
             {
                 self.throwable_message(dispatch_receiver, &args, *ret)?;
             }
-            IrExpr::Call { .. } if value_hash::call_kind(self.ir, self.callables, id).is_some() => {
-                self.value_hash_call(id)?;
+            IrExpr::Call {
+                dispatch_receiver: Some(receiver),
+                args,
+                ..
+            } if let Some(member) = any_members::call_member(self.ir, self.callables, id) => {
+                self.dependency_any_member_call(member, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1177,6 +1199,14 @@ impl<'a> Body<'a> {
                 || self.interface_of_type(type_operand).is_some() =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
+            }
+            // `as Int` on a reference reads the value out of its box once the cast has checked it.
+            IrExpr::TypeOp {
+                op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
+                arg,
+                type_operand,
+            } if self.is_unboxing_cast(arg, type_operand) => {
+                self.checked_unbox_cast(arg, type_operand)?
             }
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast),
@@ -1257,6 +1287,16 @@ impl<'a> Body<'a> {
                     &defaults,
                 )?;
             }
+            IrExpr::EnumConstant {
+                name,
+                ordinal,
+                construction,
+                published: None,
+                ..
+            } => self.enum_constant(&name, ordinal, construction)?,
+            IrExpr::NoSuchEnumConstant { classifier, name } => {
+                self.no_such_enum_constant(classifier, name)?
+            }
             IrExpr::Throw { operand } => self.throw_value(operand)?,
             IrExpr::Vararg {
                 array_type,
@@ -1324,6 +1364,26 @@ impl<'a> Body<'a> {
                 self.property_read(*target, *dispatch_receiver)?
             }
             IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } =
+                    &**checked_op
+                    && self.is_array_size_property(*target) =>
+            {
+                self.checked_array_size(checked_op)?;
+            }
+            // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from
+            // the `$Enum` fields its struct leads with.
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && let Some(member) =
+                        crate::backend::enums::base_member(self.callables, *target) =>
+            {
+                self.enum_member(member, *receiver)?
+            }
+            IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
                     target,
                     dispatch: crate::ir::IrPropertyDispatch::Ordinary,
@@ -1337,6 +1397,21 @@ impl<'a> Body<'a> {
                     && self.is_throwable_message_property(*target) =>
             {
                 self.throwable_message(*receiver, arguments, *result)?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && self.is_string_length_property(*target) =>
+            {
+                self.intrinsic(IrIntrinsic::StringLength, Some(*receiver), &[])?;
             }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::PropertyWrite {

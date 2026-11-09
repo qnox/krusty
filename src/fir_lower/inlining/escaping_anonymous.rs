@@ -17,6 +17,9 @@ use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{ClassId, ExprId, FunId, IrExpr};
 use crate::types::{ty_subst_keep_unbound, Ty, TypeName};
 
+mod reified_uses;
+use reified_uses::class_uses_binding;
+
 use super::specialize_inline_copy;
 
 /// The inline expansion an anonymous-class copy belongs to.
@@ -374,6 +377,16 @@ fn specialized_class(
     copy.is_source_declared = false;
     copy.enclosure = expansion.site.caller.or(copy.enclosure);
     copy.methods = cloned_methods.clone();
+    for supertype in &mut copy.supertypes {
+        *supertype = ty_subst_keep_unbound(*supertype, expansion.bindings);
+    }
+    // Metadata describes the copied declaration and retains its original capture identities.
+    // The applied hierarchy above is the copy's current semantic view; a target realizes that
+    // view separately from the immutable declaration signature.
+    if let Some(signature) = ir.class_signature_name(internal).cloned() {
+        ir.insert_class_signature_name(placeholder, signature);
+    }
+
     // The copy is the class regenerated for this call: the inline function's parameters are bound
     // to its arguments. A capture of one still holds a `crossinline` parameter only when the call
     // binds it to one of the caller's own.
@@ -1881,97 +1894,6 @@ fn shift_capture_map<V: Clone>(
         }
         let index = if index > removed { index - 1 } else { index };
         map.insert((owner, index), value);
-    }
-}
-
-fn class_uses_binding(
-    ir: &crate::ir::IrFile,
-    class: ClassId,
-    bindings: &HashMap<String, Ty>,
-    seen: &mut HashSet<ClassId>,
-) -> bool {
-    if bindings.is_empty() || !seen.insert(class) {
-        return false;
-    }
-    let Some(class_decl) = ir.classes.get(class as usize) else {
-        return false;
-    };
-    let mut functions = class_decl.methods.clone();
-    functions.extend(
-        class_decl
-            .properties
-            .iter()
-            .flat_map(|property| property.getter.into_iter().chain(property.setter)),
-    );
-    if let Some(extensions) = ir.member_ext_props.get(&class_decl.fq_name) {
-        functions.extend(
-            extensions
-                .iter()
-                .flat_map(|property| std::iter::once(property.getter).chain(property.setter)),
-        );
-    }
-    let mut roots = functions
-        .into_iter()
-        .filter_map(|function| ir.functions.get(function as usize)?.body)
-        .collect::<Vec<_>>();
-    roots.extend(class_decl.init_body);
-    // Accessor functions are materialized after inlining. Their checked bodies are already
-    // expressions on the property, and a reified operation there must still select the copy.
-    // A class that is itself a copy keeps those bodies on its specialization record.
-    roots.extend(property_roots(ir, class));
-    for root in roots {
-        if dag_uses_binding(ir, root, bindings, seen) {
-            return true;
-        }
-    }
-    false
-}
-
-fn dag_uses_binding(
-    ir: &crate::ir::IrFile,
-    root: ExprId,
-    bindings: &HashMap<String, Ty>,
-    classes: &mut HashSet<ClassId>,
-) -> bool {
-    let mut pending = vec![root];
-    let mut seen = HashSet::default();
-    while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
-            continue;
-        }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-        if node_uses_binding(ir.expr(expression), bindings)
-            || super::escaping_lambda::expression_facts_use_binding(ir, expression, bindings)
-        {
-            return true;
-        }
-        if let IrExpr::New { internal, .. } = ir.expr(expression) {
-            if let Some(class) = ir.class_id_by_name(*internal) {
-                if class_uses_binding(ir, class, bindings, classes) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn node_uses_binding(expression: &IrExpr, bindings: &HashMap<String, Ty>) -> bool {
-    let uses = |ty: Ty| ty_subst_keep_unbound(ty, bindings) != ty;
-    match expression {
-        IrExpr::TypeOp { type_operand, .. } => uses(*type_operand),
-        IrExpr::KClassLiteral { classifier, .. } => classifier.is_some_and(uses),
-        IrExpr::Call {
-            callee: call_callee,
-            ..
-        } if let crate::ir::Callee::Intrinsic {
-            operation: crate::ir::IrIntrinsic::TypeOf { ty },
-            ..
-        } = &**call_callee =>
-        {
-            uses(*ty)
-        }
-        _ => false,
     }
 }
 

@@ -15,6 +15,7 @@ use super::{
 use crate::ir::IrFile;
 use crate::types::Ty;
 
+mod abstract_builtin_overrides;
 mod read_only_stubs;
 
 struct BridgeMethodHeader<'a> {
@@ -178,7 +179,7 @@ fn attach_interface_entry_debug_tables(
     cw.set_method_debug(&bridge.name, descriptor, line, &locals);
     // The return's line is an entry of its own only below the entry line; on that same line the
     // method's one entry at its start already covers it.
-    let end = ir.fn_end_lines.get(&member).copied();
+    let end = ir.function_position(member).end_line;
     if let (Some(line), Some(pc), Some(end)) =
         (line, offsets.ret, end.filter(|&end| Some(end) != entry))
     {
@@ -296,6 +297,9 @@ pub(super) fn emit_bridges(
         }
         emit_planned_bridge(&class, cw, bridge_index, b);
     }
+    // kotlinc's bridge lowering reaches the abstract fake overrides after the class's own members,
+    // before the stubs it appends.
+    abstract_builtin_overrides::emit(ir, c, cw, env);
     stub_bridges.emit_rest(c, cw);
     let inherited = &env.collection_members.inherited_bridges;
     for bridge in inherited.for_class(c.fq_name_id()) {
@@ -1054,7 +1058,10 @@ fn emit_inherited_collection_bridge(
         return;
     }
     let signature = match &bridge.body {
-        crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::SuperDelegate {
+        crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Abstract {
+            signature,
+        }
+        | crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::SuperDelegate {
             signature,
             ..
         }
@@ -1068,12 +1075,22 @@ fn emit_inherited_collection_bridge(
     })
     .filter(|signature| *signature != descriptor);
     let signature = signature.as_deref();
+    if let crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Abstract {
+        ..
+    } = &bridge.body
+    {
+        cw.add_abstract_method_sig(0x0401, &bridge.name, &descriptor, signature);
+        return;
+    }
     // ASM visits the method header before its body. Reserve it here so body references do not
     // precede the name, descriptor, and generic Signature in the constant pool.
     cw.reserve_method_pool(&bridge.name, &descriptor, signature, &[]);
     let words: u16 = params.iter().map(|ty| slot_words(*ty)).sum();
     let mut code = CodeBuilder::new(1 + words);
     match &bridge.body {
+        crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Abstract {
+            ..
+        } => unreachable!("an abstract member is written without code above"),
         crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::SuperDelegate {
             owner,
             name,
@@ -1162,6 +1179,9 @@ fn emit_inherited_collection_bridge(
         }
     }
     let access = match &bridge.body {
+        crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Abstract {
+            ..
+        } => 0x0401,
         crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::SuperDelegate {
             ..
         } => 0x0041,

@@ -72,6 +72,8 @@ mod inline_copies;
 mod suspension_points;
 pub use suspension_points::{IrIntrinsicSuspensionPoint, IrValueClassSuspendResult};
 mod intrinsic;
+mod jvm_accessor_names;
+pub(crate) use jvm_accessor_names::{JvmAccessorNames, JvmAccessorSide};
 mod jvm_delegate_realization;
 mod jvm_static_realization;
 mod lambda_classes;
@@ -83,6 +85,8 @@ pub use local_delegates::IrLocalDelegateAccess;
 pub(crate) use local_delegates::{
     IrInlineDeclaration, IrLocalDelegateAccessorPlan, IrLocalDelegatePlan,
 };
+mod function_positions;
+pub use function_positions::IrFunctionPosition;
 mod local_property_references;
 mod module_records;
 mod negations;
@@ -177,7 +181,7 @@ pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
     IrAccessorLines, IrCheckedProperty, IrInlinePropertySplice, IrInlineTypeSubstitution,
     IrMemberKind, IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers,
-    MemberExtProp, PrivatePropertyAccessorCall,
+    IrPropertyOrigin, MemberExtProp, PrivatePropertyAccessorCall,
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
@@ -1686,6 +1690,12 @@ pub struct IrFile {
     /// `x$delegate`. Kept apart from `jvm_companion_property_statics`: the delegate is storage the
     /// property's accessors read, not the property itself.
     jvm_companion_delegate_statics: crate::fx_hash::HashMap<(TypeName, u32), u32>,
+    /// Exact class property declaration → the JVM names realized for its default accessors.
+    /// Populated only by JVM realization passes; see [`jvm_accessor_names`].
+    jvm_property_accessor_names:
+        crate::fx_hash::HashMap<(TypeName, u32), jvm_accessor_names::JvmAccessorNames>,
+    /// Static index → the JVM names realized for its default accessors. JVM-populated only.
+    jvm_static_accessor_names: crate::fx_hash::HashMap<u32, jvm_accessor_names::JvmAccessorNames>,
     /// User annotations applied to FUNCTIONS (top-level and members share the `functions` arena),
     /// by function id, retaining the resolved semantic retention. A side table rather than a field on [`IrFunction`], for the
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
@@ -1716,11 +1726,12 @@ pub struct IrFile {
     /// ordinary backend-neutral `IrExpr::Return`; inline expansion consumes/decrements this fact as
     /// lambda bodies cross lexical boundaries, so no source label or AST identity survives.
     pub checked_return_depths: crate::fx_hash::HashMap<ExprId, u32>,
-    /// The result declaration of each inline-return frame, by the frame's label. An inline
-    /// expansion's returns leave through `break` to that label after storing their value. A return
-    /// in the expansion's own body stores it by the declaration's value index; one in a lambda body
-    /// nested in it writes [`IrExpr::SetFrameResult`], which every renumbering of either body
-    /// leaves pointing at the same frame.
+    /// Each inline-return frame's label, keyed by the fact that owns it. A frame that stores a
+    /// result is keyed by that result's declaration. A `Unit` frame has no declaration and is keyed
+    /// by its loop. An inline expansion's returns leave through `break` to that label after storing
+    /// their value. A return in the expansion's own body stores it by the declaration's value
+    /// index; one in a lambda body nested in it writes [`IrExpr::SetFrameResult`], which every
+    /// renumbering of either body leaves pointing at the same frame.
     pub inline_return_frames: crate::fx_hash::HashMap<ExprId, String>,
     /// `try` expressions whose result is the value of a spliced inline lambda protected by the
     /// inline call's cleanup. This is semantic inline-frame provenance: a backend chooses how the
@@ -1872,6 +1883,11 @@ pub struct IrFile {
     /// adaptation boundary records this edge when it creates the call; later representation
     /// analysis consumes the identity and never recognizes an unbox operation by its spelling.
     pub(crate) value_class_unbox_type_operation_edges: crate::fx_hash::HashMap<ExprId, ExprId>,
+    /// JVM null-safe value-class unbox call -> the type operation whose value it unboxes through
+    /// its temporary (`a as X?`: `checkcast X`, then `unbox-impl` unless null). The call reads the
+    /// temporary, so it is not the call's receiver, but it is the same checked box.
+    pub(crate) value_class_null_safe_unbox_type_operation_edges:
+        crate::fx_hash::HashMap<ExprId, ExprId>,
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
@@ -2311,28 +2327,12 @@ pub struct IrFile {
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.
     /// kotlinc attributes both the property's getter and its constructor-side initializer to this line.
     pub prop_decl_lines: crate::fx_hash::HashMap<(TypeName, String), u32>,
-    /// FunId → 1-based source line of its `fun` declaration, for the method's `LineNumberTable`.
-    /// A side map (not a field on `IrFunction`) so the 40-odd construction sites stay untouched.
-    pub fn_decl_lines: crate::fx_hash::HashMap<u32, u32>,
+    /// The source position of every function declaration (`src/ir/function_positions.rs`).
+    pub(crate) function_positions: function_positions::IrFunctionPositions,
     /// Functions whose debug representation retains receiver/parameter bindings even when the body
     /// deliberately has no executable source line. Generated declarations use this explicit
     /// source/debug contract instead of inventing a line merely to retain their binding names.
     pub fn_debug_locals: crate::fx_hash::HashSet<FunId>,
-    /// FunId → 1-based source line of a BLOCK body's closing `}` — kotlinc maps a `Unit` fn's
-    /// implicit `return` there in the `LineNumberTable`. Same side-map rationale as `fn_decl_lines`.
-    pub fn_close_lines: crate::fx_hash::HashMap<u32, u32>,
-    /// FunId → 1-based source line the declaration ENDS on (a block's `}` or an expression body's
-    /// last line). kotlinc returns a generated forwarder of the declaration on this line.
-    pub fn_end_lines: crate::fx_hash::HashMap<u32, u32>,
-    /// FunId → 1-based source line of the DECLARATION itself, never body-rewritten. `fn_decl_lines`
-    /// holds the line the method BODY maps to (an expression body's own line); a `$default` stub's
-    /// LineNumberTable instead points here — the two differ exactly when an expression body starts
-    /// on a later line than the signature. Same side-map rationale as `fn_decl_lines`.
-    pub fn_sig_lines: crate::fx_hash::HashMap<u32, u32>,
-    /// FunId → source byte offset of the `fun` keyword. The JVM backend reports a platform
-    /// declaration clash at this position. A method with no entry is a bridge, a default stub, or
-    /// another representation, not a source declaration.
-    pub fn_signature_offsets: crate::fx_hash::HashMap<u32, u32>,
     /// FunId → the SOURCE BYTE OFFSET of the declaration a class member realizes (a property's
     /// accessors carry the property's offset). kotlinc emits class members in DECLARATION order,
     /// interleaving property accessors among functions; lowering groups them by kind, so the JVM

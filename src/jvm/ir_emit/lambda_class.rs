@@ -662,9 +662,8 @@ fn emit_sam_bridge(
     cw.reserve_method_lvt(&locals);
     finish_code::<0x1041>(cw, &target.method, &erased, &mut code, 1 + erased_words);
     let line = ir
-        .fn_decl_lines
-        .get(&invoke)
-        .copied()
+        .function_position(invoke)
+        .decl_line
         .filter(|&line| line != 0);
     cw.set_method_debug(&target.method, &erased, line.map(|line| (0, line)), &locals);
 }

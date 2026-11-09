@@ -134,6 +134,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         // operation.
         value_class_type_operations: _,
         value_class_unbox_type_operation_edges: _,
+        value_class_null_safe_unbox_type_operation_edges: _,
         // The accessor bodies materialized for one inline property access.
         inline_property_access: _,
         // A callable reference consumed as an inline argument: the expansion that consumes the
@@ -233,6 +234,8 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         jvm_field_statics: _,
         jvm_companion_property_statics: _,
         jvm_companion_delegate_statics: _,
+        jvm_property_accessor_names: _,
+        jvm_static_accessor_names: _,
         function_annotations: _,
         function_source_annotations: _,
         compose: _,
@@ -329,12 +332,8 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         fn_varargs: _,
         declared_class_statics: _,
         prop_decl_lines: _,
-        fn_decl_lines: _,
+        function_positions: _,
         fn_debug_locals: _,
-        fn_close_lines: _,
-        fn_end_lines: _,
-        fn_sig_lines: _,
-        fn_signature_offsets: _,
         fn_source_order: _,
         fn_continuation_ordinal: _,
         fn_contracts: _,

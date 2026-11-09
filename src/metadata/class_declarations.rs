@@ -113,6 +113,7 @@ pub(crate) struct ClassDeclarationRecord {
     pub(crate) primary_ctor_annotations: MetadataAnnotations,
     local_classifiers: crate::fx_hash::HashSet<TypeName>,
     enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
+    anonymous_classifiers: crate::fx_hash::HashSet<TypeName>,
     is_enum: bool,
     is_script: bool,
 }
@@ -206,6 +207,11 @@ impl ClassDeclarationRecord {
         annotations(&mut self.primary_ctor_annotations);
         self.local_classifiers = self
             .local_classifiers
+            .iter()
+            .map(|&classifier| renaming.name(classifier))
+            .collect();
+        self.anonymous_classifiers = self
+            .anonymous_classifiers
             .iter()
             .map(|&classifier| renaming.name(classifier))
             .collect();
@@ -402,6 +408,7 @@ impl ClassDeclarationRecord {
                 .unwrap_or(&self.primary_ctor_annotations),
             local_classifiers: &self.local_classifiers,
             enum_entry_bodies: &self.enum_entry_bodies,
+            anonymous_classifiers: &self.anonymous_classifiers,
             is_enum: self.is_enum,
             is_script: self.is_script,
             annotations_in_metadata: options.annotations_in_metadata,
@@ -613,6 +620,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .properties
         .iter()
         .enumerate()
+        .filter(|(_, property)| property.origin != crate::ir::IrPropertyOrigin::CaptureStorage)
         .map(|(property_index, property)| {
             crate::trace_compiler!(
                 "metadata",
@@ -959,7 +967,6 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .collect::<Vec<_>>();
     member_order::sort_delegation_functions(&mut delegation);
     let delegation_functions = methods.len()..methods.len() + delegation.len();
-    let delegation_function_count = delegation.len();
     methods.extend(delegation);
     let (methods, method_origins): (Vec<FnMeta>, Vec<FunctionOrigin>) = methods.into_iter().unzip();
     let type_aliases = ir
@@ -988,20 +995,24 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         &mut prop_origins,
         &mut prop_source_orders,
     );
-    let delegation_members = delegation_function_count + delegation_properties.len();
+    let (synthesized, delegation_functions) = member_order::generated_function_order(
+        ir,
+        &declared_fids,
+        &methods,
+        &method_origins,
+        declared_method_count.min(inferred_method_count)..inferred_method_count,
+        delegation_functions,
+    );
+    // Structural functions consume delegation forwarders into their mixed sorted run. Only the
+    // remaining function range and delegation properties still form a trailing run.
+    let delegation_members = delegation_functions.len() + delegation_properties.len();
     let member_order = member_order::member_order(
         ir,
         c,
         &prop_source_orders,
         &declared_fids,
         MemberRanges {
-            synthesized: member_order::generated_function_order(
-                ir,
-                &declared_fids,
-                &methods,
-                &method_origins,
-                declared_method_count.min(inferred_method_count)..inferred_method_count,
-            ),
+            synthesized,
             published_functions: inferred_method_count,
             delegation_functions,
             delegation_properties,
@@ -1128,6 +1139,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         primary_ctor_annotations: MetadataAnnotations::of(&c.primary_ctor_annotations),
         local_classifiers: local_classifiers::names(ir),
         enum_entry_bodies: local_classifiers::enum_entry_bodies(ir),
+        anonymous_classifiers: local_classifiers::anonymous_names(ir),
         is_enum: c.is_enum,
         is_script: c.is_script,
     })
@@ -1804,6 +1816,40 @@ mod tests {
     }
 
     #[test]
+    fn anonymous_reference_provenance_follows_recorded_classifier_renaming() {
+        let original = type_name("sample/Owner").nested_child("object");
+        let renamed = type_name("sample/Physical").nested_child("object");
+        let mut ir = IrFile::default();
+        let mut class = crate::ir::IrClass::synthetic(original);
+        class.is_anonymous_object = true;
+        ir.add_class(class);
+        super::record_all(&mut ir);
+        ir.remap_classifier_identities(&[(original, renamed)].into_iter().collect());
+        assert!(!ir.class_declarations.contains_key(&original));
+        let record = ir.class_declarations[&renamed].as_ref().unwrap();
+        assert_eq!(
+            record.anonymous_classifiers,
+            [renamed].into_iter().collect()
+        );
+        assert_eq!(record.local_classifiers, [renamed].into_iter().collect());
+        let mut strings = crate::metadata::type_encoder::StringTable::with_local_classifiers(
+            &record.local_classifiers,
+            &record.enum_entry_bodies,
+            &record.anonymous_classifiers,
+            None,
+            crate::metadata::MetadataTypeLookups::default().inner_classifiers,
+        );
+        assert_eq!(strings.class_id(renamed), 0);
+        assert_eq!(
+            strings.declaration_class_id(&crate::metadata::class_id::ResolvedClassId::anonymous(
+                renamed
+            )),
+            Ok(0)
+        );
+        assert_eq!(strings.into_strings(), ["sample/Physical$object"]);
+    }
+
+    #[test]
     fn publication_is_explicit_not_inferred_from_names_or_synthetic_shape() {
         let class = synthetic_class("sample/Owner");
         let mut unpublished = constructor(None);
@@ -1976,5 +2022,87 @@ mod tests {
         assert_eq!(record.ret, Ty::Unit);
         assert_eq!(record.flags, 32);
         assert!(!record.annotations.declares_annotations());
+    }
+    fn late_publication_member_order(data: bool) -> Vec<String> {
+        let source = format!(
+            "interface Greeter {{ fun answer(): Int; val size: Int }}\n\
+             {}class Owner(val greeter: Greeter) : Greeter by greeter {{ fun own(): Int = 1 }}\n",
+            if data { "data " } else { "" }
+        );
+        let mut ir = crate::fir_lower::tests::lower_single_source(&source, "LatePublication");
+        let owner = type_name("Owner");
+        super::record_all(&mut ir);
+        let function = generated_function(&mut ir, true);
+        ir.functions[function as usize].name = "late".to_string();
+        ir.functions[function as usize].params[0] = Ty::obj_name(owner);
+        let class = ir.class_id_by_name(owner).unwrap();
+        ir.classes[class as usize].methods.push(function);
+        ir.publish_generated_members(
+            owner,
+            IrGeneratedMemberPublication {
+                metadata_scope: IrGeneratedFunctionMetadataScope::Additive,
+                functions: vec![IrGeneratedFunctionPublication {
+                    function,
+                    parameter_identities: ["self", "output", "serialDesc"]
+                        .map(crate::ir::IrParameterIdentity::producer_value)
+                        .to_vec(),
+                    metadata: Some(IrGeneratedFunctionMetadata {
+                        source_name: "late".to_string(),
+                        visibility: Visibility::Internal,
+                    }),
+                    debug: IrGeneratedDeclarationDebug::declaration_line(2),
+                }],
+            },
+        );
+        super::add_target_generated_functions(&mut ir);
+        // Refreshing an already published function must not insert it twice or shift indices again.
+        super::add_target_generated_functions(&mut ir);
+        let record = ir.class_declarations[&owner].as_ref().unwrap();
+        record
+            .member_order
+            .iter()
+            .map(|member| match member {
+                super::ClassMemberOrder::Function(index) => {
+                    format!("function:{}", record.methods[*index].name)
+                }
+                super::ClassMemberOrder::Property(index) => {
+                    format!("property:{}", record.props[*index].name)
+                }
+                _ => panic!("unexpected non-function/property member in the complete record"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn late_publication_follows_the_complete_mixed_structural_run() {
+        assert_eq!(
+            late_publication_member_order(true),
+            [
+                "property:greeter",
+                "function:own",
+                "function:component1",
+                "function:copy",
+                "function:answer",
+                "function:equals",
+                "function:hashCode",
+                "function:toString",
+                "function:late",
+                "property:size",
+            ]
+        );
+    }
+
+    #[test]
+    fn late_publication_precedes_the_remaining_ordinary_delegation_tail() {
+        assert_eq!(
+            late_publication_member_order(false),
+            [
+                "property:greeter",
+                "function:own",
+                "function:late",
+                "function:answer",
+                "property:size"
+            ]
+        );
     }
 }

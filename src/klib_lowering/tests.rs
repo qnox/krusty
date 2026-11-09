@@ -23,6 +23,7 @@ mod primitive_calls;
 mod range_membership_producers;
 mod returnable_blocks;
 mod safe_calls;
+mod same_library_class;
 mod target_calls;
 mod target_members;
 mod value_class_members;
@@ -448,6 +449,21 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
                 .join(", ");
             format!(
                 "call {}({args}) omitting {defaults:?}",
+                ir.fn_source_names[function]
+            )
+        }
+        IrExpr::Call {
+            callee: call_callee,
+            dispatch_receiver: None,
+            args,
+        } if let Callee::LocalWithDefaults { function, defaults } = &**call_callee => {
+            let args = args
+                .iter()
+                .map(|argument| render(ir, *argument))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "call {}({args}; defaults {defaults:?})",
                 ir.fn_source_names[function]
             )
         }

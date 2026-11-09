@@ -1,5 +1,6 @@
 //! Compiler orchestration.
 
+mod artifact_origin;
 mod backend_handoff;
 mod capture_storage;
 mod checked_body_observer;
@@ -17,6 +18,7 @@ use crate::ast::File;
 pub use crate::backend::{Artifact, Backend, CheckedIrFile};
 use crate::diag::{DiagSink, Span};
 use crate::frontend::StreamingSourceSetAnalysis;
+pub use artifact_origin::ArtifactOrigin;
 pub(crate) use checked_body_observer::{
     CheckedBodyObserver, NoObserver, ObservedBody, ObservedModule, ObservedSource,
 };
@@ -60,6 +62,25 @@ pub fn emit_analyzed_to<B: Backend>(
     diags: &mut DiagSink,
     sink: &mut dyn FnMut(Artifact),
 ) {
+    emit_analyzed_with_origins_to(
+        analysis,
+        stems,
+        backend,
+        module_name,
+        diags,
+        &mut |_, artifact| sink(artifact),
+    );
+}
+
+/// [`emit_analyzed_to`], handing each artifact to `sink` with the input it was emitted for.
+pub fn emit_analyzed_with_origins_to<B: Backend>(
+    analysis: impl Into<StreamingSourceSetAnalysis>,
+    stems: &[String],
+    backend: &B,
+    module_name: &str,
+    diags: &mut DiagSink,
+    sink: &mut dyn FnMut(ArtifactOrigin, Artifact),
+) {
     let mut state = B::State::default();
     let mut dependency_support = dependency_body_emission::DependencySupportState::default();
     emit_analyzed_into(
@@ -83,7 +104,7 @@ pub fn emit_analyzed_to<B: Backend>(
         backend
             .finalize(state, module_name)
             .into_iter()
-            .for_each(sink);
+            .for_each(|artifact| sink(ArtifactOrigin::Module, artifact));
     }
 }
 
@@ -101,8 +122,9 @@ struct PassTwoHooks<'a> {
     before_target: &'a mut dyn FnMut(&mut CheckedIrFile<'_>, &mut DiagSink),
     /// Sees each checked body before common lowering consumes it.
     checked_bodies: &'a mut dyn CheckedBodyObserver,
-    /// Receives each source file's target artifacts once that file is emitted.
-    artifacts: &'a mut dyn FnMut(Artifact),
+    /// Receives each source file's target artifacts once that file is emitted, with the input
+    /// each belongs to.
+    artifacts: &'a mut dyn FnMut(ArtifactOrigin, Artifact),
 }
 
 /// Lower one separately analyzed source module into an existing backend state. Backend
@@ -455,14 +477,21 @@ fn emit_analyzed_into<B: Backend>(
             diags,
         )
         .into_iter()
-        .for_each(&mut *artifacts);
+        .for_each(|artifact| {
+            artifacts(
+                ArtifactOrigin::DependencySupport {
+                    requested_by: raw_source,
+                },
+                artifact,
+            )
+        });
         if diags.has_errors() {
             continue;
         }
         backend
             .lower_ir_file(file, state, diags)
             .into_iter()
-            .for_each(&mut *artifacts);
+            .for_each(|artifact| artifacts(ArtifactOrigin::Source(raw_source), artifact));
     }
     assert!(
         default_arguments.is_empty(),
@@ -535,7 +564,7 @@ pub(crate) fn lower_analyzed_observing(
         PassTwoHooks {
             before_target: &mut |_, _| {},
             checked_bodies: observer,
-            artifacts: &mut |_| {
+            artifacts: &mut |_, _| {
                 panic!("lowering without a target must not produce target artifacts")
             },
         },
