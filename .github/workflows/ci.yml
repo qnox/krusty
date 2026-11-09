@@ -731,7 +731,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/klib-references
-          key: box-klib-references-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          key: box-klib-references-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-${{ steps.base.outputs.sha }}
           restore-keys: |
             box-klib-references-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-
       # A restore through `restore-keys` never reports a hit, so whether a master push saves is
@@ -904,7 +904,7 @@ jobs:
           KRUSTY_KLIB_REFERENCE_CACHE: ${{ github.workspace }}/target/cache/klib-references
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/klib-references
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
-          KRUSTY_CLASS_DUMP_WRITE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.klib-recordings.outputs.cache-hit != 'true' && '1' || '0' }}
+          KRUSTY_CLASS_DUMP_WRITE: ${{ github.ref == 'refs/heads/master' && steps.klib-recordings.outputs.cache-hit != 'true' && '1' || '0' }}
         run: |
           set -euo pipefail
           chmod +x conformance-bin
@@ -916,7 +916,7 @@ jobs:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: just wasm-conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       - name: list new KLIB box reference bytes
-        if: always() && matrix.target != 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: always() && matrix.target != 'jvm' && github.ref == 'refs/heads/master'
         id: klib-recordings-added
         env:
           RESTORED: ${{ steps.klib-recordings-restored.outputs.entries }}
