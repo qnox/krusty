@@ -191,7 +191,7 @@ pub(super) fn lower_file(
         None
     } else {
         let mut classes =
-            super::classes::declare(ir, module, &mut runtime.objects, &indices, properties, plan)?;
+            super::classes::declare(ir, module, runtime, classifiers, &indices, properties, plan)?;
         super::interface_members::record(
             &super::interface_members::Recording {
                 ir,
