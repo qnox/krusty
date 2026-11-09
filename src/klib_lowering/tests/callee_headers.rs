@@ -36,7 +36,7 @@ fn declarations(unit: &DependencyBodyUnit) -> Vec<String> {
         .map(|(index, function)| {
             let id = crate::ir::FunId::try_from(index).expect("fits");
             format!(
-                "{} {:?} -> {:?} static={} dispatch={:?} identities={:?} extension={} contexts={:?}",
+                "{} {:?} -> {:?} static={} dispatch={:?} identities={:?} extension={} contexts={}",
                 function.name,
                 function.params,
                 function.ret,
@@ -44,7 +44,7 @@ fn declarations(unit: &DependencyBodyUnit) -> Vec<String> {
                 function.dispatch_receiver,
                 ir.fn_params[&id].identities,
                 ir.extension_receiver_fns.contains(&id),
-                ir.fn_context_counts.get(&id),
+                ir.declared_parameters(id).context_count,
             )
         })
         .collect()
@@ -75,10 +75,10 @@ fn a_callee_no_checked_call_selected_is_declared_from_its_header() {
         [
             "a [Obj(TypeName(\"kotlin/Int\"), [])] -> Obj(TypeName(\"kotlin/Int\"), []) static=true \
              dispatch=None identities=[IrParameterIdentity { source_name: Some(\"a\"), role: Value, \
-             provenance: SourceDeclared }] extension=false contexts=None",
+             provenance: SourceDeclared }] extension=false contexts=0",
             "b [Obj(TypeName(\"kotlin/Int\"), [])] -> Obj(TypeName(\"kotlin/Int\"), []) static=true \
              dispatch=None identities=[IrParameterIdentity { source_name: Some(\"a\"), role: Value, \
-             provenance: SourceDeclared }] extension=false contexts=None",
+             provenance: SourceDeclared }] extension=false contexts=0",
         ]
     );
 }
@@ -1543,7 +1543,6 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
                 ("it declares type parameters)", 205),
-                ("it uses a block of a compiler-introduced form)", 1),
                 ("it uses a call of a file-private declaration)", 6),
                 ("it uses a call of a member function)", 74),
                 (
@@ -1553,6 +1552,10 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
+                (
+                    "it uses an object literal with a superclass constructor argument)",
+                    1,
+                ),
                 ("its library serializes none)", 100),
             ]
         } else {
@@ -1562,7 +1565,6 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
                 ("it declares type parameters)", 187),
-                ("it uses a block of a compiler-introduced form)", 1),
                 ("it uses a call of a file-private declaration)", 4),
                 ("it uses a call of a member function)", 71),
                 (
@@ -1572,6 +1574,10 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
+                (
+                    "it uses an object literal with a superclass constructor argument)",
+                    1,
+                ),
                 ("its library serializes none)", 100),
             ]
         };

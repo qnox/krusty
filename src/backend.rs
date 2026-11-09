@@ -35,7 +35,7 @@ pub(crate) use dependency_metadata::has_standalone_dependency_code;
 pub use dependency_metadata::KlibDependencyCallable;
 pub use dependency_metadata::{authenticated_singleton_receiver, inert_staged_singleton_bindings};
 pub use dependency_metadata::{
-    DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata,
+    DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata, EnumConstant,
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
 pub(crate) use dependency_metadata::{ExportedConstructor, ExportedPropertyAccessor};

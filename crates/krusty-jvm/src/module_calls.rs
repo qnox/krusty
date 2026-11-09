@@ -70,6 +70,13 @@ pub(super) fn jvm_field_storage(
     Some((owner, is_static))
 }
 
+/// The class whose instance field a module member property is realized as, when `@JvmField`
+/// makes its storage the declaration's JVM surface: the instance case of [`jvm_field_storage`].
+pub(super) fn instance_jvm_field_owner(property: &IrModuleProperty) -> Option<TypeName> {
+    // An instance field never lives on a facade, so no facade can be named.
+    jvm_field_storage(property, &[]).and_then(|(owner, is_static)| (!is_static).then_some(owner))
+}
+
 pub(super) fn owner_is_jvm_interface(property: &IrModuleProperty) -> bool {
     matches!(
         property.owner_kind,
@@ -396,13 +403,8 @@ fn realize_local_default_arguments(
         .cloned()
         .unwrap_or_default();
     let extension_receiver_parameter = ir.extension_receiver_fns.contains(&function).then(|| {
-        u32::try_from(
-            ir.fn_context_counts
-                .get(&function)
-                .copied()
-                .unwrap_or_default(),
-        )
-        .expect("too many context parameters")
+        u32::try_from(ir.declared_parameters(function).context_count)
+            .expect("too many context parameters")
     });
     realize_default_arguments(
         ir,
