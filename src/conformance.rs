@@ -203,11 +203,31 @@ class ResultContinuation : Continuation<Any?> {
 /// needs `@JvmInline`. The JVM runner inserts it only while `FullValueClasses` is disabled; Native
 /// and Wasm always expand it to nothing because their `value class` needs no JVM annotation.
 pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
+    prepare_test_source_for(src, target, crate::kotlin_version::target())
+}
+
+/// The name Kotlin's runner gives its JVM `TargetBackend`, which `BACKEND_UNDER_TEST` spells. Kotlin
+/// 2.5 renamed the `JVM_IR` entry to `JVM` (keeping `JVM_IR` only as a deprecated alias), so a corpus
+/// compares against the spelling of the release it was written for.
+fn jvm_backend_under_test(release: crate::kotlin_version::KotlinVersion) -> &'static str {
+    if release >= crate::kotlin_version::KotlinVersion::V2_5_0_BETA2 {
+        "\"JVM\""
+    } else {
+        "\"JVM_IR\""
+    }
+}
+
+fn prepare_test_source_for(
+    src: &str,
+    target: TestTarget,
+    release: crate::kotlin_version::KotlinVersion,
+) -> String {
     let full_value_classes =
         crate::features::LangFeatures::from_source(src).has("FullValueClasses");
+    let jvm = jvm_backend_under_test(release);
     let (value_class_annotation, backend) = match target {
-        TestTarget::Jvm if !full_value_classes => ("@JvmInline", "\"JVM_IR\""),
-        TestTarget::Jvm => ("", "\"JVM_IR\""),
+        TestTarget::Jvm if !full_value_classes => ("@JvmInline", jvm),
+        TestTarget::Jvm => ("", jvm),
         TestTarget::Native => ("", "\"NATIVE\""),
         TestTarget::WasmJs => ("", "\"WASM_JS\""),
         TestTarget::WasmWasi => ("", "\"WASM_WASI\""),
@@ -978,6 +998,7 @@ pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kotlin_version::KotlinVersion;
 
     #[test]
     fn sampling_is_even_and_never_exceeds_the_requested_limit() {
@@ -1043,13 +1064,33 @@ mod tests {
 
     #[test]
     fn backend_under_test_is_preprocessed_like_the_kotlin_runner() {
-        let prepared = prepare_test_source(
+        let prepared = prepare_test_source_for(
             "val jvm = BACKEND_UNDER_TEST == \"JVM_IR\"\nval android = BACKEND_UNDER_TEST == \"ANDROID\"",
             TestTarget::Jvm,
+            KotlinVersion::V2_4_21,
         );
         assert_eq!(
             prepared,
             "val jvm = \"JVM_IR\" == \"JVM_IR\"\nval android = \"JVM_IR\" == \"ANDROID\""
+        );
+    }
+
+    /// Kotlin 2.5's `TargetBackend` names the JVM backend `JVM`; its corpus compares against that
+    /// spelling (`topLevelInitializtion/failInInitializer2.kt`), while older corpora say `JVM_IR`.
+    #[test]
+    fn backend_under_test_spells_the_jvm_backend_as_the_release_runner_does() {
+        let source = "val here = BACKEND_UNDER_TEST";
+        assert_eq!(
+            prepare_test_source_for(source, TestTarget::Jvm, KotlinVersion::V2_5_0_BETA2),
+            "val here = \"JVM\""
+        );
+        assert_eq!(
+            prepare_test_source_for(source, TestTarget::Jvm, KotlinVersion::V2_4_21),
+            "val here = \"JVM_IR\""
+        );
+        assert_eq!(
+            prepare_test_source_for(source, TestTarget::Native, KotlinVersion::V2_5_0_BETA2),
+            "val here = \"NATIVE\""
         );
     }
 
@@ -1068,7 +1109,7 @@ mod tests {
             "\nvalue class V(val x: Int)\nval here = \"NATIVE\""
         );
         assert_eq!(
-            prepare_test_source(source, TestTarget::Jvm),
+            prepare_test_source_for(source, TestTarget::Jvm, KotlinVersion::V2_4_21),
             "@JvmInline\nvalue class V(val x: Int)\nval here = \"JVM_IR\""
         );
     }
