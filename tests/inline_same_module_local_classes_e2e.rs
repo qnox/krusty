@@ -124,3 +124,28 @@ fn a_regenerated_objects_suspend_method_takes_a_regenerated_continuation_like_ko
 fn a_regenerated_objects_suspend_method_runs() {
     common::expect_box_ok_files_with_stdlib(&[("Suspending.kt", SUSPEND_METHOD)], "SuspendingKt");
 }
+
+/// An object whose supertype names a reified parameter (`object : Inv<T>()`) carries it in its
+/// generic signature, so each call site regenerates the object with the signature specialized.
+const REIFIED_SUPERTYPE: &str =
+    include_str!("box_regressions/inlineCompiledReifiedSupertypeObjects.kt");
+
+#[test]
+fn an_object_whose_supertype_names_a_reified_parameter_is_regenerated_like_kotlinc() {
+    let classes = common::classes_against_kotlinc_module(&[("Reified.kt", REIFIED_SUPERTYPE)]);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>()
+    );
+    for name in classes.reference.keys() {
+        assert!(
+            classes.krusty.get(name) == classes.reference.get(name),
+            "{name} differs from kotlinc's bytes"
+        );
+    }
+}
+
+#[test]
+fn an_object_whose_supertype_names_a_reified_parameter_runs() {
+    common::expect_box_ok_files_with_stdlib(&[("Reified.kt", REIFIED_SUPERTYPE)], "ReifiedKt");
+}
