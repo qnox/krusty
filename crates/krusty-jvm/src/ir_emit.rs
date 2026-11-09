@@ -4140,11 +4140,8 @@ fn emit_placed_method(
         function_annotations::nullability_annotated(ir, fid, &declared_annotations)
             && !placement.is_for_inline_copy();
     // The USER annotations on this function's parameters.
-    let user_param_anns: &[krusty::ir::DeclarationAnnotations] = ir
-        .fn_param_annotations
-        .get(&fid)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
+    let user_param_anns: &[krusty::ir::DeclarationAnnotations] =
+        &ir.declared_parameters(fid).annotations;
     let method_parameters = if env.java_parameters {
         super::method_parameters::function(ir, fid, &param_tys, holder_receiver)
     } else {

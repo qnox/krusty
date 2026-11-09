@@ -140,3 +140,11 @@ fn a_write_through_a_projected_receiver_is_rejected() {
         );
     }
 }
+
+#[test]
+fn a_definitely_non_null_member_keeps_its_and_any_through_a_projected_receiver() {
+    common::expect_box_same_as_kotlinc(
+        include_str!("box_regressions/projectedDefinitelyNonNullMember.kt"),
+        "ProjectedDefinitelyNonNullMember",
+    );
+}
