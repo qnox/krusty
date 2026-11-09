@@ -188,31 +188,18 @@ impl Checker<'_> {
         array_ty: Ty,
         indices: &[ExprId],
         value: ExprId,
-        builtin_element: Option<Ty>,
     ) -> Ty {
-        let expected = match builtin_element {
-            Some(expected) => Some(expected),
-            None => {
-                let mut arguments = indices.to_vec();
-                arguments.push(value);
-                self.selected_operator_params(scope, array_ty, "set", &arguments)
-                    .and_then(|params| params.last().copied())
-            }
-        };
+        let mut arguments = indices.to_vec();
+        arguments.push(value);
+        let expected = self
+            .selected_operator_params(scope, array_ty, "set", &arguments)
+            .and_then(|params| params.last().copied());
         if let Some(lhs) = self.compound_index_lhs(array, indices, value) {
             let element_ty = self.type_selected_index(scope, lhs, array_ty);
-            let expected = match expected {
-                Some(expected) if builtin_element.is_none() => {
-                    Some(self.declared_function_semantic_type(expected))
-                }
-                other => other,
-            };
+            let expected = expected.map(|expected| self.declared_function_semantic_type(expected));
             return self.type_compound_on_prepared_lhs(scope, value, element_ty, expected);
         }
         match expected {
-            Some(expected) if builtin_element.is_some() => {
-                self.expr_expected(scope, value, expected)
-            }
             Some(expected) => self.check_argument_expected(scope, value, expected, false, None),
             None => self.expr(scope, value),
         }
@@ -453,49 +440,21 @@ impl Checker<'_> {
             None => self.expr(scope, array),
         };
         let its: Vec<Ty> = indices.iter().map(|&i| self.expr(scope, i)).collect();
-        // Array access is the built-in member rung only when its `Int` index is applicable. An
-        // inapplicable built-in does not hide a user operator extension such as
-        // `operator fun IntArray.set(Long, Int)`.
-        let builtin_array_element = matches!(indices.as_slice(), [_])
-            .then(|| self.builtin_array_store_element(at))
-            .flatten()
-            .filter(|_| self.receiver_is_assignable(its[0], Ty::Int));
         let vt = if selected_receiver.is_some() {
-            self.type_assignment_value_on_selected_index(
-                scope,
-                array,
-                at,
-                &indices,
-                value,
-                builtin_array_element,
-            )
+            self.type_assignment_value_on_selected_index(scope, array, at, &indices, value)
         } else {
-            match builtin_array_element {
-                Some(expected) => self.expr_expected(scope, value, expected),
-                None => {
-                    let mut arguments = indices.clone();
-                    arguments.push(value);
-                    match self
-                        .selected_operator_params(scope, at, "set", &arguments)
-                        .and_then(|params| params.last().copied())
-                    {
-                        Some(expected) => {
-                            self.check_argument_expected(scope, value, expected, false, None)
-                        }
-                        None => self.expr(scope, value),
-                    }
-                }
+            let mut arguments = indices.clone();
+            arguments.push(value);
+            match self
+                .selected_operator_params(scope, at, "set", &arguments)
+                .and_then(|params| params.last().copied())
+            {
+                Some(expected) => self.check_argument_expected(scope, value, expected, false, None),
+                None => self.expr(scope, value),
             }
         };
         let span = self.file.stmt_spans[s.0 as usize];
         let single_index = matches!(indices.as_slice(), [_]);
-        if single_index {
-            if let Some(elem) = builtin_array_element {
-                self.expect_assignable(Ty::Int, its[0], span, "array index");
-                self.expect_assignable(elem, vt, span, "array element assignment");
-                return;
-            }
-        }
         if at == Ty::Error {
             return;
         }

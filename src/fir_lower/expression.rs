@@ -1021,27 +1021,6 @@ impl BodyLowering<'_> {
                 }
                 lowered
             }
-            FirExprKind::IndexedWrite {
-                receiver,
-                indices,
-                value,
-                conversion,
-            } => {
-                let receiver = self.expression(*receiver)?;
-                let mut arguments = indices
-                    .iter()
-                    .map(|index| self.expression_with_conversion(index.value, index.conversion))
-                    .collect::<Result<Vec<_>, _>>()?;
-                arguments.push(self.expression_with_conversion(*value, *conversion)?);
-                self.ir.add_expr(IrExpr::Call {
-                    callee: Box::new(Callee::Intrinsic {
-                        operation: IrIntrinsic::ArraySet,
-                        ret: expression.ty.get(),
-                    }),
-                    dispatch_receiver: Some(receiver),
-                    args: arguments,
-                })
-            }
             FirExprKind::SafeCall { receiver, selector } => {
                 self.safe_call_expression(expression_id, receiver, *selector, expression.ty.get())?
             }

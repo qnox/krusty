@@ -47,9 +47,7 @@ const fn jdk_carrier(element: UnsignedElement) -> (&'static str, &'static str) {
 /// Whether `callable`, a member of `UInt` or `ULong`, is realized as the JDK's own unsigned
 /// operation on its carrier. kotlinc's `IntrinsicMethods` implements exactly those declarations
 /// with an intrinsic method of its own instead of a call of the declaration.
-pub(in crate::jvm) fn realizes_jdk_unsigned_operation(
-    callable: &crate::backend::BackendCallableFact,
-) -> bool {
+pub fn realizes_jdk_unsigned_operation(callable: &crate::backend::BackendCallableFact) -> bool {
     let Some(crate::types::SemanticCallableOwner::Classifier(owner)) = callable.declaration_owner
     else {
         return false;

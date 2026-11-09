@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod annotation_values;
-pub(crate) mod bytecode_analysis;
+pub mod bytecode_analysis;
 mod checkpoint;
 mod class_pool_seed;
 mod codegen_markers;
@@ -24,7 +24,7 @@ mod enclosing_method;
 mod exception_tables;
 mod field_annotations;
 mod inline_call_stacks;
-pub(crate) mod inline_scope_frames;
+pub mod inline_scope_frames;
 mod inner_classes;
 mod kotlin_metadata;
 mod late_fields;
@@ -40,14 +40,14 @@ mod source_map_annotation;
 mod stack_maps;
 mod utf8_pool;
 
-pub(crate) use annotation_values::split_declaration_annotations;
+pub use annotation_values::split_declaration_annotations;
 use annotation_values::{NOT_NULL, NULLABLE};
 use descriptor_mentions::DescriptorMentionCache;
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
-pub(crate) use coroutine_transform::{CoroutineOutcome, CoroutineRequest, TransformedCoroutine};
+pub use coroutine_transform::{CoroutineOutcome, CoroutineRequest, TransformedCoroutine};
 pub use inner_classes::{InnerClassDetails, InnerClassResolver, InnerClassSpec};
-pub(crate) use {
+pub use {
     copied_class::CopyError,
     inner_classes::{DeclarationPaths, TableOrders},
 };
@@ -619,7 +619,7 @@ impl ClassWriter {
         self.source_file = name;
     }
 
-    pub(crate) fn set_value_classes(
+    pub fn set_value_classes(
         &mut self,
         value_classes: Rc<crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
     ) {
@@ -912,7 +912,7 @@ impl ClassWriter {
     }
 
     /// The name and descriptor of every method declared so far, in declaration order.
-    pub(crate) fn declared_methods(&self) -> Vec<(String, String)> {
+    pub fn declared_methods(&self) -> Vec<(String, String)> {
         self.methods
             .iter()
             .filter_map(|method| {
@@ -1234,7 +1234,7 @@ impl ClassWriter {
     /// whose inline calls saved the operand stack: the class, what each coroutine transformation
     /// found (which its continuation class is built from), and each method that could not be
     /// normalized. A class with such a failure is not written: its bytes are empty.
-    pub(crate) fn finish_with_coroutines(mut self) -> FinishedClass {
+    pub fn finish_with_coroutines(mut self) -> FinishedClass {
         // Every method's tables are final now: the coroutine transformer runs over the suspend
         // functions it was asked for, the operand stack is saved around the other methods' inline
         // calls, then kotlinc's bytecode rewrites run over the rest.
@@ -1963,8 +1963,8 @@ pub struct CodeBuilder {
     /// stand in, which a bytecode rewrite that inserts an instruction between them needs.
     bind_sequence: Vec<u32>,
     next_bind: u32,
-    /// kotlinc's `LineNumberMapper` state for this body (see [`crate::jvm::line_numbers`]).
-    lines: crate::jvm::line_numbers::LineNumberMapper,
+    /// kotlinc's `LineNumberMapper` state for this body (see [`line_numbers::LineNumberMapper`]).
+    lines: line_numbers::LineNumberMapper,
     /// This method expanded an inline body. kotlinc sorts that method's whole exception table by
     /// handler pc, then start pc, only after inlining. A method that was not inlined keeps
     /// emission order (the inner handler of a nested `try` stays ahead of the outer one).
@@ -2008,7 +2008,7 @@ impl CodeBuilder {
             .unwrap_or(false)
     }
 
-    pub(crate) fn owns_label(&self, label: Label) -> bool {
+    pub fn owns_label(&self, label: Label) -> bool {
         label.builder == self.id
     }
 
@@ -2054,7 +2054,7 @@ impl CodeBuilder {
         self.cur_stack = height;
     }
 
-    pub(crate) fn can_fall_through(&self) -> bool {
+    pub fn can_fall_through(&self) -> bool {
         !self.dead
     }
 
@@ -2591,7 +2591,7 @@ impl CodeBuilder {
 }
 
 /// A class written by [`ClassWriter::finish_with_coroutines`].
-pub(crate) struct FinishedClass {
+pub struct FinishedClass {
     /// The class file, empty when a method failed to be normalized.
     pub bytes: Vec<u8>,
     /// What the coroutine transformation of each requested method found.

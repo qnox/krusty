@@ -4,8 +4,11 @@
 //! rules about which mark wins at a given offset live here, beside the table they produce, rather
 //! than at the emission sites that call them.
 
+mod mapper;
+
+pub use mapper::LineNumberMapper;
+
 use super::{ClassWriter, CodeBuilder, LvtEntry};
-use crate::jvm::line_numbers::LineNumberMapper;
 
 impl ClassWriter {
     /// Position of the implicit void return recorded by declared-function emission. `None` for an
@@ -167,7 +170,7 @@ impl ClassWriter {
 
     /// Write no `LineNumberTable` for `name desc`, whatever lines its emission collects: kotlinc
     /// writes none for a `<clinit>` that fills `$$delegatedProperties`.
-    pub(in crate::jvm) fn omit_method_lines(&mut self, name: &str, desc: &str) {
+    pub fn omit_method_lines(&mut self, name: &str, desc: &str) {
         self.lineless_methods
             .push((name.to_string(), desc.to_string()));
     }
@@ -175,7 +178,7 @@ impl ClassWriter {
 
 impl CodeBuilder {
     /// kotlinc's `markLineNumber` at the current offset: an entry when the line differs from the
-    /// one the method's [`LineNumberMapper`] last marked (see [`crate::jvm::line_numbers`]).
+    /// one the method's [`LineNumberMapper`] last marked.
     ///
     /// Code dropped as dead still advances the mapper, as kotlinc's codegen marks it before its
     /// dead-code pass removes the entry.
@@ -199,7 +202,7 @@ impl CodeBuilder {
     /// inliner copies with an inline body, or the caller's line kotlinc registers again after an
     /// inlined call inside a condition (`markLineNumberAfterInlineIfNeeded`). The line the mapper
     /// last marked is unchanged.
-    pub(crate) fn inlined_line(&mut self, line: u16) {
+    pub fn inlined_line(&mut self, line: u16) {
         if self.push_line_entry(line) {
             let pc = self.bytes.len() as u16;
             self.inlined_line_marks.push((pc, line));
@@ -214,21 +217,21 @@ impl CodeBuilder {
         true
     }
 
-    /// The method's line mapper, for the rules [`crate::jvm::line_numbers`] states.
-    pub(crate) fn line_mapper(&mut self) -> &mut LineNumberMapper {
+    /// The method's line mapper, for the node-kind line rule the JVM backend states.
+    pub fn line_mapper(&mut self) -> &mut LineNumberMapper {
         &mut self.lines
     }
 
     /// How many line entries are recorded so far: where an in-place call's own entry goes (see
     /// [`Self::mark_in_place_call_line`]).
-    pub(crate) fn line_entry_count(&self) -> usize {
+    pub fn line_entry_count(&self) -> usize {
         self.line_marks.len()
     }
 
     /// kotlinc's mark of an `@InlineOnly` call whose arguments are evaluated in place, made once
     /// its arguments have marked theirs: the entry, when due, goes ahead of those arguments' own
     /// entries at `pc`, where `InplaceArgumentsMethodTransformer` leaves the call's line label.
-    pub(crate) fn mark_in_place_call_line(&mut self, index: usize, pc: u16, line: u32) {
+    pub fn mark_in_place_call_line(&mut self, index: usize, pc: u16, line: u32) {
         let line = line.min(u32::from(u16::MAX)) as u16;
         if !self.lines.mark(line) || self.dead || self.bytes.len() > u16::MAX as usize {
             return;
@@ -240,7 +243,7 @@ impl CodeBuilder {
     /// kotlinc's `markLineNumberAfterInlineIfNeeded` once an inlined body ends: inside a
     /// condition the caller's line is registered again at once; elsewhere it is forgotten, so the
     /// next mark of any line is written.
-    pub(crate) fn line_after_inline(&mut self, register: bool) {
+    pub fn line_after_inline(&mut self, register: bool) {
         if let Some(line) = self.lines.after_inline(register) {
             self.inlined_line(line);
         }
@@ -275,12 +278,12 @@ impl CodeBuilder {
     /// Forget which line is in effect, so the next mark is written even for the same line: kotlinc
     /// resets its last line number after an inlined call (`markLineNumberAfterInlineIfNeeded`),
     /// whose code ran under the callee's lines rather than the caller's.
-    pub(crate) fn forget_line(&mut self) {
+    pub fn forget_line(&mut self) {
         let _ = self.lines.after_inline(false);
     }
 
     /// Line marks whose provenance is an inlined body or its caller-line restoration.
-    pub(crate) fn inlined_line_marks(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+    pub fn inlined_line_marks(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
         self.inlined_line_marks
             .iter()
             .copied()
@@ -289,7 +292,7 @@ impl CodeBuilder {
 
     /// Whether the mapper holds no line, after an inlined body ([`Self::forget_line`]) or before
     /// the first mark, so the next mark of any line is written.
-    pub(crate) fn line_forgotten(&self) -> bool {
+    pub fn line_forgotten(&self) -> bool {
         self.lines.last_line().is_none()
     }
 
@@ -300,7 +303,7 @@ impl CodeBuilder {
 
     /// Whether the last entry numbers `line` on a `nop` written just behind the cursor, the
     /// provisional anchor that closes a spliced lambda's frame.
-    pub(crate) fn line_anchored_by_trailing_nop(&self, line: u16) -> bool {
+    pub fn line_anchored_by_trailing_nop(&self, line: u16) -> bool {
         self.line_marks.last().is_some_and(|&(pc, marked)| {
             marked == line
                 && usize::from(pc) + 1 == self.bytes.len()

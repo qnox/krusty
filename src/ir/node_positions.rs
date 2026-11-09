@@ -107,7 +107,7 @@ impl InheritedFacts for IrNodePositions {
 
 impl IrFile {
     /// Give `target` the source position `source` has.
-    pub(crate) fn copy_position(&mut self, source: ExprId, target: ExprId) {
+    pub fn copy_position(&mut self, source: ExprId, target: ExprId) {
         self.positions.inherit(source, target);
     }
 
@@ -123,7 +123,7 @@ impl IrFile {
     /// Settle every node in `nodes` that is not settled yet with the start, source and end lines of
     /// `position`: the nodes lowering built for one FIR expression or statement take its position,
     /// and a node that an inner expression, an explicit write or a copy settled keeps its own.
-    pub(crate) fn settle_positions(&mut self, nodes: Range<usize>, position: IrNodePosition) {
+    pub fn settle_positions(&mut self, nodes: Range<usize>, position: IrNodePosition) {
         for expression in nodes {
             let expression = expression as ExprId;
             if !self.positions.is_settled(expression) {
@@ -165,7 +165,7 @@ impl IrFile {
     /// Give every node of the generated tree rooted at `root` that has no source line `line`, as
     /// kotlinc builds a compiler-generated body (a delegated local's accessor) at its declaration's
     /// offsets. A node that has a source line, and the tree under it, keeps its own.
-    pub(crate) fn position_generated_tree(&mut self, root: ExprId, line: u32) {
+    pub fn position_generated_tree(&mut self, root: ExprId, line: u32) {
         if line == 0 {
             return;
         }

@@ -1,0 +1,290 @@
+//! JVM storage and `<clinit>` emission for a named object or interface companion.
+
+use super::*;
+
+pub(super) fn emit(
+    ir: &IrFile,
+    c: &IrClass,
+    facade: &str,
+    env: &EmitEnv,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    fq_name: &str,
+    cw: &mut ClassWriter,
+) {
+    let clinit_statics: Vec<(u32, &krusty::ir::IrStatic, krusty::ir::ExprId)> = ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter(|(_, property)| property.owner_matches(fq_name))
+        .filter_map(|(index, property)| {
+            Some((
+                index as u32,
+                property,
+                static_fields::stored_clinit_initializer(ir, property)?,
+            ))
+        })
+        .collect();
+
+    // An interface's companion self-hosts its singleton; a plain object publishes INSTANCE.
+    let interface_companion = companion_of_interface(ir, c);
+    let (instance_name, instance_access) = if interface_companion {
+        ("$$INSTANCE", 0x1018) // STATIC | FINAL | SYNTHETIC (package-private)
+    } else {
+        ("INSTANCE", 0x0019) // PUBLIC | STATIC | FINAL
+    };
+    let self_desc = format!("L{fq_name};");
+
+    // kotlinc reaches `<clinit>` before the fields, so the body interns first and the leading
+    // INSTANCE and `$$delegatedProperties` intern with the field visit.
+    cw.reserve_method_name("<clinit>");
+    cw.add_field_late_leading(
+        (instance_access, instance_name, &self_desc),
+        None,
+        Some("Lorg/jetbrains/annotations/NotNull;"),
+    );
+    delegated_property_array::declare(env, c.fq_name, cw);
+
+    // An interface companion interleaves const fields with instance fields in source order; a named
+    // object's backing fields were declared beside its static storage (`declared_fields`).
+    if interface_companion {
+        emit_interface_companion_member_fields(ir, env.run, c, signature_formatter, fq_name, cw);
+    }
+
+    let init_body = c.init_body;
+    let mut emitter = Emitter::new(
+        ir,
+        &mut *cw,
+        env,
+        EmitterOwner {
+            static_owner: Some(StaticOwner::Class(c.fq_name)),
+            owner: fq_name,
+            facade,
+        },
+        Ty::Unit,
+        clinit_statics
+            .iter()
+            .map(|&(_, _, init)| init)
+            .chain(init_body),
+    );
+    emitter.enter_class_initializer(env.signature_symbols);
+    let mut clinit = CodeBuilder::new(0);
+    emitter.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
+    if delegated_property_array::exists(env, c.fq_name) {
+        emitter.cw.omit_method_lines("<clinit>", "()V");
+    }
+    let ci = emitter.cw.class_ref(fq_name);
+    let init = emitter.cw.methodref(fq_name, "<init>", "()V");
+    let fref = emitter.cw.fieldref(fq_name, instance_name, &self_desc);
+    clinit.new_obj(ci);
+    clinit.dup();
+    clinit.invokespecial(init, 0, 0);
+    clinit.putstatic(fref, 1);
+
+    // Backend support storage must exist before source initializers. A generated declaration can
+    // independently request placement after them; generated provenance alone does not imply order.
+    let (after_source, before_source): (Vec<_>, Vec<_>) = clinit_statics
+        .iter()
+        .partition(|(index, _, _)| ir.static_initializer_is_after_source(*index));
+    for &(index, _, init) in &before_source {
+        emitter.emit_static_initializer_store(fq_name, index, init, &mut clinit);
+    }
+
+    let mut clinit_line_entries: Vec<(u16, u32)> = Vec::new();
+    if let Some(init_body) = init_body {
+        let body_start = clinit.bytes.len() as u16;
+        // The source body reads `this` as kotlinc does: each read loads the published instance
+        // again, with no local holding it.
+        emitter.singleton_receiver = Some(c.fq_name);
+        // Each store marks its initializer's line, and the lines its value marks inside itself
+        // stay, as in a constructor; an `init` block marks its own lines as it goes.
+        let first = clinit.line_marks().len();
+        emitter.render_initializer_boundaries = true;
+        emitter.emit(init_body, &mut clinit);
+        emitter.render_initializer_boundaries = false;
+        let marks = clinit.line_marks()[first..].iter();
+        clinit_line_entries.extend(marks.map(|&(pc, line)| (pc, u32::from(line))));
+        clinit_line_entries.dedup();
+        if !c.is_source_declared && c.decl_line != 0 && c.decl_end_line != 0 {
+            let start = if c.decl_start_line == 0 {
+                c.decl_line
+            } else {
+                c.decl_start_line
+            };
+            clinit_line_entries = vec![(body_start, start)];
+        }
+    }
+
+    for &(index, property, init) in &after_source {
+        if property.line != 0
+            && clinit_line_entries.last().map(|&(_, line)| line) != Some(property.line)
+        {
+            // Through the builder's mapper, so a line it marked last writes no second entry.
+            clinit.mark_line(property.line);
+            clinit_line_entries.push((clinit.bytes.len() as u16, property.line));
+        }
+        emitter.emit_static_initializer_store(fq_name, index, init, &mut clinit);
+    }
+
+    let clinit_max = emitter.frame.max();
+    let clinit_return = clinit.bytes.len() as u16;
+    clinit.ret_void();
+    clinit.ensure_locals(clinit_max);
+    clinit.link();
+    cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+
+    // A one-line object already maps its last store to the closing line, which needs no entry of
+    // its own.
+    let returns_to_closing_line = (!c.is_source_declared || !after_source.is_empty())
+        && clinit_line_entries
+            .last()
+            .is_some_and(|&(_, line)| line != c.decl_end_line);
+    if returns_to_closing_line && c.decl_end_line != 0 {
+        clinit_line_entries.push((clinit_return, c.decl_end_line));
+    }
+    if !clinit_line_entries.is_empty() {
+        cw.set_method_lines("<clinit>", "()V", &clinit_line_entries);
+    }
+}
+
+/// A named object's backing fields with the source position of each, for the field-table visit.
+/// Like an interface companion's, they intern after `<clinit>` and the accessors, so a field's
+/// generic `Signature` follows the initializer's constants. A field with no property of its own
+/// takes the position of the field before it.
+pub(super) fn declared_fields(ir: &IrFile, c: &IrClass) -> Vec<(u32, usize)> {
+    if !static_storage(ir, c) || companion_of_interface(ir, c) {
+        return Vec::new();
+    }
+    let mut position = 0;
+    (0..c.fields.len())
+        .map(|field_index| {
+            if let Some(property) = c
+                .properties
+                .iter()
+                .find(|property| property.backing_field == Some(field_index as u32))
+            {
+                position = property.source_order;
+            }
+            (position, field_index)
+        })
+        .collect()
+}
+
+/// Instance backing fields and companion-owned `const val`s, in source order, after `$$INSTANCE`.
+///
+/// A public or internal const also has a copy on the interface. The copy that stays here is the
+/// companion's own field: private when the declaration is private, public otherwise (`internal` has
+/// no JVM spelling). Each reference field carries the same nullability annotation as any other
+/// backing field, attached here so its name is not interned ahead of the field visit.
+fn emit_interface_companion_member_fields(
+    ir: &IrFile,
+    run: &EmitRun,
+    c: &IrClass,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    fq_name: &str,
+    cw: &mut ClassWriter,
+) {
+    enum Member {
+        Instance(usize),
+        Const(u32),
+    }
+    let property_order = |field_index: usize| {
+        c.properties
+            .iter()
+            .find(|property| property.backing_field == Some(field_index as u32))
+            .map(|property| property.source_order)
+            .unwrap_or(u32::MAX)
+    };
+    let mut members = Vec::new();
+    for (field_index, _) in c.fields.iter().enumerate() {
+        members.push((
+            property_order(field_index),
+            field_index as u32,
+            Member::Instance(field_index),
+        ));
+    }
+    for (static_index, property) in ir.statics.iter().enumerate() {
+        if property.is_const && property.owner_matches(fq_name) {
+            members.push((
+                property.source_order,
+                static_index as u32,
+                Member::Const(static_index as u32),
+            ));
+        }
+    }
+    members.sort_by_key(|(order, tie, _)| (*order, *tie));
+    for (_, _, member) in members {
+        match member {
+            Member::Instance(field_index) => {
+                add_late_member_field(ir, run, c, signature_formatter, fq_name, cw, field_index);
+            }
+            Member::Const(static_index) => {
+                let property = &ir.statics[static_index as usize];
+                let descriptor = ir_type_desc(&property.ty);
+                let access = if property.visibility.is_private() {
+                    0x001a // PRIVATE | STATIC | FINAL
+                } else {
+                    0x0019 // PUBLIC | STATIC | FINAL
+                };
+                let value = property
+                    .init
+                    .and_then(|init| static_fields::constant_value(ir, init));
+                let nullability = (descriptor.starts_with('L') || descriptor.starts_with('['))
+                    .then(|| {
+                        if property.ty.is_nullable() {
+                            "Lorg/jetbrains/annotations/Nullable;"
+                        } else {
+                            "Lorg/jetbrains/annotations/NotNull;"
+                        }
+                    });
+                cw.add_field_late(access, &property.name, &descriptor, value, nullability);
+            }
+        }
+    }
+}
+
+/// Declare an object's backing field for the field-table visit, with its generic `Signature`,
+/// nullability and declared annotations.
+pub(super) fn add_late_member_field(
+    ir: &IrFile,
+    run: &EmitRun,
+    c: &IrClass,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    fq_name: &str,
+    cw: &mut ClassWriter,
+    field_index: usize,
+) {
+    let field = &c.fields[field_index];
+    let acc = declared_field_access(c, field_index, true);
+    let type_parameter = ir
+        .field_signatures(fq_name)
+        .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
+        .map(|(_, parameter)| parameter.as_str())
+        .or(field.type_param.as_deref());
+    let field_sig = signature_formatter
+        .field_signature(
+            &field.ty,
+            type_parameter,
+            field_visibility::backs_var_property(c, field_index),
+        )
+        .filter(|_| !field.is_property_delegate());
+    let physical_name = instance_field_jvm_name(ir, run, c, field_index);
+    let descriptor = ir_type_desc(&field.ty);
+    let nullability = field_visibility::publishes_field_nullability(c, field_index)
+        .then(|| super::declared_field_annotation(c, field_index))
+        .flatten();
+    cw.add_field_late_sig(
+        acc,
+        &physical_name,
+        &descriptor,
+        field_sig.as_deref(),
+        None,
+        nullability,
+    );
+    if let Some(annotations) = c
+        .field_annotations
+        .iter()
+        .find(|annotations| annotations.field == field.name)
+    {
+        cw.set_last_late_field_annotations(&annotations.annotations);
+    }
+}

@@ -437,7 +437,7 @@ fn range_construction(facts: &BuiltinMemberDeclaration<'_>) -> Option<MemberReal
 /// and bitwise declarations expose the carrier/result type after Kotlin numeric promotion
 /// (`Long.minus(Int)` returns `Long`, so both operands of the primitive subtraction are `Long`).
 /// Shift declarations deliberately keep their count parameter distinct (`Long.shl(Int)`).
-pub(crate) fn primitive_binary_operands(
+pub fn primitive_binary_operands(
     intrinsic: CompilerIntrinsic,
     parameter: Ty,
     result: Ty,
@@ -460,7 +460,7 @@ pub(crate) fn primitive_binary_operands(
 /// Common comparison carrier of an exact builtin scalar `compareTo`: `Char` compares as `Int`,
 /// `Boolean` as itself, numeric operands at their promoted type (`Int.compareTo(Long)` compares
 /// `Long`s).
-pub(crate) fn primitive_compare_operand(receiver: Ty, parameter: Ty) -> Option<Ty> {
+pub fn primitive_compare_operand(receiver: Ty, parameter: Ty) -> Option<Ty> {
     let receiver = receiver.canonical_semantic().non_null();
     let parameter = parameter.canonical_semantic().non_null();
     if receiver == Ty::Boolean && parameter == Ty::Boolean {

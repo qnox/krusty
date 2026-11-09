@@ -42,7 +42,7 @@ pub enum IrConst {
 impl IrConst {
     /// Convert a provider-normalized Kotlin compile-time constant into common IR. The semantic
     /// type chooses the exact constant identity; a target backend chooses its physical carrier.
-    pub(crate) fn from_library_constant(constant: &crate::libraries::LibraryConst) -> Option<Self> {
+    pub fn from_library_constant(constant: &crate::libraries::LibraryConst) -> Option<Self> {
         use crate::libraries::LibConst;
 
         Some(match (&constant.value, constant.ty.canonical_semantic()) {

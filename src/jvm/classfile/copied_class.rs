@@ -17,7 +17,7 @@ use crate::jvm::source_map::SourceMap;
 
 /// Why a declaration could not be copied as it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CopyError {
+pub enum CopyError {
     /// The declaration carries something this writer does not write.
     Unsupported(&'static str),
     /// The body does not lay out.
@@ -28,7 +28,7 @@ const ACC_STATIC: u16 = 0x0008;
 
 impl ClassWriter {
     /// The value classes this class's code may box, which a class copied for its code shares.
-    pub(crate) fn value_classes(&self) -> Rc<ValueClassDescriptors> {
+    pub fn value_classes(&self) -> Rc<ValueClassDescriptors> {
         Rc::clone(&self.value_classes)
     }
 
@@ -87,7 +87,7 @@ impl ClassWriter {
     /// `ClassVisitor.visitMethod` followed by the method's body, as `MethodNode.accept` visits it:
     /// the declaration, its annotations, then the code and its local variables. The body then
     /// passes through kotlinc's method optimizations, which every class writer applies.
-    pub(crate) fn add_copied_method(&mut self, method: &ClassMethod) -> Result<(), CopyError> {
+    pub fn add_copied_method(&mut self, method: &ClassMethod) -> Result<(), CopyError> {
         self.add_copied_method_at(method, BodyStage::Emitted)
     }
 

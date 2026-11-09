@@ -46,7 +46,7 @@ const ACC_STATIC: u16 = 0x0008;
 /// The constant masks one call passes to a `$default` bridge, and where the bridge declares them:
 /// `masks.len()` words from `start`, the method handle right after them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DefaultMasks {
+pub struct DefaultMasks {
     pub start: u16,
     pub masks: Vec<i32>,
     /// Each source parameter's mask ordinal and exact physical local slot, published by the
@@ -66,7 +66,7 @@ pub(crate) const DEFAULT_LAMBDA_FAKE_CALL: &str = "$$$DEFAULT_LAMBDA_FAKE_CALL$$
 /// An omitted inline lambda parameter whose default is a lambda class's singleton, or a lambda
 /// class constructed with captured values (`ExtractedDefaultLambda`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ExtractedDefaultLambda {
+pub struct ExtractedDefaultLambda {
     /// The parameter's declaration slot.
     pub slot: u16,
     /// The lambda class.
@@ -124,7 +124,7 @@ struct Condition {
 /// Resolve `node`'s mask header for `masks` and drop the mask words and the handler from its
 /// descriptor; the omitted inline lambda parameters whose defaults are extracted are returned. A
 /// test whose shape is not kotlinc's is an error, never left to run.
-pub(crate) fn expand(
+pub fn expand(
     node: &mut MethodNode,
     masks: &DefaultMasks,
 ) -> Result<Vec<ExtractedDefaultLambda>, InlineError> {

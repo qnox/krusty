@@ -7,25 +7,25 @@ use crate::fx_hash::{HashMap, HashSet};
 use crate::types::Ty;
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct IrWhenFacts {
+pub struct IrWhenFacts {
     /// Checked result types, as fir2ir types them (`Unit` when not exhaustive down an `else if`
     /// chain). Backends use this to preserve value flow and emit the mandatory no-match failure path
     /// without re-running exhaustiveness analysis.
-    pub(crate) exhaustive: HashMap<ExprId, Ty>,
+    pub exhaustive: HashMap<ExprId, Ty>,
     /// The `when` expressions the source wrote (fir2ir's `IrStatementOrigin.WHEN`), with the line of
     /// their `when` keyword. An `if`, and a `when` lowering builds, is not one. kotlinc's JVM codegen
     /// marks that line and a `nop` before the branches of such a `when` unless it becomes a switch.
-    pub(crate) source_lines: HashMap<ExprId, u32>,
+    pub source_lines: HashMap<ExprId, u32>,
     /// The `when` each elvis (`a ?: b`) lowers to, as fir2ir builds it, with the elvis's source line
     /// (`0` when it has none): the first branch tests the left value's temporary against `null` and
     /// yields the right side, the `else` yields the left value. A backend whose platform compiler
     /// rebuilds an elvis's branches at the elvis's own position uses this provenance rather than
     /// recognizing the shape.
-    pub(crate) elvises: HashMap<ExprId, u32>,
+    pub elvises: HashMap<ExprId, u32>,
     /// The elvis `when`s that are a later link of a chain `a ?: b ?: c`. kotlinc folds a chain into
     /// one block (`JvmSafeCallChainFoldingLowering`), so a later link opens no elvis block of its
     /// own and its code takes the position the chain starts at.
-    pub(crate) elvis_chain_links: HashSet<ExprId>,
+    pub elvis_chain_links: HashSet<ExprId>,
 }
 
 impl InheritedFacts for IrWhenFacts {
