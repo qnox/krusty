@@ -22,6 +22,10 @@ concurrency:
   group: ci-${{ github.ref == 'refs/heads/master' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
+# Every cache below is restored everywhere but saved only by a master push, after the step that
+# fills it. A pull request's own entries are visible only to that pull request, and one run's
+# copies of the toolchains and Gradle caches (several GB) evicted the master entries that every
+# branch restores, so later runs downloaded the toolchains again.
 jobs:
   # Asks the runner controller where this run's jobs should run (infragnite/route-runner). In shadow
   # mode the answer is only logged and recorded beside where each job really ran; every job keeps
@@ -133,13 +137,21 @@ jobs:
       # saved again once its key hits, so a shared one held only the first saver's jars and the
       # other job downloaded the rest from Maven Central on every run (~190 MB).
       - &plugin-host-runtime-cache
-        name: cache plugin host runtime
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        name: restore plugin host runtime
+        id: plugin-host-runtime
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/krusty/plugin-host
           key: plugin-host-${{ github.job }}-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
       - name: plugin host tests
         run: cargo test --profile gate -p krusty-plugin-host -- --include-ignored
+      - &save-plugin-host-runtime
+        name: save plugin host runtime
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.plugin-host-runtime.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/krusty/plugin-host
+          key: plugin-host-${{ github.job }}-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
 
   ci:
     runs-on: ubuntu-latest
@@ -186,17 +198,18 @@ jobs:
           java-version: |
             21
             25
-      - name: cache kotlin toolchain and corpora
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: restore kotlin toolchain and corpora
+        id: kotlin-toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             target/cache/kotlinc
             target/cache/ser-corpus
             target/cache/ksp-corpus
           key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
-      - name: cache box corpus
+      - name: restore box corpus
         id: box-corpus
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus
           # The checkout carries the box corpus, the mock JDK its tests compile against, and the CLI
@@ -228,8 +241,9 @@ jobs:
           key: kotlin-toolchain-oracle-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
           restore-keys: |
             kotlin-toolchain-oracle-
-      - name: cache Kotlin Toolchain distribution
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: restore Kotlin Toolchain distribution
+        id: kotlin-toolchain-cli
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/JetBrains/Kotlin/cli
           key: kotlin-toolchain-cli-${{ runner.os }}-${{ hashFiles('scripts/kotlin-toolchain/kotlin') }}
@@ -298,6 +312,27 @@ jobs:
         with:
           path: target/cache/kotlin-toolchain-oracle
           key: kotlin-toolchain-oracle-${{ github.sha }}
+      - name: save kotlin toolchain and corpora
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.kotlin-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/cache/kotlinc
+            target/cache/ser-corpus
+            target/cache/ksp-corpus
+          key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
+      - name: save box corpus
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.box-corpus.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/box-corpus
+          key: box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}
+      - name: save Kotlin Toolchain distribution
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.kotlin-toolchain-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/JetBrains/Kotlin/cli
+          key: kotlin-toolchain-cli-${{ runner.os }}-${{ hashFiles('scripts/kotlin-toolchain/kotlin') }}
       # Reuse coverage's exact compiler e2e executable for its ignored plugin/KSP controls.
       # This pass runs after the coverage report and does not change its measured workload.
       - *plugin-host-runtime-cache
@@ -320,6 +355,7 @@ jobs:
           grep -q ': test$' <<< "$ignored_tests"
           echo "plugin host compiler tests: $E2E_BINARY plugin_host_compiler_e2e:: --include-ignored --test-threads=1 (timeout=${KRUSTY_E2E_TIMEOUT_SECONDS}s)"
           run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$E2E_BINARY" plugin_host_compiler_e2e:: --include-ignored --test-threads=1
+      - *save-plugin-host-runtime
 
   # Each artifact family has one producer. They run on separate hosted runners so the conformance
   # matrix waits for the slowest required build instead of serializing every unrelated target graph
@@ -483,9 +519,10 @@ jobs:
             17
             21
             25
-      - name: cache kotlin toolchain and conformance corpora (${{ matrix.version }})
+      - name: restore kotlin toolchain and conformance corpora (${{ matrix.version }})
         if: matrix.target == 'jvm'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: conformance-toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             target/cache/kotlinc/${{ matrix.version }}
@@ -495,33 +532,37 @@ jobs:
           # Do not reuse the former box-only immutable cache: it can never acquire the newly
           # required serialization/KSP inputs.
           key: kotlin-conformance-all-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
-      - name: cache Kotlin compiler for ${{ matrix.target }} conformance (${{ matrix.version }})
+      - name: restore Kotlin compiler for ${{ matrix.target }} conformance (${{ matrix.version }})
         if: matrix.target != 'jvm'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: target-kotlinc
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/kotlinc/${{ matrix.version }}
           # Do not let a Native or Wasm row publish the JVM row's broader immutable cache before its
           # serialization/KSP inputs exist. Every key still identifies one exact compiler version.
           key: kotlin-${{ matrix.target }}-conformance-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
-      - name: cache Wasm target KLIB dependencies (${{ matrix.version }})
+      - name: restore Wasm target KLIB dependencies (${{ matrix.version }})
         if: startsWith(matrix.target, 'wasm-')
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: wasm-klibs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/krusty-deps
           key: wasm-target-klibs-v1-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       # Native cases are analyzed against this version's Kotlin/Native stdlib KLIB.
       # `scripts/kotlin-native.sh` re-downloads a restored root whose stdlib payload is incomplete.
-      - name: cache Kotlin/Native distribution (${{ matrix.version }})
+      - name: restore Kotlin/Native distribution (${{ matrix.version }})
         if: matrix.target == 'native'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: kotlin-native
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/kotlin-native/${{ matrix.version }}
           key: kotlin-native-conformance-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       # Only the maximum-version Native row runs the focused kotlinc-native oracle checks. The
       # ordinary Native conformance step below already provisions the exact compiler distribution.
-      - name: cache Kotlin/Native dependencies
+      - name: restore Kotlin/Native dependencies
         if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: konan
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.konan/dependencies
@@ -549,9 +590,9 @@ jobs:
             write=1
           fi
           echo "write=$write" >> "$GITHUB_OUTPUT"
-      - name: cache box corpus (${{ matrix.version }})
+      - name: restore box corpus (${{ matrix.version }})
         id: box-corpus
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
           # The checkout carries the box corpus, the mock JDK its tests compile against, and the CLI
@@ -781,6 +822,48 @@ jobs:
           name: jvm-byte-equality-${{ matrix.version }}
           path: jvm-byte-equality.txt
           if-no-files-found: error
+      - name: save kotlin toolchain and conformance corpora (${{ matrix.version }})
+        if: matrix.target == 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.conformance-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/cache/kotlinc/${{ matrix.version }}
+            target/cache/ser-corpus/${{ matrix.version }}
+            target/cache/ksp-toolchain
+            target/cache/krusty-deps
+          key: kotlin-conformance-all-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      - name: save Kotlin compiler for ${{ matrix.target }} conformance (${{ matrix.version }})
+        if: matrix.target != 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.target-kotlinc.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/kotlinc/${{ matrix.version }}
+          key: kotlin-${{ matrix.target }}-conformance-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      - name: save Wasm target KLIB dependencies (${{ matrix.version }})
+        if: startsWith(matrix.target, 'wasm-') && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.wasm-klibs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: wasm-target-klibs-v1-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      - name: save Kotlin/Native distribution (${{ matrix.version }})
+        if: matrix.target == 'native' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.kotlin-native.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/kotlin-native/${{ matrix.version }}
+          key: kotlin-native-conformance-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      - name: save Kotlin/Native dependencies
+        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.konan.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.konan/dependencies
+            target/cache/krusty-deps
+          key: native-conformance-konan-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      - name: save box corpus (${{ matrix.version }})
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.box-corpus.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/box-corpus/${{ matrix.version }}
+          key: box-and-cli-corpus-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
 
   # GitHub resolves `needs` before expanding a matrix, so the Native and Wasm focused-test producer
   # dependency requires a second scheduler job. Both jobs execute the one anchored conformance step
@@ -967,13 +1050,17 @@ jobs:
           # The integration harness deliberately uses an isolated user home below. Do not restore
           # an unused ~/.gradle cache; the next step owns the exact home the nested builds consume.
           cache-provider: external
-      - name: cache Gradle integration dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: restore Gradle integration dependencies
+        id: gradle-integration
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/krusty-gradle-user-home/caches
           # Each matrix lane has a different Gradle/KGP/KSP dependency graph. The generated fixture
           # build scripts live in gradle.rs, while the tested plugin build lives under tools/.
           key: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-${{ hashFiles('Cargo.lock', 'crates/krusty-build/src/gradle.rs', 'tools/krusty-gradle/**') }}
+          # Gradle's caches are content-addressed, so master's closest entry seeds a changed graph.
+          restore-keys: |
+            gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
@@ -1018,6 +1105,12 @@ jobs:
           fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
+      - name: save Gradle integration dependencies
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.gradle-integration.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/krusty-gradle-user-home/caches
+          key: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-${{ hashFiles('Cargo.lock', 'crates/krusty-build/src/gradle.rs', 'tools/krusty-gradle/**') }}
 
   # Build the Maven plugin's release bytes once: a portable local Maven repository the release
   # publishes and the job below consumes.
