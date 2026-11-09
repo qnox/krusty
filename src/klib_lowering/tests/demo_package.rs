@@ -905,6 +905,19 @@ pub(super) fn demo_with(
     demo_with_module("demo", shapes, extra, build)
 }
 
+/// One fixture module's frozen facts and declaration trees, including `extra` class trees.
+pub(super) fn module_trees(
+    module: &str,
+    shapes: &[Shape],
+    extra: Vec<KlibIrDeclarationTree>,
+    build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
+) -> (
+    HashMap<&'static str, BackendCallableFact>,
+    KlibIrModuleTrees,
+) {
+    demo_module(module, shapes, extra, |_| true, build)
+}
+
 fn demo_with_module(
     module: &str,
     shapes: &[Shape],

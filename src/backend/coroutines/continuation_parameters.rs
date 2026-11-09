@@ -26,14 +26,14 @@ use super::control_flow::stmt_diverges;
 
 /// Why a file's suspend functions cannot take the continuation-passing form yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ContinuationDecline {
+pub enum ContinuationDecline {
     /// A body reaches a suspension point, which needs the coroutine state machine.
     Suspends,
 }
 
 impl ContinuationDecline {
     /// The construct a target names when it declines the file.
-    pub(crate) fn construct(&self) -> &'static str {
+    pub fn construct(&self) -> &'static str {
         match self {
             Self::Suspends => "a suspend function that suspends",
         }
@@ -41,7 +41,7 @@ impl ContinuationDecline {
 }
 
 /// Give every suspend function of `ir` its continuation parameter and its `Any?` result.
-pub(crate) fn add_continuation_parameters(ir: &mut IrFile) -> Result<(), ContinuationDecline> {
+pub fn add_continuation_parameters(ir: &mut IrFile) -> Result<(), ContinuationDecline> {
     let mut suspend_functions = ir.suspend_funs.clone();
     suspend_functions.sort_unstable();
     suspend_functions.dedup();
