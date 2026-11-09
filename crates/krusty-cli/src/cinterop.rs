@@ -6,8 +6,8 @@
 
 use std::path::PathBuf;
 
-use krusty::native::cinterop::CinteropOptions;
-use krusty::native::NativeTarget;
+use krusty_native::cinterop::CinteropOptions;
+use krusty_native::NativeTarget;
 
 pub const HELP: &str = "\
 Usage: krusty cinterop options_list

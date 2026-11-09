@@ -17,7 +17,7 @@ pub(crate) enum KlibAccessorRole {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct KlibBodyAccessor {
+pub struct KlibBodyAccessor {
     pub(crate) property: crate::fir::ExternalPropertyId,
     pub(crate) role: KlibAccessorRole,
     pub(crate) name: Box<str>,

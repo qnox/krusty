@@ -42,9 +42,9 @@ impl ClassMetadataExtensions<'_> {
 /// The registered plugins' view of one class whose metadata a target is about to write.
 #[derive(Clone, Copy)]
 pub struct PluginClassMetadata<'a> {
-    pub(crate) plugins: &'a PluginHost,
-    pub(crate) ir: &'a IrFile,
-    pub(crate) class: &'a IrClass,
+    pub plugins: &'a PluginHost,
+    pub ir: &'a IrFile,
+    pub class: &'a IrClass,
 }
 
 impl PluginClassMetadata<'_> {

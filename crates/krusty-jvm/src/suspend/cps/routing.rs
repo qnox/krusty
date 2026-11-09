@@ -1,0 +1,184 @@
+//! Which suspend functions get their state machine at emission instead of in IR.
+//!
+//! The routing gate is deliberately a conjunction (see `inline_suspension`): a function the IR
+//! machine found no suspension point in, which nevertheless has one inside a spliced inline body.
+//! That is exactly the function that would otherwise be emitted with no continuation to pass, so
+//! claiming it can only replace a `call arity mismatch` — never take over a function the IR machine
+//! already compiles.
+
+use krusty::fx_hash::HashMap;
+use krusty::ir::ExprId;
+
+/// One suspension whose machine is built during emission, in the enclosing body's encounter order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SplicedSuspension {
+    /// The call expression. Its continuation operand is an `IrExpr::CurrentContinuation`, which
+    /// resolves to the `$completion` parameter while discovering and to the machine's own
+    /// continuation local while emitting.
+    pub call: ExprId,
+    /// The value class whose box a resumption of this call delivers, with the carrier the call
+    /// returns where it does not suspend. The resumed path unboxes it, so both paths join holding
+    /// the carrier.
+    pub resumed_box: Option<(krusty::types::TypeName, krusty::types::Ty)>,
+}
+
+/// A suspension point of a function whose machine kotlinc's transformer builds from its bytecode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TransformedSuspension {
+    /// The call expression. Its continuation operand is an `IrExpr::CurrentContinuation`, the
+    /// function's `$completion` parameter; the transformer replaces it with the machine's own.
+    pub call: ExprId,
+    /// The callee's declared result, which the call's erased `Object` result is coerced to: the
+    /// carrier, for a call whose resumption delivers a value class's box.
+    pub result: krusty::types::Ty,
+    /// The value class whose box a resumption of this call delivers, with the carrier the call
+    /// returns where it does not suspend. The emitter unboxes it between kotlinc's unbox markers
+    /// and the transformer moves that unboxing to the resume path.
+    pub resumed_box: Option<(krusty::types::TypeName, krusty::types::Ty)>,
+}
+
+/// A function whose machine kotlinc's coroutine transformer builds from its bytecode.
+#[derive(Clone, Debug)]
+pub(crate) struct TransformedMachine {
+    /// The internal name of its continuation class: for a suspend lambda, the lambda's own class.
+    pub continuation_class: String,
+    /// Its suspension points, in encounter order.
+    pub suspensions: Vec<TransformedSuspension>,
+    /// Set for a suspend lambda's `invokeSuspend`, which the transformer takes in its lambda mode.
+    pub lambda: Option<SuspendLambdaMachine>,
+    /// The `IrExpr::CurrentContinuation` reads inside its `suspendCoroutineUninterceptedOrReturn`
+    /// blocks. Each is written as kotlinc's fake continuation, which the transformer replaces with
+    /// the machine's continuation, or with `$completion` when every point is a tail call.
+    pub fake_continuations: Vec<ExprId>,
+}
+
+/// What the transformer's lambda mode needs from a suspend lambda's `invokeSuspend` beyond its
+/// suspension points.
+#[derive(Clone, Debug)]
+pub(crate) struct SuspendLambdaMachine {
+    /// The declarations that read the lambda's parameters back from their fields at the top of the
+    /// body. codegen marks each with `mark(10)`, after which the coroutine starts.
+    pub parameter_reads: Vec<ExprId>,
+    /// The spill fields the class declares for those parameters, by normalized descriptor, with the
+    /// highest index of each (kotlinc's `continuationClassVarsCountByType`), in declaration order.
+    pub declared_spill_fields: Vec<(String, usize)>,
+}
+
+/// A value a suspend lambda's class captures.
+#[derive(Clone, Debug)]
+pub(crate) struct SuspendLambdaCapture {
+    /// Its field, by index into the class's `IrClass::fields`.
+    pub field: u32,
+    /// The captured value's type.
+    pub ty: krusty::types::Ty,
+    /// Whether the value is a `crossinline` parameter of the inline function the lambda is
+    /// written in (kotlinc's `FIELD_FOR_CROSSINLINE_CAPTURED_VALUE`).
+    pub crossinline: bool,
+}
+
+/// A suspend lambda realized as a class of its own (kotlinc's `SuspendLambdaLowering`), which the
+/// emitter writes with the members kotlinc declares for it.
+#[derive(Clone, Debug)]
+pub(crate) struct SuspendLambdaClass {
+    /// The class's `invokeSuspend`, the lambda's body.
+    pub invoke_suspend: u32,
+    /// The lambda's Kotlin function type.
+    pub function_type: krusty::types::Ty,
+    /// The captured values, in constructor order.
+    pub captures: Vec<SuspendLambdaCapture>,
+    /// What each parameter of the class's constructor, `create` and typed `invoke` is.
+    pub member_parameters: super::SuspendLambdaParameters,
+    /// The lambda's own parameters (its receiver first), in order: each one's type, and the field
+    /// it is kept in when the body reads it.
+    pub parameters: Vec<(krusty::types::Ty, Option<u32>)>,
+    /// The name Kotlin metadata records for each of the lambda's value parameters, in order. Its
+    /// receiver and context parameters are not value parameters.
+    pub metadata_names: Vec<String>,
+    /// The declarations of the type parameters the lambda's function type names, directly or
+    /// through their bounds, which its metadata records.
+    pub type_parameters: Vec<krusty::ir::IrTypeParameter>,
+    /// The source form, read before the implementation becomes `invokeSuspend` and drops its origin.
+    pub form: krusty::ir::IrLambdaForm,
+    /// Whether the source lambda itself carried the `suspend` modifier, rather than only acquiring
+    /// a suspend function type from its expected type.
+    pub explicit_suspend: bool,
+}
+
+/// The suspend functions whose machine is built during emission, with their suspensions: those
+/// the emit-time machine builds around a spliced inline body, and those kotlinc's transformer
+/// builds when the class is written.
+#[derive(Default)]
+pub(crate) struct EmitTimeMachines {
+    functions: HashMap<u32, Vec<SplicedSuspension>>,
+    transformed: HashMap<u32, TransformedMachine>,
+    suspend_lambdas: HashMap<krusty::types::TypeName, SuspendLambdaClass>,
+}
+
+impl EmitTimeMachines {
+    pub(crate) fn record(&mut self, function: u32, suspensions: Vec<SplicedSuspension>) {
+        self.functions.insert(function, suspensions);
+    }
+
+    pub(crate) fn suspensions(&self, function: u32) -> Option<&[SplicedSuspension]> {
+        self.functions.get(&function).map(Vec::as_slice)
+    }
+
+    pub(crate) fn record_transformed(&mut self, function: u32, machine: TransformedMachine) {
+        self.transformed.insert(function, machine);
+    }
+
+    pub(crate) fn transformed(&self, function: u32) -> Option<&TransformedMachine> {
+        self.transformed.get(&function)
+    }
+
+    /// Add the suspension points of the bodies inline calls place for `function`, a suspend
+    /// lambda, and the continuations they pass, to its machine.
+    pub(crate) fn add_placed_suspensions(
+        &mut self,
+        function: u32,
+        suspensions: Vec<TransformedSuspension>,
+        continuations: Vec<ExprId>,
+    ) {
+        if let Some(machine) = self.transformed.get_mut(&function) {
+            machine.suspensions.extend(suspensions);
+            machine.fake_continuations.extend(continuations);
+        }
+    }
+
+    pub(crate) fn record_suspend_lambda(
+        &mut self,
+        class: krusty::types::TypeName,
+        lambda: SuspendLambdaClass,
+    ) {
+        self.suspend_lambdas.insert(class, lambda);
+    }
+
+    /// The suspend lambda `class` realizes, when it is one.
+    pub(crate) fn suspend_lambda(
+        &self,
+        class: krusty::types::TypeName,
+    ) -> Option<&SuspendLambdaClass> {
+        self.suspend_lambdas.get(&class)
+    }
+
+    /// Give `function`'s machine its continuation class's final name.
+    pub(crate) fn rename_continuation(&mut self, function: u32, to: krusty::types::TypeName) {
+        if let Some(machine) = self.transformed.get_mut(&function) {
+            machine.continuation_class = to.render();
+        }
+    }
+
+    pub(crate) fn remap_suspend_lambda_class(
+        &mut self,
+        function: u32,
+        from: krusty::types::TypeName,
+        to: krusty::types::TypeName,
+    ) {
+        if let Some(lambda) = self.suspend_lambdas.remove(&from) {
+            self.suspend_lambdas.insert(to, lambda);
+        }
+        if let Some(machine) = self.transformed.get_mut(&function) {
+            machine.continuation_class = to.render();
+        }
+    }
+}

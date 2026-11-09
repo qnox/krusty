@@ -24,7 +24,7 @@ fn record_serialize_lines(
         ir.expr_lines.insert(opening_expression, start_line);
     }
     if header_line != 0 {
-        ir.fn_close_lines.insert(function, header_line);
+        ir.function_position_mut(function).close_line = Some(header_line);
     }
 }
 
@@ -752,6 +752,6 @@ mod tests {
                 types,
             } if exprs.is_empty() && data == &[type_name("demo/Foo")] && types.is_empty()
         ));
-        assert!(!crate::jvm::ir_emit::jvm_can_emit(&ir));
+        assert!(!crate::jvm::emission_readiness::jvm_can_emit(&ir));
     }
 }
