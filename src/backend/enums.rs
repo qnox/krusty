@@ -34,6 +34,11 @@
 //! for a target whose companion getter runs before the companion is built, calling the enum's
 //! initializer there ([`IrFile::enum_initializers`]).
 //!
+//! Another file reads a constant of an enum this file declares through an entry: an ordinary
+//! function of this file answering the constant ([`publish_constants`]), which a target exports by
+//! the enum and constant name, as it exports an object's instance entry. Only the declaring file
+//! holds the constants' storage, so every read of a constant, in any file, finds the one object.
+//!
 //! A target runs this before the shared default-argument lowering, which then realizes a
 //! constant that leaves constructor arguments out like any other construction. The JVM keeps
 //! kotlinc's `<clinit>`, `$VALUES` and `$ENTRIES` and does not run it. An enum that another file
@@ -78,6 +83,39 @@ pub enum Contract {
     /// `values()` is an array of the constants as they stand, in declaration order; `entries` is
     /// built from `values()` on its first read.
     KotlinWasm,
+}
+
+/// Build the entry answering each constant of every enum `exports` publishes from `ir`, before
+/// [`realize`] rewrites the entries' reads into reads of the constants' storage.
+pub fn publish_constants(ir: &mut IrFile, exports: &mut super::DependencyExportSignatures) {
+    let enums = exports.enums().to_vec();
+    for class in enums {
+        let classifier = ir.classes[class as usize].fq_name_id();
+        let Some(result) = ir.declared_class_self_type(classifier) else {
+            continue;
+        };
+        let names: Vec<Box<str>> = ir.classes[class as usize]
+            .enum_entries
+            .iter()
+            .map(|entry| entry.name.as_str().into())
+            .collect();
+        for name in names {
+            let value = ir.add_expr(crate::ir::IrExpr::EnumEntry {
+                classifier,
+                name: name.clone(),
+            });
+            ir.set_logical_type(value, result);
+            let entry = super::construction_entries::entry(
+                ir,
+                &format!("<enum constant {name}>$get"),
+                Vec::new(),
+                result,
+                value,
+            );
+            ir.construction_entries.insert(entry, class);
+            exports.record_enum_constant_entry(super::EnumConstant { classifier, name }, entry);
+        }
+    }
 }
 
 /// Realize every enum class `ir` declares and rewrite every emitted use of one.

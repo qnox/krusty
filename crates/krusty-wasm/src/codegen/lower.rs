@@ -191,7 +191,7 @@ pub(super) fn lower_file(
         None
     } else {
         let mut classes =
-            super::classes::declare(ir, module, &mut runtime.objects, &indices, properties, plan)?;
+            super::classes::declare(ir, module, runtime, classifiers, &indices, properties, plan)?;
         super::interface_members::record(
             &super::interface_members::Recording {
                 ir,
@@ -1236,8 +1236,11 @@ impl<'a> Body<'a> {
                 arg,
                 type_operand,
             } => self.type_test(id, op, arg, type_operand)?,
+            // A cast to a non-null type is the cast to its nullable form, then a null check: `as
+            // String` on an `Any` reads the reference as the runtime's string and traps on `null`,
+            // as a cast to a class of the file does.
             IrExpr::TypeOp {
-                op: op @ (IrTypeOp::ImplicitCoercion | IrTypeOp::Cast),
+                op: op @ (IrTypeOp::ImplicitCoercion | IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
                 type_operand,
             } => {
@@ -1272,7 +1275,12 @@ impl<'a> Body<'a> {
                         }
                         self.numeric_narrowing(arg, type_operand)?;
                     }
-                    Some(_) => self.value(arg, type_operand)?,
+                    Some(target) => {
+                        self.value(arg, type_operand)?;
+                        if op == IrTypeOp::CastNonNull && matches!(target, ValType::Ref { .. }) {
+                            self.code.ref_as_non_null();
+                        }
+                    }
                 }
             }
             IrExpr::NotNullAssert { operand, .. } => {
@@ -1367,6 +1375,21 @@ impl<'a> Body<'a> {
             // `Unit` has no carrier: its one value is the absence of one.
             IrExpr::SingletonValue { .. } if self.carrier_of(id)?.is_none() => {}
             IrExpr::SingletonValue { classifier } => self.singleton(classifier)?,
+            // The shared enum lowering realized every enum this file declares; a constant of
+            // another file's enum is read through the entry that file exports.
+            IrExpr::EnumEntry { classifier, name } => {
+                let entry = self
+                    .calls
+                    .dependency_enum_constant(classifier, &name)
+                    .ok_or_else(|| {
+                        // Boundary conversion for a diagnostic.
+                        format!(
+                            "an enum another file declares (`{}`)",
+                            classifier.render().replace('/', ".")
+                        )
+                    })?;
+                self.code.call(entry);
+            }
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
                 ty,

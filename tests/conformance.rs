@@ -18,6 +18,8 @@ mod box_byte_score;
 mod box_inventory;
 #[path = "box_lane.rs"]
 mod box_lane;
+#[path = "box_lane_profile.rs"]
+mod box_lane_profile;
 #[path = "box_ratchet.rs"]
 mod box_ratchet;
 #[path = "box_reference_classes.rs"]
