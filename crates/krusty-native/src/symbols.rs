@@ -85,7 +85,6 @@ pub(super) fn module_constructor_symbol(
     Some(symbol)
 }
 
-/// Program-wide identity of a selected source constructor declaration.
 /// The declaration identity every reference to a module property shares, whichever of the
 /// module's files writes it.
 pub(super) fn property_reference_symbol(
@@ -99,6 +98,7 @@ pub(super) fn property_reference_symbol(
     )
 }
 
+/// Program-wide identity of a selected source constructor declaration.
 pub(super) fn constructor_reference_symbol(
     module_name: &str,
     declaration: krusty::fir::DeclarationId,
