@@ -31,7 +31,7 @@ impl BodyLowering<'_> {
             ));
         }
         let symbol = variable.base.symbol.clone();
-        let input = super::semantic_type(self.arena, self.header.type_parameters(), variable.ty)?;
+        let input = self.semantic(variable.ty)?;
         if !input.is_nullable() || !ty.is_nullable() {
             return Err(mismatch("a safe call is not over and of nullable types"));
         }
