@@ -1,5 +1,5 @@
-//! The declared superclass and instance functions of every named source classifier of the module,
-//! frozen before Pass 2 starts.
+//! The declared superclass, type parameters, instance functions and instance properties of every
+//! named source classifier of the module, frozen before Pass 2 starts.
 //!
 //! Only the declaring file's IR holds a class's members, so a target asking what a class inherits
 //! from a source supertype declared in another file of the module cannot find it there. These
@@ -15,8 +15,31 @@ use crate::types::{Ty, TypeName, Visibility};
 pub struct SourceClassMembers {
     /// The declared superclass, `None` for an interface or a class extending `kotlin.Any`.
     pub superclass: Option<TypeName>,
+    /// Semantic names of every type parameter an application of the classifier binds, in order:
+    /// its own, then those it captures from enclosing declarations. `None` when a header did not
+    /// complete (a module that recovered from a frontend error).
+    pub type_parameters: Option<Box<[Box<str>]>>,
     /// Instance functions in source order; a companion's members belong to the companion.
     pub functions: Box<[SourceMemberFunction]>,
+    /// Instance properties in source order.
+    pub properties: Box<[SourceMemberProperty]>,
+}
+
+/// One instance property a source classifier declares.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceMemberProperty {
+    pub name: Box<str>,
+    pub visibility: Visibility,
+    /// What its accessors take besides the dispatch receiver, `None` when its header did not
+    /// complete. A consumer that needs it must refuse, not skip it.
+    pub receivers: Option<SourcePropertyReceivers>,
+}
+
+/// The receivers and context parameters a source property's accessors take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourcePropertyReceivers {
+    pub extension: bool,
+    pub context_parameters: u32,
 }
 
 /// One instance function a source classifier declares.
@@ -45,6 +68,12 @@ pub(super) fn from_resolved_index(
     declaration: DeclarationId,
     superclass: Option<TypeName>,
 ) -> SourceClassMembers {
+    let type_parameters = index
+        .classifier_type_arguments(declaration)
+        .unwrap_or_default()
+        .iter()
+        .map(|&parameter| index.type_parameter_semantic_name(parameter).map(Box::from))
+        .collect::<Option<Box<[_]>>>();
     let mut owned = index
         .owned_declarations(declaration)
         .iter()
@@ -70,8 +99,45 @@ pub(super) fn from_resolved_index(
         .collect();
     SourceClassMembers {
         superclass: superclass.filter(|&superclass| superclass != crate::types::wk::any()),
+        type_parameters,
         functions,
+        properties: properties(index, declaration),
     }
+}
+
+fn properties(
+    index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
+) -> Box<[SourceMemberProperty]> {
+    let mut owned = index
+        .owned_declarations(declaration)
+        .iter()
+        .copied()
+        .filter_map(|member| {
+            let header = index.declaration_header(member)?;
+            (header.kind == DeclarationKind::Property
+                && !header.flags.has(DeclarationFlags::COMPANION))
+            .then_some((member, header.visibility))
+        })
+        .collect::<Vec<_>>();
+    owned.sort_by_key(|(member, _)| index.source_order(*member));
+    owned
+        .into_iter()
+        .filter_map(|(member, visibility)| {
+            let receivers = index
+                .property_for_declaration(member)
+                .and_then(|property| index.property(property))
+                .map(|header| SourcePropertyReceivers {
+                    extension: header.extension_receiver.is_some(),
+                    context_parameters: header.context_parameter_count,
+                });
+            Some(SourceMemberProperty {
+                name: index.declaration_name(member)?.into(),
+                visibility,
+                receivers,
+            })
+        })
+        .collect()
 }
 
 fn signature(

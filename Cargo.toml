@@ -12,7 +12,7 @@ categories = ["compilers", "development-tools"]
 autotests = false
 
 [workspace]
-members = ["crates/krusty-build", "crates/krusty-cli", "crates/krusty-lsp", "crates/krusty-plugin-host", "crates/krusty-plugin-ir", "crates/krusty-test-support", "crates/krusty-toolchain"]
+members = ["crates/krusty-build", "crates/krusty-cli", "crates/krusty-lsp", "crates/krusty-plugin-host", "crates/krusty-plugin-ir", "crates/krusty-test-modules", "crates/krusty-test-support", "crates/krusty-toolchain"]
 default-members = [".", "crates/krusty-cli"]
 resolver = "2"
 
@@ -68,6 +68,8 @@ dhat-heap = ["dep:dhat"]
 [dev-dependencies]
 # Compiler-dependent integration with the real plugin and KSP hosts lives in the e2e target.
 krusty-plugin-host = { path = "crates/krusty-plugin-host" }
+# Declares the e2e target's modules from the `tests/*_e2e.rs` files present.
+krusty-test-modules = { path = "crates/krusty-test-modules" }
 # The kotlinc command-line conformance test compares the CLI's argument parser with kotlinc's own.
 krusty-cli = { path = "crates/krusty-cli" }
 rayon = "1"
@@ -110,6 +112,15 @@ overflow-checks = false
 debug-assertions = false
 debug = false
 incremental = true
+
+# Every third-party dependency is opt-level 2 as well; `"*"` does not cover workspace members.
+# The compiler spends real time inside them: the Cranelift backend, `sha2` digesting each KLIB
+# input generation, and the `zip` and `flate2` readers. At opt-level 0, digesting the 14 MB Native
+# stdlib KLIB took 220 ms instead of 12 ms, and the Native box corpus ran in 188s; with optimized
+# dependencies it ran in 131s on the same 4-core host with the same case outcomes. A cold build of
+# the conformance binary went from 6m17s to 6m31s; CI restores dependencies from its cache.
+[profile.gate.package."*"]
+opt-level = 2
 
 [profile.gate.package.krusty]
 opt-level = 2
@@ -170,7 +181,7 @@ path = "tests/e2e.rs"
 
 [[test]]
 name = "klib_e2e"
-path = "tests/klib_e2e.rs"
+path = "tests/klib.rs"
 required-features = ["focused-klib-tests"]
 
 [[test]]

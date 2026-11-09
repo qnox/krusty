@@ -58,32 +58,32 @@ impl BodyLowering<'_> {
         if access.symbol.kind != KlibIrSymbolKind::Constructor {
             return Err(mismatch("a constructor call's symbol is not a constructor"));
         }
-        let KlibIrSignature::Public(callee) = &access.symbol.signature else {
-            return unsupported("a call of a file-private constructor");
-        };
         if constructor_type_arguments != 0 {
             return unsupported("a call of a generic constructor");
         }
-        let linked = self.linker.link_constructor(self.ir, callee)?;
         let type_arguments = access
             .type_arguments
             .iter()
             .map(|argument| {
                 let argument = argument
                     .ok_or_else(|| mismatch("a constructor leaves a class type argument unset"))?;
-                super::super::klib_types::semantic_type(
-                    self.arena,
-                    self.header.type_parameters(),
-                    argument,
-                )
+                self.semantic(argument)
             })
             .collect::<Lowered<Vec<_>>>()?;
-        let params = linked
-            .declaration
-            .instantiate(&type_arguments, ty, |argument, bound| {
-                self.linker
-                    .constructor_bound(self.header.type_parameters(), argument, bound)
-            })?;
+        let (declaration, external_target, local_access) = match &access.symbol.signature {
+            KlibIrSignature::Public(callee) => {
+                let linked = self.linker.link_constructor(self.ir, callee)?;
+                (linked.declaration, Some(linked.target), None)
+            }
+            signature => {
+                let linked = self.linker.link_local_constructor(self.ir, signature)?;
+                (linked.declaration, None, Some(linked.access))
+            }
+        };
+        let params = declaration.instantiate(&type_arguments, ty, |argument, bound| {
+            self.linker
+                .constructor_bound(self.header.type_parameters(), argument, bound)
+        })?;
         let arguments = constructor_arguments(access)?;
         if arguments.len() != params.len() {
             return Err(mismatch(
@@ -95,9 +95,7 @@ impl BodyLowering<'_> {
         for (ordinal, (argument, parameter)) in arguments.into_iter().zip(&params).enumerate() {
             match argument {
                 Some(argument) => args.push(self.operand(argument, *parameter)?),
-                None if linked.declaration.default_allowed(ordinal) => {
-                    defaults.push(ordinal as u32)
-                }
+                None if declaration.default_allowed(ordinal) => defaults.push(ordinal as u32),
                 None => {
                     return Err(mismatch(
                         "a constructor omits a parameter without a declared default",
@@ -105,9 +103,9 @@ impl BodyLowering<'_> {
                 }
             }
         }
-        match linked.declaration.semantic_role {
+        match declaration.semantic_role {
             Some(crate::types::SemanticCallRole::KotlinArrayAllocation) => {
-                if linked.declaration.classifier != crate::types::wk::array()
+                if declaration.classifier != crate::types::wk::array()
                     || !ty.is_reference_array()
                     || ty.type_args().len() != 1
                     || params != [Ty::Int]
@@ -128,16 +126,23 @@ impl BodyLowering<'_> {
             Some(_) => return unsupported("an unmodelled constructor semantic role"),
             None => {}
         }
-        Ok(self.ir.add_expr(IrExpr::New {
-            internal: linked.declaration.classifier,
+        let site = self.ir.add_expr(IrExpr::New {
+            internal: declaration.classifier,
             args,
             ctor_params: Some(params),
-            declared_params: Some(linked.declaration.declared_parameters().into()),
+            declared_params: Some(declaration.declared_parameters().into()),
             ctor_desc: None,
-            external_target: Some(linked.target),
+            external_target,
             defaults: defaults.into_boxed_slice(),
             default_prefix_count: 0,
-        }))
+        });
+        if let Some(access) = local_access {
+            self.ir.construction_targets.insert(
+                site,
+                super::super::same_library_class::construction_target(access),
+            );
+        }
+        Ok(site)
     }
 }
 

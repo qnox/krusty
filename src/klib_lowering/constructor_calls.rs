@@ -15,6 +15,7 @@ use crate::metadata::klib_ir::tree::{KlibIrFunction, KlibIrNullability, KlibIrTy
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
 use crate::types::{Ty, TyKind, TypeName};
 
+#[derive(Clone)]
 pub(super) struct ConstructorDeclaration {
     pub(super) classifier: TypeName,
     params: Vec<Ty>,
@@ -249,6 +250,22 @@ pub(super) fn authenticate_root_header(
 impl ConstructorDeclaration {
     pub(super) fn declared_parameters(&self) -> &[Ty] {
         &self.params
+    }
+
+    /// A constructor this library materializes for a file-local class, with no provider record.
+    pub(super) fn local(
+        classifier: TypeName,
+        params: Vec<Ty>,
+        class_parameters: KlibBodyClassParameters,
+        defaults: ParamFlags,
+    ) -> Self {
+        Self {
+            classifier,
+            params,
+            class_parameters,
+            defaults,
+            semantic_role: None,
+        }
     }
 
     pub(super) fn default_allowed(&self, ordinal: usize) -> bool {

@@ -47,7 +47,7 @@ url="$releases/v${ver}/${name}.tar.gz"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 echo "downloading kotlin-native ${ver} for ${host}…" >&2
-curl -fsSL "$url" -o "$tmp/kotlin-native.tar.gz"
+curl -fsSL --retry 3 "$url" -o "$tmp/kotlin-native.tar.gz"
 tar -xzf "$tmp/kotlin-native.tar.gz" -C "$tmp"
 stdlib_complete "$tmp/$name" || {
   echo "downloaded Kotlin/Native archive has no common stdlib KLIB metadata" >&2
