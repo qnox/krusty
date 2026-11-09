@@ -81,6 +81,10 @@ jobs:
   # only the queue's own branches do.
   lint:
     runs-on: [self-hosted, rust-4c-8gb]
+    permissions:
+      contents: read
+      # Cancels the rest of a merge queue run after a lint failure.
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -99,16 +103,20 @@ jobs:
       # Commit messages are checked here so a push does not queue a second workflow for them.
       # The check finishes in seconds; a separate job was still waiting on a runner.
       - name: attribution commits
+        id: attribution
         env:
           RANGE: ${{ steps.base.outputs.sha }}..${{ github.sha }}
         run: scripts/check-attribution.sh "$RANGE"
       - name: validate pinned IntelliJ patch
+        id: intellij_patch
         run: scripts/check-intellij-patch.sh
       # The release job runs tools/krusty-gradle's wrapper with the signing key, without setup-gradle's
       # wrapper validation; every committed wrapper is checked here instead.
       - name: validate Gradle wrappers
+        id: gradle_wrappers
         run: scripts/check-gradle-wrappers.sh
       - name: outcome manifests only shrink
+        id: outcome_lists
         env:
           BASE: ${{ steps.base.outputs.sha }}
           HEAD: ${{ github.sha }}
@@ -131,7 +139,22 @@ jobs:
       - *just-on-path
       - *install-just
       - name: lint
+        id: lint
         run: just lint
+      # A queue branch that fails a check cannot land, and its run would otherwise keep every other
+      # job queued for the shared runners. Cancel the rest of the run; the required aggregate still
+      # reports the failure, which the queue reads. Only a failed check cancels: a runner or setup
+      # failure (such as setup-java) leaves the run alone. Master runs always run to completion.
+      - name: cancel the rest of a merge queue run after a lint failure
+        if: >-
+          failure() && startsWith(github.ref, 'refs/heads/mq/')
+          && (steps.attribution.outcome == 'failure' || steps.intellij_patch.outcome == 'failure'
+          || steps.gradle_wrappers.outcome == 'failure' || steps.outcome_lists.outcome == 'failure'
+          || steps.lint.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh run cancel "$GITHUB_RUN_ID"
 
   # krusty-plugin-host is outside the default members and the coverage packages, so its own
   # compiler-independent tests run here. Compiler-dependent plugin integrations run in `ci`.
@@ -684,6 +707,8 @@ jobs:
       # content-identity implementation. A producer or layout change therefore starts a fresh cache
       # instead of replaying inventories built by code that a hit would otherwise never execute.
       # Owned Native/Wasm cases require these same JVM oracle inventories.
+      # The bytecodeText and bytecodeListing reference checks in the non-box step compile through
+      # the same cache, so master saves it after that step and pull requests replay those compiles.
       - name: restore kotlinc box references (${{ matrix.version }})
         id: box-references
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -724,12 +749,6 @@ jobs:
           just conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" jvm-byte-equality.txt > pct.txt
           bash scripts/conformance-badge.sh fields conformance pct.txt "${{ matrix.version }}"
           bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt "${{ matrix.version }}"
-      - name: save kotlinc box references (${{ matrix.version }})
-        if: matrix.target == 'jvm' && github.ref == 'refs/heads/master' && steps.box-references.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/cache/ref-classes
-          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.sha }}
       - name: run native box conformance ${{ matrix.version }}
         if: matrix.target == 'native'
         id: native_box
@@ -858,6 +877,12 @@ jobs:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: "1"
         run: just conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
+      - name: save kotlinc box references (${{ matrix.version }})
+        if: matrix.target == 'jvm' && github.ref == 'refs/heads/master' && steps.box-references.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/ref-classes
+          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.sha }}
       - name: save recorded kotlinc bytes (${{ matrix.version }})
         if: matrix.target == 'jvm' && steps.recorded-mode.outputs.write == '1'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1197,7 +1222,7 @@ jobs:
           tests="$tests verify_task_reports_an_unsupported_kotlin_gradle_plugin verify_task_reports_projects_that_each_load_the_plugin"
           tests="$tests verify_task_reports_kotlin_dsl_compiles_after_kotlinc_compiles_them"
           tests="$tests verify_task_reports_a_kotlin_gradle_plugin_older_than_the_plugin_api"
-          tests="$tests multiplatform_jvm_compiles_through_krusty"
+          tests="$tests multiplatform_jvm_compiles_through_krusty body_only_dependency_edit_keeps_dependent_compile_up_to_date"
           tests="$tests oss_corpus_init_script_applies_the_packaged_plugin"
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"

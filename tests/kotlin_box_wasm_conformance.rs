@@ -948,13 +948,13 @@ fn wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract() {
     }
 }
 
-// PLATFORM-SPECIFIC: function values are non-suspend objects called through their arity's entry;
-// a suspend function value has no Wasm representation yet and must decline, not run as a plain one.
+// PLATFORM-SPECIFIC: a suspend function value is a function value whose implementation takes the
+// caller's continuation. Passing one without invoking it answers the same as on the JVM.
 #[test]
-fn wasm_suspend_function_values_decline() {
+fn wasm_suspend_function_values_are_function_values() {
     let src = "fun take(f: suspend () -> Int): Int = 1\nfun box(): String = if (take { 2 } == 1) \"OK\" else \"fail\"";
     expect_reference_box(src, "suspendFunctionValue");
-    expect_wasm_decline(src, "suspendFunctionValue", "a suspend function value");
+    expect_wasm_box(src, "suspendFunctionValue");
 }
 
 // A lambda or callable reference converted to a `fun interface` becomes an object of that
@@ -1277,6 +1277,9 @@ mod dependency_constructor_exports;
 
 #[path = "wasm_escaping_closures.rs"]
 mod escaping_closures;
+
+#[path = "wasm_type_of.rs"]
+mod type_of;
 
 #[test]
 fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
