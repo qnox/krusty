@@ -141,7 +141,6 @@ impl super::Emitter<'_> {
     }
 }
 
-/// The wrapper class of a JVM primitive type; `None` for a reference or an unsigned value class.
 impl super::Emitter<'_> {
     /// The type whose runtime class a bound class literal names. A scalar value sits in its JVM
     /// carrier (an unsigned value in the signed one), so the checked scalar type, not the slot,
@@ -155,6 +154,7 @@ impl super::Emitter<'_> {
     }
 }
 
+/// The wrapper class of a JVM primitive type; `None` for a reference or an unsigned value class.
 fn primitive_wrapper(ty: Ty) -> Option<&'static str> {
     (ty.scalar_value_repr() == Some(ty))
         .then(|| krusty::jvm::jvm_class_map::wrapper_internal(ty))
