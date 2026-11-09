@@ -36,7 +36,7 @@ impl IrFile {
     ///
     /// Plugins and targets consume this common declaration edge instead of rediscovering a
     /// property from a generated accessor's spelling.
-    pub(crate) fn property_accessor_parameters(
+    pub fn property_accessor_parameters(
         &self,
         class_index: usize,
         source_order: u32,
@@ -427,7 +427,7 @@ impl IrProperty {
     /// Whether this mutable declaration has a compiler-default setter whose resolved visibility is
     /// private. This is a stable Kotlin declaration fact: it does not depend on whether a backend has
     /// materialized an accessor function.
-    pub(crate) fn has_private_default_setter(&self) -> bool {
+    pub fn has_private_default_setter(&self) -> bool {
         self.is_var && !self.modifiers.declared_setter && self.setter_visibility.is_private()
     }
 }

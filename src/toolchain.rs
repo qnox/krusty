@@ -638,7 +638,7 @@ pub fn atomicfu_klib(target: crate::compilation_target::CompilationTarget) -> Op
     use crate::compilation_target::CompilationTarget;
     let artifact = match target {
         CompilationTarget::Native => {
-            let konan = crate::native::NativeTarget::host()?.konan_name()?;
+            let konan = crate::native_target::NativeTarget::host()?.konan_name()?;
             format!("atomicfu-{}", konan.replace('_', ""))
         }
         CompilationTarget::WasmJs => "atomicfu-wasm-js".to_string(),

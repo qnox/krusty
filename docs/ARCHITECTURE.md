@@ -47,6 +47,15 @@ boundary.
   snapshots. These packages depend toward the compiler library; the compiler never depends on any
   process adapter. LSP compiler analysis is an internal module—not a single-consumer workspace
   package—and architecture guards keep it isolated from the long-lived protocol/session modules.
+- **Backends are separate workspace packages.** `crates/krusty-jvm` lowers checked IR to class files,
+  `crates/krusty-native` to Cranelift objects and its linker, and `crates/krusty-wasm` to WebAssembly.
+  Each depends on the compiler library and implements its backend contract; the library never
+  depends on a backend. The JVM class-file layer (classpath and class readers, `ClassWriter`, the
+  bytecode passes and the bytecode inliner) stays in the library under `src/jvm`, because the
+  frontend reads library declarations and inline bodies through it. The split keeps each rustc
+  invocation small: one crate is one compiler process, so the old single crate's unit-test build
+  needed more memory than an 8 GB CI machine has. Fixtures a backend's unit tests share with the
+  library (`fir_lower::single_source_lowering`) sit behind the library's `test-support` feature.
 - **Shared process-independent policy** stays in the compiler library when it is genuinely a compiler
   concern. For example, JVM classpath code resolves a JDK home to `lib/modules` (or a pre-jimage
   JDK's `jre/lib/rt.jar`); each executable independently decides how its own arguments select that
