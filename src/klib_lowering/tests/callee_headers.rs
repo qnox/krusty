@@ -1509,8 +1509,8 @@ fn stdlib_calls_reach_header_declared_callees() {
     // they are not expected-failure allowances for executable conformance tests. Elvis and safe-call
     // blocks, then generic calls and `when` subject blocks, now reach further declared callees;
     // so do callees that declare parameter defaults, which their headers now carry, and callees
-    // reached past a call that leaves a parameter to its default. The same complete inputs were
-    // measured on every release.
+    // reached past a call that leaves a parameter to its default, and past a `for` loop over an
+    // array, which loops by index. The same complete inputs were measured on every release.
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
@@ -1518,15 +1518,15 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
-                ("it declares type parameters)", 205),
+                ("it declares type parameters)", 207),
                 ("it uses a block of a compiler-introduced form)", 1),
                 ("it uses a call of a file-private declaration)", 6),
-                ("it uses a call of a member function)", 74),
+                ("it uses a call of a member function)", 78),
                 (
                     "it uses a call of a member no library serializes, such as a fake override)",
                     10,
                 ),
-                ("it uses a call through a property accessor signature)", 35),
+                ("it uses a call through a property accessor signature)", 39),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
                 ("its library serializes none)", 98),
@@ -1537,15 +1537,15 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
-                ("it declares type parameters)", 187),
+                ("it declares type parameters)", 189),
                 ("it uses a block of a compiler-introduced form)", 1),
                 ("it uses a call of a file-private declaration)", 4),
-                ("it uses a call of a member function)", 71),
+                ("it uses a call of a member function)", 75),
                 (
                     "it uses a call of a member no library serializes, such as a fake override)",
                     10,
                 ),
-                ("it uses a call through a property accessor signature)", 35),
+                ("it uses a call through a property accessor signature)", 39),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
                 ("its library serializes none)", 98),

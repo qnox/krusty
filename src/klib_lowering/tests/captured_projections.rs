@@ -29,7 +29,7 @@ fn member(
 }
 
 #[test]
-fn stdlib_array_walk_reads_its_captured_iterator() {
+fn stdlib_array_walk_reads_its_captured_element() {
     let Some(root) = distribution_root() else {
         return;
     };
@@ -56,52 +56,20 @@ fn stdlib_array_walk_reads_its_captured_iterator() {
         helper.semantic_params().as_ref(),
     );
     let root = fact.klib_body_callable().expect("signed");
-    let providers = [
-        member(&libraries, "kotlin/Array", "iterator"),
-        member(&libraries, "kotlin/collections/Iterator", "hasNext"),
-        member(&libraries, "kotlin/collections/Iterator", "next"),
-        member(&libraries, "kotlin/collections/MutableCollection", "add"),
-    ];
-    let [iterator, has_next, next, add] = providers
-        .each_ref()
-        .map(|provider| provider.klib_body_callable().unwrap());
-    let leaves = [
-        (
-            iterator.identity().clone(),
-            super::super::EmittedDependencyCallable::target_member(
-                crate::fir::ExternalCallableId::from_raw(70),
-            ),
+    let add = member(&libraries, "kotlin/collections/MutableCollection", "add");
+    let add = add.klib_body_callable().unwrap();
+    let leaves = [(
+        add.identity().clone(),
+        super::super::EmittedDependencyCallable::new(
+            crate::fir::ExternalCallableId::from_raw(73),
+            None,
+            None,
         ),
-        (
-            has_next.identity().clone(),
-            super::super::EmittedDependencyCallable::new(
-                crate::fir::ExternalCallableId::from_raw(71),
-                None,
-                None,
-            ),
-        ),
-        (
-            next.identity().clone(),
-            super::super::EmittedDependencyCallable::new(
-                crate::fir::ExternalCallableId::from_raw(72),
-                None,
-                None,
-            ),
-        ),
-        (
-            add.identity().clone(),
-            super::super::EmittedDependencyCallable::new(
-                crate::fir::ExternalCallableId::from_raw(73),
-                None,
-                None,
-            ),
-        ),
-    ]
+    )]
     .into_iter()
     .collect();
     let oracle = crate::symbol_resolver::SourceOracle(&libraries);
-    let facts = KlibCalleeFacts::with_declarations([root], [iterator, has_next, next, add])
-        .with_type_oracle(&oracle);
+    let facts = KlibCalleeFacts::with_declarations([root], [add]).with_type_oracle(&oracle);
     let mut unit = DependencyBodyUnit::default();
     let lowered = unit
         .lower_function_with_intrinsics_and_externals(
@@ -113,8 +81,8 @@ fn stdlib_array_walk_reads_its_captured_iterator() {
         )
         .unwrap_or_else(|decline| panic!("{decline}"));
     validated(unit.ir());
-    // `iterator()` on the `Array<out T>` receiver answers `Iterator<out T>`, which kotlinc writes
-    // as the `Iterator<T>` it equals; the call is typed as serialized, over the root's own `T`.
+    // kotlinc loops over the `Array<out T>` receiver by index, so the walk makes no iterator
+    // call; each element read answers the `T` the out-projection reads, over the root's own `T`.
     let ir = unit.ir();
     let [receiver, ..] = ir.functions[lowered as usize].params.as_slice() else {
         panic!("`toCollection` takes its receiver first")
@@ -124,7 +92,7 @@ fn stdlib_array_walk_reads_its_captured_iterator() {
     };
     let root_t = element.projection_read_ty();
     assert!(matches!(root_t.kind(), crate::types::TyKind::TyParam(..)));
-    let iterators = ir
+    let elements = ir
         .exprs
         .iter()
         .enumerate()
@@ -132,7 +100,10 @@ fn stdlib_array_walk_reads_its_captured_iterator() {
             IrExpr::Call { callee, .. }
                 if matches!(
                     &**callee,
-                    crate::ir::Callee::External { target, .. } if target.raw() == 70
+                    crate::ir::Callee::Intrinsic {
+                        operation: crate::ir::IrIntrinsic::ArrayGet,
+                        ..
+                    }
                 ) =>
             {
                 ir.checked_type(index as u32)
@@ -140,10 +111,7 @@ fn stdlib_array_walk_reads_its_captured_iterator() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        iterators,
-        [Ty::obj_args("kotlin/collections/Iterator", &[root_t])]
-    );
+    assert_eq!(elements, [root_t]);
 }
 
 /// The provider realization of the `kotlin.collections` function `name` over an object array,
