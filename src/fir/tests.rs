@@ -2547,12 +2547,10 @@ impl SignatureSemantics for TestSignatureSemantics {
         callee: ResolvedTy,
         arguments: &[ResolvedSigCallArgument<'_>],
         _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
-    ) -> Result<ResolvedTy, DiagnosticId> {
+    ) -> Result<InvokeSelection, DiagnosticId> {
         self.operations.borrow_mut().push("invoke".into());
-        Ok(arguments
-            .last()
-            .map(|argument| argument.ty)
-            .unwrap_or(callee))
+        let result = arguments.last().map(|argument| argument.ty);
+        Ok(InvokeSelection::Selected(result.unwrap_or(callee)))
     }
 
     fn invoke_argument_expectations(
@@ -2857,6 +2855,7 @@ fn compact_graph_walker_delegates_every_semantic_operation() {
         arguments: invoke_arguments,
         scope,
         origin,
+        later: None,
     });
     let nullable = graph.add_expr(SigExpr::Nullable(invoke));
     let substitutions = graph.add_substitutions([SigSubstitution {

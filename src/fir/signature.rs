@@ -42,6 +42,15 @@ pub use resolved_types::*;
 pub use selected_result_publication::SelectedResultPublicationSemantics;
 pub use selections::*;
 pub use signature_state::SignatureState;
+
+/// The `invoke` convention selected on a callee value.
+#[derive(Clone, Copy, Debug)]
+pub enum InvokeSelection {
+    Selected(ResolvedTy),
+    /// The callee has no applicable `invoke`. A bare call's tower moves on to its later levels;
+    /// without one, this is the call's diagnostic.
+    Inapplicable(DiagnosticId),
+}
 mod classifier_headers;
 mod declaration_metadata;
 mod serialization_records;
@@ -882,7 +891,7 @@ pub trait SignatureSemantics:
         callee: ResolvedTy,
         arguments: &[ResolvedSigCallArgument<'_>],
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
-    ) -> Result<ResolvedTy, DiagnosticId>;
+    ) -> Result<InvokeSelection, DiagnosticId>;
 
     fn invoke_argument_expectations(
         &self,

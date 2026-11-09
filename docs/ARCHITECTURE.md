@@ -164,10 +164,17 @@ forwarded as `-Werror`; an explicit `-Werror` alongside it is the same idempoten
 forwarded exactly once.
 
 Gradle owns incremental invalidation. An unchanged replacement task is UP-TO-DATE and does not run
-krusty. Once any source, classpath, friend path, plugin, compiler option, or compiler binary changes,
-the task cleans its Kotlin output directory and recompiles the complete source set. That deliberately
-coarse boundary keeps source additions and removals, multifile facades, generated classes, and
-`.kotlin_module` metadata correct without reconstructing Kotlin's dependency graph from class files.
+krusty. The task is not keyed on its classpath and friend paths directly: a `<task>KrustyClasspath`
+task, which runs after every task producing an entry, writes `krusty classpath-fingerprint` of them,
+and the compile is keyed on that file. The fingerprint covers what a dependent compilation observes
+of each entry: a class enters by its declarations, not its method bodies, except that a class
+declaring an inline function, a synthetic class or an anonymous class enters by all its bytes. A
+body-only edit in a dependency therefore reruns the fingerprint task and leaves the compile
+UP-TO-DATE, while a signature or inline-body change recompiles it. Once any source, fingerprint,
+plugin, compiler option, or compiler binary changes, the task cleans its Kotlin output directory
+and recompiles the complete source set. That deliberately coarse boundary keeps source additions
+and removals, multifile facades, generated classes, and `.kotlin_module` metadata correct without
+reconstructing Kotlin's dependency graph from class files.
 Compiler plugins pass through the adapter as kotlinc receives them: each compile task's KGP
 `pluginClasspath` becomes `-Xplugin=<jars>` and its `pluginOptions` become
 `-P plugin:<id>:<key>=<value>`, and the compiler resolves each jar by the registrar it declares.
