@@ -6,7 +6,53 @@
 
 use crate::jvm::classpath::kotlin_name_to_ty;
 use crate::jvm::jvm_class_map;
-use crate::types::{Ty, TyKind, TyList};
+use crate::types::{Ty, TyKind, TyList, TypeName, TypeNameList};
+
+/// Publish mapped Kotlin supertypes and remove physical JDK collection edges from ordinary classes.
+///
+/// A JVM mapped builtin and its Kotlin declaration are one source-level classifier face. Concrete
+/// classes and ordinary Java interfaces that extend collection interfaces are mutable; a collection
+/// interface face itself is not, because `java/util/List` also realizes read-only `List`. Physical
+/// JDK collection interfaces are removed after adding their Kotlin faces, matching kotlinc's
+/// collection mapping and avoiding duplicate Java abstract-member obligations.
+pub(super) fn publish_mapped_supertypes(
+    libraries: &super::JvmLibraries,
+    internal_name: TypeName,
+    is_interface: bool,
+    mut supertypes: TypeNameList,
+    mut mapped: Vec<TypeName>,
+) -> TypeNameList {
+    let is_collection_face = jvm_class_map::is_mapped_collection_face(internal_name);
+    if !is_interface || !is_collection_face {
+        for name in std::iter::once(internal_name)
+            .chain(supertypes.iter_ids())
+            .filter_map(jvm_class_map::jvm_collection_to_kotlin_mutable_type_name)
+        {
+            if !mapped.contains(&name) {
+                mapped.push(name);
+            }
+        }
+    }
+    for name in mapped {
+        let duplicate_class_face = libraries.cp.builtin_is_interface_name(name) == Some(false)
+            && supertypes.iter_ids().any(|existing| {
+                jvm_class_map::type_names_map_to_same_jvm_internal(existing, name)
+            });
+        if !supertypes.contains_name(name) && !duplicate_class_face {
+            supertypes.push_name(name);
+        }
+    }
+    if is_collection_face {
+        return supertypes;
+    }
+    let mut kotlin_faces = TypeNameList::new();
+    for supertype in supertypes.iter_ids().filter(|&supertype| {
+        jvm_class_map::jvm_collection_to_kotlin_type_name(supertype).is_none()
+    }) {
+        kotlin_faces.push_name(supertype);
+    }
+    kotlin_faces
+}
 
 /// Overlay the `@Metadata`-declared collection classifiers onto a JVM-signature-derived type, level
 /// by level. The signature erases read-only vs mutable (`List`/`MutableList` both spell

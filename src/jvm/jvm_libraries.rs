@@ -1951,45 +1951,17 @@ impl JvmLibraries {
             // `StringBuilder : java.lang.CharSequence` reaches `kotlin.CharSequence`, and Java collection
             // implementations reach their Kotlin collection interfaces. The mapping table owns the
             // equivalence; extension resolution must not reconstruct a platform-name list.
-            let mut mapped: Vec<TypeName> = std::iter::once(internal_name)
+            let mapped: Vec<TypeName> = std::iter::once(internal_name)
                 .chain(supertypes.iter_ids())
                 .filter_map(super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name)
                 .collect();
-            // The MUTABLE face — but ONLY for a CONCRETE class (`java/util/ArrayList`, `HashMap`), never for
-            // the JVM collection INTERFACES: `java/util/List` is the shared realization of BOTH the read-only
-            // `kotlin/collections/List` and its mutable sibling, so tagging the interface mutable would make a
-            // read-only `List` (which reaches `java/util/List` in its supertypes) spuriously satisfy a
-            // `MutableCollection.plusAssign`. A concrete class is genuinely mutable, so its `MutableList`/
-            // `MutableSet`/`MutableMap` face is sound (derived from the java.util interface it implements).
-            // …and an ordinary Java INTERFACE that extends one (`javax.script.Bindings : Map`) is
-            // mutable in exactly the same way a class is: kotlinc sees it as the flexible
-            // `MutableMap!`, so `bindings["k"] = v` resolves. What must not carry the mutable face
-            // is a COLLECTION FACE itself — `java/util/List` and the Kotlin read-only builtin that
-            // realizes it.
-            let is_collection_face = super::jvm_class_map::is_mapped_collection_face(internal_name);
-            if !ci.is_interface() || !is_collection_face {
-                for m in std::iter::once(internal_name)
-                    .chain(supertypes.iter_ids())
-                    .filter_map(super::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name)
-                {
-                    if !mapped.contains(&m) {
-                        mapped.push(m);
-                    }
-                }
-            }
-            for k in mapped {
-                // A mapped CLASS face is the same superclass edge under its Kotlin identity; adding
-                // both (`java/lang/Object` and `kotlin/Any`) would publish two class parents. Mapped
-                // INTERFACE faces stay explicit: source assignability needs the Kotlin collection /
-                // CharSequence identity in addition to the physical Java interface realization.
-                let duplicate_class_face = self.cp.builtin_is_interface_name(k) == Some(false)
-                    && supertypes.iter_ids().any(|existing| {
-                        super::jvm_class_map::type_names_map_to_same_jvm_internal(existing, k)
-                    });
-                if !supertypes.contains_name(k) && !duplicate_class_face {
-                    supertypes.push_name(k);
-                }
-            }
+            supertypes = collection_canonicalization::publish_mapped_supertypes(
+                self,
+                internal_name,
+                ci.is_interface(),
+                supertypes,
+                mapped,
+            );
             // Kotlin metadata is authoritative for Kotlin companion identity. The structural field
             // pattern is only a Java/classfile fallback when no Kotlin companion fact exists.
             let metadata_companion = super::metadata::class_companion_name(&ci).map(|field| {
