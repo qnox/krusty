@@ -245,12 +245,13 @@ fn stdlib_array_copy_binds_its_captured_type_argument() {
         .with_type_oracle(&oracle);
     let mut unit = DependencyBodyUnit::default();
     let lowered = unit
-        .lower_function_with_intrinsics_and_externals(
+        .lower_function_with_declarations(
             root,
             libraries.declaration_bodies(),
             &facts,
             crate::klib_libraries::KlibIntrinsicFacts::empty(),
             &externals,
+            &libraries,
         )
         .unwrap_or_else(|decline| panic!("{decline}"));
     validated(unit.ir());

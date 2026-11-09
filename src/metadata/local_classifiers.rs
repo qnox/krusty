@@ -12,7 +12,7 @@ use crate::types::TypeName;
 /// anonymous object too, so what it nests is local, although the body itself keeps an ordinary
 /// member's nullability annotations. kotlinc's lambda and callable-reference classes are local
 /// too; their writers here annotate nothing to begin with.
-pub(crate) fn is_local(ir: &IrFile, class: &IrClass) -> bool {
+pub fn is_local(ir: &IrFile, class: &IrClass) -> bool {
     is_local_in(ir, class, &|owner| ir.class_id_by_name(owner))
 }
 
@@ -56,7 +56,7 @@ pub(crate) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<Str
 /// classes rather than a scan of them per lookup. Locality starts at a local class, an anonymous
 /// object or an enum entry body: a file declaring none of them has no local class id, and its
 /// classes' owners need no lookup at all.
-pub(crate) fn names(ir: &IrFile) -> HashSet<TypeName> {
+pub fn names(ir: &IrFile) -> HashSet<TypeName> {
     if !ir
         .classes
         .iter()
@@ -81,11 +81,11 @@ pub(crate) fn names(ir: &IrFile) -> HashSet<TypeName> {
 
 /// Anonymous declarations use their raw class ID even inside an enum entry's namespace.
 /// Enum-entry bodies have a distinct declaration role and keep their member class IDs.
-pub(crate) fn is_anonymous(class: &IrClass) -> bool {
+pub fn is_anonymous(class: &IrClass) -> bool {
     class.is_anonymous_object && !class.is_enum_entry
 }
 
-pub(crate) fn anonymous_names(ir: &IrFile) -> HashSet<TypeName> {
+pub fn anonymous_names(ir: &IrFile) -> HashSet<TypeName> {
     ir.classes
         .iter()
         .filter(|class| is_anonymous(class))
@@ -96,7 +96,7 @@ pub(crate) fn anonymous_names(ir: &IrFile) -> HashSet<TypeName> {
 /// Classifiers in an enum entry body's declaration namespace. Members and class-initializer
 /// objects keep that namespace; a class declared in an executable body starts a raw local ID.
 /// Follow the retained declaration context, since generated naming segments need not be classes.
-pub(crate) fn enum_entry_bodies(ir: &IrFile) -> HashSet<TypeName> {
+pub fn enum_entry_bodies(ir: &IrFile) -> HashSet<TypeName> {
     let mut namespaces: HashSet<_> = ir
         .classes
         .iter()
