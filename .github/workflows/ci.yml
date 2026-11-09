@@ -151,7 +151,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/krusty/plugin-host
-          key: plugin-host-${{ github.job }}-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
+          key: ${{ steps.plugin-host-runtime.outputs.cache-primary-key }}
 
   ci:
     runs-on: ubuntu-latest
@@ -247,6 +247,15 @@ jobs:
         with:
           path: ~/.cache/JetBrains/Kotlin/cli
           key: kotlin-toolchain-cli-${{ runner.os }}-${{ hashFiles('scripts/kotlin-toolchain/kotlin') }}
+      # krusty-toolchain's tests run the krusty-build-tools wrapper in a fresh Gradle user home (see
+      # the coverage gate below). Only the wrapper's distribution is kept: a restored Kotlin-DSL
+      # workspace can lack metadata.bin.
+      - name: restore Kotlin Build Tools Gradle distribution
+        id: build-tools-gradle-dists
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/krusty-build-tools-gradle-user-home/wrapper/dists
+          key: build-tools-gradle-dists-${{ runner.os }}-${{ hashFiles('tools/krusty-build-tools/gradle/wrapper/gradle-wrapper.properties') }}
       - name: select recorded-byte cache mode
         id: recorded-mode
         env:
@@ -320,19 +329,25 @@ jobs:
             target/cache/kotlinc
             target/cache/ser-corpus
             target/cache/ksp-corpus
-          key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
+          key: ${{ steps.kotlin-toolchain.outputs.cache-primary-key }}
       - name: save box corpus
         if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.box-corpus.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus
-          key: box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}
+          key: ${{ steps.box-corpus.outputs.cache-primary-key }}
+      - name: save Kotlin Build Tools Gradle distribution
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.build-tools-gradle-dists.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/krusty-build-tools-gradle-user-home/wrapper/dists
+          key: ${{ steps.build-tools-gradle-dists.outputs.cache-primary-key }}
       - name: save Kotlin Toolchain distribution
         if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.kotlin-toolchain-cli.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/JetBrains/Kotlin/cli
-          key: kotlin-toolchain-cli-${{ runner.os }}-${{ hashFiles('scripts/kotlin-toolchain/kotlin') }}
+          key: ${{ steps.kotlin-toolchain-cli.outputs.cache-primary-key }}
       # Reuse coverage's exact compiler e2e executable for its ignored plugin/KSP controls.
       # This pass runs after the coverage report and does not change its measured workload.
       - *plugin-host-runtime-cache
@@ -831,25 +846,25 @@ jobs:
             target/cache/ser-corpus/${{ matrix.version }}
             target/cache/ksp-toolchain
             target/cache/krusty-deps
-          key: kotlin-conformance-all-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          key: ${{ steps.conformance-toolchain.outputs.cache-primary-key }}
       - name: save Kotlin compiler for ${{ matrix.target }} conformance (${{ matrix.version }})
         if: matrix.target != 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.target-kotlinc.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/kotlinc/${{ matrix.version }}
-          key: kotlin-${{ matrix.target }}-conformance-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          key: ${{ steps.target-kotlinc.outputs.cache-primary-key }}
       - name: save Wasm target KLIB dependencies (${{ matrix.version }})
         if: startsWith(matrix.target, 'wasm-') && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.wasm-klibs.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/krusty-deps
-          key: wasm-target-klibs-v1-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          key: ${{ steps.wasm-klibs.outputs.cache-primary-key }}
       - name: save Kotlin/Native distribution (${{ matrix.version }})
         if: matrix.target == 'native' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.kotlin-native.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/kotlin-native/${{ matrix.version }}
-          key: kotlin-native-conformance-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          key: ${{ steps.kotlin-native.outputs.cache-primary-key }}
       - name: save Kotlin/Native dependencies
         if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.konan.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -857,13 +872,13 @@ jobs:
           path: |
             ~/.konan/dependencies
             target/cache/krusty-deps
-          key: native-conformance-konan-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          key: ${{ steps.konan.outputs.cache-primary-key }}
       - name: save box corpus (${{ matrix.version }})
         if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.box-corpus.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
-          key: box-and-cli-corpus-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          key: ${{ steps.box-corpus.outputs.cache-primary-key }}
 
   # GitHub resolves `needs` before expanding a matrix, so the Native and Wasm focused-test producer
   # dependency requires a second scheduler job. Both jobs execute the one anchored conformance step
@@ -974,7 +989,7 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-home-${{ github.job }}-${{ matrix.kotlin || 'plugin' }}-${{ hashFiles('tools/**/*.gradle*', 'tools/**/gradle-wrapper.properties', 'tools/**/*.versions.toml') }}
+          key: ${{ steps.gradle-home.outputs.cache-primary-key }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: krusty-gradle-plugin
@@ -1131,7 +1146,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/krusty-gradle-user-home/caches
-          key: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-${{ hashFiles('Cargo.lock', 'crates/krusty-build/src/gradle.rs', 'tools/krusty-gradle/**') }}
+          key: ${{ steps.gradle-integration.outputs.cache-primary-key }}
 
   # Build the Maven plugin's release bytes once: a portable local Maven repository the release
   # publishes and the job below consumes.
