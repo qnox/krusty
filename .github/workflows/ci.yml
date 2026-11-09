@@ -909,9 +909,10 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [native, wasm-js, wasm-wasi]
-    # Native retains its prior hosted capacity. Wasm uses the guarded self-hosted pool.
+    # Native and Wasm use the guarded self-hosted pool. Native once reached its suite deadline on
+    # these 8 GB runners; sharing decoded KLIB trees (#3274) halved its lane and its peak memory.
     # Separate target rows preserve independent measurements.
-    runs-on: ${{ (matrix.target == 'native' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps: *conformance-steps
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
