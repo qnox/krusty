@@ -57,7 +57,7 @@ impl InheritedFacts for IrNodePositions {
 
 impl IrFile {
     /// Give `target` the source position `source` has.
-    pub(crate) fn copy_position(&mut self, source: ExprId, target: ExprId) {
+    pub fn copy_position(&mut self, source: ExprId, target: ExprId) {
         self.positions.inherit(source, target);
     }
 
