@@ -436,8 +436,9 @@ impl ClassInitializations {
         if let Some(edges) = self.classes.get(&key) {
             return Ok(edges.clone());
         }
-        let edges =
-            super::class_initialization::constructor_initialization_callees(selected, bodies, facts)?;
+        let edges = super::class_initialization::constructor_initialization_callees(
+            selected, bodies, facts,
+        )?;
         self.classes.insert(key, edges.clone());
         Ok(edges)
     }
