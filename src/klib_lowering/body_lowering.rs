@@ -37,7 +37,7 @@ pub(super) use blocks::publish_parameter_defaults;
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::FunctionHeader;
 use super::ir_builtins::IrBuiltinOperators;
-use super::klib_types::{semantic_type, KlibTypeParameters};
+use super::klib_types::KlibTypeParameters;
 use super::local_values::LocalValues;
 use crate::ir::{
     complete_bottom_value, Callee, ExprId, FunId, IrBindingStability, IrConst, IrExpr, IrFile,
@@ -45,8 +45,8 @@ use crate::ir::{
 };
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{
-    KlibIrArena, KlibIrExpr, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeOperator,
-    KlibIrVariableId,
+    KlibIrArena, KlibIrExpr, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeId,
+    KlibIrTypeOperator, KlibIrVariableId,
 };
 use crate::metadata::klib_ir::{KlibIrConstant, KlibIrSymbol};
 use crate::types::{Ty, TypeName};
@@ -82,7 +82,28 @@ pub(super) struct LinkedCallee {
 pub(super) struct LinkedCallableReference {
     pub(super) declaration: crate::fir::ExternalCallableId,
     pub(super) kind: crate::libraries::ExternalCallableKind,
+    pub(super) extension_receiver_parameter: Option<usize>,
     pub(super) call: LinkedCallee,
+}
+
+impl LinkedCallableReference {
+    pub(super) fn new(
+        declaration: crate::fir::ExternalCallableId,
+        callable: crate::libraries::KlibBodyCallable<'_>,
+        call: LinkedCallee,
+    ) -> Self {
+        Self {
+            declaration,
+            kind: callable.kind(),
+            extension_receiver_parameter: callable.parameter_identities().iter().position(|role| {
+                matches!(
+                    role,
+                    crate::fir::ResolvedParameterIdentity::ExtensionReceiver
+                )
+            }),
+            call,
+        }
+    }
 }
 
 /// The declared shape of a member a range literal's membership calls.
@@ -137,6 +158,33 @@ pub(super) trait CallLinker {
         ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
     ) -> Lowered<LinkedConstructor>;
+
+    /// The classifier a file-local signature names in the library of the body being lowered.
+    /// `Ok(None)` refuses the type, including a class that exists only in another library.
+    fn local_class(
+        &self,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<Option<crate::types::TypeName>> {
+        Ok(None)
+    }
+
+    /// The constructor a file-local construction invokes. Template linkers keep the refusal.
+    fn link_local_constructor(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<super::same_library_class::LocalConstructor> {
+        unsupported("a call of a file-private constructor")
+    }
+
+    /// The function a file-local call invokes. Template linkers keep the refusal.
+    fn link_local_function(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<LinkedCallee> {
+        unsupported("a call of a file-private declaration")
+    }
 
     /// The dependency property a call of its accessor `callee` reads or writes.
     fn link_accessor(
@@ -299,7 +347,7 @@ impl<'a> BodyLowering<'a> {
             argument,
         } = &expression.kind
         {
-            if semantic_type(self.arena, self.header.type_parameters(), *operand)? != Ty::Unit
+            if self.semantic(*operand)? != Ty::Unit
                 || self.ty(expression, "coercion to `Unit`")? != Ty::Unit
             {
                 return Err(mismatch("a coercion to `Unit` is typed apart from `Unit`"));
@@ -380,7 +428,7 @@ impl<'a> BodyLowering<'a> {
                 ..
             } => {
                 if let Some(reference) =
-                    super::callable_references::unbound_reference(self.arena, expression)
+                    super::callable_references::declaration_reference(self.arena, expression)
                 {
                     let ty = self.ty(expression, "callable reference")?;
                     let lowered = self.callable_reference(reference, ty)?;
@@ -596,7 +644,17 @@ impl<'a> BodyLowering<'a> {
         let ty = expression
             .ty
             .ok_or(KlibBodyDeclineReason::UntypedExpression(form))?;
-        semantic_type(self.arena, self.header.type_parameters(), ty)
+        self.semantic(ty)
+    }
+
+    /// A type used in this body, including a non-public class of the body's own library.
+    fn semantic(&self, id: KlibIrTypeId) -> Lowered<Ty> {
+        super::klib_types::semantic_type_in(
+            self.arena,
+            self.header.type_parameters(),
+            id,
+            &|signature| self.linker.local_class(signature),
+        )
     }
 
     /// Lower `id` as a value used where `expected` is. The serialized body states every
@@ -797,7 +855,7 @@ impl<'a> BodyLowering<'a> {
     /// declaration: a named variable in the next value slot, with no type of its own.
     fn variable(&mut self, id: KlibIrVariableId) -> Lowered<ExprId> {
         let variable = self.arena.variable(id);
-        let ty = semantic_type(self.arena, self.header.type_parameters(), variable.ty)?;
+        let ty = self.semantic(variable.ty)?;
         let initializer =
             variable
                 .initializer

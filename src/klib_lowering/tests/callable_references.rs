@@ -5,6 +5,8 @@ use crate::fir::ExternalCallableId;
 use crate::klib_libraries::{KlibLibraryInput, KlibStdlibSemantics};
 use crate::libraries::ExternalCallableRealization;
 
+mod bound_extensions;
+
 struct ProducerDirectory(PathBuf);
 
 impl ProducerDirectory {
@@ -81,7 +83,13 @@ fn assert_reference(ir: &IrFile, target: ExternalCallableId) {
     assert_eq!(adapter.params, vec![Ty::Int]);
     assert_eq!(adapter.ret, Ty::Int);
     assert_eq!(ir.lambda_own_params_from[&reference.adapter], 0);
-    assert_eq!(ir.fn_params[&reference.adapter].identities.len(), 1);
+    assert_eq!(
+        ir.fn_params[&reference.adapter].identities,
+        vec![crate::ir::IrParameterIdentity::generated(
+            crate::ir::IrGeneratedParameterRole::ReferenceInvokeValue { ordinal: 0 },
+            None,
+        )]
+    );
     let body = adapter.body.unwrap();
     let result = ir.callable_reference_adapter_results[&body];
     assert_eq!(ir.checked_type(result), Some(Ty::Int));
@@ -90,9 +98,11 @@ fn assert_reference(ir: &IrFile, target: ExternalCallableId) {
 
 fn reference_declarations(
     libraries: &KlibLibraries,
+    roots: &[&str],
 ) -> Vec<(ExternalCallableId, ExternalCallableRealization)> {
-    let mut pending = ["makeReference", "inlineMakeReference", "makeOtherReference"]
-        .into_iter()
+    let mut pending = roots
+        .iter()
+        .copied()
         .map(|name| selected(libraries, name).1.dependency_callable.unwrap())
         .collect::<Vec<_>>();
     let mut visited = crate::fx_hash::HashSet::default();
@@ -177,7 +187,10 @@ fn official_references_preserve_raw_prepared_identity_and_refusal_rollback() {
         KlibLibraryInput::dependency(library),
     ])
     .unwrap();
-    let declarations = reference_declarations(&libraries);
+    let declarations = reference_declarations(
+        &libraries,
+        &["makeReference", "inlineMakeReference", "makeOtherReference"],
+    );
     assert_raw_and_prepared(&libraries, &declarations);
     assert_refusals_and_reuse(&libraries, &declarations);
     assert_ambiguous_identity(&libraries);

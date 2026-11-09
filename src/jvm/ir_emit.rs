@@ -4056,7 +4056,7 @@ fn emit_placed_method(
     let marked = placement.is_for_inline_copy()
         || crate::jvm::suspend_inline_functions::keeps_marked_body(ir, fid);
     // Suspend lowering does not preserve source-local expression IDs.
-    e.record_locals = (ir.fn_decl_lines.contains_key(&fid)
+    e.record_locals = (ir.function_position(fid).decl_line.is_some()
         || ir.fn_debug_locals.contains(&fid)
         || ir
             .generated_function_publication(fid)
@@ -4364,10 +4364,10 @@ fn emit_placed_method(
     // (`fun foo() { throw … }`): an unreachable `return` after `athrow` has no stack-map frame and
     // the verifier rejects it. Skip it exactly when the body can't fall through.
     if ret == Ty::Unit && !e.discarding_diverges(body) {
-        // kotlinc maps the implicit `return` to the body's closing-`}` line. `fn_close_lines` has
+        // kotlinc maps the implicit `return` to the body's closing-`}` line. the close line has
         // entries only for PARSED declarations, so a synthesized body (no entry) keeps its
         // decl-line fallback table.
-        if let Some(&close) = ir.fn_close_lines.get(&fid) {
+        if let Some(close) = ir.function_position(fid).close_line {
             code.mark_line(close);
         }
         code.implicit_ret_void();
@@ -4736,8 +4736,8 @@ struct Emitter<'a> {
     /// The suspensions of the function being emitted, by call expression, each with the value
     /// class box its resumption unboxes. Empty for every function whose machine the IR pass owns.
     machine_suspensions: HashMap<u32, Option<(TypeName, Ty)>>,
-    /// The deferred result value of each inline-return frame, by the frame's label.
-    inline_return_frame_results: HashMap<String, (u32, Ty)>,
+    /// Results and deferred loop exits of inline-return frames in the method being emitted.
+    inline_returns: inline_return_frames::InlineReturnState,
     /// Inline-return results whose expansion is discarded. A break to that frame leaves the
     /// value in its slot: the landing label does not read it, so it must not travel on the stack.
     discarded_inline_results: HashSet<u32>,
@@ -4912,7 +4912,7 @@ impl<'a> Emitter<'a> {
             frame: frame_map::FrameMap::default(),
             continuation_slot: None,
             machine_suspensions: HashMap::default(),
-            inline_return_frame_results: HashMap::default(),
+            inline_returns: inline_return_frames::InlineReturnState::default(),
             discarded_inline_results: HashSet::default(),
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::default(),
@@ -5365,6 +5365,7 @@ impl<'a> Emitter<'a> {
     fn emit_property_read(&mut self, operation: PropertyOperation<'_>, code: &mut CodeBuilder) {
         use crate::jvm::inline::PropertyAccess;
         let receiver_ty = operation.receiver.map(|receiver| self.value_ty(receiver));
+        let receiver_class = self.ir.dispatch_classes.get(&operation.expression).copied();
         let selected = self
             .ir
             .property_selected_accessors
@@ -5396,6 +5397,7 @@ impl<'a> Emitter<'a> {
                         *target,
                         selected.map(|(name, _)| name.as_str()),
                         operation.interface,
+                        receiver_class,
                     ),
             };
             if let Some(mut access) = access {
@@ -5426,6 +5428,7 @@ impl<'a> Emitter<'a> {
             None,
             selected.map(|(name, _)| name.as_str()),
             operation.interface,
+            receiver_class,
         ) {
             self.retarget_explicit_backing_read(&operation, &mut access);
             return self.emit_realized_property_read(&operation, access, code);
@@ -5477,6 +5480,7 @@ impl<'a> Emitter<'a> {
         code: &mut CodeBuilder,
     ) {
         use crate::jvm::inline::PropertyAccess;
+        let receiver_class = self.ir.dispatch_classes.get(&operation.expression).copied();
         let stamped = self
             .ir
             .property_accessor_jvm_realizations
@@ -5494,7 +5498,7 @@ impl<'a> Emitter<'a> {
                     access.clone()
                 }
                 crate::jvm::property_realizations::PropertyRealization::Local(target) => self
-                    .local_property_write_access(*target)
+                    .local_property_write_access(*target, receiver_class)
                     .expect("a realized local member property write has exact JVM access"),
             })
             .or_else(|| {
@@ -5503,7 +5507,9 @@ impl<'a> Emitter<'a> {
                     .get(&operation.expression)
                     .and_then(|accessor| self.bodies.external_property_access(*accessor))
             })
-            .or_else(|| self.declared_property_write_access(operation.owner, operation.name))
+            .or_else(|| {
+                self.declared_property_write_access(operation.owner, operation.name, receiver_class)
+            })
             .or_else(|| {
                 self.bodies
                     .property_write_access(operation.owner, operation.name)
@@ -5760,10 +5766,11 @@ impl<'a> Emitter<'a> {
                 receiver,
                 owner,
                 name,
+                operation,
                 ..
             } => {
                 receiver.is_some_and(|receiver| self.emits_control_flow(receiver))
-                    || self.lateinit_read_guards_inline(*owner, name)
+                    || self.lateinit_read_guards_inline(operation.unwrap_or(e), *owner, name)
             }
             IrExpr::SetField {
                 receiver, value, ..
