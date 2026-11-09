@@ -2548,7 +2548,7 @@ fn consuming_sink_retains_member_function_context_arity() {
         .find_map(|(id, function)| (function.name == "four").then_some(id as u32))
         .expect("member context function");
 
-    assert_eq!(ir.fn_context_counts.get(&function), Some(&1));
+    assert_eq!(ir.declared_parameters(function).context_count, 1);
 }
 
 #[test]

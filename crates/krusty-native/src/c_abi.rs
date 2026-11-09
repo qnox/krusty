@@ -141,7 +141,7 @@ fn refusal(ir: &IrFile, index: usize, name: &str, params: &[Ty], ret: Ty) -> Opt
             "krusty: public function `{name}` has no safe C identifier"
         ));
     }
-    if ir.fn_varargs.contains_key(&(index as u32)) {
+    if ir.declared_parameters(index as u32).vararg.is_some() {
         return Some(format!(
             "krusty: the native backend does not support a public function `{name}` with a \
              vararg parameter yet"

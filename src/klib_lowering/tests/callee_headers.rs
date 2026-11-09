@@ -36,7 +36,7 @@ fn declarations(unit: &DependencyBodyUnit) -> Vec<String> {
         .map(|(index, function)| {
             let id = crate::ir::FunId::try_from(index).expect("fits");
             format!(
-                "{} {:?} -> {:?} static={} dispatch={:?} identities={:?} extension={} contexts={:?}",
+                "{} {:?} -> {:?} static={} dispatch={:?} identities={:?} extension={} contexts={}",
                 function.name,
                 function.params,
                 function.ret,
@@ -44,7 +44,7 @@ fn declarations(unit: &DependencyBodyUnit) -> Vec<String> {
                 function.dispatch_receiver,
                 ir.fn_params[&id].identities,
                 ir.extension_receiver_fns.contains(&id),
-                ir.fn_context_counts.get(&id),
+                ir.declared_parameters(id).context_count,
             )
         })
         .collect()
@@ -75,10 +75,10 @@ fn a_callee_no_checked_call_selected_is_declared_from_its_header() {
         [
             "a [Obj(TypeName(\"kotlin/Int\"), [])] -> Obj(TypeName(\"kotlin/Int\"), []) static=true \
              dispatch=None identities=[IrParameterIdentity { source_name: Some(\"a\"), role: Value, \
-             provenance: SourceDeclared }] extension=false contexts=None",
+             provenance: SourceDeclared }] extension=false contexts=0",
             "b [Obj(TypeName(\"kotlin/Int\"), [])] -> Obj(TypeName(\"kotlin/Int\"), []) static=true \
              dispatch=None identities=[IrParameterIdentity { source_name: Some(\"a\"), role: Value, \
-             provenance: SourceDeclared }] extension=false contexts=None",
+             provenance: SourceDeclared }] extension=false contexts=0",
         ]
     );
 }

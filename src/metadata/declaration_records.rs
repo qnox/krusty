@@ -11,19 +11,12 @@ use super::builder::{FnMeta, PropMeta, TypeAliasMeta};
 
 /// A package function's record, without any target signature.
 pub fn package_function(ir: &IrFile, declaration: &crate::ir::IrPackageFunction) -> FnMeta {
-    let mut param_annotations = ir
-        .fn_param_annotations
-        .get(&declaration.function)
-        .cloned()
-        .unwrap_or_default();
+    let declared = ir.declared_parameters(declaration.function);
+    let mut param_annotations = declared.annotations.clone();
     if declaration.receiver.is_some() && declaration.context_count < param_annotations.len() {
         param_annotations.remove(declaration.context_count);
     }
-    let mut no_infer_params = ir
-        .fn_param_no_infer
-        .get(&declaration.function)
-        .cloned()
-        .unwrap_or_default();
+    let mut no_infer_params = declared.no_infer.clone();
     if declaration.receiver.is_some() && declaration.context_count < no_infer_params.len() {
         no_infer_params.remove(declaration.context_count);
     }

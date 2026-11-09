@@ -201,10 +201,8 @@ fn emit_companion_bridge(
     } = override_result_emission::declared_nullability(ir, env, function);
     let nullability_annotated =
         function_annotations::nullability_annotated(ir, function, &annotations);
-    let parameter_annotations: &[krusty::ir::DeclarationAnnotations] = ir
-        .fn_param_annotations
-        .get(&function)
-        .map_or(&[], Vec::as_slice);
+    let parameter_annotations: &[krusty::ir::DeclarationAnnotations] =
+        &ir.declared_parameters(function).annotations;
     let method_parameters = if env.java_parameters {
         crate::method_parameters::function(ir, function, &parameters, None)
     } else {
