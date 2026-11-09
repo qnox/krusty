@@ -30,6 +30,7 @@ pub use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
     CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
+    PrimitiveImplementation, PrimitiveOverrideDeclaration,
 };
 pub(crate) use dependency_metadata::has_standalone_dependency_code;
 pub use dependency_metadata::KlibDependencyCallable;

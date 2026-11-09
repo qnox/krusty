@@ -41,6 +41,7 @@ mod member_property_selection;
 mod member_specialization;
 mod overload_selection;
 mod postponed_lambda_selection;
+mod primitive_overrides;
 mod property_candidates;
 mod qualified_classifiers;
 mod raw_member_view;
@@ -95,11 +96,12 @@ pub use lambda_call_shape::LambdaCallShape;
 pub(crate) use member_hierarchy::{
     apply_inner_alias_outer_in_source, apply_inner_classifier_outer_in_source,
     bound_inner_classifier_in_source, bound_inner_constructor_candidates,
-    declared_member_callables, declared_member_declarations, function_input_shapes_match,
-    function_override_input_slots_match, function_result_refines, imported_object_member_symbols,
-    inherited_nested_classifier_name, inherits_nested_classifiers_through,
-    lexical_enclosing_classifier_names, member_declarations_in_hierarchy, member_is_inheritable,
-    members_in_hierarchy, nested_classifier_supertypes, normalize_inherited_member_functions,
+    declared_member_callables, declared_member_declarations, function_declaration_identity,
+    function_input_shapes_match, function_override_input_slots_match, function_result_refines,
+    imported_object_member_symbols, inherited_nested_classifier_name,
+    inherits_nested_classifiers_through, lexical_enclosing_classifier_names,
+    member_declarations_in_hierarchy, member_is_inheritable, members_in_hierarchy,
+    nested_classifier_supertypes, normalize_inherited_member_functions,
     override_input_shapes_match, override_parameter_types_match, property_declaration_identity,
     specialize_member_function, supertype_preorder, BoundInnerConstructorContext,
     InheritedNestedClassifier, InnerAliasOuterApplication, OverrideInputShape,
@@ -131,6 +133,7 @@ use overload_selection::{
     unique_most_specific_with_conflicts_and_ties, ExtCtx, IndexedConvention, OverloadCall,
     SelectionMode,
 };
+pub(crate) use primitive_overrides::{primitive_overrides, PrimitiveOverride};
 use property_candidates::{
     generic_property_more_specific, source_property_visible, specialize_property,
 };

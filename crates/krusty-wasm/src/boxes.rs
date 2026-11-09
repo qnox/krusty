@@ -5,7 +5,8 @@
 //! type has one box type: a struct of the dispatch table every object starts with, then the value
 //! itself. Its table holds the primitive's own `equals` and `hashCode`, as the JVM's box defines them, which is what
 //! kotlinc's output observes. A box type and its table are declared the first time a
-//! file boxes that primitive.
+//! file boxes that primitive. A box also implements the members of the library classes above its
+//! primitive that a call goes through (`Number.toLong`, see [`members`]).
 //!
 //! The box type is the primitive's identity: a `Long` box never equals an `Int` box holding the
 //! same number, and unboxing casts to exactly the type the frontend checked the value is.
@@ -14,11 +15,16 @@ use krusty::fx_hash::HashMap;
 use krusty::types::{Ty, TyKind};
 
 use super::encode::{BlockType, Code, CompositeType, Function, HeapType, Module, SubType, ValType};
+use super::interface_dispatch::ClassRef;
 use super::objects::immutable;
 use super::runtime::{Runtime, AND32, EQ32, EQ64, OR32};
 
+mod members;
+
+pub(super) use members::BoxMembers;
+
 /// A primitive that has a box.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Primitive {
     Boolean,
     Byte,
@@ -73,6 +79,8 @@ impl Primitive {
 pub(super) struct BoxForm {
     pub(super) structure: u32,
     pub(super) table: u32,
+    /// The box as a class of the program's dispatch, which records the members it implements.
+    class: ClassRef,
     /// The globals holding the only two `Boolean` boxes, `false` then `true`: the JVM's
     /// `Boolean.valueOf` answers one instance per value, which `===` observes.
     pub(super) booleans: Option<[u32; 2]>,
@@ -117,17 +125,27 @@ impl BoxForm {
 #[derive(Default)]
 pub(super) struct Boxes {
     forms: HashMap<Primitive, BoxForm>,
+    /// The library class members called on a value that may be a box.
+    members: BoxMembers,
     /// The global holding `kotlin.Unit`, once something reads it as a reference.
     unit: Option<u32>,
 }
 
 impl Runtime {
     /// The box of `ty`'s values, declared on first use; `None` for a type that is not boxed as a
-    /// primitive (an unsigned number is a value class, whose box is its own).
-    pub(super) fn box_form(&mut self, module: &mut Module, ty: Ty) -> Option<BoxForm> {
-        let primitive = Primitive::of(ty)?;
+    /// primitive (an unsigned number is a value class, whose box is its own). Declaring one
+    /// declines when a library class member called on such values has an implementation for the
+    /// primitive this generator cannot write.
+    pub(super) fn box_form(
+        &mut self,
+        module: &mut Module,
+        ty: Ty,
+    ) -> Result<Option<BoxForm>, String> {
+        let Some(primitive) = Primitive::of(ty) else {
+            return Ok(None);
+        };
         if let Some(form) = self.boxes.forms.get(&primitive) {
-            return Some(*form);
+            return Ok(Some(*form));
         }
         let objects = &self.objects;
         let structure = module.subtype(SubType {
@@ -145,7 +163,7 @@ impl Runtime {
         // receiver, which this backend does not lower yet.
         let to_string = self.objects.trap(module, to_string_ty);
         let objects = &mut self.objects;
-        let (_, itable) = objects
+        let (class, itable) = objects
             .interfaces
             .class(module, objects.itable, vec![structure]);
         let mut init = Code::default();
@@ -167,10 +185,12 @@ impl Runtime {
         let form = BoxForm {
             structure,
             table,
+            class,
             booleans,
         };
         self.boxes.forms.insert(primitive, form);
-        Some(form)
+        self.implement_box_members(module, primitive, form)?;
+        Ok(Some(form))
     }
 }
 

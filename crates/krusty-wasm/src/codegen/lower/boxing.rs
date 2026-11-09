@@ -9,7 +9,7 @@ impl Body<'_> {
     pub(super) fn box_value(&mut self, ty: Ty) -> Result<(), Unsupported> {
         let form = self
             .runtime
-            .box_form(self.module, ty)
+            .box_form(self.module, ty)?
             .ok_or_else(|| format!("a `{}` value carried as a reference", describe(ty)))?;
         let scratch = match form.needs_scratch() {
             true => Some(self.local(carrier(ty)?.expect("a boxed primitive has a value"))),
@@ -23,7 +23,7 @@ impl Body<'_> {
     pub(super) fn unbox(&mut self, ty: Ty) -> Result<(), Unsupported> {
         let form = self
             .runtime
-            .box_form(self.module, ty)
+            .box_form(self.module, ty)?
             .ok_or_else(|| format!("a reference read as a `{}` value", describe(ty)))?;
         form.emit_unbox(&mut self.code);
         Ok(())
@@ -36,7 +36,7 @@ impl Body<'_> {
     pub(super) fn checked_unbox_cast(&mut self, arg: u32, ty: Ty) -> Result<(), Unsupported> {
         let form = self
             .runtime
-            .box_form(self.module, ty)
+            .box_form(self.module, ty)?
             .ok_or_else(|| format!("a reference cast to a `{}` value", describe(ty)))?;
         let failure = self.runtime.exceptions.ensure_class(
             self.module,

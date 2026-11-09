@@ -243,7 +243,7 @@ impl Body<'_> {
             Some(_) => {
                 let form = self
                     .runtime
-                    .box_form(self.module, ty)
+                    .box_form(self.module, ty)?
                     .ok_or_else(|| format!("a function value taking a `{}` value", describe(ty)))?;
                 form.emit_unbox(code);
                 Ok(())
@@ -267,7 +267,7 @@ impl Body<'_> {
             }
             Some(ValType::Ref { .. }) => {}
             Some(value) => {
-                let form = self.runtime.box_form(self.module, ty).ok_or_else(|| {
+                let form = self.runtime.box_form(self.module, ty)?.ok_or_else(|| {
                     format!("a function value answering a `{}` value", describe(ty))
                 })?;
                 let scratch = form.needs_scratch().then(|| {
