@@ -1,7 +1,7 @@
 # Kotlin 2.4.10 codegen/box files expected to fail on wasm-wasi-klib, relative to
+# compiler/testData/codegen/box. Later releases with no file of their own read this one.
 # Owned fixtures use regressions/<path relative to tests/box_regressions>.
 # Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local
-# compiler/testData/codegen/box. Later releases with no file of their own read this one.
 # wasm-wasi-klib run. The lists only shrink.
 annotations/annotations0.kt
 annotations/instances/AnnotationInstantiationWithArray.kt
@@ -649,11 +649,9 @@ companion/protectedConstValFromSuperCompanion.kt
 companionBlocksAndExtensions/lateinit.kt
 compileKotlinAgainstKotlin/adaptedSuspendFunctionReference.kt
 compileKotlinAgainstKotlin/clashingFakeOverrideSignatures.kt
-compileKotlinAgainstKotlin/companionObjectInEnum.kt
 compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
-compileKotlinAgainstKotlin/enum.kt
 compileKotlinAgainstKotlin/genericSetter.kt
 compileKotlinAgainstKotlin/inlineClasses/callDeserializedPropertyOnInlineClassType.kt
 compileKotlinAgainstKotlin/inlineClasses/constructorWithInlineClassParametersInBinaryDependencies.kt
@@ -704,7 +702,6 @@ compileKotlinAgainstKotlin/sealedClass.kt
 compileKotlinAgainstKotlin/secondaryConstructors.kt
 compileKotlinAgainstKotlin/simpleValAnonymousObject.kt
 compileKotlinAgainstKotlin/specialBridgesInDependencies.kt
-compileKotlinAgainstKotlin/starImportEnum.kt
 compileKotlinAgainstKotlin/typeAliasesKt13181.kt
 compileKotlinAgainstKotlin/unsignedTypesInAnnotations.kt
 compileKotlinAgainstKotlin/useDeserializedFunInterface.kt
@@ -1644,7 +1641,6 @@ enum/lambdaInDefault.kt
 enum/loop.kt
 enum/multipleModules.kt
 enum/nested.kt
-enum/openMethodNoOverrides.kt
 enum/ordinalsWithEnumEntitiesOverrides.kt
 enum/reorderedArguments.kt
 enum/sortEnumEntries.kt
@@ -3265,7 +3261,6 @@ multiplatform/k2/delegation/delegationToExpectInterface_withNewMembersSameName.k
 multiplatform/k2/delegation/delegationToExpectInterface_withOverrideInDelegated.kt
 multiplatform/k2/delegation/delegationWithIntersection.kt
 multiplatform/k2/enumStaticMethods.kt
-multiplatform/k2/exhaustiveness/commonEnum.kt
 multiplatform/k2/exhaustiveness/commonSealedClass.kt
 multiplatform/k2/expectRefinement.kt
 multiplatform/k2/expectValInInlineClass.kt

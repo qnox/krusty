@@ -161,6 +161,7 @@ impl Backend for WasmBackend {
         krusty::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
         // Before default arguments: a constant leaving constructor arguments out is then an
         // ordinary construction for that lowering.
+        krusty::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
         krusty::backend::enums::realize(&mut file.ir, krusty::backend::enums::Contract::KotlinWasm);
         krusty::backend::default_arguments::realize(
             &mut file.ir,

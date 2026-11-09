@@ -19,6 +19,29 @@ pub(super) struct EnumBase {
 }
 
 impl BodyLowering<'_, '_, '_> {
+    /// A constant of an enum another file declares, read through the entry that file exports:
+    /// its storage lives there, so every file finds the one constant.
+    pub(super) fn dependency_enum_constant(
+        &mut self,
+        classifier: krusty::types::TypeName,
+        name: &str,
+    ) -> Result<Option<Value>, Unsupported> {
+        let constant = krusty::backend::EnumConstant {
+            classifier,
+            name: name.into(),
+        };
+        let Some(symbol) = self.file.dependency_enum_constants.get(&constant) else {
+            return Err(declined!(
+                "an enum another file declares (`{}`)",
+                classifier.render()
+            ));
+        };
+        let id = self.file.import(symbol, &[], Ty::obj_name(classifier))?;
+        let func_ref = self.func_ref(id);
+        let call = self.emit_call(func_ref, &[])?;
+        Ok(Some(self.builder.inst_results(call)[0]))
+    }
+
     /// One enum constant: its construction, with `kotlin.Enum`'s storage filled right after the
     /// allocation, or on the published allocation it constructs in place, so a constructor reading
     /// `name` or `ordinal` finds them.

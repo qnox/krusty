@@ -300,6 +300,28 @@ impl TemplateCalls<'_> {
 }
 
 impl CallLinker for TemplateCalls<'_> {
+    /// A template is expanded into a source file, whose read of the constant reaches the enum
+    /// through the entry its declaring file exports. The selected library record proves the
+    /// enum and its constant.
+    fn enum_entry(
+        &mut self,
+        _ir: &mut IrFile,
+        entry: &KlibPublicIdSignature,
+    ) -> Result<(crate::types::TypeName, String), KlibBodyDeclineReason> {
+        let classifier = member_owner(entry)?;
+        let name = entry.declaration().segments().last().ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch("an enum entry has no name".to_owned())
+        })?;
+        match self.callees.source.classifier(classifier) {
+            Some(record) if record.is_enum() && record.is_enum_entry(name) => {
+                Ok((classifier, name.clone()))
+            }
+            _ => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "the serialized enum entry {name} of {classifier:?} is selected as no enum entry"
+            ))),
+        }
+    }
+
     fn singleton(&self, classifier: crate::types::TypeName) -> Result<(), KlibBodyDeclineReason> {
         match self.callees.source.classifier(classifier) {
             Some(record) if record.is_object() => Ok(()),

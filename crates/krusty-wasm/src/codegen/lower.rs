@@ -1367,6 +1367,21 @@ impl<'a> Body<'a> {
             // `Unit` has no carrier: its one value is the absence of one.
             IrExpr::SingletonValue { .. } if self.carrier_of(id)?.is_none() => {}
             IrExpr::SingletonValue { classifier } => self.singleton(classifier)?,
+            // The shared enum lowering realized every enum this file declares; a constant of
+            // another file's enum is read through the entry that file exports.
+            IrExpr::EnumEntry { classifier, name } => {
+                let entry = self
+                    .calls
+                    .dependency_enum_constant(classifier, &name)
+                    .ok_or_else(|| {
+                        // Boundary conversion for a diagnostic.
+                        format!(
+                            "an enum another file declares (`{}`)",
+                            classifier.render().replace('/', ".")
+                        )
+                    })?;
+                self.code.call(entry);
+            }
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
                 ty,
