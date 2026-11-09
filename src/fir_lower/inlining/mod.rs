@@ -881,7 +881,9 @@ impl BodyLowering<'_> {
         // plan would specialize a lambda is not a template this expansion understands. The
         // anonymous objects a template builds were lowered into this file with it, and are
         // specialized below as a same-module callee's are.
-        if frame.source().is_none() && !escaping_lambda_plan.is_empty() {
+        if matches!(frame.callee, crate::ir::IrInlineCallee::Dependency(_))
+            && !escaping_lambda_plan.is_empty()
+        {
             return None;
         }
         // A function-value conversion between an inline parameter and its lambda is a

@@ -1295,8 +1295,6 @@ pub struct IrValueClassTypeOperation {
     pub role: IrValueClassTypeRole,
 }
 
-/// A call-site copy of a lambda implementation.
-///
 /// The inline function whose body an expansion copied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IrInlineCallee {
@@ -1306,6 +1304,8 @@ pub enum IrInlineCallee {
     Dependency(crate::fir::ExternalCallableId),
 }
 
+/// A call-site copy of a lambda implementation.
+///
 /// The record keeps the checked declaration identities and lexical containment that caused the
 /// copy. Source spellings are retained only as rendering provenance. A backend decides whether the
 /// copy needs a separate artifact and owns every physical name and ordinal used for that artifact.
