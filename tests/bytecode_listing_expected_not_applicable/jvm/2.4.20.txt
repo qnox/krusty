@@ -29,8 +29,7 @@ sam/lambdaSpecializedSamInterface.kt
 sam/specializedSamInterface.kt
 
 # The case selects a compiler option through a directive the box harness does not translate yet:
-# `INHERIT_MULTIFILE_PARTS`, or `API_VERSION: LATEST`.
-annotations/repeatable/kotlinAnnotationWithBothRepeatables.kt
+# `INHERIT_MULTIFILE_PARTS`.
 defaultArguments/functionInMultifileClassWithInheritedParts.kt
 
 # The expectation lists a particular JDK's members. The `FULL_JDK` cases were recorded against a

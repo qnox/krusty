@@ -16,6 +16,7 @@ annotations/onProperties.kt
 annotations/onReceiver.kt
 annotations/repeatable/javaAnnotation.kt
 annotations/repeatable/kotlinAnnotation.kt
+annotations/repeatable/kotlinAnnotationWithBothRepeatables.kt
 annotations/repeatable/kotlinSpecificTargets.kt
 annotations/repeatable/multipleRepeatableOrder.kt
 annotations/repeatable/propertyGetterUseSiteTarget.kt
