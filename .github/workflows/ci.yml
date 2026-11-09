@@ -3,35 +3,38 @@ name: ci
 # Build the conformance test binary once. Every supported Kotlin version gets independent JVM,
 # Native, and Wasm matrix rows. Each row owns its corpus and focused target regressions.
 # Publish only after all rows pass and every version matches its committed platform expectations.
-# `ci-and-conformance` is the one required check over core CI, conformance (including the focused
-# KLIB decoder/oracle checks), and Gradle release/compatibility validation.
-# `merge_group` runs the same checks on a merge queue's combined commit: two pull requests can each
-# match the lists on their own base and still disagree with them once both are on master.
+# `ci-and-conformance` is the one check over core CI, conformance (including the focused KLIB
+# decoder/oracle checks), and Gradle release/compatibility validation; the queue lands a batch only
+# when it passes, and master requires the queue's own `merge-queue` status on each pull request.
+# CI runs only for the merge queue app (infragnite/github-merge-queue), which is the one way into
+# master. It pushes `mq/*` branches: a batch (the base plus one squash commit per pull request), a
+# bisection run of part of a failed batch, or a `try` run of one pull request on master. Each commit
+# names its base in a `Merge-Queue-Base:` trailer, which stands in for a pull request's base. The
+# queue also dispatches this workflow on master now and then; only those runs save the caches every
+# queue branch restores (a branch's own cache entries are visible to that branch alone).
 on:
-  pull_request:
-  merge_group:
   push:
-    branches: [master]
+    branches: ['mq/**']
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# One run per pull-request or merge-group ref, so an update supersedes its older run. Every master
-# push uses a unique group and remains authoritative evidence even when a newer commit is queued.
+# One run per queue branch (each is unique). Every master run uses a unique group and remains
+# authoritative evidence even when a newer one is started.
 concurrency:
   group: ci-${{ github.ref == 'refs/heads/master' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
-# Every cache below is restored everywhere but saved only by a master push, after the step that
-# fills it. A pull request's own entries are visible only to that pull request, and one run's
+# Every cache below is restored everywhere but saved only by a master run, after the step that
+# fills it. A queue branch's own entries are visible only to that branch, and one run's
 # copies of the toolchains and Gradle caches (several GB) evicted the master entries that every
 # branch restores, so later runs downloaded the toolchains again.
 jobs:
   # Asks the runner controller where this run's jobs should run (infragnite/route-runner). In shadow
   # mode the answer is only logged and recorded beside where each job really ran; every job keeps
-  # its own runs-on. No job waits for this one. Fork PRs get no OIDC token and do not ask.
+  # its own runs-on. No job waits for this one.
   route:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -65,11 +68,11 @@ jobs:
   # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
   # TEMP (2026-11-07): GHA hosted queue is backed up — temporarily run the heavy ubuntu-latest
-  # jobs on self-hosted rust-4c-8gb too (same fork guard). Revert once the hosted backlog clears;
-  # then dual-label + route enforce can choose GHA vs own. route stays on ubuntu-latest.
-  # Fork PRs still run on ubuntu-latest: self-hosted runners never take fork PR jobs.
+  # jobs on self-hosted rust-4c-8gb too. Revert once the hosted backlog clears; then dual-label +
+  # route enforce can choose GHA vs own. route stays on ubuntu-latest. Fork PRs no longer run CI:
+  # only the queue's own branches do.
   lint:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: [self-hosted, rust-4c-8gb]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -77,11 +80,19 @@ jobs:
           # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
           filter: tree:0
+      # The commit this run's change is measured from: a queue branch's base, from the trailer the
+      # merge queue writes into its commits; on master, the commit itself (nothing to compare).
+      - &mq-base
+        name: base commit
+        id: base
+        run: |
+          base=$(git log -1 --format='%(trailers:key=Merge-Queue-Base,valueonly)' HEAD | head -n 1)
+          echo "sha=${base:-$GITHUB_SHA}" >> "$GITHUB_OUTPUT"
       # Commit messages are checked here so a push does not queue a second workflow for them.
       # The check finishes in seconds; a separate job was still waiting on a runner.
       - name: attribution commits
         env:
-          RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.event.after) || github.event_name == 'merge_group' && format('{0}..{1}', github.event.merge_group.base_sha, github.event.merge_group.head_sha) || 'HEAD^1..HEAD^2' }}
+          RANGE: ${{ steps.base.outputs.sha }}..${{ github.sha }}
         run: scripts/check-attribution.sh "$RANGE"
       - name: validate pinned IntelliJ patch
         run: scripts/check-intellij-patch.sh
@@ -91,8 +102,8 @@ jobs:
         run: scripts/check-gradle-wrappers.sh
       - name: outcome manifests only shrink
         env:
-          BASE: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          HEAD: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.after }}
+          BASE: ${{ steps.base.outputs.sha }}
+          HEAD: ${{ github.sha }}
         run: scripts/check-outcome-lists.sh "$BASE" "$HEAD"
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
@@ -100,7 +111,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # Pull requests restore master's entries but never save their own: per-branch copies
+          # Queue branches restore master's entries but never save their own: per-branch copies
           # overflowed the repository cache and evicted the master entries every branch restores.
           save-if: ${{ github.ref == 'refs/heads/master' }}
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
@@ -119,7 +130,7 @@ jobs:
   plugin-host:
     # GitHub-hosted: these tests ran out of memory on the 8 GB self-hosted runners, and GitHub's
     # Linux runners (16 GB) had free slots.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: [self-hosted, rust-4c-8gb]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -127,7 +138,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # Pull requests restore master's entries but never save their own: per-branch copies
+          # Queue branches restore master's entries but never save their own: per-branch copies
           # overflowed the repository cache and evicted the master entries every branch restores.
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
@@ -150,7 +161,7 @@ jobs:
         run: cargo test --profile gate -p krusty-plugin-host -- --include-ignored
       - &save-plugin-host-runtime
         name: save plugin host runtime
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.plugin-host-runtime.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/master' && steps.plugin-host-runtime.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/krusty/plugin-host
@@ -173,6 +184,7 @@ jobs:
           # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
           filter: tree:0
+      - *mq-base
       # Self-hosted runners have no preinstalled rustup.
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
@@ -190,7 +202,7 @@ jobs:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # Pull requests restore master's entries but never save their own: per-branch copies
+          # Queue branches restore master's entries but never save their own: per-branch copies
           # overflowed the repository cache and evicted the master entries every branch restores.
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - *just-on-path
@@ -234,7 +246,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/class-dumps
-          key: recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          key: recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-${{ steps.base.outputs.sha }}
           restore-keys: |
             recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-
       # krusty-toolchain's references (JetBrains' `kotlin` and the JDK glob matcher) are cached the
@@ -245,7 +257,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/kotlin-toolchain-oracle
-          key: kotlin-toolchain-oracle-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          key: kotlin-toolchain-oracle-${{ steps.base.outputs.sha }}
           restore-keys: |
             kotlin-toolchain-oracle-
       - name: restore Kotlin Toolchain distribution
@@ -267,12 +279,12 @@ jobs:
         id: recorded-mode
         env:
           CACHE_HIT: ${{ steps.recorded-bytes.outputs.cache-hit }}
-          MASTER_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          MASTER_PUSH: ${{ github.ref == 'refs/heads/master' }}
         run: |
           set -euo pipefail
           # A restored entry is replayed. A test absent from this job's archive compiles
           # with kotlinc instead of failing. Master publishes the archive, including that
-          # new recording, under this commit. A pull request does not write it.
+          # new recording, under this commit. A queue branch does not write it.
           record=0
           compile_missing=1
           write=0
@@ -302,7 +314,7 @@ jobs:
           # minutes leaves room for a slow runner and still fails a hung binary.
           KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 1800
           # A change to what krusty-toolchain's oracle entries hold re-runs every Kotlin Toolchain
-          # case live (a pull request restores, but never saves, the oracle cache), which takes
+          # case live (a queue branch restores, but never saves, the oracle cache), which takes
           # compile_cases past the ordinary 120 seconds.
           KRUSTY_COVERAGE_TEST_TIMEOUT_SECONDS: 600
           KRUSTY_BUILD_TOOLS_JAVA_HOME: ${{ env.JAVA_HOME_21_X64 }}
@@ -323,13 +335,13 @@ jobs:
           path: target/cache/class-dumps
           key: recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-${{ github.sha }}
       - name: save Kotlin Toolchain oracle output
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.toolchain-oracle.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/master' && steps.toolchain-oracle.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/kotlin-toolchain-oracle
           key: kotlin-toolchain-oracle-${{ github.sha }}
       - name: save kotlin toolchain and corpora
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.kotlin-toolchain.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/master' && steps.kotlin-toolchain.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -338,19 +350,19 @@ jobs:
             target/cache/ksp-corpus
           key: ${{ steps.kotlin-toolchain.outputs.cache-primary-key }}
       - name: save box corpus
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.box-corpus.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/master' && steps.box-corpus.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus
           key: ${{ steps.box-corpus.outputs.cache-primary-key }}
       - name: save Kotlin Build Tools Gradle distribution
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.build-tools-gradle-dists.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/master' && steps.build-tools-gradle-dists.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/krusty-build-tools-gradle-user-home/wrapper/dists
           key: ${{ steps.build-tools-gradle-dists.outputs.cache-primary-key }}
       - name: save Kotlin Toolchain distribution
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.kotlin-toolchain-cli.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/master' && steps.kotlin-toolchain-cli.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/JetBrains/Kotlin/cli
@@ -383,7 +395,7 @@ jobs:
   # matrix waits for the slowest required build instead of serializing every unrelated target graph
   # on one runner. Consumers never compile krusty again.
   build-conformance-bin:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: [self-hosted, rust-4c-8gb]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -391,7 +403,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # Pull requests restore master's entries but never save their own: per-branch copies
+          # Queue branches restore master's entries but never save their own: per-branch copies
           # overflowed the repository cache and evicted the master entries every branch restores.
           save-if: ${{ github.ref == 'refs/heads/master' }}
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
@@ -428,7 +440,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # Pull requests restore master's entries but never save their own: per-branch copies
+          # Queue branches restore master's entries but never save their own: per-branch copies
           # overflowed the repository cache and evicted the master entries every branch restores.
           save-if: ${{ github.ref == 'refs/heads/master' }}
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
@@ -457,7 +469,7 @@ jobs:
           if-no-files-found: error
 
   build-tool-bins:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: [self-hosted, rust-4c-8gb]
     outputs:
       # Every consumer already waits for this artifact family. Publish the manifest-derived matrix
       # here instead of scheduling a separate ten-second runner solely for these two values.
@@ -470,7 +482,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # Pull requests restore master's entries but never save their own: per-branch copies
+          # Queue branches restore master's entries but never save their own: per-branch copies
           # overflowed the repository cache and evicted the master entries every branch restores.
           save-if: ${{ github.ref == 'refs/heads/master' }}
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
@@ -519,15 +531,16 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [jvm]
-    # Cold reflective box() calls share one deadline. Hosted runners and forks keep 2s. The 8 GB
+    # Cold reflective box() calls share one deadline. Hosted runners kept 2s. The 8 GB
     # pool missed it once: functions/functionNtoString.kt on Kotlin 2.4.0, while the same source
     # passed for 2.4.10, 2.4.20, and 2.4.21. Give that pool 8s. The client round-trip wait stays
     # 8s above the JVM deadline.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: [self-hosted, rust-4c-8gb]
     env:
-      KRUSTY_BOX_CASE_TIMEOUT_MS: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '2000' || '8000' }}
+      KRUSTY_BOX_CASE_TIMEOUT_MS: '8000'
     steps: &conformance-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - *mq-base
       - *just-on-path
       - *install-just
       # Kotlin's CLI corpus names JDK 8, 11, 17 and 21 homes; kotlin_cli_jvm_conformance finds them
@@ -600,7 +613,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/native-recordings
-          key: recorded-kotlinc-native-bytes-${{ matrix.version }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          key: recorded-kotlinc-native-bytes-${{ matrix.version }}-${{ steps.base.outputs.sha }}
           restore-keys: |
             recorded-kotlinc-native-bytes-${{ matrix.version }}-
       - name: select kotlinc-native recording mode
@@ -608,7 +621,7 @@ jobs:
         id: native-recording-mode
         env:
           CACHE_HIT: ${{ steps.native-recordings.outputs.cache-hit }}
-          MASTER_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          MASTER_PUSH: ${{ github.ref == 'refs/heads/master' }}
         run: |
           set -euo pipefail
           write=0
@@ -637,7 +650,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/class-dumps
-          key: recorded-kotlinc-bytes-conformance-${{ matrix.version }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          key: recorded-kotlinc-bytes-conformance-${{ matrix.version }}-${{ steps.base.outputs.sha }}
           restore-keys: |
             recorded-kotlinc-bytes-conformance-${{ matrix.version }}-
       - name: select recorded-byte cache mode
@@ -645,7 +658,7 @@ jobs:
         id: recorded-mode
         env:
           CACHE_HIT: ${{ steps.recorded-bytes.outputs.cache-hit }}
-          MASTER_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          MASTER_PUSH: ${{ github.ref == 'refs/heads/master' }}
         run: |
           set -euo pipefail
           compile_missing=1
@@ -668,7 +681,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/ref-classes
-          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-${{ steps.base.outputs.sha }}
           restore-keys: |
             box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-
       - name: download conformance binary
@@ -704,7 +717,7 @@ jobs:
           bash scripts/conformance-badge.sh fields conformance pct.txt "${{ matrix.version }}"
           bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt "${{ matrix.version }}"
       - name: save kotlinc box references (${{ matrix.version }})
-        if: matrix.target == 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.box-references.outputs.cache-hit != 'true'
+        if: matrix.target == 'jvm' && github.ref == 'refs/heads/master' && steps.box-references.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/ref-classes
@@ -858,7 +871,7 @@ jobs:
           path: jvm-byte-equality.txt
           if-no-files-found: error
       - name: save kotlin toolchain and conformance corpora (${{ matrix.version }})
-        if: matrix.target == 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.conformance-toolchain.outputs.cache-hit != 'true'
+        if: matrix.target == 'jvm' && github.ref == 'refs/heads/master' && steps.conformance-toolchain.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -868,25 +881,25 @@ jobs:
             target/cache/krusty-deps
           key: ${{ steps.conformance-toolchain.outputs.cache-primary-key }}
       - name: save Kotlin compiler for ${{ matrix.target }} conformance (${{ matrix.version }})
-        if: matrix.target != 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.target-kotlinc.outputs.cache-hit != 'true'
+        if: matrix.target != 'jvm' && github.ref == 'refs/heads/master' && steps.target-kotlinc.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/kotlinc/${{ matrix.version }}
           key: ${{ steps.target-kotlinc.outputs.cache-primary-key }}
       - name: save Wasm target KLIB dependencies (${{ matrix.version }})
-        if: startsWith(matrix.target, 'wasm-') && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.wasm-klibs.outputs.cache-hit != 'true'
+        if: startsWith(matrix.target, 'wasm-') && github.ref == 'refs/heads/master' && steps.wasm-klibs.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/krusty-deps
           key: ${{ steps.wasm-klibs.outputs.cache-primary-key }}
       - name: save Kotlin/Native distribution (${{ matrix.version }})
-        if: matrix.target == 'native' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.kotlin-native.outputs.cache-hit != 'true'
+        if: matrix.target == 'native' && github.ref == 'refs/heads/master' && steps.kotlin-native.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/kotlin-native/${{ matrix.version }}
           key: ${{ steps.kotlin-native.outputs.cache-primary-key }}
       - name: save Kotlin/Native dependencies
-        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.konan.outputs.cache-hit != 'true'
+        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max && github.ref == 'refs/heads/master' && steps.konan.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -894,7 +907,7 @@ jobs:
             target/cache/krusty-deps
           key: ${{ steps.konan.outputs.cache-primary-key }}
       - name: save box corpus (${{ matrix.version }})
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.box-corpus.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/master' && steps.box-corpus.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
@@ -914,7 +927,7 @@ jobs:
     # Native and Wasm use the guarded self-hosted pool. Native once reached its suite deadline on
     # these 8 GB runners; sharing decoded KLIB trees (#3274) halved its lane and its peak memory.
     # Separate target rows preserve independent measurements.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: [self-hosted, rust-4c-8gb]
     steps: *conformance-steps
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
@@ -926,7 +939,7 @@ jobs:
     name: ci-and-conformance
     needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, maven, build-tools, bazel]
     if: always()
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "helper-1c-1gb"]') }}
+    runs-on: [self-hosted, helper-1c-1gb]
     steps:
       - name: require every merge gate to succeed
         env:
@@ -970,7 +983,7 @@ jobs:
   build-gradle-plugin:
     # GitHub-hosted: a one- or two-minute producer that the gradle matrix waits for; in the
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: [self-hosted, rust-4c-8gb]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1007,7 +1020,7 @@ jobs:
           scripts/package-gradle-plugin.sh "$version" "$PWD/dist-gradle"
       - &save-gradle-home
         name: save Gradle user home
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.gradle-home.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/master' && steps.gradle-home.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1032,7 +1045,7 @@ jobs:
       fail-fast: false
       matrix:
         kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: [self-hosted, rust-4c-8gb]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1083,7 +1096,7 @@ jobs:
           - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true }
           - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true }
           - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false }
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: [self-hosted, rust-4c-8gb]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1188,7 +1201,7 @@ jobs:
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
       - name: save Gradle integration dependencies
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.gradle-integration.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/master' && steps.gradle-integration.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/krusty-gradle-user-home/caches
@@ -1199,7 +1212,7 @@ jobs:
   build-maven-plugin:
     # GitHub-hosted: a one- or two-minute producer that the maven matrix waits for; in the
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: [self-hosted, rust-4c-8gb]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1236,7 +1249,7 @@ jobs:
   # kotlin-maven-plugin builds, with the shared krusty binary.
   maven:
     needs: [build-tool-bins, build-maven-plugin]
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: [self-hosted, rust-4c-8gb]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1285,7 +1298,7 @@ jobs:
       fail-fast: false
       matrix:
         bazel: [8.4.2, 9.3.1]
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: [self-hosted, rust-4c-8gb]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1330,7 +1343,7 @@ jobs:
   # hosted runners per master commit, and the release job below is skipped with them.
   build-release:
     needs: [ci-and-conformance]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.KRUSTY_RELEASE_BUILDS == 'true'
+    if: github.ref == 'refs/heads/master' && vars.KRUSTY_RELEASE_BUILDS == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -1419,7 +1432,7 @@ jobs:
     needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
     # Publication runs Gradle to build and sign Maven Central and Plugin Portal artifacts.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: [self-hosted, rust-4c-8gb]
     # Shorter than either lock's TTL; only dead jobs' locks may be taken over.
     timeout-minutes: 25
     permissions:
