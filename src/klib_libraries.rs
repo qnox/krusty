@@ -33,7 +33,7 @@ use crate::metadata::semantic::KotlinPackage;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::TypeName;
 
-pub(crate) use archives::OpenedKlibLibraries;
+pub use archives::OpenedKlibLibraries;
 pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics};
 pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub(crate) use declaration_bodies::{KlibCalleeOrigin, LocatedClass, LocatedMember};
@@ -167,9 +167,7 @@ impl KlibLibraries {
         &self.references
     }
 
-    pub(crate) fn dependency_body_snapshot(
-        &self,
-    ) -> Option<&crate::libraries::DependencyBodySnapshot> {
+    pub fn dependency_body_snapshot(&self) -> Option<&crate::libraries::DependencyBodySnapshot> {
         self.body_snapshot.as_ref()
     }
 }

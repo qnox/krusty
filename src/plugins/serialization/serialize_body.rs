@@ -751,6 +751,6 @@ mod tests {
                 types,
             } if exprs.is_empty() && data == &[type_name("demo/Foo")] && types.is_empty()
         ));
-        assert!(!crate::jvm::ir_emit::jvm_can_emit(&ir));
+        assert!(!crate::jvm::emission_readiness::jvm_can_emit(&ir));
     }
 }

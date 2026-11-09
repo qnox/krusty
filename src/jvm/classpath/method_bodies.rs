@@ -191,7 +191,7 @@ impl crate::jvm::inline::MethodBodies for Classpath {
 impl Classpath {
     /// The unique metadata-declared static function implementing a dispatched member of an array
     /// classifier on the JVM array class (`ArrayIteratorsKt.iterator([I)`).
-    pub(crate) fn static_array_member_realization(
+    pub fn static_array_member_realization(
         &self,
         name: &str,
         descriptor: &str,
