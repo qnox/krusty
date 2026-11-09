@@ -27,20 +27,9 @@ pub(super) fn function_classifier_record(
     let owner = function.identity();
     let signature = invoke_signature(function)
         .expect("a language function classifier's `invoke` has a public signature");
-    if let Some(callables) = record.declared_callables.get_mut("invoke") {
-        let (mut functions, properties) = std::mem::take(callables).into_parts();
-        for invoke in &mut functions.overloads {
-            identities.assign_language_member(signature.clone(), invoke);
-            for member in record
-                .members
-                .iter_mut()
-                .filter(|member| member.name == "invoke" && member.owner == Some(owner))
-            {
-                member.external_identity = invoke.callable.external_identity;
-            }
-        }
-        *callables = crate::libraries::Callables::from_parts(functions, properties);
-    }
+    function_classifiers::identify_declared_invoke(&mut record, owner, |invoke| {
+        identities.assign_language_member(signature.clone(), invoke);
+    });
     Arc::new(record)
 }
 
