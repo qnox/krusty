@@ -42,23 +42,26 @@ pub(crate) fn delegation_functions(ir: &IrFile, c: &IrClass) -> Vec<u32> {
 /// Sort delegation functions as kotlinc's `FirCallableDeclarationComparator` orders them: by name,
 /// extension receiver, return type, then value parameters (count, then types in order).
 pub(crate) fn sort_delegation_functions<T>(functions: &mut [(FnMeta, T)]) {
-    functions.sort_by(|(left, _), (right, _)| {
-        left.name
-            .cmp(&right.name)
-            .then_with(|| receiver_cmp(left.receiver, right.receiver))
-            .then_with(|| type_cmp(left.ret, right.ret))
-            .then_with(|| {
-                let left = &left.params[left.context_count..];
-                let right = &right.params[right.context_count..];
-                left.len().cmp(&right.len()).then_with(|| {
-                    left.iter()
-                        .zip(right)
-                        .map(|((_, left), (_, right))| type_cmp(*left, *right))
-                        .find(|order| order.is_ne())
-                        .unwrap_or(Ordering::Equal)
-                })
+    functions.sort_by(|(left, _), (right, _)| callable_cmp(left, right));
+}
+
+/// kotlinc's `FirCallableDeclarationComparator` over two function records.
+fn callable_cmp(left: &FnMeta, right: &FnMeta) -> Ordering {
+    left.name
+        .cmp(&right.name)
+        .then_with(|| receiver_cmp(left.receiver, right.receiver))
+        .then_with(|| type_cmp(left.ret, right.ret))
+        .then_with(|| {
+            let left = &left.params[left.context_count..];
+            let right = &right.params[right.context_count..];
+            left.len().cmp(&right.len()).then_with(|| {
+                left.iter()
+                    .zip(right)
+                    .map(|((_, left), (_, right))| type_cmp(*left, *right))
+                    .find(|order| order.is_ne())
+                    .unwrap_or(Ordering::Equal)
             })
-    });
+        })
 }
 
 fn receiver_cmp(left: Option<Ty>, right: Option<Ty>) -> Ordering {
@@ -153,16 +156,21 @@ pub(crate) fn sort_delegation_properties(
 }
 
 /// The metadata order of a class's generated functions, `generated` being their indices in
-/// `methods` (whose origins `origins` gives). kotlinc sorts a data class's `equals`, `hashCode` and `toString` together with the
-/// functions a compiler plugin declares on the class, by name, after its components and `copy`:
-/// a serializable data object lists `equals`, `hashCode`, `serializer`, `toString`.
+/// `methods` (whose origins `origins` gives) and `delegation` those of its `interface by`
+/// forwarders. kotlinc sorts a data or value class's `equals`, `hashCode` and `toString` together
+/// with the functions a compiler plugin declares on the class and with the delegation forwarders,
+/// through one `FirCallableDeclarationComparator`, after its components and `copy`: a serializable
+/// data object lists `equals`, `hashCode`, `serializer`, `toString`, and a value class delegating
+/// `ok()` lists `equals`, `hashCode`, `ok`, `toString`. The delegation forwarders sorted here leave
+/// the returned range empty; a class without structural members keeps them in that range.
 pub(crate) fn generated_function_order(
     ir: &IrFile,
     declared_fids: &[u32],
     methods: &[FnMeta],
     origins: &[FunctionOrigin],
     generated: Range<usize>,
-) -> Vec<usize> {
+    delegation: Range<usize>,
+) -> (Vec<usize>, Range<usize>) {
     let structural = |index: &usize| {
         matches!(
             origins[*index],
@@ -170,7 +178,8 @@ pub(crate) fn generated_function_order(
                 IrDataClassMemberRole::Equals
                     | IrDataClassMemberRole::HashCode
                     | IrDataClassMemberRole::ToString
-            )
+            ) | FunctionOrigin::ValueClassAny(_)
+                | FunctionOrigin::OpenValueClassAny(_)
         )
     };
     let mut order: Vec<usize> = generated
@@ -178,22 +187,25 @@ pub(crate) fn generated_function_order(
         .filter(|index| !structural(index))
         .collect();
     let mut sorted: Vec<usize> = generated.filter(structural).collect();
-    if !sorted.is_empty() {
-        sorted.extend(
-            declared_fids
-                .iter()
-                .enumerate()
-                .filter(|(_, fid)| {
-                    ir.plugin_declaration_functions
-                        .values()
-                        .any(|functions| functions.contains(fid))
-                })
-                .map(|(index, _)| index),
-        );
+    if sorted.is_empty() {
+        return (order, delegation);
     }
-    sorted.sort_by(|left, right| methods[*left].name.cmp(&methods[*right].name));
+    sorted.extend(
+        declared_fids
+            .iter()
+            .enumerate()
+            .filter(|(_, fid)| {
+                ir.plugin_declaration_functions
+                    .values()
+                    .any(|functions| functions.contains(fid))
+            })
+            .map(|(index, _)| index),
+    );
+    let end = delegation.end;
+    sorted.extend(delegation);
+    sorted.sort_by(|left, right| callable_cmp(&methods[*left], &methods[*right]));
     order.extend(sorted);
-    order
+    (order, end..end)
 }
 
 /// `declared_fids` are the declared functions, which open the metadata function list; the

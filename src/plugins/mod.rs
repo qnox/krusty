@@ -1492,8 +1492,8 @@ impl PluginHost {
 }
 
 /// Fill all `IrClass` fields with empty defaults for a synthesized class named by its spelling.
-#[cfg(test)]
-pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass {
+#[cfg(any(test, feature = "test-support"))]
+pub fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass {
     synthetic_class_name(crate::types::type_name(&fq_name.into()))
 }
 

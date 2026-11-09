@@ -50,13 +50,13 @@ impl DirectCFunction {
 /// authoritative for the slot's physical type; this contract authenticates only its classifier
 /// marker and stable parameter identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct KlibBodyCompanionReceiver {
+pub struct KlibBodyCompanionReceiver {
     classifier: TypeName,
     identity: crate::fir::ResolvedParameterIdentity,
 }
 
 impl KlibBodyCompanionReceiver {
-    pub(crate) fn new(classifier: TypeName) -> Self {
+    pub fn new(classifier: TypeName) -> Self {
         Self {
             classifier,
             identity: crate::fir::ResolvedParameterIdentity::ExtensionReceiver,
@@ -373,16 +373,16 @@ pub struct ExternalCallableRealization {
     /// KLIB-only serialized receiver contract for a classifier-associated companion extension.
     /// It is separate from source parameters because source lookup names the declaration through
     /// the classifier without a value receiver.
-    pub(crate) klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
+    pub klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
     /// Declaration-owned formal types, frozen before normalized full bounds can deepen their
     /// finite self/forward references. Empty for declarations without KLIB generic body facts.
-    pub(crate) klib_body_type_parameters: Box<[Ty]>,
+    pub klib_body_type_parameters: Box<[Ty]>,
     /// Known declaration implementation modifiers; absent for providers without KLIB body facts.
-    pub(crate) klib_body_declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
-    pub(crate) klib_body_class_contract: Option<super::KlibBodyClassContract>,
-    pub(crate) klib_body_accessor: Option<super::KlibBodyAccessor>,
-    pub(crate) klib_body_vararg_index: Option<usize>,
-    pub(crate) klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
+    pub klib_body_declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
+    pub klib_body_class_contract: Option<super::KlibBodyClassContract>,
+    pub klib_body_accessor: Option<super::KlibBodyAccessor>,
+    pub klib_body_vararg_index: Option<usize>,
+    pub klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
     /// Whether a source parameter declares a default value, as the provider's declaration says.
     pub declares_parameter_defaults: bool,
 }

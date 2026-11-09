@@ -78,7 +78,7 @@ impl IrFile {
     /// The member functions of `owner` that override one of `Any`'s `equals`/`hashCode`/`toString`,
     /// each with the `Any` member it overrides, by the frontend's override edges. A value class
     /// generates exactly the `Any` members its source does not override.
-    pub(crate) fn any_member_overrides(
+    pub fn any_member_overrides(
         &self,
         owner: TypeName,
     ) -> crate::fx_hash::HashMap<FunId, super::IrValueClassAnyMember> {

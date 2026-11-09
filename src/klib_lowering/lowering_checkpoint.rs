@@ -37,6 +37,8 @@ impl LoweringCheckpoint {
         ir.short_circuits
             .retain(|expression, _| *expression < first);
         ir.written_casts.retain(|expression| *expression < first);
+        ir.construction_targets
+            .retain(|expression, _| *expression < first);
         ir.whens
             .exhaustive
             .retain(|expression, _| *expression < first);
