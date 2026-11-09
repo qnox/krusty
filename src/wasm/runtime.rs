@@ -48,6 +48,10 @@ pub(super) struct Runtime {
     /// Reference-element array storage shared by every applied Kotlin `Array<T>`.
     pub(super) references: u32,
     pub(super) arrays: ReferenceArrays,
+    /// `(array (mut i32))`, the storage of a Kotlin `IntArray`.
+    pub(super) ints: u32,
+    /// `IntArray`'s identity object. Same shape as a reference array, with `ints` as storage.
+    pub(super) int_arrays: ReferenceArrays,
     pub(super) string_equals: u32,
     pub(super) object_equals: u32,
     pub(super) string_concat: u32,
@@ -113,8 +117,13 @@ impl Runtime {
             storage: StorageType::Val(super::objects::REFERENCE),
             mutable: true,
         }));
+        let ints = module.ty(CompositeType::Array(FieldType {
+            storage: StorageType::Val(ValType::I32),
+            mutable: true,
+        }));
         let identity = IdentityObjects::declare(module, &objects);
         let arrays = ReferenceArrays::declare(module, &mut objects, &identity, references);
+        let int_arrays = ReferenceArrays::declare(module, &mut objects, &identity, ints);
         let object_equals = module.declare();
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
         let mut runtime = Self {
@@ -122,6 +131,8 @@ impl Runtime {
             string,
             references,
             arrays,
+            ints,
+            int_arrays,
             string_equals: module.declare(),
             object_equals,
             string_concat: module.declare(),
