@@ -64,13 +64,31 @@ impl Checker<'_> {
             && classifier.own_type_parameter_count == classifier.type_params().len()
             && call.alias_target.is_none())
         .then(|| {
-            self.select_scope_constructor(
+            let candidates = self.scope_constructor_candidates(
                 scope,
                 call_args,
                 (internal, classifier),
                 (call.explicit_type_args, call.arg_names),
                 (call.expected, priority),
-            )
+            );
+            match self.select_callable_candidate(
+                scope,
+                call_args,
+                call.explicit_type_args,
+                None,
+                CallResultConstraint::direct(call.expected),
+                candidates.clone(),
+            ) {
+                Some(CallableCandidateSelection::Selected(selected)) => {
+                    ScopeConstructorSelection::Selected(Box::new(selected.info))
+                }
+                Some(CallableCandidateSelection::Ambiguous(..)) => {
+                    ScopeConstructorSelection::Ambiguous
+                }
+                Some(CallableCandidateSelection::MissingContext(_)) | None => {
+                    ScopeConstructorSelection::Inapplicable(candidates)
+                }
+            }
         });
         let checkpoint = self.diags.diags.len();
         let recorded = self.record_library_constructor(
@@ -134,17 +152,17 @@ impl Checker<'_> {
         }
     }
 
-    /// Select among `internal`'s constructors of one priority tier as ordinary callable
-    /// candidates of the bare call. Eager lambda analysis narrows them as it narrows a
+    /// `internal`'s constructors of one priority tier as ordinary callable candidates of the
+    /// bare call, for the shared selector. Eager lambda analysis narrows them as it narrows a
     /// receiver-less function family.
-    fn select_scope_constructor(
+    fn scope_constructor_candidates(
         &mut self,
         scope: &CheckerScope<'_>,
         call_args: CallArgs<'_>,
         (internal, classifier): (TypeName, &crate::libraries::LibraryType),
         (explicit_type_args, arg_names): (&[Ty], Option<&[Option<String>]>),
         (expected, priority): (Option<Ty>, ConstructorPriorityTier),
-    ) -> ScopeConstructorSelection {
+    ) -> Vec<crate::libraries::FunctionInfo> {
         let low_priority =
             crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
         let candidates = self
@@ -163,7 +181,7 @@ impl Checker<'_> {
             })
             .collect::<Vec<_>>();
         let CallArgs { call, args, .. } = call_args;
-        let candidates = if args
+        if args
             .iter()
             .any(|&argument| self.file.is_callable_syntax(argument))
         {
@@ -191,22 +209,6 @@ impl Checker<'_> {
             )
         } else {
             candidates
-        };
-        match self.select_callable_candidate(
-            scope,
-            call_args,
-            explicit_type_args,
-            None,
-            CallResultConstraint::direct(expected),
-            candidates.clone(),
-        ) {
-            Some(CallableCandidateSelection::Selected(selected)) => {
-                ScopeConstructorSelection::Selected(Box::new(selected.info))
-            }
-            Some(CallableCandidateSelection::Ambiguous(..)) => ScopeConstructorSelection::Ambiguous,
-            Some(CallableCandidateSelection::MissingContext(_)) | None => {
-                ScopeConstructorSelection::Inapplicable(candidates)
-            }
         }
     }
 }
