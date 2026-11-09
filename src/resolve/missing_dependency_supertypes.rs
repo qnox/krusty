@@ -645,7 +645,7 @@ impl Checker<'_> {
         })
     }
 
-    fn missing_supertype_callee_span(&self, callee: ExprId) -> Span {
+    pub(super) fn missing_supertype_callee_span(&self, callee: ExprId) -> Span {
         match self.file.expr(callee) {
             Expr::Member { name, .. } => self.member_name_span(callee, name),
             _ => self.span(callee),

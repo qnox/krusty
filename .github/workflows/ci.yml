@@ -590,8 +590,11 @@ jobs:
             ~/.konan/dependencies
             target/cache/krusty-deps
           key: native-conformance-konan-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      # Every Native row replays the kotlinc-native results its box lane and focused checks
+      # recorded: the box lane's owned multimodule fixtures alone run 68 kotlinc-native graphs,
+      # about three quarters of a cold row's case time. Master records what is missing.
       - name: restore recorded kotlinc-native bytes
-        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max
+        if: matrix.target == 'native'
         id: native-recordings
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -600,7 +603,7 @@ jobs:
           restore-keys: |
             recorded-kotlinc-native-bytes-${{ matrix.version }}-
       - name: select kotlinc-native recording mode
-        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max
+        if: matrix.target == 'native'
         id: native-recording-mode
         env:
           CACHE_HIT: ${{ steps.native-recordings.outputs.cache-hit }}
@@ -712,6 +715,9 @@ jobs:
         # and focused deadlines unchanged; a corpus timeout still fails this row.
         env:
           KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
+          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
+          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
         run: |
           chmod +x conformance-bin
           just native-conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" native-pct.txt
@@ -722,6 +728,10 @@ jobs:
         if: matrix.target == 'native' && (success() || steps.native_box.outcome == 'failure')
         id: native_focused
         continue-on-error: true
+        env:
+          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
+          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
         run: just native-conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       - name: upload Native conformance
         if: always() && matrix.target == 'native'
@@ -758,7 +768,7 @@ jobs:
           timeout 600s ./klib-unit-tests klib_ --nocapture
           timeout 600s ./klib-native-unit-tests klib_ --nocapture
       - name: save recorded kotlinc-native bytes
-        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max && steps.native-recording-mode.outputs.write == '1'
+        if: matrix.target == 'native' && steps.native-recording-mode.outputs.write == '1'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/native-recordings
