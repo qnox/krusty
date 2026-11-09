@@ -447,6 +447,13 @@ pub(crate) fn nested_result_is_input_constrained(
         })
 }
 
+/// A nested call's expectation-free result type, and whether it still mentions an open formal.
+#[derive(Clone, Copy)]
+pub(crate) struct ProvisionalResult {
+    pub(crate) ty: Ty,
+    pub(crate) open: bool,
+}
+
 /// Whether binding a nested call's result to an enclosing expectation keeps the nullability the
 /// call itself established.
 ///
@@ -457,13 +464,6 @@ pub(crate) fn nested_result_is_input_constrained(
 /// `String` parameter does not accept it. Only nullability is read back. A provisional's classifier
 /// may still be a placeholder when the call's own inputs are contextual (`forward(produce())`),
 /// and the expectation may widen a binding anyway (`mutableListOf(1)` as `MutableList<Number>`).
-/// A nested call's expectation-free result type, and whether it still mentions an open formal.
-#[derive(Clone, Copy)]
-pub(crate) struct ProvisionalResult {
-    pub(crate) ty: Ty,
-    pub(crate) open: bool,
-}
-
 pub(crate) fn expected_result_keeps_call_evidence(
     provisional: ProvisionalResult,
     generic_sig: &GenericSig,
