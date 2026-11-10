@@ -70,6 +70,67 @@ pub(super) fn useless_alias_type(
 }
 
 impl Checker<'_> {
+    /// Star-project a class literal whose classifier was not published to the module index.
+    ///
+    /// `internal` is the classifier the literal already selected. Its published type parameters
+    /// survive a header that did not finalize, including a nested class. A class with no
+    /// published parameters and no declaration in this file stays the unbound type.
+    fn unindexed_class_literal_receiver(&self, internal: TypeName) -> Option<Ty> {
+        let count = self.written_classifier_type_parameter_count(internal)?;
+        if count == 0 {
+            return Some(Ty::obj_name(internal));
+        }
+        let star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
+        Some(Ty::obj_args_name(internal, &vec![star; count]))
+    }
+
+    /// Type parameters still written on the classifier `internal` selected this literal.
+    ///
+    /// The active overlay sees the class while its file is the one being checked, including a
+    /// nested class. A header that did not finalize publishes no classifier header, but it does
+    /// publish the type parameters, and Pass 2 reparses the function without that class. The
+    /// declaration identity the literal already selected is what carries the count. A class
+    /// written in this file is the last source, matched by its full identity (`Outer.Inner` is
+    /// `Outer$Inner`), never by the type's last segment.
+    fn written_classifier_type_parameter_count(&self, internal: TypeName) -> Option<usize> {
+        if let Some((active, index)) = self.active_declarations.zip(self.resolved_index) {
+            if let Some(declaration) = index.classifier_declaration(internal) {
+                if let Some((_, class)) = active.class(self.file, declaration) {
+                    let count = class.type_parameters.type_params().len();
+                    if count > 0 {
+                        return Some(count);
+                    }
+                }
+            }
+        }
+        if let Some(index) = self.resolved_index {
+            if let Some(declaration) = index.classifier_declaration(internal) {
+                let mut count = 0u32;
+                while index.type_parameter(declaration, count).is_some() {
+                    count += 1;
+                }
+                if count > 0 {
+                    return Some(count as usize);
+                }
+            }
+        }
+        let declarations: Vec<DeclId> = self.file.decls.iter().copied().collect();
+        for declaration in declarations {
+            let Decl::Class(class) = self.file.decl(declaration) else {
+                continue;
+            };
+            let Some(name) =
+                crate::types::existing_type_name(&class_internal(self.file, &class.name))
+            else {
+                continue;
+            };
+            if name == internal {
+                return Some(class.type_parameters.type_params().len());
+            }
+        }
+        None
+    }
+
     /// Resolve one class-literal left-hand side as an unbound semantic type. A value root remains
     /// bound and is checked by the caller. A simple classifier is selected once by the ordinary
     /// scope tower; the special type-argument diagnostic consumes that selected alias identity.
@@ -114,10 +175,21 @@ impl Checker<'_> {
             let Some((internal, [])) = ty.obj_parts() else {
                 return ty;
             };
-            let classifier = self
-                .fed_source()
-                .classifier(internal)
-                .expect("a resolved class-literal classifier must retain its declaration");
+            // A class whose signature did not finalize (an unresolved supertype) is absent
+            // from the module index, or present there without the type parameters still
+            // written on the class. Star projection then uses that declaration, including a
+            // nested class. Aborting would drop every other diagnostic in the module.
+            let recovered = self.unindexed_class_literal_receiver(internal);
+            let Some(classifier) = self.fed_source().classifier(internal) else {
+                return recovered.unwrap_or(ty);
+            };
+            if classifier.type_params().is_empty()
+                && recovered
+                    .as_ref()
+                    .is_some_and(|ty| ty.obj_parts().is_some_and(|(_, args)| !args.is_empty()))
+            {
+                return recovered.unwrap_or(ty);
+            }
             super::class_literal_receiver::star_projected_class_literal_receiver(ty, &classifier)
         })
     }
