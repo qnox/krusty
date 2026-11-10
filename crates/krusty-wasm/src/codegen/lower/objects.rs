@@ -586,7 +586,7 @@ impl Body<'_> {
     }
 
     /// Replace the object on the stack with its dispatch table, as `$AnyTable`.
-    fn table_of_object(&mut self) {
+    pub(super) fn table_of_object(&mut self) {
         let object = self.runtime.objects.object;
         self.code
             .ref_cast(false, HeapType::Concrete(object))

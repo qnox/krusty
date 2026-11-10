@@ -239,9 +239,7 @@ pub(super) fn published_property(
             signed.compiler_builtin_owner,
             &mut property,
         );
-    }
-    if let CallablePlacement::Member { owner, .. } = placement {
-        builtin_realizations::realize_throwable_property(
+        builtin_realizations::realize_class_name_property(
             owner,
             signed.compiler_builtin_owner,
             &mut property,

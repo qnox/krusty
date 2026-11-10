@@ -16,7 +16,8 @@
 //! file lays out is recorded in turn.
 //!
 //! **Tables.** A class's table is a struct with one immutable field per slot of its shared table,
-//! each a typed function reference, and the interface table after `kotlin.Any`'s three
+//! each a typed function reference, and the interface table and the class's type information
+//! record after `kotlin.Any`'s three
 //! (`super::super::objects::slot_field`). It is declared a subtype of its superclass's table, or of
 //! `$AnyTable` for a root class. A slot a table does not type is `funcref` and null. A class that
 //! inherits `kotlin.Any`'s own `hashCode` gets its identity hash; one that inherits `toString` gets
@@ -701,7 +702,11 @@ pub(super) fn declare(
             open: true,
         });
         let table_type = module.subtype(SubType {
-            composite: table_struct(&slot_types[id as usize], objects.itable),
+            composite: table_struct(
+                &slot_types[id as usize],
+                objects.itable,
+                objects.type_infos.ty,
+            ),
             supertype: Some(match (parent, laid_out_parent) {
                 (Some(parent), _) => parent.table_type.expect("a superclass has a table type"),
                 (None, Some(superclass)) => superclass.table_type,
@@ -789,10 +794,16 @@ pub(super) fn declare(
                     .objects
                     .interfaces
                     .class(module, runtime.objects.itable, ancestors.clone());
+            let info = runtime.objects.type_infos.global(module, class.fq_name);
+            runtime.objects.type_infos.name(
+                module,
+                class.fq_name,
+                &krusty::backend::class_names::declared_class(ir, id),
+            );
             let mut init = Code::default();
             for (slot, function) in functions_here.iter().enumerate() {
                 if slot as u32 == ITABLE_FIELD {
-                    init.global_get(itable);
+                    init.global_get(itable).global_get(info);
                 }
                 match function {
                     Some(function) => {
@@ -805,7 +816,7 @@ pub(super) fn declare(
                 }
             }
             if table.vtable.len() as u32 <= ITABLE_FIELD {
-                init.global_get(itable);
+                init.global_get(itable).global_get(info);
             }
             let table_type = forms[id as usize]
                 .table_type
@@ -1010,12 +1021,13 @@ pub(super) fn accessor_function(
 }
 
 /// A table struct: one immutable typed function reference per typed slot, `funcref` elsewhere,
-/// and the interface table after `kotlin.Any`'s slots.
-fn table_struct(slots: &[Option<u32>], itable: u32) -> CompositeType {
-    let mut fields = Vec::with_capacity(slots.len() + 1);
+/// and the interface table and the type information after `kotlin.Any`'s slots.
+fn table_struct(slots: &[Option<u32>], itable: u32, type_info: u32) -> CompositeType {
+    let mut fields = Vec::with_capacity(slots.len() + 2);
     for (slot, ty) in slots.iter().enumerate() {
         if slot as u32 == ITABLE_FIELD {
             fields.push(immutable(ValType::nullable(itable)));
+            fields.push(immutable(ValType::nullable(type_info)));
         }
         fields.push(immutable(match ty {
             Some(ty) => ValType::reference(*ty),
@@ -1027,6 +1039,7 @@ fn table_struct(slots: &[Option<u32>], itable: u32) -> CompositeType {
     }
     if slots.len() as u32 <= ITABLE_FIELD {
         fields.push(immutable(ValType::nullable(itable)));
+        fields.push(immutable(ValType::nullable(type_info)));
     }
     CompositeType::Struct(fields)
 }

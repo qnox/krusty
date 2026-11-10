@@ -24,6 +24,7 @@ mod arrays;
 pub(super) mod box_members;
 mod boxing;
 mod callable_reference_identity;
+mod class_literals;
 mod dependency_exports;
 mod enums;
 mod exceptions;
@@ -52,6 +53,10 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
+        || matches!(
+            operation,
+            krusty::backend::BackendCompilerIntrinsic::ClassName(_)
+        )
 }
 
 use krusty::backend::class_tables::module_interfaces::ModuleInterfaces;
@@ -390,6 +395,7 @@ pub(super) fn lower_file(
     if objects::holds_unprinted_values(ir) {
         reach.bodiless_value(AnyMember::ToString);
     }
+    class_literals::name_type_infos(module, runtime, classifiers);
     Ok(LoweredFile {
         functions: indices,
         initializer,
@@ -1505,6 +1511,21 @@ impl<'a> Body<'a> {
                 } = &**checked_op
                     && parameters.is_empty()
                     && arguments.is_empty()
+                    && let Some(kind) = self.class_name_property(*target) =>
+            {
+                self.class_name(kind, *receiver)?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
                     && self.is_string_length_property(*target) =>
             {
                 self.intrinsic(IrIntrinsic::StringLength, Some(*receiver), &[])?;
@@ -1569,6 +1590,9 @@ impl<'a> Body<'a> {
                 params,
                 ret,
             } => self.invoke_function(func, &args, &params, ret)?,
+            IrExpr::KClassLiteral {
+                classifier, value, ..
+            } => self.class_literal(id, classifier, value)?,
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
             }

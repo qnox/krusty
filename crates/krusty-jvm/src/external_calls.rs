@@ -1053,6 +1053,9 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::ThrowableMessage
                 | krusty::libraries::CompilerIntrinsic::ThrowableCause,
             ) => unreachable!("target KLIB Throwable storage cannot reach JVM call realization"),
+            Some(krusty::libraries::CompilerIntrinsic::ClassName(_)) => {
+                unreachable!("a target KLIB class token cannot reach JVM call realization")
+            }
             Some(
                 krusty::libraries::CompilerIntrinsic::ArraySize
                 | krusty::libraries::CompilerIntrinsic::FloatingIsNaN { .. }

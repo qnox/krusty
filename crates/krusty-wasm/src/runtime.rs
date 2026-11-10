@@ -27,6 +27,7 @@ use krusty::fx_hash::HashMap;
 use super::array_objects::ArrayObjects;
 use super::boxes::Boxes;
 use super::callable_references::CallableReferences;
+use super::class_tokens::{ClassTokens, TokenRuntime};
 use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
 };
@@ -80,6 +81,8 @@ pub(super) struct Runtime {
     pub(super) callable_references: CallableReferences,
     /// The `KType` objects `typeOf` sites make.
     type_objects: TypeObjects,
+    /// What a class literal evaluates to.
+    pub(super) class_tokens: ClassTokens,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
 }
@@ -116,7 +119,7 @@ impl Runtime {
     /// run after every import is declared and before any program function.
     pub(super) fn start(module: &mut Module, host: &Host) -> Self {
         let (chars, string) = Self::declare_types(module);
-        let mut objects = ObjectRoot::declare(module, ValType::nullable(string));
+        let mut objects = ObjectRoot::declare(module, chars, string);
         let identity = IdentityObjects::declare(module, &objects);
         let exceptions =
             ExceptionTransport::declare(module, &objects, &identity, ValType::nullable(string));
@@ -130,13 +133,25 @@ impl Runtime {
             ArrayObjects::declare(module, &mut objects, &identity, references, array_to_string);
         let object_equals = module.declare();
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
+        let string_concat = module.declare();
+        let hashing = Hashing::declare(module);
+        let class_tokens = ClassTokens::declare(
+            module,
+            &mut objects,
+            TokenRuntime {
+                string,
+                string_concat,
+                string_hash: hashing.string_hash,
+            },
+            &"class ".encode_utf16().collect::<Vec<_>>(),
+        );
         let mut runtime = Self {
             chars,
             string,
             arrays,
             string_equals: module.declare(),
             object_equals,
-            string_concat: module.declare(),
+            string_concat,
             string_of_i32: module.declare(),
             string_of_i64: module.declare(),
             string_of_u32: module.declare(),
@@ -149,7 +164,8 @@ impl Runtime {
             i64_div: module.declare(),
             objects,
             identity,
-            hashing: Hashing::declare(module),
+            hashing,
+            class_tokens,
             exceptions,
             object_strings,
             boxes: Boxes::default(),

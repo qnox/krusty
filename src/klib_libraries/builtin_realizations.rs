@@ -6,6 +6,7 @@
 //! annotation. A declaration the rules do not name is realized by its serialized IR body.
 
 mod arrays;
+mod class_tokens;
 mod collection_size;
 mod library_helpers;
 
@@ -18,6 +19,7 @@ use crate::types::TypeName;
 mod throwables;
 
 pub(super) use arrays::realize_array_constructor;
+pub(super) use class_tokens::realize_class_name_property;
 pub(super) use throwables::{realize_constructor, realize_throwable_property};
 
 /// Attach the operation the member `function` of `owner` denotes, if it is a builtin one.
