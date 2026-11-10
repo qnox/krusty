@@ -758,21 +758,34 @@ impl Checker<'_> {
         class: &ClassDecl,
         owner: Option<TypeName>,
     ) {
-        let container = owner
-            .and_then(|owner| owner.nested_owner())
-            .filter(|container| {
-                self.fed_source().classifier(*container).is_some()
-                    && !self.lexical_source_class_names().contains(container)
-            });
-        if let Some(container) = container {
-            self.lexical_class_context.insert(0, container);
-        }
+        let container = self.enter_annotation_class_rung(owner.and_then(TypeName::nested_owner));
         for (annotation, arguments) in class.annotations.iter().zip(&class.annotation_args) {
             self.check_non_property_annotation_application(scope, annotation, arguments, "class");
         }
-        if let Some(container) = container {
+        self.exit_annotation_class_rung(container);
+    }
+
+    /// Open the lexical rung of `class` for annotation applications checked outside its body
+    /// scope. A member's annotations (`@Ser(Nested::class) val p`, `@Tag(CONST) constructor()`)
+    /// see the static rungs of the classifier that declares the member, as a classifier's own
+    /// annotations see those of its container. Returns the rung this call opened, if the class
+    /// was not already lexically enclosing.
+    pub(super) fn enter_annotation_class_rung(
+        &mut self,
+        class: Option<TypeName>,
+    ) -> Option<TypeName> {
+        let rung = class.filter(|class| {
+            self.fed_source().classifier(*class).is_some()
+                && !self.lexical_source_class_names().contains(class)
+        })?;
+        self.lexical_class_context.insert(0, rung);
+        Some(rung)
+    }
+
+    pub(super) fn exit_annotation_class_rung(&mut self, rung: Option<TypeName>) {
+        if let Some(rung) = rung {
             let removed = self.lexical_class_context.remove(0);
-            debug_assert_eq!(removed, container);
+            debug_assert_eq!(removed, rung);
         }
     }
 }
