@@ -26,6 +26,21 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    systemProperty(
+        "krusty.main.classes",
+        layout.buildDirectory.dir("classes/kotlin/main").get().asFile.absolutePath,
+    )
+}
+
+// The wrapper's Kotlin 2.4 compiler writes .kotlin_module metadata 2.2.0. Gradle 7.6.3 compiles
+// build scripts with Kotlin 1.7.10, which reads the flags integer before the protobuf payload only
+// when the metadata major version is 1. Major version 2 leaves those four zero bytes to the
+// protobuf parser, and every consumer fails configuration with "Protocol message contained an
+// invalid tag (zero)". 1.9.0 is the newest major-version-1 metadata that compiler still reads.
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>().configureEach {
+    compilerOptions {
+        freeCompilerArgs.add("-Xmetadata-version=1.9.0")
+    }
 }
 
 // Package the compiler's vendored tables separately, with the manifest of supported versions. The
