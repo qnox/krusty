@@ -14,6 +14,9 @@
 //! receiver's interface table. The members looked up are packed so that no class's table holds two
 //! at one index; a class's table is an immutable `(array funcref)` its dispatch table points to,
 //! null when it holds none. An `is` function per interface tests every implementing struct.
+//!
+//! A library class's member that boxes implement is dispatched the same way, through a member no
+//! interface numbers ([`InterfaceDispatch::unnumbered`], `super::boxes`).
 
 use krusty::fx_hash::HashMap;
 use krusty::types::TypeName;
@@ -92,6 +95,19 @@ impl InterfaceDispatch {
             }
             return Ok(member);
         }
+        let member = self.unnumbered(module, (params, results));
+        self.numbered
+            .insert((module_name.to_owned(), number), member);
+        Ok(member)
+    }
+
+    /// A member no interface numbers, carried as `params` (the receiver first) and `results`: a
+    /// library class's member its boxes implement (`super::boxes`), which keeps it.
+    pub(super) fn unnumbered(
+        &mut self,
+        module: &mut Module,
+        (params, results): (Vec<ValType>, Vec<ValType>),
+    ) -> MemberRef {
         let member = MemberRef(self.members.len() as u32);
         let ty = module.func_type(params.clone(), results.clone());
         self.members.push(Member {
@@ -101,9 +117,7 @@ impl InterfaceDispatch {
             stub: None,
             implementations: Vec::new(),
         });
-        self.numbered
-            .insert((module_name.to_owned(), number), member);
-        Ok(member)
+        member
     }
 
     /// Publish `identity` as `member`'s, for a dependent module to name it by.
