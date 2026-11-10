@@ -39,9 +39,12 @@ mod type_evidence;
 
 pub use crate::libraries::KlibBodyCallable as KlibCallable;
 pub use body_unit::DependencyBodyUnit;
-pub(crate) use body_unit::{is_private_value_member, EmittedDependencyCallable};
-pub(crate) use callee_facts::ClassInitializations;
+pub(crate) use body_unit::{
+    is_private_class_member, is_receiver_member, EmittedDependencyCallable,
+};
+pub(crate) use callee_facts::CallEdge;
 pub use callee_facts::KlibCalleeFacts;
+pub(crate) use class_initialization::delegated_superclass_constructor;
 pub(crate) use closure_forms::emitted_closure_function;
 
 /// The serialized forms common body lowering realizes without the declaration edges they name.

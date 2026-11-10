@@ -260,9 +260,10 @@ fn malformed_elvis_contracts_decline_by_their_exact_boundary() {
     }
 }
 
-#[test]
-fn an_unrelated_originless_when_still_declines() {
-    let fixture = demo(&[("f", &[T::Boolean], T::Int)], |_, body| {
+/// `f(condition: Boolean): Int` returning `if (condition) 1 else 0` as a `when` of `origin`.
+fn origin_when(origin: Option<&str>) -> Demo {
+    let origin = origin.map(str::to_owned);
+    demo(&[("f", &[T::Boolean], T::Int)], move |_, body| {
         let condition = body.param(0);
         let one = body.int(1);
         let otherwise = body.otherwise();
@@ -280,10 +281,33 @@ fn an_unrelated_originless_when_still_declines() {
                         result: zero,
                     },
                 ],
-                origin: None,
+                origin: origin.clone(),
             },
         );
         Some(vec![body.ret(conditional)])
-    });
-    assert_eq!(fixture.declined("f", &[]), "the KLIB body of `demo.f` (it uses a `when` of another origin than `if`, `when`, `&&` or `||`)");
+    })
+}
+
+#[test]
+fn a_when_of_an_unrelated_origin_still_declines() {
+    assert_eq!(
+        origin_when(Some("EXCLEXCL")).declined("f", &[]),
+        "the KLIB body of `demo.f` (it uses a `when` of another origin than `if`, `when`, `&&` or `||`)"
+    );
+}
+
+/// A compiler-generated `when`, such as the ones a data class's `equals` is built of, carries no
+/// origin. Its branches are evaluated in order, as a source `when`'s are.
+#[test]
+fn an_originless_when_lowers_as_a_subjectless_when() {
+    let lowered = |origin| {
+        let demo = origin_when(origin);
+        let mut unit = DependencyBodyUnit::default();
+        let function = demo
+            .lower(&mut unit, "f", &[])
+            .unwrap_or_else(|decline| panic!("{decline}"));
+        validated(unit.ir());
+        lowered_body(&unit, function)
+    };
+    assert_eq!(lowered(None), lowered(Some("WHEN")));
 }

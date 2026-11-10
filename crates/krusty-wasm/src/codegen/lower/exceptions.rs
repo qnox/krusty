@@ -7,6 +7,11 @@ use krusty::types::TypeName;
 
 use super::*;
 
+/// Whether `classifier` is one of the exception classes the runtime lays out itself.
+pub(in crate::codegen) fn runtime_lays_out(classifier: TypeName) -> bool {
+    krusty::libraries::RuntimeExceptionKind::of(classifier).is_some()
+}
+
 #[cfg(test)]
 mod tests;
 

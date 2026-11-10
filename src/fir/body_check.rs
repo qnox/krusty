@@ -1656,6 +1656,7 @@ impl BodyFirChecker<'_> {
                                 end_type: self.expression_type(*end)?,
                                 ends_inlined_call: self
                                     .selected_range_inlines(expression, operator),
+                                declaration: self.selected_range_declaration(expression, operator),
                             }
                         } else {
                             self.source_member_operator_call(expression, operator, *start, &[*end])?

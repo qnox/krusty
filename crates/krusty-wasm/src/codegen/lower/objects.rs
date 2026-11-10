@@ -1188,6 +1188,14 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// Whether `ty` is a final class an earlier file declared which answers `member` itself.
+    pub(super) fn answered_by_earlier_final_class(&self, ty: Ty, member: AnyMember) -> bool {
+        match ty.non_null().kind() {
+            TyKind::Obj(name, _) => self.final_classes.answers(name, member),
+            _ => false,
+        }
+    }
+
     /// Replace the object reference on the stack with its `toString()` slot's answer, or
     /// `"null"`. The caller has proven every object the reference can hold has a `toString`.
     pub(super) fn dispatch_to_string(&mut self) {

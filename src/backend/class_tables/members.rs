@@ -309,6 +309,16 @@ pub(crate) fn overridden_functions(
                     }
                 }
             }
+            // An override of a dependency member this file emits as a method of a class it
+            // materializes replaces that method's slot, as an override of any method here does.
+            ResolvedFunctionOverrideTarget::External(target)
+                if let Some(&overridden) = ir.dependency_methods.get(target) =>
+            {
+                let targets = map.entry(implementation).or_default();
+                if !targets.contains(&overridden) {
+                    targets.push(overridden);
+                }
+            }
             ResolvedFunctionOverrideTarget::External(_) => {
                 // An override of a DEPENDENCY method takes a slot of its own, like any method
                 // this class declares freshly: a caller naming the class reaches it, and a caller

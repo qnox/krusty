@@ -78,6 +78,8 @@ pub(super) struct LinkedCallee {
     /// Whether each of [`Self::params`] declares a default a call may leave it to, for a function
     /// this unit lowers; empty for every other callee, which no call may omit an argument of.
     pub(super) parameter_defaults: Vec<bool>,
+    /// The facts a target dispatches the call by, as for a source call of the same declaration.
+    pub(super) edge: super::CallEdge,
 }
 
 pub(super) struct LinkedCallableReference {
@@ -119,6 +121,16 @@ pub(super) trait CallLinker {
     /// The same authenticated primitive call shape that dependency planning treats as a leaf.
     /// Template linkers retain their ordinary checked external-call boundary by default.
     fn common_primitive(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
+        Ok(None)
+    }
+
+    /// The range construction a range literal's membership compares against, read as
+    /// [`Self::common_primitive`] reads its primitive but whatever range class the target lays
+    /// out: the membership builds no range.
+    fn range_literal_bounds(
         &self,
         _callee: &crate::libraries::KlibDeclarationSignature,
     ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
@@ -178,7 +190,8 @@ pub(super) trait CallLinker {
         unsupported("a call of a file-private constructor")
     }
 
-    /// The function a file-local call invokes. Template linkers keep the refusal.
+    /// The function a file-local call invokes: a top-level function private to the lowered
+    /// body's file, or a member of a file-local class. Template linkers keep the refusal.
     fn link_local_function(
         &mut self,
         _ir: &mut IrFile,
@@ -360,17 +373,23 @@ impl<'a> BodyLowering<'a> {
         }
     }
 
-    /// This body as a member of the value class `class`, which reads its value through `field`.
-    pub(super) fn reading_value_through(
+    /// This body as a member of the materialized class `class`, which reads its receiver's
+    /// `fields`. A value class member reads its one value and writes nothing.
+    pub(super) fn reading_through(
         mut self,
         class: crate::ir::ClassId,
-        field: &'a crate::metadata::klib_ir::tree::KlibIrField,
+        fields: &[&'a crate::metadata::klib_ir::tree::KlibIrField],
+        value: bool,
     ) -> Self {
-        self.instance_storage = Some(instance_storage::InstanceStorageFrame::value_member(
+        let declared = &self.ir.classes[class as usize].fields;
+        self.instance_storage = Some(instance_storage::InstanceStorageFrame::member(
             class,
-            field,
-            self.ir.classes[class as usize].fields[0].ty,
+            fields
+                .iter()
+                .zip(declared)
+                .map(|(field, declared)| (&field.base.symbol, declared.ty, declared.is_final())),
             self.header.value_receiver(),
+            value,
         ));
         self
     }
@@ -946,6 +965,11 @@ impl<'a> BodyLowering<'a> {
     /// declaration: a named variable in the next value slot, with no type of its own.
     fn variable(&mut self, id: KlibIrVariableId) -> Lowered<ExprId> {
         let variable = self.arena.variable(id);
+        // A compiler temporary, such as the cast `other` of a data class's `equals`, is an unnamed
+        // immutable local the source never names.
+        if variable.base.origin == "IR_TEMPORARY_VARIABLE" {
+            return self.unnamed_local(id);
+        }
         let ty = self.semantic(variable.ty)?;
         let initializer =
             variable

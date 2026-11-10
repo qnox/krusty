@@ -85,7 +85,8 @@ pub(super) fn authenticate<'a, 'b>(
             &class.signature,
             selected
                 .accessor()
-                .map_or(KlibAccessorRole::Getter, |accessor| accessor.role),
+                .map_or(KlibAccessorRole::Getter, |accessor| accessor.role)
+                .into(),
         )
         .map_err(mismatch)?
         .ok_or_else(|| mismatch("a selected member has no exact serialized class header"))?;
@@ -107,8 +108,8 @@ pub(super) fn authenticate<'a, 'b>(
 
 /// The raw header of `identity`, a private member of `class` that no provider records. Only
 /// members of its class call a private member, so the calling member's authenticated class is
-/// the authority: the callee must be a direct member of that exact class header (a getter in its
-/// own property's getter slot), its receiver must name that exact class, and it must be private.
+/// the authority: the callee must be a direct member of that exact class header (an accessor in
+/// the slot of its own shape), its receiver must name that exact class, and it must be private.
 pub(super) fn authenticate_private_member<'a, 'b>(
     class: &'a KlibBodyClassContract,
     identity: &crate::libraries::KlibDependencyCallable,
@@ -123,7 +124,7 @@ pub(super) fn authenticate_private_member<'a, 'b>(
         ));
     }
     let member = bodies
-        .class_member_header(identity, &class.signature, KlibAccessorRole::Getter)
+        .class_member_header(identity, &class.signature, None)
         .map_err(mismatch)?
         .ok_or_else(|| mismatch("a private member is not a direct member of its calling class"))?;
     if member.class.base.symbol.kind != KlibIrSymbolKind::Class {

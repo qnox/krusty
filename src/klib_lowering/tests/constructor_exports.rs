@@ -2,7 +2,7 @@
 
 use super::demo_package::{assert_unit_is_empty, demo, operator, T};
 use super::*;
-use crate::backend::{DependencyExportSignatures, ExportedConstructor};
+use crate::backend::DependencyExportSignatures;
 use crate::libraries::{KlibBodyClassContract, KlibBodyClassParameters, TypeKind};
 use crate::metadata::klib_ir::tree::{KlibIrClass, KlibIrField};
 use crate::metadata::semantic::KotlinModality;
@@ -659,8 +659,11 @@ fn constructor_root_exports_allocation_with_exact_parameters_and_declared_self_t
     let [(identity, class)] = constructors.as_slice() else {
         panic!("one constructor")
     };
-    let (identity, class) = (identity.clone(), *class);
+    let (identity, constructor) = (identity.clone(), *class);
     assert_eq!(&identity, selected.identity());
+    // The class's primary constructor allocates it.
+    assert_eq!(constructor.secondary, None);
+    let class = constructor.class;
     let mut ir = unit.into_ir();
     let owner = type_name("demo/Act");
     assert_eq!(
@@ -688,9 +691,9 @@ fn constructor_root_exports_allocation_with_exact_parameters_and_declared_self_t
     }
     let mut exports = DependencyExportSignatures::default();
     exports.record_constructor(
-        ExportedConstructor {
-            class,
-            secondary: None,
+        crate::backend::ExportedConstructor {
+            class: constructor.class,
+            secondary: constructor.secondary,
         },
         identity.clone(),
     );
@@ -747,15 +750,16 @@ fn constructor_allocation_export_does_not_guess_a_missing_self_type() {
         &Default::default(),
     )
     .unwrap();
-    let (_, class) = unit.allocating_constructors().next().unwrap();
+    let (_, constructor) = unit.allocating_constructors().next().unwrap();
+    assert_eq!(constructor.secondary, None);
     let mut ir = unit.into_ir();
     ir.restore_declared_class_self_type_owners(&Default::default());
     let before = (ir.exprs.len(), ir.functions.len());
     let mut exports = DependencyExportSignatures::default();
     exports.record_constructor(
-        ExportedConstructor {
-            class,
-            secondary: None,
+        crate::backend::ExportedConstructor {
+            class: constructor.class,
+            secondary: constructor.secondary,
         },
         selected.identity().clone(),
     );

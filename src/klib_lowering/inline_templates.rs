@@ -739,6 +739,7 @@ impl CallLinker for TemplateCalls<'_> {
             type_parameter_bounds: Some(Vec::new()),
             class_type_parameters: Vec::new(),
             parameter_defaults: Vec::new(),
+            edge: Default::default(),
         })
     }
 
@@ -831,6 +832,7 @@ fn generic_call(
             .map(|signature| signature.formal_bounds.clone()),
         class_type_parameters: Vec::new(),
         parameter_defaults: Vec::new(),
+        edge: Default::default(),
     })
 }
 
@@ -920,6 +922,7 @@ fn member_call(
         type_parameter_bounds: Some(Vec::new()),
         class_type_parameters,
         parameter_defaults: Vec::new(),
+        edge: Default::default(),
     })
 }
 

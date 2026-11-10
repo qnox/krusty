@@ -14,13 +14,6 @@ fn assert_left_to_its_target(f: &Fixture) {
             .unwrap(),
         None
     );
-    let mut classes = crate::klib_lowering::ClassInitializations::default();
-    assert_eq!(
-        classes
-            .callees(&facts, selected.identity(), &f.bodies)
-            .unwrap(),
-        None
-    );
 }
 
 #[test]

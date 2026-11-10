@@ -7,6 +7,7 @@
 
 mod callable_registry;
 mod classes;
+mod final_classes;
 mod interface_members;
 mod lower;
 mod property_registry;
@@ -84,6 +85,7 @@ struct Started {
     runtime: Runtime,
     callables: callable_registry::CallableRegistry,
     properties: property_registry::PropertyRegistry,
+    final_classes: final_classes::FinalClassAnswers,
 }
 
 impl Started {
@@ -100,6 +102,7 @@ impl Started {
             runtime,
             callables: Default::default(),
             properties: Default::default(),
+            final_classes: Default::default(),
         }
     }
 }
@@ -120,6 +123,16 @@ impl Backend for WasmBackend {
 
     fn numbers_slots(&self) -> bool {
         true
+    }
+
+    /// The runtime lays out text and its exception classes itself: a library body of one of
+    /// their members reads a layout this target does not have, and a library class extending
+    /// one of the exceptions delegates to the runtime's constructor.
+    fn represents_dependency_classifier(
+        &self,
+        classifier: krusty::backend::DependencyClassifier,
+    ) -> bool {
+        classifier == krusty::types::wk::string() || lower::runtime_lays_out(classifier)
     }
 
     fn realizes_dependency_intrinsic(
@@ -223,6 +236,7 @@ impl Backend for WasmBackend {
                 runtime: &mut started.runtime,
                 callables: &mut started.callables,
                 properties: &mut started.properties,
+                final_classes: &mut started.final_classes,
             },
         ) {
             Ok(lowered) => lowered,

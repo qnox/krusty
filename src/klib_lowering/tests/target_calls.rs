@@ -181,7 +181,8 @@ fn member_target_tree(
                 .accessor()
                 .map_or(crate::libraries::KlibAccessorRole::Getter, |accessor| {
                     accessor.role
-                }),
+                })
+                .into(),
         )
         .unwrap()
         .unwrap();

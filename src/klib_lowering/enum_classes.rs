@@ -261,7 +261,7 @@ fn authenticate_constructor(
         .class_member_header(
             &enum_constructor,
             &enum_class,
-            crate::libraries::KlibAccessorRole::Getter,
+            Some(crate::libraries::KlibAccessorRole::Getter),
         )
         .map_err(mismatch)?
         .ok_or_else(|| mismatch("an enum constructor delegates past kotlin.Enum"))?;

@@ -677,6 +677,8 @@ impl PackageInventory {
                         &property.getter == accessor || property.setter.as_ref() == Some(accessor)
                     })
                 }
+                // A file-private function is top-level; no class declares one.
+                crate::libraries::KlibDeclarationSignature::FileLocal { .. } => false,
             };
             declares.then_some((owner, class))
         })

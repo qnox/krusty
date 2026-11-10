@@ -2039,6 +2039,7 @@ impl BodyFirChecker<'_> {
                     selected.member.params[0],
                 )?,
                 ends_inlined_call: selected.member.inline.can_inline(),
+                declaration: selected.member.external_identity,
             });
         }
         let primitive_operation = match selected.member.realization {

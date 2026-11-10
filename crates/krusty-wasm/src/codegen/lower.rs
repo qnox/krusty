@@ -40,6 +40,7 @@ mod type_of;
 #[cfg(test)]
 use tests::lower_alone;
 
+pub(super) use exceptions::runtime_lays_out;
 pub(super) use scalar_instructions::is_scalar_operation;
 pub(super) use shared_cells::parameter_carrier;
 
@@ -98,6 +99,7 @@ pub(super) struct ModuleState<'a> {
     pub(super) runtime: &'a mut Runtime,
     pub(super) callables: &'a mut CallableRegistry,
     pub(super) properties: &'a mut PropertyRegistry,
+    pub(super) final_classes: &'a mut super::final_classes::FinalClassAnswers,
 }
 
 /// Lower every function and class of `file` into the program.
@@ -120,6 +122,7 @@ pub(super) fn lower_file(
         runtime,
         callables: callable_registry,
         properties: property_registry,
+        final_classes,
     } = state;
     for property in &ir.statics {
         if property.owner.is_some() {
@@ -212,6 +215,7 @@ pub(super) fn lower_file(
                 callables: &mut *callable_registry,
             },
         )?;
+        final_classes.record_file(ir, &classes.tables);
         Some(classes)
     };
     let context = FileContext {
@@ -228,6 +232,7 @@ pub(super) fn lower_file(
         callables,
         inert_singleton_bindings: &inert_singleton_bindings,
         properties: property_registry,
+        final_classes,
     };
     for (id, function) in ir.functions.iter().enumerate() {
         let (Some(index), Some(signature)) = (indices[id], signatures[id]) else {
@@ -254,7 +259,7 @@ pub(super) fn lower_file(
         };
         let mut parameters = Vec::new();
         if let Some(owner) = function.dispatch_receiver {
-            parameters.push(Ty::obj_name(owner));
+            parameters.push(super::classes::receiver_type(owner));
         }
         parameters.extend(function.params.iter().copied());
         let mut body = Body::new(
@@ -381,6 +386,8 @@ struct FileContext<'a> {
     inert_singleton_bindings: &'a HashSet<krusty::ir::ExprId>,
     /// Top-level property storage reserved or published by files of this source module.
     properties: &'a PropertyRegistry,
+    /// What each final class of the files lowered so far answers of `kotlin.Any` itself.
+    final_classes: &'a super::final_classes::FinalClassAnswers,
 }
 
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
@@ -607,6 +614,7 @@ struct Body<'a> {
     callables: &'a CheckedBackendCallables,
     inert_singleton_bindings: &'a HashSet<krusty::ir::ExprId>,
     properties: &'a PropertyRegistry,
+    final_classes: &'a super::final_classes::FinalClassAnswers,
     code: Code,
     /// Locals beyond the parameters, in index order.
     locals: Vec<ValType>,
@@ -671,6 +679,7 @@ impl<'a> Body<'a> {
             callables: context.callables,
             inert_singleton_bindings: context.inert_singleton_bindings,
             properties: context.properties,
+            final_classes: context.final_classes,
             code: Code::default(),
             locals: Vec::new(),
             next_local: parameters.len() as u32,
@@ -2035,6 +2044,7 @@ mod tests {
                 runtime: &mut started.runtime,
                 callables: &mut started.callables,
                 properties: &mut started.properties,
+                final_classes: &mut started.final_classes,
             },
         )
     }

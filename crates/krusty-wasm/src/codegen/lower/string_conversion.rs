@@ -52,6 +52,15 @@ impl Body<'_> {
             {
                 return self.type_object_to_string(ty)
             }
+            // An instance of a final class of an earlier file, which renders itself.
+            ty if self.answered_by_earlier_final_class(
+                ty,
+                krusty::backend::class_tables::AnyMember::ToString,
+            ) =>
+            {
+                self.dispatch_to_string();
+                return Ok(());
+            }
             other => {
                 return Err(format!(
                     "a string template part of type `{}`",

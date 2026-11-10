@@ -2387,7 +2387,6 @@ regressions/kt2017.kt
 regressions/kt2060.kt
 regressions/kt2246.kt
 regressions/kt344.kt
-regressions/kt3442.kt
 regressions/kt5056.kt
 regressions/kt6434.kt
 regressions/kt68727.kt
