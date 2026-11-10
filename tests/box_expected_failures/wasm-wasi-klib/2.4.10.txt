@@ -1260,7 +1260,6 @@ dataClasses/copy/withGenericParameter.kt
 dataClasses/doubleParam.kt
 dataClasses/equalityChecksPrimitiveUnboxed.kt
 dataClasses/equals/genericarray.kt
-dataClasses/equals/intarray.kt
 dataClasses/equals/null.kt
 dataClasses/equals/nullother.kt
 dataClasses/equals/sameinstance.kt
