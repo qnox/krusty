@@ -602,6 +602,7 @@ fn add_delegate_method(ir: &mut IrFile, method: DelegateMethod) -> u32 {
                 source_line: Some(method.line),
                 end_line: Some(method.line),
                 statement_line: None,
+                start_offset: None,
             },
         );
     }
