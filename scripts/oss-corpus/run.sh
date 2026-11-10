@@ -33,7 +33,13 @@ if [ -z "$row" ]; then
   echo "unknown corpus project: $name" >&2
   exit 2
 fi
+# A trailing lane (`lsp`, `compile`, or `compile,lsp`) is not an Android variant. `read` keeps the
+# rest of the line in its last variable, so leaving the lane on the row stores `compile` as the
+# variant, or joins `demoDebug` and `compile,lsp` with a tab.
 lane=${row##*$'\t'}
+case $lane in
+  lsp|compile|compile,lsp) row=${row%$'\t'"$lane"} ;;
+esac
 if [ "$lane" = lsp ]; then
   echo "$name is in the language-server metric set; this corpus does not build it" >&2
   exit 2
