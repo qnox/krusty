@@ -914,10 +914,16 @@ fn member_overrides(
                 "an override of a declaration other than a function",
             ));
         }
-        let KlibIrSignature::Public(signature) = &symbol.signature else {
-            return Err(unsupported("an override of a non-public declaration"));
+        // A property's accessor overrides the interface property's accessor of the same kind.
+        let declaration = match &symbol.signature {
+            KlibIrSignature::Public(signature) => {
+                KlibDeclarationSignature::Public(signature.clone())
+            }
+            KlibIrSignature::Accessor(signature) => {
+                KlibDeclarationSignature::Accessor(signature.clone())
+            }
+            _ => return Err(unsupported("an override of a non-public declaration")),
         };
-        let declaration = KlibDeclarationSignature::Public(signature.clone());
         let identity = match scope.bodies.callee_origin(scope.module, &declaration) {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => {

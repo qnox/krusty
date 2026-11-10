@@ -860,6 +860,43 @@ fn interface_typed_call_targets_the_authenticated_override() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+const INTERFACE_PROPERTY_DISPATCH: &str =
+    include_str!("../../../tests/box_regressions/sameLibraryInterfacePropertyDispatch.kt");
+
+/// The private class's `size` getter overrides the interface property's getter, which kotlinc
+/// serializes by its accessor signature: the class `make` returns publishes its getter as that
+/// accessor's override.
+#[test]
+fn returned_interface_publishes_a_property_getter_override() {
+    let Some((directory, libraries)) =
+        produce_library("interface-property", INTERFACE_PROPERTY_DISPATCH)
+    else {
+        return;
+    };
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+        "Sized",
+    );
+    let classifier = symbols.classifier.as_ref().expect("fixture.Sized");
+    let getter = classifier.declared_callables["size"].properties()[0]
+        .getter
+        .external_identity
+        .expect("fixture.Sized.size getter identity");
+    let mut unit = DependencyBodyUnit::default();
+    lower_fixture(
+        &mut unit,
+        &libraries,
+        "make",
+        &Default::default(),
+        &libraries,
+    );
+    validated(unit.ir());
+    let edge = override_edge(unit.ir(), getter);
+    assert!(edge.overridden_is_interface);
+    assert!(edge.implementation_function.is_some());
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 #[test]
 fn returned_interface_publishes_the_override_without_calling_it() {
     let Some((directory, libraries)) = produce_library("returned-interface", INTERFACE_DISPATCH)
