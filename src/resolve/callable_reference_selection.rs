@@ -302,8 +302,10 @@ pub(super) fn specialize_generic_signature(
     }
     if let Some(expected) = expected_params {
         let vararg = call_sig.vararg_index;
+        // A whole array is the vararg's single input. When it is the last expected input, any
+        // parameters after the vararg take their defaults (`vararg xs: E, k: Int = 0`).
         let whole_vararg = vararg.is_some_and(|index| {
-            expected.len() == generic.params.len()
+            expected.len() == index + 1
                 && expected
                     .get(index)
                     .zip(generic.params.get(index))
