@@ -193,9 +193,9 @@ mod tests;
 
 /// The runnable Native lane targets Linux on the runner's architecture. Library comparison uses
 /// that same explicit target even when its metadata-only smoke test runs on another host OS.
-fn native_target() -> Result<krusty::native::NativeTarget, String> {
-    Ok(krusty::native::NativeTarget::new(
-        krusty::native::Arch::host().ok_or("unsupported Native architecture")?,
-        krusty::native::Os::Linux,
+fn native_target() -> Result<krusty_native::NativeTarget, String> {
+    Ok(krusty_native::NativeTarget::new(
+        krusty_native::Arch::host().ok_or("unsupported Native architecture")?,
+        krusty_native::Os::Linux,
     ))
 }

@@ -39,7 +39,7 @@ fn case_capture_keeps_module_identity_and_clears_after_failure() {
 #[test]
 fn observing_klib_entries_preserves_executable_bytes() {
     use krusty::backend::Entry;
-    use krusty::wasm::{WasmBackend, WasmTarget};
+    use krusty_wasm::{WasmBackend, WasmTarget};
     let source = SIMPLE;
     let sources = vec![("Case".to_owned(), source.to_owned())];
     let backend = WasmBackend::new(WasmTarget::Js).with_entry(Entry::Box);
