@@ -1006,10 +1006,6 @@ evaluate/serialization/annotationOnTypeOnFakeOverride.kt
 evaluate/serialization/annotationWithDefaultValueOnFakeOverride.kt
 evaluate/serialization/typeAnnotation.kt
 evaluate/thisPlusString.kt
-evaluate/ubyteOperations.kt
-evaluate/uintOperations.kt
-evaluate/ulongOperations.kt
-evaluate/ushortOperations.kt
 exceptions/catch1.kt
 exceptions/catch2.kt
 exceptions/rethrow.kt
@@ -1321,8 +1317,6 @@ inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClas
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypes.kt
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypesGeneric.kt
 inlineClasses/jvmInline.kt
-inlineClasses/kt27096.kt
-inlineClasses/kt27096Generic.kt
 inlineClasses/kt27113.kt
 inlineClasses/kt28405.kt
 inlineClasses/kt32793.kt
@@ -1545,7 +1539,6 @@ multiplatform/k2/delegation/delegationToExpectInterfaceByExpectFun.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
 multiplatform/k2/enumStaticMethods.kt
 multiplatform/k2/expectStatic.kt
-multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/abstractExpectedActual2-2.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
@@ -2578,11 +2571,6 @@ unsignedTypes/forInUnsignedProgression.kt
 unsignedTypes/forInUnsignedRangeWithCoercion.kt
 unsignedTypes/inUnsignedDownTo.kt
 unsignedTypes/kt47716.kt
-unsignedTypes/unsignedIntCompare.kt
-unsignedTypes/unsignedLiteralsForMaxLongValue.kt
-unsignedTypes/unsignedLongCompare.kt
-unsignedTypes/unsignedLongDivide.kt
-unsignedTypes/unsignedLongRemainder.kt
 unsignedTypes/unsignedRangeIterator.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
 vararg/inlineClassArraysAsNamedArgumentInVararg.kt
