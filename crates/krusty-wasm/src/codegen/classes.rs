@@ -389,6 +389,11 @@ fn constructs(ir: &IrFile, name: TypeName) -> bool {
         })
 }
 
+pub(super) struct ClassEntryPoints<'a> {
+    pub(super) functions: &'a [Option<u32>],
+    pub(super) singletons: &'a super::callable_registry::FileCallTargets,
+}
+
 /// Lay out every class of `ir` in `module`: types, constructors' and accessors' indices, and the
 /// dispatch tables, whose entries name `functions` (the file's function indices, by `FunId`).
 pub(super) fn declare(
@@ -396,10 +401,11 @@ pub(super) fn declare(
     module: &mut Module,
     runtime: &mut Runtime,
     classifiers: &dyn BackendClassifierSource,
-    functions: &[Option<u32>],
+    entries: ClassEntryPoints<'_>,
     properties: &RealizedProperties,
     plan: &ModuleSlotPlan,
 ) -> Result<FileClasses, Unsupported> {
+    let functions = entries.functions;
     for class in 0..ir.classes.len() {
         check_supported(ir, class as ClassId)?;
         check_exception_storage(ir, classifiers, class as ClassId)?;
@@ -476,7 +482,10 @@ pub(super) fn declare(
         if class.is_object || class.is_companion {
             form.singleton = Some(Singleton {
                 global: module.global(REFERENCE),
-                getter: module.declare(),
+                getter: entries
+                    .singletons
+                    .singleton_definition(id)
+                    .unwrap_or_else(|| module.declare()),
             });
         }
     }

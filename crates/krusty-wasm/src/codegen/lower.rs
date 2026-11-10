@@ -81,6 +81,8 @@ pub(super) struct LoweredFile {
 
 /// One file's checked IR and the facts frozen beside it.
 pub(super) struct FileInput<'a> {
+    /// Present only for actual source units, never dependency-support units.
+    pub(super) source_singletons: Option<&'a krusty::backend::BackendModuleFacts>,
     pub(super) array_range_checks: bool,
     pub(super) classifiers: &'a dyn krusty::backend::BackendClassifierSource,
     pub(super) ir: &'a IrFile,
@@ -106,6 +108,7 @@ pub(super) fn lower_file(
     state: ModuleState<'_>,
 ) -> Result<LoweredFile, Unsupported> {
     let FileInput {
+        source_singletons,
         array_range_checks,
         classifiers,
         ir,
@@ -169,7 +172,12 @@ pub(super) fn lower_file(
         runtime
             .callable_references
             .begin_file(module_name, ir, dependency_exports)?;
-    let call_targets = callable_registry.file_calls(ir, callables, module)?;
+    let call_targets = callable_registry.file_calls(
+        ir,
+        callables,
+        module,
+        source_singletons.map(|facts| (module_name, facts)),
+    )?;
     let inert_singleton_bindings = krusty::backend::inert_staged_singleton_bindings(
         ir,
         |expression| {
@@ -194,8 +202,18 @@ pub(super) fn lower_file(
     let classes = if ir.classes.is_empty() {
         None
     } else {
-        let mut classes =
-            super::classes::declare(ir, module, runtime, classifiers, &indices, properties, plan)?;
+        let mut classes = super::classes::declare(
+            ir,
+            module,
+            runtime,
+            classifiers,
+            super::classes::ClassEntryPoints {
+                functions: &indices,
+                singletons: &call_targets,
+            },
+            properties,
+            plan,
+        )?;
         super::interface_members::record(
             &super::interface_members::Recording {
                 ir,
@@ -351,6 +369,7 @@ pub(super) fn lower_file(
     } else {
         None
     };
+    callable_registry.define_source_singletons(&call_targets)?;
     callable_registry.publish(ir, dependency_exports, &indices)?;
     Ok(LoweredFile {
         functions: indices,
@@ -2054,6 +2073,7 @@ mod tests {
         );
         lower_file(
             FileInput {
+                source_singletons: None,
                 array_range_checks: super::super::super::array_access::default_range_checks(),
                 classifiers: &classifiers,
                 ir,

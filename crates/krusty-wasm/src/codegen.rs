@@ -195,7 +195,10 @@ impl Backend for WasmBackend {
             // A support unit has no source `CallableId`s. It is emitted immediately before the
             // source file that selected it, so rotating the source registry here would discard
             // cross-file reservations from the current source module.
-            started.callables.enter_source_module(file.module_name);
+            if let Err(error) = started.callables.enter_source_module(file.module_name) {
+                decline(state, error);
+                return Vec::new();
+            }
             started.properties.enter_source_module(file.module_name);
         }
         if state
@@ -210,6 +213,8 @@ impl Backend for WasmBackend {
         let lowered = match lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
+                source_singletons: (file.kind == krusty::backend::CheckedIrUnitKind::Source)
+                    .then_some(file.classifiers.module()),
                 properties: &properties,
                 callables: &file.callables,
                 classifiers: &file.classifiers,
@@ -260,6 +265,14 @@ impl Backend for WasmBackend {
     }
 
     fn check_module(&self, state: &Self::State, diags: &mut DiagSink) {
+        if let Some(started) = state.started.as_ref().filter(|_| !state.declined) {
+            if let Err(error) = started.callables.check_source_singletons() {
+                diags.error(
+                    krusty::diag::Span::new(0, 0),
+                    format!("{DECLINE_PREFIX}{error} yet"),
+                );
+            }
+        }
         if state.started.is_some() && !state.declined && state.entry.is_none() {
             diags.error(
                 krusty::diag::Span::new(0, 0),
@@ -277,6 +290,9 @@ impl Backend for WasmBackend {
         else {
             return Vec::new();
         };
+        if started.callables.check_source_singletons().is_err() {
+            return Vec::new();
+        }
         started
             .runtime
             .objects
