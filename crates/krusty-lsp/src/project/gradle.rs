@@ -434,6 +434,7 @@ fn parse_model(root: &Path, stdout: &str) -> Result<ProjectModel, ProbeError> {
         kind: ProviderKind::Gradle,
         jdk_home,
         modules,
+        repository_libraries: Vec::new(),
     })
 }
 
