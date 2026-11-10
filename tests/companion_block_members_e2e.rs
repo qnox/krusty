@@ -432,7 +432,8 @@ fn nested_class_block_members_belong_to_the_nested_class() {
 /// features so the same program pins whichever reference compiler the harness runs.
 #[test]
 fn block_and_companion_object_initialization_follow_kotlinc() {
-    const SRC: &str = "// LANGUAGE: +CompanionBlocksAndExtensions +CompanionBlocks +CompanionExtensions\n\
+    const SRC: &str =
+        "// LANGUAGE: +CompanionBlocksAndExtensions +CompanionBlocks +CompanionExtensions\n\
         var log = \"\"\n\
         fun l(s: String): String { log += s; return s }\n\
         class A {\n\
@@ -455,7 +456,10 @@ fn block_and_companion_object_initialization_follow_kotlinc() {
         \x20   return log\n\
         }\n";
     let expected = common::kotlinc_box_result(SRC);
-    assert!(expected.contains('|'), "kotlinc ran the program: {expected}");
+    assert!(
+        expected.contains('|'),
+        "kotlinc ran the program: {expected}"
+    );
     assert_eq!(
         common::compile_and_run_with_stdlib(SRC, "Main").expect("initialization order"),
         expected
@@ -1222,7 +1226,11 @@ impl ReleaseBuild {
             work,
         };
         for krusty in [false, true] {
-            let output = if krusty { &build.krusty } else { &build.reference };
+            let output = if krusty {
+                &build.krusty
+            } else {
+                &build.reference
+            };
             let mut args: Vec<String> = vec![
                 source.to_string_lossy().into_owned(),
                 "-no-stdlib".into(),
@@ -1231,7 +1239,11 @@ impl ReleaseBuild {
                 "-d".into(),
                 output.to_string_lossy().into_owned(),
             ];
-            args.extend(features.iter().map(|feature| format!("-XXLanguage:{feature}")));
+            args.extend(
+                features
+                    .iter()
+                    .map(|feature| format!("-XXLanguage:{feature}")),
+            );
             let (code, stderr) = if krusty {
                 args.insert(0, format!("-Xkotlin-reference-version={release}"));
                 let result = std::process::Command::new(common::krusty_binary())
@@ -1321,7 +1333,10 @@ fn hoisted_companion_delegate_initializes_with_its_companion_on_2_5() {
         &["+CompanionBlocks", "+CompanionExtensions"],
     );
     let (expected, actual) = build.box_results();
-    assert!(expected.starts_with("OK:"), "kotlinc ran the program: {expected}");
+    assert!(
+        expected.starts_with("OK:"),
+        "kotlinc ran the program: {expected}"
+    );
     assert_eq!(actual, expected);
 }
 
