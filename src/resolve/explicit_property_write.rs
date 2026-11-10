@@ -4,7 +4,8 @@
 //! The families follow Kotlin's scope tower: a declared member property, a member setter, a
 //! read-only member, a member extension from an implicit dispatch receiver, and only then a
 //! top-level extension property. A family is queried only while every higher-priority family is
-//! absent, and only the selected family records facts. In particular an extension's receiver
+//! absent, and only the selected family records facts. A member property the site cannot see
+//! yields all three member families when the read's tower selects an extension instead. In particular an extension's receiver
 //! constraint on a postponed builder call belongs to the extension's selection: a shadowed
 //! `B<String>.p` must not fix `T` when the member `B<T>.p` wins the write.
 
@@ -106,13 +107,17 @@ impl Checker<'_> {
         rt: Ty,
         name: &str,
     ) -> ExplicitPropertyWrite {
-        let source_property = if rt.is_nullable() {
-            None
-        } else {
+        // A member property the site cannot see yields its member rungs to the member extension
+        // or extension property the read's tower selects.
+        let member_rungs =
+            !rt.is_nullable() && !self.invisible_member_property_yields(scope, rt, name);
+        let source_property = if member_rungs {
             rt.obj_internal()
                 .and_then(|_| self.lookup_property_for_write(rt, name))
+        } else {
+            None
         };
-        let setter = (!rt.is_nullable())
+        let setter = member_rungs
             .then(|| self.select_property_setter(rt, name))
             .flatten();
         if let Some((owner, ty, is_var, setter_visibility, stable_declaration)) = source_property {
@@ -132,7 +137,7 @@ impl Checker<'_> {
                 declared_ty: source_property.map(|(_, ty, _, _, _)| ty),
             };
         }
-        if let Some(property) = (!rt.is_nullable())
+        if let Some(property) = member_rungs
             .then(|| self.resolver().select_member_property(rt, name))
             .flatten()
             .and_then(|selected| selected.property)

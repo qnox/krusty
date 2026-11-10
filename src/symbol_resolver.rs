@@ -32,7 +32,7 @@ pub(crate) use classifier_scope::{
 mod declaration_specificity;
 mod extension_specialization;
 mod generic_inference;
-pub(crate) use generic_inference::reified_runtime_type;
+pub(crate) use generic_inference::{reified_runtime_type, ReifiedDeclarations};
 mod hierarchy_projection;
 mod indexed_convention_selection;
 mod lambda_call_shape;

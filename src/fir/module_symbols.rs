@@ -1885,6 +1885,7 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
 
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
         self.index
+            .source_fragments()
             .actualizes_expect(self.source_file, internal)
             .then(|| self.index.type_alias_by_identity(internal))
             .flatten()

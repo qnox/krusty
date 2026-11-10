@@ -55,9 +55,11 @@ pub(super) fn specialization_source(ir: &IrFile, mut function: FunId) -> FunId {
 /// The retained inline declaration template whose expansion created `function`.
 pub(super) fn specialization_template(ir: &IrFile, function: FunId) -> Option<FunId> {
     let specialization = ir.specialized_functions.get(&function)?;
-    ir.checked_callable_functions
-        .get(&specialization.inline_callee)
-        .copied()
+    // A dependency template is not a declaration of this compilation, so it retains none.
+    let krusty::ir::IrInlineCallee::Module(callee) = specialization.inline_callee else {
+        return None;
+    };
+    ir.checked_callable_functions.get(&callee).copied()
 }
 
 use krusty::ir::{ClassId, ExprId, FunId, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole};

@@ -297,7 +297,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             .collect::<Vec<_>>();
         for (identity, function) in &closed {
             exports.record_callable(*function, identity.clone());
-            if let Some(receiver) = unit.value_member_receiver(identity) {
+            if let Some(receiver) = unit.member_receiver(identity) {
                 exports.record_member_receiver(*function, receiver);
             }
             if let Some(classifier) = unit.authenticated_singleton_classifier(identity) {
