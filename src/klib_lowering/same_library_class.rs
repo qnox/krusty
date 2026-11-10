@@ -135,6 +135,20 @@ pub(super) struct MemberOverride {
     pub(super) declared_result: Ty,
     pub(super) applied_parameters: Vec<Ty>,
     pub(super) applied_result: Ty,
+    /// The property whose accessor this implementation overrides. `None` for a function.
+    ///
+    /// A public interface property is serialized as an accessor signature, not a public function
+    /// signature. The edge is still that property: backends dispatch it through the property
+    /// override table, keyed by the accessor the provider published.
+    pub(super) property: Option<OverriddenProperty>,
+}
+
+/// The property side of [`MemberOverride`] when the overridden declaration is an accessor.
+#[derive(Clone)]
+pub(super) struct OverriddenProperty {
+    pub(super) name: String,
+    /// The implementation accessor is the property's setter. A getter leaves this false.
+    pub(super) setter: bool,
 }
 
 /// `parameters` and `result` after substituting each declaring type parameter in `formals` with
@@ -264,6 +278,8 @@ pub(super) fn realized_member_override(
         declared_result,
         applied_parameters,
         applied_result,
+        // Object literals publish the property edge themselves; this record is the signature.
+        property: None,
     })
 }
 
@@ -620,6 +636,90 @@ struct ClassDeclaration<'a> {
     class_name: TypeName,
 }
 
+/// Whether every override `function` declares stays with the target.
+///
+/// That is a member of `kotlin.Any`, a fake override of one recorded on an interface, or an
+/// interface member this unit cannot locate and therefore cannot lower.
+fn overrides_only_any(
+    bodies: &KlibDeclarationBodies,
+    module: &str,
+    function: &KlibIrFunction,
+) -> bool {
+    !function.overridden.is_empty()
+        && function
+            .overridden
+            .iter()
+            .all(|symbol| any_member_signature(symbol) || left_with_target(bodies, module, symbol))
+}
+
+/// An override the target keeps: `kotlin.Any`, or an interface member that only overrides `Any`
+/// or that has no serialized function of its own.
+fn left_with_target(bodies: &KlibDeclarationBodies, module: &str, symbol: &KlibIrSymbol) -> bool {
+    if symbol.kind != KlibIrSymbolKind::Function {
+        return false;
+    }
+    let KlibIrSignature::Public(signature) = &symbol.signature else {
+        return false;
+    };
+    match bodies.function_owner(module, &symbol.signature) {
+        LocatedMember::One {
+            class, function, ..
+        } => {
+            class_kind(class.base.flags) == TypeKind::Interface
+                && !function.overridden.is_empty()
+                && function
+                    .overridden
+                    .iter()
+                    .all(|overridden| any_member_signature(overridden))
+        }
+        LocatedMember::Missing => interface_classifier(bodies, module, signature),
+        LocatedMember::Several => false,
+    }
+}
+
+/// `kotlin.Any`'s own member, by the public signature the override names.
+fn any_member_signature(symbol: &KlibIrSymbol) -> bool {
+    let KlibIrSignature::Public(signature) = &symbol.signature else {
+        return false;
+    };
+    let declaration = signature.declaration().segments();
+    signature.package().segments() == ["kotlin"]
+        && declaration.len() == 2
+        && declaration[0] == "Any"
+}
+
+/// Whether `signature` names a member of an interface serialized for `module`.
+fn interface_classifier(
+    bodies: &KlibDeclarationBodies,
+    module: &str,
+    signature: &KlibPublicIdSignature,
+) -> bool {
+    let Some(classifier) = member_classifier(signature) else {
+        return false;
+    };
+    matches!(
+        bodies.public_class(module, &classifier),
+        LocatedClass::One(class) if class_kind(class.base.flags) == TypeKind::Interface
+    )
+}
+
+/// The classifier that declares `signature`'s member, without the member segment.
+fn member_classifier(signature: &KlibPublicIdSignature) -> Option<KlibPublicIdSignature> {
+    let declaration = signature.declaration().segments();
+    if declaration.len() < 2 {
+        return None;
+    }
+    let mut name = TypeName::ROOT;
+    for segment in signature.package().segments() {
+        name = crate::types::type_name_child(name, segment);
+    }
+    name = crate::types::type_name_child(name, &declaration[0]);
+    for segment in &declaration[1..declaration.len() - 1] {
+        name = crate::types::type_name_nested_child(name, segment);
+    }
+    Some(KlibPublicIdSignature::classifier(name))
+}
+
 fn prepare_class<'a>(
     source: LocalClassSource<'a, '_>,
     signature: &KlibIrSignature,
@@ -849,16 +949,31 @@ fn members_and_storage<'a>(
         match declaration {
             KlibIrMember::Function(id) => {
                 let function = arena.function(*id);
-                if !function.constructor {
-                    members.push(prepare_member(arena, function, scope, false)?);
+                // `equals`, `hashCode` and `toString` override `kotlin.Any`, sometimes recorded as
+                // the interface's fake override of those members. The target realizes them. This
+                // class still materializes the members of its own, such as a field projection.
+                if !function.constructor
+                    && !overrides_only_any(scope.bodies, scope.module, function)
+                {
+                    members.push(prepare_member(arena, function, scope, None)?);
                 }
             }
             KlibIrMember::Property(property) => {
                 if let Some(id) = property.getter {
-                    members.push(prepare_member(arena, arena.function(id), scope, false)?);
+                    members.push(prepare_member(
+                        arena,
+                        arena.function(id),
+                        scope,
+                        Some((property.name.as_str(), false)),
+                    )?);
                 }
                 if let Some(id) = property.setter {
-                    members.push(prepare_member(arena, arena.function(id), scope, true)?);
+                    members.push(prepare_member(
+                        arena,
+                        arena.function(id),
+                        scope,
+                        Some((property.name.as_str(), true)),
+                    )?);
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {}
@@ -883,7 +998,7 @@ fn prepare_member<'a>(
     arena: &'a KlibIrArena,
     function: &'a KlibIrFunction,
     scope: &MemberScope<'_>,
-    setter: bool,
+    property: Option<(&str, bool)>,
 ) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
     let statements = match &function.body {
         Some(KlibIrBody::Block(statements)) => statements.as_slice(),
@@ -897,15 +1012,16 @@ fn prepare_member<'a>(
         symbol: &function.base.symbol,
         statements,
         header: local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?,
-        overrides: member_overrides(function, scope)?,
+        overrides: member_overrides(function, scope, property)?,
         visibility: declaration_visibility(function.base.flags),
-        setter,
+        setter: property.is_some_and(|(_, setter)| setter),
     })
 }
 
 fn member_overrides(
     function: &KlibIrFunction,
     scope: &MemberScope<'_>,
+    property: Option<(&str, bool)>,
 ) -> Result<Vec<MemberOverride>, KlibBodyDeclineReason> {
     let mut overrides = Vec::with_capacity(function.overridden.len());
     for symbol in &function.overridden {
@@ -914,10 +1030,30 @@ fn member_overrides(
                 "an override of a declaration other than a function",
             ));
         }
-        let KlibIrSignature::Public(signature) = &symbol.signature else {
-            return Err(unsupported("an override of a non-public declaration"));
+        // A public function is a public signature. A public property's getter or setter is an
+        // accessor signature: that is the declaration the interface publishes, not a file-local
+        // symbol. Only a file-local symbol is a non-public declaration.
+        let (declaration, overridden_property) = match (&symbol.signature, property) {
+            (KlibIrSignature::Public(signature), None) => {
+                (KlibDeclarationSignature::Public(signature.clone()), None)
+            }
+            (KlibIrSignature::Public(_), Some(_)) => {
+                return Err(mismatch("a property overrides a function"));
+            }
+            (KlibIrSignature::Accessor(signature), Some((name, setter))) => (
+                KlibDeclarationSignature::Accessor(signature.clone()),
+                Some(OverriddenProperty {
+                    name: name.to_owned(),
+                    setter,
+                }),
+            ),
+            (KlibIrSignature::Accessor(_), None) => {
+                return Err(mismatch("a function overrides a property"));
+            }
+            (KlibIrSignature::FileLocal { .. }, _) => {
+                return Err(unsupported("an override of a non-public declaration"));
+            }
         };
-        let declaration = KlibDeclarationSignature::Public(signature.clone());
         let identity = match scope.bodies.linked_origin(scope.module, &declaration) {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => {
@@ -997,6 +1133,7 @@ fn member_overrides(
             declared_result: declared_signature.result,
             applied_parameters,
             applied_result,
+            property: overridden_property,
         });
     }
     Ok(overrides)

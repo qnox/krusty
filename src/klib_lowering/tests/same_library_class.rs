@@ -654,6 +654,16 @@ private class Hidden(private val value: String) : View<CharSequence> {
 }
 fun make(value: String): View<CharSequence> = Hidden(value)
 ";
+const APPLIED_PROPERTY: &str = "\
+package fixture
+interface View<T> {
+    val item: T
+}
+private class Hidden(private val value: String) : View<CharSequence> {
+    override val item: String get() = value
+}
+fun make(value: String): View<CharSequence> = Hidden(value)
+";
 
 #[test]
 fn official_klib_initializes_a_private_class_and_calls_its_members() {
@@ -938,6 +948,36 @@ fn applied_interface_signature_substitutes_the_supertype() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+#[test]
+fn applied_property_override_publishes_the_accessor() {
+    let Some((directory, libraries)) = produce_library("applied-property", APPLIED_PROPERTY) else {
+        return;
+    };
+    let item = declared_property_getter(&libraries, "View", "item");
+    let mut unit = DependencyBodyUnit::default();
+    lower_fixture(
+        &mut unit,
+        &libraries,
+        "make",
+        &Default::default(),
+        &libraries,
+    );
+    validated(unit.ir());
+    let edge = property_override_edge(unit.ir(), item.id);
+    assert!(edge.overridden_is_interface);
+    assert_eq!(edge.name, "item");
+    assert!(edge.implementation_getter.is_some());
+    assert!(edge.implementation_setter.is_none());
+    assert!(edge.overridden_setter_value.is_none());
+    assert!(edge.declared_type.is_ty_param(), "{:?}", edge.declared_type);
+    assert_eq!(type_name_of(edge.applied_type), "kotlin/CharSequence");
+    assert_eq!(type_name_of(edge.implementation_type), "kotlin/String");
+    assert!(unit.ir().function_overrides.values().flatten().all(|edge| {
+        edge.overridden != crate::fir::ResolvedFunctionOverrideTarget::External(item.id)
+    }));
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 struct MarkIdentity {
     id: crate::fir::ExternalCallableId,
     identity: crate::libraries::KlibDependencyCallable,
@@ -945,6 +985,164 @@ struct MarkIdentity {
 
 fn marker_mark(libraries: &crate::klib_libraries::KlibLibraries) -> MarkIdentity {
     declared_member(libraries, "Marker", "mark")
+}
+
+fn declared_property_getter(
+    libraries: &crate::klib_libraries::KlibLibraries,
+    owner: &str,
+    name: &str,
+) -> MarkIdentity {
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+        owner,
+    );
+    let classifier = symbols
+        .classifier
+        .as_ref()
+        .unwrap_or_else(|| panic!("fixture.{owner}"));
+    let callables = classifier
+        .declared_callables
+        .get(name)
+        .unwrap_or_else(|| panic!("fixture.{owner}.{name}"));
+    let property = callables
+        .properties()
+        .first()
+        .unwrap_or_else(|| panic!("fixture.{owner}.{name} property"));
+    let id = property
+        .getter
+        .external_identity
+        .unwrap_or_else(|| panic!("fixture.{owner}.{name} getter"));
+    let selected = libraries.external_callable(id).unwrap();
+    let identity = selected
+        .dependency_callable
+        .clone()
+        .unwrap_or_else(|| panic!("fixture.{owner}.{name} dependency identity"));
+    MarkIdentity { id, identity }
+}
+
+fn property_override_edge(
+    ir: &crate::ir::IrFile,
+    id: crate::fir::ExternalCallableId,
+) -> &crate::ir::IrPropertyOverride {
+    ir.property_overrides
+        .values()
+        .flatten()
+        .find(|edge| edge.overridden == crate::fir::ResolvedPropertyOverrideTarget::External(id))
+        .unwrap_or_else(|| panic!("missing property override {id:?}"))
+}
+
+const FIELD_PAST_ANY: &str = "\
+package fixture
+
+class Box(val value: String) {
+    override fun toString(): String = value
+}
+
+fun read(value: String): String = Box(value).value
+";
+
+/// `Box` overrides `Any.toString` and stores `value`. The override stays with the target, which
+/// realizes `Any`, and the class still materializes so `value` is a field read.
+#[test]
+fn a_field_read_materializes_past_an_any_override() {
+    let Some((directory, libraries)) = produce_library("field-past-any", FIELD_PAST_ANY) else {
+        return;
+    };
+    let mut unit = DependencyBodyUnit::default();
+    lower_fixture(
+        &mut unit,
+        &libraries,
+        "read",
+        &Default::default(),
+        &libraries,
+    );
+    validated(unit.ir());
+    let class = unit
+        .ir()
+        .class_id_by_name(crate::types::type_name("fixture/Box"))
+        .expect("fixture.Box");
+    let names = unit.ir().classes[class as usize]
+        .methods
+        .iter()
+        .map(|method| unit.ir().functions[*method as usize].name.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        names.iter().all(|name| name != "toString"),
+        "Any.toString stays with the target: {names:?}"
+    );
+    assert!(
+        unit.ir()
+            .exprs
+            .iter()
+            .any(|expression| matches!(expression, crate::ir::IrExpr::GetField { .. })),
+        "the property read is the stored field: {names:?}"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// `kotlin.Pair.component2` is a field read of a final class that also overrides `Any`. The class
+/// materializes, and the projection is that field; `equals`, `hashCode` and `toString` stay with
+/// the target.
+#[test]
+fn pair_component2_is_a_field_of_its_class() {
+    let Some(root) = super::distribution_root() else {
+        return;
+    };
+    let libraries = super::stdlib(&root);
+    let pair = libraries
+        .classifier(crate::types::type_name("kotlin/Pair"))
+        .expect("kotlin.Pair");
+    let function = &pair
+        .declared_callables
+        .get("component2")
+        .expect("component2")
+        .functions()[0];
+    let realization = libraries
+        .external_callable(
+            function
+                .callable
+                .external_identity
+                .expect("component2 identity"),
+        )
+        .expect("component2 realization");
+    let callable = realization
+        .klib_body_callable()
+        .expect("component2 contract");
+    let bodies = libraries.declaration_bodies();
+    let oracle = crate::symbol_resolver::SourceOracle(&libraries);
+    let facts = super::super::KlibCalleeFacts::default().with_type_oracle(&oracle);
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_function_with_declarations(
+        callable,
+        bodies,
+        &facts,
+        libraries.intrinsic_facts(),
+        &Default::default(),
+        &libraries,
+    )
+    .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    let class = unit
+        .ir()
+        .class_id_by_name(crate::types::type_name("kotlin/Pair"))
+        .expect("kotlin.Pair");
+    let names = unit.ir().classes[class as usize]
+        .methods
+        .iter()
+        .map(|method| unit.ir().functions[*method as usize].name.clone())
+        .collect::<Vec<_>>();
+    assert!(names.iter().any(|name| name == "component2"), "{names:?}");
+    for left in ["toString", "equals", "hashCode"] {
+        assert!(
+            names.iter().all(|name| name != left),
+            "{left} stays with the target: {names:?}"
+        );
+    }
+    assert!(unit
+        .ir()
+        .exprs
+        .iter()
+        .any(|expression| matches!(expression, crate::ir::IrExpr::GetField { .. })));
 }
 
 fn declared_member(

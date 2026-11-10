@@ -123,6 +123,7 @@ impl<'s> Linker<'_, 's> {
                     crate::types::Visibility::Private
                 },
             );
+            let body_identity = published.clone().unwrap_or_else(|| identity.clone());
             if let Some(identity) = published {
                 if ir.functions[function as usize].dispatch_receiver.is_some() {
                     self.member_receivers
@@ -144,7 +145,7 @@ impl<'s> Linker<'_, 's> {
                 },
             );
             self.pending.push_back(PendingBody {
-                identity: identity.clone(),
+                identity: body_identity,
                 arena: prepared.arena,
                 symbol: member.symbol,
                 statements: member.statements,
@@ -320,6 +321,18 @@ fn publish_overrides(
                 "an override's parameters differ from its interface member".to_owned(),
             ));
         }
+        if let Some(property) = &edge.property {
+            publish_property_override(
+                ir,
+                owner,
+                function,
+                edge,
+                property,
+                external.target(),
+                implementation_result,
+            )?;
+            continue;
+        }
         ir.function_overrides
             .entry(owner)
             .or_default()
@@ -365,6 +378,80 @@ fn publish_overrides(
                 depth: 1,
             });
     }
+    Ok(())
+}
+
+/// Publish `edge` as a property override. A getter starts the edge; the setter of the same
+/// property, prepared after it, records its accessor on that edge. The edge's target stays the
+/// getter's declaration, which is the identity both accessor slots are keyed by.
+fn publish_property_override(
+    ir: &mut IrFile,
+    owner: crate::types::TypeName,
+    function: crate::ir::FunId,
+    edge: &super::super::same_library_class::MemberOverride,
+    property: &super::super::same_library_class::OverriddenProperty,
+    external: crate::fir::ExternalCallableId,
+    implementation_result: crate::types::Ty,
+) -> Result<(), KlibBodyDeclineReason> {
+    let target = crate::fir::ResolvedPropertyOverrideTarget::External(external);
+    let edges = ir.property_overrides.entry(owner).or_default();
+    if let Some(existing) = edges.iter_mut().find(|published| {
+        published.name == property.name && published.overridden_owner == edge.owner
+    }) {
+        if property.setter {
+            if existing.implementation_setter.is_some() {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a property publishes two setter overrides".to_owned(),
+                ));
+            }
+            existing.implementation_setter = Some(function);
+            existing.overridden_setter_value =
+                Some(crate::fir::ResolvedParameterIdentity::Unnamed { ordinal: 0 });
+            existing.implementation_mutable = true;
+            return Ok(());
+        }
+        if existing.implementation_getter.is_some() {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a property publishes two getter overrides".to_owned(),
+            ));
+        }
+        existing.implementation_getter = Some(function);
+        existing.implementation = target;
+        existing.overridden = target;
+        existing.declared_type = edge.declared_result;
+        existing.applied_type = edge.applied_result;
+        existing.implementation_type = implementation_result;
+        return Ok(());
+    }
+    if property.setter {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(
+            "a property setter override has no getter".to_owned(),
+        ));
+    }
+    if !edge.declared_parameters.is_empty() {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(
+            "an override of an extension property".to_owned(),
+        ));
+    }
+    edges.push(crate::ir::IrPropertyOverride {
+        implementation: target,
+        implementation_getter: Some(function),
+        implementation_setter: None,
+        implementation_owner: owner,
+        overridden: target,
+        overridden_owner: edge.owner,
+        overridden_is_interface: true,
+        name: property.name.clone(),
+        declared_type: edge.declared_result,
+        applied_type: edge.applied_result,
+        implementation_type: implementation_result,
+        declared_receiver: None,
+        implementation_receiver: None,
+        overridden_setter_value: None,
+        implementation_mutable: false,
+        has_kotlin_superclass_override: false,
+        depth: 1,
+    });
     Ok(())
 }
 

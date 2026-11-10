@@ -33,8 +33,6 @@ mod string_templates;
 mod try_catch;
 mod type_operators;
 
-pub(super) use blocks::publish_parameter_defaults;
-
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::FunctionHeader;
 use super::ir_builtins::IrBuiltinOperators;
@@ -210,6 +208,15 @@ pub(super) trait CallLinker {
         _signature: &crate::metadata::klib_ir::KlibIrSignature,
     ) -> Lowered<Option<crate::types::TypeName>> {
         Ok(None)
+    }
+
+    /// The primary constructor of a class this unit has already materialized, when `callee` is it.
+    /// A constructor call then builds that class instead of an external allocation.
+    fn installed_public_constructor(
+        &self,
+        _callee: &KlibPublicIdSignature,
+    ) -> Option<super::same_library_class::LocalConstructor> {
+        None
     }
 
     /// The constructor a file-local construction invokes. Template linkers keep the refusal.
