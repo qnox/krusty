@@ -184,6 +184,11 @@ pub(super) fn predeclare_properties(
                     property.id,
                     IrCheckedProperty {
                         declaration,
+                        declaration_source: None,
+                        annotations: index
+                            .declaration_annotations(declaration)
+                            .to_vec()
+                            .into_boxed_slice(),
                         diagnostic_span: None,
                         getter_diagnostic_span: None,
                         setter_diagnostic_span: None,

@@ -150,6 +150,16 @@ pub(super) fn is_string_builder(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/text/StringBuilder"])
 }
 
+/// The classes the runtime makes whose members runtime functions realize, each with the descriptor
+/// its instances carry. An instance stands behind every interface its class implements, where no
+/// class of the program recorded an implementation for a call through that interface to reach.
+pub(super) fn runtime_member_classes() -> [(TypeName, &'static str); 1] {
+    [(
+        krusty::types::type_name("kotlin/text/StringBuilder"),
+        "kt_type_string_builder",
+    )]
+}
+
 /// Whether the runtime, not a library class body, lays out `internal`: the root class, `Unit`, the
 /// companions of the built-in types, the shared empty set, text, the arrays, the throwables and builder it
 /// constructs, and the standard collection implementations. A dependency body's call of such a
@@ -612,6 +622,25 @@ impl<'a> FileLowering<'a> {
                         .any(|named| named == internal)
             })
             .collect()
+    }
+
+    /// Whether the classifier `class` is `of` or has it among its supertypes, by the hierarchy
+    /// the declarations froze.
+    pub(super) fn is_subclassifier(&self, class: TypeName, of: TypeName) -> bool {
+        let mut pending = vec![class];
+        let mut visited = krusty::fx_hash::HashSet::default();
+        while let Some(classifier) = pending.pop() {
+            if classifier == of {
+                return true;
+            }
+            if !visited.insert(classifier) {
+                continue;
+            }
+            if let Some(fact) = self.classifiers.classifier(classifier) {
+                pending.extend(fact.supertypes.iter().copied());
+            }
+        }
+        false
     }
 
     pub(super) fn implements_dependency(&self, internal: TypeName) -> bool {
