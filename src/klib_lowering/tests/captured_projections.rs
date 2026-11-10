@@ -669,3 +669,98 @@ fn a_nullable_result_through_a_contravariant_receiver_reads_as_any() {
         .collect::<Vec<_>>();
     assert_eq!(puts, [Ty::nullable(Ty::obj("kotlin/Any"))]);
 }
+
+/// `Iterable<T?>.filterNotNullTo(destination: C)`, with `C : MutableCollection<in T>`, passes the
+/// `T?` element it checked against `null` to `add` with no cast: kotlinc approximates the
+/// parameter `E`, captured from `in T`, to `E`'s bound `Any?`, and the body lowers as serialized.
+#[test]
+fn an_argument_through_a_contravariant_receiver_is_checked_against_the_parameter_bound() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/collections")),
+        "filterNotNullTo",
+    );
+    let filter = symbols
+        .callables
+        .functions()
+        .iter()
+        .find(|function| {
+            function.semantic_receiver().is_some_and(|receiver| {
+                receiver.kotlin_class_internal() == Some(type_name("kotlin/collections/Iterable"))
+            })
+        })
+        .expect("`Iterable<T?>.filterNotNullTo(destination: C)`");
+    let fact = frozen_function(
+        &libraries,
+        "kotlin/collections",
+        "filterNotNullTo",
+        filter.semantic_receiver(),
+        filter.semantic_params().as_ref(),
+    );
+    let root = fact.klib_body_callable().expect("signed");
+    let providers = [
+        member(&libraries, "kotlin/collections/Iterable", "iterator"),
+        member(&libraries, "kotlin/collections/Iterator", "hasNext"),
+        member(&libraries, "kotlin/collections/Iterator", "next"),
+        member(&libraries, "kotlin/collections/MutableCollection", "add"),
+    ];
+    let leaves = providers
+        .each_ref()
+        .map(|provider| provider.klib_body_callable().unwrap());
+    let externals = leaves
+        .iter()
+        .enumerate()
+        .map(|(index, leaf)| {
+            (
+                leaf.identity().clone(),
+                super::super::EmittedDependencyCallable::target_member(
+                    crate::fir::ExternalCallableId::from_raw(100 + index as u32),
+                ),
+            )
+        })
+        .collect();
+    let oracle = crate::symbol_resolver::SourceOracle(&libraries);
+    let facts = KlibCalleeFacts::with_declarations([root], leaves).with_type_oracle(&oracle);
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_function_with_intrinsics_and_externals(
+        root,
+        libraries.declaration_bodies(),
+        &facts,
+        crate::klib_libraries::KlibIntrinsicFacts::empty(),
+        &externals,
+    )
+    .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    // `add` receives the element read as it is, typed `T?`, with no cast placed before it.
+    let ir = unit.ir();
+    let added = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Call { callee, args, .. }
+                if matches!(
+                    &**callee,
+                    crate::ir::Callee::External { target, .. } if target.raw() == 103
+                ) =>
+            {
+                Some(args.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [element] = added.iter().map(Vec::as_slice).collect::<Vec<_>>()[..] else {
+        panic!("one `add(element)` call, found {added:?}");
+    };
+    let [element] = element else {
+        panic!("`add` takes one argument, found {element:?}");
+    };
+    assert!(
+        matches!(ir.exprs[*element as usize], IrExpr::GetValue(_)),
+        "{:?}",
+        ir.exprs[*element as usize]
+    );
+    assert!(ir.checked_type(*element).is_some_and(|ty| ty.is_nullable()));
+}

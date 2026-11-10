@@ -670,9 +670,14 @@ impl BodyLowering<'_> {
             .collect::<Vec<_>>();
         let mut args = Vec::with_capacity(params.len());
         let mut omitted = Vec::new();
-        for (index, (argument, &parameter)) in arguments.zip(&params).enumerate() {
+        for (index, (argument, (&declared, &parameter))) in
+            arguments.zip(callee.params.iter().zip(&params)).enumerate()
+        {
             match argument {
-                Some(argument) => args.push(self.operand(argument, parameter)?),
+                Some(argument) => {
+                    let accepted = argument_expectation(declared, parameter, substitute);
+                    args.push(self.operand(argument, accepted)?);
+                }
                 // A serialized call leaves out exactly the arguments the callee's defaults supply.
                 None if callee.parameter_defaults.get(index).copied() == Some(true) => {
                     omitted.push(u32::try_from(index).expect("a parameter list fits u32"));
@@ -1027,5 +1032,17 @@ fn binary_operands(access: &KlibIrMemberAccess, ty: Ty) -> Lowered<(KlibIrExprId
         _ => Err(mismatch(
             "a built-in operator is called with another shape than its declaration's",
         )),
+    }
+}
+
+/// The type an argument for the parameter `declared` is checked against, where `parameter` is
+/// `declared` at the call's receiver. A parameter whose type is the class's type parameter read
+/// through an `in` projection (`add(element: E)` on a `MutableCollection<in T>`) has a captured
+/// type, which kotlinc approximates to the type parameter's bound when it places the argument's
+/// implicit casts: the serialized argument is a value of that bound, with no cast to `T`.
+fn argument_expectation(declared: Ty, parameter: Ty, substitute: impl Fn(Ty) -> Ty) -> Ty {
+    match (parameter.kind(), declared.ty_param_bound()) {
+        (crate::types::TyKind::InProjection(_), Some(bound)) => substitute(bound),
+        _ => parameter,
     }
 }
