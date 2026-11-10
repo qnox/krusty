@@ -2962,3 +2962,13 @@ fun comparesFalse(value: Any): Int {
     );
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
+
+/// The complete `conditionalArgumentBranchView.kt` program over the library's `MutableList`, whose
+/// portable box regression uses a local invariant class instead.
+#[test]
+fn conditional_argument_branches_keep_the_argument_view_over_a_library_list() {
+    common::expect_box_same_as_kotlinc(
+        include_str!("fixtures/conditional_argument_branch_view/ConditionalArgumentBranchView.kt"),
+        "ConditionalArgumentBranchView",
+    );
+}
