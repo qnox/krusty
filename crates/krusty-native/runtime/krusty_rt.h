@@ -213,6 +213,8 @@ extern const KType kt_type_boolean;
 extern const KType kt_type_float;
 extern const KType kt_type_double;
 extern const KType kt_type_unit;
+/* `Nothing` has no instances; its descriptor exists for the classifier of a `KType` that names it. */
+extern const KType kt_type_nothing;
 
 /* The companion object of a built-in type. Declared in no file krusty compiles and carrying no
    state — every member of one is a constant the frontend folds — so the only observable thing about

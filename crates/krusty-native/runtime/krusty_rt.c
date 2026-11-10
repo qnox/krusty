@@ -283,6 +283,7 @@ KT_TYPE_WITH(kt_type_boolean, "kotlin.", "Boolean", sizeof(KObject), 0, NULL, kt
 KT_TYPE_WITH(kt_type_float, "kotlin.", "Float", sizeof(KObject), 0, NULL, kt_number_interfaces)
 KT_TYPE_WITH(kt_type_double, "kotlin.", "Double", sizeof(KObject), 0, NULL, kt_number_interfaces)
 KT_TYPE(kt_type_unit, "kotlin.", "Unit", sizeof(KObject), 0, NULL)
+KT_TYPE(kt_type_nothing, "kotlin.", "Nothing", sizeof(KObject), 0, NULL)
 
 /* Kotlin's four unsigned integers. Each is a value class over a signed primitive, and the generated
    code carries it as the machine integer it wraps — the right machine shape, and the wrong one to
