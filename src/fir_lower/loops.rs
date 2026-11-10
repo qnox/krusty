@@ -698,7 +698,7 @@ impl BodyLowering<'_> {
             }
             crate::fir::FirCallTarget::Module(target) => self
                 .same_file_call(
-                    *target,
+                    super::expect_realization::realized_callable(self.index, *target),
                     super::source_calls::DispatchOperand::plain(dispatch_receiver),
                     extension_receiver,
                     arguments,

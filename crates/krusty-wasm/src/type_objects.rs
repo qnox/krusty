@@ -26,11 +26,29 @@ const TEXT_FIELD: u32 = 2;
 /// nullable.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct TypeDescription {
-    /// The classifier's Kotlin qualified name. Only classifiers that have one are described, so
-    /// it names exactly one classifier of the program.
-    pub(super) classifier: String,
+    pub(super) classifier: Classifier,
     pub(super) arguments: Vec<Projection>,
     pub(super) nullable: bool,
+}
+
+/// The classifier a [`TypeDescription`] names, by identity. Only classifiers with a Kotlin
+/// qualified name are described, so each names exactly one classifier of the program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Classifier {
+    /// A declared classifier other than a `FunctionN`.
+    Declared(TypeName),
+    /// The `FunctionN` of this arity, whether the type is spelled `(A) -> B` or `Function1<A, B>`.
+    Function(u8),
+}
+
+impl Classifier {
+    /// The Kotlin qualified name Kotlin/Wasm prints for the classifier.
+    fn text(self) -> String {
+        match self {
+            Self::Declared(name) => name.kotlin_qualified_name(),
+            Self::Function(arity) => format!("kotlin.Function{arity}"),
+        }
+    }
 }
 
 /// One type argument of a [`TypeDescription`].
@@ -47,7 +65,7 @@ impl TypeDescription {
     /// arguments as `KTypeProjection.toString` prints each (`*`, `T`, `in T`, `out T`) between
     /// `<` and `>`, then `?` when marked nullable.
     pub(super) fn text(&self) -> String {
-        let mut text = self.classifier.clone();
+        let mut text = self.classifier.text();
         if !self.arguments.is_empty() {
             text.push('<');
             for (index, argument) in self.arguments.iter().enumerate() {

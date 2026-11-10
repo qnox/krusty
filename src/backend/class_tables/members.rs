@@ -187,6 +187,7 @@ pub(crate) type PropertyOverrideSlots =
 
 pub(crate) fn property_type(
     ir: &IrFile,
+    owner: &IrClass,
     target: ResolvedPropertyOverrideTarget,
     overrides: &PropertyOverrideSlots,
 ) -> Option<Ty> {
@@ -199,7 +200,14 @@ pub(crate) fn property_type(
                 .checked_properties
                 .get(&property)
                 .map(|property| property.ty),
-            ResolvedPropertyOverrideTarget::External(_) => None,
+            // A property lowered from a dependency body has no checked declaration: the class's
+            // override edge records the type its accessors implement.
+            ResolvedPropertyOverrideTarget::External(_) => ir
+                .property_overrides
+                .get(&owner.fq_name_id())?
+                .iter()
+                .find(|edge| edge.implementation == target)
+                .map(|edge| edge.implementation_type),
         })
 }
 
