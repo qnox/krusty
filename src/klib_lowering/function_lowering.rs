@@ -509,7 +509,8 @@ pub(super) fn raw_function_header(
 
 /// The header of `selected`'s serialized declaration `function`. A member of a generic class
 /// binds its class's type parameters from the class header `class_bodies` holds, so the header
-/// names them as the member's own declaration does.
+/// names them as the member's own declaration does. Semantic conversion of that header interns
+/// the dispatch receiver's class path, so the raw receiver is proved against the class first.
 pub(super) fn selected_function_header(
     selected: KlibBodyCallable<'_>,
     purpose: HeaderPurpose,
@@ -522,6 +523,11 @@ pub(super) fn selected_function_header(
         .is_some_and(|class| !class.parameters.formals.is_empty());
     match class_bodies.filter(|_| generic_class) {
         Some(bodies) => super::class_headers::authenticate(selected, bodies).and_then(|class| {
+            super::class_headers::authenticate_receiver(
+                class.contract,
+                class.arena,
+                class.function,
+            )?;
             raw_function_header_with_class(
                 Some(selected),
                 purpose,
